@@ -134,6 +134,10 @@ def extract_attachment(filename: str, mime: str, data: bytes) -> dict:
         if ext in {"xlsx", "xlsm"} or "spreadsheetml" in mime:
             return _extract_xlsx(res, data)
 
+        if ext == "xls" or (mime in {"application/vnd.ms-excel", "application/excel",
+                                      "application/x-msexcel"} and ext not in {"csv", "txt"}):
+            return _extract_xls(res, data)
+
         if ext in {"txt", "csv", "log", "md"} or mime.startswith("text/"):
             res["method"] = "text"
             _set_text(res, data.decode("utf-8", errors="replace"))
@@ -219,5 +223,28 @@ def _extract_xlsx(res: dict, data: bytes) -> dict:
             if cells:
                 chunks.append("\t".join(cells))
     res["method"] = "xlsx"
+    _set_text(res, "\n".join(chunks))
+    return res
+
+
+def _extract_xls(res: dict, data: bytes) -> dict:
+    """Legacy BIFF .xls (application/vnd.ms-excel) — openpyxl can't read these."""
+    import xlrd
+    book = xlrd.open_workbook(file_contents=data)
+    chunks = []
+    for sh in book.sheets():
+        chunks.append(f"[Sheet: {sh.name}]")
+        for r in range(sh.nrows):
+            cells = []
+            for c in range(sh.ncols):
+                v = sh.cell_value(r, c)
+                if v is None or v == "":
+                    continue
+                if isinstance(v, float) and v.is_integer():
+                    v = int(v)          # quantities come through as 6.0 -> 6
+                cells.append(str(v))
+            if cells:
+                chunks.append("\t".join(cells))
+    res["method"] = "xls"
     _set_text(res, "\n".join(chunks))
     return res

@@ -67,6 +67,25 @@ def test_xlsx_native():
     assert "Bageta" in res["text"] and "Polozka" in res["text"]
 
 
+def test_xls_legacy_native():
+    # legacy BIFF .xls (application/vnd.ms-excel) — openpyxl can't read these; xlrd path
+    import xlwt
+    wb = xlwt.Workbook()
+    ws = wb.add_sheet("Objednavka")
+    rows = [["Polozka", "Mnozstvo"], ["Bageta kvaskova 250g", 6], ["Rozok kvaskovy 70g", 35]]
+    for r, row in enumerate(rows):
+        for c, val in enumerate(row):
+            ws.write(r, c, val)
+    buf = io.BytesIO()
+    wb.save(buf)
+    res = extract.extract_attachment("Balla.xls", "application/vnd.ms-excel", buf.getvalue())
+    assert res["method"] == "xls"
+    assert "Bageta kvaskova 250g" in res["text"]
+    assert "Rozok kvaskovy 70g" in res["text"]
+    assert "35" in res["text"] and "6" in res["text"]   # quantities, not "6.0"
+    assert res["chars"] > 0
+
+
 def test_txt_native():
     res = extract.extract_attachment("a.txt", "text/plain", "Dobrý deň\nObjednávka".encode())
     assert res["method"] == "text"
