@@ -6,7 +6,7 @@ ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 # OCR + PDF rasterization stack (Slovak + Czech + English)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tesseract-ocr tesseract-ocr-ces tesseract-ocr-slk tesseract-ocr-eng \
-        poppler-utils ghostscript \
+        poppler-utils ghostscript antiword \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
