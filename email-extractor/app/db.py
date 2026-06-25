@@ -27,6 +27,7 @@ SCHEMA = [
         classified_at   TIMESTAMPTZ,
         original_category TEXT,
         human_reviewed  BOOLEAN NOT NULL DEFAULT FALSE,
+        review_status   TEXT,
         corrected_at    TIMESTAMPTZ,
         processed       BOOLEAN NOT NULL DEFAULT FALSE,
         processed_by    TEXT,

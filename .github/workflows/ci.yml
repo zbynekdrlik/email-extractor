@@ -23,6 +23,10 @@ jobs:
           python-version: "3.12"
       - name: Install OCR system deps
         run: |
+          # Drop the runner's preinstalled 3rd-party apt sources (azure-cli / microsoft)
+          # — they intermittently 403 and break `apt-get update`; tesseract/poppler are
+          # in the standard Ubuntu repos and don't need them.
+          sudo rm -f /etc/apt/sources.list.d/*microsoft* /etc/apt/sources.list.d/*azure* 2>/dev/null || true
           sudo apt-get update -qq
           sudo apt-get install -y -qq tesseract-ocr tesseract-ocr-ces tesseract-ocr-slk poppler-utils
       - name: Install Python deps
