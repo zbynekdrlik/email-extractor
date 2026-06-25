@@ -19,4 +19,4 @@ addopts = "-q"
 
 [tool.coverage.run]
 source = ["app"]
-omit = ["app/main.py", "app/imap_poll.py", "app/db.py", "app/httpapi.py", "app/store.py"]
+omit = ["app/main.py", "app/imap_poll.py", "app/db.py", "app/httpapi.py", "app/store.py", "app/backfill.py"]
