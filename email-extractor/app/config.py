@@ -36,6 +36,7 @@ class Config:
     data_dir: str = "/data/store"
     http_port: int = 8099
     api_token: str = ""
+    public_base_url: str = ""
 
     @classmethod
     def load(cls) -> Config:
@@ -43,6 +44,8 @@ class Config:
         folders = _get(o, "folders", "FOLDERS", "INBOX")
         if isinstance(folders, str):
             folders = [f.strip() for f in folders.split(",") if f.strip()]
+        http_port = int(_get(o, "http_port", "HTTP_PORT", 8099))
+        base = _get(o, "public_base_url", "PUBLIC_BASE_URL", "") or f"http://localhost:{http_port}"
         return cls(
             imap_host=_get(o, "imap_host", "IMAP_HOST", ""),
             imap_port=int(_get(o, "imap_port", "IMAP_PORT", 993)),
@@ -52,6 +55,7 @@ class Config:
             poll_interval=int(_get(o, "poll_interval", "POLL_INTERVAL", 60)),
             pg_dsn=_get(o, "pg_dsn", "PG_DSN", ""),
             data_dir=_get(o, "data_dir", "DATA_DIR", "/data/store"),
-            http_port=int(_get(o, "http_port", "HTTP_PORT", 8099)),
+            http_port=http_port,
             api_token=_get(o, "api_token", "API_TOKEN", ""),
+            public_base_url=base,
         )
