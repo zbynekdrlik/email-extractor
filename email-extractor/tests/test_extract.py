@@ -86,6 +86,50 @@ def test_xls_legacy_native():
     assert res["chars"] > 0
 
 
+def test_odt_native():
+    # OpenDocument Text (.odt) — LibreOffice/OpenOffice Writer
+    from odf.opendocument import OpenDocumentText
+    from odf.text import P
+    d = OpenDocumentText()
+    d.text.addElement(P(text="Objednavka peciva: Bageta kvaskova 6 ks, Vianocka 2 ks"))
+    buf = io.BytesIO()
+    d.write(buf)
+    res = extract.extract_attachment("order.odt", "application/vnd.oasis.opendocument.text",
+                                     buf.getvalue())
+    assert res["method"] == "odf"
+    assert "Bageta kvaskova" in res["text"] and "Vianocka" in res["text"]
+
+
+def test_ods_native():
+    # OpenDocument Spreadsheet (.ods) — LibreOffice/OpenOffice Calc
+    from odf.opendocument import OpenDocumentSpreadsheet
+    from odf.table import Table, TableCell, TableRow
+    from odf.text import P
+    d = OpenDocumentSpreadsheet()
+    tbl = Table(name="Objednavka")
+    for vals in [["Polozka", "Mnozstvo"], ["Rozok kvaskovy", 35], ["Chlieb", 4]]:
+        tr = TableRow()
+        for v in vals:
+            tc = TableCell()
+            tc.addElement(P(text=str(v)))
+            tr.addElement(tc)
+        tbl.addElement(tr)
+    d.spreadsheet.addElement(tbl)
+    buf = io.BytesIO()
+    d.write(buf)
+    res = extract.extract_attachment("order.ods", "application/vnd.oasis.opendocument.spreadsheet",
+                                     buf.getvalue())
+    assert res["method"] == "odf"
+    assert "Rozok kvaskovy" in res["text"] and "35" in res["text"]
+
+
+def test_rtf_native():
+    rtf = r"{\rtf1\ansi\ansicpg1250 Objednavka: Chlieb 1000g 2 ks\par Bageta 6 ks\par}"
+    res = extract.extract_attachment("order.rtf", "application/rtf", rtf.encode("utf-8"))
+    assert res["method"] == "rtf"
+    assert "Chlieb 1000g" in res["text"] and "Bageta" in res["text"]
+
+
 def test_txt_native():
     res = extract.extract_attachment("a.txt", "text/plain", "Dobrý deň\nObjednávka".encode())
     assert res["method"] == "text"

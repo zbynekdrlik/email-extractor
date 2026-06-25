@@ -138,6 +138,15 @@ def extract_attachment(filename: str, mime: str, data: bytes) -> dict:
                                       "application/x-msexcel"} and ext not in {"csv", "txt"}):
             return _extract_xls(res, data)
 
+        if ext in {"odt", "ods", "fodt", "fods"} or "opendocument" in mime:
+            return _extract_odf(res, data)
+
+        if ext == "doc" or mime == "application/msword":
+            return _extract_doc(res, data)
+
+        if ext == "rtf" or mime in {"application/rtf", "text/rtf"}:
+            return _extract_rtf(res, data)
+
         if ext in {"txt", "csv", "log", "md"} or mime.startswith("text/"):
             res["method"] = "text"
             _set_text(res, data.decode("utf-8", errors="replace"))
@@ -247,4 +256,56 @@ def _extract_xls(res: dict, data: bytes) -> dict:
                 chunks.append("\t".join(cells))
     res["method"] = "xls"
     _set_text(res, "\n".join(chunks))
+    return res
+
+
+def _extract_odf(res: dict, data: bytes) -> dict:
+    """OpenDocument .odt (Writer) / .ods (Calc) via odfpy."""
+    from odf import table, teletype, text
+    from odf.opendocument import load
+    doc = load(io.BytesIO(data))
+    mt = doc.mimetype or ""
+    parts = []
+    if "spreadsheet" in mt:
+        for tbl in doc.getElementsByType(table.Table):
+            parts.append(f"[Sheet: {tbl.getAttribute('name') or ''}]")
+            for row in tbl.getElementsByType(table.TableRow):
+                cells = [teletype.extractText(c) for c in row.getElementsByType(table.TableCell)]
+                cells = [c for c in cells if c.strip()]
+                if cells:
+                    parts.append("\t".join(cells))
+    else:
+        for p in doc.getElementsByType(text.P):
+            t = teletype.extractText(p)
+            if t.strip():
+                parts.append(t)
+    res["method"] = "odf"
+    _set_text(res, "\n".join(parts))
+    return res
+
+
+def _extract_doc(res: dict, data: bytes) -> dict:
+    """Legacy binary .doc (application/msword) via the antiword system binary."""
+    import subprocess
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".doc") as tf:
+        tf.write(data)
+        tf.flush()
+        proc = subprocess.run(["antiword", tf.name], capture_output=True, timeout=60)
+    txt = proc.stdout.decode("utf-8", errors="replace").strip()
+    if not txt and proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="replace")[:200]
+        res.update(method="unsupported", flag="error", error=f"antiword rc={proc.returncode}: {err}")
+        return res
+    res["method"] = "doc"
+    _set_text(res, txt)
+    return res
+
+
+def _extract_rtf(res: dict, data: bytes) -> dict:
+    """Rich Text Format via striprtf (pure Python)."""
+    from striprtf.striprtf import rtf_to_text
+    txt = rtf_to_text(data.decode("utf-8", errors="replace"))
+    res["method"] = "rtf"
+    _set_text(res, txt)
     return res
