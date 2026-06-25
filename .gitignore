@@ -1,0 +1,18 @@
+# spike artifacts (real business email data — never commit)
+_spike_raws/
+_spike_out/
+pipeline.py
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# secrets
+.env
+options.json
