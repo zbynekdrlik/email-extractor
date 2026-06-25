@@ -1,0 +1,22 @@
+[project]
+name = "email-extractor"
+version = "0.1.0"
+description = "OCR email extractor — reads IMAP, extracts body + attachments, writes Postgres for n8n"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]   # long prompt/option strings are fine
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["app/main.py", "app/imap_poll.py", "app/db.py", "app/httpapi.py", "app/store.py"]

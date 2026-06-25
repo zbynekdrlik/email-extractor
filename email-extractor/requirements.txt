@@ -1,0 +1,12 @@
+imapclient>=3.0
+pdfplumber>=0.11
+pdf2image>=1.17
+pytesseract>=0.3.13
+python-docx>=1.1
+openpyxl>=3.1
+Pillow>=10.0
+beautifulsoup4>=4.12
+lxml>=5.0
+psycopg[binary]>=3.2
+Flask>=3.0
+python-dateutil>=2.9
