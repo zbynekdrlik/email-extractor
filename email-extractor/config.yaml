@@ -1,5 +1,5 @@
 name: Email OCR Extractor
-version: "0.2.2"
+version: "0.2.3"
 slug: email_extractor
 description: Reads an IMAP mailbox, OCR-extracts the body + all attachments, and writes Postgres for n8n.
 url: https://github.com/zbynekdrlik/email-extractor

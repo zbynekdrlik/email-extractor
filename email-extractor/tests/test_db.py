@@ -51,6 +51,23 @@ def test_init_schema_idempotent(pg):
     assert n == 1
 
 
+def test_insert_message_logs_ingested_event(pg):
+    rec = {
+        "identity": "<m-ing@x>",
+        "headers": {"message_id": "<m-ing@x>", "from_addr": "a@x.sk", "from_name": "A",
+                    "to_addrs": [], "cc_addrs": [], "subject": "Obj", "date": "2026-06-26"},
+        "body_text": "telo", "body_source": "plain", "combined_text": "telo",
+        "has_attachments": False, "needs_vision": False, "attachments": [],
+    }
+    assert db.insert_message(pg, rec, "INBOX", 1, 1, "/x/raw.eml", []) is True
+    ev = pg.execute("SELECT workflow, stage, status, rollup FROM email_events "
+                    "WHERE message_id=%s", ("<m-ing@x>",)).fetchone()
+    assert ev == ("extractor", "ingested", "ok", False)
+    # rollup=False -> the ingest event does not set proc_status (stays 'nové')
+    assert pg.execute("SELECT proc_status FROM messages WHERE message_id=%s",
+                      ("<m-ing@x>",)).fetchone()[0] is None
+
+
 def test_non_rollup_event_is_timeline_only(pg):
     pg.execute("INSERT INTO messages (message_id, proc_status, proc_stage, proc_outcome) "
                "VALUES ('nr','ok','uploaded_orion','EDI')")
