@@ -73,6 +73,23 @@ def message_identity(msg, raw: bytes) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
+def content_signature(from_addr: str, subject: str, combined_text: str) -> str:
+    """Content fingerprint for near-duplicate dedup.
+
+    The same mail delivered to several addresses (all forwarded to the automation
+    mailbox) arrives as separate messages with DIFFERENT Message-IDs but identical
+    content. Hashing sender+subject+body lets the ingest skip such copies (within a
+    short time window — see db.insert_message — so a genuine re-order hours later is
+    still kept).
+    """
+    src = "\n".join([
+        (from_addr or "").strip().lower(),
+        (subject or "").strip(),
+        (combined_text or "").strip(),
+    ])
+    return hashlib.sha256(src.encode("utf-8", "replace")).hexdigest()
+
+
 def headers(msg) -> dict:
     from_name, from_addr = parseaddr(str(msg.get("From", "")))
     return {

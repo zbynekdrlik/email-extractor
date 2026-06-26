@@ -222,3 +222,15 @@ def test_low_quality_image_flagged_needs_vision_and_text_dropped():
     if res["needs_vision"]:                       # fix #2: placeholder, not garbage
         assert res["text"].startswith("[needs AI Vision")
         assert res["flag"] == "needs_vision"
+
+
+def test_content_signature_dedup():
+    # near-duplicate dedup fingerprint: sender case + subject whitespace normalized;
+    # different body -> different signature (so distinct orders are not merged)
+    from app import mailparse
+    a = mailparse.content_signature("X@y.sk", "Objednavka", "Bageta 6 ks")
+    b = mailparse.content_signature("X@Y.sk", " Objednavka ", "Bageta 6 ks")
+    c = mailparse.content_signature("X@y.sk", "Objednavka", "Rozok 35 ks")
+    assert a == b
+    assert a != c
+    assert len(a) == 64
