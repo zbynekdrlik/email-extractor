@@ -224,6 +224,50 @@ def test_low_quality_image_flagged_needs_vision_and_text_dropped():
         assert res["flag"] == "needs_vision"
 
 
+def test_xlsx_preserves_empty_cells_so_columns_align():
+    # Regression: customers send a price-list sheet with the ORDER QUANTITY thrown
+    # into the last column on ordered rows only; un-ordered rows leave it blank.
+    # The extractor dropped empty cells, so rows had different column counts and the
+    # quantity column no longer lined up -> downstream AI mis-read quantities (grabbed
+    # the wrong column / hallucinated). Fix: keep empty cells as "" and pad every row
+    # to the grid width so the trailing quantity column stays aligned.
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Produkt", "Cena", "Mnozstvo"])
+    ws.append(["Chlieb", 1.5, 3])      # ordered: qty 3
+    ws.append(["Rozok", 0.4, None])    # NOT ordered: blank trailing quantity
+    ws.append(["Bageta", 1.2, 30])     # ordered: qty 30
+    buf = io.BytesIO()
+    wb.save(buf)
+    res = extract.extract_attachment("order.xlsx", "", buf.getvalue())
+    rows = [ln.split("\t") for ln in res["text"].splitlines() if "\t" in ln]
+    assert {len(r) for r in rows} == {3}                 # every row same width -> aligned
+    assert ["Rozok", "0.4", ""] in rows                  # blank quantity preserved
+    assert ["Chlieb", "1.5", "3"] in rows                # integer qty (not "3.0")
+    assert ["Bageta", "1.2", "30"] in rows
+
+
+def test_xls_preserves_empty_cells_so_columns_align():
+    # Same regression for legacy BIFF .xls (xlrd path) — this is the format the real
+    # failing email used ("Pekarová žena 27.xls").
+    import xlwt
+    wb = xlwt.Workbook()
+    ws = wb.add_sheet("o")
+    ws.write(0, 0, "Produkt"); ws.write(0, 1, "Cena"); ws.write(0, 2, "Mnozstvo")
+    ws.write(1, 0, "Chlieb"); ws.write(1, 1, 1.5); ws.write(1, 2, 3)
+    ws.write(2, 0, "Rozok"); ws.write(2, 1, 0.4)        # col 2 left blank (not ordered)
+    ws.write(3, 0, "Bageta"); ws.write(3, 1, 1.2); ws.write(3, 2, 30)
+    buf = io.BytesIO()
+    wb.save(buf)
+    res = extract.extract_attachment("order.xls", "application/vnd.ms-excel", buf.getvalue())
+    rows = [ln.split("\t") for ln in res["text"].splitlines() if "\t" in ln]
+    assert {len(r) for r in rows} == {3}
+    assert ["Rozok", "0.4", ""] in rows
+    assert ["Chlieb", "1.5", "3"] in rows
+    assert ["Bageta", "1.2", "30"] in rows
+
+
 def test_content_signature_dedup():
     # near-duplicate dedup fingerprint: sender case + subject whitespace normalized;
     # different body -> different signature (so distinct orders are not merged)
