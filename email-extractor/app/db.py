@@ -117,15 +117,6 @@ def insert_message(conn, rec: dict, folder: str, uid: int, uidvalidity: int,
     h = rec["headers"]
     content_sig = mailparse.content_signature(
         h.get("from_addr"), h.get("subject"), rec.get("combined_text"))
-    # Near-duplicate guard: the same mail delivered to several addresses (all forwarded
-    # to the automation mailbox) arrives as separate messages with different Message-IDs.
-    # Skip a copy whose content already arrived in the last 10 minutes; a genuine re-order
-    # hours/days later has a fresh window and is still inserted.
-    if conn.execute(
-        "SELECT 1 FROM messages WHERE content_sig = %s AND created_at > now() - interval '10 minutes' LIMIT 1",
-        (content_sig,),
-    ).fetchone():
-        return False
     row = conn.execute(
         """
         INSERT INTO messages (message_id, header_message_id, folder, imap_uid,
