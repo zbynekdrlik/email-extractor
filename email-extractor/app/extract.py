@@ -221,16 +221,37 @@ def _extract_docx(res: dict, data: bytes) -> dict:
     return res
 
 
+def _fmt_cell(v) -> str:
+    """One spreadsheet cell -> string. None -> "" (kept, for column alignment).
+    Integer-valued floats -> int, so an order quantity 6.0 reads as "6", not "6.0"."""
+    if v is None:
+        return ""
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def _grid_rows(rows: list[list[str]]) -> list[str]:
+    """Tab-join rows, padding each to the widest row so columns stay aligned.
+    Empty cells are PRESERVED (a blank trailing 'quantity' column must line up so the
+    AI can tell ordered rows from un-ordered ones); fully-empty rows are dropped."""
+    ncols = max((len(r) for r in rows), default=0)
+    out = []
+    for r in rows:
+        r = list(r) + [""] * (ncols - len(r))
+        if any(c.strip() for c in r):
+            out.append("\t".join(r))
+    return out
+
+
 def _extract_xlsx(res: dict, data: bytes) -> dict:
     import openpyxl
     wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     chunks = []
     for ws in wb.worksheets:
         chunks.append(f"[Sheet: {ws.title}]")
-        for row in ws.iter_rows(values_only=True):
-            cells = [str(c) for c in row if c is not None]
-            if cells:
-                chunks.append("\t".join(cells))
+        rows = [[_fmt_cell(c) for c in row] for row in ws.iter_rows(values_only=True)]
+        chunks.extend(_grid_rows(rows))
     res["method"] = "xlsx"
     _set_text(res, "\n".join(chunks))
     return res
@@ -243,17 +264,9 @@ def _extract_xls(res: dict, data: bytes) -> dict:
     chunks = []
     for sh in book.sheets():
         chunks.append(f"[Sheet: {sh.name}]")
-        for r in range(sh.nrows):
-            cells = []
-            for c in range(sh.ncols):
-                v = sh.cell_value(r, c)
-                if v is None or v == "":
-                    continue
-                if isinstance(v, float) and v.is_integer():
-                    v = int(v)          # quantities come through as 6.0 -> 6
-                cells.append(str(v))
-            if cells:
-                chunks.append("\t".join(cells))
+        rows = [[_fmt_cell(sh.cell_value(r, c)) for c in range(sh.ncols)]
+                for r in range(sh.nrows)]
+        chunks.extend(_grid_rows(rows))
     res["method"] = "xls"
     _set_text(res, "\n".join(chunks))
     return res
@@ -269,11 +282,9 @@ def _extract_odf(res: dict, data: bytes) -> dict:
     if "spreadsheet" in mt:
         for tbl in doc.getElementsByType(table.Table):
             parts.append(f"[Sheet: {tbl.getAttribute('name') or ''}]")
-            for row in tbl.getElementsByType(table.TableRow):
-                cells = [teletype.extractText(c) for c in row.getElementsByType(table.TableCell)]
-                cells = [c for c in cells if c.strip()]
-                if cells:
-                    parts.append("\t".join(cells))
+            rows = [[teletype.extractText(c) for c in row.getElementsByType(table.TableCell)]
+                    for row in tbl.getElementsByType(table.TableRow)]
+            parts.extend(_grid_rows(rows))
     else:
         for p in doc.getElementsByType(text.P):
             t = teletype.extractText(p)
