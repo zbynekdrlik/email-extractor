@@ -51,6 +51,20 @@ def test_init_schema_idempotent(pg):
     assert n == 1
 
 
+def test_classified_trigger_logs_on_category_change(pg):
+    pg.execute("INSERT INTO messages (message_id) VALUES ('cls')")
+    pg.execute("UPDATE messages SET category='ai_orders' WHERE message_id='cls'")
+    ev = pg.execute("SELECT workflow, stage, status, rollup FROM email_events "
+                    "WHERE message_id='cls' AND stage='classified' ORDER BY id DESC LIMIT 1").fetchone()
+    assert ev == ("sorter", "classified", "ok", False)
+    # no duplicate event when category is set to the same value
+    pg.execute("UPDATE messages SET category='ai_orders' WHERE message_id='cls'")
+    assert pg.execute("SELECT count(*) FROM email_events WHERE message_id='cls' "
+                      "AND stage='classified'").fetchone()[0] == 1
+    # rollup=false -> proc_status stays NULL ('nové') after classification
+    assert pg.execute("SELECT proc_status FROM messages WHERE message_id='cls'").fetchone()[0] is None
+
+
 def test_insert_message_logs_ingested_event(pg):
     rec = {
         "identity": "<m-ing@x>",
