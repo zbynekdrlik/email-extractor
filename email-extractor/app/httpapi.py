@@ -20,8 +20,9 @@ from pathlib import Path
 
 import psycopg
 from flask import Flask, abort, jsonify, redirect, request, send_file, session
+from psycopg.types.json import Json
 
-from . import __version__
+from . import __version__, db
 from .store import safe_id
 
 CATEGORIES = ["ai_orders", "invoices", "reklamacie", "dodacie_listy",
@@ -414,6 +415,118 @@ def create_app(cfg) -> Flask:
                 "created_by": f[6], "resolved_at": f[7].isoformat() if f[7] else None,
                 "resolution": f[8],
             } for f in fixes])
+
+    # ---- operator actions ----
+
+    @app.post("/api/message/<int:mid>/reclassify")
+    def api_reclassify(mid: int):
+        body = request.get_json(silent=True) or {}
+        cat = body.get("category")
+        if cat not in CATEGORIES:
+            abort(400)
+        with _db() as c:
+            m = c.execute("SELECT message_id, category FROM messages WHERE id=%s",
+                          (mid,)).fetchone()
+            if not m:
+                abort(404)
+            c.execute(
+                """UPDATE messages
+                   SET original_category = COALESCE(original_category, category),
+                       category = %s, human_reviewed = true, review_status = 'corrected',
+                       corrected_at = now(), processed = false, processed_at = NULL,
+                       processed_by = NULL, processing_at = NULL
+                   WHERE id = %s""", (cat, mid))
+            db.log_event(c, m[0], "dashboard", "reclassified", "ok",
+                         outcome=f"preklasifikované {m[1]} → {cat}",
+                         detail={"from": m[1], "to": cat})
+        return jsonify(ok=True, id=mid, category=cat)
+
+    @app.post("/api/message/<int:mid>/reprocess")
+    def api_reprocess(mid: int):
+        with _db() as c:
+            m = c.execute("SELECT message_id FROM messages WHERE id=%s", (mid,)).fetchone()
+            if not m:
+                abort(404)
+            c.execute(
+                """UPDATE messages SET processed = false, processed_at = NULL,
+                   processed_by = NULL, processing_at = NULL, error = NULL
+                   WHERE id = %s""", (mid,))
+            db.log_event(c, m[0], "dashboard", "requeued", "ok",
+                         outcome="manuálne preposlané na spracovanie")
+        return jsonify(ok=True, id=mid)
+
+    # ---- fix queue ----
+
+    @app.post("/api/message/<int:mid>/fix")
+    def api_fix(mid: int):
+        body = request.get_json(silent=True) or {}
+        ptype = body.get("problem_type")
+        if ptype not in ("mis_sorted", "mis_processed", "other"):
+            abort(400)
+        expected = body.get("expected_category")
+        if expected is not None and expected not in CATEGORIES:
+            abort(400)
+        desc = (body.get("description") or "").strip()
+        with _db() as c:
+            m = c.execute(
+                """SELECT message_id, subject, category, proc_status, proc_outcome
+                   FROM messages WHERE id=%s""", (mid,)).fetchone()
+            if not m:
+                abort(404)
+            snapshot = {"subject": m[1], "category": m[2],
+                        "proc_status": m[3], "proc_outcome": m[4]}
+            fid = c.execute(
+                """INSERT INTO fix_requests
+                       (message_id, problem_type, expected_category, description,
+                        snapshot, created_by)
+                   VALUES (%s,%s,%s,%s,%s,%s) RETURNING id""",
+                (m[0], ptype, expected, desc, Json(snapshot), "dashboard")).fetchone()[0]
+            db.log_event(c, m[0], "dashboard", "fix_requested", "review",
+                         outcome="na opravu: " + ptype + (f" → {expected}" if expected else ""),
+                         detail={"fix_id": fid, "problem_type": ptype,
+                                 "expected_category": expected})
+        return jsonify(ok=True, id=mid, fix_id=fid)
+
+    @app.get("/api/fix-queue")
+    def api_fix_queue():
+        status = request.args.get("status", "")
+        where, params = [], []
+        if status:
+            where.append("f.status = %s")
+            params.append(status)
+        wsql = ("WHERE " + " AND ".join(where)) if where else ""
+        with _db() as c:
+            rows = c.execute(
+                f"""SELECT f.id, f.message_id, f.problem_type, f.expected_category,
+                           f.description, f.status, f.created_at, f.created_by,
+                           f.resolved_at, f.resolution,
+                           m.id, m.subject, m.from_addr, m.category
+                    FROM fix_requests f
+                    LEFT JOIN messages m ON m.message_id = f.message_id
+                    {wsql} ORDER BY f.id DESC LIMIT 200""", params).fetchall()
+        return jsonify(items=[{
+            "id": r[0], "message_id": r[1], "problem_type": r[2], "expected_category": r[3],
+            "description": r[4], "status": r[5],
+            "created_at": r[6].isoformat() if r[6] else None, "created_by": r[7],
+            "resolved_at": r[8].isoformat() if r[8] else None, "resolution": r[9],
+            "msg_id": r[10], "subject": r[11], "from": r[12], "category": r[13],
+        } for r in rows])
+
+    @app.post("/api/fix/<int:fid>/resolve")
+    def api_fix_resolve(fid: int):
+        body = request.get_json(silent=True) or {}
+        status = body.get("status", "fixed")
+        if status not in ("open", "in_progress", "fixed", "wontfix"):
+            abort(400)
+        resolution = (body.get("resolution") or "").strip()
+        with _db() as c:
+            if not c.execute("SELECT 1 FROM fix_requests WHERE id=%s", (fid,)).fetchone():
+                abort(404)
+            resolved = "now()" if status in ("fixed", "wontfix") else "NULL"
+            c.execute(
+                f"UPDATE fix_requests SET status=%s, resolution=%s, resolved_at={resolved} "
+                f"WHERE id=%s", (status, resolution, fid))
+        return jsonify(ok=True, id=fid, status=status)
 
     @app.get("/")
     def dashboard():

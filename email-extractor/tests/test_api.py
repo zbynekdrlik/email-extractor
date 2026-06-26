@@ -146,3 +146,103 @@ def test_date_to_is_inclusive_of_whole_day(pg):
     today = pg.execute("SELECT to_char(now(),'YYYY-MM-DD')").fetchone()[0]
     d = c.get(f"/api/messages?to={today}").get_json()
     assert d["total"] == 1     # a message created today is within to=today (inclusive)
+
+
+# ---- #14 operator actions ----
+
+def test_reclassify_changes_category_and_logs(pg):
+    pg.execute("INSERT INTO messages (message_id, subject, category, processed) "
+               "VALUES ('rc','S','invoices', true)")
+    mid = pg.execute("SELECT id FROM messages WHERE message_id='rc'").fetchone()[0]
+    c = _client()
+    _login(c)
+    assert c.post(f"/api/message/{mid}/reclassify", json={"category": "ai_orders"}).status_code == 200
+    row = pg.execute("SELECT category, original_category, processed, review_status "
+                     "FROM messages WHERE id=%s", (mid,)).fetchone()
+    assert row == ("ai_orders", "invoices", False, "corrected")
+    ev = pg.execute("SELECT stage, status FROM email_events WHERE message_id='rc' "
+                    "ORDER BY id DESC LIMIT 1").fetchone()
+    assert ev == ("reclassified", "ok")
+
+
+def test_reclassify_bad_category_400_and_missing_404(pg):
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('rc2','invoices')")
+    mid = pg.execute("SELECT id FROM messages WHERE message_id='rc2'").fetchone()[0]
+    c = _client()
+    _login(c)
+    assert c.post(f"/api/message/{mid}/reclassify", json={"category": "nope"}).status_code == 400
+    assert c.post("/api/message/9999999/reclassify", json={"category": "ai_orders"}).status_code == 404
+
+
+def test_reprocess_resets_flags_and_logs(pg):
+    pg.execute("INSERT INTO messages (message_id, category, processed, error) "
+               "VALUES ('rp','ai_orders', true, 'boom')")
+    mid = pg.execute("SELECT id FROM messages WHERE message_id='rp'").fetchone()[0]
+    c = _client()
+    _login(c)
+    assert c.post(f"/api/message/{mid}/reprocess").status_code == 200
+    assert pg.execute("SELECT processed, error FROM messages WHERE id=%s", (mid,)).fetchone() == (False, None)
+    assert pg.execute("SELECT count(*) FROM email_events WHERE message_id='rp' "
+                      "AND stage='requeued'").fetchone()[0] == 1
+    assert c.post("/api/message/9999999/reprocess").status_code == 404
+
+
+# ---- #15 fix queue ----
+
+def test_fix_request_inserts_snapshot_event_and_shows_in_queue(pg):
+    pg.execute("INSERT INTO messages (message_id, subject, category, proc_status, proc_outcome) "
+               "VALUES ('fx','Objednavka','ai_orders','review','prazdny')")
+    mid = pg.execute("SELECT id FROM messages WHERE message_id='fx'").fetchone()[0]
+    c = _client()
+    _login(c)
+    r = c.post(f"/api/message/{mid}/fix",
+               json={"problem_type": "mis_processed", "description": "zle qty"})
+    assert r.status_code == 200
+    fid = r.get_json()["fix_id"]
+    row = pg.execute("SELECT problem_type, status, snapshot->>'subject', created_by "
+                     "FROM fix_requests WHERE id=%s", (fid,)).fetchone()
+    assert row == ("mis_processed", "open", "Objednavka", "dashboard")
+    assert pg.execute("SELECT count(*) FROM email_events WHERE message_id='fx' "
+                      "AND stage='fix_requested'").fetchone()[0] == 1
+    assert c.get("/api/messages?state=onfix").get_json()["total"] == 1
+    q = c.get("/api/fix-queue").get_json()["items"]
+    assert len(q) == 1
+    assert q[0]["problem_type"] == "mis_processed"
+    assert q[0]["subject"] == "Objednavka"
+
+
+def test_fix_validates_inputs(pg):
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('fx2','ai_orders')")
+    mid = pg.execute("SELECT id FROM messages WHERE message_id='fx2'").fetchone()[0]
+    c = _client()
+    _login(c)
+    assert c.post(f"/api/message/{mid}/fix", json={"problem_type": "bogus"}).status_code == 400
+    assert c.post(f"/api/message/{mid}/fix",
+                  json={"problem_type": "mis_sorted", "expected_category": "nope"}).status_code == 400
+    assert c.post("/api/message/9999999/fix", json={"problem_type": "other"}).status_code == 404
+
+
+def test_fix_queue_status_filter_and_resolve(pg):
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('fq','ai_orders')")
+    pg.execute("INSERT INTO fix_requests (message_id, problem_type, status) "
+               "VALUES ('fq','mis_sorted','open')")
+    fid = pg.execute("SELECT id FROM fix_requests WHERE message_id='fq'").fetchone()[0]
+    c = _client()
+    _login(c)
+    assert len(c.get("/api/fix-queue?status=open").get_json()["items"]) == 1
+    assert len(c.get("/api/fix-queue?status=fixed").get_json()["items"]) == 0
+    r = c.post(f"/api/fix/{fid}/resolve", json={"status": "fixed", "resolution": "opravene v #99"})
+    assert r.status_code == 200
+    assert pg.execute("SELECT status, resolution, resolved_at IS NOT NULL "
+                      "FROM fix_requests WHERE id=%s", (fid,)).fetchone() == ("fixed", "opravene v #99", True)
+    assert c.post(f"/api/fix/{fid}/resolve", json={"status": "bogus"}).status_code == 400
+    assert c.post("/api/fix/9999999/resolve", json={"status": "fixed"}).status_code == 404
+
+
+def test_actions_require_auth(pg):
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('au','ai_orders')")
+    mid = pg.execute("SELECT id FROM messages WHERE message_id='au'").fetchone()[0]
+    c = _client()   # no login, no token
+    assert c.post(f"/api/message/{mid}/reclassify", json={"category": "invoices"}).status_code == 401
+    assert c.post(f"/api/message/{mid}/fix", json={"problem_type": "other"}).status_code == 401
+    assert c.get("/api/fix-queue").status_code == 401
