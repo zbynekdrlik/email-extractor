@@ -49,3 +49,15 @@ def test_init_schema_idempotent(pg):
     n = pg.execute(
         "SELECT count(*) FROM pg_trigger WHERE tgname='trg_email_events_rollup'").fetchone()[0]
     assert n == 1
+
+
+def test_non_rollup_event_is_timeline_only(pg):
+    pg.execute("INSERT INTO messages (message_id, proc_status, proc_stage, proc_outcome) "
+               "VALUES ('nr','ok','uploaded_orion','EDI')")
+    db.log_event(pg, "nr", "dashboard", "fix_requested", "review",
+                 outcome="na opravu", rollup=False)
+    row = pg.execute("SELECT proc_status, proc_stage, proc_outcome "
+                     "FROM messages WHERE message_id='nr'").fetchone()
+    assert row == ("ok", "uploaded_orion", "EDI")   # unchanged by the non-rollup event
+    assert pg.execute("SELECT count(*) FROM email_events "
+                      "WHERE message_id='nr'").fetchone()[0] == 1   # but recorded in the timeline
