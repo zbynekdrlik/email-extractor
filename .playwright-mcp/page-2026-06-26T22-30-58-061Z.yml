@@ -1,0 +1,341 @@
+- generic [active] [ref=e1]:
+  - banner [ref=e2]:
+    - generic [ref=e3]: 📬 Email dashboard
+    - 'textbox "hľadať: odosielateľ, predmet, telo, príloha…" [ref=e4]'
+    - combobox [ref=e5]:
+      - option "kategória" [selected]
+      - option "ai_orders"
+      - option "invoices"
+      - option "reklamacie"
+      - option "dodacie_listy"
+      - option "static_orders"
+      - option "human_processing"
+      - option "no_processing"
+    - combobox [ref=e6]:
+      - option "stav" [selected]
+      - option "hotové"
+      - option "review"
+      - option "chyba"
+      - option "spracúva"
+      - option "na oprave"
+    - textbox "od" [ref=e7]
+    - textbox "do" [ref=e8]
+    - generic [ref=e9] [cursor=pointer]:
+      - text: ●
+      - generic [ref=e10]: LIVE
+    - generic [ref=e11]: v0.2.2
+    - link "odhlásiť" [ref=e12] [cursor=pointer]:
+      - /url: /logout
+  - generic [ref=e13]:
+    - button "spolu 728" [ref=e14] [cursor=pointer]
+    - button "✓ hotové 254" [ref=e15] [cursor=pointer]
+    - button "⚠ review 0" [ref=e16] [cursor=pointer]
+    - button "✗ chyba 0" [ref=e17] [cursor=pointer]
+    - button "… spracúva 0" [ref=e18] [cursor=pointer]
+    - button "🔧 na oprave 0" [ref=e19] [cursor=pointer]
+  - generic [ref=e20]:
+    - button "Maily" [ref=e21] [cursor=pointer]
+    - button "Fix fronta" [ref=e22] [cursor=pointer]
+  - main [ref=e23]:
+    - generic [ref=e24]:
+      - generic [ref=e25] [cursor=pointer]:
+        - generic [ref=e26]:
+          - generic [ref=e27]: "#750 stano.tekac@gmail.com"
+          - generic [ref=e28]: 06-26 17:24
+        - generic [ref=e29]: (bez predmetu)
+        - generic [ref=e30]: no_processing
+      - generic [ref=e31] [cursor=pointer]:
+        - generic [ref=e32]:
+          - generic [ref=e33]: "#749 news@letter.alza.sk"
+          - generic [ref=e34]: 06-26 16:19
+        - generic [ref=e35]: Kto sa pripraví dnes, nebude sa potiť zajtra.
+        - generic [ref=e36]: no_processing
+      - generic [ref=e37] [cursor=pointer]:
+        - generic [ref=e38]:
+          - generic [ref=e39]: "#748 notifications@slovnormal.sk"
+          - generic [ref=e40]: 06-26 15:28
+        - generic [ref=e41]: Klíma Sl
+        - generic [ref=e42]: human_processing
+      - generic [ref=e43] [cursor=pointer]:
+        - generic [ref=e44]:
+          - generic [ref=e45]: "#747 notifications@slovnormal.sk"
+          - generic [ref=e46]: 06-26 13:28
+        - generic [ref=e47]: Klíma Sl
+        - generic [ref=e48]: human_processing
+      - generic [ref=e49] [cursor=pointer]:
+        - generic [ref=e50]:
+          - generic [ref=e51]: "#746 notifications@slovnormal.sk"
+          - generic [ref=e52]: 06-26 13:28
+        - generic [ref=e53]: codex sklady
+        - generic [ref=e54]: human_processing
+      - generic [ref=e55] [cursor=pointer]:
+        - generic [ref=e56]:
+          - generic [ref=e57]: "#745 cepartners@cepartners.sk"
+          - generic [ref=e58]: 06-26 13:05
+        - generic [ref=e59]: Plánujete investície do farmy? Získajte na ne nenávratný príspevok
+        - generic [ref=e60]: no_processing
+      - generic [ref=e61] [cursor=pointer]:
+        - generic [ref=e62]:
+          - generic [ref=e63]: "#744 alexmikulaaa@gmail.com"
+          - generic [ref=e64]: 06-26 12:28
+        - generic [ref=e65]: "📎 Re: Vstupné tlačivá"
+        - generic [ref=e66]: human_processing
+      - generic [ref=e67] [cursor=pointer]:
+        - generic [ref=e68]:
+          - generic [ref=e69]: "#743 alexmikulaaa@gmail.com"
+          - generic [ref=e70]: 06-26 12:18
+        - generic [ref=e71]: "📎 Re: Vstupné tlačivá"
+        - generic [ref=e72]: human_processing
+      - generic [ref=e73] [cursor=pointer]:
+        - generic [ref=e74]:
+          - generic [ref=e75]: "#742 kevin.seo99@outlook.com"
+          - generic [ref=e76]: 06-26 12:01
+        - generic [ref=e77]: SEO Cost Details
+        - generic [ref=e78]: no_processing
+      - generic [ref=e79] [cursor=pointer]:
+        - generic [ref=e80]:
+          - generic [ref=e81]: "#741 alexmikulaaa@gmail.com"
+          - generic [ref=e82]: 06-26 12:00
+        - generic [ref=e83]: "📎 Re: Vstupné tlačivá"
+        - generic [ref=e84]: human_processing
+      - generic [ref=e85] [cursor=pointer]:
+        - generic [ref=e86]:
+          - generic [ref=e87]: "#740 noreply@grit.eu"
+          - generic [ref=e88]: 06-26 11:23
+        - generic [ref=e89]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898741 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e90]: no_processing
+      - generic [ref=e91] [cursor=pointer]:
+        - generic [ref=e92]:
+          - generic [ref=e93]: "#739 noreply@grit.eu"
+          - generic [ref=e94]: 06-26 11:23
+        - generic [ref=e95]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898675 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e96]: no_processing
+      - generic [ref=e97] [cursor=pointer]:
+        - generic [ref=e98]:
+          - generic [ref=e99]: "#738 noreply@grit.eu"
+          - generic [ref=e100]: 06-26 11:23
+        - generic [ref=e101]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898939 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e102]: no_processing
+      - generic [ref=e103] [cursor=pointer]:
+        - generic [ref=e104]:
+          - generic [ref=e105]: "#737 noreply@grit.eu"
+          - generic [ref=e106]: 06-26 11:23
+        - generic [ref=e107]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898902 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e108]: no_processing
+      - generic [ref=e109] [cursor=pointer]:
+        - generic [ref=e110]:
+          - generic [ref=e111]: "#736 noreply@grit.eu"
+          - generic [ref=e112]: 06-26 11:23
+        - generic [ref=e113]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898725 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e114]: no_processing
+      - generic [ref=e115] [cursor=pointer]:
+        - generic [ref=e116]:
+          - generic [ref=e117]: "#735 noreply@grit.eu"
+          - generic [ref=e118]: 06-26 11:23
+        - generic [ref=e119]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898716 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e120]: no_processing
+      - generic [ref=e121] [cursor=pointer]:
+        - generic [ref=e122]:
+          - generic [ref=e123]: "#734 noreply@grit.eu"
+          - generic [ref=e124]: 06-26 11:23
+        - generic [ref=e125]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898663 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e126]: no_processing
+      - generic [ref=e127] [cursor=pointer]:
+        - generic [ref=e128]:
+          - generic [ref=e129]: "#733 noreply@grit.eu"
+          - generic [ref=e130]: 06-26 11:23
+        - generic [ref=e131]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898755 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e132]: no_processing
+      - generic [ref=e133] [cursor=pointer]:
+        - generic [ref=e134]:
+          - generic [ref=e135]: "#732 noreply@grit.eu"
+          - generic [ref=e136]: 06-26 11:23
+        - generic [ref=e137]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898929 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e138]: no_processing
+      - generic [ref=e139] [cursor=pointer]:
+        - generic [ref=e140]:
+          - generic [ref=e141]: "#731 noreply@grit.eu"
+          - generic [ref=e142]: 06-26 11:23
+        - generic [ref=e143]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898680 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e144]: no_processing
+      - generic [ref=e145] [cursor=pointer]:
+        - generic [ref=e146]:
+          - generic [ref=e147]: "#730 noreply@grit.eu"
+          - generic [ref=e148]: 06-26 11:23
+        - generic [ref=e149]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898682 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e150]: no_processing
+      - generic [ref=e151] [cursor=pointer]:
+        - generic [ref=e152]:
+          - generic [ref=e153]: "#729 noreply@grit.eu"
+          - generic [ref=e154]: 06-26 11:23
+        - generic [ref=e155]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898688 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e156]: no_processing
+      - generic [ref=e157] [cursor=pointer]:
+        - generic [ref=e158]:
+          - generic [ref=e159]: "#728 noreply@grit.eu"
+          - generic [ref=e160]: 06-26 11:23
+        - generic [ref=e161]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898871 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e162]: no_processing
+      - generic [ref=e163] [cursor=pointer]:
+        - generic [ref=e164]:
+          - generic [ref=e165]: "#727 noreply@grit.eu"
+          - generic [ref=e166]: 06-26 11:23
+        - generic [ref=e167]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898334 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e168]: no_processing
+      - generic [ref=e169] [cursor=pointer]:
+        - generic [ref=e170]:
+          - generic [ref=e171]: "#726 noreply@grit.eu"
+          - generic [ref=e172]: 06-26 11:23
+        - generic [ref=e173]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898947 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e174]: no_processing
+      - generic [ref=e175] [cursor=pointer]:
+        - generic [ref=e176]:
+          - generic [ref=e177]: "#725 noreply@grit.eu"
+          - generic [ref=e178]: 06-26 11:23
+        - generic [ref=e179]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898274 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e180]: no_processing
+      - generic [ref=e181] [cursor=pointer]:
+        - generic [ref=e182]:
+          - generic [ref=e183]: "#724 noreply@grit.eu"
+          - generic [ref=e184]: 06-26 11:22
+        - generic [ref=e185]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898275 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e186]: no_processing
+      - generic [ref=e187] [cursor=pointer]:
+        - generic [ref=e188]:
+          - generic [ref=e189]: "#723 noreply@grit.eu"
+          - generic [ref=e190]: 06-26 11:22
+        - generic [ref=e191]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898928 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e192]: no_processing
+      - generic [ref=e193] [cursor=pointer]:
+        - generic [ref=e194]:
+          - generic [ref=e195]: "#722 noreply@grit.eu"
+          - generic [ref=e196]: 06-26 11:22
+        - generic [ref=e197]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898674 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e198]: no_processing
+      - generic [ref=e199] [cursor=pointer]:
+        - generic [ref=e200]:
+          - generic [ref=e201]: "#721 noreply@grit.eu"
+          - generic [ref=e202]: 06-26 11:22
+        - generic [ref=e203]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898819 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e204]: no_processing
+      - generic [ref=e205] [cursor=pointer]:
+        - generic [ref=e206]:
+          - generic [ref=e207]: "#720 noreply@grit.eu"
+          - generic [ref=e208]: 06-26 11:22
+        - generic [ref=e209]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898900 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e210]: no_processing
+      - generic [ref=e211] [cursor=pointer]:
+        - generic [ref=e212]:
+          - generic [ref=e213]: "#719 noreply@grit.eu"
+          - generic [ref=e214]: 06-26 11:22
+        - generic [ref=e215]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898666 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e216]: no_processing
+      - generic [ref=e217] [cursor=pointer]:
+        - generic [ref=e218]:
+          - generic [ref=e219]: "#718 noreply@grit.eu"
+          - generic [ref=e220]: 06-26 11:22
+        - generic [ref=e221]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898889 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e222]: no_processing
+      - generic [ref=e223] [cursor=pointer]:
+        - generic [ref=e224]:
+          - generic [ref=e225]: "#717 noreply@grit.eu"
+          - generic [ref=e226]: 06-26 11:22
+        - generic [ref=e227]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898888 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e228]: no_processing
+      - generic [ref=e229] [cursor=pointer]:
+        - generic [ref=e230]:
+          - generic [ref=e231]: "#716 noreply@grit.eu"
+          - generic [ref=e232]: 06-26 11:22
+        - generic [ref=e233]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898723 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e234]: no_processing
+      - generic [ref=e235] [cursor=pointer]:
+        - generic [ref=e236]:
+          - generic [ref=e237]: "#715 noreply@grit.eu"
+          - generic [ref=e238]: 06-26 11:22
+        - generic [ref=e239]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898715 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e240]: no_processing
+      - generic [ref=e241] [cursor=pointer]:
+        - generic [ref=e242]:
+          - generic [ref=e243]: "#714 noreply@grit.eu"
+          - generic [ref=e244]: 06-26 11:22
+        - generic [ref=e245]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898949 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e246]: no_processing
+      - generic [ref=e247] [cursor=pointer]:
+        - generic [ref=e248]:
+          - generic [ref=e249]: "#713 noreply@grit.eu"
+          - generic [ref=e250]: 06-26 11:22
+        - generic [ref=e251]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898678 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e252]: no_processing
+      - generic [ref=e253] [cursor=pointer]:
+        - generic [ref=e254]:
+          - generic [ref=e255]: "#712 noreply@grit.eu"
+          - generic [ref=e256]: 06-26 11:22
+        - generic [ref=e257]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898748 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e258]: no_processing
+      - generic [ref=e259] [cursor=pointer]:
+        - generic [ref=e260]:
+          - generic [ref=e261]: "#711 noreply@grit.eu"
+          - generic [ref=e262]: 06-26 11:22
+        - generic [ref=e263]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898749 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e264]: no_processing
+      - generic [ref=e265] [cursor=pointer]:
+        - generic [ref=e266]:
+          - generic [ref=e267]: "#710 noreply@grit.eu"
+          - generic [ref=e268]: 06-26 11:22
+        - generic [ref=e269]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898333 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e270]: no_processing
+      - generic [ref=e271] [cursor=pointer]:
+        - generic [ref=e272]:
+          - generic [ref=e273]: "#709 noreply@grit.eu"
+          - generic [ref=e274]: 06-26 11:22
+        - generic [ref=e275]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898704 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e276]: no_processing
+      - generic [ref=e277] [cursor=pointer]:
+        - generic [ref=e278]:
+          - generic [ref=e279]: "#708 noreply@grit.eu"
+          - generic [ref=e280]: 06-26 11:22
+        - generic [ref=e281]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898930 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e282]: no_processing
+      - generic [ref=e283] [cursor=pointer]:
+        - generic [ref=e284]:
+          - generic [ref=e285]: "#707 noreply@grit.eu"
+          - generic [ref=e286]: 06-26 11:22
+        - generic [ref=e287]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898835 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e288]: no_processing
+      - generic [ref=e289] [cursor=pointer]:
+        - generic [ref=e290]:
+          - generic [ref=e291]: "#706 noreply@grit.eu"
+          - generic [ref=e292]: 06-26 11:22
+        - generic [ref=e293]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898760 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e294]: no_processing
+      - generic [ref=e295] [cursor=pointer]:
+        - generic [ref=e296]:
+          - generic [ref=e297]: "#705 noreply@grit.eu"
+          - generic [ref=e298]: 06-26 11:22
+        - generic [ref=e299]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898703 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e300]: no_processing
+      - generic [ref=e301] [cursor=pointer]:
+        - generic [ref=e302]:
+          - generic [ref=e303]: "#704 noreply@grit.eu"
+          - generic [ref=e304]: 06-26 11:22
+        - generic [ref=e305]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898840 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e306]: no_processing
+      - generic [ref=e307] [cursor=pointer]:
+        - generic [ref=e308]:
+          - generic [ref=e309]: "#703 noreply@grit.eu"
+          - generic [ref=e310]: 06-26 11:22
+        - generic [ref=e311]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898759 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e312]: no_processing
+      - generic [ref=e313] [cursor=pointer]:
+        - generic [ref=e314]:
+          - generic [ref=e315]: "#702 noreply@grit.eu"
+          - generic [ref=e316]: 06-26 11:22
+        - generic [ref=e317]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898805 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e318]: no_processing
+      - generic [ref=e319] [cursor=pointer]:
+        - generic [ref=e320]:
+          - generic [ref=e321]: "#701 noreply@grit.eu"
+          - generic [ref=e322]: 06-26 11:22
+        - generic [ref=e323]: "[SLOVNORMAL, s.r.o.] Odmietnutie EDI dokladu č. 267898722 adresátom COOP JEDNOTA Liptovský Mikuláš"
+        - generic [ref=e324]: no_processing
+    - generic [ref=e326]: Vyber mail vľavo.

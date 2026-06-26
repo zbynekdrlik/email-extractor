@@ -29,6 +29,11 @@ def test_version_open():
     assert b"." in r.data
 
 
+def test_favicon_no_404():
+    # browsers auto-request /favicon.ico; serve 204 so the dashboard console stays clean
+    assert _client().get("/favicon.ico").status_code == 204
+
+
 def test_dashboard_closed_by_default():
     # nothing configured -> dashboard redirects to login (which cannot succeed)
     assert _client(token="", dash="").get("/").status_code == 302

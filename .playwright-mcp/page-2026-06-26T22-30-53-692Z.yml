@@ -1,0 +1,4 @@
+- generic [ref=e2]:
+  - heading "📬 Email dashboard" [level=1] [ref=e3]
+  - textbox "heslo" [ref=e4]
+  - button "Prihlásiť sa" [ref=e5] [cursor=pointer]

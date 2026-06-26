@@ -87,7 +87,7 @@ def create_app(cfg) -> Flask:
     def _gate():
         p = request.path
         # Open, or self-guarded by their own in-route _auth() (the file APIs).
-        if (p in ("/health", "/version", "/login", "/logout")
+        if (p in ("/health", "/version", "/login", "/logout", "/favicon.ico")
                 or p.startswith("/static")
                 or p.startswith("/files") or p.startswith("/eml")):
             return None
@@ -119,6 +119,10 @@ def create_app(cfg) -> Flask:
     def logout():
         session.clear()
         return redirect("/login")
+
+    @app.get("/favicon.ico")
+    def favicon():
+        return ("", 204)   # no icon — avoids a 404 console error on the dashboard
 
     @app.get("/health")
     def health():

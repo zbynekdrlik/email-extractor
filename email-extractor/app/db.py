@@ -299,4 +299,13 @@ def insert_message(conn, rec: dict, folder: str, uid: int, uidvalidity: int,
              a.get("chars"), a.get("needs_vision"), a.get("flag"), f.get("path"),
              f.get("url"), a.get("text")),
         )
+    # Start the processing timeline (rollup=False: keep proc_status NULL/'nové' —
+    # the email isn't processed yet, just ingested).
+    n_att = len(rec["attachments"])
+    log_event(conn, rec["identity"], "extractor", "ingested", "ok",
+              outcome=f"prijaté + extrahované ({n_att} príloh)"
+                      + (", potrebuje AI Vision" if rec.get("needs_vision") else ""),
+              detail={"attachments": n_att, "needs_vision": bool(rec.get("needs_vision")),
+                      "folder": folder},
+              rollup=False)
     return True
