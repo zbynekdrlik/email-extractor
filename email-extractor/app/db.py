@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import psycopg
 
+from . import mailparse
+
 SCHEMA = [
     """
     CREATE TABLE IF NOT EXISTS messages (
@@ -31,6 +33,8 @@ SCHEMA = [
         corrected_at    TIMESTAMPTZ,
         processed       BOOLEAN NOT NULL DEFAULT FALSE,
         processed_by    TEXT,
+        processing_at   TIMESTAMPTZ,
+        content_sig     TEXT,
         status          TEXT DEFAULT 'new',
         error           TEXT,
         raw_eml_path    TEXT,
@@ -111,20 +115,32 @@ def insert_message(conn, rec: dict, folder: str, uid: int, uidvalidity: int,
                    raw_path: str, att_files: list[dict]) -> bool:
     """Insert one email + its attachments. Returns False if already present (dedup)."""
     h = rec["headers"]
+    content_sig = mailparse.content_signature(
+        h.get("from_addr"), h.get("subject"), rec.get("combined_text"))
+    # Near-duplicate guard: the same mail delivered to several addresses (all forwarded
+    # to the automation mailbox) arrives as separate messages with different Message-IDs.
+    # Skip a copy whose content already arrived in the last 10 minutes; a genuine re-order
+    # hours/days later has a fresh window and is still inserted.
+    if conn.execute(
+        "SELECT 1 FROM messages WHERE content_sig = %s AND created_at > now() - interval '10 minutes' LIMIT 1",
+        (content_sig,),
+    ).fetchone():
+        return False
     row = conn.execute(
         """
         INSERT INTO messages (message_id, header_message_id, folder, imap_uid,
             imap_uidvalidity, from_addr, from_name, to_addrs, cc_addrs, subject,
             sent_at, body_text, body_source, combined_text, has_attachments,
-            needs_vision, raw_eml_path)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            needs_vision, raw_eml_path, content_sig)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT (message_id) DO NOTHING
         RETURNING id
         """,
         (rec["identity"], h.get("message_id"), folder, uid, uidvalidity,
          h.get("from_addr"), h.get("from_name"), h.get("to_addrs"), h.get("cc_addrs"),
          h.get("subject"), h.get("date"), rec["body_text"], rec["body_source"],
-         rec["combined_text"], rec["has_attachments"], rec["needs_vision"], raw_path),
+         rec["combined_text"], rec["has_attachments"], rec["needs_vision"], raw_path,
+         content_sig),
     ).fetchone()
     if not row:
         return False
