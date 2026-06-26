@@ -19,3 +19,6 @@ options.json
 
 # brainstorming visual companion (mockups, transient)
 .superpowers/
+
+# playwright MCP artifacts
+.playwright-mcp/
