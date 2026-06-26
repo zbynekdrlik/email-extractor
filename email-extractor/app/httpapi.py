@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import threading
+from datetime import date
 from pathlib import Path
 
 import psycopg
@@ -26,37 +27,76 @@ from .store import safe_id
 CATEGORIES = ["ai_orders", "invoices", "reklamacie", "dodacie_listy",
               "static_orders", "human_processing", "no_processing"]
 
+def _valid_date(s: str) -> bool:
+    """True iff s is a real ISO date (YYYY-MM-DD); rejects bad months/days."""
+    try:
+        date.fromisoformat(s)
+        return True
+    except ValueError:
+        return False
+
+
+def _escape_like(s: str) -> str:
+    """Escape LIKE/ILIKE metacharacters so user input is a literal substring."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _persistent_secret(data_dir: Path) -> bytes:
+    """Stable Flask session key when secret_key is unset: persist one on the
+    data volume so sessions survive restarts (instead of a per-process random
+    key that logs everyone out on every restart)."""
+    f = data_dir / ".session_secret"
+    try:
+        if f.exists():
+            return f.read_bytes()
+        data_dir.mkdir(parents=True, exist_ok=True)
+        s = os.urandom(32)
+        f.write_bytes(s)
+        return s
+    except OSError:
+        return os.urandom(32)   # read-only fs fallback: ephemeral key
+
 
 def create_app(cfg) -> Flask:
     app = Flask(__name__)
-    app.secret_key = cfg.secret_key or os.urandom(32)
     data_dir = Path(cfg.data_dir)
+    app.secret_key = cfg.secret_key or _persistent_secret(data_dir)
+
+    def _token_ok():
+        tok = request.args.get("token") or request.headers.get("X-Token")
+        return bool(cfg.api_token) and tok == cfg.api_token
+
+    def _authorized():
+        # A logged-in human OR a valid machine token; OR — only when NO auth at
+        # all is configured — open (pure dev mode).
+        if session.get("auth") or _token_ok():
+            return True
+        return not cfg.api_token and not cfg.dash_password
 
     def _auth():
-        if cfg.api_token:
-            tok = request.args.get("token") or request.headers.get("X-Token")
-            if tok != cfg.api_token:
-                abort(403)
+        # Used by the file APIs + legacy /review/* routes (they self-guard).
+        if not _authorized():
+            abort(403)
 
     def _db():
         return psycopg.connect(cfg.pg_dsn, autocommit=True)
 
     @app.before_request
     def _gate():
-        # No dashboard password configured -> open (consistent with token-less mode).
-        if not cfg.dash_password:
-            return None
         p = request.path
-        # Open / token-gated within their own route / login flow:
+        # Open, or self-guarded by their own in-route _auth() (file APIs, legacy
+        # /review/*). The /review page itself is a public HTML shell; its data
+        # endpoints enforce _auth().
         if (p in ("/health", "/version", "/login", "/logout")
-                or p.startswith("/files") or p.startswith("/eml")
-                or p.startswith("/static")):
+                or p.startswith("/static") or p.startswith("/review")
+                or p.startswith("/files") or p.startswith("/eml")):
             return None
-        if not session.get("auth"):
-            if p.startswith("/api/"):
-                return jsonify(error="auth required"), 401
-            return redirect("/login")
-        return None
+        # New dashboard surface ("/", "/api/*"): require a session or token.
+        if _authorized():
+            return None
+        if p.startswith("/api/"):
+            return jsonify(error="auth required"), 401
+        return redirect("/login")
 
     @app.get("/login")
     def login_page():
@@ -66,7 +106,7 @@ def create_app(cfg) -> Flask:
     def login_submit():
         body = request.form or (request.get_json(silent=True) or {})
         pw = body.get("password", "")
-        if not cfg.dash_password or pw == cfg.dash_password:
+        if cfg.dash_password and pw == cfg.dash_password:
             session["auth"] = True
             return redirect("/")
         return LOGIN_HTML.replace("<!--ERR-->",
@@ -126,7 +166,8 @@ def create_app(cfg) -> Flask:
             params.append(rev)
         if q:
             where.append("(from_addr ILIKE %s OR subject ILIKE %s)")
-            params += [f"%{q}%", f"%{q}%"]
+            like = f"%{_escape_like(q)}%"
+            params += [like, like]
         wsql = ("WHERE " + " AND ".join(where)) if where else ""
         with _db() as c:
             counts = dict(c.execute(
@@ -269,13 +310,17 @@ def create_app(cfg) -> Flask:
                 "OR m.body_text ILIKE %s OR m.combined_text ILIKE %s "
                 "OR EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.message_id "
                 "AND a.extracted_text ILIKE %s))")
-            like = f"%{q}%"
+            like = f"%{_escape_like(q)}%"
             params += [like, like, like, like, like, like]
         if dfrom:
-            where.append("m.created_at >= %s")
+            if not _valid_date(dfrom):
+                abort(400)
+            where.append("m.created_at >= %s::date")
             params.append(dfrom)
         if dto:
-            where.append("m.created_at <= %s")
+            if not _valid_date(dto):
+                abort(400)
+            where.append("m.created_at < (%s::date + 1)")   # inclusive of the whole day
             params.append(dto)
         wsql = ("WHERE " + " AND ".join(where)) if where else ""
 

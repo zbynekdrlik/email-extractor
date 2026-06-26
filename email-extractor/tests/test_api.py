@@ -111,3 +111,38 @@ def test_search_matches_attachment_text(pg):
     d = c.get("/api/messages?q=tajnyklucvtexte").get_json()
     assert d["total"] == 1
     assert d["items"][0]["subject"] == "S"
+
+
+def test_token_authorizes_api_and_files(pg):
+    pg.execute("INSERT INTO messages (message_id, subject, category) VALUES ('t','S','ai_orders')")
+    c = _client()
+    # no session, but a valid machine token authorizes the data API
+    assert c.get("/api/messages?token=tok").status_code == 200
+    # /files with a valid token but missing file -> 404 (authorized), not 403
+    assert c.get("/files/nope/0?token=tok").status_code == 404
+
+
+def test_like_metacharacters_are_literal(pg):
+    pg.execute("INSERT INTO messages (message_id, subject, category) VALUES ('x1','50% zlava','ai_orders')")
+    pg.execute("INSERT INTO messages (message_id, subject, category) VALUES ('x2','nic','ai_orders')")
+    c = _client()
+    _login(c)
+    d = c.get("/api/messages?q=%25").get_json()    # %25 decodes to a literal '%'
+    assert d["total"] == 1
+    assert d["items"][0]["subject"] == "50% zlava"
+
+
+def test_invalid_date_filter_returns_400(pg):
+    c = _client()
+    _login(c)
+    assert c.get("/api/messages?from=2026-13-99").status_code == 400
+    assert c.get("/api/messages?to=garbage").status_code == 400
+
+
+def test_date_to_is_inclusive_of_whole_day(pg):
+    pg.execute("INSERT INTO messages (message_id, subject, category) VALUES ('td','dnes','ai_orders')")
+    c = _client()
+    _login(c)
+    today = pg.execute("SELECT to_char(now(),'YYYY-MM-DD')").fetchone()[0]
+    d = c.get(f"/api/messages?to={today}").get_json()
+    assert d["total"] == 1     # a message created today is within to=today (inclusive)
