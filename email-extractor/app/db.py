@@ -213,6 +213,28 @@ SCHEMA = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_fix_status ON fix_requests(status)",
     "CREATE INDEX IF NOT EXISTS idx_fix_message ON fix_requests(message_id)",
+    # --- sorter classification timeline event (DB-side: no n8n change needed).
+    # Fires when the sorter UPDATEs category; rollup=false so it's a timeline
+    # marker that doesn't set proc_status (the email isn't processed yet). ---
+    """
+    CREATE OR REPLACE FUNCTION messages_classified_event() RETURNS trigger AS $func$
+    BEGIN
+        IF NEW.category IS NOT NULL AND (OLD.category IS DISTINCT FROM NEW.category) THEN
+            INSERT INTO email_events (message_id, workflow, stage, status, outcome, detail, rollup)
+            VALUES (NEW.message_id, 'sorter', 'classified', 'ok',
+                    'zaradené: ' || NEW.category,
+                    jsonb_build_object('category', NEW.category), false);
+        END IF;
+        RETURN NEW;
+    END;
+    $func$ LANGUAGE plpgsql
+    """,
+    "DROP TRIGGER IF EXISTS trg_messages_classified ON messages",
+    """
+    CREATE TRIGGER trg_messages_classified
+        AFTER UPDATE OF category ON messages
+        FOR EACH ROW EXECUTE FUNCTION messages_classified_event()
+    """,
 ]
 
 
