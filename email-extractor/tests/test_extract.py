@@ -254,10 +254,15 @@ def test_xls_preserves_empty_cells_so_columns_align():
     import xlwt
     wb = xlwt.Workbook()
     ws = wb.add_sheet("o")
-    ws.write(0, 0, "Produkt"); ws.write(0, 1, "Cena"); ws.write(0, 2, "Mnozstvo")
-    ws.write(1, 0, "Chlieb"); ws.write(1, 1, 1.5); ws.write(1, 2, 3)
-    ws.write(2, 0, "Rozok"); ws.write(2, 1, 0.4)        # col 2 left blank (not ordered)
-    ws.write(3, 0, "Bageta"); ws.write(3, 1, 1.2); ws.write(3, 2, 30)
+    rows = [
+        ["Produkt", "Cena", "Mnozstvo"],
+        ["Chlieb", 1.5, 3],     # ordered: qty 3
+        ["Rozok", 0.4],         # col 2 left blank (not ordered)
+        ["Bageta", 1.2, 30],    # ordered: qty 30
+    ]
+    for r, row in enumerate(rows):
+        for c, val in enumerate(row):
+            ws.write(r, c, val)
     buf = io.BytesIO()
     wb.save(buf)
     res = extract.extract_attachment("order.xls", "application/vnd.ms-excel", buf.getvalue())
