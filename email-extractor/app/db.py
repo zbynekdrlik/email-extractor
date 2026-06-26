@@ -97,6 +97,9 @@ SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_events_message ON email_events(message_id, ts)",
     "CREATE INDEX IF NOT EXISTS idx_events_status ON email_events(status)",
     "CREATE INDEX IF NOT EXISTS idx_events_stage ON email_events(stage)",
+    # rollup=false for operator/audit events (reclassify, fix, ...) so they appear
+    # in the timeline but do NOT overwrite the pipeline-owned proc_* state.
+    "ALTER TABLE email_events ADD COLUMN IF NOT EXISTS rollup BOOLEAN NOT NULL DEFAULT true",
     # --- denormalized current processing state on messages (cheap list/filter) ---
     """
     ALTER TABLE messages
@@ -115,18 +118,20 @@ SCHEMA = [
     """
     CREATE OR REPLACE FUNCTION email_events_rollup() RETURNS trigger AS $func$
     BEGIN
-        UPDATE messages SET
-            proc_stage    = NEW.stage,
-            proc_status   = NEW.status,
-            proc_outcome  = NEW.outcome,
-            last_event_at = NEW.ts,
-            attempts      = COALESCE(attempts, 0)
-                            + CASE WHEN NEW.stage = 'claimed' THEN 1 ELSE 0 END,
-            edi_file      = COALESCE(NEW.detail->>'edi_file', edi_file),
-            orion_path    = COALESCE(NEW.detail->>'orion_path', orion_path),
-            odoo_url      = COALESCE(NEW.detail->>'odoo_url', odoo_url),
-            forwarded_to  = COALESCE(NEW.detail->>'forwarded_to', forwarded_to)
-        WHERE message_id = NEW.message_id;
+        IF NEW.rollup THEN
+            UPDATE messages SET
+                proc_stage    = NEW.stage,
+                proc_status   = NEW.status,
+                proc_outcome  = NEW.outcome,
+                last_event_at = NEW.ts,
+                attempts      = COALESCE(attempts, 0)
+                                + CASE WHEN NEW.stage = 'claimed' THEN 1 ELSE 0 END,
+                edi_file      = COALESCE(NEW.detail->>'edi_file', edi_file),
+                orion_path    = COALESCE(NEW.detail->>'orion_path', orion_path),
+                odoo_url      = COALESCE(NEW.detail->>'odoo_url', odoo_url),
+                forwarded_to  = COALESCE(NEW.detail->>'forwarded_to', forwarded_to)
+            WHERE message_id = NEW.message_id;
+        END IF;
         RETURN NEW;
     END;
     $func$ LANGUAGE plpgsql
@@ -168,13 +173,18 @@ def init_schema(conn) -> None:
 
 
 def log_event(conn, message_id: str, workflow: str, stage: str, status: str,
-              outcome: str = "", detail: dict | None = None) -> None:
-    """Append one processing-timeline row; the rollup trigger updates messages."""
+              outcome: str = "", detail: dict | None = None, rollup: bool = True) -> None:
+    """Append one processing-timeline row.
+
+    rollup=True (pipeline events): the trigger rolls the state onto messages.
+    rollup=False (operator/audit events: reclassify, fix, resolve): timeline-only,
+    so a dashboard action never overwrites the pipeline-owned proc_* state.
+    """
     conn.execute(
-        """INSERT INTO email_events (message_id, workflow, stage, status, outcome, detail)
-           VALUES (%s,%s,%s,%s,%s,%s)""",
+        """INSERT INTO email_events (message_id, workflow, stage, status, outcome, detail, rollup)
+           VALUES (%s,%s,%s,%s,%s,%s,%s)""",
         (message_id, workflow, stage, status, outcome,
-         Json(detail) if detail is not None else None),
+         Json(detail) if detail is not None else None, rollup),
     )
 
 

@@ -27,6 +27,8 @@ from .store import safe_id
 
 CATEGORIES = ["ai_orders", "invoices", "reklamacie", "dodacie_listy",
               "static_orders", "human_processing", "no_processing"]
+PROBLEM_TYPES = ["mis_sorted", "mis_processed", "other"]
+FIX_STATUSES = ["open", "in_progress", "fixed", "wontfix"]
 
 def _valid_date(s: str) -> bool:
     """True iff s is a real ISO date (YYYY-MM-DD); rejects bad months/days."""
@@ -420,7 +422,7 @@ def create_app(cfg) -> Flask:
 
     @app.post("/api/message/<int:mid>/reclassify")
     def api_reclassify(mid: int):
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(force=True, silent=True) or {}
         cat = body.get("category")
         if cat not in CATEGORIES:
             abort(400)
@@ -434,11 +436,13 @@ def create_app(cfg) -> Flask:
                    SET original_category = COALESCE(original_category, category),
                        category = %s, human_reviewed = true, review_status = 'corrected',
                        corrected_at = now(), processed = false, processed_at = NULL,
-                       processed_by = NULL, processing_at = NULL
+                       processed_by = NULL, processing_at = NULL, error = NULL
                    WHERE id = %s""", (cat, mid))
+            # rollup=False: a reclassify is an operator action, not a pipeline stage —
+            # it must not overwrite proc_status (the real state set by processing).
             db.log_event(c, m[0], "dashboard", "reclassified", "ok",
                          outcome=f"preklasifikované {m[1]} → {cat}",
-                         detail={"from": m[1], "to": cat})
+                         detail={"from": m[1], "to": cat}, rollup=False)
         return jsonify(ok=True, id=mid, category=cat)
 
     @app.post("/api/message/<int:mid>/reprocess")
@@ -452,16 +456,16 @@ def create_app(cfg) -> Flask:
                    processed_by = NULL, processing_at = NULL, error = NULL
                    WHERE id = %s""", (mid,))
             db.log_event(c, m[0], "dashboard", "requeued", "ok",
-                         outcome="manuálne preposlané na spracovanie")
+                         outcome="manuálne preposlané na spracovanie", rollup=False)
         return jsonify(ok=True, id=mid)
 
     # ---- fix queue ----
 
     @app.post("/api/message/<int:mid>/fix")
     def api_fix(mid: int):
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(force=True, silent=True) or {}
         ptype = body.get("problem_type")
-        if ptype not in ("mis_sorted", "mis_processed", "other"):
+        if ptype not in PROBLEM_TYPES:
             abort(400)
         expected = body.get("expected_category")
         if expected is not None and expected not in CATEGORIES:
@@ -481,21 +485,33 @@ def create_app(cfg) -> Flask:
                         snapshot, created_by)
                    VALUES (%s,%s,%s,%s,%s,%s) RETURNING id""",
                 (m[0], ptype, expected, desc, Json(snapshot), "dashboard")).fetchone()[0]
+            # rollup=False: flagging an email for fixing is a side annotation; it must
+            # not overwrite the message's real proc_status (a done order stays done).
             db.log_event(c, m[0], "dashboard", "fix_requested", "review",
                          outcome="na opravu: " + ptype + (f" → {expected}" if expected else ""),
                          detail={"fix_id": fid, "problem_type": ptype,
-                                 "expected_category": expected})
+                                 "expected_category": expected}, rollup=False)
         return jsonify(ok=True, id=mid, fix_id=fid)
 
     @app.get("/api/fix-queue")
     def api_fix_queue():
         status = request.args.get("status", "")
+        try:
+            offset = max(0, int(request.args.get("offset", 0)))
+        except ValueError:
+            offset = 0
+        try:
+            limit = min(200, max(1, int(request.args.get("limit", 50))))
+        except ValueError:
+            limit = 50
         where, params = [], []
         if status:
             where.append("f.status = %s")
             params.append(status)
         wsql = ("WHERE " + " AND ".join(where)) if where else ""
         with _db() as c:
+            total = c.execute(
+                f"SELECT count(*) FROM fix_requests f {wsql}", params).fetchone()[0]
             rows = c.execute(
                 f"""SELECT f.id, f.message_id, f.problem_type, f.expected_category,
                            f.description, f.status, f.created_at, f.created_by,
@@ -503,8 +519,9 @@ def create_app(cfg) -> Flask:
                            m.id, m.subject, m.from_addr, m.category
                     FROM fix_requests f
                     LEFT JOIN messages m ON m.message_id = f.message_id
-                    {wsql} ORDER BY f.id DESC LIMIT 200""", params).fetchall()
-        return jsonify(items=[{
+                    {wsql} ORDER BY f.id DESC LIMIT %s OFFSET %s""",
+                params + [limit, offset]).fetchall()
+        return jsonify(total=total, offset=offset, limit=limit, items=[{
             "id": r[0], "message_id": r[1], "problem_type": r[2], "expected_category": r[3],
             "description": r[4], "status": r[5],
             "created_at": r[6].isoformat() if r[6] else None, "created_by": r[7],
@@ -514,18 +531,24 @@ def create_app(cfg) -> Flask:
 
     @app.post("/api/fix/<int:fid>/resolve")
     def api_fix_resolve(fid: int):
-        body = request.get_json(silent=True) or {}
+        body = request.get_json(force=True, silent=True) or {}
         status = body.get("status", "fixed")
-        if status not in ("open", "in_progress", "fixed", "wontfix"):
+        if status not in FIX_STATUSES:
             abort(400)
         resolution = (body.get("resolution") or "").strip()
         with _db() as c:
-            if not c.execute("SELECT 1 FROM fix_requests WHERE id=%s", (fid,)).fetchone():
+            row = c.execute("SELECT message_id FROM fix_requests WHERE id=%s",
+                            (fid,)).fetchone()
+            if not row:
                 abort(404)
             resolved = "now()" if status in ("fixed", "wontfix") else "NULL"
             c.execute(
                 f"UPDATE fix_requests SET status=%s, resolution=%s, resolved_at={resolved} "
                 f"WHERE id=%s", (status, resolution, fid))
+            db.log_event(c, row[0], "dashboard", "fix_resolved", "ok",
+                         outcome=f"fix #{fid} → {status}" + (f": {resolution}" if resolution else ""),
+                         detail={"fix_id": fid, "status": status, "resolution": resolution},
+                         rollup=False)
         return jsonify(ok=True, id=fid, status=status)
 
     @app.get("/")

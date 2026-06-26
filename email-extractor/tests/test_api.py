@@ -246,3 +246,72 @@ def test_actions_require_auth(pg):
     assert c.post(f"/api/message/{mid}/reclassify", json={"category": "invoices"}).status_code == 401
     assert c.post(f"/api/message/{mid}/fix", json={"problem_type": "other"}).status_code == 401
     assert c.get("/api/fix-queue").status_code == 401
+
+
+def test_fix_does_not_clobber_proc_status(pg):
+    pg.execute("INSERT INTO messages (message_id, subject, category, proc_status, proc_stage, "
+               "proc_outcome, processed) "
+               "VALUES ('done','S','ai_orders','ok','uploaded_orion','EDI nahrate', true)")
+    mid = pg.execute("SELECT id FROM messages WHERE message_id='done'").fetchone()[0]
+    c = _client()
+    _login(c)
+    assert c.post(f"/api/message/{mid}/fix", json={"problem_type": "mis_processed"}).status_code == 200
+    # a done order flagged for fixing stays done — proc_status NOT flipped to 'review'
+    assert pg.execute("SELECT proc_status, proc_outcome FROM messages WHERE id=%s",
+                      (mid,)).fetchone() == ("ok", "EDI nahrate")
+    counts = c.get("/api/messages").get_json()["counts"]
+    assert counts["review"] == 0
+    assert counts["done"] == 1
+    assert counts["on_fix"] == 1     # but it shows in the on-fix bucket
+
+
+def test_reclassify_does_not_clobber_proc_status(pg):
+    pg.execute("INSERT INTO messages (message_id, category, proc_status) "
+               "VALUES ('rv','invoices','review')")
+    mid = pg.execute("SELECT id FROM messages WHERE message_id='rv'").fetchone()[0]
+    c = _client()
+    _login(c)
+    c.post(f"/api/message/{mid}/reclassify", json={"category": "ai_orders"})
+    # proc_status stays 'review' (pipeline-owned); only category/processed change
+    assert pg.execute("SELECT proc_status, category, processed FROM messages WHERE id=%s",
+                      (mid,)).fetchone() == ("review", "ai_orders", False)
+
+
+def test_actions_accept_json_without_content_type_header(pg):
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('ct','invoices')")
+    mid = pg.execute("SELECT id FROM messages WHERE message_id='ct'").fetchone()[0]
+    c = _client()
+    _login(c)
+    # raw JSON body, no application/json header (curl -d / n8n default) -> still parsed
+    r = c.post(f"/api/message/{mid}/reclassify", data='{"category":"ai_orders"}',
+               content_type="text/plain")
+    assert r.status_code == 200
+    assert pg.execute("SELECT category FROM messages WHERE id=%s", (mid,)).fetchone()[0] == "ai_orders"
+
+
+def test_fix_resolve_writes_audit_event(pg):
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('re','ai_orders')")
+    pg.execute("INSERT INTO fix_requests (message_id, problem_type, status) "
+               "VALUES ('re','other','open')")
+    fid = pg.execute("SELECT id FROM fix_requests WHERE message_id='re'").fetchone()[0]
+    c = _client()
+    _login(c)
+    c.post(f"/api/fix/{fid}/resolve", json={"status": "fixed", "resolution": "done"})
+    ev = pg.execute("SELECT stage, status FROM email_events WHERE message_id='re' "
+                    "ORDER BY id DESC LIMIT 1").fetchone()
+    assert ev == ("fix_resolved", "ok")
+    # rollup=False -> the resolve event does not set proc_status
+    assert pg.execute("SELECT proc_status FROM messages WHERE message_id='re'").fetchone()[0] is None
+
+
+def test_fix_queue_paginates(pg):
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('pg1','ai_orders')")
+    for _ in range(3):
+        pg.execute("INSERT INTO fix_requests (message_id, problem_type, status) "
+                   "VALUES ('pg1','other','open')")
+    c = _client()
+    _login(c)
+    d = c.get("/api/fix-queue?limit=2").get_json()
+    assert d["total"] == 3
+    assert len(d["items"]) == 2
+    assert len(c.get("/api/fix-queue?limit=2&offset=2").get_json()["items"]) == 1
