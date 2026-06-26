@@ -16,3 +16,6 @@ htmlcov/
 # secrets
 .env
 options.json
+
+# brainstorming visual companion (mockups, transient)
+.superpowers/

@@ -13,11 +13,13 @@ Both set human_reviewed=true. Confirmed + corrected = labelled set to score/tune
 """
 from __future__ import annotations
 
+import os
 import threading
+from datetime import date
 from pathlib import Path
 
 import psycopg
-from flask import Flask, abort, jsonify, request, send_file
+from flask import Flask, abort, jsonify, redirect, request, send_file, session
 
 from . import __version__
 from .store import safe_id
@@ -25,19 +27,95 @@ from .store import safe_id
 CATEGORIES = ["ai_orders", "invoices", "reklamacie", "dodacie_listy",
               "static_orders", "human_processing", "no_processing"]
 
+def _valid_date(s: str) -> bool:
+    """True iff s is a real ISO date (YYYY-MM-DD); rejects bad months/days."""
+    try:
+        date.fromisoformat(s)
+        return True
+    except ValueError:
+        return False
+
+
+def _escape_like(s: str) -> str:
+    """Escape LIKE/ILIKE metacharacters so user input is a literal substring."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _persistent_secret(data_dir: Path) -> bytes:
+    """Stable Flask session key when secret_key is unset: persist one on the
+    data volume so sessions survive restarts (instead of a per-process random
+    key that logs everyone out on every restart)."""
+    f = data_dir / ".session_secret"
+    try:
+        if f.exists():
+            return f.read_bytes()
+        data_dir.mkdir(parents=True, exist_ok=True)
+        s = os.urandom(32)
+        f.write_bytes(s)
+        return s
+    except OSError:
+        return os.urandom(32)   # read-only fs fallback: ephemeral key
+
 
 def create_app(cfg) -> Flask:
     app = Flask(__name__)
     data_dir = Path(cfg.data_dir)
+    app.secret_key = cfg.secret_key or _persistent_secret(data_dir)
+
+    def _token_ok():
+        tok = request.args.get("token") or request.headers.get("X-Token")
+        return bool(cfg.api_token) and tok == cfg.api_token
+
+    def _authorized():
+        # A logged-in human OR a valid machine token; OR — only when NO auth at
+        # all is configured — open (pure dev mode).
+        if session.get("auth") or _token_ok():
+            return True
+        return not cfg.api_token and not cfg.dash_password
 
     def _auth():
-        if cfg.api_token:
-            tok = request.args.get("token") or request.headers.get("X-Token")
-            if tok != cfg.api_token:
-                abort(403)
+        # Used by the file APIs + legacy /review/* routes (they self-guard).
+        if not _authorized():
+            abort(403)
 
     def _db():
         return psycopg.connect(cfg.pg_dsn, autocommit=True)
+
+    @app.before_request
+    def _gate():
+        p = request.path
+        # Open, or self-guarded by their own in-route _auth() (file APIs, legacy
+        # /review/*). The /review page itself is a public HTML shell; its data
+        # endpoints enforce _auth().
+        if (p in ("/health", "/version", "/login", "/logout")
+                or p.startswith("/static") or p.startswith("/review")
+                or p.startswith("/files") or p.startswith("/eml")):
+            return None
+        # New dashboard surface ("/", "/api/*"): require a session or token.
+        if _authorized():
+            return None
+        if p.startswith("/api/"):
+            return jsonify(error="auth required"), 401
+        return redirect("/login")
+
+    @app.get("/login")
+    def login_page():
+        return LOGIN_HTML
+
+    @app.post("/login")
+    def login_submit():
+        body = request.form or (request.get_json(silent=True) or {})
+        pw = body.get("password", "")
+        if cfg.dash_password and pw == cfg.dash_password:
+            session["auth"] = True
+            return redirect("/")
+        return LOGIN_HTML.replace("<!--ERR-->",
+                                  '<div class="err">Nesprávne heslo</div>'), 401
+
+    @app.get("/logout")
+    def logout():
+        session.clear()
+        return redirect("/login")
 
     @app.get("/health")
     def health():
@@ -88,7 +166,8 @@ def create_app(cfg) -> Flask:
             params.append(rev)
         if q:
             where.append("(from_addr ILIKE %s OR subject ILIKE %s)")
-            params += [f"%{q}%", f"%{q}%"]
+            like = f"%{_escape_like(q)}%"
+            params += [like, like]
         wsql = ("WHERE " + " AND ".join(where)) if where else ""
         with _db() as c:
             counts = dict(c.execute(
@@ -185,6 +264,161 @@ def create_app(cfg) -> Flask:
     @app.get("/review")
     def review_page():
         return REVIEW_HTML
+
+    # ---- dashboard data API (session-gated via _gate) ----
+
+    @app.get("/api/messages")
+    def api_messages():
+        cat = request.args.get("category", "")
+        state = request.args.get("state", "")       # done|review|error|processing|onfix
+        rev = request.args.get("reviewed", "")      # no|confirmed|corrected
+        q = (request.args.get("q", "") or "").strip()
+        dfrom = request.args.get("from", "")
+        dto = request.args.get("to", "")
+        try:
+            offset = max(0, int(request.args.get("offset", 0)))
+        except ValueError:
+            offset = 0
+        try:
+            limit = min(200, max(1, int(request.args.get("limit", 50))))
+        except ValueError:
+            limit = 50
+
+        where, params = [], []
+        if cat:
+            where.append("m.category = %s")
+            params.append(cat)
+        if state == "done":
+            where.append("m.processed = true")
+        elif state == "review":
+            where.append("m.proc_status = 'review'")
+        elif state == "error":
+            where.append("m.proc_status = 'error'")
+        elif state == "processing":
+            where.append("m.processing_at IS NOT NULL AND m.processed = false")
+        elif state == "onfix":
+            where.append("EXISTS (SELECT 1 FROM fix_requests f "
+                         "WHERE f.message_id = m.message_id AND f.status = 'open')")
+        if rev == "no":
+            where.append("m.review_status IS NULL")
+        elif rev in ("confirmed", "corrected"):
+            where.append("m.review_status = %s")
+            params.append(rev)
+        if q:
+            where.append(
+                "(m.subject ILIKE %s OR m.from_addr ILIKE %s OR m.from_name ILIKE %s "
+                "OR m.body_text ILIKE %s OR m.combined_text ILIKE %s "
+                "OR EXISTS (SELECT 1 FROM attachments a WHERE a.message_id = m.message_id "
+                "AND a.extracted_text ILIKE %s))")
+            like = f"%{_escape_like(q)}%"
+            params += [like, like, like, like, like, like]
+        if dfrom:
+            if not _valid_date(dfrom):
+                abort(400)
+            where.append("m.created_at >= %s::date")
+            params.append(dfrom)
+        if dto:
+            if not _valid_date(dto):
+                abort(400)
+            where.append("m.created_at < (%s::date + 1)")   # inclusive of the whole day
+            params.append(dto)
+        wsql = ("WHERE " + " AND ".join(where)) if where else ""
+
+        with _db() as c:
+            total = c.execute(
+                f"SELECT count(*) FROM messages m {wsql}", params).fetchone()[0]
+            rows = c.execute(
+                f"""SELECT m.id, m.sent_at, m.created_at, m.from_addr, m.from_name, m.subject,
+                           m.category, m.original_category, m.review_status, m.processed,
+                           m.has_attachments, m.proc_status, m.proc_stage, m.proc_outcome,
+                           m.last_event_at, m.processing_at,
+                           EXISTS (SELECT 1 FROM fix_requests f
+                                   WHERE f.message_id = m.message_id AND f.status='open') AS on_fix
+                    FROM messages m {wsql}
+                    ORDER BY m.id DESC LIMIT %s OFFSET %s""",
+                params + [limit, offset]).fetchall()
+            cnt = c.execute(
+                """SELECT count(*) AS total,
+                          count(*) FILTER (WHERE processed) AS done,
+                          count(*) FILTER (WHERE proc_status='review') AS review,
+                          count(*) FILTER (WHERE proc_status='error') AS error,
+                          count(*) FILTER (WHERE processing_at IS NOT NULL AND NOT processed) AS proc
+                   FROM messages""").fetchone()
+            on_fix = c.execute(
+                "SELECT count(DISTINCT message_id) FROM fix_requests WHERE status='open'").fetchone()[0]
+            cat_counts = dict(c.execute(
+                "SELECT COALESCE(category,'(none)'), count(*) FROM messages GROUP BY category").fetchall())
+
+        items = [{
+            "id": r[0], "sent_at": r[1],
+            "created_at": r[2].isoformat() if r[2] else None,
+            "from": r[3], "from_name": r[4], "subject": r[5], "category": r[6],
+            "original_category": r[7], "review_status": r[8], "processed": r[9],
+            "has_attachments": r[10], "proc_status": r[11], "proc_stage": r[12],
+            "proc_outcome": r[13],
+            "last_event_at": r[14].isoformat() if r[14] else None,
+            "processing": (r[15] is not None) and not r[9], "on_fix": r[16],
+        } for r in rows]
+        return jsonify(
+            total=total, offset=offset, limit=limit, items=items, categories=CATEGORIES,
+            counts={"total": cnt[0], "done": cnt[1], "review": cnt[2],
+                    "error": cnt[3], "processing": cnt[4], "on_fix": on_fix},
+            category_counts=cat_counts)
+
+    @app.get("/api/message/<int:mid>")
+    def api_message(mid: int):
+        with _db() as c:
+            m = c.execute(
+                """SELECT id, message_id, from_addr, from_name, to_addrs, cc_addrs, subject,
+                          sent_at, created_at, body_text, combined_text, category,
+                          original_category, needs_vision, processed, processing_at,
+                          review_status, proc_status, proc_stage, proc_outcome, last_event_at,
+                          attempts, edi_file, orion_path, odoo_url, forwarded_to, error, status
+                   FROM messages WHERE id = %s""", (mid,)).fetchone()
+            if not m:
+                abort(404)
+            atts = c.execute(
+                """SELECT idx, filename, mime, size, method, ocr_conf, pages,
+                          needs_vision, flag, left(extracted_text, 8000)
+                   FROM attachments WHERE message_id = %s ORDER BY idx""", (m[1],)).fetchall()
+            events = c.execute(
+                """SELECT ts, workflow, stage, status, outcome, detail
+                   FROM email_events WHERE message_id = %s ORDER BY ts, id""", (m[1],)).fetchall()
+            fixes = c.execute(
+                """SELECT id, problem_type, expected_category, description, status,
+                          created_at, created_by, resolved_at, resolution
+                   FROM fix_requests WHERE message_id = %s ORDER BY id DESC""", (m[1],)).fetchall()
+        return jsonify(
+            id=m[0], message_id=m[1], from_addr=m[2], from_name=m[3], to_addrs=m[4],
+            cc_addrs=m[5], subject=m[6], sent_at=m[7],
+            created_at=m[8].isoformat() if m[8] else None,
+            body_text=m[9], combined_text=m[10], category=m[11], original_category=m[12],
+            needs_vision=m[13], processed=m[14],
+            processing=(m[15] is not None) and not m[14],
+            review_status=m[16], proc_status=m[17], proc_stage=m[18], proc_outcome=m[19],
+            last_event_at=m[20].isoformat() if m[20] else None, attempts=m[21],
+            edi_file=m[22], orion_path=m[23], odoo_url=m[24], forwarded_to=m[25],
+            error=m[26], status=m[27], categories=CATEGORIES,
+            attachments=[{
+                "idx": a[0], "filename": a[1], "mime": a[2], "size": a[3], "method": a[4],
+                "ocr_conf": a[5], "pages": a[6], "needs_vision": a[7], "flag": a[8],
+                "extracted_text": a[9],
+            } for a in atts],
+            events=[{
+                "ts": e[0].isoformat() if e[0] else None, "workflow": e[1], "stage": e[2],
+                "status": e[3], "outcome": e[4], "detail": e[5],
+            } for e in events],
+            fixes=[{
+                "id": f[0], "problem_type": f[1], "expected_category": f[2], "description": f[3],
+                "status": f[4], "created_at": f[5].isoformat() if f[5] else None,
+                "created_by": f[6], "resolved_at": f[7].isoformat() if f[7] else None,
+                "resolution": f[8],
+            } for f in fixes])
+
+    @app.get("/")
+    def dashboard():
+        # Placeholder landing; the full single-page dashboard is built in #16.
+        return DASH_PLACEHOLDER_HTML.replace("__VERSION__", __version__)
 
     return app
 
@@ -304,6 +538,39 @@ function closeM(){ov.style.display='none'}
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeM()});
 load(0);
 </script></body></html>"""
+
+
+LOGIN_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Prihlásenie</title>
+<style>
+ body{font:15px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;background:#0d1117;color:#e6edf3;
+      display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+ form{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:28px 26px;width:300px}
+ h1{font-size:17px;margin:0 0 16px}
+ input{width:100%;box-sizing:border-box;padding:9px 11px;border:1px solid #30363d;border-radius:7px;
+       background:#0d1117;color:#e6edf3;font:inherit;margin-bottom:12px}
+ button{width:100%;padding:9px;border:0;border-radius:7px;background:#1f6feb;color:#fff;font:inherit;
+        font-weight:600;cursor:pointer}
+ .err{background:#3d1418;border:1px solid #cf222e;color:#ffb3ba;border-radius:7px;padding:7px 10px;
+      margin-bottom:12px;font-size:13px}
+</style></head><body>
+<form method="post" action="/login">
+  <h1>📬 Email dashboard</h1>
+  <!--ERR-->
+  <input type="password" name="password" placeholder="heslo" autofocus autocomplete="current-password">
+  <button type="submit">Prihlásiť sa</button>
+</form></body></html>"""
+
+
+DASH_PLACEHOLDER_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Email dashboard</title>
+<style>body{font:15px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;background:#0d1117;color:#e6edf3;
+ display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0;gap:10px}
+ .v{color:#6e7681;font-size:12px}a{color:#58a6ff}</style></head><body>
+<h1>📬 Email dashboard</h1>
+<p>Dátové API beží (<a href="/api/messages">/api/messages</a>). Plné UI sa dorába (#16).</p>
+<p class="v">v__VERSION__ · <a href="/logout">odhlásiť</a></p>
+</body></html>"""
 
 
 def start(cfg) -> None:
