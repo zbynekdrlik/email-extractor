@@ -113,6 +113,59 @@ SCHEMA = [
         ADD COLUMN IF NOT EXISTS odoo_url      TEXT,
         ADD COLUMN IF NOT EXISTS forwarded_to  TEXT
     """,
+    # --- self-healing migration for columns added after the initial 2026-06-25
+    # deploy: the live prod DB predates several columns and CREATE TABLE IF NOT
+    # EXISTS is a no-op on it, so add every non-original column idempotently.
+    """
+    ALTER TABLE messages
+        ADD COLUMN IF NOT EXISTS header_message_id TEXT,
+        ADD COLUMN IF NOT EXISTS folder            TEXT,
+        ADD COLUMN IF NOT EXISTS imap_uid          BIGINT,
+        ADD COLUMN IF NOT EXISTS imap_uidvalidity  BIGINT,
+        ADD COLUMN IF NOT EXISTS from_addr         TEXT,
+        ADD COLUMN IF NOT EXISTS from_name         TEXT,
+        ADD COLUMN IF NOT EXISTS to_addrs          TEXT[],
+        ADD COLUMN IF NOT EXISTS cc_addrs          TEXT[],
+        ADD COLUMN IF NOT EXISTS subject           TEXT,
+        ADD COLUMN IF NOT EXISTS sent_at           TEXT,
+        ADD COLUMN IF NOT EXISTS body_text         TEXT,
+        ADD COLUMN IF NOT EXISTS body_source       TEXT,
+        ADD COLUMN IF NOT EXISTS combined_text     TEXT,
+        ADD COLUMN IF NOT EXISTS has_attachments   BOOLEAN DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS needs_vision      BOOLEAN DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS category          TEXT,
+        ADD COLUMN IF NOT EXISTS classified_at     TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS original_category TEXT,
+        ADD COLUMN IF NOT EXISTS human_reviewed    BOOLEAN NOT NULL DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS review_status     TEXT,
+        ADD COLUMN IF NOT EXISTS corrected_at      TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS processed         BOOLEAN NOT NULL DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS processed_by      TEXT,
+        ADD COLUMN IF NOT EXISTS processing_at     TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS content_sig       TEXT,
+        ADD COLUMN IF NOT EXISTS status            TEXT DEFAULT 'new',
+        ADD COLUMN IF NOT EXISTS error             TEXT,
+        ADD COLUMN IF NOT EXISTS raw_eml_path      TEXT,
+        ADD COLUMN IF NOT EXISTS created_at        TIMESTAMPTZ DEFAULT now(),
+        ADD COLUMN IF NOT EXISTS processed_at      TIMESTAMPTZ
+    """,
+    """
+    ALTER TABLE attachments
+        ADD COLUMN IF NOT EXISTS idx            INTEGER,
+        ADD COLUMN IF NOT EXISTS filename       TEXT,
+        ADD COLUMN IF NOT EXISTS mime           TEXT,
+        ADD COLUMN IF NOT EXISTS size           BIGINT,
+        ADD COLUMN IF NOT EXISTS sha256         TEXT,
+        ADD COLUMN IF NOT EXISTS method         TEXT,
+        ADD COLUMN IF NOT EXISTS ocr_conf       REAL,
+        ADD COLUMN IF NOT EXISTS pages          INTEGER,
+        ADD COLUMN IF NOT EXISTS chars          INTEGER,
+        ADD COLUMN IF NOT EXISTS needs_vision   BOOLEAN DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS flag           TEXT,
+        ADD COLUMN IF NOT EXISTS file_path      TEXT,
+        ADD COLUMN IF NOT EXISTS file_url       TEXT,
+        ADD COLUMN IF NOT EXISTS extracted_text TEXT
+    """,
     # --- rollup: every email_events INSERT updates the messages denorm state ---
     # No-op (zero rows) when the messages row is absent, so it never raises.
     """

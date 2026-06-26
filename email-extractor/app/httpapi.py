@@ -12,6 +12,7 @@ Dashboard (session login):
 """
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from datetime import date
@@ -28,6 +29,8 @@ CATEGORIES = ["ai_orders", "invoices", "reklamacie", "dodacie_listy",
               "static_orders", "human_processing", "no_processing"]
 PROBLEM_TYPES = ["mis_sorted", "mis_processed", "other"]
 FIX_STATUSES = ["open", "in_progress", "fixed", "wontfix"]
+
+log = logging.getLogger("email_extractor.httpapi")
 
 def _valid_date(s: str) -> bool:
     """True iff s is a real ISO date (YYYY-MM-DD); rejects bad months/days."""
@@ -63,21 +66,18 @@ def create_app(cfg) -> Flask:
     app = Flask(__name__)
     data_dir = Path(cfg.data_dir)
     app.secret_key = cfg.secret_key or _persistent_secret(data_dir)
+    if not cfg.dash_password:
+        log.warning("dash_password is unset — the dashboard is CLOSED; "
+                    "set dash_password to enable it")
 
     def _token_ok():
         tok = request.args.get("token") or request.headers.get("X-Token")
         return bool(cfg.api_token) and tok == cfg.api_token
 
-    def _authorized():
-        # A logged-in human OR a valid machine token; OR — only when NO auth at
-        # all is configured — open (pure dev mode).
-        if session.get("auth") or _token_ok():
-            return True
-        return not cfg.api_token and not cfg.dash_password
-
     def _auth():
-        # Used by the file APIs (/files, /eml) — exempt from the gate, self-guard here.
-        if not _authorized():
+        # File APIs (/files, /eml): a logged-in human OR a valid machine token.
+        # No open-by-default — if neither is configured the endpoint stays closed.
+        if not (session.get("auth") or _token_ok()):
             abort(403)
 
     def _db():
@@ -91,8 +91,9 @@ def create_app(cfg) -> Flask:
                 or p.startswith("/static")
                 or p.startswith("/files") or p.startswith("/eml")):
             return None
-        # New dashboard surface ("/", "/api/*"): require a session or token.
-        if _authorized():
+        # Dashboard surface ("/", "/api/*"): session only — login requires a
+        # configured dash_password, so an unconfigured add-on is closed, not open.
+        if session.get("auth"):
             return None
         if p.startswith("/api/"):
             return jsonify(error="auth required"), 401
@@ -108,7 +109,9 @@ def create_app(cfg) -> Flask:
         pw = body.get("password", "")
         if cfg.dash_password and pw == cfg.dash_password:
             session["auth"] = True
+            log.info("dashboard login OK from %s", request.remote_addr)
             return redirect("/")
+        log.warning("dashboard login FAILED from %s", request.remote_addr)
         return LOGIN_HTML.replace("<!--ERR-->",
                                   '<div class="err">Nesprávne heslo</div>'), 401
 
@@ -316,6 +319,7 @@ def create_app(cfg) -> Flask:
             db.log_event(c, m[0], "dashboard", "reclassified", "ok",
                          outcome=f"preklasifikované {m[1]} → {cat}",
                          detail={"from": m[1], "to": cat}, rollup=False)
+        log.info("reclassify #%s %s -> %s", mid, m[1], cat)
         return jsonify(ok=True, id=mid, category=cat)
 
     @app.post("/api/message/<int:mid>/reprocess")
@@ -330,6 +334,7 @@ def create_app(cfg) -> Flask:
                    WHERE id = %s""", (mid,))
             db.log_event(c, m[0], "dashboard", "requeued", "ok",
                          outcome="manuálne preposlané na spracovanie", rollup=False)
+        log.info("reprocess #%s", mid)
         return jsonify(ok=True, id=mid)
 
     # ---- fix queue ----
@@ -364,6 +369,7 @@ def create_app(cfg) -> Flask:
                          outcome="na opravu: " + ptype + (f" → {expected}" if expected else ""),
                          detail={"fix_id": fid, "problem_type": ptype,
                                  "expected_category": expected}, rollup=False)
+        log.info("fix_requested #%s type=%s -> fix #%s", mid, ptype, fid)
         return jsonify(ok=True, id=mid, fix_id=fid)
 
     @app.get("/api/fix-queue")
@@ -422,6 +428,7 @@ def create_app(cfg) -> Flask:
                          outcome=f"fix #{fid} → {status}" + (f": {resolution}" if resolution else ""),
                          detail={"fix_id": fid, "status": status, "resolution": resolution},
                          rollup=False)
+        log.info("fix #%s resolved -> %s", fid, status)
         return jsonify(ok=True, id=fid, status=status)
 
     @app.get("/")

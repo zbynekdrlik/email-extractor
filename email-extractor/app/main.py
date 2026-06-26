@@ -51,9 +51,9 @@ def main() -> None:
                          "(set them in the add-on options).")
     log.info("email-extractor %s starting; folders=%s interval=%ss",
              __version__, cfg.folders, cfg.poll_interval)
-    httpapi.start(cfg)
     conn = db.connect(cfg.pg_dsn)
-    db.init_schema(conn)
+    db.init_schema(conn)          # run migrations BEFORE the dashboard serves requests
+    httpapi.start(cfg)
     while True:
         try:
             n = run_once(cfg, conn)

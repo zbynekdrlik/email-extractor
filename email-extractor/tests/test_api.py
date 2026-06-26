@@ -113,12 +113,12 @@ def test_search_matches_attachment_text(pg):
     assert d["items"][0]["subject"] == "S"
 
 
-def test_token_authorizes_api_and_files(pg):
+def test_token_authorizes_files_not_api(pg):
     pg.execute("INSERT INTO messages (message_id, subject, category) VALUES ('t','S','ai_orders')")
     c = _client()
-    # no session, but a valid machine token authorizes the data API
-    assert c.get("/api/messages?token=tok").status_code == 200
-    # /files with a valid token but missing file -> 404 (authorized), not 403
+    # the data API is session-only — a machine token must NOT authorize it
+    assert c.get("/api/messages?token=tok").status_code == 401
+    # but the file APIs accept the token (missing file -> 404, i.e. authorized)
     assert c.get("/files/nope/0?token=tok").status_code == 404
 
 
