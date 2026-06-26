@@ -1,15 +1,14 @@
-"""Internal HTTP API + human review UI.
+"""Internal HTTP API + live dashboard.
 
+Machine endpoints (token, used by n8n):
 - /health, /version
 - /files/<mid>/<idx>, /eml/<mid>            (originals for n8n AI-Vision / forwarding)
-- /review                                   (human review web page)
-- /review/list, /review/detail, /review/correct, /review/confirm, /review/processed
 
-Human actions:
-- confirm  -> review_status='confirmed', category unchanged (this one is right)
-- correct  -> review_status='corrected', category := new, original_category kept,
-              processed reset so the terminal workflow re-handles it
-Both set human_reviewed=true. Confirmed + corrected = labelled set to score/tune the classifier.
+Dashboard (session login):
+- /                                          (single-page dashboard)
+- /api/messages, /api/message/<id>           (list/search + detail + timeline)
+- /api/message/<id>/reclassify|reprocess|fix (operator actions)
+- /api/fix-queue, /api/fix/<id>/resolve      (the fix queue Claude works)
 """
 from __future__ import annotations
 
@@ -77,7 +76,7 @@ def create_app(cfg) -> Flask:
         return not cfg.api_token and not cfg.dash_password
 
     def _auth():
-        # Used by the file APIs + legacy /review/* routes (they self-guard).
+        # Used by the file APIs (/files, /eml) — exempt from the gate, self-guard here.
         if not _authorized():
             abort(403)
 
@@ -87,11 +86,9 @@ def create_app(cfg) -> Flask:
     @app.before_request
     def _gate():
         p = request.path
-        # Open, or self-guarded by their own in-route _auth() (file APIs, legacy
-        # /review/*). The /review page itself is a public HTML shell; its data
-        # endpoints enforce _auth().
+        # Open, or self-guarded by their own in-route _auth() (the file APIs).
         if (p in ("/health", "/version", "/login", "/logout")
-                or p.startswith("/static") or p.startswith("/review")
+                or p.startswith("/static")
                 or p.startswith("/files") or p.startswith("/eml")):
             return None
         # New dashboard surface ("/", "/api/*"): require a session or token.
@@ -143,130 +140,6 @@ def create_app(cfg) -> Flask:
         if not path.exists():
             abort(404)
         return send_file(path, mimetype="message/rfc822")
-
-    @app.get("/review/list")
-    def review_list():
-        _auth()
-        cat = request.args.get("category", "")
-        proc = request.args.get("processed", "")
-        rev = request.args.get("reviewed", "")   # '', 'no', 'confirmed', 'corrected'
-        q = (request.args.get("q", "") or "").strip()
-        try:
-            offset = max(0, int(request.args.get("offset", 0)))
-        except ValueError:
-            offset = 0
-        where, params = [], []
-        if cat:
-            where.append("category = %s")
-            params.append(cat)
-        if proc in ("true", "false"):
-            where.append("processed = %s")
-            params.append(proc == "true")
-        if rev == "no":
-            where.append("review_status IS NULL")
-        elif rev in ("confirmed", "corrected"):
-            where.append("review_status = %s")
-            params.append(rev)
-        if q:
-            where.append("(from_addr ILIKE %s OR subject ILIKE %s)")
-            like = f"%{_escape_like(q)}%"
-            params += [like, like]
-        wsql = ("WHERE " + " AND ".join(where)) if where else ""
-        with _db() as c:
-            counts = dict(c.execute(
-                "SELECT COALESCE(category,'(none)'), count(*) FROM messages GROUP BY category").fetchall())
-            grand = c.execute("SELECT count(*) FROM messages").fetchone()[0]
-            reviewed = c.execute("SELECT count(*) FROM messages WHERE review_status IS NOT NULL").fetchone()[0]
-            total = c.execute(f"SELECT count(*) FROM messages {wsql}", params).fetchone()[0]
-            rows = c.execute(
-                f"""SELECT id, sent_at, from_addr, subject, category, original_category,
-                           review_status, processed, has_attachments
-                    FROM messages {wsql}
-                    ORDER BY id DESC LIMIT 50 OFFSET %s""", params + [offset]).fetchall()
-        items = [{
-            "id": r[0], "sent_at": r[1], "from": r[2], "subject": r[3],
-            "category": r[4], "original_category": r[5], "review_status": r[6],
-            "processed": r[7], "has_attachments": r[8],
-        } for r in rows]
-        return jsonify(total=total, offset=offset, counts=counts, grand=grand,
-                       reviewed=reviewed, categories=CATEGORIES, items=items)
-
-    @app.get("/review/detail")
-    def review_detail():
-        _auth()
-        try:
-            mid = int(request.args.get("id"))
-        except (TypeError, ValueError):
-            abort(400)
-        with _db() as c:
-            m = c.execute(
-                """SELECT id, message_id, from_addr, from_name, to_addrs, cc_addrs,
-                          subject, sent_at, body_text, combined_text, category,
-                          original_category, needs_vision, processed, review_status
-                   FROM messages WHERE id = %s""", (mid,)).fetchone()
-            if not m:
-                abort(404)
-            atts = c.execute(
-                """SELECT idx, filename, mime, size, method, ocr_conf, pages,
-                          needs_vision, flag, left(extracted_text, 6000)
-                   FROM attachments WHERE message_id = %s ORDER BY idx""", (m[1],)).fetchall()
-        return jsonify(
-            id=m[0], message_id=m[1], from_addr=m[2], from_name=m[3], to_addrs=m[4],
-            cc_addrs=m[5], subject=m[6], sent_at=m[7], body_text=m[8], combined_text=m[9],
-            category=m[10], original_category=m[11], needs_vision=m[12], processed=m[13],
-            review_status=m[14], categories=CATEGORIES,
-            attachments=[{
-                "idx": a[0], "filename": a[1], "mime": a[2], "size": a[3], "method": a[4],
-                "ocr_conf": a[5], "pages": a[6], "needs_vision": a[7], "flag": a[8],
-                "extracted_text": a[9],
-            } for a in atts])
-
-    @app.post("/review/confirm")
-    def review_confirm():
-        _auth()
-        body = request.get_json(force=True, silent=True) or {}
-        mid = body.get("id")
-        if not isinstance(mid, int):
-            abort(400)
-        with _db() as c:
-            c.execute(
-                "UPDATE messages SET human_reviewed = true, review_status = 'confirmed', corrected_at = now() WHERE id = %s",
-                (mid,))
-        return jsonify(ok=True, id=mid, review_status="confirmed")
-
-    @app.post("/review/correct")
-    def review_correct():
-        _auth()
-        body = request.get_json(force=True, silent=True) or {}
-        mid, cat = body.get("id"), body.get("category")
-        if not isinstance(mid, int) or cat not in CATEGORIES:
-            abort(400)
-        with _db() as c:
-            c.execute(
-                """UPDATE messages
-                   SET original_category = COALESCE(original_category, category),
-                       category = %s, human_reviewed = true, review_status = 'corrected',
-                       corrected_at = now(), processed = false, processed_at = NULL, processed_by = NULL
-                   WHERE id = %s""", (cat, mid))
-        return jsonify(ok=True, id=mid, category=cat, review_status="corrected")
-
-    @app.post("/review/processed")
-    def review_processed():
-        _auth()
-        body = request.get_json(force=True, silent=True) or {}
-        mid = body.get("id")
-        by = body.get("by") or "workflow"
-        if not isinstance(mid, int):
-            abort(400)
-        with _db() as c:
-            c.execute(
-                "UPDATE messages SET processed = true, processed_at = now(), processed_by = %s WHERE id = %s",
-                (by, mid))
-        return jsonify(ok=True, id=mid)
-
-    @app.get("/review")
-    def review_page():
-        return REVIEW_HTML
 
     # ---- dashboard data API (session-gated via _gate) ----
 
@@ -553,127 +426,9 @@ def create_app(cfg) -> Flask:
 
     @app.get("/")
     def dashboard():
-        # Placeholder landing; the full single-page dashboard is built in #16.
-        return DASH_PLACEHOLDER_HTML.replace("__VERSION__", __version__)
+        return DASH_HTML.replace("__VERSION__", __version__)
 
     return app
-
-
-REVIEW_HTML = r"""<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Email triedenie — kontrola</title>
-<style>
- body{font:14px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;margin:0;background:#f6f8fa;color:#1f2328}
- header{background:#24292f;color:#fff;padding:10px 16px;position:sticky;top:0;z-index:5}
- .wrap{padding:14px 16px}
- .bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
- select,input,button{font:inherit;padding:6px 8px;border:1px solid #d0d7de;border-radius:6px;background:#fff}
- button{cursor:pointer}
- .chips span{display:inline-block;background:#eaeef2;border-radius:12px;padding:2px 8px;margin:2px;font-size:12px}
- table{border-collapse:collapse;width:100%;background:#fff;border:1px solid #d0d7de;border-radius:8px;overflow:hidden}
- th,td{padding:7px 10px;border-bottom:1px solid #eaeef2;text-align:left;vertical-align:middle;font-size:13px}
- th{background:#f6f8fa;position:sticky;top:44px}
- tr.confirmed{background:#e6ffec}tr.corrected{background:#fff8c5}
- tr.row:hover{background:#f0f6ff}
- .muted{color:#57606a;font-size:12px}
- .subj{max-width:380px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
- .badge{font-size:11px;padding:1px 6px;border-radius:10px}
- .p1{background:#1a7f37;color:#fff}.p0{background:#d0d7de}.nv{background:#bf3989;color:#fff;margin-left:4px}
- .catsel{min-width:150px}
- .ok{background:#1a7f37;color:#fff;border-color:#1a7f37;font-weight:600}
- .stbadge{font-size:11px;padding:1px 6px;border-radius:10px}.sc{background:#1a7f37;color:#fff}.sx{background:#9a6700;color:#fff}
- #ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:20}
- #modal{background:#fff;max-width:900px;margin:24px auto;border-radius:10px;max-height:90vh;overflow:auto}
- #modal .mh{position:sticky;top:0;background:#24292f;color:#fff;padding:12px 16px;display:flex;justify-content:space-between;align-items:center}
- #modal .mb{padding:16px}#modal h3{margin:14px 0 6px;font-size:14px}
- #modal pre{background:#f6f8fa;border:1px solid #eaeef2;border-radius:6px;padding:10px;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;font-size:12px}
- .kv{font-size:13px;margin:2px 0}.kv b{display:inline-block;min-width:70px;color:#57606a}
- .att{border:1px solid #d0d7de;border-radius:8px;padding:10px;margin:8px 0}
- .x{cursor:pointer;font-size:20px;background:none;border:none;color:#fff}
- a.btn{display:inline-block;text-decoration:none;background:#0969da;color:#fff;padding:4px 8px;border-radius:6px;font-size:12px;margin-right:6px}
-</style></head><body>
-<header><b>Email triedenie — ľudská kontrola</b> &nbsp;<span id="stats" class="muted"></span></header>
-<div class="wrap">
- <div class="bar">
-   <label>Kategória: <select id="fcat"><option value="">— všetky —</option></select></label>
-   <label>Kontrola: <select id="frev"><option value="">— všetky —</option><option value="no">neskontrolované</option><option value="confirmed">potvrdené</option><option value="corrected">opravené</option></select></label>
-   <label>Stav: <select id="fproc"><option value="">— všetky —</option><option value="false">nespracované</option><option value="true">spracované</option></select></label>
-   <input id="fq" placeholder="hľadať odosielateľ/predmet" size="20">
-   <button onclick="load(0)">Filtrovať</button>
-   <span id="pager"></span>
- </div>
- <div class="chips" id="chips"></div>
- <table><thead><tr><th>kontrola</th><th>id</th><th>od</th><th>predmet (klik = detail)</th><th>kategória</th><th>spr.</th></tr></thead>
- <tbody id="rows"></tbody></table>
-</div>
-<div id="ov" onclick="if(event.target.id=='ov')closeM()"><div id="modal">
-  <div class="mh"><span id="mtitle">Detail</span><button class="x" onclick="closeM()">×</button></div>
-  <div class="mb" id="mbody"></div>
-</div></div>
-<script>
-const token=new URLSearchParams(location.search).get('token')||'';
-const H={'Content-Type':'application/json','X-Token':token};
-const CATS=["ai_orders","invoices","reklamacie","dodacie_listy","static_orders","human_processing","no_processing"];
-let offset=0;
-function esc(s){return (s||'').toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
-function catSelect(id,cur,big){return '<select class=catsel onchange="correct('+id+',this.value,this)"'+(big?' style="font-size:14px"':'')+'>'+CATS.map(c=>'<option'+(c===cur?' selected':'')+'>'+c+'</option>').join('')+'</select>'}
-function stbadge(s){return s==='confirmed'?'<span class="stbadge sc">✓</span>':s==='corrected'?'<span class="stbadge sx">✎</span>':''}
-async function load(off){
-  offset=off||0;
-  const p=new URLSearchParams({category:fcat.value,reviewed:frev.value,processed:fproc.value,q:fq.value,offset});
-  const r=await fetch('/review/list?'+p+'&token='+encodeURIComponent(token));
-  if(!r.ok){rows.innerHTML='<tr><td colspan=6>chyba '+r.status+' (token?)</td></tr>';return}
-  const d=await r.json();
-  if(fcat.options.length<=1){CATS.forEach(c=>{const o=document.createElement('option');o.value=o.textContent=c;fcat.appendChild(o)})}
-  stats.textContent='skontrolované '+d.reviewed+' / '+d.grand+'  ·  výber: '+d.total;
-  chips.innerHTML=Object.entries(d.counts).map(([k,v])=>'<span>'+esc(k)+': '+v+'</span>').join('');
-  pager.innerHTML=(offset>0?'<button onclick="load('+(offset-50)+')">‹</button> ':'')+'<span class=muted>'+(offset+1)+'–'+(offset+d.items.length)+'</span>'+(d.items.length===50?' <button onclick="load('+(offset+50)+')">›</button>':'');
-  rows.innerHTML=d.items.map(it=>'<tr class="row'+(it.review_status==='confirmed'?' confirmed':it.review_status==='corrected'?' corrected':'')+'" id=r'+it.id+'>'+
-    '<td><button class="ok'+(it.review_status==='confirmed'?'':'')+'" onclick="confirm('+it.id+',this)">✓ OK</button></td>'+
-    '<td onclick="detail('+it.id+')">'+it.id+' '+stbadge(it.review_status)+'</td>'+
-    '<td onclick="detail('+it.id+')">'+esc(it.from)+'</td>'+
-    '<td class=subj onclick="detail('+it.id+')">'+(it.has_attachments?'📎 ':'')+esc(it.subject)+'</td>'+
-    '<td>'+catSelect(it.id,it.category)+(it.original_category&&it.original_category!==it.category?' <span class=muted>(pôv. '+esc(it.original_category)+')</span>':'')+'</td>'+
-    '<td><span class="badge '+(it.processed?'p1':'p0')+'">'+(it.processed?'OK':'—')+'</span></td></tr>').join('');
-}
-async function confirm(id,el){
-  el.disabled=true;
-  const r=await fetch('/review/confirm?token='+encodeURIComponent(token),{method:'POST',headers:H,body:JSON.stringify({id})});
-  el.disabled=false;
-  if(r.ok){const tr=document.getElementById('r'+id);if(tr){tr.className='row confirmed';if(frev.value==='no'){tr.remove()}}}
-  else alert('chyba '+r.status);
-}
-async function correct(id,category,el){
-  el.disabled=true;
-  const r=await fetch('/review/correct?token='+encodeURIComponent(token),{method:'POST',headers:H,body:JSON.stringify({id,category})});
-  el.disabled=false;
-  if(r.ok){const tr=document.getElementById('r'+id);if(tr){tr.className='row corrected';const b=tr.querySelector('.badge');if(b){b.className='badge p0';b.textContent='—';}if(frev.value==='no'){tr.remove()}}}
-  else alert('chyba '+r.status);
-}
-async function detail(id){
-  mbody.innerHTML='načítavam…';ov.style.display='block';
-  const r=await fetch('/review/detail?id='+id+'&token='+encodeURIComponent(token));
-  if(!r.ok){mbody.innerHTML='chyba '+r.status;return}
-  const d=await r.json();
-  mtitle.textContent='#'+d.id+' — '+(d.subject||'(bez predmetu)');
-  const fb='/files/'+encodeURIComponent(d.message_id);
-  const atts=(d.attachments||[]).map(a=>'<div class=att><div><b>'+esc(a.filename)+'</b> <span class=muted>'+esc(a.mime)+' · '+Math.round((a.size||0)/1024)+' KB · '+esc(a.method)+(a.ocr_conf!=null?' · OCR '+a.ocr_conf+'%':'')+'</span>'+(a.needs_vision?' <span class="badge nv">AI VISION</span>':'')+'</div>'+
-    '<div style="margin:6px 0"><a class=btn target=_blank href="'+fb+'/'+a.idx+'?token='+encodeURIComponent(token)+'">Otvoriť súbor</a></div>'+
-    '<pre>'+esc(a.extracted_text||'(žiadny text)')+'</pre></div>').join('')||'<div class=muted>žiadne prílohy</div>';
-  mbody.innerHTML=
-    '<div style="margin-bottom:8px"><button class=ok onclick="confirm('+d.id+',this);closeM()">✓ Správne</button> &nbsp; '+catSelect(d.id,d.category,true)+(d.original_category&&d.original_category!==d.category?' <span class=muted>(pôv. '+esc(d.original_category)+')</span>':'')+'</div>'+
-    '<div class=kv><b>Od:</b> '+esc(d.from_name)+' &lt;'+esc(d.from_addr)+'&gt;</div>'+
-    '<div class=kv><b>Komu:</b> '+esc((d.to_addrs||[]).join(', '))+'</div>'+
-    ((d.cc_addrs||[]).length?'<div class=kv><b>Kópia:</b> '+esc(d.cc_addrs.join(', '))+'</div>':'')+
-    '<div class=kv><b>Dátum:</b> '+esc(d.sent_at)+' &nbsp; <a class=btn target=_blank href="/eml/'+encodeURIComponent(d.message_id)+'?token='+encodeURIComponent(token)+'">Originál .eml</a></div>'+
-    '<h3>Telo</h3><pre>'+esc(d.body_text||'(prázdne)')+'</pre>'+
-    '<h3>Prílohy ('+(d.attachments||[]).length+')</h3>'+atts+
-    '<h3>combined_text (čo videla AI)</h3><pre>'+esc(d.combined_text)+'</pre>';
-}
-function closeM(){ov.style.display='none'}
-document.addEventListener('keydown',e=>{if(e.key==='Escape')closeM()});
-load(0);
-</script></body></html>"""
 
 
 LOGIN_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
@@ -698,15 +453,193 @@ LOGIN_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
 </form></body></html>"""
 
 
-DASH_PLACEHOLDER_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>Email dashboard</title>
-<style>body{font:15px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;background:#0d1117;color:#e6edf3;
- display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0;gap:10px}
- .v{color:#6e7681;font-size:12px}a{color:#58a6ff}</style></head><body>
-<h1>📬 Email dashboard</h1>
-<p>Dátové API beží (<a href="/api/messages">/api/messages</a>). Plné UI sa dorába (#16).</p>
-<p class="v">v__VERSION__ · <a href="/logout">odhlásiť</a></p>
-</body></html>"""
+DASH_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Email dashboard</title>
+<style>
+ *{box-sizing:border-box}
+ body{font:13px/1.45 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;
+      background:#f6f8fa;color:#1f2328;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+ a{color:#0969da}
+ header{background:#0d1117;color:#fff;padding:8px 14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+ header b{font-size:14px;white-space:nowrap}
+ header input,header select{font:inherit;padding:5px 8px;border:1px solid #30363d;border-radius:6px;
+      background:#161b22;color:#e6edf3}
+ #q{min-width:220px;flex:1}
+ .live{display:flex;align-items:center;gap:5px;font-size:12px;color:#3fb950;cursor:pointer;white-space:nowrap}
+ .ver{color:#6e7681;font-size:11px;white-space:nowrap}
+ .chips{display:flex;gap:6px;padding:7px 14px;background:#fff;border-bottom:1px solid #d0d7de;flex-wrap:wrap}
+ .chip{border:0;border-radius:11px;padding:3px 10px;font:inherit;font-size:11px;cursor:pointer}
+ .chip.active{outline:2px solid #0969da}
+ .c-total{background:#ddf4ff;color:#0969da}.c-done{background:#dafbe1;color:#1a7f37}
+ .c-review{background:#fff8c5;color:#7d4e00}.c-error{background:#ffebe9;color:#cf222e}
+ .c-processing{background:#eaeef2;color:#57606a}.c-onfix{background:#ffe3f1;color:#bf3989}
+ .tabs{display:flex;gap:4px;padding:6px 14px 0;background:#fff;border-bottom:1px solid #d0d7de}
+ .tab{border:1px solid #d0d7de;border-bottom:0;border-radius:7px 7px 0 0;background:#f6f8fa;
+      padding:5px 12px;cursor:pointer;font:inherit}
+ .tab.active{background:#fff;font-weight:600}
+ main{flex:1;display:flex;min-height:0}
+ #list{width:42%;max-width:560px;border-right:1px solid #d0d7de;overflow:auto;background:#fff}
+ .row{padding:7px 11px;border-bottom:1px solid #eaeef2;border-left:3px solid transparent;cursor:pointer}
+ .row:hover{background:#f0f6ff}.row.sel{background:#eef4ff;border-left-color:#1f6feb}
+ .row.s-done{border-left-color:#1a7f37}.row.s-review{border-left-color:#7d4e00}
+ .row.s-error{border-left-color:#cf222e}.row.s-processing{border-left-color:#57606a}
+ .row .t{display:flex;justify-content:space-between;gap:8px}
+ .row .f{font-weight:600}.row .when{color:#57606a;font-size:11px;white-space:nowrap}
+ .row .sub{color:#1f2328;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .pill{border-radius:9px;padding:1px 7px;font-size:11px;background:#ddf4ff;color:#0969da}
+ .out{font-size:11px}.ok{color:#1a7f37}.rev{color:#7d4e00}.err{color:#cf222e}
+ #detail{flex:1;overflow:auto;padding:14px 16px}
+ .muted{color:#57606a}.lbl{font-size:11px;color:#57606a;text-transform:uppercase;letter-spacing:.04em;margin:14px 0 6px}
+ .badge{border-radius:11px;padding:2px 9px;font-size:11px}
+ .b-ok{background:#dafbe1;color:#1a7f37}.b-review{background:#fff8c5;color:#7d4e00}
+ .b-error{background:#ffebe9;color:#cf222e}.b-none{background:#eaeef2;color:#57606a}
+ .tl{border-left:2px solid #d0d7de;padding-left:13px;margin-left:4px}
+ .tl .ev{margin-bottom:9px;position:relative}
+ .tl .dot{position:absolute;left:-18px;top:2px;width:9px;height:9px;border-radius:50%;background:#57606a}
+ .tl .d-ok{background:#1a7f37}.tl .d-review{background:#7d4e00}.tl .d-error{background:#cf222e}
+ .att{background:#fff;border:1px solid #d0d7de;border-radius:7px;padding:6px 9px;margin:5px 0;font-size:12px}
+ pre{background:#f6f8fa;border:1px solid #eaeef2;border-radius:6px;padding:9px;white-space:pre-wrap;
+     word-break:break-word;max-height:280px;overflow:auto;font-size:12px;margin:0}
+ .actions{display:flex;gap:7px;flex-wrap:wrap;margin:14px 0;align-items:center}
+ button,select.act{font:inherit;padding:6px 11px;border:1px solid #d0d7de;border-radius:6px;background:#fff;cursor:pointer}
+ .btn-blue{background:#0969da;color:#fff;border-color:#0969da;font-weight:600}
+ .btn-red{background:#cf222e;color:#fff;border-color:#cf222e;font-weight:600}
+ .fixrow{background:#fff;border:1px solid #d0d7de;border-radius:8px;padding:9px 11px;margin:8px 14px}
+ .fixrow.resolved{opacity:.6}
+ #ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:30;align-items:center;justify-content:center}
+ #modal{background:#fff;border-radius:10px;width:440px;max-width:92vw;padding:16px}
+ #modal h3{margin:0 0 10px}#modal label{display:block;margin:8px 0 3px;font-size:12px;color:#57606a}
+ #modal select,#modal textarea{width:100%;font:inherit;padding:7px;border:1px solid #d0d7de;border-radius:6px}
+ .empty{color:#57606a;padding:30px;text-align:center}
+</style></head><body>
+<header>
+  <b>📬 Email dashboard</b>
+  <input id="q" placeholder="hľadať: odosielateľ, predmet, telo, príloha…">
+  <select id="fcat"><option value="">kategória</option></select>
+  <select id="fstate"><option value="">stav</option>
+    <option value="done">hotové</option><option value="review">review</option>
+    <option value="error">chyba</option><option value="processing">spracúva</option>
+    <option value="onfix">na oprave</option></select>
+  <input id="ffrom" type="date" title="od">
+  <input id="fto" type="date" title="do">
+  <span class="live" id="livetog">● <span id="livelbl">LIVE</span></span>
+  <span class="ver" data-testid="version">v__VERSION__</span>
+  <a class="ver" href="/logout">odhlásiť</a>
+</header>
+<div class="chips" id="chips"></div>
+<div class="tabs">
+  <button class="tab active" id="tabMails" onclick="setView('mails')">Maily</button>
+  <button class="tab" id="tabFix" onclick="setView('fix')">Fix fronta</button>
+</div>
+<main>
+  <div id="list"></div>
+  <div id="detail"><div class="empty">Vyber mail vľavo.</div></div>
+</main>
+<div id="ov" onclick="if(event.target.id=='ov')closeModal()"><div id="modal"></div></div>
+<script>
+const E=s=>(s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let CATS=[],sel=null,view='mails',timer=null,live=true,counts={};
+async function api(path,opts){const r=await fetch(path,Object.assign({headers:{'Content-Type':'application/json'}},opts));
+  if(r.status===401){location.href='/login';throw new Error('auth')}
+  if(!r.ok)throw new Error(r.status);return r.json()}
+function tsShort(s){if(!s)return '';return s.replace('T',' ').slice(5,16)}
+function params(){const p=new URLSearchParams();
+  if(q.value.trim())p.set('q',q.value.trim());
+  if(fcat.value)p.set('category',fcat.value);
+  if(fstate.value)p.set('state',fstate.value);
+  if(ffrom.value)p.set('from',ffrom.value);
+  if(fto.value)p.set('to',fto.value);
+  return p}
+async function loadList(){
+  let d;try{d=await api('/api/messages?'+params())}catch(e){return}
+  if(!CATS.length){CATS=d.categories;for(const c of CATS){const o=document.createElement('option');o.value=o.textContent=c;fcat.appendChild(o)}}
+  counts=d.counts;renderChips();
+  const L=document.getElementById('list');
+  if(view!=='mails')return;
+  if(!d.items.length){L.innerHTML='<div class="empty">Žiadne maily pre tento filter.</div>';return}
+  L.innerHTML=d.items.map(it=>{
+    const st=it.processed?'done':(it.proc_status==='review'?'review':it.proc_status==='error'?'error':it.processing?'processing':'');
+    const out=it.on_fix?'<span class="out" style="color:#bf3989">🔧 na oprave</span>':
+      (it.proc_outcome?'<span class="out '+(it.proc_status==='error'?'err':it.proc_status==='review'?'rev':'ok')+'">'+E(it.proc_outcome)+'</span>':'');
+    return '<div class="row s-'+st+(sel===it.id?' sel':'')+'" onclick="openDetail('+it.id+')">'+
+      '<div class="t"><span class="f">#'+it.id+' '+E(it.from||'')+'</span><span class="when">'+tsShort(it.last_event_at||it.created_at)+'</span></div>'+
+      '<div class="sub">'+(it.has_attachments?'📎 ':'')+E(it.subject||'(bez predmetu)')+'</div>'+
+      '<div><span class="pill">'+E(it.category||'—')+'</span> '+out+'</div></div>'}).join('')}
+function renderChips(){const c=counts;const C=document.getElementById('chips');
+  const def=[['','c-total','spolu',c.total],['done','c-done','✓ hotové',c.done],['review','c-review','⚠ review',c.review],
+    ['error','c-error','✗ chyba',c.error],['processing','c-processing','… spracúva',c.processing],['onfix','c-onfix','🔧 na oprave',c.on_fix]];
+  C.innerHTML=def.map(([v,cl,lbl,n])=>'<button class="chip '+cl+(fstate.value===v?' active':'')+'" onclick="setState(\''+v+'\')">'+lbl+' '+(n||0)+'</button>').join('')}
+function setState(v){fstate.value=v;loadList()}
+async function openDetail(id){
+  sel=id;document.querySelectorAll('.row').forEach(r=>r.classList.toggle('sel',r.getAttribute('onclick').includes('('+id+')')));
+  const D=document.getElementById('detail');D.innerHTML='<div class="empty">načítavam…</div>';
+  let m;try{m=await api('/api/message/'+id)}catch(e){D.innerHTML='<div class="empty">chyba</div>';return}
+  const badge=m.proc_status?('<span class="badge b-'+(m.proc_status==='ok'?'ok':m.proc_status==='review'?'review':m.proc_status==='error'?'error':'none')+'">'+E(m.proc_status)+'</span>'):
+    (m.processed?'<span class="badge b-ok">hotové</span>':'<span class="badge b-none">nové</span>');
+  const fb='/files/'+encodeURIComponent(m.message_id);
+  const evs=(m.events||[]).map(e=>'<div class="ev"><span class="dot d-'+(e.status==='ok'?'ok':e.status==='review'?'review':e.status==='error'?'error':'')+'"></span>'+
+    '<b>'+E(e.stage)+'</b> <span class="muted">'+tsShort(e.ts)+(e.workflow?' · '+E(e.workflow):'')+'</span>'+(e.outcome?'<br>'+E(e.outcome):'')+'</div>').join('')
+    ||'<div class="muted">žiadne udalosti zatiaľ</div>';
+  const atts=(m.attachments||[]).map(a=>'<div class="att"><b>'+E(a.filename)+'</b> <span class="muted">'+E(a.mime)+' · '+Math.round((a.size||0)/1024)+' KB · '+E(a.method||'')+(a.ocr_conf!=null?' · OCR '+a.ocr_conf+'%':'')+'</span>'+
+    (a.needs_vision?' <span class="pill" style="background:#ffe3f1;color:#bf3989">VISION</span>':'')+
+    ' <a target=_blank href="'+fb+'/'+a.idx+'">otvoriť</a></div>').join('')||'<div class="muted">žiadne prílohy</div>';
+  const fixes=(m.fixes||[]).filter(f=>f.status==='open'||f.status==='in_progress').map(f=>'<div class="att" style="border-color:#bf3989">🔧 <b>'+E(f.problem_type)+'</b>'+(f.expected_category?' → '+E(f.expected_category):'')+(f.description?' — '+E(f.description):'')+' <span class="muted">('+E(f.status)+')</span></div>').join('');
+  const opts=CATS.map(c=>'<option'+(c===m.category?' selected':'')+'>'+c+'</option>').join('');
+  D.innerHTML='<div class="t" style="display:flex;justify-content:space-between;align-items:flex-start">'+
+      '<div><b style="font-size:15px">#'+m.id+' — '+E(m.subject||'(bez predmetu)')+'</b>'+
+      '<div class="muted">'+E(m.from_name||'')+' &lt;'+E(m.from_addr||'')+'&gt; · '+E(m.sent_at||'')+'</div></div>'+badge+'</div>'+
+    '<div class="actions">'+
+      '<label class="muted">kategória: <select class="act" onchange="doReclassify('+m.id+',this.value)">'+opts+'</select></label>'+
+      '<button onclick="doReprocess('+m.id+')">⟳ spustiť znova</button>'+
+      '<a class="ver" style="color:#0969da" target=_blank href="/eml/'+encodeURIComponent(m.message_id)+'">📄 .eml</a>'+
+      '<button class="btn-red" onclick="openFix('+m.id+')">🔧 dať na opravu</button></div>'+
+    (fixes?'<div>'+fixes+'</div>':'')+
+    '<div class="lbl">Časová os spracovania</div><div class="tl">'+evs+'</div>'+
+    '<div class="lbl">Prílohy ('+(m.attachments||[]).length+')</div>'+atts+
+    '<div class="lbl">Telo</div><pre>'+E(m.body_text||'(prázdne)')+'</pre>'+
+    '<div class="lbl">combined_text (čo videla AI)</div><pre>'+E(m.combined_text||'')+'</pre>'}
+async function doReclassify(id,cat){try{await api('/api/message/'+id+'/reclassify',{method:'POST',body:JSON.stringify({category:cat})});await loadList();await openDetail(id)}catch(e){alert('chyba')}}
+async function doReprocess(id){try{await api('/api/message/'+id+'/reprocess',{method:'POST'});await loadList();await openDetail(id)}catch(e){alert('chyba')}}
+function openFix(id){
+  const opts=CATS.map(c=>'<option value="'+c+'">'+c+'</option>').join('');
+  document.getElementById('modal').innerHTML='<h3>🔧 Dať na opravu — #'+id+'</h3>'+
+    '<label>Čo je zle?</label><select id="fxtype" onchange="document.getElementById(\'fxcatwrap\').style.display=this.value===\'mis_sorted\'?\'block\':\'none\'">'+
+      '<option value="mis_processed">zle spracované</option><option value="mis_sorted">zle zaradené (sortnuté)</option><option value="other">iné</option></select>'+
+    '<div id="fxcatwrap" style="display:none"><label>Správna kategória</label><select id="fxcat">'+opts+'</select></div>'+
+    '<label>Poznámka pre Clauda</label><textarea id="fxdesc" rows="3" placeholder="čo presne je zle / aké by malo byť správne"></textarea>'+
+    '<div class="actions"><button class="btn-red" onclick="submitFix('+id+')">Odoslať na opravu</button><button onclick="closeModal()">zrušiť</button></div>';
+  document.getElementById('ov').style.display='flex'}
+async function submitFix(id){
+  const t=document.getElementById('fxtype').value;
+  const body={problem_type:t,description:document.getElementById('fxdesc').value};
+  if(t==='mis_sorted')body.expected_category=document.getElementById('fxcat').value;
+  try{await api('/api/message/'+id+'/fix',{method:'POST',body:JSON.stringify(body)});closeModal();await loadList();await openDetail(id)}catch(e){alert('chyba')}}
+function closeModal(){document.getElementById('ov').style.display='none'}
+async function loadFix(){const D=document.getElementById('detail'),L=document.getElementById('list');
+  L.innerHTML='';let d;try{d=await api('/api/fix-queue')}catch(e){return}
+  if(!d.items.length){D.innerHTML='<div class="empty">Fix fronta je prázdna 🎉</div>';return}
+  D.innerHTML='<div class="lbl">Fix fronta ('+d.total+')</div>'+d.items.map(f=>{
+    const open=f.status==='open'||f.status==='in_progress';
+    return '<div class="fixrow'+(open?'':' resolved')+'">'+
+      '<div class="t" style="display:flex;justify-content:space-between"><b>🔧 #'+f.id+' — '+E(f.problem_type)+(f.expected_category?' → '+E(f.expected_category):'')+'</b><span class="muted">'+E(f.status)+'</span></div>'+
+      '<div class="muted">mail #'+(f.msg_id||'?')+' · '+E(f.from||'')+' · '+E(f.subject||'')+'</div>'+
+      (f.description?'<div>'+E(f.description)+'</div>':'')+
+      (f.resolution?'<div class="ok">→ '+E(f.resolution)+'</div>':'')+
+      (open?'<div class="actions"><button onclick="openDetail('+(f.msg_id||'null')+');setView(\'mails\')">otvoriť mail</button>'+
+        '<button class="btn-blue" onclick="resolveFix('+f.id+',\'fixed\')">označiť opravené</button>'+
+        '<button onclick="resolveFix('+f.id+',\'wontfix\')">neopravím</button></div>':'')+'</div>'}).join('')}
+async function resolveFix(fid,status){const res=status==='fixed'?(prompt('Poznámka k oprave (voliteľné):')||''):'';
+  try{await api('/api/fix/'+fid+'/resolve',{method:'POST',body:JSON.stringify({status,resolution:res})});await loadFix()}catch(e){alert('chyba')}}
+function setView(v){view=v;document.getElementById('tabMails').classList.toggle('active',v==='mails');
+  document.getElementById('tabFix').classList.toggle('active',v==='fix');
+  if(v==='fix'){loadFix()}else{document.getElementById('detail').innerHTML='<div class="empty">Vyber mail vľavo.</div>';loadList()}}
+function tick(){if(live&&document.getElementById('ov').style.display!=='flex'){if(view==='mails')loadList();else loadFix()}}
+document.getElementById('livetog').onclick=()=>{live=!live;document.getElementById('livetog').style.color=live?'#3fb950':'#6e7681';document.getElementById('livelbl').textContent=live?'LIVE':'pauza'};
+let deb;q.oninput=()=>{clearTimeout(deb);deb=setTimeout(loadList,350)};
+for(const el of [fcat,fstate,ffrom,fto])el.onchange=loadList;
+loadList();timer=setInterval(tick,5000);
+</script></body></html>"""
 
 
 def start(cfg) -> None:

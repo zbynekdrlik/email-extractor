@@ -1,14 +1,15 @@
-"""Tests for the review HTTP API (app factory + auth gate; no DB needed).
+"""App factory: auth gate + open endpoints + dashboard page (no DB needed).
 
-The token check runs before any DB access, so the 403 paths are testable without
-Postgres. /health and /version are intentionally open.
+The gate / token check runs before any DB access, so these paths are testable
+without Postgres. /health and /version are intentionally open.
 """
 from app.config import Config
 from app.httpapi import create_app
 
 
-def _client(token="secret"):
-    cfg = Config(api_token=token, pg_dsn="postgresql://unused", data_dir="/tmp")
+def _client(token="secret", dash=""):
+    cfg = Config(api_token=token, dash_password=dash, secret_key="t",
+                 pg_dsn="postgresql://unused", data_dir="/tmp")
     app = create_app(cfg)
     app.testing = True
     return app.test_client()
@@ -26,31 +27,40 @@ def test_version_open():
     assert b"." in r.data
 
 
-def test_review_page_served():
-    r = _client().get("/review")
+def test_dashboard_page_served_when_no_auth_configured():
+    r = _client(token="").get("/")
     assert r.status_code == 200
-    body = r.data.lower()
-    assert b"/review/list" in r.data
-    assert b"kontrol" in body  # the page is the human-review UI
+    assert b'data-testid="version"' in r.data   # version label present (mandatory rule)
+    assert b"/api/messages" in r.data            # the SPA talks to the data API
 
 
-def test_auth_gate_blocks_data_without_token():
+def test_dashboard_redirects_without_auth():
+    # token configured, no session, no token on the request -> not authorized
+    assert _client(token="secret").get("/").status_code == 302
+
+
+def test_files_and_eml_require_token():
     c = _client(token="secret")
-    assert c.get("/review/list").status_code == 403
-    assert c.get("/review/detail?id=1").status_code == 403
-    assert c.post("/review/correct", json={"id": 1, "category": "invoices"}).status_code == 403
-    assert c.post("/review/confirm", json={"id": 1}).status_code == 403
+    assert c.get("/files/x/0").status_code == 403
+    assert c.get("/eml/x").status_code == 403
 
 
-def test_auth_gate_open_when_no_token_configured():
-    # with no api_token set, endpoints are not token-gated (the auth check is a no-op)
-    c = _client(token="")
-    assert c.get("/health").status_code == 200
+def test_files_ok_with_token_but_missing_is_404():
+    # authorized via token -> the route runs and 404s on the missing file
+    assert _client(token="secret").get("/files/nope/0?token=secret").status_code == 404
 
 
-def test_correct_rejects_bad_category_after_auth():
-    c = _client(token="secret")
-    # valid token, invalid category -> 400 (validation runs, no DB write)
-    r = c.post("/review/correct", headers={"X-Token": "secret"},
-               json={"id": 1, "category": "not_a_category"})
-    assert r.status_code == 400
+def test_api_requires_auth_401():
+    assert _client(token="secret").get("/api/messages").status_code == 401
+
+
+def test_login_disabled_without_dash_password():
+    # dash_password unset -> login can never succeed (the dashboard stays closed)
+    assert _client(token="secret", dash="").post(
+        "/login", data={"password": "anything"}).status_code == 401
+
+
+def test_login_succeeds_with_dash_password():
+    c = _client(token="secret", dash="pw")
+    assert c.post("/login", data={"password": "pw"}).status_code == 302
+    assert c.get("/").status_code == 200          # now authorized via session
