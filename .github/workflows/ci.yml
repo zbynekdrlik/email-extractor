@@ -41,6 +41,8 @@ jobs:
           sudo apt-get install -y -qq tesseract-ocr tesseract-ocr-ces tesseract-ocr-slk poppler-utils
       - name: Install Python deps
         run: pip install -r requirements-dev.txt
+      - name: Install Playwright browser
+        run: python -m playwright install --with-deps chromium
       - name: Lint (ruff)
         run: ruff check .
       - name: Test (pytest + coverage)
