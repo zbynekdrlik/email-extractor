@@ -36,6 +36,8 @@ class Config:
     data_dir: str = "/data/store"
     http_port: int = 8099
     api_token: str = ""
+    dash_password: str = ""
+    secret_key: str = ""
     public_base_url: str = ""
 
     @classmethod
@@ -57,5 +59,7 @@ class Config:
             data_dir=_get(o, "data_dir", "DATA_DIR", "/data/store"),
             http_port=http_port,
             api_token=_get(o, "api_token", "API_TOKEN", ""),
+            dash_password=_get(o, "dash_password", "DASH_PASSWORD", ""),
+            secret_key=_get(o, "secret_key", "SECRET_KEY", ""),
             public_base_url=base,
         )

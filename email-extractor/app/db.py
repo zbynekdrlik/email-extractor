@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import psycopg
+from psycopg.types.json import Json
 
 from . import mailparse
 
@@ -80,6 +81,80 @@ SCHEMA = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(status)",
+    # --- telemetry: per-email processing timeline (one row per step) ---
+    """
+    CREATE TABLE IF NOT EXISTS email_events (
+        id          BIGSERIAL PRIMARY KEY,
+        message_id  TEXT NOT NULL,
+        ts          TIMESTAMPTZ DEFAULT now(),
+        workflow    TEXT,
+        stage       TEXT,
+        status      TEXT,
+        outcome     TEXT,
+        detail      JSONB
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_events_message ON email_events(message_id, ts)",
+    "CREATE INDEX IF NOT EXISTS idx_events_status ON email_events(status)",
+    "CREATE INDEX IF NOT EXISTS idx_events_stage ON email_events(stage)",
+    # --- denormalized current processing state on messages (cheap list/filter) ---
+    """
+    ALTER TABLE messages
+        ADD COLUMN IF NOT EXISTS proc_status   TEXT,
+        ADD COLUMN IF NOT EXISTS proc_stage    TEXT,
+        ADD COLUMN IF NOT EXISTS proc_outcome  TEXT,
+        ADD COLUMN IF NOT EXISTS last_event_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS attempts      INT DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS edi_file      TEXT,
+        ADD COLUMN IF NOT EXISTS orion_path    TEXT,
+        ADD COLUMN IF NOT EXISTS odoo_url      TEXT,
+        ADD COLUMN IF NOT EXISTS forwarded_to  TEXT
+    """,
+    # --- rollup: every email_events INSERT updates the messages denorm state ---
+    # No-op (zero rows) when the messages row is absent, so it never raises.
+    """
+    CREATE OR REPLACE FUNCTION email_events_rollup() RETURNS trigger AS $func$
+    BEGIN
+        UPDATE messages SET
+            proc_stage    = NEW.stage,
+            proc_status   = NEW.status,
+            proc_outcome  = NEW.outcome,
+            last_event_at = NEW.ts,
+            attempts      = COALESCE(attempts, 0)
+                            + CASE WHEN NEW.stage = 'claimed' THEN 1 ELSE 0 END,
+            edi_file      = COALESCE(NEW.detail->>'edi_file', edi_file),
+            orion_path    = COALESCE(NEW.detail->>'orion_path', orion_path),
+            odoo_url      = COALESCE(NEW.detail->>'odoo_url', odoo_url),
+            forwarded_to  = COALESCE(NEW.detail->>'forwarded_to', forwarded_to)
+        WHERE message_id = NEW.message_id;
+        RETURN NEW;
+    END;
+    $func$ LANGUAGE plpgsql
+    """,
+    "DROP TRIGGER IF EXISTS trg_email_events_rollup ON email_events",
+    """
+    CREATE TRIGGER trg_email_events_rollup
+        AFTER INSERT ON email_events
+        FOR EACH ROW EXECUTE FUNCTION email_events_rollup()
+    """,
+    # --- fix queue: emails the user flagged for Claude to fix ---
+    """
+    CREATE TABLE IF NOT EXISTS fix_requests (
+        id                BIGSERIAL PRIMARY KEY,
+        message_id        TEXT NOT NULL,
+        problem_type      TEXT,
+        expected_category TEXT,
+        description       TEXT,
+        status            TEXT DEFAULT 'open',
+        snapshot          JSONB,
+        created_at        TIMESTAMPTZ DEFAULT now(),
+        created_by        TEXT,
+        resolved_at       TIMESTAMPTZ,
+        resolution        TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_fix_status ON fix_requests(status)",
+    "CREATE INDEX IF NOT EXISTS idx_fix_message ON fix_requests(message_id)",
 ]
 
 
@@ -90,6 +165,17 @@ def connect(dsn: str):
 def init_schema(conn) -> None:
     for stmt in SCHEMA:
         conn.execute(stmt)
+
+
+def log_event(conn, message_id: str, workflow: str, stage: str, status: str,
+              outcome: str = "", detail: dict | None = None) -> None:
+    """Append one processing-timeline row; the rollup trigger updates messages."""
+    conn.execute(
+        """INSERT INTO email_events (message_id, workflow, stage, status, outcome, detail)
+           VALUES (%s,%s,%s,%s,%s,%s)""",
+        (message_id, workflow, stage, status, outcome,
+         Json(detail) if detail is not None else None),
+    )
 
 
 def get_folder_state(conn, folder: str) -> tuple[int | None, int]:

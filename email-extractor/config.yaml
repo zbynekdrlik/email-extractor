@@ -1,5 +1,5 @@
 name: Email OCR Extractor
-version: "0.1.1"
+version: "0.2.0"
 slug: email_extractor
 description: Reads an IMAP mailbox, OCR-extracts the body + all attachments, and writes Postgres for n8n.
 url: https://github.com/zbynekdrlik/email-extractor
@@ -21,6 +21,8 @@ options:
   pg_dsn: ""
   public_base_url: ""
   api_token: ""
+  dash_password: ""
+  secret_key: ""
   http_port: 8099
   data_dir: "/data/store"
 schema:
@@ -33,5 +35,7 @@ schema:
   pg_dsn: str
   public_base_url: str?
   api_token: password?
+  dash_password: password?
+  secret_key: password?
   http_port: int
   data_dir: str
