@@ -111,7 +111,8 @@ SCHEMA = [
         ADD COLUMN IF NOT EXISTS edi_file      TEXT,
         ADD COLUMN IF NOT EXISTS orion_path    TEXT,
         ADD COLUMN IF NOT EXISTS odoo_url      TEXT,
-        ADD COLUMN IF NOT EXISTS forwarded_to  TEXT
+        ADD COLUMN IF NOT EXISTS forwarded_to  TEXT,
+        ADD COLUMN IF NOT EXISTS alerted_stuck BOOLEAN NOT NULL DEFAULT false
     """,
     # --- self-healing migration for columns added after the initial 2026-06-25
     # deploy: the live prod DB predates several columns and CREATE TABLE IF NOT
