@@ -13,7 +13,9 @@ set -euo pipefail
 OPTS=/data/options.json
 PGDATA=/data/postgres
 PGBIN="$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -1)"
-PGLOG=/data/postgres.log
+# Log lives inside PGDATA: /data itself is root-owned, postgres cannot
+# create files there (0.3.0 startup failure "cannot create /data/postgres.log").
+PGLOG="$PGDATA/startup.log"
 
 opt() {
   python3 - "$1" <<'PY'
