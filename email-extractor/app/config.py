@@ -1,4 +1,5 @@
 """Configuration: read Home Assistant add-on options (/data/options.json) or env."""
+
 from __future__ import annotations
 
 import json
