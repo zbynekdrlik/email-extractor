@@ -1,10 +1,12 @@
 """Configuration: read Home Assistant add-on options (/data/options.json) or env."""
+
 from __future__ import annotations
 
 import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import quote_plus
 
 OPTIONS_PATH = Path(os.environ.get("ADDON_OPTIONS", "/data/options.json"))
 
@@ -47,6 +49,12 @@ class Config:
         if isinstance(folders, str):
             folders = [f.strip() for f in folders.split(",") if f.strip()]
         http_port = int(_get(o, "http_port", "HTTP_PORT", 8099))
+        pg_dsn = _get(o, "pg_dsn", "PG_DSN", "")
+        pg_password = _get(o, "pg_password", "PG_PASSWORD", "")
+        if not pg_dsn and pg_password:
+            # Bundled-Postgres mode: run.sh starts a local cluster inside the
+            # add-on container and creates role/db "email" with pg_password.
+            pg_dsn = f"postgresql://email:{quote_plus(pg_password)}@127.0.0.1:5432/email"
         base = _get(o, "public_base_url", "PUBLIC_BASE_URL", "") or f"http://localhost:{http_port}"
         return cls(
             imap_host=_get(o, "imap_host", "IMAP_HOST", ""),
@@ -55,7 +63,7 @@ class Config:
             imap_pass=_get(o, "imap_pass", "IMAP_PASS", ""),
             folders=folders or ["INBOX"],
             poll_interval=int(_get(o, "poll_interval", "POLL_INTERVAL", 60)),
-            pg_dsn=_get(o, "pg_dsn", "PG_DSN", ""),
+            pg_dsn=pg_dsn,
             data_dir=_get(o, "data_dir", "DATA_DIR", "/data/store"),
             http_port=http_port,
             api_token=_get(o, "api_token", "API_TOKEN", ""),

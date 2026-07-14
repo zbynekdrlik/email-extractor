@@ -1,7 +1,7 @@
 name: Email OCR Extractor
-version: "0.2.6"
+version: "0.3.0"
 slug: email_extractor
-description: Reads an IMAP mailbox, OCR-extracts the body + all attachments, and writes Postgres for n8n.
+description: Reads an IMAP mailbox, OCR-extracts the body + all attachments, and writes Postgres for n8n. Bundles its own Postgres on /data (leave pg_dsn empty, set pg_password).
 url: https://github.com/zbynekdrlik/email-extractor
 arch:
   - amd64
@@ -9,8 +9,10 @@ init: false
 image: ghcr.io/zbynekdrlik/email-extractor-{arch}
 ports:
   "8099/tcp": 8099
+  "5432/tcp": null
 ports_description:
-  "8099/tcp": Internal file API for n8n (original attachments + raw .eml)
+  "8099/tcp": Dashboard + file API for n8n (original attachments + raw .eml)
+  "5432/tcp": Bundled Postgres (only used when pg_dsn is empty; add-ons reach it internally without host mapping)
 options:
   imap_host: ""
   imap_port: 993
@@ -19,6 +21,7 @@ options:
   folders: "INBOX"
   poll_interval: 60
   pg_dsn: ""
+  pg_password: ""
   public_base_url: ""
   api_token: ""
   dash_password: ""
@@ -32,7 +35,8 @@ schema:
   imap_pass: password
   folders: str
   poll_interval: int
-  pg_dsn: str
+  pg_dsn: str?
+  pg_password: password?
   public_base_url: str?
   api_token: password?
   dash_password: password?
