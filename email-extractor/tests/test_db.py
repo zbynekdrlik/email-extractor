@@ -92,3 +92,33 @@ def test_non_rollup_event_is_timeline_only(pg):
     assert row == ("ok", "uploaded_orion", "EDI")   # unchanged by the non-rollup event
     assert pg.execute("SELECT count(*) FROM email_events "
                       "WHERE message_id='nr'").fetchone()[0] == 1   # but recorded in the timeline
+
+
+def test_insert_message_strips_nul_bytes(pg):
+    """Weak scans' PDF text layers can contain NUL (0x00) bytes; Postgres text
+    columns reject them. Incident 2026-07-15: a scanned DL (uid 18236) failed to
+    ingest on every cycle with DataError — the mail never entered the system."""
+    rec = {
+        "identity": "<m-nul@x>",
+        "headers": {"message_id": "<m-nul@x>", "from_addr": "tlaciaren@slovnormal.sk",
+                    "from_name": "Sc\x00an", "to_addrs": ["a@x.sk"], "cc_addrs": [],
+                    "subject": "Scan\x00", "date": "2026-07-15"},
+        "body_text": "telo\x00 skenu", "body_source": "plain",
+        "combined_text": "Subject: Scan\x00\n\ntelo\x00 skenu",
+        "has_attachments": True, "needs_vision": False,
+        "attachments": [{"filename": "sken\x00.pdf", "mime": "application/pdf",
+                         "size": 10, "method": "pdf-text", "ocr_conf": None,
+                         "pages": 1, "chars": 5, "needs_vision": False,
+                         "flag": None, "text": "DL \x00text so NUL"}],
+    }
+    assert db.insert_message(pg, rec, "INBOX", 18236, 1, "/x/raw.eml",
+                             [{"idx": 0, "sha256": "s", "path": "/p", "url": "u"}]) is True
+    subj, comb = pg.execute(
+        "SELECT subject, combined_text FROM messages WHERE message_id=%s",
+        ("<m-nul@x>",)).fetchone()
+    assert "\x00" not in subj and subj == "Scan"
+    assert "\x00" not in comb
+    fname, text = pg.execute(
+        "SELECT filename, extracted_text FROM attachments WHERE message_id=%s",
+        ("<m-nul@x>",)).fetchone()
+    assert "\x00" not in fname and "\x00" not in text
