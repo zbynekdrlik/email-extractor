@@ -283,6 +283,17 @@ def set_folder_state(conn, folder: str, uidvalidity: int, last_uid: int) -> None
     )
 
 
+def _no_nul(v):
+    """Strip NUL (0x00) bytes from str/list values — Postgres text columns reject
+    them, and a weak scan's PDF text layer occasionally contains one (2026-07-15:
+    a scanned DL failed to ingest on every poll cycle with DataError)."""
+    if isinstance(v, str):
+        return v.replace("\x00", "")
+    if isinstance(v, list):
+        return [_no_nul(x) for x in v]
+    return v
+
+
 def insert_message(conn, rec: dict, folder: str, uid: int, uidvalidity: int,
                    raw_path: str, att_files: list[dict]) -> bool:
     """Insert one email + its attachments. Returns False if already present (dedup)."""
@@ -299,11 +310,12 @@ def insert_message(conn, rec: dict, folder: str, uid: int, uidvalidity: int,
         ON CONFLICT (message_id) DO NOTHING
         RETURNING id
         """,
-        (rec["identity"], h.get("message_id"), folder, uid, uidvalidity,
-         h.get("from_addr"), h.get("from_name"), h.get("to_addrs"), h.get("cc_addrs"),
-         h.get("subject"), h.get("date"), rec["body_text"], rec["body_source"],
-         rec["combined_text"], rec["has_attachments"], rec["needs_vision"], raw_path,
-         content_sig),
+        tuple(_no_nul(p) for p in (
+            rec["identity"], h.get("message_id"), folder, uid, uidvalidity,
+            h.get("from_addr"), h.get("from_name"), h.get("to_addrs"), h.get("cc_addrs"),
+            h.get("subject"), h.get("date"), rec["body_text"], rec["body_source"],
+            rec["combined_text"], rec["has_attachments"], rec["needs_vision"], raw_path,
+            content_sig)),
     ).fetchone()
     if not row:
         return False
@@ -317,10 +329,11 @@ def insert_message(conn, rec: dict, folder: str, uid: int, uidvalidity: int,
                 file_url, extracted_text)
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
-            (rec["identity"], i, a.get("filename"), a.get("mime"), a.get("size"),
-             f.get("sha256"), a.get("method"), a.get("ocr_conf"), a.get("pages"),
-             a.get("chars"), a.get("needs_vision"), a.get("flag"), f.get("path"),
-             f.get("url"), a.get("text")),
+            tuple(_no_nul(p) for p in (
+                rec["identity"], i, a.get("filename"), a.get("mime"), a.get("size"),
+                f.get("sha256"), a.get("method"), a.get("ocr_conf"), a.get("pages"),
+                a.get("chars"), a.get("needs_vision"), a.get("flag"), f.get("path"),
+                f.get("url"), a.get("text"))),
         )
     # Start the processing timeline (rollup=False: keep proc_status NULL/'nové' —
     # the email isn't processed yet, just ingested).
