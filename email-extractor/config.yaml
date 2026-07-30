@@ -28,6 +28,10 @@ options:
   secret_key: ""
   http_port: 8099
   data_dir: "/data/store"
+  catalog_sheet_id: ""
+  catalog_gid: ""
+  customer_gid: ""
+  catalog_refresh_minutes: 60
 schema:
   imap_host: str
   imap_port: int
@@ -43,3 +47,7 @@ schema:
   secret_key: password?
   http_port: int
   data_dir: str
+  catalog_sheet_id: str?
+  catalog_gid: str?
+  customer_gid: str?
+  catalog_refresh_minutes: int?

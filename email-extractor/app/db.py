@@ -262,6 +262,46 @@ SCHEMA = [
         PRIMARY KEY (folder, uidvalidity, uid)
     )
     """,
+    # --- #59: frozen catalog + customer list for the order pipeline. The n8n version
+    # reads the Google Sheet live on every run, so the same email gives different
+    # results on different days and no regression test can exist. A snapshot is
+    # content-addressed and immutable: a run records the id it used and stays
+    # replayable after the sheet changes. ---
+    """
+    CREATE TABLE IF NOT EXISTS order_snapshots (
+        id             BIGSERIAL PRIMARY KEY,
+        content_sha256 TEXT NOT NULL,
+        catalog_rows   INT  NOT NULL,
+        customer_rows  INT  NOT NULL,
+        imported_at    TIMESTAMPTZ DEFAULT now(),
+        checked_at     TIMESTAMPTZ DEFAULT now()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_order_snapshots_hash ON order_snapshots(content_sha256)",
+    """
+    CREATE TABLE IF NOT EXISTS catalog_snapshot (
+        snapshot_id BIGINT NOT NULL REFERENCES order_snapshots(id) ON DELETE CASCADE,
+        gtin        TEXT   NOT NULL,
+        name        TEXT   NOT NULL,
+        alias       TEXT,
+        PRIMARY KEY (snapshot_id, gtin)
+    )
+    """,
+    # No unique key on ean_edi: the sheet legitimately holds rows with an empty EAN and
+    # several branches sharing one, so a surrogate id is the only safe identity here.
+    """
+    CREATE TABLE IF NOT EXISTS customer_snapshot (
+        id          BIGSERIAL PRIMARY KEY,
+        snapshot_id BIGINT NOT NULL REFERENCES order_snapshots(id) ON DELETE CASCADE,
+        ean_edi     TEXT,
+        name        TEXT NOT NULL,
+        emails      TEXT[],
+        city        TEXT,
+        street      TEXT,
+        zip         TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_customer_snapshot_snap ON customer_snapshot(snapshot_id)",
 ]
 
 

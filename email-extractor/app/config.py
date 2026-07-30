@@ -41,6 +41,12 @@ class Config:
     dash_password: str = ""
     secret_key: str = ""
     public_base_url: str = ""
+    # --- order pipeline (#59): the catalog/customer sheet is fetched as CSV and frozen
+    # into Postgres. The document id is an option, never committed. ---
+    catalog_sheet_id: str = ""
+    catalog_gid: str = ""
+    customer_gid: str = ""
+    catalog_refresh_minutes: int = 60
 
     @classmethod
     def load(cls) -> Config:
@@ -71,4 +77,9 @@ class Config:
             dash_password=_get(o, "dash_password", "DASH_PASSWORD", ""),
             secret_key=_get(o, "secret_key", "SECRET_KEY", ""),
             public_base_url=base,
+            catalog_sheet_id=_get(o, "catalog_sheet_id", "CATALOG_SHEET_ID", "") or "",
+            catalog_gid=str(_get(o, "catalog_gid", "CATALOG_GID", "") or ""),
+            customer_gid=str(_get(o, "customer_gid", "CUSTOMER_GID", "") or ""),
+            catalog_refresh_minutes=int(
+                _get(o, "catalog_refresh_minutes", "CATALOG_REFRESH_MINUTES", 60)),
         )

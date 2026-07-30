@@ -30,7 +30,8 @@ def _schema():
 def pg(_schema):
     """Clean slate before each DB test."""
     _schema.execute(
-        "TRUNCATE messages, attachments, email_events, fix_requests RESTART IDENTITY CASCADE")
+        "TRUNCATE messages, attachments, email_events, fix_requests, order_snapshots "
+        "RESTART IDENTITY CASCADE")
     return _schema
 
 
