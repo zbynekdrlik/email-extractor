@@ -315,3 +315,144 @@ def test_fix_queue_paginates(pg):
     assert d["total"] == 3
     assert len(d["items"]) == 2
     assert len(c.get("/api/fix-queue?limit=2&offset=2").get_json()["items"]) == 1
+
+
+# ---- #20: emails that never made it in must be visible somewhere ----
+
+def test_imap_failures_endpoint_lists_pending_and_skipped(pg):
+    pg.execute("TRUNCATE imap_failures")
+    db.record_uid_failure(pg, "INBOX", 1, 41, "RuntimeError('OCR out of memory')")
+    for _ in range(db.MAX_UID_ATTEMPTS):
+        db.record_uid_failure(pg, "INBOX", 1, 42, "ValueError('broken part')")
+    db.mark_uid_skipped(pg, "INBOX", 1, 42)
+    c = _client()
+    _login(c)
+    d = c.get("/api/imap-failures").get_json()
+    assert d["total"] == 2
+    assert d["pending"] == 1 and d["skipped"] == 1
+    assert d["max_attempts"] == db.MAX_UID_ATTEMPTS
+    by_uid = {i["uid"]: i for i in d["items"]}
+    assert by_uid[41]["attempts"] == 1 and by_uid[41]["skipped"] is False
+    assert by_uid[42]["skipped"] is True
+    assert "OCR out of memory" in by_uid[41]["last_error"]
+
+
+def test_imap_failures_endpoint_needs_login(pg):
+    assert _client().get("/api/imap-failures").status_code == 401
+
+
+def test_dashboard_has_the_imap_failures_tab(pg):
+    c = _client()
+    _login(c)
+    html = c.get("/").get_data(as_text=True)
+    assert "/api/imap-failures" in html
+    assert "tabImap" in html
+
+
+# ---- #21: /files and /eml must never serve another email's originals ----
+
+def test_files_are_not_served_across_a_colliding_message_id(pg, tmp_path):
+    from app import store
+    long_prefix = "y" * 130
+    id_a, id_b = f"<{long_prefix}.a@m.example>", f"<{long_prefix}.b@m.example>"
+    store.save_message(str(tmp_path), id_a, b"EML-A",
+                       [{"filename": "a.pdf", "_data": b"PDF-A"}], "http://x", "")
+    store.save_message(str(tmp_path), id_b, b"EML-B",
+                       [{"filename": "b.pdf", "_data": b"PDF-B"}], "http://x", "")
+    cfg = Config(pg_dsn=PG_DSN, data_dir=str(tmp_path), api_token="tok",
+                 dash_password="secret", secret_key="test-secret")
+    app = create_app(cfg)
+    app.testing = True
+    c = app.test_client()
+    assert c.get(f"/files/{id_a}/0?token=tok").data == b"PDF-A"
+    assert c.get(f"/files/{id_b}/0?token=tok").data == b"PDF-B"
+    assert c.get(f"/eml/{id_a}?token=tok").data == b"EML-A"
+    assert c.get(f"/eml/{id_b}?token=tok").data == b"EML-B"
+
+
+def test_files_still_serve_legacy_storage_dirs(pg, tmp_path):
+    from app import store
+    mid = "<legacy.dir@m.example>"
+    old = tmp_path / store.legacy_safe_id(mid)
+    old.mkdir()
+    (old / "raw.eml").write_bytes(b"OLD-EML")
+    (old / "att0__x.pdf").write_bytes(b"OLD-PDF")
+    cfg = Config(pg_dsn=PG_DSN, data_dir=str(tmp_path), api_token="tok",
+                 dash_password="secret", secret_key="test-secret")
+    app = create_app(cfg)
+    app.testing = True
+    c = app.test_client()
+    assert c.get(f"/files/{mid}/0?token=tok").data == b"OLD-PDF"
+    assert c.get(f"/eml/{mid}?token=tok").data == b"OLD-EML"
+
+
+# ---- #25: operator actions must not steal an in-flight claim (double-process) ----
+
+def _msg_claimed(pg, minutes_ago: float) -> int:
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('claimed@t','ai_orders')")
+    return pg.execute(
+        """UPDATE messages SET processing_at = now() - (%s || ' minutes')::interval,
+                               processed_by = 'n8n-worker'
+           WHERE message_id='claimed@t' RETURNING id""", (minutes_ago,)).fetchone()[0]
+
+
+def test_reprocess_refuses_while_a_worker_holds_the_message(pg):
+    mid = _msg_claimed(pg, 1)
+    c = _client()
+    _login(c)
+    r = c.post(f"/api/message/{mid}/reprocess")
+    assert r.status_code == 409, "a fresh claim must not be cleared under the worker"
+    assert "spracúva" in r.get_json()["error"]
+    row = pg.execute("SELECT processing_at, processed_by FROM messages WHERE id=%s",
+                     (mid,)).fetchone()
+    assert row[0] is not None and row[1] == 'n8n-worker', "claim left untouched"
+
+
+def test_reclassify_refuses_while_a_worker_holds_the_message(pg):
+    mid = _msg_claimed(pg, 2)
+    c = _client()
+    _login(c)
+    r = c.post(f"/api/message/{mid}/reclassify", json={"category": "invoices"})
+    assert r.status_code == 409
+    row = pg.execute("SELECT category, processing_at FROM messages WHERE id=%s",
+                     (mid,)).fetchone()
+    assert row == ("ai_orders", row[1]) and row[1] is not None
+
+
+def test_reprocess_clears_a_stale_claim(pg):
+    mid = _msg_claimed(pg, db.CLAIM_STALE_MINUTES + 1)
+    c = _client()
+    _login(c)
+    assert c.post(f"/api/message/{mid}/reprocess").status_code == 200
+    assert pg.execute("SELECT processing_at FROM messages WHERE id=%s",
+                      (mid,)).fetchone()[0] is None
+
+
+def test_reclassify_still_works_when_nothing_is_in_flight(pg):
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('free@t','ai_orders')")
+    mid = pg.execute("SELECT id FROM messages WHERE message_id='free@t'").fetchone()[0]
+    c = _client()
+    _login(c)
+    assert c.post(f"/api/message/{mid}/reclassify", json={"category": "invoices"}).status_code == 200
+    assert pg.execute("SELECT category FROM messages WHERE id=%s", (mid,)).fetchone()[0] == "invoices"
+
+
+def test_fix_request_and_its_event_commit_together(pg, monkeypatch):
+    """A failed second write must not leave an orphan fix row (a duplicate work item)."""
+    pg.execute("INSERT INTO messages (message_id, subject) VALUES ('fx@t','Predmet')")
+    mid = pg.execute("SELECT id FROM messages WHERE message_id='fx@t'").fetchone()[0]
+    from app import httpapi
+
+    def boom(*a, **kw):
+        raise RuntimeError("event insert failed")
+
+    monkeypatch.setattr(httpapi.db, "log_event", boom)
+    cfg = Config(pg_dsn=PG_DSN, data_dir="/tmp", api_token="tok",
+                 dash_password="secret", secret_key="test-secret")
+    app = create_app(cfg)          # testing=False → Flask turns the error into a 500
+    c = app.test_client()
+    _login(c)
+    r = c.post(f"/api/message/{mid}/fix", json={"problem_type": "other", "description": "x"})
+    assert r.status_code == 500
+    assert pg.execute("SELECT count(*) FROM fix_requests").fetchone()[0] == 0, \
+        "the fix row must roll back with the failed event write"

@@ -6,8 +6,50 @@ import re
 from pathlib import Path
 
 
+def _sanitize(message_id: str, limit: int) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", message_id or "")[:limit] or "noid"
+
+
+def legacy_safe_id(message_id: str) -> str:
+    """The pre-0.4.0 dir name (plain 120-char cut). Read-only: live data uses it."""
+    return _sanitize(message_id, 120)
+
+
 def safe_id(message_id: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", message_id or "")[:120] or "noid"
+    """Directory name for one email — unambiguous per Message-ID (#21).
+
+    A truncated prefix alone collided: two long auto-generated IDs sharing their
+    first 120 chars landed in one directory and overwrote each other's originals.
+    The appended hash is taken from the FULL id, so distinct ids always differ.
+    """
+    digest = hashlib.sha256((message_id or "").encode("utf-8", "surrogatepass")).hexdigest()
+    return f"{_sanitize(message_id, 100)}-{digest[:12]}"
+
+
+def message_dir(data_dir: str, key: str) -> Path:
+    """Resolve one email's storage dir from a URL segment or a raw Message-ID.
+
+    Accepts all three forms that exist in the wild, newest first:
+      * a raw Message-ID (what n8n passes: /files/<message_id>/<idx>),
+      * a current dir name (`<prefix>-<hash>`, what save_message puts in file_url),
+      * a legacy 120-char dir name (emails ingested before 0.4.0).
+    Falls back to the current name for this key when nothing exists yet, so a
+    missing file 404s instead of leaking another email's directory.
+    """
+    root = Path(data_dir)
+    current = root / safe_id(key)
+    for cand in (current, root / legacy_safe_id(key), root / _sanitize(key, 200)):
+        if _within(root, cand) and cand.exists():
+            return cand
+    return current
+
+
+def _within(root: Path, path: Path) -> bool:
+    """Guard against a crafted ../ segment escaping the store."""
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except OSError:
+        return False
 
 
 def _safe_name(name: str, idx: int) -> str:

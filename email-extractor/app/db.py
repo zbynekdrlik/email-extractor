@@ -236,6 +236,23 @@ SCHEMA = [
         AFTER UPDATE OF category ON messages
         FOR EACH ROW EXECUTE FUNCTION messages_classified_event()
     """,
+    # --- emails that failed to ingest (#20). The IMAP watermark stops below a
+    # failed UID so it is retried; after MAX_UID_ATTEMPTS it is passed over and
+    # kept here as skipped=true, so a broken email can neither be lost silently
+    # nor wedge the folder for every later email. ---
+    """
+    CREATE TABLE IF NOT EXISTS imap_failures (
+        folder      TEXT   NOT NULL,
+        uidvalidity BIGINT NOT NULL,
+        uid         BIGINT NOT NULL,
+        attempts    INT    NOT NULL DEFAULT 1,
+        skipped     BOOLEAN NOT NULL DEFAULT false,
+        first_seen  TIMESTAMPTZ DEFAULT now(),
+        last_seen   TIMESTAMPTZ DEFAULT now(),
+        last_error  TEXT,
+        PRIMARY KEY (folder, uidvalidity, uid)
+    )
+    """,
 ]
 
 
@@ -281,6 +298,91 @@ def set_folder_state(conn, folder: str, uidvalidity: int, last_uid: int) -> None
         """,
         (folder, uidvalidity, last_uid),
     )
+
+
+# How many polls a failing UID is retried before the watermark is allowed past it
+# (#20). Lives here so both the ingest loop and the dashboard API can state it.
+MAX_UID_ATTEMPTS = 5
+
+# A claim (messages.processing_at) younger than this means an n8n worker is really
+# working on that email; the same window the n8n dispatcher uses to re-claim stale
+# rows. Operator actions must not clear a claim inside it (#25).
+CLAIM_STALE_MINUTES = 10
+
+
+def active_claim(conn, mid: int):
+    """Return processing_at when a worker currently holds this message, else None."""
+    row = conn.execute(
+        """SELECT processing_at FROM messages
+           WHERE id = %s AND processed = false AND processing_at IS NOT NULL
+             AND processing_at > now() - (%s || ' minutes')::interval""",
+        (mid, CLAIM_STALE_MINUTES),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def record_uid_failure(conn, folder: str, uidvalidity: int, uid: int, err: str) -> int:
+    """Remember that this UID failed to ingest; return how many times it has failed."""
+    return conn.execute(
+        """
+        INSERT INTO imap_failures (folder, uidvalidity, uid, last_error)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (folder, uidvalidity, uid) DO UPDATE
+            SET attempts = imap_failures.attempts + 1,
+                last_seen = now(),
+                last_error = EXCLUDED.last_error
+        RETURNING attempts
+        """,
+        (folder, uidvalidity, uid, (err or "")[:2000]),
+    ).fetchone()[0]
+
+
+def mark_uid_skipped(conn, folder: str, uidvalidity: int, uid: int) -> None:
+    """Give up on this UID (watermark may pass it) but keep it on record."""
+    conn.execute(
+        "UPDATE imap_failures SET skipped = true WHERE folder=%s AND uidvalidity=%s AND uid=%s",
+        (folder, uidvalidity, uid),
+    )
+
+
+def clear_uid_failure(conn, folder: str, uidvalidity: int, uid: int) -> None:
+    conn.execute(
+        "DELETE FROM imap_failures WHERE folder=%s AND uidvalidity=%s AND uid=%s",
+        (folder, uidvalidity, uid),
+    )
+
+
+def list_uid_failures(conn, limit: int = 200) -> list[dict]:
+    rows = conn.execute(
+        """SELECT folder, uidvalidity, uid, attempts, skipped, first_seen, last_seen, last_error
+           FROM imap_failures ORDER BY skipped DESC, last_seen DESC LIMIT %s""",
+        (limit,),
+    ).fetchall()
+    return [{
+        "folder": r[0], "uidvalidity": r[1], "uid": r[2], "attempts": r[3], "skipped": r[4],
+        "first_seen": r[5].isoformat() if r[5] else None,
+        "last_seen": r[6].isoformat() if r[6] else None,
+        "last_error": r[7],
+    } for r in rows]
+
+
+def count_uid_failures(conn) -> tuple[int, int]:
+    """(pending, skipped) — exact counts, independent of list_uid_failures' limit."""
+    row = conn.execute(
+        """SELECT count(*) FILTER (WHERE NOT skipped), count(*) FILTER (WHERE skipped)
+           FROM imap_failures""").fetchone()
+    return (row[0], row[1])
+
+
+def retire_stale_uid_failures(conn, folder: str, uidvalidity: int) -> int:
+    """The mailbox was re-numbered, so pending UIDs from the previous UIDVALIDITY can
+    never be retried — mark them skipped instead of showing them as 'still retrying'
+    forever. They stay on record (that is the point of the table)."""
+    return conn.execute(
+        """UPDATE imap_failures SET skipped = true
+           WHERE folder = %s AND uidvalidity <> %s AND NOT skipped""",
+        (folder, uidvalidity),
+    ).rowcount
 
 
 def _no_nul(v):

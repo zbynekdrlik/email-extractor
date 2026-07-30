@@ -23,7 +23,8 @@ from flask import Flask, abort, jsonify, redirect, request, send_file, session
 from psycopg.types.json import Json
 
 from . import __version__, db
-from .store import safe_id
+from .db import MAX_UID_ATTEMPTS
+from .store import message_dir
 
 CATEGORIES = ["ai_orders", "invoices", "reklamacie", "dodacie_listy",
               "static_orders", "human_processing", "no_processing"]
@@ -83,6 +84,24 @@ def create_app(cfg) -> Flask:
     def _db():
         return psycopg.connect(cfg.pg_dsn, autocommit=True)
 
+    def _db_tx():
+        """One transaction: `with _db_tx() as c` commits at exit, rolls back on error.
+        For routes that do several writes which must land together (#25)."""
+        return psycopg.connect(cfg.pg_dsn)
+
+    def _busy(mid: int, c):
+        """409 body when an n8n worker holds this message, else None. Clearing its
+        claim would let a second worker re-claim it → the same order processed and
+        forwarded twice (#25)."""
+        held = db.active_claim(c, mid)
+        if held is None:
+            return None
+        log.info("operator action on #%s refused — claimed by a worker since %s", mid, held)
+        return jsonify(error=f"Mail sa práve spracúva (od {held:%H:%M}). "
+                             f"Skús to znova po dokončení, najneskôr za "
+                             f"{db.CLAIM_STALE_MINUTES} minút.",
+                       claimed_at=held.isoformat()), 409
+
     @app.before_request
     def _gate():
         p = request.path
@@ -135,7 +154,7 @@ def create_app(cfg) -> Flask:
     @app.get("/files/<mid>/<int:idx>")
     def get_file(mid: str, idx: int):
         _auth()
-        matches = sorted((data_dir / safe_id(mid)).glob(f"att{idx}__*"))
+        matches = sorted(message_dir(str(data_dir), mid).glob(f"att{idx}__*"))
         if not matches:
             abort(404)
         return send_file(matches[0])
@@ -143,7 +162,7 @@ def create_app(cfg) -> Flask:
     @app.get("/eml/<mid>")
     def get_eml(mid: str):
         _auth()
-        path = data_dir / safe_id(mid) / "raw.eml"
+        path = message_dir(str(data_dir), mid) / "raw.eml"
         if not path.exists():
             abort(404)
         return send_file(path, mimetype="message/rfc822")
@@ -311,6 +330,9 @@ def create_app(cfg) -> Flask:
                           (mid,)).fetchone()
             if not m:
                 abort(404)
+            busy = _busy(mid, c)
+            if busy:
+                return busy
             c.execute(
                 """UPDATE messages
                    SET original_category = COALESCE(original_category, category),
@@ -332,6 +354,9 @@ def create_app(cfg) -> Flask:
             m = c.execute("SELECT message_id FROM messages WHERE id=%s", (mid,)).fetchone()
             if not m:
                 abort(404)
+            busy = _busy(mid, c)
+            if busy:
+                return busy
             c.execute(
                 """UPDATE messages SET processed = false, processed_at = NULL,
                    processed_by = NULL, processing_at = NULL, error = NULL
@@ -353,7 +378,10 @@ def create_app(cfg) -> Flask:
         if expected is not None and expected not in CATEGORIES:
             abort(400)
         desc = (body.get("description") or "").strip()
-        with _db() as c:
+        # One transaction: the fix row and its timeline event commit together, so a
+        # failed second write cannot leave an orphan fix row that a client retry
+        # then duplicates (#25).
+        with _db_tx() as c:
             m = c.execute(
                 """SELECT message_id, subject, category, proc_status, proc_outcome
                    FROM messages WHERE id=%s""", (mid,)).fetchone()
@@ -375,6 +403,16 @@ def create_app(cfg) -> Flask:
                                  "expected_category": expected}, rollup=False)
         log.info("fix_requested #%s type=%s -> fix #%s", mid, ptype, fid)
         return jsonify(ok=True, id=mid, fix_id=fid)
+
+    @app.get("/api/imap-failures")
+    def api_imap_failures():
+        """Emails that could not be ingested at all (#20) — they have no messages row,
+        so this is the ONLY place they are visible. Never let them be silent."""
+        with _db() as c:
+            items = db.list_uid_failures(c)
+            pending, skipped = db.count_uid_failures(c)
+        return jsonify(total=pending + skipped, items=items, shown=len(items),
+                       max_attempts=MAX_UID_ATTEMPTS, pending=pending, skipped=skipped)
 
     @app.get("/api/fix-queue")
     def api_fix_queue():
@@ -542,6 +580,7 @@ DASH_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
 <div class="tabs">
   <button class="tab active" id="tabMails" onclick="setView('mails')">Maily</button>
   <button class="tab" id="tabFix" onclick="setView('fix')">Fix fronta</button>
+  <button class="tab" id="tabImap" onclick="setView('imap')">Neprijaté <span id="imapBadge"></span></button>
 </div>
 <main>
   <div id="list"></div>
@@ -553,7 +592,9 @@ const E=s=>(s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;',
 let CATS=[],sel=null,view='mails',timer=null,live=true,counts={};
 async function api(path,opts){const r=await fetch(path,Object.assign({headers:{'Content-Type':'application/json'}},opts));
   if(r.status===401){location.href='/login';throw new Error('auth')}
-  if(!r.ok)throw new Error(r.status);return r.json()}
+  if(!r.ok){let m='';try{m=(await r.json()).error||''}catch(e){}
+    throw new Error(m||('chyba '+r.status))}
+  return r.json()}
 function tsShort(s){if(!s)return '';return s.replace('T',' ').slice(5,16)}
 function params(){const p=new URLSearchParams();
   if(q.value.trim())p.set('q',q.value.trim());
@@ -610,8 +651,8 @@ async function openDetail(id){
     '<div class="lbl">Prílohy ('+(m.attachments||[]).length+')</div>'+atts+
     '<div class="lbl">Telo</div><pre>'+E(m.body_text||'(prázdne)')+'</pre>'+
     '<div class="lbl">combined_text (čo videla AI)</div><pre>'+E(m.combined_text||'')+'</pre>'}
-async function doReclassify(id,cat){try{await api('/api/message/'+id+'/reclassify',{method:'POST',body:JSON.stringify({category:cat})});await loadList();await openDetail(id)}catch(e){alert('chyba')}}
-async function doReprocess(id){try{await api('/api/message/'+id+'/reprocess',{method:'POST'});await loadList();await openDetail(id)}catch(e){alert('chyba')}}
+async function doReclassify(id,cat){try{await api('/api/message/'+id+'/reclassify',{method:'POST',body:JSON.stringify({category:cat})});await loadList();await openDetail(id)}catch(e){alert(e.message||'chyba')}}
+async function doReprocess(id){try{await api('/api/message/'+id+'/reprocess',{method:'POST'});await loadList();await openDetail(id)}catch(e){alert(e.message||'chyba')}}
 function openFix(id){
   const opts=CATS.map(c=>'<option value="'+c+'">'+c+'</option>').join('');
   document.getElementById('modal').innerHTML='<h3>🔧 Dať na opravu — #'+id+'</h3>'+
@@ -640,16 +681,34 @@ async function loadFix(){const D=document.getElementById('detail'),L=document.ge
       (open?'<div class="actions"><button onclick="openDetail('+(f.msg_id||'null')+');setView(\'mails\')">otvoriť mail</button>'+
         '<button class="btn-blue" onclick="resolveFix('+f.id+',\'fixed\')">označiť opravené</button>'+
         '<button onclick="resolveFix('+f.id+',\'wontfix\')">neopravím</button></div>':'')+'</div>'}).join('')}
+async function loadImap(){const D=document.getElementById('detail'),L=document.getElementById('list');
+  L.innerHTML='';let d;try{d=await api('/api/imap-failures')}catch(e){return}
+  const b=document.getElementById('imapBadge');
+  b.textContent=d.total?String(d.total):'';b.style.color='#f85149';
+  if(!d.items.length){D.innerHTML='<div class="empty">Všetky maily sa podarilo prijať 🎉</div>';return}
+  D.innerHTML='<div class="lbl">Maily, ktoré sa nepodarilo prijať ('+d.pending+' sa ešte skúša, '+d.skipped+' vzdané)</div>'+
+    d.items.map(f=>'<div class="fixrow'+(f.skipped?'':' resolved')+'">'+
+      '<div class="t" style="display:flex;justify-content:space-between"><b>'+(f.skipped?'⛔ vzdané':'🔄 skúša sa')+
+      ' — '+E(f.folder)+' UID '+f.uid+'</b><span class="muted">'+f.attempts+'/'+d.max_attempts+' pokusov</span></div>'+
+      '<div class="muted">prvýkrát '+tsShort(f.first_seen)+' · naposledy '+tsShort(f.last_seen)+'</div>'+
+      '<div class="err">'+E(f.last_error||'')+'</div>'+
+      (f.skipped?'<div class="muted">Tento mail v systéme NIE JE. Treba ho vytiahnuť ručne z mailu (schránka, UID '+f.uid+') alebo opraviť príčinu a znížiť watermark.</div>':'')+
+      '</div>').join('')}
 async function resolveFix(fid,status){const res=status==='fixed'?(prompt('Poznámka k oprave (voliteľné):')||''):'';
   try{await api('/api/fix/'+fid+'/resolve',{method:'POST',body:JSON.stringify({status,resolution:res})});await loadFix()}catch(e){alert('chyba')}}
 function setView(v){view=v;document.getElementById('tabMails').classList.toggle('active',v==='mails');
   document.getElementById('tabFix').classList.toggle('active',v==='fix');
-  if(v==='fix'){loadFix()}else{document.getElementById('detail').innerHTML='<div class="empty">Vyber mail vľavo.</div>';loadList()}}
-function tick(){if(live&&document.getElementById('ov').style.display!=='flex'){if(view==='mails')loadList();else loadFix()}}
+  document.getElementById('tabImap').classList.toggle('active',v==='imap');
+  if(v==='fix'){loadFix()}else if(v==='imap'){loadImap()}
+  else{document.getElementById('detail').innerHTML='<div class="empty">Vyber mail vľavo.</div>';loadList()}}
+function tick(){if(live&&document.getElementById('ov').style.display!=='flex'){
+  if(view==='mails')loadList();else if(view==='imap')loadImap();else loadFix()}}
+async function imapBadgeRefresh(){try{const d=await api('/api/imap-failures');
+  const b=document.getElementById('imapBadge');b.textContent=d.total?String(d.total):'';b.style.color='#f85149'}catch(e){}}
 document.getElementById('livetog').onclick=()=>{live=!live;document.getElementById('livetog').style.color=live?'#3fb950':'#6e7681';document.getElementById('livelbl').textContent=live?'LIVE':'pauza'};
 let deb;q.oninput=()=>{clearTimeout(deb);deb=setTimeout(loadList,350)};
 for(const el of [fcat,fstate,ffrom,fto])el.onchange=loadList;
-loadList();timer=setInterval(tick,5000);
+loadList();imapBadgeRefresh();timer=setInterval(tick,5000);setInterval(imapBadgeRefresh,30000);
 </script></body></html>"""
 
 
