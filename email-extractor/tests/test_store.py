@@ -84,3 +84,22 @@ def test_dir_name_from_a_stored_url_resolves_back(tmp_path):
                        "http://x", "")
     assert store.message_dir(str(tmp_path), store.safe_id(mid)).name == store.safe_id(mid)
     assert (store.message_dir(str(tmp_path), store.safe_id(mid)) / "raw.eml").exists()
+
+
+# ---- #22: the API token must never be baked into a stored URL ----
+
+def test_file_url_carries_no_token(tmp_path):
+    _, files = store.save_message(str(tmp_path), "<t@m>", b"EML",
+                                  [{"filename": "a.pdf", "_data": b"P"}],
+                                  "http://email-extractor:8099")
+    assert "token" not in files[0]["url"], "the secret must not be persisted in Postgres"
+    assert files[0]["url"].startswith("http://email-extractor:8099/files/")
+    assert files[0]["url"].endswith("/0")
+
+
+def test_file_url_uses_the_configured_base(tmp_path):
+    _, files = store.save_message(str(tmp_path), "<t2@m>", b"E",
+                                  [{"filename": "a.pdf", "_data": b"P"}],
+                                  "http://e0ac7775-email-extractor:8099")
+    assert "localhost" not in files[0]["url"]
+    assert files[0]["url"].startswith("http://e0ac7775-email-extractor:8099/files/")
