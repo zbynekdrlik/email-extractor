@@ -46,6 +46,21 @@ Convert `XL_CELL_DATE` via `xlrd.xldate.xldate_as_datetime(v, book.datemode)`
 (`_xls_cell`); time-only serials (< 1) render as `HH:MM`; an out-of-range serial falls
 back to the raw value rather than raising.
 
+## TNEF (`winmail.dat`) is deliberately NOT handled
+
+Outlook sometimes wraps the real attachments in `application/ms-tnef`. Those land as
+`flag='unsupported'` (visible, never silently dropped). Measured on live data
+2026-07-30 (7 days): 3 occurrences, all from read receipts ("Prečítané: …"), an
+auto-reply and internal mail — **zero customer orders**. So a TNEF handler (a new
+runtime dependency in the add-on image) is not worth it. Re-measure with the query
+below before revisiting; if real orders start arriving this way, then add it.
+
+```sql
+SELECT m.from_addr, left(m.subject,60), m.category, count(*)
+FROM attachments a JOIN messages m ON m.message_id = a.message_id
+WHERE a.mime LIKE '%tnef' GROUP BY 1,2,3 ORDER BY 4 DESC;
+```
+
 ## Invisible characters break quantities
 
 Strip zero-width characters (U+200B & co.) at ingest — `45​ks` parsed as a different
