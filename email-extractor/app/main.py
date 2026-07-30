@@ -99,6 +99,7 @@ def main() -> None:
     conn = db.connect(cfg.pg_dsn)
     db.init_schema(conn)          # run migrations BEFORE the dashboard serves requests
     httpapi.start(cfg)
+    start_order_worker(cfg)
     while True:
         try:
             n = run_once(cfg, conn)
@@ -113,6 +114,27 @@ def main() -> None:
         except Exception:
             log.exception("cycle error")
         time.sleep(cfg.poll_interval)
+
+
+def start_order_worker(cfg) -> None:   # pragma: no cover - thread wiring
+    """Run the order worker in its OWN thread with its OWN connection.
+
+    It shares nothing with the IMAP loop, so a stuck order run can never delay mail
+    ingestion, and a Postgres hiccup in one does not kill the other. With the default
+    options (engine=n8n, shadow off) every tick returns immediately.
+    """
+    import threading
+
+    from .orders import worker
+
+    def loop():
+        try:
+            conn = db.connect(cfg.pg_dsn)
+            worker.run_forever(conn, cfg)
+        except Exception:
+            log.exception("order worker died")
+
+    threading.Thread(target=loop, name="order-worker", daemon=True).start()
 
 
 if __name__ == "__main__":

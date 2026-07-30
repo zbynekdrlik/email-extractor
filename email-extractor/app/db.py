@@ -302,6 +302,39 @@ SCHEMA = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_customer_snapshot_snap ON customer_snapshot(snapshot_id)",
+    # --- #60: one row per pipeline run, plus the per-item decision trace. The trace is
+    # the reason an item matched or did not; today that lives only in the n8n execution,
+    # which n8n prunes after ~2 days, so a warehouse complaint can no longer be
+    # diagnosed after the weekend. shadow=true means the run only observed. ---
+    """
+    CREATE TABLE IF NOT EXISTS order_runs (
+        id          BIGSERIAL PRIMARY KEY,
+        message_id  TEXT NOT NULL,
+        snapshot_id BIGINT REFERENCES order_snapshots(id),
+        shadow      BOOLEAN NOT NULL DEFAULT false,
+        status      TEXT,
+        error       TEXT,
+        result      JSONB,
+        started_at  TIMESTAMPTZ DEFAULT now(),
+        finished_at TIMESTAMPTZ
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_order_runs_message ON order_runs(message_id, shadow)",
+    """
+    CREATE TABLE IF NOT EXISTS order_items (
+        id         BIGSERIAL PRIMARY KEY,
+        run_id     BIGINT NOT NULL REFERENCES order_runs(id) ON DELETE CASCADE,
+        name       TEXT,
+        quantity   NUMERIC,
+        unit       TEXT,
+        gtin       TEXT,
+        card       TEXT,
+        confidence REAL,
+        rule       TEXT,
+        trace      JSONB
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_order_items_run ON order_items(run_id)",
 ]
 
 
