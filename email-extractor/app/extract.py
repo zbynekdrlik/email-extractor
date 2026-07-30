@@ -136,6 +136,15 @@ def extract_attachment(filename: str, mime: str, data: bytes) -> dict:
 
         if ext == "xls" or (mime in {"application/vnd.ms-excel", "application/excel",
                                       "application/x-msexcel"} and ext not in {"csv", "txt"}):
+            # Senders mislabel spreadsheets constantly, so the BYTES decide, not the
+            # declared mime: an OOXML or CSV pushed into xlrd raised and the order text
+            # was lost entirely (#23). Only real BIFF goes to xlrd.
+            if data[:2] == b"PK":
+                return _extract_xlsx(res, data)
+            if not data.startswith(b"\xd0\xcf\x11\xe0"):
+                res["method"] = "text"
+                _set_text(res, data.decode("utf-8", errors="replace"))
+                return res
             return _extract_xls(res, data)
 
         if ext in {"odt", "ods", "fodt", "fods"} or "opendocument" in mime:
@@ -257,6 +266,27 @@ def _extract_xlsx(res: dict, data: bytes) -> dict:
     return res
 
 
+def _xls_cell(book, sheet, r: int, c: int) -> str:
+    """One legacy .xls cell -> string, with date cells rendered as dates.
+
+    xlrd hands date cells back as float serials, so a delivery date used to reach
+    Postgres as e.g. `46237` and was simply lost (#23).
+    """
+    import xlrd
+    cell = sheet.cell(r, c)
+    if cell.ctype == xlrd.XL_CELL_DATE:
+        try:
+            dt = xlrd.xldate.xldate_as_datetime(cell.value, book.datemode)
+        except (ValueError, OverflowError, xlrd.xldate.XLDateError):
+            return _fmt_cell(cell.value)
+        # Time-only cells (serial < 1) carry no meaningful date part.
+        if dt.year == 1899 or (dt.hour or dt.minute) and cell.value < 1:
+            return dt.strftime("%H:%M")
+        return dt.strftime("%Y-%m-%d") if (dt.hour or dt.minute) == 0 \
+            else dt.strftime("%Y-%m-%d %H:%M")
+    return _fmt_cell(cell.value)
+
+
 def _extract_xls(res: dict, data: bytes) -> dict:
     """Legacy BIFF .xls (application/vnd.ms-excel) — openpyxl can't read these."""
     import xlrd
@@ -264,7 +294,7 @@ def _extract_xls(res: dict, data: bytes) -> dict:
     chunks = []
     for sh in book.sheets():
         chunks.append(f"[Sheet: {sh.name}]")
-        rows = [[_fmt_cell(sh.cell_value(r, c)) for c in range(sh.ncols)]
+        rows = [[_xls_cell(book, sh, r, c) for c in range(sh.ncols)]
                 for r in range(sh.nrows)]
         chunks.extend(_grid_rows(rows))
     res["method"] = "xls"
@@ -272,17 +302,75 @@ def _extract_xls(res: dict, data: bytes) -> dict:
     return res
 
 
+ODF_MAX_REPEAT = 256   # Calc pads rows to 1024+ empty columns; keep the grid sane
+
+
+def _odf_row_cells(row, table_mod, teletype) -> list[str]:
+    """Cells of one ODF table row, with `number-columns-repeated` EXPANDED.
+
+    Calc run-length-encodes runs of identical (usually empty) cells. Reading such a run
+    as ONE cell shifted every following column LEFT, so the quantity was read out of the
+    wrong column (#23).
+    """
+    out = []
+    for c in row.getElementsByType(table_mod.TableCell):
+        try:
+            rep = int(c.getAttribute("numbercolumnsrepeated") or 1)
+        except (TypeError, ValueError):
+            rep = 1
+        out.extend([teletype.extractText(c)] * max(1, min(rep, ODF_MAX_REPEAT)))
+    while out and not out[-1].strip():
+        out.pop()          # drop Calc's trailing padding, keep interior blanks
+    return out
+
+
+def _extract_flat_odf(res: dict, data: bytes) -> dict:
+    """Flat ODF (.fods/.fodt): one XML document, no zip container."""
+    from xml.etree import ElementTree as ET
+    ns_t = "{urn:oasis:names:tc:opendocument:xmlns:table:1.0}"
+    root = ET.fromstring(data.decode("utf-8", errors="replace"))
+    parts = []
+    for tbl in root.iter(f"{ns_t}table"):
+        parts.append(f"[Sheet: {tbl.get(f'{ns_t}name') or ''}]")
+        rows = []
+        for row in tbl.iter(f"{ns_t}table-row"):
+            cells = []
+            for c in row.iter(f"{ns_t}table-cell"):
+                try:
+                    rep = int(c.get(f"{ns_t}number-columns-repeated") or 1)
+                except (TypeError, ValueError):
+                    rep = 1
+                txt = "".join(c.itertext()).strip()
+                cells.extend([txt] * max(1, min(rep, ODF_MAX_REPEAT)))
+            while cells and not cells[-1].strip():
+                cells.pop()
+            rows.append(cells)
+        parts.extend(_grid_rows(rows))
+    if not parts:
+        # Writer-flavoured flat ODF (.fodt): no tables, just paragraphs.
+        parts = [t for t in ("".join(p.itertext()).strip() for p in root.iter(
+            "{urn:oasis:names:tc:opendocument:xmlns:text:1.0}p")) if t]
+    res["method"] = "odf-flat"
+    _set_text(res, "\n".join(parts))
+    return res
+
+
 def _extract_odf(res: dict, data: bytes) -> dict:
     """OpenDocument .odt (Writer) / .ods (Calc) via odfpy."""
     from odf import table, teletype, text
     from odf.opendocument import load
+    if not data[:2] == b"PK":
+        # Flat single-XML ODF (.fods/.fodt): odfpy's load() only reads the zip-packaged
+        # form and raised BadZipFile, which was swallowed into flag='error' with no text
+        # at all (#23).
+        return _extract_flat_odf(res, data)
     doc = load(io.BytesIO(data))
     mt = doc.mimetype or ""
     parts = []
     if "spreadsheet" in mt:
         for tbl in doc.getElementsByType(table.Table):
             parts.append(f"[Sheet: {tbl.getAttribute('name') or ''}]")
-            rows = [[teletype.extractText(c) for c in row.getElementsByType(table.TableCell)]
+            rows = [_odf_row_cells(row, table, teletype)
                     for row in tbl.getElementsByType(table.TableRow)]
             parts.extend(_grid_rows(rows))
     else:
