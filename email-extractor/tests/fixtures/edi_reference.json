@@ -1,0 +1,88 @@
+[
+ {
+  "name": "two_items_no_po",
+  "input": {
+   "ean": "2000000000001",
+   "store": "Pekáreň Testovacia s.r.o.",
+   "orderNumber": "",
+   "deliveryDate": "04.08.2026",
+   "items": [
+    {
+     "gtin": "8588001800013",
+     "quantity": 120,
+     "unit": "ks",
+     "name": "rožok",
+     "matchedCatalogName": "Rožok štandart 50g"
+    },
+    {
+     "gtin": "8588001800020",
+     "quantity": 7,
+     "unit": "ks",
+     "name": "vianočka",
+     "matchedCatalogName": "Vianočka 400g"
+    }
+   ]
+  },
+  "expected": {
+   "content": "HDR8586013743063                               20260730   2000000000001    Pekaren Testovacia s.r.o.                                                                                                                                                                                        2000000000001    Pekaren Testovacia s.r.o.                                                                                                                                                          2000000000001                                                                                                                                                                                                                     8586013743063    SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                                                                                                              20260804                                                                          \r\nLIN     1   8588001800013                 120.000PCE            ROZOK STANDART 50G                                                                                                                                    \r\nLIN     2   8588001800020                   7.000PCE            VIANOCKA 400G                                                                                                                                         \r\nSUM",
+   "lineCount": 2,
+   "skipped": []
+  }
+ },
+ {
+  "name": "iso_date_long_po_and_a_skipped_item",
+  "input": {
+   "ean": "2000000000002",
+   "store": "Odberateľ Druhý, a.s.",
+   "orderNumber": "PO-2026-A123456789012345",
+   "deliveryDate": "2026-08-03",
+   "items": [
+    {
+     "gtin": "109",
+     "quantity": 3.5,
+     "unit": "kg",
+     "name": "buchty",
+     "matchedCatalogName": "Jankové buchty malinové 80g"
+    },
+    {
+     "gtin": "NO_MATCH",
+     "quantity": 5,
+     "unit": "ks",
+     "name": "neznámy produkt",
+     "matchedCatalogName": ""
+    }
+   ]
+  },
+  "expected": {
+   "content": "HDR8586013743063  123456789012345              20260730   2000000000002    Odberatel Druhy, a.s.                                                                                                                                                                                            2000000000002    Odberatel Druhy, a.s.                                                                                                                                                              2000000000002                                                                                                                                                                                                                     8586013743063    SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                                                                                                              20260803                                                                          \r\nLIN     1   109                             3.500PCE            JANKOVE BUCHTY MALINOVE 80G                                                                                                                           \r\nSUM",
+   "lineCount": 1,
+   "skipped": [
+    "neznámy produkt"
+   ]
+  }
+ },
+ {
+  "name": "missing_date_and_diacritics",
+  "input": {
+   "ean": "",
+   "store": "Žltý Kôň – Ľubovňa",
+   "orderNumber": "obj/2026 12",
+   "deliveryDate": "",
+   "items": [
+    {
+     "gtin": "XYZ",
+     "quantity": 1,
+     "unit": "ks",
+     "name": "čokoládový šuhajdík",
+     "matchedCatalogName": "Čokoládový šuhajdík ĽŠŤ 60g"
+    }
+   ]
+  },
+  "expected": {
+   "content": "HDR8586013743063  obj/2026 12                  20260730                    Zlty Kon – Lubovna                                                                                                                                                                                                                Zlty Kon – Lubovna                                                                                                                                                                                                                                                                                                                                                                                                   8586013743063    SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                                                                                                                                                                                                \r\nLIN     1   XYZ                             1.000PCE            COKOLADOVY SUHAJDIK LST 60G                                                                                                                           \r\nSUM",
+   "lineCount": 1,
+   "skipped": []
+  },
+  "divergence": "ascii_strict: the production generator maps only the Slovak letters, so characters outside its table (here an en dash) reach the fixed-width file as multi-byte UTF-8. We fold to strict ASCII instead; nothing else about the layout changes."
+ }
+]

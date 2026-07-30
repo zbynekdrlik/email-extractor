@@ -355,6 +355,20 @@ SCHEMA = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_item_memory_lookup ON item_memory(customer_ean, item_key)",
+    # --- #64: ledger of documents actually uploaded to ORION. A duplicate upload creates
+    # a duplicate order there and cannot be undone from our side (#51), so the identity
+    # (customer, delivery date, content hash) may be claimed exactly once. ---
+    """
+    CREATE TABLE IF NOT EXISTS edi_sent (
+        id             BIGSERIAL PRIMARY KEY,
+        customer_ean   TEXT NOT NULL,
+        delivery_date  TEXT NOT NULL,
+        content_sha256 TEXT NOT NULL,
+        filename       TEXT,
+        sent_at        TIMESTAMPTZ DEFAULT now(),
+        UNIQUE (customer_ean, delivery_date, content_sha256)
+    )
+    """,
 ]
 
 
