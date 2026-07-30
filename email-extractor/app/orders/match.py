@@ -56,6 +56,9 @@ class Decision:
     note: str
     review: bool = False
     trace: dict = field(default_factory=dict)
+    # carried through from the extracted item so one object describes the whole line
+    quantity: float | None = None
+    unit: str = "ks"
 
 
 # --- text helpers --------------------------------------------------------
@@ -309,6 +312,7 @@ def apply_siblings(decisions: list[Decision]) -> list[Decision]:
                                                        "confidence": twin.confidence})
         out.append(Decision(item_name=d.item_name, gtin=twin.gtin, card=twin.card,
                             confidence=twin.confidence, rule="sibling",
-                            note=note + " " + d.note, review=True, trace=trace))
+                            note=note + " " + d.note, review=True, trace=trace,
+                            quantity=d.quantity, unit=d.unit))
         log.info("sibling rescue: %r -> %s", d.item_name, twin.gtin)
     return out

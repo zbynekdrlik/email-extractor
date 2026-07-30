@@ -1,5 +1,5 @@
 name: Email OCR Extractor
-version: "0.7.4"
+version: "0.8.1"
 slug: email_extractor
 description: Reads an IMAP mailbox, OCR-extracts the body + all attachments, and writes Postgres for n8n. Bundles its own Postgres on /data (leave pg_dsn empty, set pg_password).
 url: https://github.com/zbynekdrlik/email-extractor
@@ -37,6 +37,14 @@ options:
   openai_api_key: ""
   orders_model: "gpt-5.4"
   orders_reasoning_effort: "high"
+  odoo_url: ""
+  odoo_api_key: ""
+  odoo_db: "odoo"
+  orders_channel_id: 0
+  orion_host: ""
+  orion_port: 22
+  orion_user: ""
+  orion_pass: ""
 schema:
   imap_host: str
   imap_port: int
@@ -61,3 +69,11 @@ schema:
   openai_api_key: password?
   orders_model: str?
   orders_reasoning_effort: list(low|medium|high|xhigh)?
+  odoo_url: str?
+  odoo_api_key: password?
+  odoo_db: str?
+  orders_channel_id: int?
+  orion_host: str?
+  orion_port: int?
+  orion_user: str?
+  orion_pass: password?
