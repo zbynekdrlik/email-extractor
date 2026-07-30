@@ -1,5 +1,5 @@
 name: Email OCR Extractor
-version: "0.8.1"
+version: "0.8.2"
 slug: email_extractor
 description: Reads an IMAP mailbox, OCR-extracts the body + all attachments, and writes Postgres for n8n. Bundles its own Postgres on /data (leave pg_dsn empty, set pg_password).
 url: https://github.com/zbynekdrlik/email-extractor
@@ -34,6 +34,7 @@ options:
   catalog_refresh_minutes: 60
   ai_orders_engine: "n8n"
   orders_shadow: false
+  orders_shadow_days: 3
   openai_api_key: ""
   orders_model: "gpt-5.4"
   orders_reasoning_effort: "high"
@@ -66,6 +67,7 @@ schema:
   catalog_refresh_minutes: int?
   ai_orders_engine: list(n8n|python)?
   orders_shadow: bool?
+  orders_shadow_days: int?
   openai_api_key: password?
   orders_model: str?
   orders_reasoning_effort: list(low|medium|high|xhigh)?

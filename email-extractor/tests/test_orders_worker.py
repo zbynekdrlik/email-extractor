@@ -166,3 +166,24 @@ def test_engine_option_only_accepts_known_values():
         worker.resolve_engine("postgres-please")
     assert worker.resolve_engine("python") == "python"
     assert worker.resolve_engine("") == "n8n"
+
+
+# --- shadow must not chew through the whole archive ----------------------
+
+def test_shadow_only_looks_at_recent_mail(pg):
+    """Shadow calls the real model, so an unbounded shadow would replay every message
+    ever received (195 of them) at top-tier reasoning cost. The window is what keeps it a
+    comparison against n8n on CURRENT mail; the historical corpus is a deliberate,
+    separately-run evaluation (#66)."""
+    _snapshot(pg)
+    _msg(pg, mid="fresh")
+    _msg(pg, mid="ancient")
+    pg.execute("UPDATE messages SET created_at = now() - interval '30 days' "
+               "WHERE message_id = 'ancient'")
+    cfg = _cfg(orders_shadow=True, orders_shadow_days=3)
+    seen = []
+    assert worker.tick(pg, cfg, pipeline=lambda c, cf, m, s: seen.append(m["message_id"])
+                       or {"status": "ok", "items": []}) == 1
+    assert seen == ["fresh"]
+    # and the ancient one is never picked up on a later tick either
+    assert worker.tick(pg, cfg, pipeline=lambda *a, **k: {"status": "ok", "items": []}) == 0
