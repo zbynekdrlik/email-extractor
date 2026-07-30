@@ -335,6 +335,26 @@ SCHEMA = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_order_items_run ON order_items(run_id)",
+    # --- #63: shipment history per customer + wording. The n8n Data Table it replaces
+    # has NO unique key, so one shipment writes a row per item and the JS dedups them —
+    # a seed row was once read as 18 deliveries and released the weight override far too
+    # early. The key is (customer, wording, card, DAY): re-running one order must never
+    # look like a second delivery. ---
+    """
+    CREATE TABLE IF NOT EXISTS item_memory (
+        id           BIGSERIAL PRIMARY KEY,
+        customer_ean TEXT NOT NULL,
+        item_key     TEXT NOT NULL,
+        item_raw     TEXT,
+        gtin         TEXT NOT NULL,
+        card         TEXT,
+        delivered_on DATE NOT NULL,
+        source       TEXT,
+        created_at   TIMESTAMPTZ DEFAULT now(),
+        UNIQUE (customer_ean, item_key, gtin, delivered_on)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_item_memory_lookup ON item_memory(customer_ean, item_key)",
 ]
 
 
