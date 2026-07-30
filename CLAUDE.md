@@ -43,3 +43,4 @@ Load the matching skill BEFORE working on that area (don't re-derive):
 - n8n workflows / nodes / MCP → load `using-n8n-skills` then the matching `n8n-*` skill
 - problém/chyba popísaná v Odoo Discuss (dodacie/objednávky/reklamácie, aj s fotkami) → load `.claude/skills/odoo-reported-issues`
 - extraction quality / OCR tuning → see `docs/superpowers/specs/` + the spike memory
+- prílohy / formáty (xlsx, xls, ods, fods, csv) → `.claude/rules/extraction-formats.md` (auto-loads on `app/extract.py`)
