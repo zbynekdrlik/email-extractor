@@ -187,3 +187,36 @@ def test_the_model_and_effort_come_from_the_config(tmp_path):
     assert seen["model"] == "gpt-5.4"
     assert seen["reasoning"]["effort"] == "high"
     assert json.dumps(seen["text"])   # a structured-output request, not free text
+
+
+# --- defects found by the first live run against real emails --------------
+
+def test_the_prompt_input_carries_todays_date():
+    """Without it the model dates "zajtra"/"pondelok" from its own training cutoff — a
+    silently wrong delivery date. Found on the first live run of this stage."""
+    sent = {}
+
+    class FakeClient:
+        last_prompt_hash = "abc123abc123"
+
+        def json_call(self, system, user, schema, name="result"):
+            sent["user"] = user
+            return {"orders": []}
+
+    extract.run(FakeClient(), {"combined_text": "na zajtra 10x rožok", "today": "2026-07-30"})
+    assert "30.07.2026" in sent["user"]
+    assert "štvrtok" in sent["user"], "the weekday matters for 'na pondelok'"
+
+
+def test_a_price_list_with_no_quantities_filled_in_is_not_an_order():
+    """Real email (Náš dvor PNO RK, 2026-07-30): the wholesale list is attached for
+    reference and the actual order is one line in the BODY. If the parser returned the
+    list's products, it would override the body and ship the entire catalog."""
+    mail = (
+        "Body: Dobrý deň, poprosím doložiť 3x slimák kakaový 90 g.\n\nAttachments:\n"
+        "===== VO Pekarová žena.xls =====\n"
+        "Názov  tovaru\t%DPH\tVO bez DPH\tVO  s DPH\tTrvanlivosť v dňoch\n"
+        "Bageta kvásková 250g\t19\t1\t1.19\t2\n"
+        "Rožok 70g\t5\t0.38\t0.399\t20\n"
+    )
+    assert extract.parse_table(mail) is None
