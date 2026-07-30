@@ -5,6 +5,9 @@ The gate runs before any DB access, so these paths are testable without Postgres
 session-only (login needs a configured dash_password); the file APIs are
 session-or-token; nothing is open when unconfigured.
 """
+import logging
+import os
+
 from app.config import Config
 from app.httpapi import create_app
 
@@ -71,3 +74,57 @@ def test_login_disabled_without_dash_password():
     # dash_password unset -> login can never succeed (the dashboard stays closed)
     assert _client(token="secret", dash="").post(
         "/login", data={"password": "anything"}).status_code == 401
+
+
+# ---- #28: the dashboard HTTP layer must log requests and error paths ----
+
+def _app_client():
+    from app.config import Config
+    from app.httpapi import create_app
+    cfg = Config(pg_dsn=os.environ.get("PG_TEST_DSN"), data_dir="/tmp", api_token="tok",
+                 dash_password="secret", secret_key="s")
+    return create_app(cfg)
+
+
+def test_every_request_is_access_logged(pg, caplog):
+    caplog.set_level(logging.INFO, logger="email_extractor.httpapi")
+    c = _app_client().test_client()
+    c.get("/health")
+    lines = [r.message % r.args if r.args else r.message for r in caplog.records]
+    assert any("GET /health -> 200" in ln for ln in lines), lines
+    assert any("ms)" in ln for ln in lines), "the duration must be logged"
+
+
+def test_the_access_log_never_contains_the_token(pg, caplog):
+    caplog.set_level(logging.INFO, logger="email_extractor.httpapi")
+    c = _app_client().test_client()
+    c.get("/eml/whatever?token=tok")
+    text = "\n".join((r.message % r.args if r.args else r.message) for r in caplog.records)
+    assert "token" not in text, text
+
+
+def test_a_failing_endpoint_is_logged_and_returns_a_clean_500(pg, caplog, monkeypatch):
+    caplog.set_level(logging.ERROR, logger="email_extractor.httpapi")
+    app = _app_client()
+    c = app.test_client()
+    c.post("/login", data={"password": "secret"})
+
+    from app import httpapi
+
+    def broken(*a, **kw):
+        raise RuntimeError("relation does not exist")
+
+    monkeypatch.setattr(httpapi.db, "list_uid_failures", broken)
+    r = c.get("/api/imap-failures")
+    assert r.status_code == 500
+    assert "chyba" in r.get_json()["error"].lower(), r.get_json()
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "/api/imap-failures failed" in text and "relation does not exist" in text
+
+
+def test_client_errors_are_warned_not_swallowed(pg, caplog):
+    caplog.set_level(logging.INFO, logger="email_extractor.httpapi")
+    c = _app_client().test_client()
+    c.get("/api/messages")            # 401, no session
+    warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("-> 401" in (r.message % r.args if r.args else r.message) for r in warns)
