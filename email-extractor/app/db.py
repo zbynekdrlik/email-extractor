@@ -304,6 +304,22 @@ def set_folder_state(conn, folder: str, uidvalidity: int, last_uid: int) -> None
 # (#20). Lives here so both the ingest loop and the dashboard API can state it.
 MAX_UID_ATTEMPTS = 5
 
+# A claim (messages.processing_at) younger than this means an n8n worker is really
+# working on that email; the same window the n8n dispatcher uses to re-claim stale
+# rows. Operator actions must not clear a claim inside it (#25).
+CLAIM_STALE_MINUTES = 10
+
+
+def active_claim(conn, mid: int):
+    """Return processing_at when a worker currently holds this message, else None."""
+    row = conn.execute(
+        """SELECT processing_at FROM messages
+           WHERE id = %s AND processed = false AND processing_at IS NOT NULL
+             AND processing_at > now() - (%s || ' minutes')::interval""",
+        (mid, CLAIM_STALE_MINUTES),
+    ).fetchone()
+    return row[0] if row else None
+
 
 def record_uid_failure(conn, folder: str, uidvalidity: int, uid: int, err: str) -> int:
     """Remember that this UID failed to ingest; return how many times it has failed."""

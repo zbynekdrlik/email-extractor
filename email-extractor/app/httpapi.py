@@ -84,6 +84,24 @@ def create_app(cfg) -> Flask:
     def _db():
         return psycopg.connect(cfg.pg_dsn, autocommit=True)
 
+    def _db_tx():
+        """One transaction: `with _db_tx() as c` commits at exit, rolls back on error.
+        For routes that do several writes which must land together (#25)."""
+        return psycopg.connect(cfg.pg_dsn)
+
+    def _busy(mid: int, c):
+        """409 body when an n8n worker holds this message, else None. Clearing its
+        claim would let a second worker re-claim it → the same order processed and
+        forwarded twice (#25)."""
+        held = db.active_claim(c, mid)
+        if held is None:
+            return None
+        log.info("operator action on #%s refused — claimed by a worker since %s", mid, held)
+        return jsonify(error=f"Mail sa práve spracúva (od {held:%H:%M}). "
+                             f"Skús to znova po dokončení, najneskôr za "
+                             f"{db.CLAIM_STALE_MINUTES} minút.",
+                       claimed_at=held.isoformat()), 409
+
     @app.before_request
     def _gate():
         p = request.path
@@ -312,6 +330,9 @@ def create_app(cfg) -> Flask:
                           (mid,)).fetchone()
             if not m:
                 abort(404)
+            busy = _busy(mid, c)
+            if busy:
+                return busy
             c.execute(
                 """UPDATE messages
                    SET original_category = COALESCE(original_category, category),
@@ -333,6 +354,9 @@ def create_app(cfg) -> Flask:
             m = c.execute("SELECT message_id FROM messages WHERE id=%s", (mid,)).fetchone()
             if not m:
                 abort(404)
+            busy = _busy(mid, c)
+            if busy:
+                return busy
             c.execute(
                 """UPDATE messages SET processed = false, processed_at = NULL,
                    processed_by = NULL, processing_at = NULL, error = NULL
@@ -354,7 +378,10 @@ def create_app(cfg) -> Flask:
         if expected is not None and expected not in CATEGORIES:
             abort(400)
         desc = (body.get("description") or "").strip()
-        with _db() as c:
+        # One transaction: the fix row and its timeline event commit together, so a
+        # failed second write cannot leave an orphan fix row that a client retry
+        # then duplicates (#25).
+        with _db_tx() as c:
             m = c.execute(
                 """SELECT message_id, subject, category, proc_status, proc_outcome
                    FROM messages WHERE id=%s""", (mid,)).fetchone()
@@ -566,7 +593,9 @@ const E=s=>(s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;',
 let CATS=[],sel=null,view='mails',timer=null,live=true,counts={};
 async function api(path,opts){const r=await fetch(path,Object.assign({headers:{'Content-Type':'application/json'}},opts));
   if(r.status===401){location.href='/login';throw new Error('auth')}
-  if(!r.ok)throw new Error(r.status);return r.json()}
+  if(!r.ok){let m='';try{m=(await r.json()).error||''}catch(e){}
+    throw new Error(m||('chyba '+r.status))}
+  return r.json()}
 function tsShort(s){if(!s)return '';return s.replace('T',' ').slice(5,16)}
 function params(){const p=new URLSearchParams();
   if(q.value.trim())p.set('q',q.value.trim());
@@ -623,8 +652,8 @@ async function openDetail(id){
     '<div class="lbl">Prílohy ('+(m.attachments||[]).length+')</div>'+atts+
     '<div class="lbl">Telo</div><pre>'+E(m.body_text||'(prázdne)')+'</pre>'+
     '<div class="lbl">combined_text (čo videla AI)</div><pre>'+E(m.combined_text||'')+'</pre>'}
-async function doReclassify(id,cat){try{await api('/api/message/'+id+'/reclassify',{method:'POST',body:JSON.stringify({category:cat})});await loadList();await openDetail(id)}catch(e){alert('chyba')}}
-async function doReprocess(id){try{await api('/api/message/'+id+'/reprocess',{method:'POST'});await loadList();await openDetail(id)}catch(e){alert('chyba')}}
+async function doReclassify(id,cat){try{await api('/api/message/'+id+'/reclassify',{method:'POST',body:JSON.stringify({category:cat})});await loadList();await openDetail(id)}catch(e){alert(e.message||'chyba')}}
+async function doReprocess(id){try{await api('/api/message/'+id+'/reprocess',{method:'POST'});await loadList();await openDetail(id)}catch(e){alert(e.message||'chyba')}}
 function openFix(id){
   const opts=CATS.map(c=>'<option value="'+c+'">'+c+'</option>').join('');
   document.getElementById('modal').innerHTML='<h3>🔧 Dať na opravu — #'+id+'</h3>'+

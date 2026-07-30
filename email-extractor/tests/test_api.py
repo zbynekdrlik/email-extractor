@@ -447,9 +447,12 @@ def test_fix_request_and_its_event_commit_together(pg, monkeypatch):
         raise RuntimeError("event insert failed")
 
     monkeypatch.setattr(httpapi.db, "log_event", boom)
-    c = _client()
+    cfg = Config(pg_dsn=PG_DSN, data_dir="/tmp", api_token="tok",
+                 dash_password="secret", secret_key="test-secret")
+    app = create_app(cfg)          # testing=False → Flask turns the error into a 500
+    c = app.test_client()
     _login(c)
     r = c.post(f"/api/message/{mid}/fix", json={"problem_type": "other", "description": "x"})
-    assert r.status_code >= 500
+    assert r.status_code == 500
     assert pg.execute("SELECT count(*) FROM fix_requests").fetchone()[0] == 0, \
         "the fix row must roll back with the failed event write"
