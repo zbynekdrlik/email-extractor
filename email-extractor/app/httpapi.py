@@ -24,7 +24,7 @@ from psycopg.types.json import Json
 
 from . import __version__, db
 from .db import MAX_UID_ATTEMPTS
-from .store import safe_id
+from .store import message_dir
 
 CATEGORIES = ["ai_orders", "invoices", "reklamacie", "dodacie_listy",
               "static_orders", "human_processing", "no_processing"]
@@ -136,7 +136,7 @@ def create_app(cfg) -> Flask:
     @app.get("/files/<mid>/<int:idx>")
     def get_file(mid: str, idx: int):
         _auth()
-        matches = sorted((data_dir / safe_id(mid)).glob(f"att{idx}__*"))
+        matches = sorted(message_dir(str(data_dir), mid).glob(f"att{idx}__*"))
         if not matches:
             abort(404)
         return send_file(matches[0])
@@ -144,7 +144,7 @@ def create_app(cfg) -> Flask:
     @app.get("/eml/<mid>")
     def get_eml(mid: str):
         _auth()
-        path = data_dir / safe_id(mid) / "raw.eml"
+        path = message_dir(str(data_dir), mid) / "raw.eml"
         if not path.exists():
             abort(404)
         return send_file(path, mimetype="message/rfc822")

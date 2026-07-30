@@ -67,3 +67,20 @@ def test_new_writes_prefer_the_new_scheme(tmp_path):
                                      "http://email-extractor:8099", "")
     assert Path(raw_path).parent.name == store.safe_id(mid)
     assert Path(raw_path).parent.name != store.legacy_safe_id(mid)
+
+
+def test_a_crafted_traversal_segment_cannot_escape_the_store(tmp_path):
+    outside = tmp_path.parent / "outside"
+    outside.mkdir(exist_ok=True)
+    (outside / "raw.eml").write_bytes(b"SECRET")
+    d = store.message_dir(str(tmp_path), "../outside")
+    assert not (d / "raw.eml").exists(), "must not reach a dir above the store"
+
+
+def test_dir_name_from_a_stored_url_resolves_back(tmp_path):
+    """file_url carries the dir name, so /files/<dirname>/<idx> must resolve too."""
+    mid = "<roundtrip@m.example>"
+    store.save_message(str(tmp_path), mid, b"EML", [{"filename": "a.pdf", "_data": b"P"}],
+                       "http://x", "")
+    assert store.message_dir(str(tmp_path), store.safe_id(mid)).name == store.safe_id(mid)
+    assert (store.message_dir(str(tmp_path), store.safe_id(mid)) / "raw.eml").exists()
