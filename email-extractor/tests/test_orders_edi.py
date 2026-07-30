@@ -23,9 +23,28 @@ FIXTURE = json.loads(
 def test_the_writer_matches_the_production_generator_byte_for_byte():
     for case in FIXTURE:
         got = edi.build(**case["input"])
+        if case.get("divergence"):
+            continue          # asserted separately below, with the reason
         assert got.content == case["expected"]["content"], case["name"]
         assert got.line_count == case["expected"]["lineCount"], case["name"]
         assert got.skipped == case["expected"]["skipped"], case["name"]
+
+
+def test_the_one_deliberate_divergence_is_strict_ascii():
+    """The production generator maps only the Slovak letters, so anything outside its
+    table (an en dash in a customer name) reaches the fixed-width file as multi-byte
+    UTF-8 — a latent column shift for a byte-oriented reader. We fold to strict ASCII.
+
+    The assertion on the reference bytes is deliberate: it proves the divergence is real
+    and would fail if production ever fixed it, at which point this test goes away.
+    """
+    case = next(c for c in FIXTURE if c.get("divergence"))
+    reference = case["expected"]["content"]
+    assert not reference.isascii(), "reference no longer diverges — drop this test"
+    got = edi.build(**case["input"])
+    assert got.content.isascii()
+    assert len(got.content.split("\r\n")[0]) == 1157, "the layout is unchanged"
+    assert got.line_count == case["expected"]["lineCount"]
 
 
 def test_the_header_is_exactly_1157_characters():
