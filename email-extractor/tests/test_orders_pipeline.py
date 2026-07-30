@@ -30,8 +30,8 @@ CUSTOMER_CSV = (
 )
 
 MAIL = {"message_id": "m1", "subject": "Objednávka", "from_addr": "sklad@pekaren.sk",
-        "from_name": "Sklad", "combined_text": "na 04.08.2026 prosím 120x rožok 50g "
-        "a 7 ks vianočka 400g", "today": "2026-07-30"}
+        "from_name": "Sklad", "combined_text": "na 04.08.2026 prosím 120x rožok 50g, 7x vianočka 400g, "
+        "5x torta, 3x chlieb", "today": "2026-07-30"}
 
 
 class ScriptedClient:
@@ -52,18 +52,26 @@ class ScriptedClient:
 
 def _answers(items=(("rožok 50g", "G50", 0.95), ("vianočka 400g", "VIA", 0.95)),
              change=False):
+    """extract answer, then the customer answer, then one answer per item."""
+    # quantities must match MAIL's text, or the citation check drops the item before it
+    # ever reaches the matcher (which is its own test, above)
+    quantities = {"rožok 50g": 120, "vianočka 400g": 7, "torta": 5, "chlieb": 3}
+    extracted_items = []
+    for name, _gtin, _conf in items:
+        qty = quantities[name]
+        extracted_items.append({"name": name, "quantity": qty, "unit": "ks",
+                                "sourceQuote": f"{qty}x {name}"})
     extract_answer = {
         "senderName": "Sklad", "senderEmail": "sklad@pekaren.sk",
-        "companyName": "Pekáreň Testovacia s.r.o.", "isChangeRequest": change, "notes": "",
-        "orders": [{"orderNumber": "", "deliveryDate": "04.08.2026", "recipientGroup": "",
-                    "items": [{"name": n, "quantity": 120 if i == 0 else 7, "unit": "ks",
-                               "sourceQuote": q}
-                              for i, (n, _, _) in enumerate(items)
-                              for q in [f'{120 if items.index((n, _, _)) == 0 else 7}x {n}']]}],
+        "companyName": "Pekáreň Testovacia s.r.o.", "isChangeRequest": change,
+        "notes": "",
+        "orders": [{"orderNumber": "", "deliveryDate": "04.08.2026",
+                    "recipientGroup": "", "items": extracted_items}],
     }
     out = [extract_answer, {"ean_edi": "2000000000001", "confidence": 0.95}]
-    for _, gtin, conf in items:
-        out.append({"gtin": gtin, "confidence": conf, "matchedCatalogName": "", "reason": ""})
+    for _name, gtin, conf in items:
+        out.append({"gtin": gtin or "NO_MATCH", "confidence": conf,
+                    "matchedCatalogName": "", "reason": ""})
     return out
 
 
@@ -147,6 +155,8 @@ def test_a_change_request_is_not_uploaded_and_names_the_original_file(pg, env):
 def test_an_unknown_customer_stops_the_document(pg, env):
     rec = Recorder()
     answers = _answers()
+    answers[0]["senderEmail"] = "cudzi@nikde.sk"      # the address is in no customer row
+    answers[0]["companyName"] = "Neznáma firma s.r.o."
     answers[1] = {"ean_edi": "", "confidence": 0.1}
     mail = dict(MAIL, from_addr="cudzi@nikde.sk")
     result = pipeline.run(pg, _cfg(), mail, env, client=ScriptedClient(answers),

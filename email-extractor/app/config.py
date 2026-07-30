@@ -55,6 +55,15 @@ class Config:
     orders_model: str = "gpt-5.4"
     orders_reasoning_effort: str = "high"
     llm_cache_dir: str = "/data/llm-cache"
+    odoo_url: str = ""
+    odoo_api_key: str = ""
+    odoo_db: str = "odoo"
+    orders_channel_id: int = 0
+    orion_host: str = ""
+    orion_port: int = 22
+    orion_user: str = ""
+    orion_pass: str = ""
+    orion_dir: str = "C:\\ORION\\COMMUNICATOR\\data\\in"
 
     @classmethod
     def load(cls) -> Config:
@@ -100,4 +109,14 @@ class Config:
             orders_reasoning_effort=_get(o, "orders_reasoning_effort",
                                          "ORDERS_REASONING_EFFORT", "high") or "high",
             llm_cache_dir=_get(o, "llm_cache_dir", "LLM_CACHE_DIR", "/data/llm-cache"),
+            odoo_url=_get(o, "odoo_url", "ODOO_URL", "") or "",
+            odoo_api_key=_get(o, "odoo_api_key", "ODOO_API_KEY", "") or "",
+            odoo_db=_get(o, "odoo_db", "ODOO_DB", "odoo") or "odoo",
+            orders_channel_id=int(_get(o, "orders_channel_id", "ORDERS_CHANNEL_ID", 0) or 0),
+            orion_host=_get(o, "orion_host", "ORION_HOST", "") or "",
+            orion_port=int(_get(o, "orion_port", "ORION_PORT", 22) or 22),
+            orion_user=_get(o, "orion_user", "ORION_USER", "") or "",
+            orion_pass=_get(o, "orion_pass", "ORION_PASS", "") or "",
+            orion_dir=_get(o, "orion_dir", "ORION_DIR",
+                           "C:\\ORION\\COMMUNICATOR\\data\\in"),
         )
