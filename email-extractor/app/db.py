@@ -366,8 +366,23 @@ def list_uid_failures(conn, limit: int = 200) -> list[dict]:
     } for r in rows]
 
 
-def count_uid_failures(conn) -> int:
-    return conn.execute("SELECT count(*) FROM imap_failures").fetchone()[0]
+def count_uid_failures(conn) -> tuple[int, int]:
+    """(pending, skipped) — exact counts, independent of list_uid_failures' limit."""
+    row = conn.execute(
+        """SELECT count(*) FILTER (WHERE NOT skipped), count(*) FILTER (WHERE skipped)
+           FROM imap_failures""").fetchone()
+    return (row[0], row[1])
+
+
+def retire_stale_uid_failures(conn, folder: str, uidvalidity: int) -> int:
+    """The mailbox was re-numbered, so pending UIDs from the previous UIDVALIDITY can
+    never be retried — mark them skipped instead of showing them as 'still retrying'
+    forever. They stay on record (that is the point of the table)."""
+    return conn.execute(
+        """UPDATE imap_failures SET skipped = true
+           WHERE folder = %s AND uidvalidity <> %s AND NOT skipped""",
+        (folder, uidvalidity),
+    ).rowcount
 
 
 def _no_nul(v):

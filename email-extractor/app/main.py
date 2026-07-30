@@ -31,6 +31,12 @@ def run_once(cfg, conn) -> int:
         # even when nothing (or nothing successful) came out of this poll, or the
         # rescan is re-detected on every cycle.
         base_uid = prev_uid if prev_validity == uidvalidity else 0
+        if prev_validity != uidvalidity:
+            retired = db.retire_stale_uid_failures(conn, folder, uidvalidity)
+            if retired:
+                log.warning("%s was re-numbered: %d unreceived email(s) from the previous "
+                            "UIDVALIDITY can no longer be retried (kept on record)",
+                            folder, retired)
         if not msgs:
             if prev_validity != uidvalidity:
                 db.set_folder_state(conn, folder, uidvalidity, base_uid)

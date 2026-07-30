@@ -410,10 +410,9 @@ def create_app(cfg) -> Flask:
         so this is the ONLY place they are visible. Never let them be silent."""
         with _db() as c:
             items = db.list_uid_failures(c)
-        return jsonify(total=len(items), items=items,
-                       max_attempts=MAX_UID_ATTEMPTS,
-                       pending=sum(1 for i in items if not i["skipped"]),
-                       skipped=sum(1 for i in items if i["skipped"]))
+            pending, skipped = db.count_uid_failures(c)
+        return jsonify(total=pending + skipped, items=items, shown=len(items),
+                       max_attempts=MAX_UID_ATTEMPTS, pending=pending, skipped=skipped)
 
     @app.get("/api/fix-queue")
     def api_fix_queue():

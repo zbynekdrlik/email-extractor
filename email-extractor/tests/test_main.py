@@ -69,7 +69,7 @@ def test_failed_uid_is_recorded_not_silent(cfg, conn, monkeypatch):
     assert rows[0]["attempts"] == 1
     assert rows[0]["skipped"] is False
     assert "out of memory" in rows[0]["last_error"]
-    assert db.count_uid_failures(conn) == 1
+    assert db.count_uid_failures(conn) == (1, 0)
 
 
 def test_failed_uid_is_retried_and_clears_on_success(cfg, conn, monkeypatch):
@@ -126,3 +126,17 @@ def test_poll_failure_leaves_the_folder_untouched(cfg, conn, monkeypatch):
     monkeypatch.setattr(main.imap_poll, "poll_folder", boom)
     assert main.run_once(cfg, conn) == 0
     assert _state(conn) == (None, 0)
+
+
+def test_renumbering_retires_pending_failures_instead_of_faking_a_retry(cfg, conn, monkeypatch):
+    """After a UIDVALIDITY change those UIDs no longer exist, so they can never be
+    retried — they must stop claiming 'still retrying' while staying on record."""
+    _feed(monkeypatch, [(11, _raw(11))], fail_uids=[11])
+    main.run_once(cfg, conn)
+    assert db.list_uid_failures(conn)[0]["skipped"] is False
+    _feed(monkeypatch, [(1, _raw(31))], uidvalidity=99)
+    main.run_once(conn=conn, cfg=cfg)
+    rows = db.list_uid_failures(conn)
+    old = [r for r in rows if r["uidvalidity"] == 1]
+    assert len(old) == 1 and old[0]["skipped"] is True
+    assert db.count_uid_failures(conn) == (0, 1)
