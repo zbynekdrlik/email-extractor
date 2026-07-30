@@ -51,7 +51,7 @@ def run_once(cfg, conn) -> int:
                 rec = process_raw(raw)
                 raw_path, files = store.save_message(
                     cfg.data_dir, rec["identity"], raw, rec["attachments"],
-                    cfg.public_base_url, cfg.api_token,
+                    cfg.public_base_url,
                 )
                 if db.insert_message(conn, rec, folder, uid, uidvalidity, raw_path, files):
                     new_count += 1
@@ -87,6 +87,13 @@ def main() -> None:
     if not cfg.imap_user or not cfg.imap_pass or not cfg.pg_dsn:
         raise SystemExit("Config error: imap_user, imap_pass and pg_dsn are required "
                          "(set them in the add-on options).")
+    if not cfg.public_base_url:
+        # It is baked into every attachment URL and fetched from ANOTHER container,
+        # so a wrong value silently breaks n8n's AI-Vision fetches (#22). Fail loudly
+        # instead of guessing localhost.
+        raise SystemExit("Config error: public_base_url is required — the base URL "
+                         "other containers reach this add-on on, e.g. "
+                         "http://e0ac7775-email-extractor:8099")
     log.info("email-extractor %s starting; folders=%s interval=%ss",
              __version__, cfg.folders, cfg.poll_interval)
     conn = db.connect(cfg.pg_dsn)
