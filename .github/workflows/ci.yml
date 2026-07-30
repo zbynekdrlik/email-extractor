@@ -48,7 +48,7 @@ jobs:
       - name: Test (pytest + coverage)
         env:
           PG_TEST_DSN: postgresql://postgres:postgres@localhost:5432/postgres
-        run: pytest --cov=app --cov-report=term-missing --cov-fail-under=65
+        run: pytest --cov=app --cov-report=term-missing --cov-fail-under=85
 
   build:
     needs: [test]

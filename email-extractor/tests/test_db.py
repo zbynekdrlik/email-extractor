@@ -122,3 +122,18 @@ def test_insert_message_strips_nul_bytes(pg):
         "SELECT filename, extracted_text FROM attachments WHERE message_id=%s",
         ("<m-nul@x>",)).fetchone()
     assert "\x00" not in fname and "\x00" not in text
+
+
+def test_migration_strips_tokens_from_stored_file_urls(pg):
+    """#22: 2685 live rows had ?token=<secret> persisted; a DB dump leaked the token
+    and rotating it broke every historical URL."""
+    pg.execute("INSERT INTO messages (message_id) VALUES ('tok@t')")
+    pg.execute("""INSERT INTO attachments (message_id, idx, file_url) VALUES
+                  ('tok@t', 0, 'http://email-extractor:8099/files/tok_t/0?token=SECRET123'),
+                  ('tok@t', 1, 'http://email-extractor:8099/files/tok_t/1')""")
+    db.init_schema(pg)          # migrations are idempotent and run on every start
+    urls = [r[0] for r in pg.execute(
+        "SELECT file_url FROM attachments WHERE message_id='tok@t' ORDER BY idx").fetchall()]
+    assert urls == ["http://email-extractor:8099/files/tok_t/0",
+                    "http://email-extractor:8099/files/tok_t/1"]
+    assert not any("SECRET123" in u for u in urls)

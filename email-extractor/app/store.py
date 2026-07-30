@@ -57,14 +57,13 @@ def _safe_name(name: str, idx: int) -> str:
 
 
 def save_message(data_dir: str, identity: str, raw: bytes,
-                 attachments: list[dict], base_url: str, token: str) -> tuple[str, list[dict]]:
+                 attachments: list[dict], base_url: str) -> tuple[str, list[dict]]:
     """Write raw.eml + each attachment under <data_dir>/<safe_id>/; return (raw_path, file_infos)."""
     mid = safe_id(identity)
     d = Path(data_dir) / mid
     d.mkdir(parents=True, exist_ok=True)
     raw_path = d / "raw.eml"
     raw_path.write_bytes(raw)
-    q = f"?token={token}" if token else ""
     files = []
     for i, a in enumerate(attachments):
         data = a.get("_data") or b""
@@ -74,6 +73,9 @@ def save_message(data_dir: str, identity: str, raw: bytes,
             "idx": i,
             "sha256": hashlib.sha256(data).hexdigest(),
             "path": str(path),
-            "url": f"{base_url}/files/{mid}/{i}{q}",
+            # No token in the URL: it is persisted in Postgres, so a dump would leak
+            # the secret and rotating it would break every stored URL (#22). The
+            # fetcher authenticates with the X-Token header instead.
+            "url": f"{base_url}/files/{mid}/{i}",
         })
     return str(raw_path), files

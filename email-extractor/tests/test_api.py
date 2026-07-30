@@ -356,9 +356,9 @@ def test_files_are_not_served_across_a_colliding_message_id(pg, tmp_path):
     long_prefix = "y" * 130
     id_a, id_b = f"<{long_prefix}.a@m.example>", f"<{long_prefix}.b@m.example>"
     store.save_message(str(tmp_path), id_a, b"EML-A",
-                       [{"filename": "a.pdf", "_data": b"PDF-A"}], "http://x", "")
+                       [{"filename": "a.pdf", "_data": b"PDF-A"}], "http://x")
     store.save_message(str(tmp_path), id_b, b"EML-B",
-                       [{"filename": "b.pdf", "_data": b"PDF-B"}], "http://x", "")
+                       [{"filename": "b.pdf", "_data": b"PDF-B"}], "http://x")
     cfg = Config(pg_dsn=PG_DSN, data_dir=str(tmp_path), api_token="tok",
                  dash_password="secret", secret_key="test-secret")
     app = create_app(cfg)

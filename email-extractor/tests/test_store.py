@@ -38,10 +38,10 @@ def test_colliding_emails_do_not_overwrite_each_others_files(tmp_path):
     raw_a, raw_b = b"EML-A", b"EML-B"
     ap, afiles = store.save_message(str(tmp_path), _id("a"), raw_a,
                                     [{"filename": "faktura.pdf", "_data": b"PDF-A"}],
-                                    "http://email-extractor:8099", "tok")
+                                    "http://email-extractor:8099")
     bp, bfiles = store.save_message(str(tmp_path), _id("b"), raw_b,
                                     [{"filename": "faktura.pdf", "_data": b"PDF-B"}],
-                                    "http://email-extractor:8099", "tok")
+                                    "http://email-extractor:8099")
     assert Path(ap).read_bytes() == raw_a, "the first email's raw.eml was overwritten"
     assert Path(bp).read_bytes() == raw_b
     assert Path(afiles[0]["path"]).read_bytes() == b"PDF-A"
@@ -64,7 +64,7 @@ def test_legacy_dirs_written_by_the_old_scheme_stay_readable(tmp_path):
 def test_new_writes_prefer_the_new_scheme(tmp_path):
     mid = _id("fresh")
     raw_path, _ = store.save_message(str(tmp_path), mid, b"NEW", [],
-                                     "http://email-extractor:8099", "")
+                                     "http://email-extractor:8099")
     assert Path(raw_path).parent.name == store.safe_id(mid)
     assert Path(raw_path).parent.name != store.legacy_safe_id(mid)
 
@@ -81,6 +81,25 @@ def test_dir_name_from_a_stored_url_resolves_back(tmp_path):
     """file_url carries the dir name, so /files/<dirname>/<idx> must resolve too."""
     mid = "<roundtrip@m.example>"
     store.save_message(str(tmp_path), mid, b"EML", [{"filename": "a.pdf", "_data": b"P"}],
-                       "http://x", "")
+                       "http://x")
     assert store.message_dir(str(tmp_path), store.safe_id(mid)).name == store.safe_id(mid)
     assert (store.message_dir(str(tmp_path), store.safe_id(mid)) / "raw.eml").exists()
+
+
+# ---- #22: the API token must never be baked into a stored URL ----
+
+def test_file_url_carries_no_token(tmp_path):
+    _, files = store.save_message(str(tmp_path), "<t@m>", b"EML",
+                                  [{"filename": "a.pdf", "_data": b"P"}],
+                                  "http://email-extractor:8099")
+    assert "token" not in files[0]["url"], "the secret must not be persisted in Postgres"
+    assert files[0]["url"].startswith("http://email-extractor:8099/files/")
+    assert files[0]["url"].endswith("/0")
+
+
+def test_file_url_uses_the_configured_base(tmp_path):
+    _, files = store.save_message(str(tmp_path), "<t2@m>", b"E",
+                                  [{"filename": "a.pdf", "_data": b"P"}],
+                                  "http://e0ac7775-email-extractor:8099")
+    assert "localhost" not in files[0]["url"]
+    assert files[0]["url"].startswith("http://e0ac7775-email-extractor:8099/files/")

@@ -236,6 +236,15 @@ SCHEMA = [
         AFTER UPDATE OF category ON messages
         FOR EACH ROW EXECUTE FUNCTION messages_classified_event()
     """,
+    # --- #22: drop the API token that used to be baked into every stored file_url.
+    # It leaked through any DB dump/backup and rotating the token invalidated every
+    # historical URL. Idempotent (runs on every start); nothing reads file_url with a
+    # token — n8n builds its own URLs and authenticates with the X-Token header. ---
+    """
+    UPDATE attachments
+       SET file_url = split_part(file_url, '?', 1)
+     WHERE file_url LIKE '%?token=%'
+    """,
     # --- emails that failed to ingest (#20). The IMAP watermark stops below a
     # failed UID so it is retried; after MAX_UID_ATTEMPTS it is passed over and
     # kept here as skipped=true, so a broken email can neither be lost silently

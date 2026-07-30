@@ -15,12 +15,14 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from datetime import date
 from pathlib import Path
 
 import psycopg
 from flask import Flask, abort, jsonify, redirect, request, send_file, session
 from psycopg.types.json import Json
+from werkzeug.exceptions import HTTPException
 
 from . import __version__, db
 from .db import MAX_UID_ATTEMPTS
@@ -101,6 +103,29 @@ def create_app(cfg) -> Flask:
                              f"Skús to znova po dokončení, najneskôr za "
                              f"{db.CLAIM_STALE_MINUTES} minút.",
                        claimed_at=held.isoformat()), 409
+
+    # ---- request + error logging (#28) ----
+
+    @app.before_request
+    def _stamp():
+        request.environ["_t0"] = time.monotonic()
+
+    @app.after_request
+    def _access_log(resp):
+        t0 = request.environ.get("_t0")
+        ms = int((time.monotonic() - t0) * 1000) if t0 else -1
+        # The path only, never the query string: /files carries ?token=<secret>.
+        line = f"{request.method} {request.path} -> {resp.status_code} ({ms} ms)"
+        (log.warning if resp.status_code >= 400 else log.info)(line)
+        return resp
+
+    @app.errorhandler(Exception)
+    def _on_error(e):
+        if isinstance(e, HTTPException):
+            return e                      # 404/403/400/409 are answers, not failures
+        # Without this a failing /api/* query 500s with nothing in the log at all.
+        log.exception("%s %s failed: %s", request.method, request.path, e)
+        return jsonify(error="Vnútorná chyba servera — podrobnosti sú v logu."), 500
 
     @app.before_request
     def _gate():

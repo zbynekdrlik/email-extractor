@@ -37,3 +37,20 @@ def test_explicit_pg_dsn_wins_over_pg_password(tmp_path, monkeypatch):
 def test_no_dsn_and_no_password_leaves_dsn_empty(tmp_path, monkeypatch):
     cfg = _load_with_options(tmp_path, monkeypatch, {})
     assert cfg.pg_dsn == ""
+
+
+def test_public_base_url_has_no_localhost_default(monkeypatch):
+    """#22: baked into file_url and fetched from ANOTHER container, so localhost
+    resolved to n8n itself and AI-Vision fetches failed. Better empty than wrong."""
+    from app import config
+    for k in ("PUBLIC_BASE_URL", "IMAP_HOST", "IMAP_USER", "IMAP_PASS", "PG_DSN"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(config, "OPTIONS_PATH", config.Path("/nonexistent/options.json"))
+    assert config.Config.load().public_base_url == ""
+
+
+def test_public_base_url_is_kept_when_configured(monkeypatch):
+    from app import config
+    monkeypatch.setenv("PUBLIC_BASE_URL", "http://e0ac7775-email-extractor:8099")
+    monkeypatch.setattr(config, "OPTIONS_PATH", config.Path("/nonexistent/options.json"))
+    assert config.Config.load().public_base_url == "http://e0ac7775-email-extractor:8099"

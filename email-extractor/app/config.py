@@ -55,7 +55,8 @@ class Config:
             # Bundled-Postgres mode: run.sh starts a local cluster inside the
             # add-on container and creates role/db "email" with pg_password.
             pg_dsn = f"postgresql://email:{quote_plus(pg_password)}@127.0.0.1:5432/email"
-        base = _get(o, "public_base_url", "PUBLIC_BASE_URL", "") or f"http://localhost:{http_port}"
+        # No localhost fallback: this value is fetched from another container (#22).
+        base = _get(o, "public_base_url", "PUBLIC_BASE_URL", "") or ""
         return cls(
             imap_host=_get(o, "imap_host", "IMAP_HOST", ""),
             imap_port=int(_get(o, "imap_port", "IMAP_PORT", 993)),
