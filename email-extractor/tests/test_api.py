@@ -384,3 +384,72 @@ def test_files_still_serve_legacy_storage_dirs(pg, tmp_path):
     c = app.test_client()
     assert c.get(f"/files/{mid}/0?token=tok").data == b"OLD-PDF"
     assert c.get(f"/eml/{mid}?token=tok").data == b"OLD-EML"
+
+
+# ---- #25: operator actions must not steal an in-flight claim (double-process) ----
+
+def _msg_claimed(pg, minutes_ago: float) -> int:
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('claimed@t','ai_orders')")
+    return pg.execute(
+        """UPDATE messages SET processing_at = now() - (%s || ' minutes')::interval,
+                               processed_by = 'n8n-worker'
+           WHERE message_id='claimed@t' RETURNING id""", (minutes_ago,)).fetchone()[0]
+
+
+def test_reprocess_refuses_while_a_worker_holds_the_message(pg):
+    mid = _msg_claimed(pg, 1)
+    c = _client()
+    _login(c)
+    r = c.post(f"/api/message/{mid}/reprocess")
+    assert r.status_code == 409, "a fresh claim must not be cleared under the worker"
+    assert "spracúva" in r.get_json()["error"]
+    row = pg.execute("SELECT processing_at, processed_by FROM messages WHERE id=%s",
+                     (mid,)).fetchone()
+    assert row[0] is not None and row[1] == 'n8n-worker', "claim left untouched"
+
+
+def test_reclassify_refuses_while_a_worker_holds_the_message(pg):
+    mid = _msg_claimed(pg, 2)
+    c = _client()
+    _login(c)
+    r = c.post(f"/api/message/{mid}/reclassify", json={"category": "invoices"})
+    assert r.status_code == 409
+    row = pg.execute("SELECT category, processing_at FROM messages WHERE id=%s",
+                     (mid,)).fetchone()
+    assert row == ("ai_orders", row[1]) and row[1] is not None
+
+
+def test_reprocess_clears_a_stale_claim(pg):
+    mid = _msg_claimed(pg, db.CLAIM_STALE_MINUTES + 1)
+    c = _client()
+    _login(c)
+    assert c.post(f"/api/message/{mid}/reprocess").status_code == 200
+    assert pg.execute("SELECT processing_at FROM messages WHERE id=%s",
+                      (mid,)).fetchone()[0] is None
+
+
+def test_reclassify_still_works_when_nothing_is_in_flight(pg):
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('free@t','ai_orders')")
+    mid = pg.execute("SELECT id FROM messages WHERE message_id='free@t'").fetchone()[0]
+    c = _client()
+    _login(c)
+    assert c.post(f"/api/message/{mid}/reclassify", json={"category": "invoices"}).status_code == 200
+    assert pg.execute("SELECT category FROM messages WHERE id=%s", (mid,)).fetchone()[0] == "invoices"
+
+
+def test_fix_request_and_its_event_commit_together(pg, monkeypatch):
+    """A failed second write must not leave an orphan fix row (a duplicate work item)."""
+    pg.execute("INSERT INTO messages (message_id, subject) VALUES ('fx@t','Predmet')")
+    mid = pg.execute("SELECT id FROM messages WHERE message_id='fx@t'").fetchone()[0]
+    from app import httpapi
+
+    def boom(*a, **kw):
+        raise RuntimeError("event insert failed")
+
+    monkeypatch.setattr(httpapi.db, "log_event", boom)
+    c = _client()
+    _login(c)
+    r = c.post(f"/api/message/{mid}/fix", json={"problem_type": "other", "description": "x"})
+    assert r.status_code >= 500
+    assert pg.execute("SELECT count(*) FROM fix_requests").fetchone()[0] == 0, \
+        "the fix row must roll back with the failed event write"
