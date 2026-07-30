@@ -1,7 +1,8 @@
 # spike artifacts (real business email data — never commit)
 _spike_raws/
 _spike_out/
-pipeline.py
+# the spike script at the repo ROOT only — app/orders/pipeline.py is real code
+/pipeline.py
 
 # python
 .venv/
