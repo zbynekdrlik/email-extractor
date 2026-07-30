@@ -63,3 +63,35 @@ def test_dashboard_user_workflow(live_server, pg, page):
     assert pg.execute("SELECT count(*) FROM fix_requests WHERE message_id='e1'").fetchone()[0] == 1
 
     assert console == [], f"browser console not clean: {console}"
+
+
+def test_unreceived_mails_tab_shows_failed_ingests(live_server, pg, page):
+    """#20: an email that never got in has no messages row — this tab is the only
+    place a human can see it, so it must actually render in the browser."""
+    pg.execute("TRUNCATE imap_failures")
+    db.record_uid_failure(pg, "INBOX", 1, 4711, "RuntimeError('OCR out of memory')")
+    for _ in range(db.MAX_UID_ATTEMPTS):
+        db.record_uid_failure(pg, "INBOX", 1, 4712, "ValueError('broken MIME part')")
+    db.mark_uid_skipped(pg, "INBOX", 1, 4712)
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/login")
+    page.fill("input[name=password]", "secret")
+    page.click("button[type=submit]")
+    page.wait_for_url(f"{live_server}/")
+
+    # the red badge on the tab counts them without the user opening anything
+    page.wait_for_selector("#imapBadge:text('2')")
+
+    page.click("#tabImap")
+    page.wait_for_selector("text=UID 4711")
+    body = page.locator("#detail").inner_text()
+    assert "skúša sa" in body and "1/5 pokusov" in body
+    assert "vzdané" in body and "UID 4712" in body
+    assert "OCR out of memory" in body
+    assert "broken MIME part" in body
+
+    # and back to the mail list without errors
+    page.click("#tabMails")
+    page.wait_for_timeout(300)
+    assert console == [], f"browser console not clean: {console}"
