@@ -84,7 +84,7 @@ def _flat_ods_bytes() -> bytes:
         '<table:table-cell><text:p>7</text:p></table:table-cell>'
         '</table:table-row>'
         '</table:table></office:spreadsheet></office:body></office:document>'
-    ).encode("utf-8")
+    ).encode()
 
 
 def _xls_with_a_date() -> bytes:
@@ -108,7 +108,7 @@ def test_ods_repeated_columns_are_expanded():
         _ods_with_repeated_columns())
     assert r["flag"] != "error", r.get("error")
     line = [ln for ln in r["text"].splitlines() if "Rožok" in ln][0]
-    cells = [c.strip() for c in line.split("|")]
+    cells = [c.strip() for c in line.split("\t")]   # _grid_rows tab-joins the columns
     assert cells[0] == "Rožok kváskový 70g"
     assert cells[-1] == "120", f"quantity column shifted: {cells}"
     assert len(cells) == 5, f"3 empty columns must stay empty, got {cells}"
