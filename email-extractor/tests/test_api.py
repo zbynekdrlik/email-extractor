@@ -347,3 +347,40 @@ def test_dashboard_has_the_imap_failures_tab(pg):
     html = c.get("/").get_data(as_text=True)
     assert "/api/imap-failures" in html
     assert "tabImap" in html
+
+
+# ---- #21: /files and /eml must never serve another email's originals ----
+
+def test_files_are_not_served_across_a_colliding_message_id(pg, tmp_path):
+    from app import store
+    long_prefix = "y" * 130
+    id_a, id_b = f"<{long_prefix}.a@m.example>", f"<{long_prefix}.b@m.example>"
+    store.save_message(str(tmp_path), id_a, b"EML-A",
+                       [{"filename": "a.pdf", "_data": b"PDF-A"}], "http://x", "")
+    store.save_message(str(tmp_path), id_b, b"EML-B",
+                       [{"filename": "b.pdf", "_data": b"PDF-B"}], "http://x", "")
+    cfg = Config(pg_dsn=PG_DSN, data_dir=str(tmp_path), api_token="tok",
+                 dash_password="secret", secret_key="test-secret")
+    app = create_app(cfg)
+    app.testing = True
+    c = app.test_client()
+    assert c.get(f"/files/{id_a}/0?token=tok").data == b"PDF-A"
+    assert c.get(f"/files/{id_b}/0?token=tok").data == b"PDF-B"
+    assert c.get(f"/eml/{id_a}?token=tok").data == b"EML-A"
+    assert c.get(f"/eml/{id_b}?token=tok").data == b"EML-B"
+
+
+def test_files_still_serve_legacy_storage_dirs(pg, tmp_path):
+    from app import store
+    mid = "<legacy.dir@m.example>"
+    old = tmp_path / store.legacy_safe_id(mid)
+    old.mkdir()
+    (old / "raw.eml").write_bytes(b"OLD-EML")
+    (old / "att0__x.pdf").write_bytes(b"OLD-PDF")
+    cfg = Config(pg_dsn=PG_DSN, data_dir=str(tmp_path), api_token="tok",
+                 dash_password="secret", secret_key="test-secret")
+    app = create_app(cfg)
+    app.testing = True
+    c = app.test_client()
+    assert c.get(f"/files/{mid}/0?token=tok").data == b"OLD-PDF"
+    assert c.get(f"/eml/{mid}?token=tok").data == b"OLD-EML"
