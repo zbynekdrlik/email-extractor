@@ -26,6 +26,9 @@ ENGINES = ("n8n", "python")
 # assumed dead (container restart mid-run) and may be picked up again.
 CLAIM_STALE_MINUTES = 30
 MAX_ATTEMPTS = 5
+# How far back shadow mode looks. Shadow calls the real model, so this is a cost bound
+# as much as a scope one.
+SHADOW_DAYS = 3
 
 
 def resolve_engine(value: str | None) -> str:
@@ -52,17 +55,24 @@ def _claim(conn) -> dict | None:
     return _as_message(row)
 
 
-def _peek_for_shadow(conn) -> dict | None:
-    """Pick a message the shadow run has not seen yet, WITHOUT touching its state."""
+def _peek_for_shadow(conn, days: int = SHADOW_DAYS) -> dict | None:
+    """Pick a message the shadow run has not seen yet, WITHOUT touching its state.
+
+    Bounded to the last `days` of mail on purpose: shadow calls the real model, so an
+    unbounded shadow would replay the whole archive at top-tier reasoning cost. Shadow
+    exists to compare against n8n on CURRENT mail; the historical corpus is the
+    evaluation harness (#66), run deliberately.
+    """
     row = conn.execute(
         """SELECT m.message_id, m.subject, m.from_addr, m.from_name,
                   m.combined_text, m.body_text
              FROM messages m
             WHERE m.category = %s
+              AND m.created_at > now() - make_interval(days => %s)
               AND NOT EXISTS (SELECT 1 FROM order_runs r
                                WHERE r.message_id = m.message_id AND r.shadow)
             ORDER BY m.created_at DESC LIMIT 1""",
-        (CATEGORY,)).fetchone()
+        (CATEGORY, max(1, int(days or SHADOW_DAYS)))).fetchone()
     return _as_message(row)
 
 
@@ -129,7 +139,8 @@ def tick(conn, cfg, pipeline=None) -> int:
                       "requested, doing nothing", engine, shadow)
             return 0
 
-    message = _peek_for_shadow(conn) if engine != "python" else _claim(conn)
+    message = (_claim(conn) if engine == "python"
+               else _peek_for_shadow(conn, getattr(cfg, "orders_shadow_days", SHADOW_DAYS)))
     if not message:
         return 0
 
