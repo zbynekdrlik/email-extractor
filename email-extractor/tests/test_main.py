@@ -8,6 +8,7 @@ import psycopg
 import pytest
 
 from app import config, db, main
+from app.process import process_raw
 
 
 def _raw(n: int) -> bytes:
@@ -37,7 +38,7 @@ def _feed(monkeypatch, uids_raws, fail_uids=(), uidvalidity=1):
     """Stub the IMAP poll with a fixed batch; raise inside processing for fail_uids."""
     monkeypatch.setattr(main.imap_poll, "poll_folder",
                         lambda cfg, conn, folder: (uidvalidity, list(uids_raws)))
-    real = main.process_raw
+    real = process_raw          # the module function, never an already-patched wrapper
     fail_bodies = {f"Telo mailu {u}" for u in fail_uids}
 
     def flaky(raw: bytes):

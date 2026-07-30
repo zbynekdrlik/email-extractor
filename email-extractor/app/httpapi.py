@@ -23,6 +23,7 @@ from flask import Flask, abort, jsonify, redirect, request, send_file, session
 from psycopg.types.json import Json
 
 from . import __version__, db
+from .db import MAX_UID_ATTEMPTS
 from .store import safe_id
 
 CATEGORIES = ["ai_orders", "invoices", "reklamacie", "dodacie_listy",
@@ -376,6 +377,17 @@ def create_app(cfg) -> Flask:
         log.info("fix_requested #%s type=%s -> fix #%s", mid, ptype, fid)
         return jsonify(ok=True, id=mid, fix_id=fid)
 
+    @app.get("/api/imap-failures")
+    def api_imap_failures():
+        """Emails that could not be ingested at all (#20) — they have no messages row,
+        so this is the ONLY place they are visible. Never let them be silent."""
+        with _db() as c:
+            items = db.list_uid_failures(c)
+        return jsonify(total=len(items), items=items,
+                       max_attempts=MAX_UID_ATTEMPTS,
+                       pending=sum(1 for i in items if not i["skipped"]),
+                       skipped=sum(1 for i in items if i["skipped"]))
+
     @app.get("/api/fix-queue")
     def api_fix_queue():
         status = request.args.get("status", "")
@@ -542,6 +554,7 @@ DASH_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
 <div class="tabs">
   <button class="tab active" id="tabMails" onclick="setView('mails')">Maily</button>
   <button class="tab" id="tabFix" onclick="setView('fix')">Fix fronta</button>
+  <button class="tab" id="tabImap" onclick="setView('imap')">Neprijaté <span id="imapBadge"></span></button>
 </div>
 <main>
   <div id="list"></div>
@@ -640,16 +653,34 @@ async function loadFix(){const D=document.getElementById('detail'),L=document.ge
       (open?'<div class="actions"><button onclick="openDetail('+(f.msg_id||'null')+');setView(\'mails\')">otvoriť mail</button>'+
         '<button class="btn-blue" onclick="resolveFix('+f.id+',\'fixed\')">označiť opravené</button>'+
         '<button onclick="resolveFix('+f.id+',\'wontfix\')">neopravím</button></div>':'')+'</div>'}).join('')}
+async function loadImap(){const D=document.getElementById('detail'),L=document.getElementById('list');
+  L.innerHTML='';let d;try{d=await api('/api/imap-failures')}catch(e){return}
+  const b=document.getElementById('imapBadge');
+  b.textContent=d.total?String(d.total):'';b.style.color='#f85149';
+  if(!d.items.length){D.innerHTML='<div class="empty">Všetky maily sa podarilo prijať 🎉</div>';return}
+  D.innerHTML='<div class="lbl">Maily, ktoré sa nepodarilo prijať ('+d.pending+' sa ešte skúša, '+d.skipped+' vzdané)</div>'+
+    d.items.map(f=>'<div class="fixrow'+(f.skipped?'':' resolved')+'">'+
+      '<div class="t" style="display:flex;justify-content:space-between"><b>'+(f.skipped?'⛔ vzdané':'🔄 skúša sa')+
+      ' — '+E(f.folder)+' UID '+f.uid+'</b><span class="muted">'+f.attempts+'/'+d.max_attempts+' pokusov</span></div>'+
+      '<div class="muted">prvýkrát '+tsShort(f.first_seen)+' · naposledy '+tsShort(f.last_seen)+'</div>'+
+      '<div class="err">'+E(f.last_error||'')+'</div>'+
+      (f.skipped?'<div class="muted">Tento mail v systéme NIE JE. Treba ho vytiahnuť ručne z mailu (schránka, UID '+f.uid+') alebo opraviť príčinu a znížiť watermark.</div>':'')+
+      '</div>').join('')}
 async function resolveFix(fid,status){const res=status==='fixed'?(prompt('Poznámka k oprave (voliteľné):')||''):'';
   try{await api('/api/fix/'+fid+'/resolve',{method:'POST',body:JSON.stringify({status,resolution:res})});await loadFix()}catch(e){alert('chyba')}}
 function setView(v){view=v;document.getElementById('tabMails').classList.toggle('active',v==='mails');
   document.getElementById('tabFix').classList.toggle('active',v==='fix');
-  if(v==='fix'){loadFix()}else{document.getElementById('detail').innerHTML='<div class="empty">Vyber mail vľavo.</div>';loadList()}}
-function tick(){if(live&&document.getElementById('ov').style.display!=='flex'){if(view==='mails')loadList();else loadFix()}}
+  document.getElementById('tabImap').classList.toggle('active',v==='imap');
+  if(v==='fix'){loadFix()}else if(v==='imap'){loadImap()}
+  else{document.getElementById('detail').innerHTML='<div class="empty">Vyber mail vľavo.</div>';loadList()}}
+function tick(){if(live&&document.getElementById('ov').style.display!=='flex'){
+  if(view==='mails')loadList();else if(view==='imap')loadImap();else loadFix()}}
+async function imapBadgeRefresh(){try{const d=await api('/api/imap-failures');
+  const b=document.getElementById('imapBadge');b.textContent=d.total?String(d.total):'';b.style.color='#f85149'}catch(e){}}
 document.getElementById('livetog').onclick=()=>{live=!live;document.getElementById('livetog').style.color=live?'#3fb950':'#6e7681';document.getElementById('livelbl').textContent=live?'LIVE':'pauza'};
 let deb;q.oninput=()=>{clearTimeout(deb);deb=setTimeout(loadList,350)};
 for(const el of [fcat,fstate,ffrom,fto])el.onchange=loadList;
-loadList();timer=setInterval(tick,5000);
+loadList();imapBadgeRefresh();timer=setInterval(tick,5000);setInterval(imapBadgeRefresh,30000);
 </script></body></html>"""
 
 

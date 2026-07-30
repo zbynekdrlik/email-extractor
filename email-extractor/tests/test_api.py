@@ -315,3 +315,35 @@ def test_fix_queue_paginates(pg):
     assert d["total"] == 3
     assert len(d["items"]) == 2
     assert len(c.get("/api/fix-queue?limit=2&offset=2").get_json()["items"]) == 1
+
+
+# ---- #20: emails that never made it in must be visible somewhere ----
+
+def test_imap_failures_endpoint_lists_pending_and_skipped(pg):
+    pg.execute("TRUNCATE imap_failures")
+    db.record_uid_failure(pg, "INBOX", 1, 41, "RuntimeError('OCR out of memory')")
+    for _ in range(db.MAX_UID_ATTEMPTS):
+        db.record_uid_failure(pg, "INBOX", 1, 42, "ValueError('broken part')")
+    db.mark_uid_skipped(pg, "INBOX", 1, 42)
+    c = _client()
+    _login(c)
+    d = c.get("/api/imap-failures").get_json()
+    assert d["total"] == 2
+    assert d["pending"] == 1 and d["skipped"] == 1
+    assert d["max_attempts"] == db.MAX_UID_ATTEMPTS
+    by_uid = {i["uid"]: i for i in d["items"]}
+    assert by_uid[41]["attempts"] == 1 and by_uid[41]["skipped"] is False
+    assert by_uid[42]["skipped"] is True
+    assert "OCR out of memory" in by_uid[41]["last_error"]
+
+
+def test_imap_failures_endpoint_needs_login(pg):
+    assert _client().get("/api/imap-failures").status_code == 401
+
+
+def test_dashboard_has_the_imap_failures_tab(pg):
+    c = _client()
+    _login(c)
+    html = c.get("/").get_data(as_text=True)
+    assert "/api/imap-failures" in html
+    assert "tabImap" in html
