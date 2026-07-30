@@ -1,6 +1,6 @@
 [project]
 name = "email-extractor"
-version = "0.4.0"
+version = "0.5.0"
 description = "OCR email extractor — reads IMAP, extracts body + attachments, writes Postgres for n8n"
 requires-python = ">=3.12"
 
