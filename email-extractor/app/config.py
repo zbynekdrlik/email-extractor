@@ -47,6 +47,10 @@ class Config:
     catalog_gid: str = ""
     customer_gid: str = ""
     catalog_refresh_minutes: int = 60
+    # n8n owns the live pipeline until this is flipped to "python"; "shadow" runs the
+    # Python pipeline for comparison only (claims nothing, uploads nothing).
+    ai_orders_engine: str = "n8n"
+    orders_shadow: bool = False
 
     @classmethod
     def load(cls) -> Config:
@@ -82,4 +86,9 @@ class Config:
             customer_gid=str(_get(o, "customer_gid", "CUSTOMER_GID", "") or ""),
             catalog_refresh_minutes=int(
                 _get(o, "catalog_refresh_minutes", "CATALOG_REFRESH_MINUTES", 60)),
+            ai_orders_engine=str(_get(o, "ai_orders_engine", "AI_ORDERS_ENGINE", "n8n")
+                                 or "n8n"),
+            orders_shadow=str(
+                _get(o, "orders_shadow", "ORDERS_SHADOW", "false")).lower() in (
+                    "1", "true", "yes", "on"),
         )

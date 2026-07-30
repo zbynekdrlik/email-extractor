@@ -138,6 +138,29 @@ def test_without_a_snapshot_nothing_runs(pg):
     assert calls == []
 
 
+def test_refresh_is_skipped_while_the_snapshot_is_fresh(pg, monkeypatch):
+    """The loop calls refresh every tick; it must only hit Google when the newest
+    snapshot is older than the configured interval."""
+    _snapshot(pg)
+    calls = []
+    monkeypatch.setattr(worker.snapshot, "refresh",
+                        lambda *a, **k: calls.append(a) or 999)
+    cfg = _cfg(catalog_sheet_id="DOC", catalog_gid="1", customer_gid="2",
+               catalog_refresh_minutes=60)
+    assert worker.refresh_due(pg, cfg) == worker.snapshot.latest_snapshot_id(pg)
+    assert calls == []
+
+    pg.execute("UPDATE order_snapshots SET checked_at = now() - interval '2 hours'")
+    assert worker.refresh_due(pg, cfg) == 999
+    assert len(calls) == 1
+
+
+def test_refresh_without_a_configured_sheet_never_calls_out(pg, monkeypatch):
+    monkeypatch.setattr(worker.snapshot, "refresh",
+                        lambda *a, **k: pytest.fail("must not fetch without a sheet id"))
+    assert worker.refresh_due(pg, _cfg()) is None
+
+
 def test_engine_option_only_accepts_known_values():
     with pytest.raises(ValueError):
         worker.resolve_engine("postgres-please")

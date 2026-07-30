@@ -32,6 +32,8 @@ options:
   catalog_gid: ""
   customer_gid: ""
   catalog_refresh_minutes: 60
+  ai_orders_engine: "n8n"
+  orders_shadow: false
 schema:
   imap_host: str
   imap_port: int
@@ -51,3 +53,5 @@ schema:
   catalog_gid: str?
   customer_gid: str?
   catalog_refresh_minutes: int?
+  ai_orders_engine: list(n8n|python)?
+  orders_shadow: bool?
