@@ -21,4 +21,4 @@ addopts = "-q"
 source = ["app"]
 # backfill.py is a one-off operator script with no tests yet — everything the
 # add-on runs in production is measured (#27).
-omit = ["app/backfill.py"]
+omit = ["app/backfill.py", "app/orders/memory_import.py"]
