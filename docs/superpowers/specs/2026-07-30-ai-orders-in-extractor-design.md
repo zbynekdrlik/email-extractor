@@ -148,14 +148,21 @@ Each case: input `.eml` + snapshot id + **expected output** (customer EAN, deliv
 items with GTIN and quantity, and whether it should have gone to review). Ground truth
 comes from the EDI we actually uploaded plus the warehouse's corrections in Odoo.
 
-**Two tiers, both in CI:**
+**Two tiers, one harness. Where each RUNS is dictated by where the corpus may live:**
 
-- **Deterministic (every push):** LLM responses served from an on-disk cache keyed by
-  prompt hash + input hash. Runs in seconds and exercises the whole ladder, the EDI writer
-  and the reporting. This is the tier that catches "the Céder fix broke AGEL".
-- **Live (nightly and on demand):** the same corpus through real gpt-5.4. Scored per case
-  **and per order type**, with a locked baseline: **a case that once passed may never stop
-  passing**. A regression fails the job.
+- **Deterministic (LLM answers from an on-disk cache):** runs in seconds and exercises the
+  whole ladder, the EDI writer and the reporting. This is the tier that catches "the Céder
+  fix broke AGEL". It runs **on the add-on box**, because the corpus is real customer mail
+  and never enters git — plus in CI against a committed **synthetic** corpus of the same
+  incident shapes, so the harness itself is regression-tested everywhere.
+- **Live (nightly and on demand):** the same corpus through real gpt-5.4; this is also what
+  records the cache the deterministic tier replays.
+
+Both tiers score per case **and per order type**, against a locked baseline: **a case that
+once passed may never stop passing**, and a regression exits non-zero (so it gates a CI job
+and a nightly run alike). The corpus lives at `/data/eval/manifest.json` on the volume; the
+harness is `app/orders/evaluate.py` with `python -m app.orders.eval_run` as its entry
+point.
 
 Every new warehouse complaint becomes a corpus case **before** its fix is written
 (`regression-test-first`). The corpus only grows.

@@ -1,0 +1,27 @@
+{
+ "note": "Synthetic corpus for CI. The real 30-email corpus lives on the add-on volume (/data/eval/manifest.json) so no customer email is ever committed. Every case here is a real INCIDENT shape, with invented products and customers.",
+ "cases": [
+  {
+   "id": "syn-free-text",
+   "type": "free_text",
+   "email": {"message_id": "syn1", "from_addr": "sklad@pekaren.test",
+             "subject": "Objednávka na pondelok",
+             "combined_text": "Dobrý deň, na pondelok prosíme 120x rožok 50g a 7x vianočka 400g. Ďakujeme, Pekáreň Testovacia s.r.o.",
+             "today": "2026-07-30"},
+   "expected": {"customer_ean": "2000000000001", "delivery_date": "03.08.2026",
+                "should_ship": true,
+                "items": [{"gtin": "G50", "quantity": 120}, {"gtin": "VIA", "quantity": 7}]}
+  },
+  {
+   "id": "syn-weight-mismatch-goes-to-review",
+   "type": "weight_not_in_catalog",
+   "email": {"message_id": "syn2", "from_addr": "sklad@pekaren.test",
+             "subject": "Objednávka",
+             "combined_text": "na 04.08.2026 prosím 10x rožok 70g",
+             "today": "2026-07-30"},
+   "expected": {"customer_ean": "2000000000001", "delivery_date": "04.08.2026",
+                "should_review": false,
+                "items": [{"gtin": "G70", "quantity": 10}]}
+  }
+ ]
+}
