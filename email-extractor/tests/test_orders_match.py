@@ -218,10 +218,11 @@ def test_the_same_wording_in_one_email_resolves_identically():
     (accepted) and 0.84/0.83 (rejected) in ONE email, and since an order needs all its
     items, the whole thing fell over. Not a discount on the gate — removing a coin flip
     on identical input."""
-    accepted = _decide("Chlieb 1000 g rezaný", llm={"gtin": "CHL", "confidence": 0.88})
-    rejected = _decide("Chlieb 1000 g rezaný", llm={"gtin": "CHL", "confidence": 0.4})
+    accepted = _decide("rožok", llm={"gtin": "G50", "confidence": 0.88})
+    rejected = _decide("rožok", llm={"gtin": "G50", "confidence": 0.4})
+    assert rejected.rule == "unmatched", "the second line really did fall below the gate"
     out = match.apply_siblings([accepted, rejected])
-    assert out[1].gtin == "CHL" and out[1].rule == "sibling"
+    assert out[1].gtin == "G50" and out[1].rule == "sibling"
     assert out[1].review is True
 
 
