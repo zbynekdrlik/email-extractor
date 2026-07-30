@@ -51,6 +51,10 @@ class Config:
     # Python pipeline for comparison only (claims nothing, uploads nothing).
     ai_orders_engine: str = "n8n"
     orders_shadow: bool = False
+    openai_api_key: str = ""
+    orders_model: str = "gpt-5.4"
+    orders_reasoning_effort: str = "high"
+    llm_cache_dir: str = "/data/llm-cache"
 
     @classmethod
     def load(cls) -> Config:
@@ -91,4 +95,9 @@ class Config:
             orders_shadow=str(
                 _get(o, "orders_shadow", "ORDERS_SHADOW", "false")).lower() in (
                     "1", "true", "yes", "on"),
+            openai_api_key=_get(o, "openai_api_key", "OPENAI_API_KEY", "") or "",
+            orders_model=_get(o, "orders_model", "ORDERS_MODEL", "gpt-5.4") or "gpt-5.4",
+            orders_reasoning_effort=_get(o, "orders_reasoning_effort",
+                                         "ORDERS_REASONING_EFFORT", "high") or "high",
+            llm_cache_dir=_get(o, "llm_cache_dir", "LLM_CACHE_DIR", "/data/llm-cache"),
         )
