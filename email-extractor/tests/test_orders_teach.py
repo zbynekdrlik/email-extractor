@@ -331,3 +331,40 @@ def test_the_dashboard_serves_the_taught_list(pg):
            json={"gtin": "SLI50", "card": "Šiška džemová 50g"})
     d = c.get("/api/orders/taught").get_json()
     assert [t["wording"] for t in d["items"]] == ["Šiška"]
+
+
+def _sklad(pg):
+    """The warehouse's client: the signed link only, never a password."""
+    import os
+
+    from app.config import Config
+    from app.httpapi import create_app, sklad_key
+    cfg = Config(pg_dsn=os.environ["PG_TEST_DSN"], data_dir="/tmp", dash_password="pw",
+                 secret_key="t")
+    app = create_app(cfg)
+    app.testing = True
+    c = app.test_client()
+    assert c.get("/sklad/" + sklad_key("t")).status_code == 302
+    return c
+
+
+def test_the_warehouse_teaches_through_the_link_without_logging_in(pg):
+    """The user's ask (2026-07-31): answering must need no password. What must NOT follow
+    from that is access to the mails — the port is on the open internet."""
+    qid = _ask(pg)
+    c = _sklad(pg)
+    assert [q["wording"] for q in c.get("/api/orders/questions").get_json()["items"]] == ["Šiška"]
+
+    r = c.post(f"/api/orders/question/{qid}/answer",
+               json={"gtin": "SLI50", "card": "Šiška džemová 50g"})
+    assert r.status_code == 200
+    assert memory.resolve(pg, EAN, "Šiška").gtin == "SLI50"
+
+    # a mis-click is still correctable from the same link
+    assert c.get("/api/orders/taught").get_json()["items"][0]["answer_gtin"] == "SLI50"
+    assert c.post(f"/api/orders/question/{qid}/undo").status_code == 200
+    assert memory.resolve(pg, EAN, "Šiška") is None
+
+    # and the link reaches nothing else
+    assert c.get("/api/messages").status_code == 401
+    assert c.get("/api/orders/spend").status_code == 401

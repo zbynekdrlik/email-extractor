@@ -128,3 +128,64 @@ def test_client_errors_are_warned_not_swallowed(pg, caplog):
     c.get("/api/messages")            # 401, no session
     warns = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert any("-> 401" in (r.message % r.args if r.args else r.message) for r in warns)
+
+
+# --- the warehouse link: answering must need no password (user's ask, 2026-07-31) ----
+
+def _sklad_client(secret="t", base=""):
+    cfg = Config(api_token="secret", dash_password="pw", secret_key=secret,
+                 pg_dsn="postgresql://unused", data_dir="/tmp", public_base_url=base)
+    app = create_app(cfg)
+    app.testing = True
+    return app, app.test_client()
+
+
+def test_the_signed_warehouse_link_opens_the_questions_page_with_no_password():
+    from app import httpapi
+    _, c = _sklad_client()
+    assert c.get("/sklad/" + httpapi.sklad_key("t")).status_code == 302
+    r = c.get("/otazky")
+    assert r.status_code == 200
+    assert b'data-testid="version"' in r.data          # version label (mandatory rule)
+    assert b"/api/orders/questions" in r.data          # it talks to the questions API
+
+
+def test_a_wrong_warehouse_link_is_refused():
+    _, c = _sklad_client()
+    assert c.get("/sklad/" + "0" * 32).status_code == 403
+    assert c.get("/otazky").status_code == 302         # and nothing was granted
+
+
+def test_the_key_differs_per_install():
+    from app import httpapi
+    assert httpapi.sklad_key("t") != httpapi.sklad_key("other")
+    _, c = _sklad_client(secret="other")
+    assert c.get("/sklad/" + httpapi.sklad_key("t")).status_code == 403
+
+
+def test_the_warehouse_link_opens_ONLY_the_questions_surface():
+    """It is an unauthenticated link: it must not become a way into the mail archive."""
+    from app import httpapi
+    _, c = _sklad_client()
+    c.get("/sklad/" + httpapi.sklad_key("t"))
+    assert c.get("/api/messages").status_code == 401
+    assert c.get("/api/orders/spend").status_code == 401
+    assert c.get("/api/fix-queue").status_code == 401
+    assert c.get("/eml/e1").status_code == 403
+    r = c.get("/")
+    assert r.status_code == 302 and "/otazky" in r.headers["Location"]
+
+
+def test_a_login_is_remembered_so_nobody_retypes_the_password():
+    app, c = _sklad_client()
+    assert app.permanent_session_lifetime.days >= 365
+    c.post("/login", data={"password": "pw"})
+    assert c.get("/api/messages").status_code != 401   # the session carries (DB error is fine)
+
+
+def test_the_dashboard_shows_the_warehouse_link_to_copy():
+    from app import httpapi
+    _, c = _sklad_client(base="http://46.224.130.35:8099")
+    c.post("/login", data={"password": "pw"})
+    body = c.get("/").data.decode()
+    assert "http://46.224.130.35:8099/sklad/" + httpapi.sklad_key("t") in body

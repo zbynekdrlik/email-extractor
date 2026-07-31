@@ -172,3 +172,43 @@ def test_the_questions_view_survives_the_live_refresh_without_duplicating(live_s
     assert page.get_by_text("Naposledy naučené").count() == 1, "the section rendered twice"
     assert page.get_by_role("button", name="vrátiť").count() == 1
     assert console == [], f"console must be clean: {console}"
+
+
+def test_the_warehouse_answers_from_the_link_with_no_login(live_server, pg, page):
+    """The user's ask: the warehouse must not type a password (2026-07-31).
+
+    Through the real browser, from the signed link only — no /login visit at all — and the
+    page must reach nothing but the questions (a 401 in the console would prove it tried).
+    """
+    from app.httpapi import sklad_key
+    from app.orders import memory, teach
+
+    ean = "2000000000009"
+    qid = teach.ask(pg, message_id="e-sklad", customer_ean=ean, customer_name="Zákazník S",
+                    wording="šiška bez hesla", quantity=12, unit="ks",
+                    candidates=[{"gtin": "AAA", "name": "Karta A"},
+                                {"gtin": "BBB", "name": 'Karta B "špeciál"'}],
+                    delivery_date="07.08.2026", reason="neznáme znenie")
+    assert qid
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/otazky")
+
+    backend_ver = page.request.get(f"{live_server}/version").text().strip()
+    assert backend_ver in page.locator('[data-testid="version"]').inner_text()
+
+    page.wait_for_selector("text=šiška bez hesla")
+    page.click('button:has-text("Karta B")')
+    page.wait_for_selector("text=Naposledy naučené")
+    assert memory.resolve(pg, ean, "šiška bez hesla").gtin == "BBB"
+
+    # and it can be taken back from the same page
+    page.click('button:has-text("vrátiť")')
+    page.wait_for_selector('button:has-text("Karta A")')
+    pg.rollback()
+    assert memory.resolve(pg, ean, "šiška bez hesla") is None
+
+    # the archive is NOT reachable from this link
+    assert page.request.get(f"{live_server}/api/messages").status == 401
+    assert console == [], f"browser console not clean: {console}"
