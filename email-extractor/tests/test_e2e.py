@@ -138,3 +138,37 @@ def test_teaching_a_wording_and_taking_it_back_in_the_browser(live_server, pg, p
     assert teach.open_questions(pg)[0]["id"] == qid, "and it is asked again"
 
     assert console == [], f"console must be clean: {console}"
+
+
+def test_the_questions_view_survives_the_live_refresh_without_duplicating(live_server, pg,
+                                                                          page):
+    """Seen on the live box: the taught section appeared TWICE.
+
+    The view auto-refreshes every 5 s. A refresh clears the list and re-renders, while the
+    PREVIOUS render's taught-list fetch is still in flight — and that late answer then appends
+    to the already re-rendered list. So the section (and its undo buttons) doubled on screen.
+    """
+    from app.orders import teach
+
+    qid = teach.ask(pg, message_id="e-dup", customer_ean="2000000000001",
+                    customer_name="Zákazník A", wording="dvojite znenie", quantity=3,
+                    unit="ks", candidates=[{"gtin": "AAA", "name": "Karta A"}],
+                    delivery_date="06.08.2026", reason="test")
+    teach.answer(pg, qid, gtin="AAA", card="Karta A", by="sklad")
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/login")
+    page.fill("input[name=password]", "secret")
+    page.click("button[type=submit]")
+    page.wait_for_url(f"{live_server}/")
+    page.click("#tabAsk")
+    page.wait_for_selector("text=Naposledy naučené")
+
+    # Force the overlap the live box hit: a click (undo/teach) re-renders while the previous
+    # render's taught-list fetch is still in flight. Two renders back to back reproduces it
+    # deterministically, where a plain 6 s wait does not.
+    page.evaluate("loadAsk(); loadAsk();")
+    page.wait_for_timeout(1500)
+    assert page.get_by_text("Naposledy naučené").count() == 1, "the section rendered twice"
+    assert page.get_by_role("button", name="vrátiť").count() == 1
+    assert console == [], f"console must be clean: {console}"
