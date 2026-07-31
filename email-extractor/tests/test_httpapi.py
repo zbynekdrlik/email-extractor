@@ -184,8 +184,15 @@ def test_a_login_is_remembered_so_nobody_retypes_the_password():
 
 
 def test_the_dashboard_shows_the_warehouse_link_to_copy():
+    """Built from the address the OPERATOR is actually on — never from public_base_url.
+
+    That option is the MACHINE base (n8n fetches /files over the docker network), so on the
+    live box it is "http://e0ac7775-email-extractor:8099": a link no browser can open. Found
+    by verifying 0.9.9 on the live dashboard.
+    """
     from app import httpapi
-    _, c = _sklad_client(base="http://46.224.130.35:8099")
+    _, c = _sklad_client(base="http://e0ac7775-email-extractor:8099")
     c.post("/login", data={"password": "pw"})
-    body = c.get("/").data.decode()
+    body = c.get("/", base_url="http://46.224.130.35:8099").data.decode()
     assert "http://46.224.130.35:8099/sklad/" + httpapi.sklad_key("t") in body
+    assert "e0ac7775-email-extractor:8099/sklad/" not in body
