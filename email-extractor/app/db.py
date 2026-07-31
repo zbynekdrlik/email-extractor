@@ -372,6 +372,35 @@ SCHEMA = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_item_memory_lookup ON item_memory(customer_ean, item_key)",
+    # --- #88: the teach-once loop. A wording the engine cannot settle becomes ONE question
+    # with its candidate cards; the warehouse answers it with a click on the dashboard and the
+    # answer lands in item_memory(source='human'), which outranks every model rung. Measured:
+    # the whole tail is 15 (customer, wording) pairs, so this closes it. ---
+    """
+    CREATE TABLE IF NOT EXISTS order_questions (
+        id            BIGSERIAL PRIMARY KEY,
+        message_id    TEXT NOT NULL,
+        customer_ean  TEXT NOT NULL,
+        customer_name TEXT,
+        wording       TEXT NOT NULL,
+        item_key      TEXT NOT NULL,
+        quantity      NUMERIC,
+        unit          TEXT,
+        candidates    JSONB NOT NULL DEFAULT '[]'::jsonb,
+        delivery_date TEXT,
+        reason        TEXT,
+        status        TEXT NOT NULL DEFAULT 'open',
+        answer_gtin   TEXT,
+        answer_card   TEXT,
+        answered_by   TEXT,
+        answered_at   TIMESTAMPTZ,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    # One OPEN question per (customer, wording): the same nickname in ten emails is one
+    # question, and asking twice is the notification noise the user removed everywhere else.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_order_questions_open "
+    "ON order_questions(customer_ean, item_key) WHERE status = 'open'",
     # --- #64: ledger of documents actually uploaded to ORION. A duplicate upload creates
     # a duplicate order there and cannot be undone from our side (#51), so the identity
     # (customer, delivery date, content hash) may be claimed exactly once. ---

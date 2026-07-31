@@ -140,3 +140,116 @@ def test_a_thin_ordinary_history_still_does_not_skip_the_model(pg):
                     source="ship")
     recalled = memory.resolve(pg, EAN, "Pletenka")
     assert match.decide_without_model("Pletenka", CATALOG, recalled=recalled) is None
+
+
+# --- the pipeline asks, the dashboard answers ----------------------------
+
+def _dash(pg):
+    import os
+
+    from app.config import Config
+    from app.httpapi import create_app
+    cfg = Config(pg_dsn=os.environ["PG_TEST_DSN"], data_dir="/tmp", dash_password="pw",
+                 secret_key="t")
+    app = create_app(cfg)
+    app.testing = True
+    c = app.test_client()
+    c.post("/login", data={"password": "pw"})
+    return c
+
+
+def test_the_dashboard_lists_open_questions_and_teaches_on_one_click(pg):
+    qid = _ask(pg)
+    c = _dash(pg)
+    d = c.get("/api/orders/questions").get_json()
+    assert [q["wording"] for q in d["items"]] == ["Šiška"]
+
+    r = c.post(f"/api/orders/question/{qid}/answer",
+               json={"gtin": "SLI50", "card": "Šiška džemová 50g"})
+    assert r.status_code == 200 and r.get_json()["ok"] is True
+    assert c.get("/api/orders/questions").get_json()["items"] == []
+    assert memory.resolve(pg, EAN, "Šiška").gtin == "SLI50"
+
+
+def test_the_dashboard_refuses_a_card_that_was_not_offered(pg):
+    qid = _ask(pg)
+    r = _dash(pg).post(f"/api/orders/question/{qid}/answer",
+                       json={"gtin": "ROZ", "card": "Rožok štandart 50g"})
+    assert r.status_code == 400
+
+
+def test_an_unmatched_line_becomes_a_question_for_the_warehouse(pg):
+    """The measured tail: a nickname the catalog cannot resolve. It must not vanish into a
+    review message nobody can act on — it becomes one answerable question."""
+    from app.config import Config
+    from app.orders import pipeline, snapshot
+
+    sid = snapshot.import_snapshot(
+        pg, "GTIN,Sklad,Názov,doplnok\nSLI50,1,Šiška džemová 50g,\n",
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,E-mail\n"
+        f"Zákazník A,{EAN},Martin,U 1,,,sklad@a.sk\n")
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('mq', 'ai_orders')")
+    mail = {"message_id": "mq", "subject": "Objednávka", "from_addr": "sklad@a.sk",
+            "from_name": "A", "combined_text": "na 04.08.2026 prosím 30x jankove buchty",
+            "today": "2026-07-31"}
+
+    class Client:
+        last_prompt_hash = "p"
+
+        def json_call(self, system, user, schema, name="result"):
+            if name == "orders":
+                return {"senderName": "A", "senderEmail": "sklad@a.sk", "companyName": "",
+                        "isChangeRequest": False, "notes": "",
+                        "orders": [{"orderNumber": "", "deliveryDate": "04.08.2026",
+                                    "recipientGroup": "",
+                                    "items": [{"name": "jankove buchty", "quantity": 30,
+                                               "unit": "ks",
+                                               "sourceQuote": "30x jankove buchty"}]}]}
+            if name == "customer":
+                return {"ean_edi": EAN, "confidence": 0.99}
+            return {"gtin": "", "confidence": 0.2, "matchedCatalogName": "", "reason": "?"}
+
+    cfg = Config(pg_dsn="", data_dir="/tmp", orders_shadow=False, odoo_url="",
+                 orion_host="")
+    pipeline.run(pg, cfg, mail, sid, client=Client(),
+                 upload=lambda *a, **k: None, post=lambda *a, **k: None)
+
+    qs = teach.open_questions(pg)
+    assert [q["wording"] for q in qs] == ["jankove buchty"]
+    assert qs[0]["customer_ean"] == EAN
+    assert any(c["gtin"] == "SLI50" for c in qs[0]["candidates"]), "candidates are offered"
+
+
+def test_shadow_mode_asks_nobody(pg):
+    """Shadow's contract is that nothing leaves the process — and a question to a human
+    leaves it. n8n is still handling these emails."""
+    from app.config import Config
+    from app.orders import pipeline, snapshot
+
+    sid = snapshot.import_snapshot(
+        pg, "GTIN,Sklad,Názov,doplnok\nSLI50,1,Šiška džemová 50g,\n",
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,E-mail\n"
+        f"Zákazník A,{EAN},Martin,U 1,,,sklad@a.sk\n")
+    mail = {"message_id": "ms", "subject": "Objednávka", "from_addr": "sklad@a.sk",
+            "from_name": "A", "combined_text": "na 04.08.2026 prosím 30x jankove buchty",
+            "today": "2026-07-31"}
+
+    class Client:
+        last_prompt_hash = "p"
+
+        def json_call(self, system, user, schema, name="result"):
+            if name == "orders":
+                return {"senderName": "A", "senderEmail": "sklad@a.sk", "companyName": "",
+                        "isChangeRequest": False, "notes": "",
+                        "orders": [{"orderNumber": "", "deliveryDate": "04.08.2026",
+                                    "recipientGroup": "",
+                                    "items": [{"name": "jankove buchty", "quantity": 30,
+                                               "unit": "ks",
+                                               "sourceQuote": "30x jankove buchty"}]}]}
+            if name == "customer":
+                return {"ean_edi": EAN, "confidence": 0.99}
+            return {"gtin": "", "confidence": 0.2, "matchedCatalogName": "", "reason": "?"}
+
+    pipeline.run(pg, Config(pg_dsn="", data_dir="/tmp", orders_shadow=True), mail, sid,
+                 client=Client(), upload=lambda *a, **k: None, post=lambda *a, **k: None)
+    assert teach.open_questions(pg) == []
