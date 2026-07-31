@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -58,6 +59,25 @@ def _items_map(items) -> dict[str, float]:
     return {str(i.get("gtin")): float(i.get("quantity") or 0) for i in items or []}
 
 
+def _day(value) -> str:
+    """One canonical form for a delivery date.
+
+    The archive holds both `2026-07-01` and `01.07.2026` for the same delivery, depending on
+    which n8n node wrote it. Comparing the strings reported a missing order AND an extra
+    order for one and the same day.
+    """
+    text = str(value or "").strip()
+    iso = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})$", text)
+    dmy = re.match(r"^(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})$", text)
+    if iso:
+        y, mo, d = iso.groups()
+    elif dmy:
+        d, mo, y = dmy.groups()
+    else:
+        return text
+    return f"{int(d):02d}.{int(mo):02d}.{y}"
+
+
 def _compare_items(want: dict, got: dict, label: str, problems: list[str]) -> int:
     """Item-level comparison; `label` names the order the items belong to (or is empty)."""
     where = f" ({label})" if label else ""
@@ -87,14 +107,17 @@ def score(expected: dict, actual: dict) -> Score:
     """
     problems: list[str] = []
 
-    if str(expected.get("customer_ean") or "") != str(actual.get("customer_ean") or ""):
+    # Absent = not asserted. A must-review case cares that nothing SHIPS, not who the sender
+    # turned out to be; naming the customer and then refusing to ship is right.
+    if "customer_ean" in expected and (
+            str(expected.get("customer_ean") or "") != str(actual.get("customer_ean") or "")):
         problems.append(f"iný zákazník: čakáme {expected.get('customer_ean')!r}, "
                         f"dostali {actual.get('customer_ean')!r}")
 
     if expected.get("orders") is not None:
         return _score_per_order(expected, actual, problems)
 
-    if str(expected.get("delivery_date") or "") != str(actual.get("delivery_date") or ""):
+    if _day(expected.get("delivery_date")) != _day(actual.get("delivery_date")):
         problems.append(f"iný dátum dodania: čakáme {expected.get('delivery_date')!r}, "
                         f"dostali {actual.get('delivery_date')!r}")
 
@@ -118,8 +141,8 @@ def _score_per_order(expected: dict, actual: dict, problems: list[str]) -> Score
     date, an invented date, and a wrong item inside the SECOND order all are — exactly the
     failures a flattened comparison could not see.
     """
-    want_orders = {str(o.get("delivery_date") or ""): o for o in expected["orders"]}
-    got_orders = {str(o.get("delivery_date") or ""): o
+    want_orders = {_day(o.get("delivery_date")): o for o in expected["orders"]}
+    got_orders = {_day(o.get("delivery_date")): o
                   for o in actual.get("order_results") or []}
 
     hits = wanted = 0
