@@ -796,11 +796,16 @@ function setView(v){view=v;document.getElementById('tabMails').classList.toggle(
 function tick(){if(live&&document.getElementById('ov').style.display!=='flex'){
   if(view==='mails')loadList();else if(view==='imap')loadImap();
   else if(view==='ask')loadAsk();else loadFix()}}
+let askRender=0;
 async function loadAsk(){const L=document.getElementById('list');
+  // Every render gets a number. A fetch that comes back after a newer render started must not
+  // append to it, or the list doubles (seen live on 0.9.7).
+  const mine=++askRender;
   L.innerHTML='';let d;try{d=await api('/api/orders/questions')}catch(e){return}
+  if(mine!==askRender)return;
   if(!d.items.length){const e0=document.createElement('div');e0.className='empty';
     e0.textContent='Nič nečaká \u2014 automat si vie poradiť sám.';L.appendChild(e0);
-    return loadTaught()}   // nothing waiting is the NORMAL state: the undo must still be here
+    return loadTaught(mine)}   // nothing waiting is the NORMAL state: the undo must still be here
   for(const q of d.items){const el=document.createElement('div');el.className='row';
     const head=document.createElement('div');const b=document.createElement('b');
     b.textContent=q.wording;head.appendChild(b);
@@ -814,9 +819,10 @@ async function loadAsk(){const L=document.getElementById('list');
       bt.onclick=()=>teachIt(q.id,c.gtin,c.name||'');acts.appendChild(bt)}
     head.appendChild(who);head.appendChild(why);head.appendChild(acts);
     el.appendChild(head);L.appendChild(el)}
-  loadTaught()}
-async function loadTaught(){const L=document.getElementById('list');let d;
+  loadTaught(mine)}
+async function loadTaught(token){const L=document.getElementById('list');let d;
   try{d=await api('/api/orders/taught')}catch(e){return}
+  if(token!==askRender)return;              // a newer render owns the list now
   if(!d.items.length)return;
   const h=document.createElement('div');h.className='sub';h.style.padding='8px 10px';
   h.textContent='Naposledy naučené \u2014 keby bol klik omylom, dá sa vrátiť:';L.appendChild(h);
