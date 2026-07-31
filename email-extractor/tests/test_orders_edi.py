@@ -164,3 +164,12 @@ def test_a_genuinely_different_order_is_still_claimable(pg):
     ean, delivery = case["input"]["ean"], case["input"]["deliveryDate"]
     assert edi.claim_send(pg, ean, delivery, a.content, "a.txt") is True
     assert edi.claim_send(pg, ean, delivery, b.content, "b.txt") is True
+
+
+def test_the_ledger_blanks_exactly_the_document_date_field():
+    """Review finding: the hash blanks a fixed offset. Pin that the offset really is the
+    creation date, so a layout change cannot silently blank a different column."""
+    case = FIXTURE[0]
+    built = edi.build(**dict(case["input"], today="20991231"))
+    at, ln = edi.DOC_DATE_AT, edi.DOC_DATE_LEN
+    assert built.content[at:at + ln] == "20991231"
