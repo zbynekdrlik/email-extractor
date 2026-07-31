@@ -37,7 +37,30 @@ class LlmError(Exception):
     """The model call failed or returned something unusable."""
 
 
-def _http_transport(payload: dict, api_key: str, timeout: int) -> dict:
+# PRICES: per 1M tokens, developers.openai.com/api/docs/pricing (fetched 2026-07-31).
+# An unlisted model RAISES rather than being priced at zero: a silent 0 would make the
+# €30/month tripwire (#89) permanently green, which is worse than no tripwire at all.
+PRICES = {
+    "gpt-5.4": (2.50, 0.25, 15.00),
+    "gpt-5.4-mini": (0.75, 0.075, 4.50),
+    "gpt-5.5": (5.00, 0.50, 30.00),
+}
+
+
+def cost_usd(usage: dict | None, model: str = DEFAULT_MODEL) -> float:
+    """What one API answer cost, from the API's own token counts."""
+    if not usage:
+        return 0.0
+    if model not in PRICES:
+        raise LlmError(f"no price known for model {model} — add it to llm.PRICES")
+    p_in, p_cached, p_out = PRICES[model]
+    cached = int((usage.get("input_tokens_details") or {}).get("cached_tokens", 0) or 0)
+    fresh = max(0, int(usage.get("input_tokens", 0) or 0) - cached)
+    out = int(usage.get("output_tokens", 0) or 0)
+    return (fresh * p_in + cached * p_cached + out * p_out) / 1_000_000
+
+
+def _http_transport(payload: dict, api_key: str, timeout: int) -> tuple[dict, dict | None]:
     req = urllib.request.Request(
         API_URL, method="POST",
         data=json.dumps(payload).encode(),
@@ -49,7 +72,7 @@ def _http_transport(payload: dict, api_key: str, timeout: int) -> dict:
         raise LlmError(f"{e.code}: {e.read().decode()[:400]}") from e
     except Exception as e:
         raise LlmError(repr(e)) from e
-    return _parse_response(body)
+    return _parse_response(body), body.get("usage")
 
 
 def _parse_response(body: dict) -> dict:
@@ -83,6 +106,28 @@ class Client:
         self._transport = transport or _http_transport
         self.last_prompt_hash = ""
         self.last_cached = False
+        # The running bill for this client, so a run can persist what it cost (#89).
+        self._spend = {"calls": 0, "cached_calls": 0, "tokens_in": 0, "tokens_cached": 0,
+                       "tokens_out": 0, "tokens_reasoning": 0, "cost_usd": 0.0}
+
+    def spend(self) -> dict:
+        return dict(self._spend, model=self.model)
+
+    def _tally(self, usage: dict | None, cached: bool) -> None:
+        self._spend["calls"] += 1
+        if cached:
+            # A replayed answer is free — counted, so the deterministic tier's saving shows.
+            self._spend["cached_calls"] += 1
+            return
+        if not usage:
+            return
+        details_in = usage.get("input_tokens_details") or {}
+        details_out = usage.get("output_tokens_details") or {}
+        self._spend["tokens_in"] += int(usage.get("input_tokens", 0) or 0)
+        self._spend["tokens_cached"] += int(details_in.get("cached_tokens", 0) or 0)
+        self._spend["tokens_out"] += int(usage.get("output_tokens", 0) or 0)
+        self._spend["tokens_reasoning"] += int(details_out.get("reasoning_tokens", 0) or 0)
+        self._spend["cost_usd"] += cost_usd(usage, self.model)
 
     # --- cache -----------------------------------------------------------
 
@@ -105,6 +150,7 @@ class Client:
         path = self._cache_path(key)
         if path and path.exists():
             self.last_cached = True
+            self._tally(None, cached=True)
             return json.loads(path.read_text(encoding="utf-8"))
         if self.offline:
             raise CacheMiss(
@@ -121,8 +167,12 @@ class Client:
             "text": {"format": {"type": "json_schema", "name": name,
                                 "schema": schema, "strict": False}},
         }
-        result = self._transport(payload, self.api_key, self.timeout)
+        answer = self._transport(payload, self.api_key, self.timeout)
+        # A transport may report the token usage alongside the answer; the test doubles (and
+        # any older transport) return the answer alone, and then the run is simply unpriced.
+        result, usage = answer if isinstance(answer, tuple) else (answer, None)
         self.last_cached = False
+        self._tally(usage, cached=False)
         if path:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(result, ensure_ascii=False, indent=1),

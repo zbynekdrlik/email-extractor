@@ -16,7 +16,7 @@ import logging
 
 from psycopg.types.json import Json
 
-from . import snapshot
+from . import snapshot, spend
 
 log = logging.getLogger("orders.worker")
 
@@ -98,6 +98,8 @@ def _finish_run(conn, run_id: int, status: str, result: dict | None, error: str 
               SET status = %s, error = %s, result = %s, finished_at = now()
             WHERE id = %s""",
         (status, error or None, Json(result or {}), run_id))
+    if (result or {}).get("spend"):
+        spend.record(conn, run_id, result["spend"])
     for item in (result or {}).get("items", []):
         conn.execute(
             """INSERT INTO order_items
@@ -106,6 +108,29 @@ def _finish_run(conn, run_id: int, status: str, result: dict | None, error: str 
             (run_id, item.get("name", ""), item.get("quantity"), item.get("unit", ""),
              item.get("gtin"), item.get("card"), item.get("confidence"),
              item.get("rule"), Json(item.get("trace") or {})))
+
+
+def _check_spend_cap(conn, cfg, shadow: bool) -> None:
+    """One message the first time a month passes the cap — never a hard stop.
+
+    An unshipped order costs the business far more than the tokens, so this warns and keeps
+    working. In shadow mode it only logs: shadow's guarantee is that nothing leaves the
+    process, and money is not a reason to break it.
+    """
+    cap = float(getattr(cfg, "orders_spend_cap_eur", 30) or 0)
+    if cap <= 0:
+        return
+    try:
+        if not spend.cap_tripped(conn, cap_eur=cap):
+            return
+        text = spend.trip_message(conn, cap_eur=cap)
+        log.warning("%s", text.replace("\n", " | "))
+        if not shadow:
+            from . import report
+            report.post_from_config(cfg, "<p>" + text.replace("\n", "<br>") + "</p>")
+    except Exception:
+        # Reporting the bill must never take an order down with it.
+        log.exception("the spend-cap check failed")
 
 
 # --- one tick ------------------------------------------------------------
@@ -160,6 +185,7 @@ def tick(conn, cfg, pipeline=None) -> int:
         return 0
 
     _finish_run(conn, run_id, result.get("status", "ok"), result)
+    _check_spend_cap(conn, cfg, shadow=engine != "python")
     if engine == "python":
         conn.execute(
             """UPDATE messages

@@ -52,6 +52,8 @@ class Config:
     ai_orders_engine: str = "n8n"
     orders_shadow: bool = False
     orders_shadow_days: int = 3
+    # The monthly tripwire (#89): warn once past this, never stop shipping orders.
+    orders_spend_cap_eur: float = 30.0
     openai_api_key: str = ""
     orders_model: str = "gpt-5.4"
     orders_reasoning_effort: str = "high"
@@ -107,6 +109,8 @@ class Config:
                     "1", "true", "yes", "on"),
             orders_shadow_days=int(
                 _get(o, "orders_shadow_days", "ORDERS_SHADOW_DAYS", 3) or 3),
+            orders_spend_cap_eur=float(
+                _get(o, "orders_spend_cap_eur", "ORDERS_SPEND_CAP_EUR", 30) or 0),
             openai_api_key=_get(o, "openai_api_key", "OPENAI_API_KEY", "") or "",
             orders_model=_get(o, "orders_model", "ORDERS_MODEL", "gpt-5.4") or "gpt-5.4",
             orders_reasoning_effort=_get(o, "orders_reasoning_effort",

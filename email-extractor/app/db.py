@@ -320,6 +320,23 @@ SCHEMA = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_order_runs_message ON order_runs(message_id, shadow)",
+    # What the run cost (#89). Without these the €30/month tripwire cannot exist: the API's
+    # usage block was parsed and discarded, so spend was invisible.
+    "ALTER TABLE order_runs ADD COLUMN IF NOT EXISTS calls INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE order_runs ADD COLUMN IF NOT EXISTS cached_calls INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE order_runs ADD COLUMN IF NOT EXISTS tokens_in INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE order_runs ADD COLUMN IF NOT EXISTS tokens_cached INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE order_runs ADD COLUMN IF NOT EXISTS tokens_out INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE order_runs ADD COLUMN IF NOT EXISTS cost_usd NUMERIC(10,6) NOT NULL DEFAULT 0",
+    "ALTER TABLE order_runs ADD COLUMN IF NOT EXISTS model TEXT",
+    "CREATE INDEX IF NOT EXISTS idx_order_runs_month ON order_runs(started_at)",
+    """
+    CREATE TABLE IF NOT EXISTS order_spend_alerts (
+        month    TEXT PRIMARY KEY,
+        cost_eur NUMERIC(10,2),
+        sent_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
     """
     CREATE TABLE IF NOT EXISTS order_items (
         id         BIGSERIAL PRIMARY KEY,
