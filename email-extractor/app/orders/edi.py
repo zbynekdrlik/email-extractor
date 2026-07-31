@@ -178,8 +178,22 @@ def orion_path(name: str) -> str:
 
 # --- the ledger ----------------------------------------------------------
 
+DOC_DATE_AT = 3 + 13 + 2 + MAX_ORDER_NUMBER + 14     # the HDR's creation-date field
+DOC_DATE_LEN = 8
+
+
 def content_hash(content: str) -> str:
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+    """Hash the ORDER, not the paperwork.
+
+    The HDR carries the day the document was written, so the same order rebuilt after
+    midnight has different bytes. Hashing those bytes made the ledger blind to exactly the
+    retry it exists to stop (#51), so the creation date is blanked before hashing. Nothing
+    else is normalized: a different quantity, card or recipient still hashes differently.
+    """
+    normalized = (content[:DOC_DATE_AT]
+                  + " " * DOC_DATE_LEN
+                  + content[DOC_DATE_AT + DOC_DATE_LEN:])
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def claim_send(conn, customer_ean: str, delivery_date: str, content: str,

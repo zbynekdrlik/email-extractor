@@ -132,9 +132,10 @@ def test_the_document_date_is_injectable_so_parity_does_not_expire_overnight():
     built = edi.build(**dict(case["input"], today="20991231"))
     assert "20991231" in built.content
     assert "20260730" not in built.content
-    # and the default still tracks the real clock
+    # and with no date given it still tracks the real clock
     from datetime import UTC, datetime
-    assert datetime.now(UTC).strftime("%Y%m%d") in edi.build(**case["input"]).content
+    live = {k: v for k, v in case["input"].items() if k != "today"}
+    assert datetime.now(UTC).strftime("%Y%m%d") in edi.build(**live).content
 
 
 def test_the_ledger_recognizes_the_same_order_built_on_a_different_day(pg):
