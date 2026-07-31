@@ -470,3 +470,28 @@ def test_the_runner_can_dump_what_actually_happened(pg, tmp_path, monkeypatch):
     eval_run.main(["--manifest", str(manifest), "--dump", str(out)])
     dumped = json.loads(out.read_text(encoding="utf-8"))
     assert dumped[0]["case_id"] == "c1" and dumped[0]["passed"] is True
+
+
+def test_two_orders_for_the_same_delivery_date_is_a_failure():
+    """Two EDI files for one delivery date are two orders in ORION for one day. Keying the
+    result by date silently kept the last of them and reported a quantity mismatch instead of
+    the real defect."""
+    expected = {"orders": [{"delivery_date": "30.06.2026",
+                            "items": [{"gtin": "A", "quantity": 50}]}]}
+    actual = {"shipped": True, "order_results": [
+        {"delivery_date": "30.06.2026", "status": "ok", "items": [{"gtin": "A", "quantity": 40}]},
+        {"delivery_date": "30.06.2026", "status": "ok", "items": [{"gtin": "A", "quantity": 10}]}]}
+    s = evaluate.score(expected, actual)
+    assert s.passed is False
+    assert any("dvakrát" in p or "dve objednávky" in p for p in s.problems), s.problems
+
+
+def test_the_same_card_twice_in_one_order_is_counted_once_as_the_total():
+    """One card must reach ORION as ONE line. If it appears twice the quantities add up —
+    silently keeping the last one hid a lost quantity."""
+    expected = {"orders": [{"delivery_date": "30.06.2026",
+                            "items": [{"gtin": "A", "quantity": 50}]}]}
+    actual = {"shipped": True, "order_results": [
+        {"delivery_date": "30.06.2026", "status": "ok",
+         "items": [{"gtin": "A", "quantity": 40}, {"gtin": "A", "quantity": 10}]}]}
+    assert evaluate.score(expected, actual).passed is True
