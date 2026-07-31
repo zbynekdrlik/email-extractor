@@ -383,3 +383,16 @@ def test_an_email_address_inside_a_display_name_still_matches(pg):
     from app.orders import customer
     matched = customer.resolve(customers, "eva@example.sk", "", "")
     assert matched and matched.ean_edi == "2000000000861"
+
+
+def test_the_same_card_in_different_units_stays_two_lines(pg, env):
+    """Review finding: merging by card alone would add 2 kg to 3 ks and ship "5" of an
+    ambiguous unit. Only lines that agree on the unit may be added up."""
+    answers = _group_answers()
+    answers[0]["orders"][1]["items"][0]["unit"] = "kg"
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), GROUPS_MAIL, env, client=ScriptedClient(answers),
+                          upload=rec.upload, post=rec.post)
+    items = result["order_results"][0]["items"]
+    assert [(i["quantity"], i["unit"]) for i in items] == [(120, "ks"), (30, "kg")]
+    assert rec.uploads[0][1].count("LIN") == 2
