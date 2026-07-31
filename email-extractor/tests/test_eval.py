@@ -495,3 +495,31 @@ def test_the_same_card_twice_in_one_order_is_counted_once_as_the_total():
         {"delivery_date": "30.06.2026", "status": "ok",
          "items": [{"gtin": "A", "quantity": 40}, {"gtin": "A", "quantity": 10}]}]}
     assert evaluate.score(expected, actual).passed is True
+
+
+def test_a_case_marked_as_a_known_defect_is_reported_loudly_but_does_not_block(pg, tmp_path,
+                                                                              monkeypatch):
+    """Some corpus cases pin behaviour the engine does not have yet. Blocking every change on
+    them would make the gate useless for the other 26; hiding them would be worse. So they
+    are printed with their ticket and excluded from the hard gate — and NOTHING else is."""
+    from app.orders import eval_run
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"cases": [
+        {"id": "known", "type": "t", "known_defect": "#81.2",
+         "email": {"combined_text": "x"}, "expected": {"items": []}},
+        {"id": "other", "type": "t", "email": {"combined_text": "y"},
+         "expected": {"items": []}}]}), encoding="utf-8")
+    monkeypatch.setattr(evaluate, "run_corpus", lambda *a, **k: (
+        [evaluate.Result("known", "t", evaluate.Score(False, 0.0, ["zlá karta"])),
+         evaluate.Result("other", "t", evaluate.Score(True, 1.0, []))],
+        {"total": {"passed": 1, "cases": 2}, "by_type": {}}))
+    import os
+    monkeypatch.setenv("PG_DSN", os.environ["PG_TEST_DSN"])
+    assert eval_run.main(["--manifest", str(manifest), "--require-all"]) == 0
+
+    # and a NON-marked failure still blocks
+    monkeypatch.setattr(evaluate, "run_corpus", lambda *a, **k: (
+        [evaluate.Result("known", "t", evaluate.Score(False, 0.0, ["zlá karta"])),
+         evaluate.Result("other", "t", evaluate.Score(False, 0.0, ["zlý zákazník"]))],
+        {"total": {"passed": 0, "cases": 2}, "by_type": {}}))
+    assert eval_run.main(["--manifest", str(manifest), "--require-all"]) == 1
