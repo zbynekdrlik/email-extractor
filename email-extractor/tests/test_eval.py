@@ -434,3 +434,39 @@ def test_the_customer_is_compared_only_when_the_case_states_one():
     assert evaluate.score(expected, actual).passed is True
     # but a case that DOES name a customer still enforces it
     assert evaluate.score(dict(expected, customer_ean="2000000000001"), actual).passed is False
+
+
+def test_an_order_can_assert_how_many_item_lines_it_must_have():
+    """Which card each wording maps to is sometimes unprovable, but HOW MANY lines the email
+    asks for always is. One real email listed 15 items and n8n's EDI carried 1 — a
+    dates-only assertion would have called that a pass."""
+    expected = {"orders": [{"delivery_date": "21.07.2026", "item_count": 3}]}
+    ok = {"shipped": True, "order_results": [
+        {"delivery_date": "21.07.2026", "status": "ok", "items": [
+            {"gtin": "A", "quantity": 1}, {"gtin": "B", "quantity": 2},
+            {"gtin": "C", "quantity": 3}]}]}
+    assert evaluate.score(expected, ok).passed is True
+
+    short = {"shipped": True, "order_results": [
+        {"delivery_date": "21.07.2026", "status": "ok",
+         "items": [{"gtin": "A", "quantity": 1}]}]}
+    s = evaluate.score(expected, short)
+    assert s.passed is False
+    assert any("3" in p and "1" in p for p in s.problems)
+
+
+def test_the_runner_can_dump_what_actually_happened(pg, tmp_path, monkeypatch):
+    """Adjudicating a corpus means comparing expected against what the engine really
+    produced, so the run has to be able to hand that over."""
+    from app.orders import eval_run
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"cases": []}), encoding="utf-8")
+    out = tmp_path / "actuals.json"
+    monkeypatch.setattr(evaluate, "run_corpus", lambda *a, **k: (
+        [evaluate.Result("c1", "t", evaluate.Score(True, 1.0, []))],
+        {"total": {"passed": 1, "cases": 1}, "by_type": {}}))
+    import os
+    monkeypatch.setenv("PG_DSN", os.environ["PG_TEST_DSN"])
+    eval_run.main(["--manifest", str(manifest), "--dump", str(out)])
+    dumped = json.loads(out.read_text(encoding="utf-8"))
+    assert dumped[0]["case_id"] == "c1" and dumped[0]["passed"] is True
