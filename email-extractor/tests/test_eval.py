@@ -188,3 +188,63 @@ def test_the_manifest_shipped_with_the_repo_is_loadable_and_typed():
         assert case["id"] and case["type"]
         assert case["expected"]["items"] is not None
         assert json.dumps(case)      # serializable, no surprises
+
+
+# --- one email, several orders (#78) -------------------------------------
+
+MULTI = {
+    "customer_ean": "2000000000001",
+    "orders": [
+        {"delivery_date": "04.08.2026", "items": [{"gtin": "G50", "quantity": 120}]},
+        {"delivery_date": "05.08.2026", "items": [{"gtin": "VIA", "quantity": 7}]},
+    ],
+}
+
+
+def _multi_actual(orders=None):
+    return {"customer_ean": "2000000000001", "shipped": True,
+            "order_results": orders if orders is not None else [
+                {"delivery_date": "04.08.2026", "status": "ok",
+                 "items": [{"gtin": "G50", "quantity": 120}]},
+                {"delivery_date": "05.08.2026", "status": "ok",
+                 "items": [{"gtin": "VIA", "quantity": 7}]}]}
+
+
+def test_a_multi_order_email_is_scored_per_delivery_date():
+    assert evaluate.score(MULTI, _multi_actual()).passed is True
+
+
+def test_order_sequence_is_not_a_difference():
+    """The model may emit the dates in either order; only their content matters."""
+    reversed_orders = list(reversed(_multi_actual()["order_results"]))
+    assert evaluate.score(MULTI, _multi_actual(reversed_orders)).passed is True
+
+
+def test_a_dropped_second_order_fails_and_names_the_date():
+    """The failure the flattened result used to hide completely."""
+    only_first = _multi_actual()["order_results"][:1]
+    s = evaluate.score(MULTI, _multi_actual(only_first))
+    assert s.passed is False
+    assert any("05.08.2026" in p for p in s.problems)
+
+
+def test_a_wrong_item_inside_the_second_order_fails():
+    orders = _multi_actual()["order_results"]
+    orders[1] = dict(orders[1], items=[{"gtin": "G70", "quantity": 7}])
+    s = evaluate.score(MULTI, _multi_actual(orders))
+    assert s.passed is False
+    assert any("05.08.2026" in p and ("G70" in p or "VIA" in p) for p in s.problems)
+
+
+def test_an_invented_extra_delivery_date_fails():
+    orders = _multi_actual()["order_results"] + [
+        {"delivery_date": "06.08.2026", "status": "ok",
+         "items": [{"gtin": "G50", "quantity": 1}]}]
+    s = evaluate.score(MULTI, _multi_actual(orders))
+    assert s.passed is False
+    assert any("06.08.2026" in p for p in s.problems)
+
+
+def test_the_single_order_shape_still_works():
+    """The old flat shape stays valid — most emails are one order."""
+    assert evaluate.score(EXPECTED, _actual()).passed is True
