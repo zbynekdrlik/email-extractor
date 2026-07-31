@@ -58,7 +58,12 @@ class Result:
 
 
 def _items_map(items) -> dict[str, float]:
-    return {str(i.get("gtin")): float(i.get("quantity") or 0) for i in items or []}
+    """Cards to total quantity. The same card twice ADDS UP — one card is one ORION line, so
+    keeping only the last occurrence hid a lost quantity."""
+    out: dict[str, float] = {}
+    for i in items or []:
+        out[str(i.get("gtin"))] = out.get(str(i.get("gtin")), 0.0) + float(i.get("quantity") or 0)
+    return out
 
 
 def _day(value) -> str:
@@ -144,8 +149,17 @@ def _score_per_order(expected: dict, actual: dict, problems: list[str]) -> Score
     failures a flattened comparison could not see.
     """
     want_orders = {_day(o.get("delivery_date")): o for o in expected["orders"]}
-    got_orders = {_day(o.get("delivery_date")): o
-                  for o in actual.get("order_results") or []}
+    got_orders: dict[str, dict] = {}
+    for o in actual.get("order_results") or []:
+        day = _day(o.get("delivery_date"))
+        if day in got_orders:
+            # Two EDI files for one delivery date are two orders in ORION for one day.
+            problems.append(f"objednávka na {day} vznikla dvakrát — v ORIONe by to boli "
+                            f"dva doklady na jeden deň")
+            got_orders[day] = {**o, "items": (got_orders[day].get("items") or [])
+                               + (o.get("items") or [])}
+            continue
+        got_orders[day] = o
 
     hits = wanted = 0
     for date, order in want_orders.items():
