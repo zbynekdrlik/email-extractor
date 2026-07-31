@@ -53,6 +53,8 @@ class Result:
     case_id: str
     type: str
     score: Score
+    # what the engine actually produced — the corpus cannot be adjudicated without it
+    actual: dict | None = None
 
 
 def _items_map(items) -> dict[str, float]:
@@ -150,6 +152,13 @@ def _score_per_order(expected: dict, actual: dict, problems: list[str]) -> Score
         if date not in got_orders:
             problems.append(f"chýba celá objednávka na {date}")
             continue
+        if "item_count" in order:
+            # Which card a wording maps to is sometimes unprovable; how many lines the email
+            # asks for always is. One real email listed 15 items and n8n's EDI carried 1.
+            got_n = len(got_orders[date].get("items") or [])
+            if got_n != int(order["item_count"]):
+                problems.append(f"iný počet položiek ({date}): "
+                                f"čakáme {int(order['item_count'])}, dostali {got_n}")
         if "items" not in order:
             # The author could not prove this order's items (a weekly order whose per-item
             # ground truth is gone). Asserting guessed GTINs would lock a wrong answer into
@@ -235,7 +244,7 @@ def run_case(conn, cfg, case: dict, snapshot_id: int, client=None) -> Result:
                        upload=_refuse_upload, post=_refuse_post)
     actual = _actual_from_run(run)
     return Result(case_id=case["id"], type=case.get("type", "?"),
-                  score=score(case["expected"], actual))
+                  score=score(case["expected"], actual), actual=actual)
 
 
 def _inert(cfg):

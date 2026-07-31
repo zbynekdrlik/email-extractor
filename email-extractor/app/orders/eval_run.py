@@ -31,6 +31,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--customers", default="", help="frozen customer CSV to import first")
     ap.add_argument("--require-all", action="store_true",
                     help="fail unless EVERY case passes, not just on a regression")
+    ap.add_argument("--dump", default="",
+                    help="write per-case results here, for adjudicating the corpus")
     args = ap.parse_args(argv)
 
     cfg = config.Config.load()
@@ -48,6 +50,14 @@ def main(argv: list[str] | None = None) -> int:
     for r in results:
         if not r.score.passed:
             print(f"FAIL {r.case_id} ({r.type}): {'; '.join(r.score.problems)}")
+
+    if args.dump:
+        Path(args.dump).write_text(json.dumps(
+            [{"case_id": r.case_id, "type": r.type, "passed": r.score.passed,
+              "item_recall": r.score.item_recall, "problems": r.score.problems,
+              "actual": getattr(r, "actual", None)} for r in results],
+            ensure_ascii=False, indent=1), encoding="utf-8")
+        print(f"actuals written: {args.dump}")
 
     baseline_path = Path(args.baseline) if args.baseline else None
     baseline = {}
