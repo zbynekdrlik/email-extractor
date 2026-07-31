@@ -119,6 +119,7 @@ def run(conn, cfg, message: dict, snapshot_id: int, client=None, upload=None,
                                extracted.get("senderName", ""),
                                extracted.get("companyName", ""), llm=cust_answer)
 
+    orders = _merge_by_day(orders)
     all_items: list[dict] = []
     statuses: list[str] = []
     previews: list[dict] = []
@@ -140,7 +141,7 @@ def run(conn, cfg, message: dict, snapshot_id: int, client=None, upload=None,
             decision.quantity = item.get("quantity")
             decision.unit = item.get("unit", "ks")
             decisions.append(decision)
-        decisions = match.apply_siblings(decisions)
+        decisions = match.merge_same_card(match.apply_siblings(decisions))
         all_items.extend(_decision_dict(d) for d in decisions)
         status, preview = _ship_one(conn, cfg, message, order, matched, decisions,
                                     extracted, shadow, upload, post)
@@ -179,6 +180,27 @@ def run(conn, cfg, message: dict, snapshot_id: int, client=None, upload=None,
             out.update(preview)
             break
     return out
+
+
+def _merge_by_day(orders: list[dict]) -> list[dict]:
+    """One delivery date is ONE order.
+
+    A mail saying "40 ks for patients and 10 ks for staff" comes back as one order per
+    recipient group with the SAME delivery date. Shipping those separately wrote two EDI files
+    for one day — two orders in ORION — and the warehouse got 40 or 10, never 50 (#81.1). A
+    recipient group is a note on the order, not a separate order.
+    """
+    merged: dict[tuple, dict] = {}
+    for order in orders:
+        key = (str(order.get("deliveryDate") or ""), str(order.get("orderNumber") or ""))
+        if key not in merged:
+            merged[key] = dict(order, items=list(order.get("items") or []))
+            continue
+        into = merged[key]
+        into["items"].extend(order.get("items") or [])
+        groups = [g for g in (into.get("recipientGroup"), order.get("recipientGroup")) if g]
+        into["recipientGroup"] = ", ".join(dict.fromkeys(groups))
+    return list(merged.values())
 
 
 def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,

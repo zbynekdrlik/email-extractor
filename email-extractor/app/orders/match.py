@@ -316,3 +316,30 @@ def apply_siblings(decisions: list[Decision]) -> list[Decision]:
                             quantity=d.quantity, unit=d.unit))
         log.info("sibling rescue: %r -> %s", d.item_name, twin.gtin)
     return out
+
+
+def merge_same_card(decisions: list[Decision]) -> list[Decision]:
+    """One card is ONE order line: repeated cards add up.
+
+    Two recipient groups, or two wordings that resolve to the same card, used to produce two
+    LIN lines for one GTIN — a double order line in ORION and, when a reader keeps only one
+    of them, a lost quantity (#81.1). Unmatched items are left alone: they are reported by
+    name, and different unmatched wordings are different problems.
+    """
+    out: list[Decision] = []
+    by_gtin: dict[str, Decision] = {}
+    for d in decisions:
+        if not d.gtin:
+            out.append(d)
+            continue
+        first = by_gtin.get(d.gtin)
+        if first is None:
+            by_gtin[d.gtin] = d
+            out.append(d)
+            continue
+        first.quantity = (first.quantity or 0) + (d.quantity or 0)
+        if d.item_name and d.item_name != first.item_name:
+            first.item_name = f"{first.item_name} + {d.item_name}"
+        first.trace = {**(first.trace or {}), "merged_with": d.item_name,
+                       "merged_rule": d.rule}
+    return out
