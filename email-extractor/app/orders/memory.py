@@ -140,3 +140,28 @@ def import_n8n_rows(conn, rows: list[dict]) -> int:
             stored += 1
     log.info("item memory: imported %d of %d n8n rows", stored, len(rows))
     return stored
+
+
+def seed_from_archive(conn, orders: list[dict]) -> int:
+    """Seed the delivery history from orders we really shipped.
+
+    The history inherited from n8n's Data Table covered 11 customers and 123 lines, so for
+    almost every customer there was nothing to remember and each unweighted wording ("Chlieb
+    pšenično ražný", "Šiška") was decided by a guess instead of by what the warehouse has
+    always delivered (#81.2). Each entry is `{customer_ean, delivered_on, items:[{name, card,
+    gtin}]}`; a line without a card teaches nothing and is skipped. Idempotent, like every
+    other write here.
+    """
+    added = 0
+    for order in orders:
+        ean = str(order.get("customer_ean") or "")
+        day = str(order.get("delivered_on") or "")
+        if not (ean and day):
+            continue
+        for item in order.get("items") or []:
+            if not (item.get("gtin") and item.get("card")):
+                continue
+            if remember(conn, ean, item.get("name") or item["card"], item["gtin"],
+                        item["card"], delivered_on=day, source="archive"):
+                added += 1
+    return added
