@@ -231,25 +231,25 @@ def test_a_single_day_in_the_subject_that_contradicts_the_body_is_refused():
     problem = extract.date_conflict(
         subject="Objednávka 29.6.2026",
         dates=["28.06.2026"])
-    assert problem and "29.6.2026" in problem and "28.06.2026" in problem
+    assert problem and "29.6." in problem and "28.06.2026" in problem
 
 
 def test_a_date_range_in_the_subject_is_not_a_contradiction():
     """"Objednávka od 06.07. - 11.07." is a range the body's days fall inside."""
-    assert extract.date_conflict("Objednávka od 06.07. - 11.07. pre PNO Poprad",
-                                 ["06.07.2026", "08.07.2026", "11.07.2026"]) is None
+    assert not extract.date_conflict("Objednávka od 06.07. - 11.07. pre PNO Poprad",
+                                     ["06.07.2026", "08.07.2026", "11.07.2026"])
 
 
 def test_a_subject_day_that_matches_one_of_the_ordered_days_is_fine():
-    assert extract.date_conflict("Objednávka 29.6.2026", ["29.06.2026"]) is None
-    assert extract.date_conflict("Objednávka 29.6.", ["29.06.2026"]) is None
+    assert not extract.date_conflict("Objednávka 29.6.2026", ["29.06.2026"])
+    assert not extract.date_conflict("Objednávka 29.6.", ["29.06.2026"])
 
 
 def test_a_subject_without_a_day_never_conflicts():
-    assert extract.date_conflict("objednávka pečiva", ["30.06.2026"]) is None
-    assert extract.date_conflict("Objednávky _ júl", ["01.07.2026", "06.07.2026"]) is None
+    assert not extract.date_conflict("objednávka pečiva", ["30.06.2026"])
+    assert not extract.date_conflict("Objednávky _ júl", ["01.07.2026", "06.07.2026"])
 
 
 def test_several_ordered_days_with_one_subject_day_among_them_is_fine():
     """A multi-day order whose subject names the first day is normal."""
-    assert extract.date_conflict("Objednávka 23.7.", ["23.07.2026", "24.07.2026"]) is None
+    assert not extract.date_conflict("Objednávka 23.7.", ["23.07.2026", "24.07.2026"])

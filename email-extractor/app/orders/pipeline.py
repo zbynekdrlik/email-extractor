@@ -119,6 +119,13 @@ def run(conn, cfg, message: dict, snapshot_id: int, client=None, upload=None,
                                extracted.get("companyName", ""), llm=cust_answer)
 
     orders = _merge_by_day(orders)
+    conflict = extract.date_conflict(message.get("subject", ""),
+                                     [o.get("deliveryDate", "") for o in orders])
+    if conflict:
+        return _finish(conn, cfg, message, shadow, post, status="review",
+                       items=[], result={"shipped": False, "reject_reason": conflict,
+                                         "customer": {}, "unverified": [],
+                                         "notes": extracted.get("notes", "")})
     all_items: list[dict] = []
     statuses: list[str] = []
     previews: list[dict] = []
