@@ -298,3 +298,28 @@ def test_an_email_that_must_not_produce_an_order_fails_if_it_produces_one():
     assert s.passed is False
     assert any("03.08.2026" in p for p in s.problems)
     assert any("kontrol" in p.lower() for p in s.problems)
+
+
+# --- the gate command itself ----------------------------------------------
+
+def test_the_gate_command_imports_the_frozen_snapshot_and_runs_offline(
+        pg, tmp_path, monkeypatch):
+    """`eval_run --catalog --customers --manifest` is the whole CI gate. It must work with
+    no add-on options file, no live sheet and no network."""
+    from app.orders import eval_run
+    cat = tmp_path / "catalog.csv"
+    cat.write_text("GTIN,Sklad,Názov,doplnok\nG50,1,Rožok štandart 50g,\n", encoding="utf-8")
+    cust = tmp_path / "customers.csv"
+    cust.write_text(
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,E-mail\n"
+        "Pekáreň s.r.o.,2000000000864,Martin,Košútka 1,,,sklad@pekaren.sk\n",
+        encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"cases": []}), encoding="utf-8")
+
+    import os
+    monkeypatch.setenv("PG_DSN", os.environ["PG_TEST_DSN"])
+    monkeypatch.setenv("LLM_CACHE_DIR", str(tmp_path / "cache"))
+    code = eval_run.main(["--manifest", str(manifest), "--catalog", str(cat),
+                          "--customers", str(cust)])
+    assert code == 0

@@ -105,3 +105,27 @@ def test_sheet_csv_url_targets_the_configured_document_and_tab():
     url = snapshot.sheet_csv_url("DOC123", 957145124)
     assert url == ("https://docs.google.com/spreadsheets/d/DOC123/export"
                    "?format=csv&gid=957145124")
+
+
+# --- the frozen snapshot the CI gate replays against ----------------------
+
+def test_a_snapshot_can_be_imported_from_frozen_files(pg, tmp_path):
+    """The golden corpus pins the catalog it was written against. Re-fetching the live
+    sheet in CI would silently invalidate every expected GTIN, so the gate imports FILES."""
+    cat = tmp_path / "catalog.csv"
+    cat.write_text("GTIN,Sklad,Názov,doplnok\n8588001800013,1,Rožok štandart 50g,\n",
+                   encoding="utf-8")
+    cust = tmp_path / "customers.csv"
+    cust.write_text(
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,E-mail\n"
+        "Pekáreň s.r.o.,2000000000864,Martin,Košútka 1,,,sklad@pekaren.sk\n",
+        encoding="utf-8")
+
+    sid = snapshot.import_files(pg, str(cat), str(cust))
+    assert sid == snapshot.latest_snapshot_id(pg)
+    assert pg.execute("SELECT count(*) FROM catalog_snapshot WHERE snapshot_id = %s",
+                      (sid,)).fetchone()[0] == 1
+    assert pg.execute("SELECT count(*) FROM customer_snapshot WHERE snapshot_id = %s",
+                      (sid,)).fetchone()[0] == 1
+    # unchanged content reuses the snapshot instead of piling up copies
+    assert snapshot.import_files(pg, str(cat), str(cust)) == sid
