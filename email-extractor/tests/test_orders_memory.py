@@ -114,8 +114,9 @@ def test_history_only_counts_deliveries_before_the_email(pg):
     assert as_of and as_of.gtin == "OLD", "only what was delivered BEFORE 24.07. may decide"
     assert as_of.strength == 3
 
-    everything = memory.resolve(pg, "200", "chlieb pšenično ražný")
-    assert everything and everything.strength == 4, "unfiltered still sees all of it"
+    # Unfiltered, the later contradicting delivery makes the history ambiguous — which is
+    # exactly why an order must be judged against the history as it stood at the time.
+    assert memory.resolve(pg, "200", "chlieb pšenično ražný") is None
 
 
 def test_a_history_with_nothing_before_the_email_decides_nothing(pg):

@@ -74,11 +74,16 @@ def remember(conn, customer_ean: str, item: str, gtin: str, card: str,
     return row is not None
 
 
-def resolve(conn, customer_ean: str, item: str) -> Recalled | None:
+def resolve(conn, customer_ean: str, item: str, as_of: str = "") -> Recalled | None:
     """What we shipped for this wording, or None when the history does not speak clearly.
 
     Silence is a valid answer: an item with no clear history goes to the warehouse for
     checking instead of being guessed at.
+
+    `as_of` (the day the email arrived) restricts the history to deliveries BEFORE it. That
+    is right in production — a delivery booked for next week cannot decide today's order —
+    and it is what keeps the golden corpus honest, since history seeded from the archive
+    would otherwise contain the very order being scored.
     """
     key = item_key(item)
     if not (customer_ean and key):
@@ -90,8 +95,9 @@ def resolve(conn, customer_ean: str, item: str) -> Recalled | None:
                   max(delivered_on)            AS last_day
              FROM item_memory
             WHERE customer_ean = %s AND item_key = %s
+              AND (%s::date IS NULL OR delivered_on < %s::date)
             GROUP BY gtin""",
-        (str(customer_ean), key)).fetchall()
+        (str(customer_ean), key, as_of or None, as_of or None)).fetchall()
     if not rows:
         return None
 

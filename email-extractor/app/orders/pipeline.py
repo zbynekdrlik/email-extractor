@@ -126,7 +126,9 @@ def run(conn, cfg, message: dict, snapshot_id: int, client=None, upload=None,
     for order in orders:
         decisions = []
         for item in order.get("items") or []:
-            recalled = memory.resolve(conn, matched.ean_edi, item["name"]) if matched else None
+            recalled = (memory.resolve(conn, matched.ean_edi, item["name"],
+                                       as_of=str(message.get("today") or ""))
+                        if matched else None)
             item_cands = match.candidates(item["name"], catalog,
                                           customer_name=matched.name if matched else "",
                                           memory_gtin=recalled.gtin if recalled else "")
