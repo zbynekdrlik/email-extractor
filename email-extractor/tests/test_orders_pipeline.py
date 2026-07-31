@@ -352,3 +352,34 @@ def test_two_different_delivery_dates_still_stay_two_orders(pg, env):
                           upload=rec.upload, post=rec.post)
     assert len(rec.uploads) == 2
     assert [o["delivery_date"] for o in result["order_results"]] == ["04.08.2026", "05.08.2026"]
+
+
+# --- who sent it: the envelope wins (#81.3) -------------------------------
+
+def test_the_real_sender_decides_even_when_the_model_quotes_our_own_address(pg, env):
+    """A reply quotes our own text, so the model reported `predaj@slovnormal.sk` as the
+    sender and the customer went unresolved — the whole order was parked. The envelope
+    address is who actually sent the mail; the model's reading is only a fallback."""
+    answers = _answers()
+    answers[0]["senderEmail"] = "predaj@slovnormal.sk"     # quoted, not the real sender
+    answers[0]["senderName"] = "Predaj - Slovnormal"
+    answers[0]["companyName"] = ""
+    answers[1] = {"ean_edi": "", "confidence": 0.0}        # model finds no customer
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), MAIL, env, client=ScriptedClient(answers),
+                          upload=rec.upload, post=rec.post)
+    assert result["customer_ean"] == "2000000000001", result.get("customer_rule")
+    assert len(rec.uploads) == 1
+
+
+def test_an_email_address_inside_a_display_name_still_matches(pg):
+    """The customer sheet holds `Eva Kozakova <eva@example.sk>` in the e-mail cell."""
+    from app.orders import snapshot
+    sid = snapshot.import_snapshot(
+        pg, CATALOG_CSV,
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,E-mail\n"
+        "Potraviny Žilina,2000000000861,Žilina,Na bráne 4,,,Eva Kozakova <eva@example.sk>\n")
+    customers = snapshot.load_customers(pg, sid)
+    from app.orders import customer
+    matched = customer.resolve(customers, "eva@example.sk", "", "")
+    assert matched and matched.ean_edi == "2000000000861"
