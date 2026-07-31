@@ -136,16 +136,22 @@ def run(conn, cfg, message: dict, snapshot_id: int, client=None, upload=None,
             recalled = (memory.resolve(conn, matched.ean_edi, item["name"],
                                        as_of=str(message.get("today") or ""))
                         if matched else None)
-            item_cands = match.candidates(item["name"], catalog,
-                                          customer_name=matched.name if matched else "",
-                                          memory_gtin=recalled.gtin if recalled else "")
-            answer = client.json_call(
-                _prompt("match_product.md"),
-                _product_input(item, item_cands, matched.name if matched else "", recalled),
-                PRODUCT_SCHEMA, name="product")
-            decision = match.decide(item_name=item["name"], llm=answer, catalog=catalog,
-                                    recalled=recalled,
-                                    customer_name=matched.name if matched else "")
+            # The wording may already BE a card, an alias, or an unanimous history — then
+            # the answer is certain and asking the model is paid-for redundancy (#86).
+            decision = match.decide_without_model(item["name"], catalog, recalled=recalled)
+            if decision is None:
+                item_cands = match.candidates(
+                    item["name"], catalog,
+                    customer_name=matched.name if matched else "",
+                    memory_gtin=recalled.gtin if recalled else "")
+                answer = client.json_call(
+                    _prompt("match_product.md"),
+                    _product_input(item, item_cands, matched.name if matched else "",
+                                   recalled),
+                    PRODUCT_SCHEMA, name="product")
+                decision = match.decide(item_name=item["name"], llm=answer, catalog=catalog,
+                                        recalled=recalled,
+                                        customer_name=matched.name if matched else "")
             decision.quantity = item.get("quantity")
             decision.unit = item.get("unit", "ks")
             decisions.append(decision)

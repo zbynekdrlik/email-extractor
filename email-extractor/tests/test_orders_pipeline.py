@@ -279,6 +279,9 @@ def test_each_order_of_a_multi_date_email_is_reported_separately(pg, env):
 
 def test_a_multi_date_email_where_one_order_fails_reports_per_order_status(pg, env):
     answers = _two_order_answers()
+    # The wording must be one the model actually decides: "vianočka 400g" IS a catalog card,
+    # so since #86 it is answered for free and a scripted model failure never reaches it.
+    answers[0]["orders"][1]["items"][0]["name"] = "vianočka veľká sviatočná"
     answers[3] = {"gtin": "NO_MATCH", "confidence": 0.1, "matchedCatalogName": "",
                   "reason": "nič sa nezhoduje"}
     rec = Recorder()

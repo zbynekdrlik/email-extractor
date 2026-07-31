@@ -6,8 +6,12 @@ order type, break five others". Here they are an ordered list with declared over
 each decision carries the rule that fired and its inputs, and `tests/test_orders_match.py`
 pins both the rungs and the pairs whose precedence matters.
 
-The ladder, highest first:
+The ladder, highest first. The first three rungs need NO model call at all
+(`decide_without_model`, #86) — the model is only paid for from rung 1 down:
 
+  0 catalog_name      the wording IS a catalog card name (unique)
+  0 alias_exact       the wording IS one of a card's alias parts (unique)
+  0 history_sure      unanimous delivery history, 3+ days, weights agree
   1 alias_exact_weight  alias IS the customer's wording AND states a weight -> beats weight guard
   2 history_weight      unanimous history, 3+ delivery days                 -> beats weight guard
   3 alias_customer      the card's alias names the ordering customer        -> beats the gate
@@ -146,6 +150,55 @@ def _score(item_name: str, card: dict, customer_toks: list[str], memory_gtin: st
     return score
 
 
+def alias_parts(card: dict) -> list[str]:
+    """The alias column is a comma/semicolon list of customer wordings for this card."""
+    return [p.strip() for p in re.split(r"[,;/]+", _fold(card.get("alias", "") or ""))
+            if len(p.strip()) >= 4]
+
+
+def decide_without_model(item_name: str, catalog: list[dict], recalled=None) -> Decision | None:
+    """The rungs that need no model call — or None when the line genuinely needs one (#86).
+
+    89 % of the engine's model spend is one call per ordered line, and it was made
+    unconditionally: the model was asked even when the wording IS a catalog card. Measured on
+    the 30-email corpus (2026-07-31), 115 of 473 lines are answerable here, and in **115 of
+    115** the answer was the same card the model-driven ladder shipped. So this is not a
+    cheaper guess — it is the same answer, unpaid for.
+
+    Certainty is the bar, not likeness: a unique exact hit, or an unanimous history of 3+
+    delivery days (the ladder's own bar), and the stated weights must agree. Anything short
+    of that returns None and the full ladder runs.
+    """
+    ordered_w = weight_grams(item_name)
+    want = _fold(item_name)
+
+    def _ok(card_name: str) -> bool:
+        return not _weights_disagree(ordered_w, weight_grams(card_name))
+
+    def _done(rule: str, gtin, card: str, note: str) -> Decision:
+        return Decision(item_name=item_name, gtin=str(gtin), card=card, confidence=1.0,
+                        rule=rule, note=note, review=False,
+                        trace={"rule": rule, "llm": None, "free": True})
+
+    by_name = [c for c in catalog if _fold(c.get("name", "")) == want]
+    if len(by_name) == 1 and _ok(by_name[0].get("name", "")):
+        return _done("catalog_name", by_name[0]["gtin"], by_name[0]["name"],
+                     "Znenie objednávky je presne názov karty v katalógu.")
+
+    by_alias = [c for c in catalog if want in alias_parts(c)]
+    if len(by_alias) == 1 and _ok(by_alias[0].get("name", "")):
+        return _done("alias_exact", by_alias[0]["gtin"], by_alias[0]["name"],
+                     f"Znenie objednávky je presne alias karty („{item_name}“) — "
+                     "ľudské priradenie zo skladu.")
+
+    # The history bar is the ladder's own: unanimous AND 3+ distinct delivery days.
+    if recalled and recalled.unanimous and recalled.strength >= 3 and _ok(recalled.card):
+        return _done("history_sure", recalled.gtin, recalled.card,
+                     f"Potvrdené jednohlasnou históriou dodávok ({recalled.note}) — "
+                     f"tomuto zákazníkovi sme pre „{item_name}“ dodávali vždy tú istú kartu.")
+    return None
+
+
 def candidates(item_name: str, catalog: list[dict], customer_name: str = "",
                memory_gtin: str = "", limit: int = CANDIDATES) -> list[dict]:
     toks = customer_tokens(customer_name)
@@ -204,8 +257,7 @@ def decide(item_name: str, llm: dict, catalog: list[dict], recalled=None,
 
     cust_toks = customer_tokens(customer_name)
     alias = _fold((llm_card or {}).get("alias", ""))
-    alias_parts = [p.strip() for p in re.split(r"[,;/]+", alias) if len(p.strip()) >= 4]
-    matched_parts = [p for p in alias_parts if p in _fold(item_name)]
+    matched_parts = [p for p in alias_parts(llm_card or {}) if p in _fold(item_name)]
     alias_exact_weight = any(re.search(r"\d+(?:[.,]\d+)?\s*(kg|g|gr)\b", p, re.I)
                              for p in matched_parts)
     alias_names_customer = bool(alias) and any(t in alias for t in cust_toks)
