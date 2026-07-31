@@ -353,3 +353,27 @@ def test_require_all_refuses_to_pass_on_an_empty_corpus(pg, tmp_path, monkeypatc
     monkeypatch.setattr(evaluate, "run_corpus", lambda *a, **k: (
         [], {"total": {"passed": 0, "cases": 0}, "by_type": {}}))
     assert eval_run.main(["--manifest", str(manifest), "--require-all"]) == 1
+
+
+def test_an_order_stopped_at_review_does_not_count_as_a_produced_order():
+    """`orders: []` in a case means "nothing may be SENT". The pipeline still extracts and
+    reports an order it refuses to ship, so scoring the raw per-order list would fail every
+    must-review case for producing exactly what it was supposed to produce: nothing sent."""
+    run = {"status": "review", "customer_ean": "2000000000001", "items": [],
+           "order_results": [{"delivery_date": "04.08.2026", "status": "review",
+                              "items": [{"gtin": "G50", "quantity": 10}]}]}
+    actual = evaluate._actual_from_run(run)
+    assert actual["order_results"] == []
+    assert actual["shipped"] is False
+    expected = {"customer_ean": "2000000000001", "orders": [], "should_review": True}
+    assert evaluate.score(expected, actual).passed is True
+
+
+def test_a_partially_shipped_order_still_counts():
+    run = {"status": "partial", "customer_ean": "X", "items": [],
+           "order_results": [{"delivery_date": "04.08.2026", "status": "partial",
+                              "items": [{"gtin": "G50", "quantity": 10}]},
+                             {"delivery_date": "05.08.2026", "status": "review",
+                              "items": [{"gtin": "VIA", "quantity": 1}]}]}
+    actual = evaluate._actual_from_run(run)
+    assert [o["delivery_date"] for o in actual["order_results"]] == ["04.08.2026"]
