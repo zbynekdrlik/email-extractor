@@ -55,7 +55,7 @@ def deterministic_share(conn, month: str = "") -> dict:
         """SELECT count(*) FILTER (WHERE i.rule = ANY(%s)), count(*)
               FROM order_items i JOIN order_runs r ON r.id = i.run_id
              WHERE to_char(coalesce(r.finished_at, r.started_at), 'YYYY-MM')
-                   = coalesce(nullif(%s, ''), to_char(now(), 'YYYY-MM'))""",  # noqa: S608
+                   = coalesce(nullif(%s, ''), to_char(now(), 'YYYY-MM'))""",
         (list(FREE_RULES), month)).fetchone()
     free, total = int(row[0] or 0), int(row[1] or 0)
     return {"free": free, "total": total,

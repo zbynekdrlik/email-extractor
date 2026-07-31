@@ -45,7 +45,11 @@ def ask(conn, message_id: str, customer_ean: str, customer_name: str, wording: s
     key = memory.item_key(wording)
     if not (customer_ean and key):
         return None
-    if memory.resolve(conn, customer_ean, wording) is not None:
+    # Skip only when a HUMAN has already settled this wording. A thin machine-learned history
+    # is NOT a reason to stay silent: it is below the ladder's 3-day bar, so the line can still
+    # end up unmatched — and then nobody could ever teach it.
+    recalled = memory.resolve(conn, customer_ean, wording)
+    if recalled is not None and recalled.human:
         return None
     row = conn.execute(
         """INSERT INTO order_questions
@@ -104,6 +108,28 @@ def answer(conn, qid: int, gtin: str, card: str, by: str = "") -> dict:
                   answered_by = %s, answered_at = now()
             WHERE id = %s""", (str(gtin), card or "", by or "", qid))
     log.info("taught %r -> %s for %s (by %s)", q["wording"], gtin, q["customer_ean"], by)
+    return get(conn, qid) or {}
+
+
+def undo(conn, qid: int) -> dict:
+    """Take a mistaken answer back: drop the mapping and ask again.
+
+    Without this a mis-click was permanent AND invisible — a taught wording is never asked
+    about again and decides the line with no model call, so nothing would ever contradict it.
+    Only what a HUMAN taught is removed; real deliveries are evidence and stay.
+    """
+    q = get(conn, qid)
+    if not q:
+        raise NotACandidate(f"question {qid} does not exist")
+    conn.execute(
+        "DELETE FROM item_memory WHERE customer_ean = %s AND item_key = %s"
+        " AND source = 'human'", (q["customer_ean"], memory.item_key(q["wording"])))
+    conn.execute(
+        """UPDATE order_questions
+              SET status = 'open', answer_gtin = NULL, answer_card = NULL,
+                  answered_by = NULL, answered_at = NULL
+            WHERE id = %s""", (qid,))
+    log.warning("teaching taken back for %r (%s)", q["wording"], q["customer_ean"])
     return get(conn, qid) or {}
 
 

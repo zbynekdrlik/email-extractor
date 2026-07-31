@@ -453,6 +453,17 @@ def create_app(cfg) -> Flask:
             return jsonify(error=str(e)), 400
         return jsonify(ok=True, question=q)
 
+    @app.post("/api/orders/question/<int:qid>/undo")
+    def api_orders_undo(qid: int):
+        """Take a mistaken teaching back — it would otherwise decide that line forever."""
+        from .orders import teach
+        try:
+            with _db_tx() as c:
+                q = teach.undo(c, qid)
+        except teach.NotACandidate as e:
+            return jsonify(error=str(e)), 404
+        return jsonify(ok=True, question=q)
+
     @app.get("/api/orders/spend")
     def api_orders_spend():
         """What the order engine costs this month, and how much of it needed no model (#89).
@@ -780,14 +791,21 @@ function tick(){if(live&&document.getElementById('ov').style.display!=='flex'){
   else if(view==='ask')loadAsk();else loadFix()}}
 async function loadAsk(){const L=document.getElementById('list');
   L.innerHTML='';let d;try{d=await api('/api/orders/questions')}catch(e){return}
-  if(!d.items.length){L.innerHTML='<div class="empty">Nič nečaká \u2014 automat si vie poradiť sám.</div>';return}
+  if(!d.items.length){const e0=document.createElement('div');e0.className='empty';
+    e0.textContent='Nič nečaká \u2014 automat si vie poradiť sám.';L.appendChild(e0);return}
   for(const q of d.items){const el=document.createElement('div');el.className='row';
-    const opts=q.candidates.map(c=>'<button class="btn" onclick="teachIt('+q.id+',\''+c.gtin+'\',\''+
-      (c.name||'').replace(/'/g,"\\'")+'\')">'+(c.name||c.gtin)+'</button>').join(' ');
-    el.innerHTML='<div><b>'+q.wording+'</b> \u00b7 '+(q.quantity||'')+' '+(q.unit||'')+
-      '<div class="sub">'+(q.customer_name||q.customer_ean)+' \u00b7 dodanie '+(q.delivery_date||'?')+
-      '</div><div class="sub">'+(q.reason||'')+'</div><div class="acts">'+opts+'</div></div>';
-    L.appendChild(el)}}
+    const head=document.createElement('div');const b=document.createElement('b');
+    b.textContent=q.wording;head.appendChild(b);
+    head.appendChild(document.createTextNode(' \u00b7 '+(q.quantity||'')+' '+(q.unit||'')));
+    const who=document.createElement('div');who.className='sub';
+    who.textContent=(q.customer_name||q.customer_ean)+' \u00b7 dodanie '+(q.delivery_date||'?');
+    const why=document.createElement('div');why.className='sub';why.textContent=q.reason||'';
+    const acts=document.createElement('div');acts.className='acts';
+    for(const c of q.candidates){const bt=document.createElement('button');bt.className='btn';
+      bt.textContent=c.name||c.gtin;            // textContent: a name may contain quotes
+      bt.onclick=()=>teachIt(q.id,c.gtin,c.name||'');acts.appendChild(bt)}
+    head.appendChild(who);head.appendChild(why);head.appendChild(acts);
+    el.appendChild(head);L.appendChild(el)}}
 async function teachIt(qid,gtin,card){try{await api('/api/orders/question/'+qid+'/answer',
   {method:'POST',body:JSON.stringify({gtin:gtin,card:card})});await loadAsk();await askBadgeRefresh()}
   catch(e){alert(e.message||'chyba')}}
