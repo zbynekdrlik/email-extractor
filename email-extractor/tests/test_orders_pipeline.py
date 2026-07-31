@@ -279,6 +279,9 @@ def test_each_order_of_a_multi_date_email_is_reported_separately(pg, env):
 
 def test_a_multi_date_email_where_one_order_fails_reports_per_order_status(pg, env):
     answers = _two_order_answers()
+    # The wording must be one the model actually decides: "vianočka 400g" IS a catalog card,
+    # so since #86 it is answered for free and a scripted model failure never reaches it.
+    answers[0]["orders"][1]["items"][0]["name"] = "vianočka veľká sviatočná"
     answers[3] = {"gtin": "NO_MATCH", "confidence": 0.1, "matchedCatalogName": "",
                   "reason": "nič sa nezhoduje"}
     rec = Recorder()
@@ -396,3 +399,28 @@ def test_the_same_card_in_different_units_stays_two_lines(pg, env):
     items = result["order_results"][0]["items"]
     assert [(i["quantity"], i["unit"]) for i in items] == [(120, "ks"), (30, "kg")]
     assert rec.uploads[0][1].count("LIN") == 2
+
+
+# --- #86: the pipeline must not pay for a line the catalog already answers ---
+
+def test_a_line_that_is_a_catalog_card_never_reaches_the_model(pg, env):
+    """Measured 2026-07-31: 89 % of model spend is one call per ordered line, made even
+    when the wording IS a card. Here the model is scripted with NO item answers at all, so
+    if the pipeline asks for one the test fails on an unscripted answer."""
+    mail = dict(MAIL, combined_text="na 04.08.2026 prosím 7x Vianočka 400g")
+    extract_answer = {
+        "senderName": "Sklad", "senderEmail": "sklad@pekaren.sk",
+        "companyName": "Pekáreň Testovacia s.r.o.", "isChangeRequest": False, "notes": "",
+        "orders": [{"orderNumber": "", "deliveryDate": "04.08.2026", "recipientGroup": "",
+                    "items": [{"name": "Vianočka 400g", "quantity": 7, "unit": "ks",
+                               "sourceQuote": "7x Vianočka 400g"}]}],
+    }
+    client = ScriptedClient([extract_answer, {"ean_edi": "2000000000001",
+                                              "confidence": 0.95}])
+    run = pipeline.run(pg, _cfg(orders_shadow=True), mail, env, client=client,
+                       upload=lambda *a, **k: None, post=lambda *a, **k: None)
+
+    assert client.asked == ["orders", "customer"], "an item call was paid for needlessly"
+    item = run["items"][0]
+    assert (item["gtin"], item["rule"]) == ("VIA", "catalog_name")
+    assert run["order_results"][0]["items"][0]["quantity"] == 7
