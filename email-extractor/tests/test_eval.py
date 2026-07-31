@@ -323,3 +323,33 @@ def test_the_gate_command_imports_the_frozen_snapshot_and_runs_offline(
     code = eval_run.main(["--manifest", str(manifest), "--catalog", str(cat),
                           "--customers", str(cust)])
     assert code == 0
+
+
+def test_require_all_fails_on_any_failing_case_not_only_a_regression(pg, tmp_path,
+                                                                    monkeypatch):
+    """The user's rule: the corpus must pass on every change, or the change is not applied.
+    Gating on regressions alone would let a case that NEVER passed stay broken forever."""
+    from app.orders import eval_run
+    cases = {"cases": [{"id": "c1", "type": "t", "email": {"combined_text": "x"},
+                        "expected": {"customer_ean": "X", "items": []}}]}
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps(cases), encoding="utf-8")
+    monkeypatch.setattr(evaluate, "run_corpus", lambda *a, **k: (
+        [evaluate.Result("c1", "t", evaluate.Score(False, 0.0, ["nesedí zákazník"]))],
+        {"total": {"passed": 0, "cases": 1}, "by_type": {}}))
+    import os
+    monkeypatch.setenv("PG_DSN", os.environ["PG_TEST_DSN"])
+    assert eval_run.main(["--manifest", str(manifest)]) == 0, "no baseline, no regression"
+    assert eval_run.main(["--manifest", str(manifest), "--require-all"]) == 1
+
+
+def test_require_all_refuses_to_pass_on_an_empty_corpus(pg, tmp_path, monkeypatch):
+    """A missing/emptied corpus must fail the gate, never pass it silently."""
+    from app.orders import eval_run
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"cases": []}), encoding="utf-8")
+    import os
+    monkeypatch.setenv("PG_DSN", os.environ["PG_TEST_DSN"])
+    monkeypatch.setattr(evaluate, "run_corpus", lambda *a, **k: (
+        [], {"total": {"passed": 0, "cases": 0}, "by_type": {}}))
+    assert eval_run.main(["--manifest", str(manifest), "--require-all"]) == 1

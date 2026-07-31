@@ -50,8 +50,59 @@ jobs:
           PG_TEST_DSN: postgresql://postgres:postgres@localhost:5432/postgres
         run: pytest --cov=app --cov-report=term-missing --cov-fail-under=85
 
-  build:
+  # The 30-email order corpus. It runs on EVERY change and a change that does not pass it
+  # does not get applied — the user's rule, after months of "you improve one order type and
+  # break five others".
+  #
+  # It runs on a self-hosted runner because the corpus is real customer email (and the
+  # recorded model answers contain it). This repo is public, so those bytes never enter it:
+  # they live in ~/eval-corpus/email-extractor on dev2, outside git. The model is NOT called
+  # here — answers are replayed from the recorded cache, so the gate is deterministic, needs
+  # no API key and takes seconds. Refreshing that cache is a separate, deliberate live run.
+  e2e-orders:
     needs: [test]
+    runs-on: [self-hosted, email-extractor-eval]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 55433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CORPUS: /home/newlevel/eval-corpus/email-extractor
+      PG_DSN: postgresql://postgres:postgres@localhost:55433/postgres
+    defaults:
+      run:
+        working-directory: email-extractor
+    steps:
+      - uses: actions/checkout@v4
+      - name: The corpus must be present (a missing corpus fails, never skips)
+        run: |
+          for f in manifest.json catalog.csv customers.csv llm-cache; do
+            test -e "$CORPUS/$f" || { echo "corpus incomplete: $CORPUS/$f missing"; exit 1; }
+          done
+          python3 -c "import json,sys;n=len(json.load(open('$CORPUS/manifest.json'))['cases']);print(f'{n} cases');sys.exit(0 if n>=30 else 1)"
+      - name: Install Python deps
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip -q install -r requirements.txt
+      - name: Run the corpus (offline, recorded answers)
+        env:
+          LLM_CACHE_DIR: ${{ env.CORPUS }}/llm-cache
+        run: |
+          .venv/bin/python -m app.orders.eval_run \
+            --manifest "$CORPUS/manifest.json" \
+            --catalog "$CORPUS/catalog.csv" \
+            --customers "$CORPUS/customers.csv" \
+            --baseline "$CORPUS/baseline.json" \
+            --require-all
+
+  build:
+    needs: [test, e2e-orders]
     runs-on: ubuntu-latest
     permissions:
       contents: read

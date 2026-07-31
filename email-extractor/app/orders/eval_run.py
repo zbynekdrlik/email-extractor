@@ -27,11 +27,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--baseline", default="")
     ap.add_argument("--live", action="store_true", help="call the real model")
     ap.add_argument("--update-baseline", action="store_true")
+    ap.add_argument("--catalog", default="", help="frozen catalog CSV to import first")
+    ap.add_argument("--customers", default="", help="frozen customer CSV to import first")
+    ap.add_argument("--require-all", action="store_true",
+                    help="fail unless EVERY case passes, not just on a regression")
     args = ap.parse_args(argv)
 
     cfg = config.Config.load()
     conn = db.connect(cfg.pg_dsn)
     db.init_schema(conn)
+    if args.catalog and args.customers:
+        # The corpus is scored against the catalog it was WRITTEN against, never against
+        # whatever the live sheet says today (#79).
+        from . import snapshot
+        sid = snapshot.import_files(conn, args.catalog, args.customers)
+        print(f"frozen snapshot imported: {sid}")
     results, summary = evaluate.run_corpus(conn, cfg, args.manifest, offline=not args.live)
 
     print(json.dumps(summary, ensure_ascii=False, indent=1))
@@ -52,6 +62,13 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(evaluate.new_baseline(results), ensure_ascii=False, indent=1),
             encoding="utf-8")
         print(f"baseline updated: {baseline_path}")
+    failed = [r for r in results if not r.score.passed]
+    if args.require_all and failed:
+        print(f"GATE FAILED: {len(failed)} of {len(results)} cases do not pass")
+        return 1
+    if args.require_all and not results:
+        print("GATE FAILED: the corpus is empty — the gate must never pass vacuously")
+        return 1
     return 1 if regressed else 0
 
 
