@@ -4,6 +4,10 @@ Machine endpoints (token, used by n8n):
 - /health, /version
 - /files/<mid>/<idx>, /eml/<mid>            (originals for n8n AI-Vision / forwarding)
 
+Warehouse link (no password — a signed, unguessable URL):
+- /sklad/<key>                               (grants the questions surface only)
+- /otazky                                    (answer a wording with one click)
+
 Dashboard (session login):
 - /                                          (single-page dashboard)
 - /api/messages, /api/message/<id>           (list/search + detail + timeline)
@@ -12,11 +16,14 @@ Dashboard (session login):
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import os
+import re
 import threading
 import time
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import psycopg
@@ -65,10 +72,30 @@ def _persistent_secret(data_dir: Path) -> bytes:
         return os.urandom(32)   # read-only fs fallback: ephemeral key
 
 
+SKLAD_ROLE = "sklad"
+# What the warehouse link may reach — the questions surface, nothing else. It is an
+# UNAUTHENTICATED link, so this list is the whole security boundary: never widen it to
+# anything that reads mails, files or spend.
+SKLAD_PATHS = ("/otazky", "/api/orders/questions", "/api/orders/taught")
+SKLAD_ACTION = re.compile(r"^/api/orders/question/\d+/(answer|undo)$")
+
+
+def sklad_key(secret) -> str:
+    """The warehouse link's key: derived from the install's session secret, so it is stable
+    across restarts (the link can be bookmarked) and different on every install."""
+    if isinstance(secret, str):
+        secret = secret.encode()
+    return hmac.new(secret, b"sklad-link-v1", hashlib.sha256).hexdigest()[:32]
+
+
 def create_app(cfg) -> Flask:
     app = Flask(__name__)
     data_dir = Path(cfg.data_dir)
     app.secret_key = cfg.secret_key or _persistent_secret(data_dir)
+    # A year: the warehouse must never be asked to log in again, and neither must the
+    # operator — Flask's default is a browser-session cookie that dies with the tab.
+    app.permanent_session_lifetime = timedelta(days=365)
+    key = sklad_key(app.secret_key)
     if not cfg.dash_password:
         log.warning("dash_password is unset — the dashboard is CLOSED; "
                     "set dash_password to enable it")
@@ -133,12 +160,19 @@ def create_app(cfg) -> Flask:
         # Open, or self-guarded by their own in-route _auth() (the file APIs).
         if (p in ("/health", "/version", "/login", "/logout", "/favicon.ico")
                 or p.startswith("/static")
+                or p.startswith("/sklad/")          # the route verifies its own signature
                 or p.startswith("/files") or p.startswith("/eml")):
             return None
         # Dashboard surface ("/", "/api/*"): session only — login requires a
         # configured dash_password, so an unconfigured add-on is closed, not open.
         if session.get("auth"):
             return None
+        if session.get("role") == SKLAD_ROLE:
+            if p in SKLAD_PATHS or SKLAD_ACTION.match(p):
+                return None
+            # Not an error: send the warehouse back to the one page it owns.
+            if not p.startswith("/api/"):
+                return redirect("/otazky")
         if p.startswith("/api/"):
             return jsonify(error="auth required"), 401
         return redirect("/login")
@@ -153,11 +187,31 @@ def create_app(cfg) -> Flask:
         pw = body.get("password", "")
         if cfg.dash_password and pw == cfg.dash_password:
             session["auth"] = True
+            session.permanent = True      # one login per device, not per browser session
             log.info("dashboard login OK from %s", request.remote_addr)
             return redirect("/")
         log.warning("dashboard login FAILED from %s", request.remote_addr)
         return LOGIN_HTML.replace("<!--ERR-->",
                                   '<div class="err">Nesprávne heslo</div>'), 401
+
+    @app.get("/sklad/<k>")
+    def sklad_link(k: str):
+        """The warehouse's own way in: no password, one bookmarkable link (user's ask).
+
+        The dashboard itself stays behind the password — this port is reachable from the
+        open internet, so an open dashboard would publish every customer's orders and
+        every original mail. The link grants ONLY the questions surface (SKLAD_PATHS).
+        """
+        if not hmac.compare_digest(str(k), key):
+            log.warning("bad warehouse link from %s", request.remote_addr)
+            abort(403)
+        session["role"] = SKLAD_ROLE
+        session.permanent = True
+        return redirect("/otazky")
+
+    @app.get("/otazky")
+    def questions_page():
+        return ASK_HTML.replace("__VERSION__", __version__)
 
     @app.get("/logout")
     def logout():
@@ -564,7 +618,9 @@ def create_app(cfg) -> Flask:
 
     @app.get("/")
     def dashboard():
-        return DASH_HTML.replace("__VERSION__", __version__)
+        base = (cfg.public_base_url or request.host_url).rstrip("/")
+        return (DASH_HTML.replace("__VERSION__", __version__)
+                .replace("__SKLADLINK__", f"{base}/sklad/{key}"))
 
     return app
 
@@ -791,11 +847,20 @@ function setView(v){view=v;document.getElementById('tabMails').classList.toggle(
   document.getElementById('tabFix').classList.toggle('active',v==='fix');
   document.getElementById('tabImap').classList.toggle('active',v==='imap');
   document.getElementById('tabAsk').classList.toggle('active',v==='ask');
-  if(v==='fix'){loadFix()}else if(v==='imap'){loadImap()}else if(v==='ask'){loadAsk()}
+  if(v==='fix'){loadFix()}else if(v==='imap'){loadImap()}
+  else if(v==='ask'){showSkladLink();loadAsk()}
   else{document.getElementById('detail').innerHTML='<div class="empty">Vyber mail vľavo.</div>';loadList()}}
 function tick(){if(live&&document.getElementById('ov').style.display!=='flex'){
   if(view==='mails')loadList();else if(view==='imap')loadImap();
   else if(view==='ask')loadAsk();else loadFix()}}
+const SKLAD_LINK="__SKLADLINK__";
+function showSkladLink(){const D=document.getElementById('detail');D.textContent='';
+  const w=document.createElement('div');w.className='row';
+  const h=document.createElement('div');h.className='sub';
+  h.textContent='Odkaz pre sklad — otvorí sa bez hesla, dá sa dať do Odoo aj do záložiek:';
+  const a=document.createElement('a');a.href=SKLAD_LINK;a.textContent=SKLAD_LINK;
+  a.target='_blank';a.rel='noopener';a.style.wordBreak='break-all';
+  w.appendChild(h);w.appendChild(a);D.appendChild(w)}
 let askRender=0;
 async function loadAsk(){const L=document.getElementById('list');
   // Every render gets a number. A fetch that comes back after a newer render started must not
@@ -854,6 +919,65 @@ document.getElementById('livetog').onclick=()=>{live=!live;document.getElementBy
 let deb;q.oninput=()=>{clearTimeout(deb);deb=setTimeout(loadList,350)};
 for(const el of [fcat,fstate,ffrom,fto])el.onchange=loadList;
 loadList();imapBadgeRefresh();spendBadgeRefresh();askBadgeRefresh();setInterval(askBadgeRefresh,30000);timer=setInterval(tick,5000);setInterval(imapBadgeRefresh,30000);setInterval(spendBadgeRefresh,60000);
+</script></body></html>"""
+
+
+# The warehouse's own page: reachable from the signed /sklad/<key> link with NO password,
+# so it fetches ONLY the two question endpoints — nothing here may reach a mail, a file or
+# the spend. Phone-sized buttons: it is answered from the floor, not from a desk.
+ASK_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Otázky skladu</title>
+<style>
+ *{box-sizing:border-box}
+ body{font:15px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;
+      background:#f6f8fa;color:#1f2328}
+ header{background:#161b22;color:#e6edf3;padding:12px 16px;display:flex;justify-content:space-between;
+        align-items:center;position:sticky;top:0}
+ h1{font-size:16px;margin:0}
+ .ver{font-size:12px;color:#8b949e}
+ main{padding:14px 12px;max-width:760px;margin:0 auto}
+ .q{background:#fff;border:1px solid #d0d7de;border-radius:12px;padding:14px;margin-bottom:14px}
+ .who{font-size:13px;color:#57606a}
+ .w{font-size:18px;font-weight:700;margin:4px 0 2px}
+ .why{font-size:13px;color:#57606a;margin-bottom:10px}
+ button{display:block;width:100%;text-align:left;padding:12px 14px;margin-top:8px;font:inherit;
+        border:1px solid #1f6feb;border-radius:10px;background:#ddf4ff;color:#0969da;cursor:pointer}
+ .t{background:#fff;border:1px solid #d0d7de;border-radius:10px;padding:10px 12px;margin-bottom:8px;
+    display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:14px}
+ .t button{width:auto;margin:0;border-color:#d0d7de;background:#f6f8fa;color:#57606a;padding:7px 12px}
+ h2{font-size:14px;color:#57606a;margin:22px 0 8px}
+ .empty{color:#57606a;padding:14px 2px}
+</style></head><body>
+<header><h1>&#128230; Otázky skladu</h1><span class="ver" data-testid="version">v__VERSION__</span></header>
+<main id="wrap"><div class="empty">Nahrávam&hellip;</div></main>
+<script>
+async function api(u,o){const r=await fetch(u,Object.assign({headers:{'Content-Type':'application/json'}},o||{}));
+  if(!r.ok){throw new Error((await r.json().catch(()=>({}))).error||('HTTP '+r.status))}return r.json()}
+let render=0;
+function el(t,cls,txt){const e=document.createElement(t);if(cls)e.className=cls;
+  if(txt!==undefined)e.textContent=txt;return e}
+async function load(){const mine=++render;let d,t;
+  try{d=await api('/api/orders/questions');t=await api('/api/orders/taught')}catch(e){return}
+  if(mine!==render)return;
+  const W=document.getElementById('wrap');W.textContent='';
+  if(!d.items.length)W.appendChild(el('div','empty','Nič nečaká. Ďakujem!'));
+  for(const q of d.items){const c=el('div','q');
+    c.appendChild(el('div','who',(q.customer_name||q.customer_ean)+(q.delivery_date?' · na '+q.delivery_date:'')));
+    c.appendChild(el('div','w',q.wording+(q.quantity?'  —  '+q.quantity+' '+(q.unit||'ks'):'')));
+    c.appendChild(el('div','why',q.reason||'Ktorý výrobok to je?'));
+    for(const cand of (q.candidates||[])){const b=el('button',null,cand.name||cand.gtin);
+      b.onclick=()=>teach(q.id,cand.gtin,cand.name||'');c.appendChild(b)}
+    W.appendChild(c)}
+  if(t.items.length){W.appendChild(el('h2',null,'Naposledy naučené'));
+    for(const x of t.items){const r=el('div','t');
+      r.appendChild(el('span',null,x.wording+' → '+(x.answer_card||x.answer_gtin)));
+      const b=el('button',null,'vrátiť');b.onclick=()=>undo(x.id);r.appendChild(b);W.appendChild(r)}}}
+async function teach(qid,gtin,card){try{await api('/api/orders/question/'+qid+'/answer',
+  {method:'POST',body:JSON.stringify({gtin:gtin,card:card})});await load()}catch(e){alert(e.message||'chyba')}}
+async function undo(qid){try{await api('/api/orders/question/'+qid+'/undo',{method:'POST'});
+  await load()}catch(e){alert(e.message||'chyba')}}
+load();setInterval(load,5000);
 </script></body></html>"""
 
 
