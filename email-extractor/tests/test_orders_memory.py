@@ -123,3 +123,30 @@ def test_a_history_with_nothing_before_the_email_decides_nothing(pg):
     memory.remember(pg, "200", "siska", "G", "Šiška čokoláda 100g",
                     delivered_on="2026-07-30", source="ship")
     assert memory.resolve(pg, "200", "šiška", as_of="2026-07-01") is None
+
+
+def test_the_archive_can_be_seeded_as_history(pg):
+    """The history the engine inherited from n8n covered 11 customers and 123 lines, so for
+    most customers there was nothing to remember and every unweighted wording was a guess.
+    The archive of orders we really shipped is the missing history."""
+    rows = [
+        {"customer_ean": "200", "delivered_on": "2026-07-01",
+         "items": [{"name": "Chlieb pšenično ražný", "card": "Chlieb pšenično-ražný 1000 gr",
+                    "gtin": "8588001805579"}]},
+        {"customer_ean": "200", "delivered_on": "2026-07-08",
+         "items": [{"name": "Chlieb pšenično ražný", "card": "Chlieb pšenično-ražný 1000 gr",
+                    "gtin": "8588001805579"}]},
+    ]
+    added = memory.seed_from_archive(pg, rows)
+    assert added == 2
+    recalled = memory.resolve(pg, "200", "chlieb pšenično ražný", as_of="2026-07-24")
+    assert recalled and recalled.gtin == "8588001805579" and recalled.strength == 2
+    # re-seeding the same archive changes nothing
+    assert memory.seed_from_archive(pg, rows) == 0
+
+
+def test_seeding_skips_a_line_with_no_card(pg):
+    added = memory.seed_from_archive(pg, [
+        {"customer_ean": "200", "delivered_on": "2026-07-01",
+         "items": [{"name": "niečo", "card": "", "gtin": ""}]}])
+    assert added == 0
