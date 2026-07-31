@@ -122,6 +122,7 @@ def run(conn, cfg, message: dict, snapshot_id: int, client=None, upload=None,
     all_items: list[dict] = []
     statuses: list[str] = []
     previews: list[dict] = []
+    order_results: list[dict] = []
     for order in orders:
         decisions = []
         for item in order.get("items") or []:
@@ -145,10 +146,23 @@ def run(conn, cfg, message: dict, snapshot_id: int, client=None, upload=None,
                                     extracted, shadow, upload, post)
         statuses.append(status)
         previews.append(preview)
+        # One EDI file per order is what n8n produces, so the result must stay per order:
+        # flattening hides the second delivery date and its items entirely (#78).
+        order_results.append({
+            "delivery_date": order.get("deliveryDate", ""),
+            "order_number": order.get("orderNumber", ""),
+            "recipient_group": order.get("recipientGroup", ""),
+            "status": status,
+            "items": [_decision_dict(d) for d in decisions],
+            "edi_filename": preview.get("edi_filename", ""),
+            "edi_preview": preview.get("edi_preview", ""),
+        })
 
     status = ("error" if "error" in statuses else
               "review" if all(s == "review" for s in statuses) else
-              "partial" if "partial" in statuses else "ok")
+              # one order shipped and another went to review is NOT a clean email: saying
+              # "ok" would hide a delivery date nobody sent (#78)
+              "partial" if ("partial" in statuses or "review" in statuses) else "ok")
     # customer + delivery date belong in the result: the shadow diff (#67) and the
     # evaluation harness (#66) both compare on them, not just on the item list.
     out = {"status": status, "items": all_items, "prompt_hash": client.last_prompt_hash,
@@ -158,7 +172,7 @@ def run(conn, cfg, message: dict, snapshot_id: int, client=None, upload=None,
            "customer_name": matched.name if matched else "",
            "customer_rule": matched.rule if matched else "unmatched",
            "delivery_date": (orders[0].get("deliveryDate") or "") if orders else "",
-           "orders": len(orders)}
+           "orders": len(orders), "order_results": order_results}
     # In shadow mode the preview IS the deliverable: it is what would have been uploaded.
     for preview in previews:
         if preview:
@@ -263,7 +277,13 @@ def _finish(conn, cfg, message, shadow, post, status: str, items: list,
             status="ok" if status in ("ok", "partial") else status,
             outcome=_outcome(status, result), detail=detail or {})
     return {"status": status, "items": items, "shadow": shadow,
-            "would_ship": bool(result.get("shipped")) or status in ("ok", "partial")}
+            "would_ship": bool(result.get("shipped")) or status in ("ok", "partial"),
+            # keep the shape identical on the reject paths, so a consumer never has to
+            # special-case "this email produced no order at all"
+            "customer_ean": (result.get("customer") or {}).get("ean_edi", ""),
+            "customer_name": (result.get("customer") or {}).get("name", ""),
+            "delivery_date": result.get("delivery_date", ""),
+            "orders": 0, "order_results": []}
 
 
 def _outcome(status: str, result: dict) -> str:

@@ -122,3 +122,16 @@ def test_a_failed_upload_is_released_so_it_can_be_retried(pg):
     assert edi.claim_send(pg, "111", "04.08.2026", built.content, "f1.txt") is True
     edi.release_send(pg, "111", "04.08.2026", built.content)
     assert edi.claim_send(pg, "111", "04.08.2026", built.content, "f1.txt") is True
+
+
+def test_the_document_date_is_injectable_so_parity_does_not_expire_overnight():
+    """The HDR carries the document's creation date. Reading it from the clock made the
+    byte-parity fixture pass only on the day it was recorded and fail every day after —
+    a test that expires is not a test. `today` is therefore an argument."""
+    case = FIXTURE[0]
+    built = edi.build(**dict(case["input"], today="20991231"))
+    assert "20991231" in built.content
+    assert "20260730" not in built.content
+    # and the default still tracks the real clock
+    from datetime import UTC, datetime
+    assert datetime.now(UTC).strftime("%Y%m%d") in edi.build(**case["input"]).content
