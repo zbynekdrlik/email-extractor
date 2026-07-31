@@ -334,14 +334,17 @@ def merge_same_card(decisions: list[Decision]) -> list[Decision]:
     name, and different unmatched wordings are different problems.
     """
     out: list[Decision] = []
-    by_gtin: dict[str, Decision] = {}
+    by_gtin: dict[tuple[str, str], Decision] = {}
     for d in decisions:
         if not d.gtin:
             out.append(d)
             continue
-        first = by_gtin.get(d.gtin)
+        # The UNIT is part of the identity: adding 2 kg to 3 ks would ship "5" of something
+        # ambiguous. Only lines that agree on the unit may be added up.
+        key = (d.gtin, (d.unit or "").strip().lower())
+        first = by_gtin.get(key)
         if first is None:
-            by_gtin[d.gtin] = d
+            by_gtin[key] = d
             out.append(d)
             continue
         first.quantity = (first.quantity or 0) + (d.quantity or 0)
