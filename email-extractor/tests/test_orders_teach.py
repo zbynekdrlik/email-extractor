@@ -302,3 +302,32 @@ def test_a_card_name_with_a_quote_does_not_break_the_page(pg):
          candidates=[{"gtin": "SLI50", "name": 'Chlieb "special" 500g'}])
     d = _dash(pg).get("/api/orders/questions").get_json()
     assert d["items"][0]["candidates"][0]["name"] == 'Chlieb "special" 500g'
+
+
+# --- the undo must be REACHABLE, not just implemented --------------------
+
+def test_recently_taught_mappings_are_listed_so_the_undo_can_be_reached(pg):
+    """Found while verifying 0.9.5 on the live box: an answered question leaves the open list,
+    so the warehouse had nowhere to click 'vrátiť'. An undo nobody can reach is not an undo."""
+    qid = _ask(pg)
+    teach.answer(pg, qid, gtin="SLI90", card="Šiška džemová 90g", by="sklad")
+    taught = teach.recently_taught(pg)
+    assert [t["id"] for t in taught] == [qid]
+    assert taught[0]["answer_card"] == "Šiška džemová 90g"
+    assert taught[0]["wording"] == "Šiška"
+
+
+def test_an_undone_mapping_leaves_the_taught_list(pg):
+    qid = _ask(pg)
+    teach.answer(pg, qid, gtin="SLI90", card="Šiška džemová 90g", by="sklad")
+    teach.undo(pg, qid)
+    assert teach.recently_taught(pg) == []
+
+
+def test_the_dashboard_serves_the_taught_list(pg):
+    qid = _ask(pg)
+    c = _dash(pg)
+    c.post(f"/api/orders/question/{qid}/answer",
+           json={"gtin": "SLI50", "card": "Šiška džemová 50g"})
+    d = c.get("/api/orders/taught").get_json()
+    assert [t["wording"] for t in d["items"]] == ["Šiška"]

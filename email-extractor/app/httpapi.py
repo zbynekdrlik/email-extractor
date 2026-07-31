@@ -453,6 +453,13 @@ def create_app(cfg) -> Flask:
             return jsonify(error=str(e)), 400
         return jsonify(ok=True, question=q)
 
+    @app.get("/api/orders/taught")
+    def api_orders_taught():
+        """What the warehouse has already taught — so a mis-click can be corrected."""
+        from .orders import teach
+        with _db() as c:
+            return jsonify(items=teach.recently_taught(c))
+
     @app.post("/api/orders/question/<int:qid>/undo")
     def api_orders_undo(qid: int):
         """Take a mistaken teaching back — it would otherwise decide that line forever."""
@@ -805,7 +812,25 @@ async function loadAsk(){const L=document.getElementById('list');
       bt.textContent=c.name||c.gtin;            // textContent: a name may contain quotes
       bt.onclick=()=>teachIt(q.id,c.gtin,c.name||'');acts.appendChild(bt)}
     head.appendChild(who);head.appendChild(why);head.appendChild(acts);
-    el.appendChild(head);L.appendChild(el)}}
+    el.appendChild(head);L.appendChild(el)}
+  loadTaught()}
+async function loadTaught(){const L=document.getElementById('list');let d;
+  try{d=await api('/api/orders/taught')}catch(e){return}
+  if(!d.items.length)return;
+  const h=document.createElement('div');h.className='sub';h.style.padding='8px 10px';
+  h.textContent='Naposledy naučené \u2014 keby bol klik omylom, dá sa vrátiť:';L.appendChild(h);
+  for(const t of d.items){const el=document.createElement('div');el.className='row';
+    const w=document.createElement('div');const b=document.createElement('b');
+    b.textContent=t.wording;w.appendChild(b);
+    w.appendChild(document.createTextNode(' \u2192 '+(t.answer_card||t.answer_gtin)));
+    const who=document.createElement('div');who.className='sub';
+    who.textContent=(t.customer_name||t.customer_ean);
+    const acts=document.createElement('div');acts.className='acts';
+    const bt=document.createElement('button');bt.className='btn';bt.textContent='vrátiť';
+    bt.onclick=()=>undoIt(t.id);acts.appendChild(bt);
+    w.appendChild(who);w.appendChild(acts);el.appendChild(w);L.appendChild(el)}}
+async function undoIt(qid){try{await api('/api/orders/question/'+qid+'/undo',{method:'POST'});
+  await loadAsk();await askBadgeRefresh()}catch(e){alert(e.message||'chyba')}}
 async function teachIt(qid,gtin,card){try{await api('/api/orders/question/'+qid+'/answer',
   {method:'POST',body:JSON.stringify({gtin:gtin,card:card})});await loadAsk();await askBadgeRefresh()}
   catch(e){alert(e.message||'chyba')}}

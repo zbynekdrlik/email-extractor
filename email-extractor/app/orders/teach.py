@@ -89,6 +89,22 @@ def open_questions(conn, limit: int = 100) -> list[dict]:
     return [_row(r) for r in rows]
 
 
+def recently_taught(conn, limit: int = 20) -> list[dict]:
+    """The mappings a human settled, newest first — this is what makes `undo` reachable.
+
+    An answered question leaves the open list, so without this the warehouse had nowhere to
+    correct a mis-click, and an undo nobody can reach is not an undo (found while verifying
+    0.9.5 on the live box).
+    """
+    rows = conn.execute(
+        """SELECT id, message_id, customer_ean, customer_name, wording, quantity, unit,
+                  candidates, delivery_date, reason, status, answer_gtin, answer_card,
+                  answered_by, answered_at, created_at
+             FROM order_questions WHERE status = 'answered'
+            ORDER BY answered_at DESC LIMIT %s""", (limit,)).fetchall()
+    return [_row(r) for r in rows]
+
+
 def answer(conn, qid: int, gtin: str, card: str, by: str = "") -> dict:
     """Settle a question and teach it. The card must be one that was offered."""
     q = get(conn, qid)
