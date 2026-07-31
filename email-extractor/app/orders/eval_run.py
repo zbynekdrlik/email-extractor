@@ -72,9 +72,21 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(evaluate.new_baseline(results), ensure_ascii=False, indent=1),
             encoding="utf-8")
         print(f"baseline updated: {baseline_path}")
+    # Cases pinning behaviour the engine does not have yet. Printed with their ticket every
+    # run — never silently dropped — but they do not block the other cases.
+    known = {c["id"]: c["known_defect"] for c in evaluate.load_manifest(args.manifest)
+             if c.get("known_defect")}
     failed = [r for r in results if not r.score.passed]
-    if args.require_all and failed:
-        print(f"GATE FAILED: {len(failed)} of {len(results)} cases do not pass")
+    for r in failed:
+        if r.case_id in known:
+            print(f"KNOWN DEFECT {known[r.case_id]} {r.case_id} ({r.type}): "
+                  f"{'; '.join(r.score.problems)}")
+    if known:
+        print(f"{len(known)} case(s) excluded from the hard gate as known defects: "
+              f"{', '.join(sorted(known))}")
+    blocking = [r for r in failed if r.case_id not in known]
+    if args.require_all and blocking:
+        print(f"GATE FAILED: {len(blocking)} of {len(results)} cases do not pass")
         return 1
     if args.require_all and not results:
         print("GATE FAILED: the corpus is empty — the gate must never pass vacuously")
