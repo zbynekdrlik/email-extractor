@@ -618,7 +618,9 @@ def create_app(cfg) -> Flask:
 
     @app.get("/")
     def dashboard():
-        base = (cfg.public_base_url or request.host_url).rstrip("/")
+        # The address the operator is ON, never cfg.public_base_url — that one is the MACHINE
+        # base (n8n fetches /files over the docker network) and is unopenable in a browser.
+        base = request.host_url.rstrip("/")
         return (DASH_HTML.replace("__VERSION__", __version__)
                 .replace("__SKLADLINK__", f"{base}/sklad/{key}"))
 
