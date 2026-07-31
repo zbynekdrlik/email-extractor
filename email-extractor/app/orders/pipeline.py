@@ -107,15 +107,14 @@ def run(conn, cfg, message: dict, snapshot_id: int, client=None, upload=None,
                                "notes": extracted.get("notes", "")})
 
     # The customer is per EMAIL, so it is decided once even for a multi-order email.
-    cands = customer.candidates(customers, extracted.get("senderEmail")
-                                or message.get("from_addr", ""),
+    sender = _sender_address(message, extracted, customers)
+    cands = customer.candidates(customers, sender,
                                 extracted.get("senderName", ""),
                                 extracted.get("companyName", ""))
     cust_answer = client.json_call(_prompt("match_customer.md"),
                                    _customer_input(cands, message, extracted),
                                    CUSTOMER_SCHEMA, name="customer")
-    matched = customer.resolve(customers, extracted.get("senderEmail")
-                               or message.get("from_addr", ""),
+    matched = customer.resolve(customers, sender,
                                extracted.get("senderName", ""),
                                extracted.get("companyName", ""), llm=cust_answer)
 
@@ -348,3 +347,27 @@ def diff(ours: dict, theirs: dict | None) -> list[str]:
         if a[gtin] != b[gtin]:
             out.append(f"iné množstvo pri {gtin}: my {a[gtin]:g} / n8n {b[gtin]:g}")
     return out
+
+
+OUR_DOMAIN = "slovnormal.sk"
+
+
+def _sender_address(message: dict, extracted: dict, customers: list[dict]) -> str:
+    """Who actually sent this mail.
+
+    The envelope address is authoritative and wins. The model's reading is only a fallback,
+    because on a reply it happily reports the address it found in the QUOTED text — on one
+    real order it returned our own `predaj@slovnormal.sk`, the customer went unresolved and
+    the whole order was parked (#81.3).
+
+    The one case where the model's reading is worth more: the envelope IS our own address,
+    i.e. somebody here forwarded a customer's mail.
+    """
+    envelope = (message.get("from_addr") or "").strip()
+    stated = (extracted.get("senderEmail") or "").strip()
+    if envelope and OUR_DOMAIN not in envelope.lower():
+        return envelope
+    known = {e.lower() for c in customers for e in (c.get("emails") or [])}
+    if stated and stated.lower() in known:
+        return stated
+    return envelope or stated
