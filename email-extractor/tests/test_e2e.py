@@ -130,7 +130,10 @@ def test_teaching_a_wording_and_taking_it_back_in_the_browser(live_server, pg, p
     assert memory.resolve(pg, ean, "testovacia pletenka").gtin == "BBB"
 
     page.click('button:has-text("vrátiť")')
-    page.wait_for_selector("text=testovacia pletenka")
+    # wait for something that exists ONLY while the question is open — the wording itself is
+    # also in the taught list, so waiting on it would pass before the undo even lands
+    page.wait_for_selector('button:has-text("Karta A")')
+    pg.rollback()          # this connection's snapshot predates the app's delete
     assert memory.resolve(pg, ean, "testovacia pletenka") is None, "the mapping is gone"
     assert teach.open_questions(pg)[0]["id"] == qid, "and it is asked again"
 
