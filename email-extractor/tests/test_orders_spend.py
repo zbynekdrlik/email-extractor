@@ -8,7 +8,6 @@ threw the API's own `usage` block away: spend was invisible.
 Three things are pinned here: the tally is captured, it is priced by the published table,
 and a cache hit costs nothing.
 """
-import json
 
 import pytest
 
@@ -147,4 +146,53 @@ def test_the_trip_message_names_the_month_and_the_worst_runs(pg):
     text = spend.trip_message(pg, cap_eur=30)
     assert "30" in text and "€" in text
     assert text.count("\n") >= 2, "the three most expensive runs, one per line"
-    assert "36" in text or "33" in text, "the month's total, in euro"
+    assert f"{36.0 / spend.USD_PER_EUR:.2f}" in text, "the month's total, in euro"
+    assert f"{30.0 / spend.USD_PER_EUR:.2f}" in text, "and the worst run of the three"
+
+
+# --- the worker persists it, and the dashboard shows it -------------------
+
+def test_the_worker_stores_what_the_pipeline_reported(pg):
+    """The worker is the single place a run's bill is written, so every pipeline exit path
+    is covered by attaching `spend` in `pipeline.run` rather than per path."""
+    from app.config import Config
+    from app.orders import snapshot as snap
+    from app.orders import worker
+    snap.import_snapshot(pg, "GTIN,Sklad,Názov,doplnok\nG,1,x,\n",
+                         "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,"
+                         "Číslo mobilu,E-mail\nA,2000000000001,M,U,,,a@b.sk\n")
+    pg.execute("INSERT INTO messages (message_id, category, processed)"
+               " VALUES ('mw', 'ai_orders', false)")
+
+    def fake_pipeline(conn, cfg, message, snapshot_id):
+        return {"status": "ok", "items": [],
+                "spend": {"calls": 4, "cached_calls": 1, "tokens_in": 900,
+                          "tokens_cached": 100, "tokens_out": 300, "cost_usd": 0.0777,
+                          "model": "gpt-5.4"}}
+
+    cfg = Config(pg_dsn="", ai_orders_engine="python", orders_shadow=False,
+                 orders_spend_cap_eur=30)
+    assert worker.tick(pg, cfg, pipeline=fake_pipeline) == 1
+    row = pg.execute("SELECT calls, cached_calls, tokens_out, cost_usd, model"
+                     " FROM order_runs ORDER BY id DESC LIMIT 1").fetchone()
+    assert (row[0], row[1], row[2], row[4]) == (4, 1, 300, "gpt-5.4")
+    assert float(row[3]) == pytest.approx(0.0777)
+
+
+def test_the_dashboard_reports_the_month_and_the_free_share(pg):
+    import os
+
+    from app.config import Config
+    from app.httpapi import create_app
+
+    _run(pg, 2.20, rules=("catalog_name", "llm_sure"))
+    cfg = Config(pg_dsn=os.environ["PG_TEST_DSN"], data_dir="/tmp", dash_password="pw",
+                 secret_key="t", orders_spend_cap_eur=30)
+    app = create_app(cfg)
+    app.testing = True
+    c = app.test_client()
+    c.post("/login", data={"password": "pw"})
+    d = c.get("/api/orders/spend").get_json()
+    assert d["cost_eur"] == pytest.approx(2.0, abs=0.01)
+    assert d["cap_eur"] == 30
+    assert d["free_pct"] == pytest.approx(50.0)

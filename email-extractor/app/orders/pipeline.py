@@ -82,9 +82,22 @@ def _decision_dict(d) -> dict:
 
 def run(conn, cfg, message: dict, snapshot_id: int, client=None, upload=None,
         post=None) -> dict:
-    """Process one email. Returns the run result (also stored by the worker)."""
-    shadow = bool(getattr(cfg, "orders_shadow", False))
+    """Process one email. Returns the run result (also stored by the worker).
+
+    A thin wrapper so that what the run COST is attached in ONE place, whichever of the
+    pipeline's exit paths produced the result (#89) — a per-path copy would be forgotten on
+    the next reject path added.
+    """
     client = client or llm.from_config(cfg)
+    out = _run(conn, cfg, message, snapshot_id, client, upload, post)
+    if hasattr(client, "spend"):
+        out["spend"] = client.spend()
+    return out
+
+
+def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
+         post=None) -> dict:
+    shadow = bool(getattr(cfg, "orders_shadow", False))
     upload = upload or (lambda c, name, content: upload_mod.put(c, name, content))
     post = post or (lambda c, html, **kw: report.post_from_config(c, html))
 

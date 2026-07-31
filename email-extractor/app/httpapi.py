@@ -429,6 +429,28 @@ def create_app(cfg) -> Flask:
         log.info("fix_requested #%s type=%s -> fix #%s", mid, ptype, fid)
         return jsonify(ok=True, id=mid, fix_id=fid)
 
+    @app.get("/api/orders/spend")
+    def api_orders_spend():
+        """What the order engine costs this month, and how much of it needed no model (#89).
+
+        The two numbers belong together: the deterministic share is supposed to RISE as the
+        delivery history fills, so a falling share explains a rising bill.
+        """
+        from .orders import spend as spend_mod
+        with _db() as c:
+            mtd = spend_mod.month_to_date(c)
+            share = spend_mod.deterministic_share(c)
+            top = spend_mod.top_runs(c)
+        return jsonify(month=mtd["month"], runs=mtd["runs"],
+                       cost_eur=round(mtd["cost_eur"], 2),
+                       cost_usd=round(mtd["cost_usd"], 2),
+                       per_email_eur=round(mtd["cost_eur"] / mtd["runs"], 3)
+                       if mtd["runs"] else 0.0,
+                       calls=mtd["calls"], cached_calls=mtd["cached_calls"],
+                       cap_eur=float(getattr(cfg, "orders_spend_cap_eur", 30) or 0),
+                       free_pct=round(share["pct"], 1), free=share["free"],
+                       decisions=share["total"], top_runs=top)
+
     @app.get("/api/imap-failures")
     def api_imap_failures():
         """Emails that could not be ingested at all (#20) — they have no messages row,
@@ -599,6 +621,7 @@ DASH_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
   <input id="fto" type="date" title="do">
   <span class="live" id="livetog">● <span id="livelbl">LIVE</span></span>
   <span class="ver" data-testid="version">v__VERSION__</span>
+  <span class="ver" id="spendBadge" data-testid="spend" title="náklady objednávkového automatu za tento mesiac"></span>
   <a class="ver" href="/logout">odhlásiť</a>
 </header>
 <div class="chips" id="chips"></div>
@@ -728,12 +751,16 @@ function setView(v){view=v;document.getElementById('tabMails').classList.toggle(
   else{document.getElementById('detail').innerHTML='<div class="empty">Vyber mail vľavo.</div>';loadList()}}
 function tick(){if(live&&document.getElementById('ov').style.display!=='flex'){
   if(view==='mails')loadList();else if(view==='imap')loadImap();else loadFix()}}
+async function spendBadgeRefresh(){try{const d=await api('/api/orders/spend');
+  const b=document.getElementById('spendBadge');
+  b.textContent=d.cost_eur.toFixed(2)+' \u20ac / '+d.cap_eur.toFixed(0)+' \u20ac \u00b7 bez modelu '+d.free_pct+' %';
+  b.style.color=(d.cap_eur&&d.cost_eur>d.cap_eur)?'#f85149':'#6e7681'}catch(e){}}
 async function imapBadgeRefresh(){try{const d=await api('/api/imap-failures');
   const b=document.getElementById('imapBadge');b.textContent=d.total?String(d.total):'';b.style.color='#f85149'}catch(e){}}
 document.getElementById('livetog').onclick=()=>{live=!live;document.getElementById('livetog').style.color=live?'#3fb950':'#6e7681';document.getElementById('livelbl').textContent=live?'LIVE':'pauza'};
 let deb;q.oninput=()=>{clearTimeout(deb);deb=setTimeout(loadList,350)};
 for(const el of [fcat,fstate,ffrom,fto])el.onchange=loadList;
-loadList();imapBadgeRefresh();timer=setInterval(tick,5000);setInterval(imapBadgeRefresh,30000);
+loadList();imapBadgeRefresh();spendBadgeRefresh();timer=setInterval(tick,5000);setInterval(imapBadgeRefresh,30000);setInterval(spendBadgeRefresh,60000);
 </script></body></html>"""
 
 
