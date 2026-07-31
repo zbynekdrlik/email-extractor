@@ -187,10 +187,14 @@ def load_manifest(path) -> list[dict]:
 def _actual_from_run(result: dict) -> dict:
     items = [{"gtin": i["gtin"], "quantity": i["quantity"]}
              for i in result.get("items") or [] if i.get("gtin")]
+    # Only orders that would actually be SENT count. The pipeline still extracts and reports
+    # an order it refuses to ship, and scoring those would fail every must-review case for
+    # doing exactly the right thing.
     orders = [{"delivery_date": o.get("delivery_date", ""), "status": o.get("status", ""),
                "items": [{"gtin": i["gtin"], "quantity": i["quantity"]}
                          for i in o.get("items") or [] if i.get("gtin")]}
-              for o in result.get("order_results") or []]
+              for o in result.get("order_results") or []
+              if o.get("status") in ("ok", "partial")]
     return {"customer_ean": result.get("customer_ean", ""),
             "delivery_date": result.get("delivery_date", ""),
             "items": items, "order_results": orders,
