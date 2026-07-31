@@ -288,3 +288,67 @@ def test_a_multi_date_email_where_one_order_fails_reports_per_order_status(pg, e
     assert [o["status"] for o in orders] == ["ok", "review"]
     assert len(rec.uploads) == 1, "the failed order must not be uploaded"
     assert result["status"] == "partial", "part of the email shipped, part did not"
+
+
+# --- recipient groups are one order, one line (#81.1) ---------------------
+
+GROUPS_MAIL = dict(MAIL, combined_text=(
+    "na 04.08.2026 Vás prosíme objednať 120x rožok 50g na pacientov "
+    "a 30x rožok 50g na zamestnancov"))
+
+
+def _group_answers():
+    """What the model really returns for "40ks na pacientov a 10ks na zamestnancov": one
+    order per recipient group, same delivery date."""
+    def order(group, qty):
+        return {"orderNumber": "", "deliveryDate": "04.08.2026", "recipientGroup": group,
+                "items": [{"name": "rožok 50g", "quantity": qty, "unit": "ks",
+                           "sourceQuote": f"{qty}x rožok 50g"}]}
+    return [
+        {"senderName": "Sklad", "senderEmail": "sklad@pekaren.sk",
+         "companyName": "Pekáreň Testovacia s.r.o.", "isChangeRequest": False, "notes": "",
+         "orders": [order("pacienti", 120), order("zamestnanci", 30)]},
+        {"ean_edi": "2000000000001", "confidence": 0.95},
+        {"gtin": "G50", "confidence": 0.95, "matchedCatalogName": "", "reason": ""},
+        {"gtin": "G50", "confidence": 0.95, "matchedCatalogName": "", "reason": ""},
+    ]
+
+
+def test_two_recipient_groups_on_one_day_are_one_order_with_the_summed_quantity(pg, env):
+    """The real failure: 40 ks for patients + 10 ks for staff became TWO EDI files for one
+    delivery date — two orders in ORION for one day — and the warehouse received 40, or 10,
+    but never 50."""
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), GROUPS_MAIL, env,
+                          client=ScriptedClient(_group_answers()),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "ok"
+    assert len(rec.uploads) == 1, "one delivery date is one EDI file"
+    content = rec.uploads[0][1]
+    assert content.count("LIN") == 1, "one card is one ORION line"
+    assert len(result["order_results"]) == 1
+    items = result["order_results"][0]["items"]
+    assert [i["gtin"] for i in items] == ["G50"]
+    assert items[0]["quantity"] == 150, "120 + 30, nothing lost"
+
+
+def test_two_wordings_that_match_the_same_card_also_become_one_line(pg, env):
+    answers = _group_answers()
+    answers[0]["orders"][1]["items"][0]["name"] = "rožok štandart"
+    answers[0]["orders"][1]["items"][0]["sourceQuote"] = "30x rožok 50g"
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), GROUPS_MAIL, env, client=ScriptedClient(answers),
+                          upload=rec.upload, post=rec.post)
+    assert rec.uploads[0][1].count("LIN") == 1
+    assert result["order_results"][0]["items"][0]["quantity"] == 150
+
+
+def test_two_different_delivery_dates_still_stay_two_orders(pg, env):
+    """The merge must key on the DAY, not flatten every order in the email."""
+    answers = _group_answers()
+    answers[0]["orders"][1]["deliveryDate"] = "05.08.2026"
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), GROUPS_MAIL, env, client=ScriptedClient(answers),
+                          upload=rec.upload, post=rec.post)
+    assert len(rec.uploads) == 2
+    assert [o["delivery_date"] for o in result["order_results"]] == ["04.08.2026", "05.08.2026"]
