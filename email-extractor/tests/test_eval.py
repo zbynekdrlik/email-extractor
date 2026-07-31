@@ -377,3 +377,27 @@ def test_a_partially_shipped_order_still_counts():
                               "items": [{"gtin": "VIA", "quantity": 1}]}]}
     actual = evaluate._actual_from_run(run)
     assert [o["delivery_date"] for o in actual["order_results"]] == ["04.08.2026"]
+
+
+def test_the_corpus_run_logs_progress_per_case(pg, tmp_path, caplog):
+    """A 30-case live run takes tens of minutes. With logging only at the END, a run that
+    died silently 40 minutes in was indistinguishable from a run still working — that
+    happened. Every case must announce itself."""
+    from app.config import Config
+    from app.orders import snapshot
+    snapshot.import_snapshot(
+        pg, "GTIN,Sklad,Názov,doplnok\nG50,1,Rožok štandart 50g,\n",
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,E-mail\n"
+        "Pekáreň s.r.o.,2000000000864,Martin,Košútka 1,,,sklad@pekaren.sk\n")
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"cases": [
+        {"id": "a", "type": "t", "email": {"message_id": "x", "combined_text": "10x rožok"},
+         "expected": {"customer_ean": "", "items": []}},
+        {"id": "b", "type": "t", "email": {"message_id": "y", "combined_text": "5x rožok"},
+         "expected": {"customer_ean": "", "items": []}}]}), encoding="utf-8")
+    cfg = Config(pg_dsn="", data_dir="/tmp", llm_cache_dir=str(tmp_path / "cache"))
+    with caplog.at_level("INFO"):
+        evaluate.run_corpus(pg, cfg, str(manifest), offline=True)
+    progress = [r.message for r in caplog.records if "1/2" in r.message or "2/2" in r.message]
+    assert len(progress) == 2, f"expected a line per case, got {progress}"
+    assert "a" in progress[0] and "b" in progress[1]
