@@ -188,6 +188,26 @@ Every new warehouse complaint becomes a corpus case **before** its fix is writte
   document.
 - A message is never reprocessed once its run uploaded to ORION.
 
+## What measuring the corpus changed in this design (2026-07-31)
+
+Building the 30-email corpus (#77) and running the engine over the same mails n8n had
+processed corrected three assumptions above:
+
+1. **"One email = one order" was wrong, in both directions.** n8n produced exactly one EDI
+   file per email — never more — while the mails routinely ask for several delivery days (a
+   July plan with 9 dates, an August plan with 13, a week with 6). So the pipeline returns a
+   result **per order** (`order_results`) and the harness scores per delivery date. Conversely
+   two recipient groups sharing ONE date must collapse into ONE order, because shipping them
+   separately wrote two ORION documents for one day (#80, #81).
+2. **n8n cannot be the oracle.** The plan said ground truth "comes from the EDI we actually
+   uploaded". For 20 of the 30 cases that answer is demonstrably wrong — dropped dates, an
+   order built out of quoted text, a weight-mismatched card. Each case now records which
+   oracle decided it and why.
+3. **The corpus cannot live in git and the gate cannot call the model.** The cases and the
+   recorded answers are customer mail, in a public repo, so the gate runs on a self-hosted
+   runner against a bundle on dev2 and replays recorded answers. What a case asserts is graded
+   by what can be proved: exact cards, or only the number of lines, or only the dates.
+
 ## Testing rules for this package
 
 - Synthetic fixtures for unit tests; the golden corpus is real mail and stays out of git
