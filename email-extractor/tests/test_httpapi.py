@@ -192,7 +192,8 @@ def test_the_dashboard_shows_the_warehouse_link_to_copy():
     """
     from app import httpapi
     _, c = _sklad_client(base="http://e0ac7775-email-extractor:8099")
-    c.post("/login", data={"password": "pw"})
-    body = c.get("/", base_url="http://46.224.130.35:8099").data.decode()
+    host = "http://46.224.130.35:8099"           # the operator's own address
+    c.post("/login", data={"password": "pw"}, base_url=host)
+    body = c.get("/", base_url=host).data.decode()
     assert "http://46.224.130.35:8099/sklad/" + httpapi.sklad_key("t") in body
     assert "e0ac7775-email-extractor:8099/sklad/" not in body
