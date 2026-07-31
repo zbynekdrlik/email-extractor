@@ -255,7 +255,8 @@ def test_candidates_prefer_a_card_whose_alias_names_the_customer():
 def test_the_decision_trace_names_the_rule_and_its_inputs():
     d = _decide("Rožok 70g", llm={"gtin": "G50", "confidence": 0.95})
     assert d.trace["rule"] == "unmatched"
-    assert d.trace["llm"] == {"gtin": "G50", "confidence": 0.95}
+    assert d.trace["llm"] == {"gtin": "G50", "confidence": 0.95,
+                              "unknown_gtin": False}
     assert d.trace["weight"] == {"ordered": 70.0, "card": 50.0}
 
 
@@ -269,7 +270,7 @@ def test_a_gtin_that_is_not_in_the_catalog_is_not_a_match():
     d = match.decide(item_name="rožok", catalog=catalog,
                      llm={"gtin": "TOTALLY-MADE-UP", "confidence": 0.97}, recalled=None,
                      customer_name="Pekáreň s.r.o.")
-    assert d.gtin == "" and d.rule == "unmatched"
+    assert not d.gtin and d.rule == "unmatched"
     assert "TOTALLY-MADE-UP" in json.dumps(d.trace, ensure_ascii=False)
 
 
@@ -278,4 +279,4 @@ def test_a_borderline_answer_with_an_unknown_gtin_also_does_not_match():
     d = match.decide(item_name="rožok", catalog=catalog,
                      llm={"gtin": "NOPE", "confidence": 0.75}, recalled=None,
                      customer_name="")
-    assert d.gtin == "" and d.rule == "unmatched"
+    assert not d.gtin and d.rule == "unmatched"

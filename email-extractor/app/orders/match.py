@@ -194,6 +194,12 @@ def decide(item_name: str, llm: dict, catalog: list[dict], recalled=None,
         conf = conf / 100
     llm_gtin = llm.get("gtin") or None
     llm_card = _card(catalog, llm_gtin)
+    # A code that resolves to no card in the catalog is not an answer — it used to be
+    # dereferenced and killed the whole run with 'NoneType' is not subscriptable. The rungs
+    # that do not need the model (history, unique card) still get their turn below.
+    unknown_gtin = bool(llm_gtin) and llm_card is None
+    if unknown_gtin:
+        llm_gtin = ""
     ordered_w = weight_grams(item_name)
 
     cust_toks = customer_tokens(customer_name)
@@ -204,7 +210,8 @@ def decide(item_name: str, llm: dict, catalog: list[dict], recalled=None,
                              for p in matched_parts)
     alias_names_customer = bool(alias) and any(t in alias for t in cust_toks)
 
-    trace = {"llm": {"gtin": llm_gtin, "confidence": llm.get("confidence")},
+    trace = {"llm": {"gtin": llm.get("gtin"), "confidence": llm.get("confidence"),
+                     "unknown_gtin": unknown_gtin},
              "alias": {"exact_parts": matched_parts, "names_customer": alias_names_customer},
              "history": None if not recalled else {
                  "gtin": recalled.gtin, "days": recalled.strength,
