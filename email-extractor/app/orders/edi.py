@@ -97,7 +97,7 @@ def _today() -> str:
 
 
 def build(ean: str, store: str, orderNumber: str, deliveryDate: str,  # noqa: N803
-          items: list[dict]) -> Edi:
+          items: list[dict], today: str = "") -> Edi:
     """The fixed-width document. Unmatched items are skipped and returned by name.
 
     Parameter names match the production node's arguments so the fixture can be applied
@@ -108,7 +108,7 @@ def build(ean: str, store: str, orderNumber: str, deliveryDate: str,  # noqa: N8
     ean = str(ean or "")
 
     hdr = ("HDR" + _pad(SUPPLIER_EAN, 13) + "  " + _pad(order_no, 15) + _pad("", 14)
-           + _today() + "   ")
+           + (today or _today()) + "   ")
     hdr += (_pad(ean, 17) + _pad(store_name, 50) + _pad("", 50) + _pad("", 50)
             + _pad("", 30) + _pad("", 15) + _pad("", 14))
     hdr += (_pad(ean, 17) + _pad(store_name, 50) + _pad("", 129) + _pad(ean, 17)

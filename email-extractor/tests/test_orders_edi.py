@@ -135,3 +135,31 @@ def test_the_document_date_is_injectable_so_parity_does_not_expire_overnight():
     # and the default still tracks the real clock
     from datetime import UTC, datetime
     assert datetime.now(UTC).strftime("%Y%m%d") in edi.build(**case["input"]).content
+
+
+def test_the_ledger_recognizes_the_same_order_built_on_a_different_day(pg):
+    """The document carries its creation date, so the SAME order rebuilt after midnight
+    produced different bytes — and a hash over the raw bytes let it through the ledger as
+    if it had never been sent. That is the duplicate order in ORION (#51), one retry
+    across midnight away. The ledger must key on the ORDER, not on the paperwork date."""
+    case = FIXTURE[0]
+    day1 = edi.build(**dict(case["input"], today="20260730"))
+    day2 = edi.build(**dict(case["input"], today="20260731"))
+    assert day1.content != day2.content, "different paperwork date, as expected"
+
+    ean, delivery = case["input"]["ean"], case["input"]["deliveryDate"]
+    assert edi.claim_send(pg, ean, delivery, day1.content, "a.txt") is True
+    assert edi.claim_send(pg, ean, delivery, day2.content, "b.txt") is False, \
+        "the same order must never be claimable twice"
+
+
+def test_a_genuinely_different_order_is_still_claimable(pg):
+    """The normalization must not go so far that two different orders collide."""
+    case = FIXTURE[0]
+    a = edi.build(**dict(case["input"], today="20260730"))
+    other = dict(case["input"])
+    other["items"] = [dict(other["items"][0], quantity=999)]
+    b = edi.build(**dict(other, today="20260730"))
+    ean, delivery = case["input"]["ean"], case["input"]["deliveryDate"]
+    assert edi.claim_send(pg, ean, delivery, a.content, "a.txt") is True
+    assert edi.claim_send(pg, ean, delivery, b.content, "b.txt") is True
