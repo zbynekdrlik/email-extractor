@@ -253,3 +253,52 @@ def test_shadow_mode_asks_nobody(pg):
     pipeline.run(pg, Config(pg_dsn="", data_dir="/tmp", orders_shadow=True), mail, sid,
                  client=Client(), upload=lambda *a, **k: None, post=lambda *a, **k: None)
     assert teach.open_questions(pg) == []
+
+
+# --- review findings: a mis-click must be undoable ------------------------
+
+def test_a_mistaken_answer_can_be_taken_back(pg):
+    """Review finding: a taught wording is never asked about again, so a mis-click used to be
+    permanent AND invisible — it would decide that customer's line forever, with no model call
+    to second-guess it. Undo removes the mapping and reopens the question."""
+    qid = _ask(pg)
+    teach.answer(pg, qid, gtin="SLI90", card="Šiška džemová 90g", by="sklad")
+    assert memory.resolve(pg, EAN, "Šiška").gtin == "SLI90"
+
+    teach.undo(pg, qid)
+    assert memory.resolve(pg, EAN, "Šiška") is None, "the wrong mapping is gone"
+    assert [q["id"] for q in teach.open_questions(pg)] == [qid], "and it is asked again"
+
+    teach.answer(pg, qid, gtin="SLI50", card="Šiška džemová 50g", by="sklad")
+    assert memory.resolve(pg, EAN, "Šiška").gtin == "SLI50"
+
+
+def test_undo_only_removes_what_a_human_taught(pg):
+    """Deliveries the engine actually shipped are evidence and must survive an undo."""
+    memory.remember(pg, EAN, "Šiška", "SLI90", "Šiška džemová 90g", "2026-07-01",
+                    source="ship")
+    qid = _ask(pg)
+    teach.answer(pg, qid, gtin="SLI50", card="Šiška džemová 50g", by="sklad")
+    teach.undo(pg, qid)
+    rows = pg.execute("SELECT source FROM item_memory WHERE customer_ean = %s",
+                      (EAN,)).fetchall()
+    assert [r[0] for r in rows] == ["ship"]
+
+
+def test_the_dashboard_can_take_an_answer_back(pg):
+    qid = _ask(pg)
+    c = _dash(pg)
+    c.post(f"/api/orders/question/{qid}/answer",
+           json={"gtin": "SLI90", "card": "Šiška džemová 90g"})
+    r = c.post(f"/api/orders/question/{qid}/undo")
+    assert r.status_code == 200
+    assert [q["id"] for q in c.get("/api/orders/questions").get_json()["items"]] == [qid]
+
+
+def test_a_card_name_with_a_quote_does_not_break_the_page(pg):
+    """The candidate list comes from the catalog sheet, so a name may contain a quote. The
+    buttons must be built as DOM nodes, never spliced into an HTML string."""
+    _ask(pg, wording='Chlieb "special"',
+         candidates=[{"gtin": "SLI50", "name": 'Chlieb "special" 500g'}])
+    d = _dash(pg).get("/api/orders/questions").get_json()
+    assert d["items"][0]["candidates"][0]["name"] == 'Chlieb "special" 500g'
