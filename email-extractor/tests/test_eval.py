@@ -248,3 +248,53 @@ def test_an_invented_extra_delivery_date_fails():
 def test_the_single_order_shape_still_works():
     """The old flat shape stays valid — most emails are one order."""
     assert evaluate.score(EXPECTED, _actual()).passed is True
+
+
+# --- asserting only what the corpus author actually knows ------------------
+
+def test_an_order_without_an_items_key_asserts_only_its_delivery_date():
+    """Some real cases are only knowable at the date level — a weekly order whose per-item
+    ground truth could not be reconstructed. Asserting invented GTINs would lock a wrong
+    answer into the baseline, so an order with NO `items` key asserts the date alone."""
+    expected = {"customer_ean": "2000000000001",
+                "orders": [{"delivery_date": "03.08.2026"},
+                           {"delivery_date": "04.08.2026"}]}
+    actual = {"customer_ean": "2000000000001", "shipped": True, "order_results": [
+        {"delivery_date": "03.08.2026", "items": [{"gtin": "G50", "quantity": 35}]},
+        {"delivery_date": "04.08.2026", "items": [{"gtin": "VIA", "quantity": 3}]}]}
+    assert evaluate.score(expected, actual).passed is True
+
+
+def test_a_date_only_order_still_fails_on_a_missing_or_invented_date():
+    expected = {"customer_ean": "2000000000001",
+                "orders": [{"delivery_date": "03.08.2026"},
+                           {"delivery_date": "04.08.2026"}]}
+    missing = {"customer_ean": "2000000000001", "shipped": True, "order_results": [
+        {"delivery_date": "03.08.2026", "items": []}]}
+    s = evaluate.score(expected, missing)
+    assert s.passed is False and any("04.08.2026" in p for p in s.problems)
+
+    invented = {"customer_ean": "2000000000001", "shipped": True, "order_results": [
+        {"delivery_date": "03.08.2026", "items": []},
+        {"delivery_date": "04.08.2026", "items": []},
+        {"delivery_date": "08.08.2026", "items": []}]}
+    s = evaluate.score(expected, invented)
+    assert s.passed is False and any("08.08.2026" in p for p in s.problems)
+
+
+def test_an_explicitly_empty_item_list_is_still_asserted():
+    """`items: []` means "this order must be empty" — absence of the key is what relaxes."""
+    expected = {"customer_ean": "X", "orders": [{"delivery_date": "03.08.2026", "items": []}]}
+    actual = {"customer_ean": "X", "shipped": True, "order_results": [
+        {"delivery_date": "03.08.2026", "items": [{"gtin": "G50", "quantity": 1}]}]}
+    assert evaluate.score(expected, actual).passed is False
+
+
+def test_an_email_that_must_not_produce_an_order_fails_if_it_produces_one():
+    expected = {"customer_ean": "", "orders": [], "should_review": True}
+    actual = {"customer_ean": "2000000000001", "shipped": True, "order_results": [
+        {"delivery_date": "03.08.2026", "items": [{"gtin": "G50", "quantity": 1}]}]}
+    s = evaluate.score(expected, actual)
+    assert s.passed is False
+    assert any("03.08.2026" in p for p in s.problems)
+    assert any("kontrol" in p.lower() for p in s.problems)
