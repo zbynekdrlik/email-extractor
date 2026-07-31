@@ -58,28 +58,48 @@ def _items_map(items) -> dict[str, float]:
     return {str(i.get("gtin")): float(i.get("quantity") or 0) for i in items or []}
 
 
+def _compare_items(want: dict, got: dict, label: str, problems: list[str]) -> int:
+    """Item-level comparison; `label` names the order the items belong to (or is empty)."""
+    where = f" ({label})" if label else ""
+    hits = 0
+    for gtin, qty in want.items():
+        if gtin not in got:
+            problems.append(f"chýba karta {gtin} ({qty:g}){where}")
+        elif abs(got[gtin] - qty) > QUANTITY_TOLERANCE:
+            problems.append(f"iné množstvo pri {gtin}{where}: čakáme {qty:g}, "
+                            f"dostali {got[gtin]:g}")
+        else:
+            hits += 1
+    for gtin in got.keys() - want.keys():
+        problems.append(f"karta {gtin} navyše ({got[gtin]:g}){where}")
+    return hits
+
+
 def score(expected: dict, actual: dict) -> Score:
-    """Compare one case's outcome. Item order and numeric formatting are not differences."""
+    """Compare one case's outcome. Item order and numeric formatting are not differences.
+
+    Two expected shapes, because one email can carry several orders:
+
+    - flat (`delivery_date` + `items`) for the ordinary single-order email;
+    - `orders: [{delivery_date, items}]`, matched by delivery date, for an email asking for
+      several dates at once. n8n writes one EDI file per date, so scoring a flattened item
+      list would silently ignore every order after the first (#78).
+    """
     problems: list[str] = []
 
     if str(expected.get("customer_ean") or "") != str(actual.get("customer_ean") or ""):
         problems.append(f"iný zákazník: čakáme {expected.get('customer_ean')!r}, "
                         f"dostali {actual.get('customer_ean')!r}")
+
+    if expected.get("orders") is not None:
+        return _score_per_order(expected, actual, problems)
+
     if str(expected.get("delivery_date") or "") != str(actual.get("delivery_date") or ""):
         problems.append(f"iný dátum dodania: čakáme {expected.get('delivery_date')!r}, "
                         f"dostali {actual.get('delivery_date')!r}")
 
     want, got = _items_map(expected.get("items")), _items_map(actual.get("items"))
-    hits = 0
-    for gtin, qty in want.items():
-        if gtin not in got:
-            problems.append(f"chýba karta {gtin} ({qty:g})")
-        elif abs(got[gtin] - qty) > QUANTITY_TOLERANCE:
-            problems.append(f"iné množstvo pri {gtin}: čakáme {qty:g}, dostali {got[gtin]:g}")
-        else:
-            hits += 1
-    for gtin in got.keys() - want.keys():
-        problems.append(f"karta {gtin} navyše ({got[gtin]:g})")
+    hits = _compare_items(want, got, "", problems)
 
     # The opposite mistake matters as much: shipping what the warehouse had to check.
     if expected.get("should_review") and actual.get("shipped"):
@@ -88,6 +108,38 @@ def score(expected: dict, actual: dict) -> Score:
         problems.append("malo sa odoslať, ale skončilo na kontrole")
 
     recall = (hits / len(want)) if want else (1.0 if not got else 0.0)
+    return Score(passed=not problems, item_recall=recall, problems=problems)
+
+
+def _score_per_order(expected: dict, actual: dict, problems: list[str]) -> Score:
+    """Match orders by delivery date, then compare each one's items.
+
+    Sequence is not a difference (the model may emit the dates in any order), but a missing
+    date, an invented date, and a wrong item inside the SECOND order all are — exactly the
+    failures a flattened comparison could not see.
+    """
+    want_orders = {str(o.get("delivery_date") or ""): o for o in expected["orders"]}
+    got_orders = {str(o.get("delivery_date") or ""): o
+                  for o in actual.get("order_results") or []}
+
+    hits = wanted = 0
+    for date, order in want_orders.items():
+        want = _items_map(order.get("items"))
+        wanted += len(want)
+        if date not in got_orders:
+            problems.append(f"chýba celá objednávka na {date} ({len(want)} položiek)")
+            continue
+        hits += _compare_items(want, _items_map(got_orders[date].get("items")),
+                               date, problems)
+    for date in got_orders.keys() - want_orders.keys():
+        problems.append(f"objednávka na {date} navyše — taký dátum v e-maile nebol")
+
+    if expected.get("should_review") and actual.get("shipped"):
+        problems.append("malo ísť na kontrolu, ale odoslalo sa")
+    if expected.get("should_ship") and not actual.get("shipped"):
+        problems.append("malo sa odoslať, ale skončilo na kontrole")
+
+    recall = (hits / wanted) if wanted else (1.0 if not got_orders else 0.0)
     return Score(passed=not problems, item_recall=recall, problems=problems)
 
 
@@ -130,9 +182,13 @@ def load_manifest(path) -> list[dict]:
 def _actual_from_run(result: dict) -> dict:
     items = [{"gtin": i["gtin"], "quantity": i["quantity"]}
              for i in result.get("items") or [] if i.get("gtin")]
+    orders = [{"delivery_date": o.get("delivery_date", ""), "status": o.get("status", ""),
+               "items": [{"gtin": i["gtin"], "quantity": i["quantity"]}
+                         for i in o.get("items") or [] if i.get("gtin")]}
+              for o in result.get("order_results") or []]
     return {"customer_ean": result.get("customer_ean", ""),
             "delivery_date": result.get("delivery_date", ""),
-            "items": items,
+            "items": items, "order_results": orders,
             "shipped": result.get("status") in ("ok", "partial")}
 
 
