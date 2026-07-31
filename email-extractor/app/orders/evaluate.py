@@ -242,7 +242,10 @@ def run_corpus(conn, cfg, manifest_path, offline: bool = True,
         raise RuntimeError("no catalog snapshot — import one before evaluating")
     client = llm.from_config(cfg, offline=offline)
     results = []
-    for case in cases:
+    for n, case in enumerate(cases, 1):
+        # A live run takes tens of minutes. Announce every case: a run that dies silently
+        # must not look like a run that is still working (it did, once, for 40 minutes).
+        log.info("case %d/%d %s (%s)", n, len(cases), case.get("id"), case.get("type", "?"))
         try:
             results.append(run_case(conn, cfg, case, sid, client=client))
         except llm.CacheMiss as e:
