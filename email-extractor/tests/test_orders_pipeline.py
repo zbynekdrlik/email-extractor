@@ -229,3 +229,62 @@ def test_the_diff_against_n8n_reports_only_real_differences(pg):
 def test_a_missing_n8n_run_is_reported_as_such(pg):
     ours = {"customer_ean": "1", "delivery_date": "04.08.2026", "items": []}
     assert pipeline.diff(ours, None) == ["n8n nemá výsledok pre túto správu"]
+
+
+# --- one email, several orders (#78) -------------------------------------
+
+TWO_DATE_MAIL = dict(MAIL, combined_text=(
+    "na 04.08.2026 prosím 120x rožok 50g\n"
+    "na 05.08.2026 prosím 7x vianočka 400g"))
+
+
+def _two_order_answers():
+    """One email, two delivery dates — what 20 of the 127 real ground-truth mails look like."""
+    return [
+        {"senderName": "Sklad", "senderEmail": "sklad@pekaren.sk",
+         "companyName": "Pekáreň Testovacia s.r.o.", "isChangeRequest": False, "notes": "",
+         "orders": [
+             {"orderNumber": "A1", "deliveryDate": "04.08.2026", "recipientGroup": "",
+              "items": [{"name": "rožok 50g", "quantity": 120, "unit": "ks",
+                         "sourceQuote": "120x rožok 50g"}]},
+             {"orderNumber": "A2", "deliveryDate": "05.08.2026", "recipientGroup": "",
+              "items": [{"name": "vianočka 400g", "quantity": 7, "unit": "ks",
+                         "sourceQuote": "7x vianočka 400g"}]}]},
+        {"ean_edi": "2000000000001", "confidence": 0.95},
+        {"gtin": "G50", "confidence": 0.95, "matchedCatalogName": "", "reason": ""},
+        {"gtin": "VIA", "confidence": 0.95, "matchedCatalogName": "", "reason": ""},
+    ]
+
+
+def test_each_order_of_a_multi_date_email_is_reported_separately(pg, env):
+    """n8n writes one EDI file per delivery date, so a flattened result cannot be scored:
+    the second order's date and items would be invisible."""
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), TWO_DATE_MAIL, env,
+                          client=ScriptedClient(_two_order_answers()),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "ok"
+    assert len(rec.uploads) == 2, "one EDI per order"
+
+    orders = result["order_results"]
+    assert [o["delivery_date"] for o in orders] == ["04.08.2026", "05.08.2026"]
+    assert [o["order_number"] for o in orders] == ["A1", "A2"]
+    assert [[i["gtin"] for i in o["items"]] for o in orders] == [["G50"], ["VIA"]]
+    assert [[i["quantity"] for i in o["items"]] for o in orders] == [[120], [7]]
+    assert [o["status"] for o in orders] == ["ok", "ok"]
+    # every order's file is nameable, and the two differ
+    names = [o["edi_filename"] for o in orders]
+    assert all(names) and names[0] != names[1]
+
+
+def test_a_multi_date_email_where_one_order_fails_reports_per_order_status(pg, env):
+    answers = _two_order_answers()
+    answers[3] = {"gtin": "NO_MATCH", "confidence": 0.1, "matchedCatalogName": "",
+                  "reason": "nič sa nezhoduje"}
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), TWO_DATE_MAIL, env, client=ScriptedClient(answers),
+                          upload=rec.upload, post=rec.post)
+    orders = result["order_results"]
+    assert [o["status"] for o in orders] == ["ok", "review"]
+    assert len(rec.uploads) == 1, "the failed order must not be uploaded"
+    assert result["status"] == "partial", "part of the email shipped, part did not"
