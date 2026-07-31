@@ -16,10 +16,14 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from . import customer, edi, extract, llm, match, memory, report, snapshot
+from . import customer, edi, extract, llm, match, memory, report, snapshot, teach
 from . import upload as upload_mod
 
 log = logging.getLogger("orders.pipeline")
+
+# The rungs that mean the engine could not settle the line on its own. Each becomes
+# ONE question for the warehouse (#88) — answering it teaches the wording for good.
+ASK_THE_WAREHOUSE = ("unmatched", "llm_borderline", "unique_card", "history_weight")
 
 PROMPTS = Path(__file__).with_name("prompts")
 
@@ -139,6 +143,7 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                        items=[], result={"shipped": False, "reject_reason": conflict,
                                          "customer": {}, "unverified": [],
                                          "notes": extracted.get("notes", "")})
+    asked: list[int] = []
     all_items: list[dict] = []
     statuses: list[str] = []
     previews: list[dict] = []
@@ -152,6 +157,7 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
             # The wording may already BE a card, an alias, or an unanimous history — then
             # the answer is certain and asking the model is paid-for redundancy (#86).
             decision = match.decide_without_model(item["name"], catalog, recalled=recalled)
+            item_cands: list[dict] = []
             if decision is None:
                 item_cands = match.candidates(
                     item["name"], catalog,
@@ -168,6 +174,19 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
             decision.quantity = item.get("quantity")
             decision.unit = item.get("unit", "ks")
             decisions.append(decision)
+            # A line the engine could not settle becomes ONE question for the warehouse, with
+            # its candidate cards (#88). Answering it teaches the wording for good — measured,
+            # the whole tail is 15 (customer, wording) pairs. Never in shadow: shadow must
+            # leave no trace, and these are questions for a human.
+            if not shadow and matched and decision.rule in ASK_THE_WAREHOUSE:
+                asked.append(teach.ask(
+                    conn, message_id=message.get("message_id", ""),
+                    customer_ean=matched.ean_edi, customer_name=matched.name,
+                    wording=item["name"], quantity=item.get("quantity"),
+                    unit=item.get("unit", "ks"),
+                    candidates=[{"gtin": str(c.get("gtin")), "name": c.get("name", "")}
+                                for c in item_cands[:6]],
+                    delivery_date=order.get("deliveryDate", ""), reason=decision.note))
         decisions = match.merge_same_card(match.apply_siblings(decisions))
         all_items.extend(_decision_dict(d) for d in decisions)
         status, preview = _ship_one(conn, cfg, message, order, matched, decisions,

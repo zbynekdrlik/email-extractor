@@ -429,6 +429,30 @@ def create_app(cfg) -> Flask:
         log.info("fix_requested #%s type=%s -> fix #%s", mid, ptype, fid)
         return jsonify(ok=True, id=mid, fix_id=fid)
 
+    @app.get("/api/orders/questions")
+    def api_orders_questions():
+        """The wordings waiting for the warehouse (#88) — one per (customer, wording)."""
+        from .orders import teach
+        with _db() as c:
+            return jsonify(items=teach.open_questions(c))
+
+    @app.post("/api/orders/question/<int:qid>/answer")
+    def api_orders_answer(qid: int):
+        """One click: this wording IS this card. Taught for that customer, forever."""
+        from .orders import teach
+        body = request.get_json(silent=True) or {}
+        gtin, card = str(body.get("gtin") or ""), str(body.get("card") or "")
+        if not gtin:
+            return jsonify(error="chýba karta"), 400
+        try:
+            with _db_tx() as c:
+                q = teach.answer(c, qid, gtin=gtin, card=card, by="sklad")
+        except teach.AlreadyAnswered as e:
+            return jsonify(error=str(e)), 409
+        except teach.NotACandidate as e:
+            return jsonify(error=str(e)), 400
+        return jsonify(ok=True, question=q)
+
     @app.get("/api/orders/spend")
     def api_orders_spend():
         """What the order engine costs this month, and how much of it needed no model (#89).
@@ -629,6 +653,7 @@ DASH_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
   <button class="tab active" id="tabMails" onclick="setView('mails')">Maily</button>
   <button class="tab" id="tabFix" onclick="setView('fix')">Fix fronta</button>
   <button class="tab" id="tabImap" onclick="setView('imap')">Neprijaté <span id="imapBadge"></span></button>
+  <button class="tab" id="tabAsk" onclick="setView('ask')">Otázky skladu <span id="askBadge"></span></button>
 </div>
 <main>
   <div id="list"></div>
@@ -747,10 +772,28 @@ async function resolveFix(fid,status){const res=status==='fixed'?(prompt('Pozná
 function setView(v){view=v;document.getElementById('tabMails').classList.toggle('active',v==='mails');
   document.getElementById('tabFix').classList.toggle('active',v==='fix');
   document.getElementById('tabImap').classList.toggle('active',v==='imap');
-  if(v==='fix'){loadFix()}else if(v==='imap'){loadImap()}
+  document.getElementById('tabAsk').classList.toggle('active',v==='ask');
+  if(v==='fix'){loadFix()}else if(v==='imap'){loadImap()}else if(v==='ask'){loadAsk()}
   else{document.getElementById('detail').innerHTML='<div class="empty">Vyber mail vľavo.</div>';loadList()}}
 function tick(){if(live&&document.getElementById('ov').style.display!=='flex'){
-  if(view==='mails')loadList();else if(view==='imap')loadImap();else loadFix()}}
+  if(view==='mails')loadList();else if(view==='imap')loadImap();
+  else if(view==='ask')loadAsk();else loadFix()}}
+async function loadAsk(){const L=document.getElementById('list');
+  L.innerHTML='';let d;try{d=await api('/api/orders/questions')}catch(e){return}
+  if(!d.items.length){L.innerHTML='<div class="empty">Nič nečaká \u2014 automat si vie poradiť sám.</div>';return}
+  for(const q of d.items){const el=document.createElement('div');el.className='row';
+    const opts=q.candidates.map(c=>'<button class="btn" onclick="teachIt('+q.id+',\''+c.gtin+'\',\''+
+      (c.name||'').replace(/'/g,"\\'")+'\')">'+(c.name||c.gtin)+'</button>').join(' ');
+    el.innerHTML='<div><b>'+q.wording+'</b> \u00b7 '+(q.quantity||'')+' '+(q.unit||'')+
+      '<div class="sub">'+(q.customer_name||q.customer_ean)+' \u00b7 dodanie '+(q.delivery_date||'?')+
+      '</div><div class="sub">'+(q.reason||'')+'</div><div class="acts">'+opts+'</div></div>';
+    L.appendChild(el)}}
+async function teachIt(qid,gtin,card){try{await api('/api/orders/question/'+qid+'/answer',
+  {method:'POST',body:JSON.stringify({gtin:gtin,card:card})});await loadAsk();await askBadgeRefresh()}
+  catch(e){alert(e.message||'chyba')}}
+async function askBadgeRefresh(){try{const d=await api('/api/orders/questions');
+  const b=document.getElementById('askBadge');b.textContent=d.items.length?String(d.items.length):'';
+  b.style.color='#d29922'}catch(e){}}
 async function spendBadgeRefresh(){try{const d=await api('/api/orders/spend');
   const b=document.getElementById('spendBadge');
   b.textContent=d.cost_eur.toFixed(2)+' \u20ac / '+d.cap_eur.toFixed(0)+' \u20ac \u00b7 bez modelu '+d.free_pct+' %';
@@ -760,7 +803,7 @@ async function imapBadgeRefresh(){try{const d=await api('/api/imap-failures');
 document.getElementById('livetog').onclick=()=>{live=!live;document.getElementById('livetog').style.color=live?'#3fb950':'#6e7681';document.getElementById('livelbl').textContent=live?'LIVE':'pauza'};
 let deb;q.oninput=()=>{clearTimeout(deb);deb=setTimeout(loadList,350)};
 for(const el of [fcat,fstate,ffrom,fto])el.onchange=loadList;
-loadList();imapBadgeRefresh();spendBadgeRefresh();timer=setInterval(tick,5000);setInterval(imapBadgeRefresh,30000);setInterval(spendBadgeRefresh,60000);
+loadList();imapBadgeRefresh();spendBadgeRefresh();askBadgeRefresh();setInterval(askBadgeRefresh,30000);timer=setInterval(tick,5000);setInterval(imapBadgeRefresh,30000);setInterval(spendBadgeRefresh,60000);
 </script></body></html>"""
 
 

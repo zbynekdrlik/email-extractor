@@ -180,6 +180,11 @@ def decide_without_model(item_name: str, catalog: list[dict], recalled=None) -> 
                         rule=rule, note=note, review=False,
                         trace={"rule": rule, "llm": None, "free": True})
 
+    # The warehouse ANSWERED this wording (#88). That outranks everything, including the
+    # weight guard: the guard stops the model guessing, it does not overrule a human.
+    if recalled is not None and getattr(recalled, "human", False):
+        return _done("human_taught", recalled.gtin, recalled.card,
+                     f"Priradené skladom — „{item_name}“ je „{recalled.card}“.")
     by_name = [c for c in catalog if _fold(c.get("name", "")) == want]
     if len(by_name) == 1 and _ok(by_name[0].get("name", "")):
         return _done("catalog_name", by_name[0]["gtin"], by_name[0]["name"],

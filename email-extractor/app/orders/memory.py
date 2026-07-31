@@ -34,6 +34,9 @@ class Recalled:
     unanimous: bool        # only ever shipped this one card for this wording
     last_day: str
     weight_override: bool  # may override the weight guard (unanimous + 3 days)
+    # A warehouse answer (#88), not machine-learned history: it decides on its own, outranks
+    # every model rung, and is never subject to the as-of window below.
+    human: bool = False
 
     @property
     def note(self) -> str:
@@ -84,10 +87,24 @@ def resolve(conn, customer_ean: str, item: str, as_of: str = "") -> Recalled | N
     is right in production — a delivery booked for next week cannot decide today's order —
     and it is what keeps the golden corpus honest, since history seeded from the archive
     would otherwise contain the very order being scored.
+
+    A HUMAN answer (#88) is exempt from `as_of` and wins outright: a mapping the warehouse
+    typed is an instruction, not evidence, so it applies to the very email that triggered the
+    question — including one that arrives the same day.
     """
     key = item_key(item)
     if not (customer_ean and key):
         return None
+    taught = conn.execute(
+        """SELECT gtin, max(card), max(delivered_on)
+             FROM item_memory
+            WHERE customer_ean = %s AND item_key = %s AND source = 'human'
+            GROUP BY gtin ORDER BY max(created_at) DESC LIMIT 1""",
+        (str(customer_ean), key)).fetchone()
+    if taught:
+        return Recalled(gtin=str(taught[0]), card=taught[1] or "", strength=1,
+                        unanimous=True, last_day=str(taught[2]), weight_override=True,
+                        human=True)
     rows = conn.execute(
         """SELECT gtin,
                   max(card)                    AS card,
