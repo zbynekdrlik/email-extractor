@@ -401,3 +401,36 @@ def test_the_corpus_run_logs_progress_per_case(pg, tmp_path, caplog):
     progress = [r.message for r in caplog.records if "1/2" in r.message or "2/2" in r.message]
     assert len(progress) == 2, f"expected a line per case, got {progress}"
     assert "a" in progress[0] and "b" in progress[1]
+
+
+# --- comparing dates and customers honestly -------------------------------
+
+def test_the_same_day_written_two_ways_is_the_same_day():
+    """The archive stores delivery dates both as 2026-07-01 and as 01.07.2026, depending on
+    which n8n node wrote them. Treating those as different dates reported a missing order
+    and an extra order for one and the same delivery."""
+    expected = {"orders": [{"delivery_date": "2026-07-01",
+                            "items": [{"gtin": "G50", "quantity": 10}]}]}
+    actual = {"shipped": True, "order_results": [
+        {"delivery_date": "01.07.2026", "status": "ok",
+         "items": [{"gtin": "G50", "quantity": 10}]}]}
+    assert evaluate.score(expected, actual).passed is True
+    assert evaluate.score({"delivery_date": "1.7.2026", "items": []},
+                          {"delivery_date": "01.07.2026", "items": []}).passed is True
+
+
+def test_a_different_day_is_still_a_difference():
+    expected = {"orders": [{"delivery_date": "2026-07-01", "items": []}]}
+    actual = {"shipped": True, "order_results": [
+        {"delivery_date": "02.07.2026", "status": "ok", "items": []}]}
+    assert evaluate.score(expected, actual).passed is False
+
+
+def test_the_customer_is_compared_only_when_the_case_states_one():
+    """A must-review case cares that nothing SHIPS, not who the sender turned out to be —
+    identifying the customer correctly and then refusing to ship is right, not a failure."""
+    expected = {"orders": [], "should_review": True}
+    actual = {"customer_ean": "2000000000354", "shipped": False, "order_results": []}
+    assert evaluate.score(expected, actual).passed is True
+    # but a case that DOES name a customer still enforces it
+    assert evaluate.score(dict(expected, customer_ean="2000000000001"), actual).passed is False
