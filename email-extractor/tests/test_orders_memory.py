@@ -96,3 +96,29 @@ def test_importing_the_n8n_rows_is_idempotent(pg):
         "same customer+item+card+DAY is one delivery; a row without a customer is unusable"
     assert memory.import_n8n_rows(pg, rows) == 0
     assert memory.resolve(pg, "2000000000865", "rožok").gtin == "8588001805647"
+
+
+# --- history is AS OF the email's date (#81.2) -----------------------------
+
+def test_history_only_counts_deliveries_before_the_email(pg):
+    """Two reasons. In production, a delivery recorded for a LATER date must not decide an
+    order written today. And in the golden corpus, history seeded from the archive would
+    otherwise contain the very order being scored — the test would know its own answer."""
+    for day in ("2026-07-01", "2026-07-08", "2026-07-22"):
+        memory.remember(pg, "200", "chlieb psenicno razny", "OLD", "Chlieb 1000 gr",
+                        delivered_on=day, source="ship")
+    memory.remember(pg, "200", "chlieb psenicno razny", "NEW", "Chlieb 700 gr",
+                    delivered_on="2026-07-30", source="ship")
+
+    as_of = memory.resolve(pg, "200", "chlieb pšenično ražný", as_of="2026-07-24")
+    assert as_of and as_of.gtin == "OLD", "only what was delivered BEFORE 24.07. may decide"
+    assert as_of.strength == 3
+
+    everything = memory.resolve(pg, "200", "chlieb pšenično ražný")
+    assert everything and everything.strength == 4, "unfiltered still sees all of it"
+
+
+def test_a_history_with_nothing_before_the_email_decides_nothing(pg):
+    memory.remember(pg, "200", "siska", "G", "Šiška čokoláda 100g",
+                    delivered_on="2026-07-30", source="ship")
+    assert memory.resolve(pg, "200", "šiška", as_of="2026-07-01") is None
