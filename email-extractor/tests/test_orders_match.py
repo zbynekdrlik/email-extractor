@@ -280,3 +280,67 @@ def test_a_borderline_answer_with_an_unknown_gtin_also_does_not_match():
                      llm={"gtin": "NOPE", "confidence": 0.75}, recalled=None,
                      customer_name="")
     assert not d.gtin and d.rule == "unmatched"
+
+
+# --- #86: rungs that need no model call at all ---------------------------
+#
+# 89 % of the engine's model spend is one call per ordered line, made unconditionally —
+# even when the wording IS a catalog card. Measured on the 30-email corpus (2026-07-31):
+# 115 of 473 lines are answerable with no call, and in 115 of 115 the free answer was the
+# SAME card the model-driven ladder shipped. So this is not a cheaper guess; it is the
+# same answer without paying for it.
+
+def test_the_wording_is_literally_a_catalog_card():
+    d = match.decide_without_model("Rožok kváskový 70g", CATALOG)
+    assert d is not None
+    assert (d.gtin, d.rule, d.review, d.confidence) == ("G70", "catalog_name", False, 1.0)
+
+
+def test_the_wording_is_literally_a_card_alias():
+    """The warehouse wrote the customer's wording into the alias column — that is a human
+    mapping already, and asking a model to confirm it is paid-for redundancy."""
+    d = match.decide_without_model("žemľa 50g", CATALOG)
+    assert d is not None
+    assert (d.gtin, d.rule) == ("G50", "alias_exact")
+
+
+def test_an_unanimous_history_of_three_days_needs_no_model():
+    d = match.decide_without_model("šiška", CATALOG, recalled=_mem("SLI", "Slimák kakaový 90g"))
+    assert d is not None
+    assert (d.gtin, d.rule) == ("SLI", "history_sure")
+
+
+def test_a_thin_history_is_not_enough_to_skip_the_model():
+    """Two deliveries is a coincidence, not a mapping — the ladder's own bar is 3 days."""
+    assert match.decide_without_model(
+        "šiška", CATALOG, recalled=_mem("SLI", "Slimák kakaový 90g", days=2)) is None
+    assert match.decide_without_model(
+        "šiška", CATALOG, recalled=_mem("SLI", "Slimák kakaový 90g", unanimous=False)) is None
+
+
+def test_an_ordinary_wording_still_goes_to_the_model():
+    assert match.decide_without_model("nieco co v katalogu nie je", CATALOG) is None
+    assert match.decide_without_model("Dánske pečivo", CATALOG) is None
+
+
+def test_a_wording_matching_two_cards_is_never_decided_for_free():
+    ambiguous = CATALOG + [{"gtin": "G70B", "name": "Rožok kváskový 70g", "alias": ""}]
+    assert match.decide_without_model("Rožok kváskový 70g", ambiguous) is None
+
+
+def test_a_disagreeing_weight_is_never_decided_for_free():
+    """"Kakaový slimák 130g" against a 90 g card is exactly the line a human must rule on
+    (measured corpus, 2026-07-31) — the free path must not swallow it."""
+    aliased = [dict(CATALOG[3], alias="kakaovy slimak 130g")] + CATALOG[:3]
+    assert match.decide_without_model("kakaovy slimak 130g", aliased) is None
+    assert match.decide_without_model(
+        "šiška 130g", CATALOG, recalled=_mem("SLI", "Slimák kakaový 90g")) is None
+
+
+def test_the_free_decision_says_in_slovak_why_it_was_certain():
+    for wording, recalled in (("Rožok kváskový 70g", None), ("žemľa 50g", None),
+                              ("šiška", _mem("SLI", "Slimák kakaový 90g"))):
+        d = match.decide_without_model(wording, CATALOG, recalled=recalled)
+        assert d.note and d.note[0].isupper(), wording
+        assert d.trace.get("rule") == d.rule
+        assert d.trace.get("llm") is None, "no model was asked, so nothing to record"
