@@ -96,3 +96,57 @@ def test_importing_the_n8n_rows_is_idempotent(pg):
         "same customer+item+card+DAY is one delivery; a row without a customer is unusable"
     assert memory.import_n8n_rows(pg, rows) == 0
     assert memory.resolve(pg, "2000000000865", "rožok").gtin == "8588001805647"
+
+
+# --- history is AS OF the email's date (#81.2) -----------------------------
+
+def test_history_only_counts_deliveries_before_the_email(pg):
+    """Two reasons. In production, a delivery recorded for a LATER date must not decide an
+    order written today. And in the golden corpus, history seeded from the archive would
+    otherwise contain the very order being scored — the test would know its own answer."""
+    for day in ("2026-07-01", "2026-07-08", "2026-07-22"):
+        memory.remember(pg, "200", "chlieb psenicno razny", "OLD", "Chlieb 1000 gr",
+                        delivered_on=day, source="ship")
+    memory.remember(pg, "200", "chlieb psenicno razny", "NEW", "Chlieb 700 gr",
+                    delivered_on="2026-07-30", source="ship")
+
+    as_of = memory.resolve(pg, "200", "chlieb pšenično ražný", as_of="2026-07-24")
+    assert as_of and as_of.gtin == "OLD", "only what was delivered BEFORE 24.07. may decide"
+    assert as_of.strength == 3
+
+    # Unfiltered, the later contradicting delivery makes the history ambiguous — which is
+    # exactly why an order must be judged against the history as it stood at the time.
+    assert memory.resolve(pg, "200", "chlieb pšenično ražný") is None
+
+
+def test_a_history_with_nothing_before_the_email_decides_nothing(pg):
+    memory.remember(pg, "200", "siska", "G", "Šiška čokoláda 100g",
+                    delivered_on="2026-07-30", source="ship")
+    assert memory.resolve(pg, "200", "šiška", as_of="2026-07-01") is None
+
+
+def test_the_archive_can_be_seeded_as_history(pg):
+    """The history the engine inherited from n8n covered 11 customers and 123 lines, so for
+    most customers there was nothing to remember and every unweighted wording was a guess.
+    The archive of orders we really shipped is the missing history."""
+    rows = [
+        {"customer_ean": "200", "delivered_on": "2026-07-01",
+         "items": [{"name": "Chlieb pšenično ražný", "card": "Chlieb pšenično-ražný 1000 gr",
+                    "gtin": "8588001805579"}]},
+        {"customer_ean": "200", "delivered_on": "2026-07-08",
+         "items": [{"name": "Chlieb pšenično ražný", "card": "Chlieb pšenično-ražný 1000 gr",
+                    "gtin": "8588001805579"}]},
+    ]
+    added = memory.seed_from_archive(pg, rows)
+    assert added == 2
+    recalled = memory.resolve(pg, "200", "chlieb pšenično ražný", as_of="2026-07-24")
+    assert recalled and recalled.gtin == "8588001805579" and recalled.strength == 2
+    # re-seeding the same archive changes nothing
+    assert memory.seed_from_archive(pg, rows) == 0
+
+
+def test_seeding_skips_a_line_with_no_card(pg):
+    added = memory.seed_from_archive(pg, [
+        {"customer_ean": "200", "delivered_on": "2026-07-01",
+         "items": [{"name": "niečo", "card": "", "gtin": ""}]}])
+    assert added == 0

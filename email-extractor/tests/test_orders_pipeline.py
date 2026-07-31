@@ -229,3 +229,157 @@ def test_the_diff_against_n8n_reports_only_real_differences(pg):
 def test_a_missing_n8n_run_is_reported_as_such(pg):
     ours = {"customer_ean": "1", "delivery_date": "04.08.2026", "items": []}
     assert pipeline.diff(ours, None) == ["n8n nemá výsledok pre túto správu"]
+
+
+# --- one email, several orders (#78) -------------------------------------
+
+TWO_DATE_MAIL = dict(MAIL, combined_text=(
+    "na 04.08.2026 prosím 120x rožok 50g\n"
+    "na 05.08.2026 prosím 7x vianočka 400g"))
+
+
+def _two_order_answers():
+    """One email, two delivery dates — what 20 of the 127 real ground-truth mails look like."""
+    return [
+        {"senderName": "Sklad", "senderEmail": "sklad@pekaren.sk",
+         "companyName": "Pekáreň Testovacia s.r.o.", "isChangeRequest": False, "notes": "",
+         "orders": [
+             {"orderNumber": "A1", "deliveryDate": "04.08.2026", "recipientGroup": "",
+              "items": [{"name": "rožok 50g", "quantity": 120, "unit": "ks",
+                         "sourceQuote": "120x rožok 50g"}]},
+             {"orderNumber": "A2", "deliveryDate": "05.08.2026", "recipientGroup": "",
+              "items": [{"name": "vianočka 400g", "quantity": 7, "unit": "ks",
+                         "sourceQuote": "7x vianočka 400g"}]}]},
+        {"ean_edi": "2000000000001", "confidence": 0.95},
+        {"gtin": "G50", "confidence": 0.95, "matchedCatalogName": "", "reason": ""},
+        {"gtin": "VIA", "confidence": 0.95, "matchedCatalogName": "", "reason": ""},
+    ]
+
+
+def test_each_order_of_a_multi_date_email_is_reported_separately(pg, env):
+    """n8n writes one EDI file per delivery date, so a flattened result cannot be scored:
+    the second order's date and items would be invisible."""
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), TWO_DATE_MAIL, env,
+                          client=ScriptedClient(_two_order_answers()),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "ok"
+    assert len(rec.uploads) == 2, "one EDI per order"
+
+    orders = result["order_results"]
+    assert [o["delivery_date"] for o in orders] == ["04.08.2026", "05.08.2026"]
+    assert [o["order_number"] for o in orders] == ["A1", "A2"]
+    assert [[i["gtin"] for i in o["items"]] for o in orders] == [["G50"], ["VIA"]]
+    assert [[i["quantity"] for i in o["items"]] for o in orders] == [[120], [7]]
+    assert [o["status"] for o in orders] == ["ok", "ok"]
+    # every order's file is nameable, and the two differ
+    names = [o["edi_filename"] for o in orders]
+    assert all(names) and names[0] != names[1]
+
+
+def test_a_multi_date_email_where_one_order_fails_reports_per_order_status(pg, env):
+    answers = _two_order_answers()
+    answers[3] = {"gtin": "NO_MATCH", "confidence": 0.1, "matchedCatalogName": "",
+                  "reason": "nič sa nezhoduje"}
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), TWO_DATE_MAIL, env, client=ScriptedClient(answers),
+                          upload=rec.upload, post=rec.post)
+    orders = result["order_results"]
+    assert [o["status"] for o in orders] == ["ok", "review"]
+    assert len(rec.uploads) == 1, "the failed order must not be uploaded"
+    assert result["status"] == "partial", "part of the email shipped, part did not"
+
+
+# --- recipient groups are one order, one line (#81.1) ---------------------
+
+GROUPS_MAIL = dict(MAIL, combined_text=(
+    "na 04.08.2026 Vás prosíme objednať 120x rožok 50g na pacientov "
+    "a 30x rožok 50g na zamestnancov"))
+
+
+def _group_answers():
+    """What the model really returns for "40ks na pacientov a 10ks na zamestnancov": one
+    order per recipient group, same delivery date."""
+    def order(group, qty):
+        return {"orderNumber": "", "deliveryDate": "04.08.2026", "recipientGroup": group,
+                "items": [{"name": "rožok 50g", "quantity": qty, "unit": "ks",
+                           "sourceQuote": f"{qty}x rožok 50g"}]}
+    return [
+        {"senderName": "Sklad", "senderEmail": "sklad@pekaren.sk",
+         "companyName": "Pekáreň Testovacia s.r.o.", "isChangeRequest": False, "notes": "",
+         "orders": [order("pacienti", 120), order("zamestnanci", 30)]},
+        {"ean_edi": "2000000000001", "confidence": 0.95},
+        {"gtin": "G50", "confidence": 0.95, "matchedCatalogName": "", "reason": ""},
+        {"gtin": "G50", "confidence": 0.95, "matchedCatalogName": "", "reason": ""},
+    ]
+
+
+def test_two_recipient_groups_on_one_day_are_one_order_with_the_summed_quantity(pg, env):
+    """The real failure: 40 ks for patients + 10 ks for staff became TWO EDI files for one
+    delivery date — two orders in ORION for one day — and the warehouse received 40, or 10,
+    but never 50."""
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), GROUPS_MAIL, env,
+                          client=ScriptedClient(_group_answers()),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "ok"
+    assert len(rec.uploads) == 1, "one delivery date is one EDI file"
+    content = rec.uploads[0][1]
+    assert content.count("LIN") == 1, "one card is one ORION line"
+    assert len(result["order_results"]) == 1
+    items = result["order_results"][0]["items"]
+    assert [i["gtin"] for i in items] == ["G50"]
+    assert items[0]["quantity"] == 150, "120 + 30, nothing lost"
+
+
+def test_two_wordings_that_match_the_same_card_also_become_one_line(pg, env):
+    answers = _group_answers()
+    answers[0]["orders"][1]["items"][0]["name"] = "rožok štandart"
+    answers[0]["orders"][1]["items"][0]["sourceQuote"] = "30x rožok 50g"
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), GROUPS_MAIL, env, client=ScriptedClient(answers),
+                          upload=rec.upload, post=rec.post)
+    assert rec.uploads[0][1].count("LIN") == 1
+    assert result["order_results"][0]["items"][0]["quantity"] == 150
+
+
+def test_two_different_delivery_dates_still_stay_two_orders(pg, env):
+    """The merge must key on the DAY, not flatten every order in the email."""
+    answers = _group_answers()
+    answers[0]["orders"][1]["deliveryDate"] = "05.08.2026"
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), GROUPS_MAIL, env, client=ScriptedClient(answers),
+                          upload=rec.upload, post=rec.post)
+    assert len(rec.uploads) == 2
+    assert [o["delivery_date"] for o in result["order_results"]] == ["04.08.2026", "05.08.2026"]
+
+
+# --- who sent it: the envelope wins (#81.3) -------------------------------
+
+def test_the_real_sender_decides_even_when_the_model_quotes_our_own_address(pg, env):
+    """A reply quotes our own text, so the model reported `predaj@slovnormal.sk` as the
+    sender and the customer went unresolved — the whole order was parked. The envelope
+    address is who actually sent the mail; the model's reading is only a fallback."""
+    answers = _answers()
+    answers[0]["senderEmail"] = "predaj@slovnormal.sk"     # quoted, not the real sender
+    answers[0]["senderName"] = "Predaj - Slovnormal"
+    answers[0]["companyName"] = ""
+    answers[1] = {"ean_edi": "", "confidence": 0.0}        # model finds no customer
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), MAIL, env, client=ScriptedClient(answers),
+                          upload=rec.upload, post=rec.post)
+    assert result["customer_ean"] == "2000000000001", result.get("customer_rule")
+    assert len(rec.uploads) == 1
+
+
+def test_an_email_address_inside_a_display_name_still_matches(pg):
+    """The customer sheet holds `Eva Kozakova <eva@example.sk>` in the e-mail cell."""
+    from app.orders import snapshot
+    sid = snapshot.import_snapshot(
+        pg, CATALOG_CSV,
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,E-mail\n"
+        "Potraviny Žilina,2000000000861,Žilina,Na bráne 4,,,Eva Kozakova <eva@example.sk>\n")
+    customers = snapshot.load_customers(pg, sid)
+    from app.orders import customer
+    matched = customer.resolve(customers, "eva@example.sk", "", "")
+    assert matched and matched.ean_edi == "2000000000861"

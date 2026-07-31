@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -52,34 +53,83 @@ class Result:
     case_id: str
     type: str
     score: Score
+    # what the engine actually produced — the corpus cannot be adjudicated without it
+    actual: dict | None = None
 
 
 def _items_map(items) -> dict[str, float]:
-    return {str(i.get("gtin")): float(i.get("quantity") or 0) for i in items or []}
+    """Cards to total quantity. The same card twice ADDS UP — one card is one ORION line, so
+    keeping only the last occurrence hid a lost quantity."""
+    out: dict[str, float] = {}
+    for i in items or []:
+        out[str(i.get("gtin"))] = out.get(str(i.get("gtin")), 0.0) + float(i.get("quantity") or 0)
+    return out
+
+
+def _day(value) -> str:
+    """One canonical form for a delivery date.
+
+    The archive holds both `2026-07-01` and `01.07.2026` for the same delivery, depending on
+    which n8n node wrote it. Comparing the strings reported a missing order AND an extra
+    order for one and the same day.
+    """
+    text = str(value or "").strip()
+    iso = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})$", text)
+    dmy = re.match(r"^(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})$", text)
+    if iso:
+        y, mo, d = iso.groups()
+    elif dmy:
+        d, mo, y = dmy.groups()
+    else:
+        return text
+    return f"{int(d):02d}.{int(mo):02d}.{y}"
+
+
+def _compare_items(want: dict, got: dict, label: str, problems: list[str]) -> int:
+    """Item-level comparison; `label` names the order the items belong to (or is empty)."""
+    where = f" ({label})" if label else ""
+    hits = 0
+    for gtin, qty in want.items():
+        if gtin not in got:
+            problems.append(f"chýba karta {gtin} ({qty:g}){where}")
+        elif abs(got[gtin] - qty) > QUANTITY_TOLERANCE:
+            problems.append(f"iné množstvo pri {gtin}{where}: čakáme {qty:g}, "
+                            f"dostali {got[gtin]:g}")
+        else:
+            hits += 1
+    for gtin in got.keys() - want.keys():
+        problems.append(f"karta {gtin} navyše ({got[gtin]:g}){where}")
+    return hits
 
 
 def score(expected: dict, actual: dict) -> Score:
-    """Compare one case's outcome. Item order and numeric formatting are not differences."""
+    """Compare one case's outcome. Item order and numeric formatting are not differences.
+
+    Two expected shapes, because one email can carry several orders:
+
+    - flat (`delivery_date` + `items`) for the ordinary single-order email;
+    - `orders: [{delivery_date, items}]`, matched by delivery date, for an email asking for
+      several dates at once. n8n writes one EDI file per date, so scoring a flattened item
+      list would silently ignore every order after the first (#78).
+    """
     problems: list[str] = []
 
-    if str(expected.get("customer_ean") or "") != str(actual.get("customer_ean") or ""):
+    # Absent = not asserted. A must-review case cares that nothing SHIPS, not who the sender
+    # turned out to be; naming the customer and then refusing to ship is right.
+    if "customer_ean" in expected and (
+            str(expected.get("customer_ean") or "") != str(actual.get("customer_ean") or "")):
         problems.append(f"iný zákazník: čakáme {expected.get('customer_ean')!r}, "
                         f"dostali {actual.get('customer_ean')!r}")
-    if str(expected.get("delivery_date") or "") != str(actual.get("delivery_date") or ""):
+
+    if expected.get("orders") is not None:
+        return _score_per_order(expected, actual, problems)
+
+    if _day(expected.get("delivery_date")) != _day(actual.get("delivery_date")):
         problems.append(f"iný dátum dodania: čakáme {expected.get('delivery_date')!r}, "
                         f"dostali {actual.get('delivery_date')!r}")
 
     want, got = _items_map(expected.get("items")), _items_map(actual.get("items"))
-    hits = 0
-    for gtin, qty in want.items():
-        if gtin not in got:
-            problems.append(f"chýba karta {gtin} ({qty:g})")
-        elif abs(got[gtin] - qty) > QUANTITY_TOLERANCE:
-            problems.append(f"iné množstvo pri {gtin}: čakáme {qty:g}, dostali {got[gtin]:g}")
-        else:
-            hits += 1
-    for gtin in got.keys() - want.keys():
-        problems.append(f"karta {gtin} navyše ({got[gtin]:g})")
+    hits = _compare_items(want, got, "", problems)
 
     # The opposite mistake matters as much: shipping what the warehouse had to check.
     if expected.get("should_review") and actual.get("shipped"):
@@ -88,6 +138,59 @@ def score(expected: dict, actual: dict) -> Score:
         problems.append("malo sa odoslať, ale skončilo na kontrole")
 
     recall = (hits / len(want)) if want else (1.0 if not got else 0.0)
+    return Score(passed=not problems, item_recall=recall, problems=problems)
+
+
+def _score_per_order(expected: dict, actual: dict, problems: list[str]) -> Score:
+    """Match orders by delivery date, then compare each one's items.
+
+    Sequence is not a difference (the model may emit the dates in any order), but a missing
+    date, an invented date, and a wrong item inside the SECOND order all are — exactly the
+    failures a flattened comparison could not see.
+    """
+    want_orders = {_day(o.get("delivery_date")): o for o in expected["orders"]}
+    got_orders: dict[str, dict] = {}
+    for o in actual.get("order_results") or []:
+        day = _day(o.get("delivery_date"))
+        if day in got_orders:
+            # Two EDI files for one delivery date are two orders in ORION for one day.
+            problems.append(f"objednávka na {day} vznikla dvakrát — v ORIONe by to boli "
+                            f"dva doklady na jeden deň")
+            got_orders[day] = {**o, "items": (got_orders[day].get("items") or [])
+                               + (o.get("items") or [])}
+            continue
+        got_orders[day] = o
+
+    hits = wanted = 0
+    for date, order in want_orders.items():
+        if date not in got_orders:
+            problems.append(f"chýba celá objednávka na {date}")
+            continue
+        if "item_count" in order:
+            # Which card a wording maps to is sometimes unprovable; how many lines the email
+            # asks for always is. One real email listed 15 items and n8n's EDI carried 1.
+            got_n = len(got_orders[date].get("items") or [])
+            if got_n != int(order["item_count"]):
+                problems.append(f"iný počet položiek ({date}): "
+                                f"čakáme {int(order['item_count'])}, dostali {got_n}")
+        if "items" not in order:
+            # The author could not prove this order's items (a weekly order whose per-item
+            # ground truth is gone). Asserting guessed GTINs would lock a wrong answer into
+            # the baseline, so the date alone is asserted.
+            continue
+        want = _items_map(order.get("items"))
+        wanted += len(want)
+        hits += _compare_items(want, _items_map(got_orders[date].get("items")),
+                               date, problems)
+    for date in got_orders.keys() - want_orders.keys():
+        problems.append(f"objednávka na {date} navyše — taký dátum v e-maile nebol")
+
+    if expected.get("should_review") and actual.get("shipped"):
+        problems.append("malo ísť na kontrolu, ale odoslalo sa")
+    if expected.get("should_ship") and not actual.get("shipped"):
+        problems.append("malo sa odoslať, ale skončilo na kontrole")
+
+    recall = (hits / wanted) if wanted else (1.0 if not got_orders else 0.0)
     return Score(passed=not problems, item_recall=recall, problems=problems)
 
 
@@ -130,9 +233,17 @@ def load_manifest(path) -> list[dict]:
 def _actual_from_run(result: dict) -> dict:
     items = [{"gtin": i["gtin"], "quantity": i["quantity"]}
              for i in result.get("items") or [] if i.get("gtin")]
+    # Only orders that would actually be SENT count. The pipeline still extracts and reports
+    # an order it refuses to ship, and scoring those would fail every must-review case for
+    # doing exactly the right thing.
+    orders = [{"delivery_date": o.get("delivery_date", ""), "status": o.get("status", ""),
+               "items": [{"gtin": i["gtin"], "quantity": i["quantity"]}
+                         for i in o.get("items") or [] if i.get("gtin")]}
+              for o in result.get("order_results") or []
+              if o.get("status") in ("ok", "partial")]
     return {"customer_ean": result.get("customer_ean", ""),
             "delivery_date": result.get("delivery_date", ""),
-            "items": items,
+            "items": items, "order_results": orders,
             "shipped": result.get("status") in ("ok", "partial")}
 
 
@@ -147,7 +258,7 @@ def run_case(conn, cfg, case: dict, snapshot_id: int, client=None) -> Result:
                        upload=_refuse_upload, post=_refuse_post)
     actual = _actual_from_run(run)
     return Result(case_id=case["id"], type=case.get("type", "?"),
-                  score=score(case["expected"], actual))
+                  score=score(case["expected"], actual), actual=actual)
 
 
 def _inert(cfg):
@@ -177,7 +288,10 @@ def run_corpus(conn, cfg, manifest_path, offline: bool = True,
         raise RuntimeError("no catalog snapshot — import one before evaluating")
     client = llm.from_config(cfg, offline=offline)
     results = []
-    for case in cases:
+    for n, case in enumerate(cases, 1):
+        # A live run takes tens of minutes. Announce every case: a run that dies silently
+        # must not look like a run that is still working (it did, once, for 40 minutes).
+        log.info("case %d/%d %s (%s)", n, len(cases), case.get("id"), case.get("type", "?"))
         try:
             results.append(run_case(conn, cfg, case, sid, client=client))
         except llm.CacheMiss as e:

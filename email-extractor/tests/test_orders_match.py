@@ -9,6 +9,8 @@ could fire.
 Every case is a real incident (dates in the comments) — that is deliberate: this file is
 the regression net for exactly the failures that already cost real orders.
 """
+import json
+
 from app.orders import match
 from app.orders.memory import Recalled
 
@@ -253,5 +255,28 @@ def test_candidates_prefer_a_card_whose_alias_names_the_customer():
 def test_the_decision_trace_names_the_rule_and_its_inputs():
     d = _decide("Rožok 70g", llm={"gtin": "G50", "confidence": 0.95})
     assert d.trace["rule"] == "unmatched"
-    assert d.trace["llm"] == {"gtin": "G50", "confidence": 0.95}
+    assert d.trace["llm"] == {"gtin": "G50", "confidence": 0.95,
+                              "unknown_gtin": False}
     assert d.trace["weight"] == {"ordered": 70.0, "card": 50.0}
+
+
+# --- a GTIN the catalog does not have (#81) --------------------------------
+
+def test_a_gtin_that_is_not_in_the_catalog_is_not_a_match():
+    """The model returned a code that exists nowhere in the catalog and the whole corpus run
+    died with `'NoneType' object is not subscriptable`. An answer we cannot resolve to a real
+    card is no answer: the item goes to the warehouse named, and the run continues."""
+    catalog = [{"gtin": "G50", "name": "Rožok štandart 50g", "alias": ""}]
+    d = match.decide(item_name="rožok", catalog=catalog,
+                     llm={"gtin": "TOTALLY-MADE-UP", "confidence": 0.97}, recalled=None,
+                     customer_name="Pekáreň s.r.o.")
+    assert not d.gtin and d.rule == "unmatched"
+    assert "TOTALLY-MADE-UP" in json.dumps(d.trace, ensure_ascii=False)
+
+
+def test_a_borderline_answer_with_an_unknown_gtin_also_does_not_match():
+    catalog = [{"gtin": "G50", "name": "Rožok štandart 50g", "alias": ""}]
+    d = match.decide(item_name="rožok", catalog=catalog,
+                     llm={"gtin": "NOPE", "confidence": 0.75}, recalled=None,
+                     customer_name="")
+    assert not d.gtin and d.rule == "unmatched"

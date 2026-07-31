@@ -21,7 +21,8 @@
      "name": "vianočka",
      "matchedCatalogName": "Vianočka 400g"
     }
-   ]
+   ],
+   "today": "20260730"
   },
   "expected": {
    "content": "HDR8586013743063                               20260730   2000000000001    Pekaren Testovacia s.r.o.                                                                                                                                                                                        2000000000001    Pekaren Testovacia s.r.o.                                                                                                                                                          2000000000001                                                                                                                                                                                                                     8586013743063    SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                                                                                                              20260804                                                                          \r\nLIN     1   8588001800013                 120.000PCE            ROZOK STANDART 50G                                                                                                                                    \r\nLIN     2   8588001800020                   7.000PCE            VIANOCKA 400G                                                                                                                                         \r\nSUM",
@@ -51,7 +52,8 @@
      "name": "neznámy produkt",
      "matchedCatalogName": ""
     }
-   ]
+   ],
+   "today": "20260730"
   },
   "expected": {
    "content": "HDR8586013743063  123456789012345              20260730   2000000000002    Odberatel Druhy, a.s.                                                                                                                                                                                            2000000000002    Odberatel Druhy, a.s.                                                                                                                                                              2000000000002                                                                                                                                                                                                                     8586013743063    SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                                                                                                              20260803                                                                          \r\nLIN     1   109                             3.500PCE            JANKOVE BUCHTY MALINOVE 80G                                                                                                                           \r\nSUM",
@@ -76,7 +78,8 @@
      "name": "čokoládový šuhajdík",
      "matchedCatalogName": "Čokoládový šuhajdík ĽŠŤ 60g"
     }
-   ]
+   ],
+   "today": "20260730"
   },
   "expected": {
    "content": "HDR8586013743063  obj/2026 12                  20260730                    Zlty Kon – Lubovna                                                                                                                                                                                                                Zlty Kon – Lubovna                                                                                                                                                                                                                                                                                                                                                                                                   8586013743063    SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                                                                                                                                                                                                \r\nLIN     1   XYZ                             1.000PCE            COKOLADOVY SUHAJDIK LST 60G                                                                                                                           \r\nSUM",

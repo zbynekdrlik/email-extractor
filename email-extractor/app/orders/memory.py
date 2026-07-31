@@ -74,11 +74,16 @@ def remember(conn, customer_ean: str, item: str, gtin: str, card: str,
     return row is not None
 
 
-def resolve(conn, customer_ean: str, item: str) -> Recalled | None:
+def resolve(conn, customer_ean: str, item: str, as_of: str = "") -> Recalled | None:
     """What we shipped for this wording, or None when the history does not speak clearly.
 
     Silence is a valid answer: an item with no clear history goes to the warehouse for
     checking instead of being guessed at.
+
+    `as_of` (the day the email arrived) restricts the history to deliveries BEFORE it. That
+    is right in production — a delivery booked for next week cannot decide today's order —
+    and it is what keeps the golden corpus honest, since history seeded from the archive
+    would otherwise contain the very order being scored.
     """
     key = item_key(item)
     if not (customer_ean and key):
@@ -90,8 +95,9 @@ def resolve(conn, customer_ean: str, item: str) -> Recalled | None:
                   max(delivered_on)            AS last_day
              FROM item_memory
             WHERE customer_ean = %s AND item_key = %s
+              AND (%s::date IS NULL OR delivered_on < %s::date)
             GROUP BY gtin""",
-        (str(customer_ean), key)).fetchall()
+        (str(customer_ean), key, as_of or None, as_of or None)).fetchall()
     if not rows:
         return None
 
@@ -134,3 +140,28 @@ def import_n8n_rows(conn, rows: list[dict]) -> int:
             stored += 1
     log.info("item memory: imported %d of %d n8n rows", stored, len(rows))
     return stored
+
+
+def seed_from_archive(conn, orders: list[dict]) -> int:
+    """Seed the delivery history from orders we really shipped.
+
+    The history inherited from n8n's Data Table covered 11 customers and 123 lines, so for
+    almost every customer there was nothing to remember and each unweighted wording ("Chlieb
+    pšenično ražný", "Šiška") was decided by a guess instead of by what the warehouse has
+    always delivered (#81.2). Each entry is `{customer_ean, delivered_on, items:[{name, card,
+    gtin}]}`; a line without a card teaches nothing and is skipped. Idempotent, like every
+    other write here.
+    """
+    added = 0
+    for order in orders:
+        ean = str(order.get("customer_ean") or "")
+        day = str(order.get("delivered_on") or "")
+        if not (ean and day):
+            continue
+        for item in order.get("items") or []:
+            if not (item.get("gtin") and item.get("card")):
+                continue
+            if remember(conn, ean, item.get("name") or item["card"], item["gtin"],
+                        item["card"], delivered_on=day, source="archive"):
+                added += 1
+    return added

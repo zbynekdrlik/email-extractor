@@ -107,25 +107,35 @@ def run(conn, cfg, message: dict, snapshot_id: int, client=None, upload=None,
                                "notes": extracted.get("notes", "")})
 
     # The customer is per EMAIL, so it is decided once even for a multi-order email.
-    cands = customer.candidates(customers, extracted.get("senderEmail")
-                                or message.get("from_addr", ""),
+    sender = _sender_address(message, extracted, customers)
+    cands = customer.candidates(customers, sender,
                                 extracted.get("senderName", ""),
                                 extracted.get("companyName", ""))
     cust_answer = client.json_call(_prompt("match_customer.md"),
                                    _customer_input(cands, message, extracted),
                                    CUSTOMER_SCHEMA, name="customer")
-    matched = customer.resolve(customers, extracted.get("senderEmail")
-                               or message.get("from_addr", ""),
+    matched = customer.resolve(customers, sender,
                                extracted.get("senderName", ""),
                                extracted.get("companyName", ""), llm=cust_answer)
 
+    orders = _merge_by_day(orders)
+    conflict = extract.date_conflict(message.get("subject", ""),
+                                     [o.get("deliveryDate", "") for o in orders])
+    if conflict:
+        return _finish(conn, cfg, message, shadow, post, status="review",
+                       items=[], result={"shipped": False, "reject_reason": conflict,
+                                         "customer": {}, "unverified": [],
+                                         "notes": extracted.get("notes", "")})
     all_items: list[dict] = []
     statuses: list[str] = []
     previews: list[dict] = []
+    order_results: list[dict] = []
     for order in orders:
         decisions = []
         for item in order.get("items") or []:
-            recalled = memory.resolve(conn, matched.ean_edi, item["name"]) if matched else None
+            recalled = (memory.resolve(conn, matched.ean_edi, item["name"],
+                                       as_of=str(message.get("today") or ""))
+                        if matched else None)
             item_cands = match.candidates(item["name"], catalog,
                                           customer_name=matched.name if matched else "",
                                           memory_gtin=recalled.gtin if recalled else "")
@@ -139,16 +149,29 @@ def run(conn, cfg, message: dict, snapshot_id: int, client=None, upload=None,
             decision.quantity = item.get("quantity")
             decision.unit = item.get("unit", "ks")
             decisions.append(decision)
-        decisions = match.apply_siblings(decisions)
+        decisions = match.merge_same_card(match.apply_siblings(decisions))
         all_items.extend(_decision_dict(d) for d in decisions)
         status, preview = _ship_one(conn, cfg, message, order, matched, decisions,
                                     extracted, shadow, upload, post)
         statuses.append(status)
         previews.append(preview)
+        # One EDI file per order is what n8n produces, so the result must stay per order:
+        # flattening hides the second delivery date and its items entirely (#78).
+        order_results.append({
+            "delivery_date": order.get("deliveryDate", ""),
+            "order_number": order.get("orderNumber", ""),
+            "recipient_group": order.get("recipientGroup", ""),
+            "status": status,
+            "items": [_decision_dict(d) for d in decisions],
+            "edi_filename": preview.get("edi_filename", ""),
+            "edi_preview": preview.get("edi_preview", ""),
+        })
 
     status = ("error" if "error" in statuses else
               "review" if all(s == "review" for s in statuses) else
-              "partial" if "partial" in statuses else "ok")
+              # one order shipped and another went to review is NOT a clean email: saying
+              # "ok" would hide a delivery date nobody sent (#78)
+              "partial" if ("partial" in statuses or "review" in statuses) else "ok")
     # customer + delivery date belong in the result: the shadow diff (#67) and the
     # evaluation harness (#66) both compare on them, not just on the item list.
     out = {"status": status, "items": all_items, "prompt_hash": client.last_prompt_hash,
@@ -158,13 +181,34 @@ def run(conn, cfg, message: dict, snapshot_id: int, client=None, upload=None,
            "customer_name": matched.name if matched else "",
            "customer_rule": matched.rule if matched else "unmatched",
            "delivery_date": (orders[0].get("deliveryDate") or "") if orders else "",
-           "orders": len(orders)}
+           "orders": len(orders), "order_results": order_results}
     # In shadow mode the preview IS the deliverable: it is what would have been uploaded.
     for preview in previews:
         if preview:
             out.update(preview)
             break
     return out
+
+
+def _merge_by_day(orders: list[dict]) -> list[dict]:
+    """One delivery date is ONE order.
+
+    A mail saying "40 ks for patients and 10 ks for staff" comes back as one order per
+    recipient group with the SAME delivery date. Shipping those separately wrote two EDI files
+    for one day — two orders in ORION — and the warehouse got 40 or 10, never 50 (#81.1). A
+    recipient group is a note on the order, not a separate order.
+    """
+    merged: dict[tuple, dict] = {}
+    for order in orders:
+        key = (str(order.get("deliveryDate") or ""), str(order.get("orderNumber") or ""))
+        if key not in merged:
+            merged[key] = dict(order, items=list(order.get("items") or []))
+            continue
+        into = merged[key]
+        into["items"].extend(order.get("items") or [])
+        groups = [g for g in (into.get("recipientGroup"), order.get("recipientGroup")) if g]
+        into["recipientGroup"] = ", ".join(dict.fromkeys(groups))
+    return list(merged.values())
 
 
 def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
@@ -263,7 +307,13 @@ def _finish(conn, cfg, message, shadow, post, status: str, items: list,
             status="ok" if status in ("ok", "partial") else status,
             outcome=_outcome(status, result), detail=detail or {})
     return {"status": status, "items": items, "shadow": shadow,
-            "would_ship": bool(result.get("shipped")) or status in ("ok", "partial")}
+            "would_ship": bool(result.get("shipped")) or status in ("ok", "partial"),
+            # keep the shape identical on the reject paths, so a consumer never has to
+            # special-case "this email produced no order at all"
+            "customer_ean": (result.get("customer") or {}).get("ean_edi", ""),
+            "customer_name": (result.get("customer") or {}).get("name", ""),
+            "delivery_date": result.get("delivery_date", ""),
+            "orders": 0, "order_results": []}
 
 
 def _outcome(status: str, result: dict) -> str:
@@ -306,3 +356,27 @@ def diff(ours: dict, theirs: dict | None) -> list[str]:
         if a[gtin] != b[gtin]:
             out.append(f"iné množstvo pri {gtin}: my {a[gtin]:g} / n8n {b[gtin]:g}")
     return out
+
+
+OUR_DOMAIN = "slovnormal.sk"
+
+
+def _sender_address(message: dict, extracted: dict, customers: list[dict]) -> str:
+    """Who actually sent this mail.
+
+    The envelope address is authoritative and wins. The model's reading is only a fallback,
+    because on a reply it happily reports the address it found in the QUOTED text — on one
+    real order it returned our own `predaj@slovnormal.sk`, the customer went unresolved and
+    the whole order was parked (#81.3).
+
+    The one case where the model's reading is worth more: the envelope IS our own address,
+    i.e. somebody here forwarded a customer's mail.
+    """
+    envelope = (message.get("from_addr") or "").strip()
+    stated = (extracted.get("senderEmail") or "").strip()
+    if envelope and OUR_DOMAIN not in envelope.lower():
+        return envelope
+    known = {e.lower() for c in customers for e in (c.get("emails") or [])}
+    if stated and stated.lower() in known:
+        return stated
+    return envelope or stated

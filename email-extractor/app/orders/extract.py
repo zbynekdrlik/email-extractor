@@ -326,3 +326,35 @@ def run(client, email: dict) -> dict:
         result = dict(verify(extracted, source), source="model")
     result["prompt_hash"] = client.last_prompt_hash
     return result
+
+
+# --- the subject and the body must agree about the day (#81.5) -------------
+
+_SUBJ_DAY = re.compile(r"\b(\d{1,2})\s*\.\s*(\d{1,2})\s*\.(\s*(\d{4}|\d{2}))?")
+_RANGE = re.compile(r"\d{1,2}\s*\.\s*\d{1,2}\s*\.?\s*(-|–|do)\s*\d{1,2}\s*\.\s*\d{1,2}")
+
+
+def date_conflict(subject: str, dates: list[str]) -> str:
+    """The problem to report when the subject names ONE day and the order is for another.
+
+    Real mail: subject "Objednávka 29.6.2026", body "na 28.6.2026" — a Sunday. Either reading
+    can be the wrong one, so a human decides instead of the model guessing (#81.5). A RANGE in
+    the subject ("od 06.07. - 11.07.") is not a contradiction, and a subject day that is among
+    the ordered days is not either.
+    """
+    subject = subject or ""
+    if not dates or _RANGE.search(subject):
+        return ""
+    found = _SUBJ_DAY.findall(subject)
+    if len(found) != 1:
+        return ""                       # no day, or several: not a single stated day
+    day, month = int(found[0][0]), int(found[0][1])
+    ordered = set()
+    for d in dates:
+        parts = re.findall(r"\d+", str(d))
+        if len(parts) >= 2:
+            ordered.add((int(parts[0]), int(parts[1])))
+    if not ordered or (day, month) in ordered:
+        return ""
+    return (f"Predmet e-mailu hovorí {found[0][0]}.{found[0][1]}., ale objednávka je na "
+            f"{', '.join(dates)} — dva rôzne dni, treba potvrdiť")

@@ -172,6 +172,19 @@ def load_customers(conn, snapshot_id: int) -> list[dict]:
              "city": r[3] or "", "street": r[4] or "", "zip": r[5] or ""} for r in rows]
 
 
+def import_files(conn, catalog_path: str, customers_path: str) -> int:
+    """Import a snapshot from two frozen CSV files.
+
+    The golden corpus pins the catalog its expected GTINs were written against. Fetching the
+    live sheet in the CI gate would silently invalidate the whole corpus the next time
+    somebody edits a product, so the gate imports these files instead (#79).
+    """
+    from pathlib import Path
+    return import_snapshot(conn,
+                           Path(catalog_path).read_text(encoding="utf-8"),
+                           Path(customers_path).read_text(encoding="utf-8"))
+
+
 def refresh(conn, doc_id: str, catalog_gid: int | str, customer_gid: int | str) -> int | None:
     """Fetch both tabs and import. Returns the current snapshot id, or None when the
     fetch failed — a failed refresh is logged and leaves the previous snapshot in place,
