@@ -95,3 +95,43 @@ def test_unreceived_mails_tab_shows_failed_ingests(live_server, pg, page):
     page.click("#tabMails")
     page.wait_for_timeout(300)
     assert console == [], f"browser console not clean: {console}"
+
+
+def test_teaching_a_wording_and_taking_it_back_in_the_browser(live_server, pg, page):
+    """The teach-once loop through the real UI (#88).
+
+    Live verification of 0.9.6 caught what a unit test could not: the taught list was rendered
+    only when open questions existed, so in the NORMAL state (nothing waiting) the "vrátiť"
+    button was unreachable and a mis-click stayed permanent. Hence a browser test.
+    """
+    from app.orders import memory, teach
+
+    ean = "2000000000001"
+    qid = teach.ask(pg, message_id="e-teach", customer_ean=ean, customer_name="Zákazník A",
+                    wording="testovacia pletenka", quantity=8, unit="ks",
+                    candidates=[{"gtin": "AAA", "name": "Karta A"},
+                                {"gtin": "BBB", "name": 'Karta B "špeciál"'}],
+                    delivery_date="06.08.2026", reason="neznáme znenie")
+    assert qid
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/login")
+    page.fill("input[name=password]", "secret")
+    page.click("button[type=submit]")
+    page.wait_for_url(f"{live_server}/")
+
+    page.click("#tabAsk")
+    page.wait_for_selector("text=testovacia pletenka")
+    # a card name containing a quote must render as a usable button
+    page.click('button:has-text("Karta B")')
+
+    # the question leaves the open list, and what was taught is listed WITH its undo
+    page.wait_for_selector("text=Naposledy naučené")
+    assert memory.resolve(pg, ean, "testovacia pletenka").gtin == "BBB"
+
+    page.click('button:has-text("vrátiť")')
+    page.wait_for_selector("text=testovacia pletenka")
+    assert memory.resolve(pg, ean, "testovacia pletenka") is None, "the mapping is gone"
+    assert teach.open_questions(pg)[0]["id"] == qid, "and it is asked again"
+
+    assert console == [], f"console must be clean: {console}"
