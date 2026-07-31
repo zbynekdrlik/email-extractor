@@ -799,7 +799,8 @@ function tick(){if(live&&document.getElementById('ov').style.display!=='flex'){
 async function loadAsk(){const L=document.getElementById('list');
   L.innerHTML='';let d;try{d=await api('/api/orders/questions')}catch(e){return}
   if(!d.items.length){const e0=document.createElement('div');e0.className='empty';
-    e0.textContent='Nič nečaká \u2014 automat si vie poradiť sám.';L.appendChild(e0);return}
+    e0.textContent='Nič nečaká \u2014 automat si vie poradiť sám.';L.appendChild(e0);
+    return loadTaught()}   // nothing waiting is the NORMAL state: the undo must still be here
   for(const q of d.items){const el=document.createElement('div');el.className='row';
     const head=document.createElement('div');const b=document.createElement('b');
     b.textContent=q.wording;head.appendChild(b);
