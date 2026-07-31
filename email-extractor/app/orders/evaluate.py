@@ -124,11 +124,16 @@ def _score_per_order(expected: dict, actual: dict, problems: list[str]) -> Score
 
     hits = wanted = 0
     for date, order in want_orders.items():
+        if date not in got_orders:
+            problems.append(f"chýba celá objednávka na {date}")
+            continue
+        if "items" not in order:
+            # The author could not prove this order's items (a weekly order whose per-item
+            # ground truth is gone). Asserting guessed GTINs would lock a wrong answer into
+            # the baseline, so the date alone is asserted.
+            continue
         want = _items_map(order.get("items"))
         wanted += len(want)
-        if date not in got_orders:
-            problems.append(f"chýba celá objednávka na {date} ({len(want)} položiek)")
-            continue
         hits += _compare_items(want, _items_map(got_orders[date].get("items")),
                                date, problems)
     for date in got_orders.keys() - want_orders.keys():
