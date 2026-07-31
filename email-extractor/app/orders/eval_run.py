@@ -31,6 +31,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--customers", default="", help="frozen customer CSV to import first")
     ap.add_argument("--require-all", action="store_true",
                     help="fail unless EVERY case passes, not just on a regression")
+    ap.add_argument("--history", default="",
+                    help="archived deliveries to seed the item history with")
     ap.add_argument("--dump", default="",
                     help="write per-case results here, for adjudicating the corpus")
     args = ap.parse_args(argv)
@@ -44,6 +46,13 @@ def main(argv: list[str] | None = None) -> int:
         from . import snapshot
         sid = snapshot.import_files(conn, args.catalog, args.customers)
         print(f"frozen snapshot imported: {sid}")
+    if args.history:
+        # Cases are scored against the history as it stood on the day of the email, so the
+        # bundle carries that history and the gate loads it.
+        from . import memory
+        added = memory.seed_from_archive(
+            conn, json.loads(Path(args.history).read_text(encoding="utf-8")))
+        print(f"delivery history seeded: {added} new lines")
     results, summary = evaluate.run_corpus(conn, cfg, args.manifest, offline=not args.live)
 
     print(json.dumps(summary, ensure_ascii=False, indent=1))
