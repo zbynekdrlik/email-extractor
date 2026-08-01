@@ -26,6 +26,20 @@ downstream and reported to the warehouse, so quote faithfully and never paraphra
   single quantity column, no per-date breakdown), repeat the FULL item list for EVERY
   date. Split items between dates only when the email explicitly assigns them.
 
+## Several SHOPS in one attachment
+
+One file may hold two or more shops of the same chain SIDE BY SIDE — a header over each
+block names it, and the day columns underneath belong only to that block
+("cyklická od 31.7.2026 | GT1- Družby 35 BB … cyklická od 31.07.2026 | GT2- 29 augusta 19 BB").
+
+- SEPARATE orders per shop. Never add a product's quantities across blocks, and never let
+  a quantity from one block land in the other — read each block's own columns only.
+- `store`: the block's header, copied verbatim ("GT2- 29 augusta 19 BB"). It usually carries
+  the shop's street, which is what identifies the branch.
+- One shop, one block, no other shop in the file → `store` is an empty string.
+- A recipient group ("na pacientov") is NOT a shop: same customer, same file, use
+  `recipientGroup`.
+
 ## Order number (the buyer's PO reference)
 
 Look in the subject first ("č. 4500295201", "PO 12345", "obj. 2025-0123"), then the body,

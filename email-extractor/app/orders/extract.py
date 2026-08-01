@@ -42,6 +42,9 @@ ORDER_SCHEMA = {
                 "orderNumber": {"type": "string"},
                 "deliveryDate": {"type": "string"},
                 "recipientGroup": {"type": "string"},
+                # The block header of this order's own half of a multi-shop attachment
+                # (#101) — it is what separates two branches registered under one address.
+                "store": {"type": "string"},
                 "items": {"type": "array", "items": {
                     "type": "object",
                     "properties": {
@@ -248,6 +251,7 @@ def verify(extracted: dict, source: str) -> dict:
             orders.append({"orderNumber": order.get("orderNumber", "") or "",
                            "deliveryDate": order.get("deliveryDate", "") or "",
                            "recipientGroup": order.get("recipientGroup", "") or "",
+                           "store": order.get("store", "") or "",
                            "items": kept})
     if unverified:
         log.warning("%d item(s) could not be verified against the email: %s",
@@ -318,6 +322,7 @@ def run(client, email: dict) -> dict:
             "orders": [{"orderNumber": head.get("orderNumber", "") or "",
                         "deliveryDate": head.get("deliveryDate", "") or "",
                         "recipientGroup": head.get("recipientGroup", "") or "",
+                        "store": head.get("store", "") or "",
                         "items": table}],
             "unverified": [],
             "source": "table",

@@ -125,7 +125,9 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                                "customer": {}, "unverified": extracted.get("unverified", []),
                                "notes": extracted.get("notes", "")})
 
-    # The customer is per EMAIL, so it is decided once even for a multi-order email.
+    # The customer is asked of the model ONCE per email — a second call would cost money to
+    # answer the same question. It is RESOLVED per order, though: one attachment may hold
+    # two shops of the same chain side by side, and then each half has its own EAN (#101).
     sender = _sender_address(message, extracted, customers)
     cands = customer.candidates(customers, sender,
                                 extracted.get("senderName", ""),
@@ -133,9 +135,14 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
     cust_answer = client.json_call(_prompt("match_customer.md"),
                                    _customer_input(cands, message, extracted),
                                    CUSTOMER_SCHEMA, name="customer")
-    matched = customer.resolve(customers, sender,
-                               extracted.get("senderName", ""),
-                               extracted.get("companyName", ""), llm=cust_answer)
+
+    def _customer_for(store: str = ""):
+        return customer.resolve(customers, sender,
+                                extracted.get("senderName", ""),
+                                extracted.get("companyName", ""), llm=cust_answer,
+                                store=store)
+
+    email_matched = matched = _customer_for()
 
     orders = _merge_by_day(orders)
     conflict = extract.date_conflict(message.get("subject", ""),
@@ -151,6 +158,10 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
     previews: list[dict] = []
     order_results: list[dict] = []
     for order in orders:
+        # Two shops in one file are two customers; everything below — the memory lookup,
+        # the alias that names the customer, the question, the EDI header — must be the
+        # one that shop belongs to, not the email's.
+        matched = _customer_for(str(order.get("store") or "")) or email_matched
         decisions = []
         for item in order.get("items") or []:
             recalled = (memory.resolve(conn, matched.ean_edi, item["name"],
@@ -201,6 +212,9 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
             "delivery_date": order.get("deliveryDate", ""),
             "order_number": order.get("orderNumber", ""),
             "recipient_group": order.get("recipientGroup", ""),
+            "store": order.get("store", ""),
+            "customer_ean": matched.ean_edi if matched else "",
+            "customer_name": matched.name if matched else "",
             "status": status,
             "items": [_decision_dict(d) for d in decisions],
             "edi_filename": preview.get("edi_filename", ""),
@@ -217,9 +231,11 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
     out = {"status": status, "items": all_items, "prompt_hash": client.last_prompt_hash,
            "shadow": shadow,
            "would_ship": any(s in ("ok", "partial") for s in statuses),
-           "customer_ean": matched.ean_edi if matched else "",
-           "customer_name": matched.name if matched else "",
-           "customer_rule": matched.rule if matched else "unmatched",
+           # The email-level customer, NOT the last order's: a two-shop email has no single
+           # customer, and reporting whichever shop happened to be last would be a lie.
+           "customer_ean": email_matched.ean_edi if email_matched else "",
+           "customer_name": email_matched.name if email_matched else "",
+           "customer_rule": email_matched.rule if email_matched else "unmatched",
            "delivery_date": (orders[0].get("deliveryDate") or "") if orders else "",
            "orders": len(orders), "order_results": order_results}
     # In shadow mode the preview IS the deliverable: it is what would have been uploaded.
@@ -240,7 +256,11 @@ def _merge_by_day(orders: list[dict]) -> list[dict]:
     """
     merged: dict[tuple, dict] = {}
     for order in orders:
-        key = (str(order.get("deliveryDate") or ""), str(order.get("orderNumber") or ""))
+        # The SHOP belongs in the key (#101): a recipient group shares a delivery, but two
+        # shops are two customers with two EANs, and merging them writes one shop's name
+        # over both shops' pastry.
+        key = (str(order.get("deliveryDate") or ""), str(order.get("orderNumber") or ""),
+               str(order.get("store") or ""))
         if key not in merged:
             merged[key] = dict(order, items=list(order.get("items") or []))
             continue

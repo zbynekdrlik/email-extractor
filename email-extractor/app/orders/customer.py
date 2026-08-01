@@ -94,9 +94,33 @@ def candidates(customers: list[dict], sender_email: str, sender_name: str,
     return scored[:limit]
 
 
+def _by_store(owners: list[dict], store: str) -> dict | None:
+    """Which of the branches sharing one address does this block header name? (#101)
+
+    Matched on the STREET, never the name: the live table calls both Gazdovský trh rows
+    "GT1", so the name proves nothing, while the header over each half of the file
+    ("GT2- 29 augusta 19 BB") carries the street verbatim. Only a UNIQUE hit counts —
+    a header naming both branches, or neither, decides nothing.
+    """
+    want = _words(store)
+    if not want:
+        return None
+    hits = []
+    for c in owners:
+        street = _words(c.get("street", ""))
+        if street and all(w in want for w in street):
+            hits.append(c)
+    return hits[0] if len(hits) == 1 else None
+
+
 def resolve(customers: list[dict], sender_email: str, sender_name: str,
-            company_name: str, llm: dict | None = None) -> Matched | None:
-    """Decide who ordered, or None when it cannot be decided safely."""
+            company_name: str, llm: dict | None = None,
+            store: str = "") -> Matched | None:
+    """Decide who ordered, or None when it cannot be decided safely.
+
+    `store` is the block header of the order's own half of a multi-shop attachment; it is
+    the only thing that separates two branches registered under one e-mail address.
+    """
     llm = llm or {}
     conf = float(llm.get("confidence") or 0)
     if conf > 1:
@@ -122,7 +146,18 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
                 note=(f"E-mail odosielateľa {addr} je v tabuľke zákazníkov zapísaný "
                       f"práve u „{owner.get('name', '')}“ a u nikoho iného."))
         if len(owners) > 1:
-            log.info("address %s belongs to %d customers — not guessing", addr, len(owners))
+            branch = _by_store(owners, store)
+            if branch:
+                log.info("address %s is shared by %d customers; the block header %r picks "
+                         "%s", addr, len(owners), store, branch.get("name"))
+                return Matched(
+                    ean_edi=str(branch.get("ean_edi") or ""), name=branch.get("name", ""),
+                    confidence=0.99, rule="store_address",
+                    note=(f"E-mail {addr} patrí viacerým predajniam; táto časť súboru je "
+                          f"nadpísaná „{store}“, čo sedí na adresu "
+                          f"„{branch.get('street', '')}“."))
+            log.info("address %s belongs to %d customers — not guessing (store hint %r)",
+                     addr, len(owners), store)
 
     if picked:
         log.info("customer match refused: %s at %.2f (below %.2f)",
