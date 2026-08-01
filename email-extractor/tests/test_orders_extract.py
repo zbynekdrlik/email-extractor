@@ -284,3 +284,18 @@ def test_a_body_with_no_explicit_day_still_relies_on_the_subject_rule():
     """Relative dates ("na pondelok") legitimately produce a day the body never spells out."""
     assert not extract.date_conflict("objednávka pečiva", ["30.06.2026"],
                                      body="Prosím na pondelok 10 ks rožkov.")
+
+
+def test_the_subject_line_inside_the_stored_text_does_not_count_as_the_body():
+    """`combined_text` begins with "Subject: … / From: … / Body: …" — the subject is IN it.
+
+    Counting it as body text made the AGEL Levoča guard inert: the body says one day, the
+    subject says another, so the naive scan saw two days and the check stood down — exactly
+    the contradiction it exists to catch.
+    """
+    problem = extract.date_conflict(
+        subject="Objednávka 29.6.2026",
+        dates=["28.06.2026", "29.06.2026"],
+        body=("Subject: Objednávka 29.6.2026\nFrom: kuchyna@nle.agel.sk\n"
+              "Body: Dobrý deň, prosíme o dodanie na 28.6.2026. Ďakujeme."))
+    assert problem and "28.6." in problem
