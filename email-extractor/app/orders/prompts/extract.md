@@ -15,6 +15,13 @@ downstream and reported to the warehouse, so quote faithfully and never paraphra
   date, and never its own order. "objednávku na 27 týždeň utorok 30.6" is ONE order with
   deliveryDate 30.06.
 - `deliveryDate` format: DD.MM.YYYY. Default: tomorrow.
+- **A delivery date can never be in the PAST.** Customers reuse last month's mail and leave a
+  stale date behind ("Sobota 30.05." inside a week that is plainly 06.07.–11.07.). When a
+  day carries BOTH a weekday name and a date that falls before the email's own date, the
+  DATE is the leftover and the WEEKDAY is the truth: use that weekday within the week the
+  surrounding days already establish. Never emit a delivery date earlier than the email.
+  (This is not the contradictory-dates case: two FUTURE dates that disagree are still a
+  conflict for a human, and nothing here resolves those.)
 
 ## One order or several
 
