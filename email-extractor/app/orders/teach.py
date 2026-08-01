@@ -36,11 +36,17 @@ class AlreadyAnswered(Exception):
 
 def ask(conn, message_id: str, customer_ean: str, customer_name: str, wording: str,
         quantity, unit: str, candidates: list[dict], delivery_date: str = "",
-        reason: str = "") -> int | None:
+        reason: str = "", on_new=None) -> int | None:
     """Raise ONE question for this (customer, wording). Returns its id.
 
     Returns the EXISTING id when it is already open, and None when the wording has already
     been taught — the engine will resolve it from memory, so asking would be noise.
+
+    `on_new` (#102) fires ONLY when a genuinely NEW question was just inserted — never on the
+    "already open" or "already taught" paths — so a duplicate order for the same still-open
+    wording does not spam a second Odoo message. Called with the full question dict; any
+    failure is logged and swallowed, exactly like the main order report's own post — a
+    notification failure must never break order processing.
     """
     key = memory.item_key(wording)
     if not (customer_ean and key):
@@ -62,8 +68,14 @@ def ask(conn, message_id: str, customer_ean: str, customer_name: str, wording: s
          unit or "ks", Json(candidates or []), delivery_date or "", reason or ""),
     ).fetchone()
     if row:
+        qid = int(row[0])
         log.info("asking the warehouse about %r for %s", wording, customer_ean)
-        return int(row[0])
+        if on_new:
+            try:
+                on_new(get(conn, qid))
+            except Exception:
+                log.exception("notifying about new question %s (%r) failed", qid, wording)
+        return qid
     existing = conn.execute(
         "SELECT id FROM order_questions WHERE customer_ean = %s AND item_key = %s"
         " AND status = 'open'", (str(customer_ean), key)).fetchone()
@@ -106,7 +118,15 @@ def recently_taught(conn, limit: int = 20) -> list[dict]:
 
 
 def answer(conn, qid: int, gtin: str, card: str, by: str = "") -> dict:
-    """Settle a question and teach it. The card must be one that was offered."""
+    """Settle a question and teach it. The card must be one that was offered.
+
+    Teaches on TWO layers (#102): the existing per-customer mapping (unchanged — it is what
+    makes THIS customer's answer instant), and a GLOBAL one for every other customer who ever
+    types the same wording. The global write is best-effort (`memory.remember_global`'s own
+    `ON CONFLICT DO NOTHING`) — if this wording is already taught globally, the per-customer
+    row still lands and, being checked first in the ladder, is exactly what lets a customer's
+    OWN mapping override the global one.
+    """
     q = get(conn, qid)
     if not q:
         raise NotACandidate(f"question {qid} does not exist")
@@ -118,6 +138,8 @@ def answer(conn, qid: int, gtin: str, card: str, by: str = "") -> dict:
 
     memory.remember(conn, q["customer_ean"], q["wording"], str(gtin), card or "",
                     _today(conn), source="human")
+    memory.remember_global(conn, q["wording"], str(gtin), card or "", question_id=qid,
+                           taught_by=by)
     conn.execute(
         """UPDATE order_questions
               SET status = 'answered', answer_gtin = %s, answer_card = %s,
@@ -133,6 +155,11 @@ def undo(conn, qid: int) -> dict:
     Without this a mis-click was permanent AND invisible — a taught wording is never asked
     about again and decides the line with no model call, so nothing would ever contradict it.
     Only what a HUMAN taught is removed; real deliveries are evidence and stay.
+
+    Also retracts the GLOBAL mapping (#102) — but ONLY the row THIS question created
+    (`memory.forget_global` checks `question_id`). A different customer's later, redundant
+    answer to the same wording never owns the global row (it was already taught), so undoing
+    THAT answer must not erase a mapping some OTHER question is responsible for.
     """
     q = get(conn, qid)
     if not q:
@@ -140,6 +167,7 @@ def undo(conn, qid: int) -> dict:
     conn.execute(
         "DELETE FROM item_memory WHERE customer_ean = %s AND item_key = %s"
         " AND source = 'human'", (q["customer_ean"], memory.item_key(q["wording"])))
+    memory.forget_global(conn, q["wording"], qid)
     conn.execute(
         """UPDATE order_questions
               SET status = 'open', answer_gtin = NULL, answer_card = NULL,

@@ -12,6 +12,9 @@ The ladder, highest first. The first three rungs need NO model call at all
   0 catalog_name      the wording IS a catalog card name (unique)
   0 alias_exact       the wording IS one of a card's alias parts (unique)
   0 history_sure      unanimous delivery history, 3+ days, weights agree
+  0 global_taught     the WAREHOUSE taught this wording for every customer (#102), below the
+                       three rungs above (catalog truth and this customer's own real shipping
+                       evidence outrank a generic crowd answer) but still needs no model call
   1 alias_exact_weight  alias IS the customer's wording AND states a weight -> beats weight guard
   2 history_weight      unanimous history, 3+ delivery days                 -> beats weight guard
   3 alias_customer      the card's alias names the ordering customer        -> beats the gate
@@ -163,7 +166,8 @@ def alias_parts(card: dict) -> list[str]:
             if len(p.strip()) >= 4]
 
 
-def decide_without_model(item_name: str, catalog: list[dict], recalled=None) -> Decision | None:
+def decide_without_model(item_name: str, catalog: list[dict], recalled=None,
+                         global_recalled=None) -> Decision | None:
     """The rungs that need no model call — or None when the line genuinely needs one (#86).
 
     89 % of the engine's model spend is one call per ordered line, and it was made
@@ -175,6 +179,13 @@ def decide_without_model(item_name: str, catalog: list[dict], recalled=None) -> 
     Certainty is the bar, not likeness: a unique exact hit, or an unanimous history of 3+
     delivery days (the ladder's own bar), and the stated weights must agree. Anything short
     of that returns None and the full ladder runs.
+
+    `global_recalled` (#102, `memory.resolve_global`) is what the warehouse taught for THIS
+    wording across every customer — checked LAST among the no-model rungs, i.e. only after
+    this customer's own taught mapping (`recalled.human`, checked first, above this whole
+    function's other rungs) and after the catalog-certain / this-customer's-own-history rungs
+    have all had their turn. Like a taught mapping, it overrides the weight guard: it IS a
+    human decision, just one that applies more broadly.
     """
     ordered_w = weight_grams(item_name)
     want = _fold(item_name)
@@ -208,6 +219,13 @@ def decide_without_model(item_name: str, catalog: list[dict], recalled=None) -> 
         return _done("history_sure", recalled.gtin, recalled.card,
                      f"Potvrdené jednohlasnou históriou dodávok ({recalled.note}) — "
                      f"tomuto zákazníkovi sme pre „{item_name}“ dodávali vždy tú istú kartu.")
+
+    # The warehouse taught this wording for EVERY customer (#102) — the weakest of the
+    # no-model rungs, tried only once nothing customer-specific or catalog-certain fired.
+    if global_recalled is not None:
+        return _done("global_taught", global_recalled.gtin, global_recalled.card,
+                     f"Naučené skladom pre všetkých zákazníkov — „{item_name}“ je "
+                     f"„{global_recalled.card}“.")
     return None
 
 

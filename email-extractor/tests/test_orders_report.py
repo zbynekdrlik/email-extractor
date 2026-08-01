@@ -111,6 +111,44 @@ def test_the_notes_from_the_email_are_carried_over():
     assert "šofér vyzdvihne" in html
 
 
+# --- the new-question message (#102) --------------------------------------
+
+def _question(**kw):
+    base = dict(customer_name="Pekáreň Testovacia s.r.o.", wording="Twister", quantity=2,
+               unit="ks", delivery_date="08.08.2026", reason="neznáme znenie",
+               candidates=[{"gtin": "VIA", "name": "Vianočka 400g"},
+                          {"gtin": "SLI", "name": "Slimák kakaový 90g"}])
+    base.update(kw)
+    return base
+
+
+def test_a_new_question_names_the_wording_and_customer():
+    html = report.build_question(_question())
+    assert "Twister" in html and "Pekáreň Testovacia" in html
+    assert "2" in html and "ks" in html
+
+
+def test_a_new_question_lists_its_candidates():
+    html = report.build_question(_question())
+    assert "Vianočka 400g" in html and "Slimák kakaový 90g" in html
+
+
+def test_a_new_question_says_the_answer_applies_to_every_customer():
+    html = report.build_question(_question())
+    assert "všetkých zákazníkov" in html.lower()
+
+
+def test_a_new_question_is_html_safe_against_a_quoted_wording():
+    html = report.build_question(_question(wording='Chlieb "special"'))
+    assert "<script" not in html.lower()
+    assert "&quot;" in html or "&#34;" in html
+
+
+def test_a_new_question_without_candidates_still_renders():
+    html = report.build_question(_question(candidates=[]))
+    assert "Twister" in html
+
+
 # --- delivery ------------------------------------------------------------
 
 def test_posting_uses_message_post_with_html_enabled():

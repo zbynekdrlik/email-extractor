@@ -70,6 +70,54 @@ def test_a_wording_already_answered_is_not_asked_again(pg):
     assert _ask(pg, message_id="m3") is None, "it has been taught; asking again is noise"
 
 
+# --- notifying about a NEW question (#102) --------------------------------
+
+def test_on_new_fires_for_a_genuinely_new_question(pg):
+    seen = []
+    qid = _ask(pg)
+    # _ask() already fired on_new=None; call ask() directly to observe the callback on a
+    # fresh (customer, wording) that has not been asked yet this test.
+    qid2 = teach.ask(pg, message_id="m9", customer_ean=OTHER, customer_name="Zákazník B",
+                     wording="Pletenka", quantity=5, unit="ks", candidates=[],
+                     on_new=lambda q: seen.append(q))
+    assert len(seen) == 1 and seen[0]["id"] == qid2 and seen[0]["wording"] == "Pletenka"
+    assert qid != qid2
+
+
+def test_on_new_does_not_fire_for_a_duplicate_of_an_open_question(pg):
+    seen = []
+    teach.ask(pg, message_id="m1", customer_ean=EAN, customer_name="Zákazník A",
+             wording="Šiška", quantity=30, unit="ks", candidates=[],
+             on_new=lambda q: seen.append(q))
+    assert len(seen) == 1
+    teach.ask(pg, message_id="m2", customer_ean=EAN, customer_name="Zákazník A",
+             wording="Šiška", quantity=30, unit="ks", candidates=[],
+             on_new=lambda q: seen.append(q))
+    assert len(seen) == 1, "the same open question must not notify a second time"
+
+
+def test_on_new_does_not_fire_once_the_wording_is_already_taught(pg):
+    qid = _ask(pg)
+    teach.answer(pg, qid, gtin="SLI50", card="Šiška džemová 50g", by="sklad")
+    seen = []
+    assert teach.ask(pg, message_id="m3", customer_ean=EAN, customer_name="Zákazník A",
+                     wording="Šiška", quantity=30, unit="ks", candidates=[],
+                     on_new=lambda q: seen.append(q)) is None
+    assert seen == []
+
+
+def test_a_failing_on_new_never_breaks_asking(pg):
+    """A notification failure (e.g. Odoo unreachable) must never lose the question itself —
+    the same log-and-continue discipline the main order report's own post already has."""
+    def boom(q):
+        raise RuntimeError("odoo is down")
+
+    qid = teach.ask(pg, message_id="m1", customer_ean=EAN, customer_name="Zákazník A",
+                    wording="Šiška", quantity=30, unit="ks", candidates=[], on_new=boom)
+    assert qid is not None
+    assert teach.get(pg, qid)["wording"] == "Šiška"
+
+
 # --- answering -----------------------------------------------------------
 
 def test_an_answer_is_remembered_for_that_customer_only(pg):
@@ -104,6 +152,29 @@ def test_an_answer_outside_the_offered_candidates_is_refused(pg):
     qid = _ask(pg)
     with pytest.raises(teach.NotACandidate):
         teach.answer(pg, qid, gtin="ROZ", card="Rožok štandart 50g", by="sklad")
+
+
+def test_an_answer_also_teaches_the_wording_globally(pg):
+    """#102: "Šiška" is a product name, not one customer's private word — the SAME answer
+    must resolve it for a DIFFERENT customer with no further asking."""
+    qid = _ask(pg)
+    teach.answer(pg, qid, gtin="SLI50", card="Šiška džemová 50g", by="sklad")
+    glob = memory.resolve_global(pg, "Šiška")
+    assert glob is not None and glob.gtin == "SLI50"
+
+
+def test_a_different_customers_own_answer_still_beats_the_global_one(pg):
+    """The safety point: a SECOND customer answering the same wording differently teaches
+    THEIR OWN mapping (checked first by decide_without_model), never overwrites the global
+    row a different question already owns."""
+    first = _ask(pg, ean=EAN)
+    teach.answer(pg, first, gtin="SLI50", card="Šiška džemová 50g", by="sklad")
+
+    second = _ask(pg, ean=OTHER, customer_name="Zákazník B", message_id="m2")
+    teach.answer(pg, second, gtin="SLI90", card="Šiška džemová 90g", by="sklad")
+
+    assert memory.resolve(pg, OTHER, "Šiška").gtin == "SLI90", "their own answer wins for them"
+    assert memory.resolve_global(pg, "Šiška").gtin == "SLI50", "first teach still owns global"
 
 
 def test_answering_twice_is_refused_rather_than_silently_overwritten(pg):
@@ -220,6 +291,144 @@ def test_an_unmatched_line_becomes_a_question_for_the_warehouse(pg):
     assert any(c["gtin"] == "SLI50" for c in qs[0]["candidates"]), "candidates are offered"
 
 
+def test_a_new_question_also_reaches_odoo(pg):
+    """#102 point 1: the warehouse reads Odoo, not always the dashboard, so a genuinely NEW
+    question must ALSO be posted there — not just written to order_questions."""
+    from app.config import Config
+    from app.orders import pipeline, snapshot
+
+    sid = snapshot.import_snapshot(
+        pg, "GTIN,Sklad,Názov,doplnok\nSLI50,1,Šiška džemová 50g,\n",
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,E-mail\n"
+        f"Zákazník A,{EAN},Martin,U 1,,,sklad@a.sk\n")
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('mq', 'ai_orders')")
+    mail = {"message_id": "mq", "subject": "Objednávka", "from_addr": "sklad@a.sk",
+            "from_name": "A", "combined_text": "na 04.08.2026 prosím 30x jankove buchty",
+            "today": "2026-07-31"}
+
+    class Client:
+        last_prompt_hash = "p"
+
+        def json_call(self, system, user, schema, name="result"):
+            if name == "orders":
+                return {"senderName": "A", "senderEmail": "sklad@a.sk", "companyName": "",
+                        "isChangeRequest": False, "notes": "",
+                        "orders": [{"orderNumber": "", "deliveryDate": "04.08.2026",
+                                    "recipientGroup": "",
+                                    "items": [{"name": "jankove buchty", "quantity": 30,
+                                               "unit": "ks",
+                                               "sourceQuote": "30x jankove buchty"}]}]}
+            if name == "customer":
+                return {"ean_edi": EAN, "confidence": 0.99}
+            return {"gtin": "", "confidence": 0.2, "matchedCatalogName": "", "reason": "?"}
+
+    posted = []
+    cfg = Config(pg_dsn="", data_dir="/tmp", orders_shadow=False, odoo_url="",
+                 orion_host="")
+    pipeline.run(pg, cfg, mail, sid, client=Client(), upload=lambda *a, **k: None,
+                 post=lambda c, html, **kw: posted.append(html))
+    assert any("jankove buchty" in p for p in posted), "the question must reach Odoo"
+
+
+def test_a_taught_wording_resolves_for_a_different_customer_with_no_model_call(pg):
+    """#102's core acceptance: teach it once, a DIFFERENT customer's order resolves it for
+    free — and asserts the stronger claim that it needed NO model call at all for that line
+    (the product schema would raise if the engine ever asked)."""
+    from app.config import Config
+    from app.orders import pipeline, snapshot
+
+    sid = snapshot.import_snapshot(
+        pg, "GTIN,Sklad,Názov,doplnok\nSLI50,1,Šiška džemová 50g,\nVIA,1,Vianočka 400g,\n",
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,E-mail\n"
+        f"Zákazník A,{EAN},Martin,U 1,,,sklad@a.sk\n"
+        f"Zákazník B,{OTHER},Poprad,U 2,,,sklad@b.sk\n")
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('mq', 'ai_orders')")
+
+    qid = _ask(pg, wording="Twister", candidates=[{"gtin": "VIA", "name": "Vianočka 400g"}])
+    teach.answer(pg, qid, gtin="VIA", card="Vianočka 400g", by="sklad")
+
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('mq2', 'ai_orders')")
+    mail = {"message_id": "mq2", "subject": "Objednávka", "from_addr": "sklad@b.sk",
+            "from_name": "B", "combined_text": "na 04.08.2026 prosím 5x Twister",
+            "today": "2026-07-31"}
+
+    class StrictClient:
+        """Raises if ever asked to match the product line — decide_without_model must
+        resolve it entirely from the global teaching."""
+        last_prompt_hash = "p"
+
+        def json_call(self, system, user, schema, name="result"):
+            if name == "orders":
+                return {"senderName": "B", "senderEmail": "sklad@b.sk", "companyName": "",
+                        "isChangeRequest": False, "notes": "",
+                        "orders": [{"orderNumber": "", "deliveryDate": "04.08.2026",
+                                    "recipientGroup": "",
+                                    "items": [{"name": "Twister", "quantity": 5, "unit": "ks",
+                                               "sourceQuote": "5x Twister"}]}]}
+            if name == "customer":
+                return {"ean_edi": OTHER, "confidence": 0.99}
+            raise AssertionError("the product line must resolve without a model call")
+
+    cfg = Config(pg_dsn="", data_dir="/tmp", orders_shadow=False, odoo_url="",
+                 orion_host="")
+    result = pipeline.run(pg, cfg, mail, sid, client=StrictClient(),
+                          upload=lambda *a, **k: None, post=lambda *a, **k: None)
+
+    assert result["status"] == "ok"
+    assert [i["gtin"] for i in result["items"]] == ["VIA"]
+    assert [i["rule"] for i in result["items"]] == ["global_taught"]
+    assert teach.open_questions(pg) == [], "no second question for the taught wording"
+
+
+def test_a_customers_own_taught_nickname_overrides_the_global_one_end_to_end(pg):
+    """The safety point: this customer answered the same wording differently for THEMSELVES,
+    and their own answer must win over what everyone else gets."""
+    from app.config import Config
+    from app.orders import pipeline, snapshot
+
+    sid = snapshot.import_snapshot(
+        pg, "GTIN,Sklad,Názov,doplnok\nSLI50,1,Šiška džemová 50g,\nVIA,1,Vianočka 400g,\n",
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,E-mail\n"
+        f"Zákazník A,{EAN},Martin,U 1,,,sklad@a.sk\n"
+        f"Zákazník B,{OTHER},Poprad,U 2,,,sklad@b.sk\n")
+
+    # customer A teaches the wording globally, VIA
+    global_q = _ask(pg, ean=EAN, wording="Twister",
+                    candidates=[{"gtin": "VIA", "name": "Vianočka 400g"}])
+    teach.answer(pg, global_q, gtin="VIA", card="Vianočka 400g", by="sklad")
+    # customer B has since taught THEIR OWN wording, SLI50 — their own nickname
+    own_q = _ask(pg, ean=OTHER, customer_name="Zákazník B", message_id="mB",
+                wording="Twister", candidates=[{"gtin": "SLI50", "name": "Šiška džemová 50g"}])
+    teach.answer(pg, own_q, gtin="SLI50", card="Šiška džemová 50g", by="sklad")
+
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('mq3', 'ai_orders')")
+    mail = {"message_id": "mq3", "subject": "Objednávka", "from_addr": "sklad@b.sk",
+            "from_name": "B", "combined_text": "na 04.08.2026 prosím 5x Twister",
+            "today": "2026-07-31"}
+
+    class Client:
+        last_prompt_hash = "p"
+
+        def json_call(self, system, user, schema, name="result"):
+            if name == "orders":
+                return {"senderName": "B", "senderEmail": "sklad@b.sk", "companyName": "",
+                        "isChangeRequest": False, "notes": "",
+                        "orders": [{"orderNumber": "", "deliveryDate": "04.08.2026",
+                                    "recipientGroup": "",
+                                    "items": [{"name": "Twister", "quantity": 5, "unit": "ks",
+                                               "sourceQuote": "5x Twister"}]}]}
+            if name == "customer":
+                return {"ean_edi": OTHER, "confidence": 0.99}
+            raise AssertionError("the product line must resolve without a model call")
+
+    cfg = Config(pg_dsn="", data_dir="/tmp", orders_shadow=False, odoo_url="",
+                 orion_host="")
+    result = pipeline.run(pg, cfg, mail, sid, client=Client(), upload=lambda *a, **k: None,
+                          post=lambda *a, **k: None)
+    assert [i["gtin"] for i in result["items"]] == ["SLI50"]
+    assert [i["rule"] for i in result["items"]] == ["human_taught"]
+
+
 def test_shadow_mode_asks_nobody(pg):
     """Shadow's contract is that nothing leaves the process — and a question to a human
     leaves it. n8n is still handling these emails."""
@@ -283,6 +492,30 @@ def test_undo_only_removes_what_a_human_taught(pg):
     rows = pg.execute("SELECT source FROM item_memory WHERE customer_ean = %s",
                       (EAN,)).fetchall()
     assert [r[0] for r in rows] == ["ship"]
+
+
+def test_undo_also_removes_the_global_mapping_it_created(pg):
+    """#102's acceptance bar: 'vrátiť' zmaže globálny zápis."""
+    qid = _ask(pg)
+    teach.answer(pg, qid, gtin="SLI50", card="Šiška džemová 50g", by="sklad")
+    assert memory.resolve_global(pg, "Šiška") is not None
+
+    teach.undo(pg, qid)
+    assert memory.resolve_global(pg, "Šiška") is None, "undo must reach the global entry too"
+
+
+def test_undo_never_removes_a_global_mapping_a_different_question_owns(pg):
+    """Undoing customer B's redundant answer must not erase the global mapping that customer
+    A's (still-standing) answer created — only ITS OWN question may retract it."""
+    first = _ask(pg, ean=EAN)
+    teach.answer(pg, first, gtin="SLI50", card="Šiška džemová 50g", by="sklad")
+
+    second = _ask(pg, ean=OTHER, customer_name="Zákazník B", message_id="m2")
+    teach.answer(pg, second, gtin="SLI90", card="Šiška džemová 90g", by="sklad")
+
+    teach.undo(pg, second)
+    assert memory.resolve_global(pg, "Šiška").gtin == "SLI50", \
+        "the global row belongs to the FIRST question and must survive"
 
 
 def test_the_dashboard_can_take_an_answer_back(pg):

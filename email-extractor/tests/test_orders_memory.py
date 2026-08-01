@@ -150,3 +150,79 @@ def test_seeding_skips_a_line_with_no_card(pg):
         {"customer_ean": "200", "delivered_on": "2026-07-01",
          "items": [{"name": "niečo", "card": "", "gtin": ""}]}])
     assert added == 0
+
+
+# --- global memory (#102): a wording taught for EVERY customer, not just one -------------
+
+def _question(pg, wording="Twister", ean="2000000000001"):
+    """A minimal order_questions row — global_item_memory.question_id FKs to it, so any test
+    exercising a real question_id needs a real row to point at."""
+    key = memory.item_key(wording)
+    row = pg.execute(
+        """INSERT INTO order_questions (message_id, customer_ean, customer_name, wording,
+                                        item_key, quantity, unit, candidates)
+           VALUES ('m', %s, 'Zákazník', %s, %s, 1, 'ks', '[]'::jsonb) RETURNING id""",
+        (ean, wording, key)).fetchone()
+    return int(row[0])
+
+
+def test_a_globally_taught_wording_resolves_with_no_customer(pg):
+    qid = _question(pg)
+    assert memory.remember_global(pg, "Twister", "VIA", "Vianočka 400g", question_id=qid,
+                                  taught_by="sklad") is True
+    hit = memory.resolve_global(pg, "Twister")
+    assert hit is not None and (hit.gtin, hit.card) == ("VIA", "Vianočka 400g")
+
+
+def test_a_globally_taught_wording_needs_no_question_at_all(pg):
+    """question_id is nullable — a global mapping seeded by other means (the eval corpus,
+    an operator import) is still a valid, resolvable teaching."""
+    assert memory.remember_global(pg, "Twister", "VIA", "Vianočka 400g",
+                                  question_id=None) is True
+    assert memory.resolve_global(pg, "Twister").gtin == "VIA"
+
+
+def test_an_untaught_wording_has_no_global_answer(pg):
+    assert memory.resolve_global(pg, "Twister") is None
+
+
+def test_teaching_the_same_wording_globally_twice_keeps_the_first_answer(pg):
+    """First teach wins — changing it needs an explicit undo, the same UX as the
+    per-customer taught mapping already has."""
+    q1, q2 = _question(pg), _question(pg, wording="Twister", ean="2000000000002")
+    assert memory.remember_global(pg, "Twister", "VIA", "Vianočka 400g",
+                                  question_id=q1) is True
+    assert memory.remember_global(pg, "Twister", "G50", "Rožok štandart 50g",
+                                  question_id=q2) is False
+    assert memory.resolve_global(pg, "Twister").gtin == "VIA"
+
+
+def test_global_teaching_is_diacritics_and_case_insensitive_but_keeps_the_weight(pg):
+    qid = _question(pg, wording="Twister 90g")
+    memory.remember_global(pg, "Twister 90g", "VIA", "Vianočka 400g", question_id=qid)
+    assert memory.resolve_global(pg, "twister 90 g").gtin == "VIA"
+    assert memory.resolve_global(pg, "twister") is None
+
+
+def test_forgetting_a_global_teaching_removes_only_the_owning_question(pg):
+    """#102's safety point: `undo` must only retract the mapping the SAME question created —
+    a different, later question for the same wording must never own someone else's row."""
+    owner = _question(pg)
+    other = _question(pg, wording="Twister", ean="2000000000002")
+    memory.remember_global(pg, "Twister", "VIA", "Vianočka 400g", question_id=owner)
+    memory.forget_global(pg, "Twister", question_id=other)   # not the owning question
+    assert memory.resolve_global(pg, "Twister") is not None, "wrong question must not retract it"
+    memory.forget_global(pg, "Twister", question_id=owner)   # the owning question
+    assert memory.resolve_global(pg, "Twister") is None
+
+
+def test_a_global_answer_is_recorded_with_who_taught_it_and_from_which_question(pg):
+    """Auditability is the whole safety condition (#102): a global write must be
+    traceable — who answered, when, from which question."""
+    qid = _question(pg)
+    memory.remember_global(pg, "Twister", "VIA", "Vianočka 400g", question_id=qid,
+                           taught_by="sklad")
+    row = pg.execute(
+        "SELECT question_id, taught_by, created_at FROM global_item_memory "
+        "WHERE item_key = %s", (memory.item_key("Twister"),)).fetchone()
+    assert row[0] == qid and row[1] == "sklad" and row[2] is not None

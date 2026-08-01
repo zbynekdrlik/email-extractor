@@ -54,3 +54,30 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   console errors, order worker started.
 - Playbook-only follow-up PR **#112** (`b5f07da` → `6707976`, merged, no version bump —
   doc-only, outside `email-extractor/`): the two playbook findings above.
+
+## 2026-08-02 — #50 + #108 (batch, one PR)
+
+- #50: Odoo API key hardcoded in `Authorization` header on 3 HTTP nodes in n8n workflow
+  `O8IYhUESjaWmPMTI` (`odoo send message1`, `Odoo Error Alert`, `Odoo Skip Alert`).
+  Migrated all 3 to the existing "Odoo Bearer" credential (`N9WJBbMicZ3pwLp9`,
+  `genericAuthType: httpHeaderAuth`), matching the pattern already live in `AI auto
+  orders`' `Odoo Success`/`Odoo Needs Review`. Old key still lives in n8n version
+  history — rotation in the Odoo UI + updating the "Odoo Bearer" credential value is a
+  remaining USER-side step, cannot be done from this session.
+- #108 (rescoped by an earlier autopilot run, duplicate credential part folded into
+  #50): `Upload a file` (SSH node) was missing the explicit `operation: "upload"`
+  discriminator — confirmed via a real past execution (720844) that the upload already
+  worked; added the missing field with no behavior change. `OpenAI Chat Model` was
+  missing explicit `responsesApiEnabled: true` (the type schema's own default) — made
+  explicit per the project's standing choice (top OpenAI tier, Responses API on).
+- All 5 node edits applied via `update_workflow` (14 ops, atomic) → `publish_workflow`;
+  verified `versionId == activeVersionId`, literal secret gone from the active version,
+  `validate_node_config` clean for all 5 nodes. Functional verification: same "Odoo
+  Bearer" credential proven live-authenticating in the sibling `AI auto orders`
+  workflow (execution 728698 — real Odoo message id returned, not a 401); this
+  workflow's own executions were frozen at 2026-07-31T09:23 for the whole session
+  (no new productions runs to observe directly).
+- Playbook updated (`.claude/rules/orders-corpus.md`): credential-migration shape +
+  the "validator warning ≠ broken behavior, check a real execution first" gotcha.
+- Shared PR: **#114** — merged `58d2fb230b`, main CI green (test+e2e-orders+build). No
+  add-on version bump (n8n-side + docs only, no app code changed).

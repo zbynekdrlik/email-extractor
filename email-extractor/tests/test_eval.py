@@ -709,3 +709,32 @@ def test_the_gate_can_seed_the_delivery_history_from_the_corpus_bundle(pg, tmp_p
     assert eval_run.main(["--manifest", str(manifest), "--catalog", str(cat),
                           "--customers", str(cust), "--history", str(hist)]) == 0
     assert memory.resolve(pg, "2000000000864", "rožok", as_of="2026-07-20") is not None
+
+
+def test_the_gate_can_seed_taught_mappings_from_the_corpus_bundle(pg, tmp_path, monkeypatch):
+    """#102: a corpus case proving the global/per-customer teach precedence needs the taught
+    state to already exist before the case runs — the harness forces shadow mode, so the
+    real ask/answer flow (covered by test_orders_teach.py) never fires during a replay."""
+    from app.orders import eval_run, memory
+    cat = tmp_path / "catalog.csv"
+    cat.write_text("GTIN,Sklad,Názov,doplnok\nVIA,1,Vianočka 400g,\n", encoding="utf-8")
+    cust = tmp_path / "customers.csv"
+    cust.write_text(
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,E-mail\n"
+        "Pekáreň s.r.o.,2000000000864,Martin,Košútka 1,,,sklad@pekaren.sk\n",
+        encoding="utf-8")
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"cases": []}), encoding="utf-8")
+    taught = tmp_path / "taught.json"
+    taught.write_text(json.dumps([
+        {"scope": "global", "wording": "Twister", "gtin": "VIA", "card": "Vianočka 400g"},
+        {"scope": "customer", "customer_ean": "2000000000864", "wording": "Twister",
+         "gtin": "SLI50", "card": "Šiška džemová 50g"},
+    ]), encoding="utf-8")
+    import os
+    monkeypatch.setenv("PG_DSN", os.environ["PG_TEST_DSN"])
+    monkeypatch.setenv("LLM_CACHE_DIR", str(tmp_path / "cache"))
+    assert eval_run.main(["--manifest", str(manifest), "--catalog", str(cat),
+                          "--customers", str(cust), "--taught", str(taught)]) == 0
+    assert memory.resolve_global(pg, "Twister").gtin == "VIA"
+    assert memory.resolve(pg, "2000000000864", "Twister").gtin == "SLI50"

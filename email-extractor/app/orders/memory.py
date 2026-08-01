@@ -140,6 +140,67 @@ def resolve(conn, customer_ean: str, item: str, as_of: str = "") -> Recalled | N
     )
 
 
+def remember_global(conn, item: str, gtin: str, card: str, question_id: int | None,
+                     taught_by: str = "") -> bool:
+    """Teach a wording GLOBALLY — the answer for every customer, not just the one who asked
+    (#102). A product name ("Twister") is not one buyer's private nickname; once someone
+    tells us what it means, every future customer using the same word should be answered for
+    free, never asked again.
+
+    `ON CONFLICT (item_key) DO NOTHING`: first teach wins. Changing an existing global answer
+    needs an explicit `undo` first — the same UX the per-customer human answer already has, no
+    new concept. Returns False when a global mapping for this wording already exists.
+    """
+    key = item_key(item)
+    if not (key and gtin):
+        return False
+    row = conn.execute(
+        """INSERT INTO global_item_memory (item_key, item_raw, gtin, card, question_id,
+                                           taught_by)
+           VALUES (%s, %s, %s, %s, %s, %s)
+           ON CONFLICT (item_key) DO NOTHING
+           RETURNING id""",
+        (key, str(item), str(gtin), card or "", question_id, taught_by or ""),
+    ).fetchone()
+    return row is not None
+
+
+def resolve_global(conn, item: str) -> Recalled | None:
+    """The globally-taught answer for this wording, or None when nobody has taught one.
+
+    Always a fallback: `match.decide_without_model` only consults this AFTER the customer's
+    own taught mapping, the catalog-certain rungs, and the customer's own unanimous delivery
+    history have all had their turn — a real customer-specific signal outranks a generic
+    crowd answer.
+    """
+    key = item_key(item)
+    if not key:
+        return None
+    row = conn.execute(
+        "SELECT gtin, card FROM global_item_memory WHERE item_key = %s", (key,)).fetchone()
+    if not row:
+        return None
+    return Recalled(gtin=str(row[0]), card=row[1] or "", strength=1, unanimous=True,
+                    last_day="", weight_override=True)
+
+
+def forget_global(conn, item: str, question_id: int) -> None:
+    """Undo a global teaching — but ONLY the row THIS question created (#102).
+
+    A different customer's later answer to the same wording never creates a second global row
+    (remember_global's ON CONFLICT DO NOTHING), so its `question_id` still points at whichever
+    question taught it first. Undoing that LATER, redundant answer must not erase a mapping
+    some OTHER question owns — checking `question_id` is what keeps the retraction traceable
+    to its origin, which is the whole point of recording it.
+    """
+    key = item_key(item)
+    if not key:
+        return
+    conn.execute(
+        "DELETE FROM global_item_memory WHERE item_key = %s AND question_id = %s",
+        (key, question_id))
+
+
 def import_n8n_rows(conn, rows: list[dict]) -> int:
     """One-off import of the existing n8n Data Table rows. Returns rows actually stored.
 
@@ -157,6 +218,40 @@ def import_n8n_rows(conn, rows: list[dict]) -> int:
             stored += 1
     log.info("item memory: imported %d of %d n8n rows", stored, len(rows))
     return stored
+
+
+def seed_taught(conn, entries: list[dict]) -> int:
+    """One-off seeding of taught mappings for the eval corpus (#102), mirroring
+    `seed_from_archive` — the ask/answer/teach.py HTTP flow is what production uses and what
+    `test_orders_teach.py` covers; the offline eval harness only needs the RESULTING state
+    (`item_memory(human)` / `global_item_memory`), which is what a corpus case can actually
+    observe (the harness forces shadow mode, so `teach.ask`/`teach.answer`'s side effects
+    never run during a corpus replay — only reads like `memory.resolve`/`resolve_global` do).
+
+    Each entry: `{"scope": "customer", "customer_ean": ..., "wording": ..., "gtin": ...,
+    "card": ...}` or `{"scope": "global", "wording": ..., "gtin": ..., "card": ...}`.
+    Returns the number of mappings actually stored (new ones only).
+    """
+    stored = 0
+    for e in entries:
+        scope = str(e.get("scope") or "customer")
+        wording, gtin, card = str(e.get("wording") or ""), str(e.get("gtin") or ""), \
+            str(e.get("card") or "")
+        if scope == "global":
+            if remember_global(conn, wording, gtin, card, question_id=None,
+                               taught_by=str(e.get("taught_by") or "corpus")):
+                stored += 1
+        else:
+            ean = str(e.get("customer_ean") or "")
+            if remember(conn, ean, wording, gtin, card, delivered_on=_today(conn),
+                       source="human"):
+                stored += 1
+    log.info("eval corpus: seeded %d of %d taught mapping(s)", stored, len(entries))
+    return stored
+
+
+def _today(conn):
+    return conn.execute("SELECT current_date").fetchone()[0]
 
 
 def seed_from_archive(conn, orders: list[dict]) -> int:

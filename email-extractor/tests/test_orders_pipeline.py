@@ -136,8 +136,12 @@ def test_an_unmatched_item_still_ships_the_rest_and_says_so(pg, env):
                           upload=rec.upload, post=rec.post)
     assert result["status"] == "partial"
     assert rec.uploads[0][1].count("LIN") == 1
-    assert "torta" in rec.posts[0]
-    assert "NEÚPLNÁ" in rec.posts[0].upper()
+    # a genuinely NEW question for the warehouse also reaches Odoo (#102), posted first
+    # (while the item is being decided), then the main order report
+    assert len(rec.posts) == 2
+    assert "torta" in rec.posts[0] and "Neznáme znenie" in rec.posts[0]
+    assert "torta" in rec.posts[1]
+    assert "NEÚPLNÁ" in rec.posts[1].upper()
     # only the shipped item is remembered
     assert pg.execute("SELECT count(*) FROM item_memory").fetchone()[0] == 1
 

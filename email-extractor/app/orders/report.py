@@ -134,6 +134,34 @@ def build(result: dict) -> str:
     return "".join(p for p in parts if p)
 
 
+def build_question(q: dict) -> str:
+    """The Odoo message for a wording the engine could not place on its own (#102).
+
+    Posted ONCE per genuinely NEW (customer, wording) question — the warehouse reads Odoo, not
+    always the dashboard, so this is what makes the question reachable without opening
+    `/otazky`. Whoever answers it (from the dashboard's one-click UI — this message never
+    parses free text) teaches the wording for every future customer, not just this one.
+    """
+    parts = [f"<h3>❓ Neznáme znenie objednávky — {escape(q.get('customer_name') or '?')}</h3>"]
+    qty, unit = q.get("quantity"), q.get("unit") or "ks"
+    qty_txt = f" ({escape(str(qty))} {escape(str(unit))})" if qty is not None else ""
+    parts.append(f"<p><b>Znenie:</b> „{escape(str(q.get('wording') or ''))}“{qty_txt}</p>")
+    if q.get("delivery_date"):
+        parts.append(f"<p><b>Dátum dodania:</b> {escape(str(q['delivery_date']))}</p>")
+    if q.get("reason"):
+        parts.append(f"<p><b>Dôvod:</b> {escape(str(q['reason']))}</p>")
+    cands = q.get("candidates") or []
+    if cands:
+        parts.append("<p><b>Kandidáti:</b><br>" +
+                     "<br>".join("&bull; " + escape(str(c.get("name", "")))
+                                for c in cands) + "</p>")
+    parts.append(
+        "<p>Odpovedzte prosím jedným klikom na dashboarde extraktora (/otazky, alebo cez "
+        "podpísaný odkaz pre sklad) — odpoveď potom platí pre <b>všetkých zákazníkov</b>, "
+        "kým ju niekto nevráti späť.</p>")
+    return "".join(parts)
+
+
 # --- delivery ------------------------------------------------------------
 
 def _http(url: str, headers: dict, payload: dict) -> dict:
