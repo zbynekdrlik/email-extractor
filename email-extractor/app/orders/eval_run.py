@@ -122,16 +122,18 @@ def main(argv: list[str] | None = None) -> int:
         os.close(fd)
         manifest_path = str(sample_tmp)
 
-    if args.live:
-        n_cases = len(evaluate.load_manifest(manifest_path))
-        model = getattr(cfg, "orders_model", llm.DEFAULT_MODEL) or llm.DEFAULT_MODEL
-        est = _estimated_cost_usd(n_cases, model)
-        print(f"--live: estimated cost ~${est:.2f} for {n_cases} case(s) at {model} "
-              f"(rough — measured avg $"
-              f"{_MEASURED_AVG_COST_PER_CASE_USD:.3f}/case at {_MEASURED_AVG_COST_MODEL}, "
-              "scaled by model pricing; real cost is billed by the API's own token counts)")
-
+    # Everything from here on must run inside the try: a raised exception while sizing the
+    # --live estimate (e.g. a corrupt sample file) must not leak the tempfile either.
     try:
+        if args.live:
+            n_cases = len(evaluate.load_manifest(manifest_path))
+            model = getattr(cfg, "orders_model", llm.DEFAULT_MODEL) or llm.DEFAULT_MODEL
+            est = _estimated_cost_usd(n_cases, model)
+            print(f"--live: estimated cost ~${est:.2f} for {n_cases} case(s) at {model} "
+                  f"(rough — measured avg $"
+                  f"{_MEASURED_AVG_COST_PER_CASE_USD:.3f}/case at {_MEASURED_AVG_COST_MODEL}, "
+                  "scaled by model pricing; real cost is billed by the API's own token counts)")
+
         results, summary = evaluate.run_corpus(conn, cfg, manifest_path, offline=not args.live)
     finally:
         if sample_tmp is not None:
