@@ -339,6 +339,10 @@ _SUBJ_DAY = re.compile(r"\b(\d{1,2})\s*\.\s*(\d{1,2})\s*\.(\s*(\d{4}|\d{2}))?")
 _RANGE = re.compile(r"\d{1,2}\s*\.\s*\d{1,2}\s*\.?\s*(-|–|do)\s*\d{1,2}\s*\.\s*\d{1,2}")
 
 
+_WEEKDAY = re.compile(
+    r"\b(pondel|utor|stred|štvrt|stvrt|piat|sobot|nedeľ|nedel)\w*", re.IGNORECASE)
+
+
 def _body_only(text: str) -> str:
     """The message text WITHOUT the `Subject:` / `From:` header block.
 
@@ -382,8 +386,13 @@ def date_conflict(subject: str, dates: list[str], body: str = "") -> str:
         parts = re.findall(r"\d+", str(d))
         if len(parts) >= 2:
             ordered_days.add((int(parts[0]), int(parts[1])))
-    body_days = _days_in(_body_only(body))
-    if len(body_days) == 1 and len(ordered_days) > 1:
+    text = _body_only(body)
+    body_days = _days_in(text)
+    # A mail that names the week once and then lists "Pondelok:/Utorok:/…", or states a
+    # range, DERIVES its extra days from what it says — that is reading the email, not
+    # inventing days. Only a body with neither may be held to its single written day.
+    derives_days = bool(_WEEKDAY.search(text) or _RANGE.search(text))
+    if not derives_days and len(body_days) == 1 and len(ordered_days) > 1:
         only = next(iter(body_days))
         return (f"E-mail hovorí o jedinom dni {only[0]}.{only[1]}., ale objednávka vyšla na "
                 f"{', '.join(dates)} — ostatné dni nikto nenapísal, treba potvrdiť")
