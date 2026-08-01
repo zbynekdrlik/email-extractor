@@ -94,3 +94,36 @@ again. That is the point: a changed prompt has not been measured until it has be
   values, never hardcode them in a committed file) and replay the exact JS/Python matching
   function against it (a `node -e` harness with a mocked `$('NodeName')` works well for the
   n8n side) before trusting a synthetic-only test suite.
+- **Migrating an `httpRequest` node off a hardcoded `Authorization` header, onto an n8n
+  credential (#50/#108, 2026-08-01).** `get_workflow_details` NEVER returns the `credentials`
+  key on any node — it is stripped from every node in the response regardless of node type,
+  not just for the one you're editing — so you cannot verify a credential attachment by
+  reading it back; verify by checking that the migrated node's `authentication`/
+  `genericAuthType` parameters are set AND that a live execution afterward returns a real
+  API result (not a 401). The working shape (copy verbatim from `AI auto orders`'
+  `Odoo Success`/`Odoo Needs Review` nodes): `authentication: "genericCredentialType"`,
+  `genericAuthType: "httpHeaderAuth"`, `headerParameters.parameters` keeps only
+  non-secret headers (e.g. `X-Odoo-Database`), and a separate `setNodeCredential` op
+  (`credentialKey: "httpHeaderAuth"`) attaches the credential by id. Do the parameter
+  edit and the credential attach as `setNodeParameter`/`setNodeCredential` ops in the
+  SAME `update_workflow` call. **The literal secret stays visible in `get_workflow_details`
+  under `.workflow.activeVersion.…` until you `publish_workflow`** — the draft you just
+  wrote (`workflow.versionId`) and the still-live old version (`workflow.activeVersionId`)
+  differ until publish; only check `versionId == activeVersionId` (and grep the WHOLE
+  response, not just `.workflow.nodes`) to confirm the secret is actually gone from the
+  active version. It still lives in n8n's version history regardless — rotating the
+  underlying key is the only way to fully invalidate it, and only whoever owns that
+  external service can do that.
+- **A node validator warning does not necessarily mean the node is functionally broken —
+  check a real recent execution before assuming a behavior change is needed (#108).**
+  `n8n-nodes-base.ssh` v1 with `resource: "file"` requires an explicit `operation`
+  (`upload`/`download`) — `get_node_types` errors without it — but a node already missing
+  `operation` can still have been running correctly in production (n8n silently defaulted
+  it): check `search_executions` + `get_execution(includeData:true, nodeNames:[...])` for
+  the node's actual output before touching its behavior. Adding the missing explicit field
+  (no other change) fixes the validator without risk. Same pattern for
+  `@n8n/n8n-nodes-langchain.lmChatOpenAi` v1.3's `builtInTools` — valid only when
+  `responsesApiEnabled: true` is explicitly present in `parameters`, even though the type
+  schema lists `true` as that field's default; the validator does not apply schema defaults
+  for an absent key, so an implicit default must be made explicit in the JSON. This project's
+  standing choice is `responsesApiEnabled: true` (top OpenAI tier, Responses API on).
