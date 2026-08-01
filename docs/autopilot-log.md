@@ -2,6 +2,46 @@
 
 Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions, shared PR #.
 
+## 2026-08-02 — #102 (PR #115)
+
+- **#102** (AI objednávky: neznámy výrobok — otázka aj do Odoo, odpoveď platí globálne):
+  new `global_item_memory` table (dedicated table, not a sentinel EAN — argued on the issue);
+  `match.decide_without_model` gains a `global_taught` rung, placed LAST among the no-model
+  rungs (below `human_taught`/`catalog_name`/`alias_exact`/`history_sure` — customer's own
+  signals always win); `teach.ask` gains `on_new` (fires only on a genuinely NEW question,
+  wired to `report.build_question` + the existing Odoo `post`); `teach.answer` teaches BOTH
+  per-customer AND global; `teach.undo` retracts the global row ONLY when it was created by
+  the SAME question (`question_id`-scoped — a different, later question can never erase
+  someone else's teaching).
+- Commits: `e471fd2` (version bump 0.9.15), `72c86f4` (feature + tests, single commit —
+  feature work, not a bug fix, so no RED/GREEN split per `regression-test-first.md`).
+- Tests: `test_orders_memory.py` (remember_global/resolve_global/forget_global/seed_taught),
+  `test_orders_match.py` (global_taught rung + full precedence matrix vs human/catalog/
+  history), `test_orders_teach.py` (on_new callback incl. failure-swallowing, global write in
+  answer, question_id-scoped undo, 2 full pipeline-level end-to-end tests), `test_orders_
+  report.py` (build_question HTML + escaping), `test_eval.py` (new `--taught` corpus seed).
+- Corpus (dev2, outside git): 2 new real cases (`syn102-twister-global-2026-08-02`,
+  `syn102-twister-customer-override-2026-08-02`) added to the 30-case golden corpus via a
+  small `--live` recording (~$0.30, 4 API calls) against real customers (LinHeart EAN
+  2000000000736, PNO Brezno EAN 2000000000819) and a new `taught.json` seed file (mirrors
+  `--history`) — the offline harness forces shadow mode, so ask/answer/undo side effects
+  never fire during a replay; only the resulting match is observable. Full 32-case corpus
+  passes `--require-all`; baseline updated. `ci.yml`'s `e2e-orders` job now also requires+
+  passes `taught.json`.
+- Shared PR: **#115** — merged `e4f105f`, main CI green (test+e2e-orders+build). Deployed
+  v0.9.15 to the live add-on (`ha addons update e0ac7775_email_extractor`, after `ha store
+  reload`). Post-deploy: dashboard DOM confirms `v0.9.15`; live functional check run
+  in-container against the real Postgres (real `global_item_memory` table present, `teach.ask`
+  → `on_new` → `report.build_question` wiring fires correctly, global resolves for a
+  never-asked customer with rule `global_taught`, a customer's own mapping still wins with
+  `human_taught`, `undo` removes the global row) — used a stubbed `post()` to avoid spamming
+  the real Odoo "objednávky" channel with test noise (the real HTTP delivery path is the
+  same `report.post_from_config` the pre-existing daily order report already uses in
+  production, and is unit-tested against the real Odoo endpoint shape). Note: the live
+  add-on currently runs with `ai_orders_engine=n8n` / `orders_shadow=true`, so this new code
+  path does not fire on real production traffic yet — expected, pre-existing rollout state,
+  unrelated to this ticket.
+
 ## 2026-08-01 — batch #36 + #41 + #87 (PR #107)
 
 - **#36** (Static generator: add EAN for KOMFOS 'CHLIEB 500g PSEN.RAZNY'): n8n-only, no repo
