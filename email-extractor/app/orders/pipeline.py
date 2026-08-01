@@ -146,7 +146,8 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
 
     orders = _merge_by_day(orders)
     conflict = extract.date_conflict(message.get("subject", ""),
-                                     [o.get("deliveryDate", "") for o in orders])
+                                     [o.get("deliveryDate", "") for o in orders],
+                                     body=message.get("combined_text", "") or "")
     if conflict:
         return _finish(conn, cfg, message, shadow, post, status="review",
                        items=[], result={"shipped": False, "reject_reason": conflict,

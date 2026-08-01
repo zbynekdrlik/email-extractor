@@ -339,27 +339,47 @@ _SUBJ_DAY = re.compile(r"\b(\d{1,2})\s*\.\s*(\d{1,2})\s*\.(\s*(\d{4}|\d{2}))?")
 _RANGE = re.compile(r"\d{1,2}\s*\.\s*\d{1,2}\s*\.?\s*(-|–|do)\s*\d{1,2}\s*\.\s*\d{1,2}")
 
 
-def date_conflict(subject: str, dates: list[str]) -> str:
-    """The problem to report when the subject names ONE day and the order is for another.
+def _days_in(text: str) -> set[tuple[int, int]]:
+    """Every explicit day.month written in the text."""
+    return {(int(d), int(m)) for d, m, _, _ in _SUBJ_DAY.findall(text or "")}
 
-    Real mail: subject "Objednávka 29.6.2026", body "na 28.6.2026" — a Sunday. Either reading
-    can be the wrong one, so a human decides instead of the model guessing (#81.5). A RANGE in
-    the subject ("od 06.07. - 11.07.") is not a contradiction, and a subject day that is among
-    the ordered days is not either.
+
+def date_conflict(subject: str, dates: list[str], body: str = "") -> str:
+    """The problem to report when the stated day and the ordered day(s) disagree.
+
+    Two independent checks, both ending in "a human decides instead of the model guessing":
+
+    1. The SUBJECT names ONE day and the order is for another (#81.5). Real mail: subject
+       "Objednávka 29.6.2026", body "na 28.6.2026" — a Sunday. A RANGE in the subject
+       ("od 06.07. - 11.07.") is not a contradiction, nor is a subject day among the ordered days.
+    2. The BODY names exactly ONE delivery day but the order came back with SEVERAL. The same
+       AGEL Levoča mail flipped between live corpus runs (2026-08-01): sometimes the model
+       refused the contradiction, sometimes it "solved" it by shipping BOTH days as separate
+       orders — which check 1 cannot see, because the subject's 29.6. IS then among the ordered
+       days. A day nobody wrote is a day nobody ordered; this is the item `sourceQuote` rule
+       applied to dates. Only a body that spells out exactly one day can prove this, so a
+       relative-date mail ("na pondelok", no day written) is untouched.
     """
     subject = subject or ""
-    if not dates or _RANGE.search(subject):
+    if not dates:
+        return ""
+    ordered_days = set()
+    for d in dates:
+        parts = re.findall(r"\d+", str(d))
+        if len(parts) >= 2:
+            ordered_days.add((int(parts[0]), int(parts[1])))
+    body_days = _days_in(body)
+    if len(body_days) == 1 and len(ordered_days) > 1:
+        only = next(iter(body_days))
+        return (f"E-mail hovorí o jedinom dni {only[0]}.{only[1]}., ale objednávka vyšla na "
+                f"{', '.join(dates)} — ostatné dni nikto nenapísal, treba potvrdiť")
+    if _RANGE.search(subject):
         return ""
     found = _SUBJ_DAY.findall(subject)
     if len(found) != 1:
         return ""                       # no day, or several: not a single stated day
     day, month = int(found[0][0]), int(found[0][1])
-    ordered = set()
-    for d in dates:
-        parts = re.findall(r"\d+", str(d))
-        if len(parts) >= 2:
-            ordered.add((int(parts[0]), int(parts[1])))
-    if not ordered or (day, month) in ordered:
+    if not ordered_days or (day, month) in ordered_days:
         return ""
     return (f"Predmet e-mailu hovorí {found[0][0]}.{found[0][1]}., ale objednávka je na "
             f"{', '.join(dates)} — dva rôzne dni, treba potvrdiť")

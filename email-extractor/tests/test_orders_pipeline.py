@@ -347,11 +347,19 @@ def test_two_wordings_that_match_the_same_card_also_become_one_line(pg, env):
 
 
 def test_two_different_delivery_dates_still_stay_two_orders(pg, env):
-    """The merge must key on the DAY, not flatten every order in the email."""
+    """The merge must key on the DAY, not flatten every order in the email.
+
+    The mail names BOTH days on purpose: since the AGEL Levoča case (2026-08-01) an order
+    for a day the body never mentions goes to a human, so a fixture that ordered for
+    05.08. out of a mail that only says 04.08. would be testing the wrong thing.
+    """
     answers = _group_answers()
     answers[0]["orders"][1]["deliveryDate"] = "05.08.2026"
+    mail = dict(GROUPS_MAIL, combined_text=(
+        "na 04.08.2026 Vás prosíme objednať 120x rožok 50g na pacientov "
+        "a na 05.08.2026 30x rožok 50g na zamestnancov"))
     rec = Recorder()
-    result = pipeline.run(pg, _cfg(), GROUPS_MAIL, env, client=ScriptedClient(answers),
+    result = pipeline.run(pg, _cfg(), mail, env, client=ScriptedClient(answers),
                           upload=rec.upload, post=rec.post)
     assert len(rec.uploads) == 2
     assert [o["delivery_date"] for o in result["order_results"]] == ["04.08.2026", "05.08.2026"]
