@@ -30,10 +30,16 @@ runner (label `email-extractor-eval`); `test` + `e2e-orders` are required checks
 offline (CI, seconds)   python -m app.orders.eval_run --manifest … --catalog … --customers … \
                           --history … --baseline … --require-all
 live    (deliberate)    … --live          # calls gpt-5.4 and RE-RECORDS the cache
+live, cheap (#87)       … --live --sample 5   # deterministic 5-case subset (one per case
+                          type, then fills by manifest order — never random), prints an
+                          estimated cost line before it starts. Use this WHILE iterating on
+                          a prompt; run the full 30-case --live once before merging.
 ```
 
 **A prompt edit invalidates every cache key**, so it needs a `--live` run before CI can pass
 again. That is the point: a changed prompt has not been measured until it has been measured.
+`--sample` makes each iteration of that re-record ~6x cheaper (measured: $4.50/30 cases full
+→ ~$0.75/5 cases sampled) without losing type coverage.
 
 ## Rules when you touch this
 
@@ -51,3 +57,13 @@ again. That is the point: a changed prompt has not been measured until it has be
   only until the ticket is closed.
 - The harness must stay inert: `run_case` forces shadow mode and refuses upload/post. An
   evaluation that ships an order would be the worst possible bug here.
+- **This Python engine is NOT the only text parser in production — the live n8n workflow
+  "Static auto orders" (`O8IYhUESjaWmPMTI`) has its own independent `extractor`/`generator`
+  Code nodes for KOMFOS/KARMEN/LABAS, with their own regexes and their own product-EAN map
+  (`PRODUCT_EAN_BY_NAME`/`PRODUCT_EAN_BY_CODE`).** A parsing-robustness fix here (e.g. this
+  package's `ZERO_WIDTH` table in `extract.py`) does NOT automatically protect that workflow
+  — check whether the same vulnerability class applies there too (#41 found `\s+ks` regexes
+  with no invisible-char guard) and mirror the fix via the n8n MCP (`get_workflow_details` →
+  `update_workflow` with `updateNodeParameters` on the node's `jsCode` → `publish_workflow` →
+  re-fetch to verify `versionId == activeVersionId`). Same direction for product/EAN mapping
+  gaps (#36): they live in the n8n `generator` node, not in this package.
