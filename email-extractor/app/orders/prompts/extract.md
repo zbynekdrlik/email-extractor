@@ -28,17 +28,19 @@ downstream and reported to the warehouse, so quote faithfully and never paraphra
 
 ## Several SHOPS in one attachment
 
-One file may hold two or more shops of the same chain SIDE BY SIDE — a header over each
-block names it, and the day columns underneath belong only to that block
-("cyklická od 31.7.2026 | GT1- Družby 35 BB … cyklická od 31.07.2026 | GT2- 29 augusta 19 BB").
+Rarely, ONE table holds two or more shops of the same chain SIDE BY SIDE: the columns are
+split into blocks, and a header above each block names that shop
+("GT1- Družby 35 BB" over one group of columns, "GT2- 29 augusta 19 BB" over the next).
 
-- SEPARATE orders per shop. Never add a product's quantities across blocks, and never let
-  a quantity from one block land in the other — read each block's own columns only.
-- `store`: the block's header, copied verbatim ("GT2- 29 augusta 19 BB"). It usually carries
-  the shop's street, which is what identifies the branch.
-- One shop, one block, no other shop in the file → `store` is an empty string.
-- A recipient group ("na pacientov") is NOT a shop: same customer, same file, use
-  `recipientGroup`.
+- Apply this ONLY when a header genuinely names a second shop. One shop → `store` is an
+  empty string and nothing here applies.
+- SEPARATE orders per shop. Never add a product's quantities across blocks, and never let a
+  quantity from one block land in the other — read each block's own columns only.
+- `store`: that block's shop header, copied verbatim ("GT2- 29 augusta 19 BB").
+- A recipient group ("na pacientov") is NOT a shop: same customer, use `recipientGroup`.
+- **This section says nothing about dates.** Splitting by shop never adds, removes or
+  changes a delivery date: the Dates rules above decide those, exactly as they would if the
+  file held one shop. Both shops are read for the SAME dates.
 
 ## Order number (the buyer's PO reference)
 
