@@ -299,3 +299,23 @@ def test_the_subject_line_inside_the_stored_text_does_not_count_as_the_body():
         body=("Subject: Objednávka 29.6.2026\nFrom: kuchyna@nle.agel.sk\n"
               "Body: Dobrý deň, prosíme o dodanie na 28.6.2026. Ďakujeme."))
     assert problem and "28.6." in problem
+
+
+def test_a_weekly_order_listing_weekdays_is_not_a_contradiction():
+    """PNO Poprad's weekly mail names the week ONCE and then lists days by NAME.
+
+    The body-day check must stand down there: the extra delivery days are derived from
+    "Pondelok:" / "Utorok:" …, which is reading the email, not inventing days. Blocking
+    these sent two real weekly orders to review (offline corpus, 2026-08-01).
+    """
+    body = ("Body: Dobrý deň, posielam objednávku na týždeň od 06.07.\n\n"
+            "Pondelok:\n30 x Rožok 70g\n\nUtorok:\n20 x Rožok 70g\n\n"
+            "Streda:\n25 x Rožok 70g")
+    assert not extract.date_conflict(
+        "Objednávka na týždeň", ["06.07.2026", "07.07.2026", "08.07.2026"], body=body)
+
+
+def test_a_date_range_in_the_body_is_not_a_contradiction_either():
+    body = "Body: objednávka od 06.07. - 11.07. pre PNO Poprad, denne 30 x Rožok 70g"
+    assert not extract.date_conflict(
+        "objednávka", ["06.07.2026", "08.07.2026", "11.07.2026"], body=body)
