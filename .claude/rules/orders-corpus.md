@@ -95,11 +95,12 @@ again. That is the point: a changed prompt has not been measured until it has be
   function against it (a `node -e` harness with a mocked `$('NodeName')` works well for the
   n8n side) before trusting a synthetic-only test suite.
 - **Migrating an `httpRequest` node off a hardcoded `Authorization` header, onto an n8n
-  credential (#50/#108, 2026-08-01).** `get_workflow_details` NEVER returns the `credentials`
-  key on any node — it is stripped from every node in the response regardless of node type,
-  not just for the one you're editing — so you cannot verify a credential attachment by
-  reading it back; verify by checking that the migrated node's `authentication`/
-  `genericAuthType` parameters are set AND that a live execution afterward returns a real
+  credential (#50/#108, 2026-08-01).** `get_workflow_details` did not return the `credentials`
+  key on ANY node it was checked against (httpRequest, postgres, ssh, executeWorkflow and
+  langchain nodes, across two different workflows) — so treat it as stripped from the
+  response and don't rely on reading it back to verify a credential attachment — verify
+  instead by checking that the migrated node's `authentication`/`genericAuthType`
+  parameters are set AND that a live execution afterward returns a real
   API result (not a 401). The working shape (copy verbatim from `AI auto orders`'
   `Odoo Success`/`Odoo Needs Review` nodes): `authentication: "genericCredentialType"`,
   `genericAuthType: "httpHeaderAuth"`, `headerParameters.parameters` keeps only
@@ -117,10 +118,12 @@ again. That is the point: a changed prompt has not been measured until it has be
 - **A node validator warning does not necessarily mean the node is functionally broken —
   check a real recent execution before assuming a behavior change is needed (#108).**
   `n8n-nodes-base.ssh` v1 with `resource: "file"` requires an explicit `operation`
-  (`upload`/`download`) — `get_node_types` errors without it — but a node already missing
-  `operation` can still have been running correctly in production (n8n silently defaulted
-  it): check `search_executions` + `get_execution(includeData:true, nodeNames:[...])` for
-  the node's actual output before touching its behavior. Adding the missing explicit field
+  (`upload`/`download`) — calling `get_node_types` with `resource` set but `operation`
+  omitted returns an inline error ("requires resource and operation discriminators") in
+  its response, and `validate_node_config`/`validate_workflow` reject it the same way —
+  but a node already missing `operation` can still have been running correctly in production
+  (n8n silently defaulted it): check `search_executions` + `get_execution(includeData:true,
+  nodeNames:[...])` for the node's actual output before touching its behavior. Adding the missing explicit field
   (no other change) fixes the validator without risk. Same pattern for
   `@n8n/n8n-nodes-langchain.lmChatOpenAi` v1.3's `builtInTools` — valid only when
   `responsesApiEnabled: true` is explicitly present in `parameters`, even though the type
