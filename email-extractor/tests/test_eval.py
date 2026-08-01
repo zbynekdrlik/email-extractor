@@ -525,6 +525,129 @@ def test_a_case_marked_as_a_known_defect_is_reported_loudly_but_does_not_block(p
     assert eval_run.main(["--manifest", str(manifest), "--require-all"]) == 1
 
 
+# --- cheap iteration: --sample and the price estimate (#87) ---------------
+
+def test_select_sample_picks_one_case_per_type_first():
+    """A prompt edit invalidates every cache key, so cheap iteration needs a SMALL subset
+    that still catches "fix one type, break five" — that means type coverage, not just the
+    first N cases in the file."""
+    from app.orders import eval_run
+    cases = [{"id": "a1", "type": "free_text"}, {"id": "a2", "type": "free_text"},
+              {"id": "b1", "type": "price_list"}, {"id": "c1", "type": "attachment"}]
+    sampled = eval_run.select_sample(cases, 2)
+    assert [c["id"] for c in sampled] == ["a1", "b1"], "one per distinct type, in file order"
+
+
+def test_select_sample_fills_remaining_slots_after_types_are_covered():
+    from app.orders import eval_run
+    cases = [{"id": "a1", "type": "free_text"}, {"id": "b1", "type": "price_list"},
+              {"id": "a2", "type": "free_text"}, {"id": "b2", "type": "price_list"}]
+    sampled = eval_run.select_sample(cases, 3)
+    # a1, b1 cover both types; the 3rd slot is the next not-yet-picked case in file order
+    assert [c["id"] for c in sampled] == ["a1", "b1", "a2"]
+
+
+def test_select_sample_is_deterministic_across_repeated_calls():
+    from app.orders import eval_run
+    cases = [{"id": f"c{i}", "type": f"t{i % 3}"} for i in range(10)]
+    first = [c["id"] for c in eval_run.select_sample(cases, 4)]
+    second = [c["id"] for c in eval_run.select_sample(cases, 4)]
+    assert first == second
+
+
+def test_select_sample_n_at_or_above_total_returns_everything():
+    from app.orders import eval_run
+    cases = [{"id": "a", "type": "t"}, {"id": "b", "type": "t"}]
+    assert eval_run.select_sample(cases, 5) == cases
+    assert eval_run.select_sample(cases, 0) == cases
+
+
+def test_sample_flag_restricts_which_cases_the_corpus_actually_runs(pg, tmp_path,
+                                                                    monkeypatch):
+    """--sample must actually narrow what evaluate.run_corpus is given, not just print a
+    line — otherwise the flag would claim savings it doesn't deliver."""
+    from app.orders import eval_run
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"cases": [
+        {"id": "a", "type": "free_text", "email": {"combined_text": "x"},
+         "expected": {"items": []}},
+        {"id": "b", "type": "price_list", "email": {"combined_text": "y"},
+         "expected": {"items": []}},
+        {"id": "c", "type": "attachment", "email": {"combined_text": "z"},
+         "expected": {"items": []}}]}), encoding="utf-8")
+    seen = {}
+
+    def fake_run_corpus(conn, cfg, manifest_path, offline=True, snapshot_id=None):
+        seen["cases"] = evaluate.load_manifest(manifest_path)
+        return [], {"total": {"passed": 0, "cases": 0}, "by_type": {}}
+
+    monkeypatch.setattr(evaluate, "run_corpus", fake_run_corpus)
+    import os
+    monkeypatch.setenv("PG_DSN", os.environ["PG_TEST_DSN"])
+    eval_run.main(["--manifest", str(manifest), "--sample", "2"])
+    assert [c["id"] for c in seen["cases"]] == ["a", "b"]
+
+
+def test_sample_tempfile_is_cleaned_up_after_the_run(pg, tmp_path, monkeypatch):
+    from app.orders import eval_run
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"cases": [
+        {"id": "a", "type": "t", "email": {"combined_text": "x"},
+         "expected": {"items": []}}]}), encoding="utf-8")
+    seen_path = {}
+
+    def fake_run_corpus(conn, cfg, manifest_path, offline=True, snapshot_id=None):
+        seen_path["path"] = manifest_path
+        return [], {"total": {"passed": 0, "cases": 0}, "by_type": {}}
+
+    monkeypatch.setattr(evaluate, "run_corpus", fake_run_corpus)
+    import os
+    monkeypatch.setenv("PG_DSN", os.environ["PG_TEST_DSN"])
+    eval_run.main(["--manifest", str(manifest), "--sample", "1"])
+    from pathlib import Path
+    assert not Path(seen_path["path"]).exists()
+
+
+def test_live_prints_an_estimated_price_before_the_run(pg, tmp_path, monkeypatch, capsys):
+    """The cost must never be a surprise: printed BEFORE the run starts, not prompted for
+    (these runs are non-interactive)."""
+    from app.orders import eval_run
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"cases": [
+        {"id": "a", "type": "t", "email": {"combined_text": "x"},
+         "expected": {"items": []}}]}), encoding="utf-8")
+    monkeypatch.setattr(evaluate, "run_corpus", lambda *a, **k: (
+        [], {"total": {"passed": 0, "cases": 0}, "by_type": {}}))
+    import os
+    monkeypatch.setenv("PG_DSN", os.environ["PG_TEST_DSN"])
+    eval_run.main(["--manifest", str(manifest), "--live"])
+    out = capsys.readouterr().out
+    assert "estimated cost" in out and "$" in out
+
+
+def test_offline_run_prints_no_price_line(pg, tmp_path, monkeypatch, capsys):
+    from app.orders import eval_run
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"cases": []}), encoding="utf-8")
+    monkeypatch.setattr(evaluate, "run_corpus", lambda *a, **k: (
+        [], {"total": {"passed": 0, "cases": 0}, "by_type": {}}))
+    import os
+    monkeypatch.setenv("PG_DSN", os.environ["PG_TEST_DSN"])
+    eval_run.main(["--manifest", str(manifest)])
+    out = capsys.readouterr().out
+    assert "estimated cost" not in out
+
+
+def test_estimated_cost_scales_with_case_count_and_model_price():
+    from app.orders import eval_run
+    base = eval_run._estimated_cost_usd(30, "gpt-5.4")
+    assert base == pytest.approx(4.50, abs=0.01), "30 cases at the measured model must ~match"
+    assert eval_run._estimated_cost_usd(5, "gpt-5.4") == pytest.approx(base / 6, abs=0.01)
+    # gpt-5.4-mini is cheaper per the PRICES table, so its estimate must be lower
+    mini = eval_run._estimated_cost_usd(30, "gpt-5.4-mini")
+    assert mini < base
+
+
 def test_the_gate_can_seed_the_delivery_history_from_the_corpus_bundle(pg, tmp_path,
                                                                       monkeypatch):
     """The corpus scores against the history as it stood, so the bundle carries it and the
