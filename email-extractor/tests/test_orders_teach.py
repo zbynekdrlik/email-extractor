@@ -368,3 +368,17 @@ def test_the_warehouse_teaches_through_the_link_without_logging_in(pg):
     # and the link reaches nothing else
     assert c.get("/api/messages").status_code == 401
     assert c.get("/api/orders/spend").status_code == 401
+
+
+def test_the_only_card_of_its_kind_is_no_longer_a_question():
+    """User decision 2026-08-01 (#103): a product we make in exactly ONE gramáž is decided,
+    not asked. Beh 2 raised a question for 'Kakaový slimák 130g' against our only 90g card —
+    there was nothing to choose between, so the warehouse got noise instead of a question.
+
+    What stays in the ask list is what a human can actually settle: a wording we could not
+    place at all, a genuinely borderline model pick, and a weight overridden by history.
+    """
+    from app.orders.pipeline import ASK_THE_WAREHOUSE
+
+    assert "unique_card" not in ASK_THE_WAREHOUSE
+    assert {"unmatched", "llm_borderline", "history_weight"} <= set(ASK_THE_WAREHOUSE)

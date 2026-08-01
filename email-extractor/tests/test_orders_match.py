@@ -25,6 +25,14 @@ CATALOG = [
     {"gtin": "DAN60", "name": "Dánske pečivo makové 60g", "alias": ""},
 ]
 
+# The Gazdovský trh catalog slice (#103): one card per kind, so the weight the customer
+# states is the ONLY thing that differs — and one flavour we simply do not make.
+GT_CATALOG = [
+    {"gtin": "PIS", "name": "Croissant pistácia 130g", "alias": ""},
+    {"gtin": "CUC", "name": "Dánske pečivo 100g čučoriedka", "alias": ""},
+    {"gtin": "SPA", "name": "Špaldový kváskový chlieb 700g", "alias": ""},
+]
+
 
 def _decide(item, llm=None, mem=None, customer="Pekáreň s.r.o.", catalog=None):
     return match.decide(
@@ -140,17 +148,57 @@ def test_a_weak_history_does_not_override_the_weight_guard():
     d = _decide("Slimák kakaový 130g", llm={"gtin": "SLI", "confidence": 0.8},
                 mem=_mem("SLI", "Slimák kakaový 90g", days=2))
     assert d.rule == "unique_card", "no weight override, but it is the only card of its kind"
+    assert d.review is False, "one card of that kind is not a question (#103)"
 
 
 # --- rung 6: the only card of its kind ---------------------------------
 
-def test_the_only_card_of_its_kind_ships_with_a_warning():
+def test_the_only_card_of_its_kind_ships_without_asking():
     """30.07.2026, PNO Poprad/Martin: the customer states a weight we simply do not have
-    ('Kakaový slimák 130g' vs our only 90g). There is nothing to decide between — but the
-    warehouse must see that the gramáž differs."""
+    ('Kakaový slimák 130g' vs our only 90g).
+
+    User decision 2026-08-01, going through the disputed runs: "keď sú to produkty, ktoré
+    majú u nás iba jednu gramáž, tak automaticky vyber ten". There is nothing to decide
+    between, so asking the warehouse is noise — but the differing gramáž still belongs in
+    the note, because that is what the Odoo report shows.
+    """
     d = _decide("Kakaový slimák 130g", llm={"gtin": None, "confidence": 0.3})
-    assert (d.gtin, d.rule, d.review) == ("SLI", "unique_card", True)
+    assert (d.gtin, d.rule, d.review) == ("SLI", "unique_card", False)
     assert "gram" in d.note.lower()
+
+
+def test_a_borderline_model_pick_is_certain_when_it_is_the_only_card_of_its_kind():
+    """Beh 26, Gazdovský trh: 'Croissant pistácia 120g' scored 0.70-0.85 against our only
+    pistachio croissant (130g) and went out flagged, four times in one order.
+
+    The model's doubt is about the weight, and the weight is not in dispute: there is no
+    other pistachio croissant to confuse it with. Same user decision as above.
+    """
+    d = _decide("Croissant pistácia 120g", llm={"gtin": "PIS", "confidence": 0.78},
+                catalog=GT_CATALOG)
+    assert (d.gtin, d.rule, d.review) == ("PIS", "unique_card", False)
+
+
+def test_a_flavour_we_do_not_make_is_never_shipped_as_the_only_card():
+    """Beh 26: 'Dánske pečivo s jahodami' against our only 'Dánske pečivo 100g čučoriedka'.
+
+    This is the line the whole rule has to get right. A different WEIGHT is a typo we can
+    absorb; a different FLAVOUR is a different product, and shipping blueberry for
+    strawberry is worse than asking. User, 2026-08-01: "keď oni chcú s jahodami a my taký
+    produkt nemáme, tak to musí ísť notifikácia do Odoo a na nástenku".
+    """
+    d = _decide("Dánske pečivo s jahodami", llm={"gtin": "CUC", "confidence": 0.78},
+                catalog=GT_CATALOG)
+    assert d.rule != "unique_card", "a different flavour is not the same product"
+    assert d.review is True, "it must reach a human"
+
+
+def test_the_only_espaldovy_bread_is_taken_despite_the_stated_weight():
+    """Beh 2, PNO Poprad: 'Chlieb kváskový špaldový 500g' vs our only špaldový (700g).
+    Verified against the live catalog on 2026-08-01: 127 cards, exactly one špaldový."""
+    d = _decide("Chlieb kváskový špaldový 500g", llm={"gtin": None, "confidence": 0.2},
+                catalog=GT_CATALOG)
+    assert (d.gtin, d.rule, d.review) == ("SPA", "unique_card", False)
 
 
 def test_a_single_word_order_never_uses_the_only_card_rule():
