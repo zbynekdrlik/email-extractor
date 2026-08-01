@@ -253,3 +253,69 @@ def test_a_subject_without_a_day_never_conflicts():
 def test_several_ordered_days_with_one_subject_day_among_them_is_fine():
     """A multi-day order whose subject names the first day is normal."""
     assert not extract.date_conflict("Objednávka 23.7.", ["23.07.2026", "24.07.2026"])
+
+
+def test_two_orders_where_the_body_names_only_one_day_go_to_a_human():
+    """The corpus caught this flipping between live runs (2026-08-01, kuchyna AGEL Levoča).
+
+    Subject says 29.6., the body says 28.6. — one order, two contradictory days. Sometimes
+    the model refused (correct); sometimes it "solved" the contradiction by emitting BOTH
+    days as separate orders, one item each. The subject rule alone cannot see that: 29.6. IS
+    among the ordered days, so it returned no conflict and two invented orders shipped.
+
+    The body is the evidence. When it names exactly ONE delivery day, a second ordered day
+    was not read anywhere — same principle as an item needing its `sourceQuote`.
+    """
+    problem = extract.date_conflict(
+        subject="Objednávka 29.6.2026",
+        dates=["28.06.2026", "29.06.2026"],
+        body="Dobrý deň, prosíme o dodanie na 28.6.2026. Ďakujeme.")
+    assert problem and "28.6." in problem
+
+
+def test_a_body_naming_both_ordered_days_is_not_a_contradiction():
+    """The normal multi-day order: the body itself lists every day it asks for."""
+    assert not extract.date_conflict(
+        "Objednávka 23.7.", ["23.07.2026", "24.07.2026"],
+        body="Na 23.7. 10 ks rožkov, na 24.7. 12 ks rožkov.")
+
+
+def test_a_body_with_no_explicit_day_still_relies_on_the_subject_rule():
+    """Relative dates ("na pondelok") legitimately produce a day the body never spells out."""
+    assert not extract.date_conflict("objednávka pečiva", ["30.06.2026"],
+                                     body="Prosím na pondelok 10 ks rožkov.")
+
+
+def test_the_subject_line_inside_the_stored_text_does_not_count_as_the_body():
+    """`combined_text` begins with "Subject: … / From: … / Body: …" — the subject is IN it.
+
+    Counting it as body text made the AGEL Levoča guard inert: the body says one day, the
+    subject says another, so the naive scan saw two days and the check stood down — exactly
+    the contradiction it exists to catch.
+    """
+    problem = extract.date_conflict(
+        subject="Objednávka 29.6.2026",
+        dates=["28.06.2026", "29.06.2026"],
+        body=("Subject: Objednávka 29.6.2026\nFrom: kuchyna@nle.agel.sk\n"
+              "Body: Dobrý deň, prosíme o dodanie na 28.6.2026. Ďakujeme."))
+    assert problem and "28.6." in problem
+
+
+def test_a_weekly_order_listing_weekdays_is_not_a_contradiction():
+    """PNO Poprad's weekly mail names the week ONCE and then lists days by NAME.
+
+    The body-day check must stand down there: the extra delivery days are derived from
+    "Pondelok:" / "Utorok:" …, which is reading the email, not inventing days. Blocking
+    these sent two real weekly orders to review (offline corpus, 2026-08-01).
+    """
+    body = ("Body: Dobrý deň, posielam objednávku na týždeň od 06.07.\n\n"
+            "Pondelok:\n30 x Rožok 70g\n\nUtorok:\n20 x Rožok 70g\n\n"
+            "Streda:\n25 x Rožok 70g")
+    assert not extract.date_conflict(
+        "Objednávka na týždeň", ["06.07.2026", "07.07.2026", "08.07.2026"], body=body)
+
+
+def test_a_date_range_in_the_body_is_not_a_contradiction_either():
+    body = "Body: objednávka od 06.07. - 11.07. pre PNO Poprad, denne 30 x Rožok 70g"
+    assert not extract.date_conflict(
+        "objednávka", ["06.07.2026", "08.07.2026", "11.07.2026"], body=body)

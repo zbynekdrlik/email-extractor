@@ -15,6 +15,13 @@ downstream and reported to the warehouse, so quote faithfully and never paraphra
   date, and never its own order. "objednávku na 27 týždeň utorok 30.6" is ONE order with
   deliveryDate 30.06.
 - `deliveryDate` format: DD.MM.YYYY. Default: tomorrow.
+- **A delivery date can never be in the PAST.** Customers reuse last month's mail and leave a
+  stale date behind ("Sobota 30.05." inside a week that is plainly 06.07.–11.07.). When a
+  day carries BOTH a weekday name and a date that falls before the email's own date, the
+  DATE is the leftover and the WEEKDAY is the truth: use that weekday within the week the
+  surrounding days already establish. Never emit a delivery date earlier than the email.
+  (This is not the contradictory-dates case: two FUTURE dates that disagree are still a
+  conflict for a human, and nothing here resolves those.)
 
 ## One order or several
 
@@ -25,6 +32,22 @@ downstream and reported to the warehouse, so quote faithfully and never paraphra
 - When the email states SEVERAL delivery dates and the quantities appear only ONCE (a
   single quantity column, no per-date breakdown), repeat the FULL item list for EVERY
   date. Split items between dates only when the email explicitly assigns them.
+
+## Several SHOPS in one attachment
+
+Rarely, ONE table holds two or more shops of the same chain SIDE BY SIDE: the columns are
+split into blocks, and a header above each block names that shop
+("GT1- Družby 35 BB" over one group of columns, "GT2- 29 augusta 19 BB" over the next).
+
+- Apply this ONLY when a header genuinely names a second shop. One shop → `store` is an
+  empty string and nothing here applies.
+- SEPARATE orders per shop. Never add a product's quantities across blocks, and never let a
+  quantity from one block land in the other — read each block's own columns only.
+- `store`: that block's shop header, copied verbatim ("GT2- 29 augusta 19 BB").
+- A recipient group ("na pacientov") is NOT a shop: same customer, use `recipientGroup`.
+- **This section says nothing about dates.** Splitting by shop never adds, removes or
+  changes a delivery date: the Dates rules above decide those, exactly as they would if the
+  file held one shop. Both shops are read for the SAME dates.
 
 ## Order number (the buyer's PO reference)
 

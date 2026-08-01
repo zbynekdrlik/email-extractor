@@ -17,10 +17,17 @@ The ladder, highest first. The first three rungs need NO model call at all
   3 alias_customer      the card's alias names the ordering customer        -> beats the gate
   4 history             history (below the gate)                            -> beats the gate
   5 llm_sure            model confidence >= 0.85
-  6 unique_card         exactly one card of that kind in the catalog        -> beats weight guard, flagged
+  6 unique_card         exactly one card of that kind in the catalog        -> beats weight guard
   7 llm_borderline      model confidence 0.70-0.85                          -> flagged
   8 sibling             same wording resolved elsewhere in the same email    (applied per order)
     unmatched           nothing above fired — the reason is kept and reported
+
+One deliberate exception to that order (#103): when the model is BELOW the sure gate and rung
+6 holds — the catalog has exactly one card of that kind, and it is the card the model picked
+— rung 6 decides instead of rung 7. A borderline score there is doubt about the gramáž, and
+the gramáž is not in dispute when there is no other card to confuse it with. A different
+FLAVOUR is not the same product, so `unique_core_card` still refuses it and the line reaches
+a human.
 """
 from __future__ import annotations
 
