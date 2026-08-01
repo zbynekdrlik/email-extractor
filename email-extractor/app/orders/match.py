@@ -216,6 +216,20 @@ def _card(catalog: list[dict], gtin) -> dict | None:
     return next((c for c in catalog if str(c.get("gtin")) == str(gtin or "")), None)
 
 
+def _unique_note(card: dict, ordered_w) -> str:
+    """Why the only-card rule fired, and — when it differs — the gramáž it overrode.
+
+    The line no longer stops for a human (#103), so this note is the only place the
+    difference is recorded: it is what the Odoo report and the dashboard show.
+    """
+    card_w = weight_grams(card.get("name", ""))
+    if _weights_disagree(ordered_w, card_w):
+        return (f"Jediný produkt toho druhu v katalógu — objednané "
+                f"{_fmt_weight(ordered_w)}, dodáva sa {_fmt_weight(card_w)} "
+                f"(„{card['name']}“).")
+    return f"Jediný produkt toho druhu v katalógu („{card['name']}“)."
+
+
 def unique_core_card(item_name: str, catalog: list[dict]) -> dict | None:
     """The only card of that kind, ignoring the weight.
 
@@ -313,6 +327,17 @@ def decide(item_name: str, llm: dict, catalog: list[dict], recalled=None,
                         f"Potvrdené históriou dodávok — tomuto zákazníkovi sme pre "
                         f"„{item_name}“ dodávali „{recalled.card}“ ({recalled.note}).")
 
+    # 6a — the model hesitated, but there is nothing to hesitate BETWEEN.
+    # User decision 2026-08-01 (#103): a product we make in exactly one gramáž is decided,
+    # not asked. A borderline score on such a card is doubt about the weight, and the weight
+    # is not in dispute — 'Croissant pistácia 120g' went out flagged four times in one order
+    # against our only pistachio croissant. This runs BEFORE the model rung so the borderline
+    # branch never gets the chance to flag it.
+    only = unique_core_card(item_name, catalog)
+    if only and conf < GATE_SURE and (not llm_gtin or str(llm_gtin) == str(only["gtin"])):
+        return done("unique_card", str(only["gtin"]), only["name"], max(conf, 0.9),
+                    _unique_note(only, ordered_w))
+
     # 5 / 7 — the model, once the weight guard agrees.
     if llm_gtin and conf >= GATE_MIN and not weight_conflict:
         if conf >= GATE_SURE:
@@ -322,17 +347,10 @@ def decide(item_name: str, llm: dict, catalog: list[dict], recalled=None,
                     f"Prešlo na hranici istoty ({round(conf * 100)} %, pod 85 %), kandidát "
                     f"„{llm_card['name']}“ — prosím prekontrolujte.", review=True)
 
-    # 6 — nothing above held: is there exactly one card of this kind?
-    only = unique_core_card(item_name, catalog)
+    # 6b — nothing above held: is there exactly one card of this kind?
     if only:
-        card_w = weight_grams(only["name"])
-        detail = ""
-        if _weights_disagree(ordered_w, card_w):
-            detail = (f"gramáž objednávky {_fmt_weight(ordered_w)} vs karta "
-                      f"{_fmt_weight(card_w)} — ")
         return done("unique_card", str(only["gtin"]), only["name"], max(conf, 0.9),
-                    f"Prešlo ako jediný produkt toho druhu v katalógu ({detail}"
-                    f"„{only['name']}“) — prosím prekontrolujte gramáž.", review=True)
+                    _unique_note(only, ordered_w))
 
     if weight_conflict:
         card_w = weight_grams(llm_card["name"])

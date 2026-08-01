@@ -23,7 +23,9 @@ log = logging.getLogger("orders.pipeline")
 
 # The rungs that mean the engine could not settle the line on its own. Each becomes
 # ONE question for the warehouse (#88) — answering it teaches the wording for good.
-ASK_THE_WAREHOUSE = ("unmatched", "llm_borderline", "unique_card", "history_weight")
+# What a human can actually settle. `unique_card` is NOT here (#103): a product we make
+# in exactly one gramáž has no alternative to choose between, so asking is noise.
+ASK_THE_WAREHOUSE = ("unmatched", "llm_borderline", "history_weight")
 
 PROMPTS = Path(__file__).with_name("prompts")
 

@@ -164,7 +164,7 @@ def test_the_only_card_of_its_kind_ships_without_asking():
     """
     d = _decide("Kakaový slimák 130g", llm={"gtin": None, "confidence": 0.3})
     assert (d.gtin, d.rule, d.review) == ("SLI", "unique_card", False)
-    assert "gram" in d.note.lower()
+    assert "130" in d.note and "90" in d.note, "the overridden gramáž must stay in the note"
 
 
 def test_a_borderline_model_pick_is_certain_when_it_is_the_only_card_of_its_kind():
