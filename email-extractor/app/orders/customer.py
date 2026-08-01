@@ -148,8 +148,11 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
         if len(owners) > 1:
             branch = _by_store(owners, store)
             if branch:
+                # The EAN, not just the name: the live table calls both Gazdovský trh rows
+                # "GT1", so a name-only log line reads as if the wrong branch was picked.
                 log.info("address %s is shared by %d customers; the block header %r picks "
-                         "%s", addr, len(owners), store, branch.get("name"))
+                         "%s (%s, %s)", addr, len(owners), store, branch.get("ean_edi"),
+                         branch.get("name"), branch.get("street"))
                 return Matched(
                     ean_edi=str(branch.get("ean_edi") or ""), name=branch.get("name", ""),
                     confidence=0.99, rule="store_address",
