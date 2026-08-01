@@ -401,6 +401,26 @@ SCHEMA = [
     # question, and asking twice is the notification noise the user removed everywhere else.
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_order_questions_open "
     "ON order_questions(customer_ean, item_key) WHERE status = 'open'",
+    # --- #102: a wording the ladder cannot place at all (0 catalog matches, e.g. "Twister")
+    # is not one customer's nickname — it is a product name, and the answer is the same for
+    # every customer. A DEDICATED table, not a sentinel EAN inside item_memory: a sentinel
+    # value would have to be remembered by every future customer_ean=%s query site, and could
+    # collide with (or be silently excluded from) code that assumes that column always names a
+    # real customer. `question_id` traces every row back to the question that created it, so
+    # `teach.undo` can retract ONLY the global mapping ITS OWN question created — a different
+    # customer's later, redundant answer to the same wording must never be able to erase it. ---
+    """
+    CREATE TABLE IF NOT EXISTS global_item_memory (
+        id           BIGSERIAL PRIMARY KEY,
+        item_key     TEXT NOT NULL UNIQUE,
+        item_raw     TEXT,
+        gtin         TEXT NOT NULL,
+        card         TEXT,
+        question_id  BIGINT REFERENCES order_questions(id),
+        taught_by    TEXT,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
     # --- #64: ledger of documents actually uploaded to ORION. A duplicate upload creates
     # a duplicate order there and cannot be undone from our side (#51), so the identity
     # (customer, delivery date, content hash) may be claimed exactly once. ---

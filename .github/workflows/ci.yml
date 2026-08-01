@@ -82,7 +82,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: The corpus must be present (a missing corpus fails, never skips)
         run: |
-          for f in manifest.json catalog.csv customers.csv history.json llm-cache; do
+          for f in manifest.json catalog.csv customers.csv history.json taught.json llm-cache; do
             test -e "$CORPUS/$f" || { echo "corpus incomplete: $CORPUS/$f missing"; exit 1; }
           done
           python3 -c "import json,sys;n=len(json.load(open('$CORPUS/manifest.json'))['cases']);print(f'{n} cases');sys.exit(0 if n>=30 else 1)"
@@ -99,6 +99,7 @@ jobs:
             --catalog "$CORPUS/catalog.csv" \
             --customers "$CORPUS/customers.csv" \
             --history "$CORPUS/history.json" \
+            --taught "$CORPUS/taught.json" \
             --baseline "$CORPUS/baseline.json" \
             --require-all
 

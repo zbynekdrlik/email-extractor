@@ -392,3 +392,63 @@ def test_the_free_decision_says_in_slovak_why_it_was_certain():
         assert d.note and d.note[0].isupper(), wording
         assert d.trace.get("rule") == d.rule
         assert d.trace.get("llm") is None, "no model was asked, so nothing to record"
+
+
+# --- rung "global_taught" (#102): a wording taught for EVERY customer, not just one -------
+#
+# "Twister" is not one buyer's private nickname — it is a product name, so once the
+# warehouse says what it means the answer must be free for every OTHER customer too, and
+# with no model call. Below the customer's own signals (taught mapping, catalog-certain
+# rungs, this customer's own unanimous history), above the model.
+
+def _global(gtin, card):
+    return Recalled(gtin=gtin, card=card, strength=1, unanimous=True, last_day="",
+                    weight_override=True)
+
+
+def test_a_globally_taught_wording_decides_with_no_model_call():
+    d = match.decide_without_model("Twister", CATALOG,
+                                   global_recalled=_global("VIA", "Vianočka 400g"))
+    assert d is not None
+    assert (d.gtin, d.rule, d.review) == ("VIA", "global_taught", False)
+    assert "Twister" in d.note and "Vianočka 400g" in d.note
+
+
+def test_a_globally_taught_wording_overrides_the_weight_guard():
+    """Like a per-customer taught mapping, this IS a human decision — the guard exists to
+    stop the MODEL guessing, not to overrule the warehouse."""
+    d = match.decide_without_model("Twister 90g", CATALOG,
+                                   global_recalled=_global("VIA", "Vianočka 400g"))
+    assert d is not None and (d.gtin, d.rule) == ("VIA", "global_taught")
+
+
+def test_the_customers_own_taught_mapping_beats_the_global_one():
+    """The whole safety point of #102: a customer's OWN nickname is stronger evidence than
+    a generic crowd answer and must win."""
+    mine = Recalled(gtin="SLI", card="Slimák kakaový 90g", strength=1, unanimous=True,
+                    last_day="2026-07-28", weight_override=True, human=True)
+    d = match.decide_without_model("Twister", CATALOG, recalled=mine,
+                                   global_recalled=_global("VIA", "Vianočka 400g"))
+    assert (d.gtin, d.rule) == ("SLI", "human_taught")
+
+
+def test_this_customers_own_unanimous_history_beats_the_global_one():
+    """Real shipping evidence for THIS customer outranks a global crowd answer too — global
+    is the LAST resort among the no-model rungs, not a shortcut past real evidence."""
+    d = match.decide_without_model("Twister", CATALOG,
+                                   recalled=_mem("SLI", "Slimák kakaový 90g"),
+                                   global_recalled=_global("VIA", "Vianočka 400g"))
+    assert (d.gtin, d.rule) == ("SLI", "history_sure")
+
+
+def test_a_catalog_certain_match_beats_a_stale_global_answer():
+    """If the catalog gains a real card for the wording later, catalog truth wins over
+    whatever a human guessed globally before that card existed."""
+    d = match.decide_without_model("Rožok kváskový 70g", CATALOG,
+                                   global_recalled=_global("VIA", "Vianočka 400g"))
+    assert (d.gtin, d.rule) == ("G70", "catalog_name")
+
+
+def test_with_no_global_teaching_nothing_changes():
+    assert match.decide_without_model("Twister", CATALOG) is None
+    assert match.decide_without_model("Twister", CATALOG, global_recalled=None) is None

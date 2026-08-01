@@ -89,6 +89,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="fail unless EVERY case passes, not just on a regression")
     ap.add_argument("--history", default="",
                     help="archived deliveries to seed the item history with")
+    ap.add_argument("--taught", default="",
+                    help="per-customer/global taught mappings to seed before running (#102)")
     ap.add_argument("--dump", default="",
                     help="write per-case results here, for adjudicating the corpus")
     ap.add_argument("--sample", type=int, default=0,
@@ -113,6 +115,14 @@ def main(argv: list[str] | None = None) -> int:
         added = memory.seed_from_archive(
             conn, json.loads(Path(args.history).read_text(encoding="utf-8")))
         print(f"delivery history seeded: {added} new lines")
+    if args.taught:
+        # A case proving the #102 global/per-customer teach precedence needs the taught
+        # mapping to already exist BEFORE the run — the harness forces shadow mode, so
+        # teach.ask/answer's own side effects never fire during a replay.
+        from . import memory
+        added = memory.seed_taught(
+            conn, json.loads(Path(args.taught).read_text(encoding="utf-8")))
+        print(f"taught mappings seeded: {added} new")
 
     manifest_path = args.manifest
     sample_tmp: Path | None = None

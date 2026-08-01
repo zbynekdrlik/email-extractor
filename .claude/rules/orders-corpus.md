@@ -21,6 +21,7 @@ runner (label `email-extractor-eval`); `test` + `e2e-orders` are required checks
 | `manifest.json` | the 30 cases: input email, expected outcome, `oracle`, and `why` for every hand-decided one |
 | `catalog.csv`, `customers.csv` | the FROZEN snapshot the expectations were written against — never re-fetch from the live sheet |
 | `history.json` | archived deliveries, so a case is judged against the history as it stood on its own day |
+| `taught.json` | per-customer / global taught mappings, seeded before the run (#102 — see below) |
 | `llm-cache/` | recorded model answers; the gate replays them, so it needs no API key |
 | `baseline.json` | locked pass/fail per case |
 
@@ -28,7 +29,7 @@ runner (label `email-extractor-eval`); `test` + `e2e-orders` are required checks
 
 ```
 offline (CI, seconds)   python -m app.orders.eval_run --manifest … --catalog … --customers … \
-                          --history … --baseline … --require-all
+                          --history … --taught … --baseline … --require-all
 live    (deliberate)    … --live          # calls gpt-5.4 and RE-RECORDS the cache
 live, cheap (#87)       … --live --sample 5   # deterministic 5-case subset (one per case
                           type, then fills by manifest order — never random), prints an
@@ -55,6 +56,26 @@ again. That is the point: a changed prompt has not been measured until it has be
 - **Never mark a failing case as passing.** A case pinning behaviour we do not have yet gets
   `known_defect: "#N"`; the gate prints it on every run and it is excluded from `--require-all`
   only until the ticket is closed.
+- **A case testing `teach`/`item_memory` (per-customer OR global, #102) needs its state
+  PRE-SEEDED via `--taught taught.json`, never exercised through the real ask/answer/undo
+  HTTP flow.** `run_case` forces shadow mode, so `teach.ask`/`teach.answer`'s side effects
+  never fire during a corpus replay — only READS (`memory.resolve`/`resolve_global`, and
+  therefore `match.decide_without_model`) run. `taught.json` entries:
+  `{"scope": "global", "wording": ..., "gtin": ..., "card": ...}` or
+  `{"scope": "customer", "customer_ean": ..., "wording": ..., "gtin": ..., "card": ...}`,
+  loaded by `memory.seed_taught` (mirrors `seed_from_archive`/`--history`). The ask/answer/
+  undo flow itself (including the Odoo post and the `question_id`-scoped undo) is covered by
+  `tests/test_orders_teach.py`, not the corpus — the corpus can only observe the RESULTING
+  match, never the side effects a real question triggers.
+- **A brand-new corpus case needs its OWN `llm-cache` entries — the customer-match and
+  extraction calls are NEVER skipped, even when `decide_without_model` will resolve every
+  item for free.** Build the case, run it once with `--live` against a SEPARATE scratch
+  manifest (just the new case(s), not the whole 30+), confirm the result by hand
+  (`--dump`), THEN copy the new cache files into `llm-cache/` and merge the case into
+  `manifest.json` — cheap (~$0.15/case, #102 cost 2 cases ≈ $0.30) because ONLY the new
+  case's content-hash is a cache miss; the other 30+ stay untouched. Re-run the FULL corpus
+  offline with `--require-all` before `--update-baseline`, to prove the new case coexists
+  with everything else, not just that it passes alone.
 - The harness must stay inert: `run_case` forces shadow mode and refuses upload/post. An
   evaluation that ships an order would be the worst possible bug here.
 - **This Python engine is NOT the only text parser in production — the live n8n workflow

@@ -168,9 +168,14 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
             recalled = (memory.resolve(conn, matched.ean_edi, item["name"],
                                        as_of=str(message.get("today") or ""))
                         if matched else None)
+            # What the warehouse taught for THIS wording across every customer (#102) — a
+            # pure read, so it applies even in shadow mode; only the ASKING/TEACHING side
+            # effects below are shadow-guarded.
+            global_recalled = memory.resolve_global(conn, item["name"])
             # The wording may already BE a card, an alias, or an unanimous history — then
             # the answer is certain and asking the model is paid-for redundancy (#86).
-            decision = match.decide_without_model(item["name"], catalog, recalled=recalled)
+            decision = match.decide_without_model(item["name"], catalog, recalled=recalled,
+                                                  global_recalled=global_recalled)
             item_cands: list[dict] = []
             if decision is None:
                 item_cands = match.candidates(
@@ -191,7 +196,9 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
             # A line the engine could not settle becomes ONE question for the warehouse, with
             # its candidate cards (#88). Answering it teaches the wording for good — measured,
             # the whole tail is 15 (customer, wording) pairs. Never in shadow: shadow must
-            # leave no trace, and these are questions for a human.
+            # leave no trace, and these are questions for a human. A genuinely NEW question
+            # (never a duplicate of one already open) also reaches Odoo (#102) — the warehouse
+            # reads Odoo, not always the dashboard.
             if not shadow and matched and decision.rule in ASK_THE_WAREHOUSE:
                 asked.append(teach.ask(
                     conn, message_id=message.get("message_id", ""),
@@ -200,7 +207,8 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                     unit=item.get("unit", "ks"),
                     candidates=[{"gtin": str(c.get("gtin")), "name": c.get("name", "")}
                                 for c in item_cands[:6]],
-                    delivery_date=order.get("deliveryDate", ""), reason=decision.note))
+                    delivery_date=order.get("deliveryDate", ""), reason=decision.note,
+                    on_new=lambda q: post(cfg, report.build_question(q))))
         decisions = match.merge_same_card(match.apply_siblings(decisions))
         all_items.extend(_decision_dict(d) for d in decisions)
         status, preview = _ship_one(conn, cfg, message, order, matched, decisions,
