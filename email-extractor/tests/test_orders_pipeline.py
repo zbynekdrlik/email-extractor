@@ -424,3 +424,36 @@ def test_a_line_that_is_a_catalog_card_never_reaches_the_model(pg, env):
     item = run["items"][0]
     assert (item["gtin"], item["rule"]) == ("VIA", "catalog_name")
     assert run["order_results"][0]["items"][0]["quantity"] == 7
+
+
+def test_two_shops_on_one_delivery_date_stay_two_orders(pg, env):
+    """Beh 26 (#101): the merge key was (date, orderNumber), so two SHOPS ordering for the
+    same day collapsed into one order — one EDI file, one shop's name, both shops' pastry.
+
+    A recipient group is a note on an order (they share a delivery); a shop is a different
+    customer with a different EAN, and merging those two is a wrong document in ORION.
+    """
+    orders = [
+        {"deliveryDate": "31.07.2026", "orderNumber": "", "store": "GT1- Družby 35 BB",
+         "items": [{"name": "Rožok štandart 50g", "quantity": 3, "unit": "ks"}]},
+        {"deliveryDate": "31.07.2026", "orderNumber": "", "store": "GT2- 29 augusta 19 BB",
+         "items": [{"name": "Rožok štandart 50g", "quantity": 5, "unit": "ks"}]},
+    ]
+    merged = pipeline._merge_by_day(orders)
+    assert len(merged) == 2, "two shops are two orders"
+    assert {o["store"] for o in merged} == {"GT1- Družby 35 BB", "GT2- 29 augusta 19 BB"}
+    assert [len(o["items"]) for o in merged] == [1, 1]
+
+
+def test_two_recipient_groups_of_the_same_shop_still_merge(pg, env):
+    """The store split must not undo the group merge it sits next to."""
+    orders = [
+        {"deliveryDate": "31.07.2026", "orderNumber": "", "store": "GT1- Družby 35 BB",
+         "recipientGroup": "pacienti",
+         "items": [{"name": "Rožok štandart 50g", "quantity": 3, "unit": "ks"}]},
+        {"deliveryDate": "31.07.2026", "orderNumber": "", "store": "GT1- Družby 35 BB",
+         "recipientGroup": "zamestnanci",
+         "items": [{"name": "Rožok štandart 50g", "quantity": 5, "unit": "ks"}]},
+    ]
+    merged = pipeline._merge_by_day(orders)
+    assert len(merged) == 1 and len(merged[0]["items"]) == 2

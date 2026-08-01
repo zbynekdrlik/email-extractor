@@ -104,3 +104,56 @@ def test_a_customer_the_model_invented_is_refused():
                            company_name="", llm={"ean_edi": "9999999999999",
                                                  "confidence": 0.99})
     assert hit is None, "the EAN must exist in the snapshot"
+
+
+# --- one address, two branches: the block header in the file decides (#101) ----
+
+GT = [
+    {"ean_edi": "2000000000856", "name": "GT1 Gazdovský trh, Banská Bystrica",
+     "emails": ["petra.durkosova@gazdovskytrh.sk"], "city": "Banská Bystrica",
+     "street": "Družby 35", "zip": ""},
+    # The table really does call this one GT1 too — a typo the matching must survive,
+    # which is exactly why the STREET decides and the name does not.
+    {"ean_edi": "2000000000857", "name": "GT1 Gazdovský trh, Banská Bystrica",
+     "emails": ["petra.durkosova@gazdovskytrh.sk"], "city": "Banská Bystrica",
+     "street": "29 augusta 19", "zip": ""},
+]
+
+
+def test_two_branches_on_one_address_are_told_apart_by_the_block_header():
+    """Beh 26, Gazdovský trh: one xlsx holds BOTH shops side by side, so one email is two
+    customers. The sender address belongs to both rows, the model cannot choose, and the
+    whole 40-line order stopped. The file itself says which is which — the block header
+    over each half carries the street."""
+    a = customer.resolve(GT, sender_email="petra.durkosova@gazdovskytrh.sk",
+                         sender_name="Durkošová", company_name="Gazdovský trh",
+                         llm={"ean_edi": "", "confidence": 0.2},
+                         store="GT1- Družby 35 BB")
+    b = customer.resolve(GT, sender_email="petra.durkosova@gazdovskytrh.sk",
+                         sender_name="Durkošová", company_name="Gazdovský trh",
+                         llm={"ean_edi": "", "confidence": 0.2},
+                         store="GT2- 29 augusta 19 BB")
+    assert (a.ean_edi, a.rule) == ("2000000000856", "store_address")
+    assert b.ean_edi == "2000000000857"
+    assert "29 augusta 19" in b.note
+
+
+def test_a_block_header_that_matches_neither_branch_decides_nothing():
+    """Guessing a branch is worse than stopping: the order would go to the wrong shop."""
+    assert customer.resolve(GT, sender_email="petra.durkosova@gazdovskytrh.sk",
+                            sender_name="", company_name="",
+                            llm={"ean_edi": "", "confidence": 0.2},
+                            store="GT9- Hlavná 1 Zvolen") is None
+
+
+def test_a_block_header_that_matches_both_branches_decides_nothing():
+    assert customer.resolve(GT, sender_email="petra.durkosova@gazdovskytrh.sk",
+                            sender_name="", company_name="",
+                            llm={"ean_edi": "", "confidence": 0.2},
+                            store="Gazdovský trh Banská Bystrica") is None
+
+
+def test_without_a_block_header_a_shared_address_still_refuses_to_guess():
+    assert customer.resolve(GT, sender_email="petra.durkosova@gazdovskytrh.sk",
+                            sender_name="", company_name="",
+                            llm={"ean_edi": "", "confidence": 0.2}) is None
