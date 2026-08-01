@@ -59,11 +59,38 @@ again. That is the point: a changed prompt has not been measured until it has be
   evaluation that ships an order would be the worst possible bug here.
 - **This Python engine is NOT the only text parser in production — the live n8n workflow
   "Static auto orders" (`O8IYhUESjaWmPMTI`) has its own independent `extractor`/`generator`
-  Code nodes for KOMFOS/KARMEN/LABAS, with their own regexes and their own product-EAN map
-  (`PRODUCT_EAN_BY_NAME`/`PRODUCT_EAN_BY_CODE`).** A parsing-robustness fix here (e.g. this
-  package's `ZERO_WIDTH` table in `extract.py`) does NOT automatically protect that workflow
-  — check whether the same vulnerability class applies there too (#41 found `\s+ks` regexes
-  with no invisible-char guard) and mirror the fix via the n8n MCP (`get_workflow_details` →
-  `update_workflow` with `updateNodeParameters` on the node's `jsCode` → `publish_workflow` →
-  re-fetch to verify `versionId == activeVersionId`). Same direction for product/EAN mapping
-  gaps (#36): they live in the n8n `generator` node, not in this package.
+  Code nodes for KOMFOS/KARMEN/LABAS, with their own regexes and their own product-EAN
+  resolution.** A parsing-robustness fix here (e.g. this package's `ZERO_WIDTH` table in
+  `extract.py`) does NOT automatically protect that workflow — check whether the same
+  vulnerability class applies there too (#41 found `\s+ks` regexes with no invisible-char
+  guard) and mirror the fix via the n8n MCP (`get_workflow_details` → `update_workflow` with
+  `updateNodeParameters` on the node's `jsCode` → `publish_workflow` → re-fetch to verify
+  `versionId == activeVersionId`).
+- **`app/orders/static_ean.py` is a hand-kept 1:1 Python PORT of `generator`'s
+  `getProductEAN()` (#49)** — n8n's JS Code node cannot run in this repo's CI, so this
+  module is the CI-tested proof the matching algorithm is correct; it is NOT imported by
+  the live pipeline. `PRODUCT_EAN_BY_CODE`/`PRODUCT_EAN_BY_NAME` in the node are now an
+  OVERRIDE for genuine exceptions only — the primary path resolves against the
+  `catalog_snapshot` table (same source `AI auto orders` uses, #59; a parallel Postgres
+  branch off "Get Static Orders", node name `Get Catalog Snapshot`, credential
+  `Email Extractor Postgres`). **Any change to one side of this mirror MUST be applied to
+  the other in the same PR** — same discipline as the `ZERO_WIDTH` mirror above.
+- **Verify an n8n Code-node `jsCode` update BYTE-FOR-BYTE after `update_workflow`/
+  `publish_workflow` — the MCP round-trip can silently mangle a character.** Observed
+  2026-08-01: a plain ASCII `'B'` in an unrelated part of the string came back as Greek
+  capital Beta (U+0392) after `updateNodeParameters`, breaking nothing syntactically (still
+  valid JS) but corrupting the text. Re-`get_workflow_details`, extract the same node's
+  `parameters.jsCode` with `jq`, and `diff` it against the string you sent — do this BEFORE
+  `publish_workflow`, or immediately after and republish if it differs. When a diff shows a
+  non-ASCII character where you intended plain ASCII, resend that substring using an
+  explicit `\uXXXX` JS escape (verified fix: it evaluates correctly at runtime and survives
+  the round-trip) rather than the literal character.
+- **Testing a catalog-lookup change against the REAL catalog finds collisions no synthetic
+  fixture will** — e.g. `catalog_snapshot` has BOTH "Lupačka 60g" and "Lupačka 75gr" (two
+  weight variants of a single-core-token product name), which a hand-picked test catalog
+  is unlikely to include. Pull the live rows read-only (`ssh` to the HA box, `docker exec
+  ... psql -h 127.0.0.1 -U email -d email`, `PGPASSWORD` from `/data/options.json`'s
+  `pg_password` — see the `ha-server-access`/`email-extractor-deploy` memory for current
+  values, never hardcode them in a committed file) and replay the exact JS/Python matching
+  function against it (a `node -e` harness with a mocked `$('NodeName')` works well for the
+  n8n side) before trusting a synthetic-only test suite.
