@@ -339,6 +339,20 @@ _SUBJ_DAY = re.compile(r"\b(\d{1,2})\s*\.\s*(\d{1,2})\s*\.(\s*(\d{4}|\d{2}))?")
 _RANGE = re.compile(r"\d{1,2}\s*\.\s*\d{1,2}\s*\.?\s*(-|–|do)\s*\d{1,2}\s*\.\s*\d{1,2}")
 
 
+def _body_only(text: str) -> str:
+    """The message text WITHOUT the `Subject:` / `From:` header block.
+
+    `combined_text` is stored as "Subject: …\\nFrom: …\\nBody: …", so a naive scan finds the
+    subject's day inside the body and every subject-vs-body contradiction looks like a mail
+    that simply named two days.
+    """
+    text = text or ""
+    marker = re.search(r"^Body:\s*", text, re.MULTILINE)
+    if marker:
+        return text[marker.end():]
+    return re.sub(r"^(Subject|From|To|Date):.*$", "", text, flags=re.MULTILINE)
+
+
 def _days_in(text: str) -> set[tuple[int, int]]:
     """Every explicit day.month written in the text."""
     return {(int(d), int(m)) for d, m, _, _ in _SUBJ_DAY.findall(text or "")}
@@ -368,7 +382,7 @@ def date_conflict(subject: str, dates: list[str], body: str = "") -> str:
         parts = re.findall(r"\d+", str(d))
         if len(parts) >= 2:
             ordered_days.add((int(parts[0]), int(parts[1])))
-    body_days = _days_in(body)
+    body_days = _days_in(_body_only(body))
     if len(body_days) == 1 and len(ordered_days) > 1:
         only = next(iter(body_days))
         return (f"E-mail hovorí o jedinom dni {only[0]}.{only[1]}., ale objednávka vyšla na "
