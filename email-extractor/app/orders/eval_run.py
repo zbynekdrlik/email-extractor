@@ -34,10 +34,16 @@ _MEASURED_AVG_COST_MODEL = "gpt-5.4"
 
 
 def _estimated_cost_usd(n_cases: int, model: str) -> float:
-    base = sum(llm.PRICES.get(_MEASURED_AVG_COST_MODEL, llm.PRICES[llm.DEFAULT_MODEL]))
-    this = sum(llm.PRICES.get(model, llm.PRICES[llm.DEFAULT_MODEL]))
-    scale = (this / base) if base else 1.0
-    return n_cases * _MEASURED_AVG_COST_PER_CASE_USD * scale
+    # An unlisted model RAISES rather than being silently priced as gpt-5.4 (mirrors
+    # llm.cost_usd's own policy, llm.py:41-42): a wrong-but-confident estimate defeats the
+    # whole point of printing one — "the cost must never be a surprise".
+    if model not in llm.PRICES:
+        raise llm.LlmError(
+            f"no price known for model {model!r} — add it to llm.PRICES before --live can "
+            "estimate its cost")
+    base = sum(llm.PRICES[_MEASURED_AVG_COST_MODEL])
+    this = sum(llm.PRICES[model])
+    return n_cases * _MEASURED_AVG_COST_PER_CASE_USD * (this / base)
 
 
 def select_sample(cases: list[dict], n: int) -> list[dict]:
@@ -110,21 +116,22 @@ def main(argv: list[str] | None = None) -> int:
 
     manifest_path = args.manifest
     sample_tmp: Path | None = None
-    if args.sample:
-        all_cases = evaluate.load_manifest(args.manifest)
-        sampled = select_sample(all_cases, args.sample)
-        print(f"sampled {len(sampled)}/{len(all_cases)} case(s): "
-              f"{', '.join(c['id'] for c in sampled)}")
-        fd, tmp_name = tempfile.mkstemp(suffix=".json", prefix="eval-sample-")
-        sample_tmp = Path(tmp_name)
-        sample_tmp.write_text(json.dumps({"cases": sampled}, ensure_ascii=False),
-                               encoding="utf-8")
-        os.close(fd)
-        manifest_path = str(sample_tmp)
-
-    # Everything from here on must run inside the try: a raised exception while sizing the
-    # --live estimate (e.g. a corrupt sample file) must not leak the tempfile either.
+    # sample_tmp is assigned as soon as mkstemp succeeds, and everything after that point
+    # (including the write itself) runs inside this try/finally — a write failure, a corrupt
+    # sample, or anything raised while sizing the --live estimate must still clean up the
+    # tempfile (and, via os.fdopen owning fd, its file descriptor too).
     try:
+        if args.sample:
+            all_cases = evaluate.load_manifest(args.manifest)
+            sampled = select_sample(all_cases, args.sample)
+            print(f"sampled {len(sampled)}/{len(all_cases)} case(s): "
+                  f"{', '.join(c['id'] for c in sampled)}")
+            fd, tmp_name = tempfile.mkstemp(suffix=".json", prefix="eval-sample-")
+            sample_tmp = Path(tmp_name)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"cases": sampled}, f, ensure_ascii=False)
+            manifest_path = str(sample_tmp)
+
         if args.live:
             n_cases = len(evaluate.load_manifest(manifest_path))
             model = getattr(cfg, "orders_model", llm.DEFAULT_MODEL) or llm.DEFAULT_MODEL

@@ -648,6 +648,42 @@ def test_estimated_cost_scales_with_case_count_and_model_price():
     assert mini < base
 
 
+def test_estimated_cost_raises_on_an_unpriced_model_instead_of_guessing():
+    """llm.cost_usd() already refuses to silently price an unlisted model at gpt-5.4 rates
+    (llm.py's own €30/month-tripwire comment); the estimate must not contradict that policy
+    by quietly falling back — a wrong-but-confident number defeats "cost is never a
+    surprise"."""
+    from app.orders import eval_run, llm
+    with pytest.raises(llm.LlmError):
+        eval_run._estimated_cost_usd(10, "some-future-model-not-in-prices")
+
+
+def test_sample_write_failure_still_cleans_up_the_tempfile(pg, tmp_path, monkeypatch):
+    """A write failure while building the --sample manifest must not leak the tempfile."""
+    from app.orders import eval_run
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"cases": [
+        {"id": "a", "type": "t", "email": {"combined_text": "x"},
+         "expected": {"items": []}}]}), encoding="utf-8")
+    created = {}
+    real_mkstemp = eval_run.tempfile.mkstemp
+
+    def spying_mkstemp(*a, **k):
+        fd, name = real_mkstemp(*a, **k)
+        created["path"] = name
+        return fd, name
+
+    monkeypatch.setattr(eval_run.tempfile, "mkstemp", spying_mkstemp)
+    monkeypatch.setattr(eval_run.json, "dump",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    import os
+    monkeypatch.setenv("PG_DSN", os.environ["PG_TEST_DSN"])
+    with pytest.raises(OSError):
+        eval_run.main(["--manifest", str(manifest), "--sample", "1"])
+    from pathlib import Path
+    assert not Path(created["path"]).exists(), "tempfile must be cleaned up even on write failure"
+
+
 def test_the_gate_can_seed_the_delivery_history_from_the_corpus_bundle(pg, tmp_path,
                                                                       monkeypatch):
     """The corpus scores against the history as it stood, so the bundle carries it and the
