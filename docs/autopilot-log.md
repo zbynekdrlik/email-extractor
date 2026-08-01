@@ -27,3 +27,30 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   in the same n8n workflow, discovered incidentally while editing it for #36/#41.
 - Decision: kept the invisible-char defense LOCAL in `app/process.py` (not imported from
   `app/orders/extract.py`) — core ingest must not depend on the `orders/` feature subpackage.
+
+## #49 — Static auto orders: EAN via catalog_snapshot, not manual maps only (2026-08-01)
+
+- `app/orders/static_ean.py` (new): 1:1 Python port of generator.js's `getProductEAN()`
+  catalog-lookup half (exact name/alias match, else unambiguous order-independent
+  core-token match with a weight guard — never guesses across gramáž/flavour). RED
+  `6d5baac` (`tests/test_orders_static_ean.py`, module didn't exist) → GREEN `ce6d95b`.
+  Independent code review (dispatched subagent) found 1x🟡 (rung-3 accepted-risk
+  tradeoff wasn't pinned by a test) + 3x🔵 (coverage gaps, no rule-provenance return,
+  pre-existing substring-map behavior) — fixed in `a72709a` (added the
+  `test_KNOWN_TRADEOFF_...` pin + weight-variant pair mirroring the real catalog +
+  reached 100% coverage on the module).
+- n8n workflow `O8IYhUESjaWmPMTI` (node `generator`): added `Get Catalog Snapshot`
+  Postgres node (parallel branch off `Get Static Orders`, same credential) +
+  `getProductEAN()` catalog fallback. Published `1c192cf7…` then republished
+  `ae74a5d8…` (fixed a one-character mojibake the MCP round-trip introduced in a dead
+  error string — see the playbook note in `.claude/rules/orders-corpus.md`). Verified
+  against the LIVE `catalog_snapshot` (127 rows) via direct psql + a `node -e` harness
+  replaying the exact KARMEN P000534 incident and the real Lupačka 60g/75g
+  weight-collision — both resolve correctly.
+- Version bump `fda2ff1`: 0.9.13 → 0.9.14.
+- Shared PR: **#111** — merged `e2820fe3`, main CI green (test+e2e-orders+build), HA
+  add-on redeployed (`ha store reload` + `ha addons update` — new gotcha, add-on didn't
+  see the update until the store cache was reloaded), dashboard shows `v0.9.14`, 0
+  console errors, order worker started.
+- Playbook-only follow-up PR **#112** (`b5f07da` → `6707976`, merged, no version bump —
+  doc-only, outside `email-extractor/`): the two playbook findings above.
