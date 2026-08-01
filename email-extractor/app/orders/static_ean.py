@@ -53,7 +53,7 @@ def weight_grams(name: str) -> float | None:
     return value * 1000 if m.group(2).lower() == "kg" else value
 
 
-def _weights_agree(a: float | None, b: float | None) -> bool:
+def weights_agree(a: float | None, b: float | None) -> bool:
     """No stated weight on either side is missing information, not a disagreement."""
     if not a or not b:
         return True
@@ -113,7 +113,7 @@ def catalog_match(description: str, catalog: list[dict]) -> dict | None:
             if not card_tokens:
                 continue
             if card_tokens <= want_tokens or want_tokens <= card_tokens:
-                if _weights_agree(want_w, weight_grams(c.get("name", ""))):
+                if weights_agree(want_w, weight_grams(c.get("name", ""))):
                     contained.append(c)
         if len(contained) == 1:
             return contained[0]
