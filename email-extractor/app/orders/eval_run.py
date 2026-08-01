@@ -4,6 +4,10 @@
     python -m app.orders.eval_run --manifest /data/eval/manifest.json
     python -m app.orders.eval_run --manifest ... --live   # real gpt-5.4, refreshes the cache
     python -m app.orders.eval_run --manifest ... --update-baseline
+    python -m app.orders.eval_run --manifest ... --live --sample 5   # cheap iteration (#87):
+                                                            # deterministic 5-case subset, one
+                                                            # per case type; prints an estimated
+                                                            # price before the run starts
 
 Exit code 1 on a REGRESSION (a case that used to pass and no longer does), so it can gate
 CI and a nightly run alike.
@@ -13,11 +17,63 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 from .. import config, db
-from . import evaluate
+from . import evaluate, llm
+
+# Measured average cost per case for the FULL 30-case corpus at gpt-5.4 rates (2026-07-31
+# live re-record: ~$4.50 total, #87) — scaled by the model's PRICES entry so the estimate
+# tracks price changes instead of going stale. This is a ROUGH up-front estimate to avoid a
+# cost surprise; the API's own token counts (via llm.cost_usd) are what actually bills.
+_MEASURED_AVG_COST_PER_CASE_USD = 4.50 / 30
+_MEASURED_AVG_COST_MODEL = "gpt-5.4"
+
+
+def _estimated_cost_usd(n_cases: int, model: str) -> float:
+    # An unlisted model RAISES rather than being silently priced as gpt-5.4 (mirrors
+    # llm.cost_usd's own policy, llm.py:41-42): a wrong-but-confident estimate defeats the
+    # whole point of printing one — "the cost must never be a surprise".
+    if model not in llm.PRICES:
+        raise llm.LlmError(
+            f"no price known for model {model!r} — add it to llm.PRICES before --live can "
+            "estimate its cost")
+    base = sum(llm.PRICES[_MEASURED_AVG_COST_MODEL])
+    this = sum(llm.PRICES[model])
+    return n_cases * _MEASURED_AVG_COST_PER_CASE_USD * (this / base)
+
+
+def select_sample(cases: list[dict], n: int) -> list[dict]:
+    """Deterministic N-case subset — NEVER random (#87): a gate that draws different cases
+    each run can pass a change because the broken order type wasn't drawn, which is exactly
+    the "fix one type, break five" failure the corpus exists to catch.
+
+    Picks one case per DISTINCT `type`, in first-seen manifest order, up to N types; if N
+    exceeds the number of distinct types, fills the remaining slots with the next
+    not-yet-picked cases in manifest order.
+    """
+    if n <= 0 or n >= len(cases):
+        return cases
+    picked: list[dict] = []
+    picked_ids: set[str] = set()
+    seen_types: set[str] = set()
+    for c in cases:
+        t = c.get("type", "?")
+        if t not in seen_types and len(picked) < n:
+            seen_types.add(t)
+            picked.append(c)
+            picked_ids.add(c["id"])
+    if len(picked) < n:
+        for c in cases:
+            if len(picked) >= n:
+                break
+            if c["id"] not in picked_ids:
+                picked.append(c)
+                picked_ids.add(c["id"])
+    return picked
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,6 +91,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="archived deliveries to seed the item history with")
     ap.add_argument("--dump", default="",
                     help="write per-case results here, for adjudicating the corpus")
+    ap.add_argument("--sample", type=int, default=0,
+                    help="deterministic subset of N cases (one per case type, then fill in "
+                         "manifest order) for cheap prompt-iteration runs — never random. "
+                         "The full corpus stays the merge gate.")
     args = ap.parse_args(argv)
 
     cfg = config.Config.load()
@@ -53,7 +113,38 @@ def main(argv: list[str] | None = None) -> int:
         added = memory.seed_from_archive(
             conn, json.loads(Path(args.history).read_text(encoding="utf-8")))
         print(f"delivery history seeded: {added} new lines")
-    results, summary = evaluate.run_corpus(conn, cfg, args.manifest, offline=not args.live)
+
+    manifest_path = args.manifest
+    sample_tmp: Path | None = None
+    # sample_tmp is assigned as soon as mkstemp succeeds, and everything after that point
+    # (including the write itself) runs inside this try/finally — a write failure, a corrupt
+    # sample, or anything raised while sizing the --live estimate must still clean up the
+    # tempfile (and, via os.fdopen owning fd, its file descriptor too).
+    try:
+        if args.sample:
+            all_cases = evaluate.load_manifest(args.manifest)
+            sampled = select_sample(all_cases, args.sample)
+            print(f"sampled {len(sampled)}/{len(all_cases)} case(s): "
+                  f"{', '.join(c['id'] for c in sampled)}")
+            fd, tmp_name = tempfile.mkstemp(suffix=".json", prefix="eval-sample-")
+            sample_tmp = Path(tmp_name)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"cases": sampled}, f, ensure_ascii=False)
+            manifest_path = str(sample_tmp)
+
+        if args.live:
+            n_cases = len(evaluate.load_manifest(manifest_path))
+            model = getattr(cfg, "orders_model", llm.DEFAULT_MODEL) or llm.DEFAULT_MODEL
+            est = _estimated_cost_usd(n_cases, model)
+            print(f"--live: estimated cost ~${est:.2f} for {n_cases} case(s) at {model} "
+                  f"(rough — measured avg $"
+                  f"{_MEASURED_AVG_COST_PER_CASE_USD:.3f}/case at {_MEASURED_AVG_COST_MODEL}, "
+                  "scaled by model pricing; real cost is billed by the API's own token counts)")
+
+        results, summary = evaluate.run_corpus(conn, cfg, manifest_path, offline=not args.live)
+    finally:
+        if sample_tmp is not None:
+            sample_tmp.unlink(missing_ok=True)
 
     print(json.dumps(summary, ensure_ascii=False, indent=1))
     for r in results:
