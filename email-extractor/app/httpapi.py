@@ -1201,10 +1201,15 @@ function searchBox(q){
   inp.value=searchState[q.id]||'';
   const res=el('div','sres-wrap');
   wrap.appendChild(inp);wrap.appendChild(res);
+  // Same stale-response guard as load()'s `mine=++render`: a slower response for an
+  // earlier keystroke must not overwrite a faster response for a later one.
+  let seq=0;
   async function run(v){
-    res.textContent='';
-    if(v.length<2)return;
+    const mine=++seq;
+    if(v.length<2){res.textContent='';return}
     let d;try{d=await api('/api/znalosti/catalog?q='+encodeURIComponent(v))}catch(e){return}
+    if(mine!==seq)return;      // a later keystroke's response already landed — drop this one
+    res.textContent='';
     if(!d.items.length){res.appendChild(el('div','sres none','žiadna zhoda'));return}
     for(const it of d.items){const b=el('div','sres',it.name+'  ('+it.gtin+')');
       b.onclick=()=>teach(q.id,it.gtin,it.name);res.appendChild(b)}

@@ -205,7 +205,14 @@ def catalog_gtin_set(conn) -> set[str]:
     """The current catalog snapshot's GTIN set — the SAME source `/api/znalosti/catalog`
     (the warehouse's full-catalog search, #149) reads, so any card the search offers is
     guaranteed to be a valid `teach.answer()` target too. Empty when no snapshot exists yet
-    (e.g. most unit tests), which keeps `teach.answer()`'s old candidates-only behaviour."""
+    (e.g. most unit tests), which keeps `teach.answer()`'s old candidates-only behaviour.
+
+    Deliberately the RAW snapshot (`load_catalog`), not the override-merged
+    `catalog_for_management` — same as `/api/znalosti/catalog` already reads (pre-existing
+    behaviour, not introduced here). A retired card therefore stays searchable/teachable
+    until the next snapshot refresh drops it; a manually-added override card is not
+    searchable/teachable until it is. Don't assume override-awareness just because
+    `catalog_for_management` exists next to this function — it serves a different page."""
     sid = latest_snapshot_id(conn)
     if not sid:
         return set()
