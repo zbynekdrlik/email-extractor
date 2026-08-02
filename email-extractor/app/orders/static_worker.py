@@ -83,12 +83,13 @@ def run_shadow(conn, message: dict, snapshot_id: int) -> dict:
     except _PARSE_ERRORS as e:
         return {"status": "review", "items": [], "reject_reason": str(e)}
 
-    catalog = snapshot.load_catalog(conn, snapshot_id)
-
     if parsed.get("skip"):
+        # A valid header with zero item lines never needs the catalog (nothing to match) —
+        # skip the load, not just the match.
         return {"status": "review", "items": [], "reject_reason": parsed.get("skipReason", ""),
                 "partner": parsed.get("partner", "")}
 
+    catalog = snapshot.load_catalog(conn, snapshot_id)
     items = _items_with_ean(parsed.get("items") or [], catalog)
 
     try:
