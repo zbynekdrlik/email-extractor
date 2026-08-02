@@ -286,3 +286,42 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
 - Bump **0.9.21** — žiadna zmena Python kódu (`app/httpapi.py` už od #22
   prijíma token aj v hlavičke `X-Token`), celá oprava je na strane n8n +
   add-on options.
+
+## 2026-08-02 — #120 zatvorené s dôkazom (žiadny kód) + #47 KOMFOS vision klasifikácia (n8n)
+
+- **#120**: overené priamo proti živému dev2 korpusu (32 prípadov) — 5 zvyšných
+  `known_defect: "#120"` prípadov (CÉDER `info@`, `dedlipova6`, `lucia-jelenikova`) potvrdené
+  ako genuinely nerekonštruovateľné z archívu (`reconstruct.py`'s `wordings_for_order()`
+  správne odmieta párovanie bez presnej zhody počtu položiek). Zatvorené komentárom s
+  dôkazom + presnou podmienkou na znovuotvorenie (žiadna nová objednávka od týchto 3
+  zákazníkov do ~3 mesiacov, alebo prípad ostane `known_defect` aj po novej objednávke).
+  Žiadny kód, žiadna PR — čisté bookkeeping.
+- **#47**: KOMFOS pobočka 67 posiela fotky (PNG) s prázdnym telom — extraktor ich správne
+  označí `needs_vision`, ale workflow "Static auto orders" (`O8IYhUESjaWmPMTI`) mal len
+  guard-throw na kanál 152 (ručné vybavenie). Korekčný komentár na tickete (14.7.) zmenil
+  predpoklad: tieto fotky sú VRATKY, nie objednávky — riešenie musí najprv klasifikovať.
+  Overené a zamietnuté: znovuzapnutie vypnutého `Call 'AI auto orders'` uzla (ignoruje
+  odovzdanú položku, claimne nesúvisiaci riadok z DB — slepý koniec); plný dual-transcript
+  vision vzor z dodacích listov (Sub1, `n:2` + aritmetická kontrola — zbytočná réžia pre
+  nefinančnú kategorizáciu).
+  Nová vetva vložená do existujúceho error-branchu workflowu (14 nových uzlov): Postgres
+  SELECT `attachments.file_url` → fetch cez existujúce `/files/<mid>/<idx>` API
+  (`X-Token` credential z #55) → jedno OpenAI vision volanie (`gpt-5.4`, `n:1`,
+  `response_format: json_object`) klasifikuje `objednavka`/`vratka`/`iny_doklad` →
+  `objednavka` sa vloží späť ako vstup PRE `extractor` (100% znovupoužitie existujúceho
+  regex parsera → EDI reťazca) → `vratka`/`iny_doklad` → nová alertka na Odoo kanál **368**
+  (reklamácie, vzor prevzatý zo sesterského workflowu "Reklamacie tovaru/ staznosti").
+  Žiadna iná chyba (napr. `generator`'s "Chýba prevNumber!") nie je ovplyvnená — guard
+  matchuje presne na frázu z guard-hlášky.
+  **Nájdená a opravená chyba počas testovania** (dôkaz TDD-cyklu na n8n úrovni): n8n skracuje
+  dlhú chybovú hlášku Code uzla na CHVOST pred jej doručením — pôvodná podmienka
+  `.includes('Príloha je FOTKA')` (začiatok hlášky) nikdy nezapla. Opravené na frázu z
+  konca hlášky (`pozri fotku a vybav ručne`), overené execution `732057` (FAIL, guard sa
+  nespustil) → oprava → execution `732064`/`732065` (obe cesty PASS): objednávka-vetva
+  reálne re-parsovala syntetický transkript cez `extractor` (partner=KOMFOS, 1 položka,
+  dátumy OK); vratka-vetva korektne odpálila `Mark Vision Handled`+`Log Vision Event`+
+  `Odoo Vratka Alert` na kanál 368. Byte-exact verifikácia po publish — žiadne
+  MCP round-trip poškodenie diakritiky.
+  Bump **0.9.22** (n8n-only zmena, žiadny Python kód — konvencia z #51/#55).
+- Design/review komentáre: [design](https://github.com/zbynekdrlik/email-extractor/issues/47#issuecomment-5155534893),
+  [review](https://github.com/zbynekdrlik/email-extractor/issues/47#issuecomment-5155593743).
