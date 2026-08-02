@@ -23,6 +23,7 @@ import os
 import re
 import threading
 import time
+import unicodedata
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -60,7 +61,6 @@ def _escape_like(s: str) -> str:
 def _fold(s: str) -> str:
     """Diacritics- and case-insensitive substring match for the /znalosti card/customer
     search — a warehouse worker types "rozok" and must still find "Rožok"."""
-    import unicodedata
     return "".join(c for c in unicodedata.normalize("NFD", str(s or "").lower())
                    if unicodedata.category(c) != "Mn")
 

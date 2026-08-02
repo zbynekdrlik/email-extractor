@@ -13,13 +13,14 @@ first-teach-wins exactly like two humans teaching the same wording.
 
 Run manually after deploy (same pattern as `memory_import.py`), not on every worker start:
 
-    python -m app.orders.alias_migration <PG_DSN>
+    python -m app.orders.alias_migration
 """
 from __future__ import annotations
 
 import logging
 import re
 
+from .. import config, db
 from . import memory, snapshot
 
 log = logging.getLogger("orders.alias_migration")
@@ -66,21 +67,20 @@ def migrate(conn, snapshot_id: int | None = None) -> dict:
     return {"cards": cards, "wordings": wordings, "imported": imported}
 
 
-def main() -> None:
-    import os
-    import sys
+def main() -> int:
+    """Same startup shape as `memory_import.py`: load the add-on's own config (so this
+    runs against whichever Postgres the add-on is actually configured for — the bundled
+    one or an external `pg_dsn` — with no separate DSN to pass by hand), and re-run schema
+    init defensively before writing (idempotent `CREATE TABLE IF NOT EXISTS`)."""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    cfg = config.Config.load()
+    conn = db.connect(cfg.pg_dsn)
+    db.init_schema(conn)
+    result = migrate(conn)
+    print(f"cards={result['cards']} wordings={result['wordings']} "
+         f"imported={result['imported']}")
+    return 0
 
-    import psycopg
 
-    logging.basicConfig(level=logging.INFO)
-    dsn = os.environ.get("PG_DSN") or (sys.argv[1] if len(sys.argv) > 1 else None)
-    if not dsn:
-        print("usage: python -m app.orders.alias_migration <PG_DSN>  (or set PG_DSN)")
-        raise SystemExit(2)
-    with psycopg.connect(dsn, autocommit=True) as conn:
-        result = migrate(conn)
-    print(result)
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__":       # pragma: no cover
+    raise SystemExit(main())
