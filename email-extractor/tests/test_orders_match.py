@@ -378,6 +378,16 @@ def test_candidates_for_question_deduplicates_when_already_present():
     assert [c["gtin"] for c in out] == ["DAN90", "SLI"]
 
 
+def test_proposed_gtin_tolerates_a_trace_with_no_llm_key_at_all():
+    """A `decide_without_model()` free rung sets `trace={"llm": None, ...}` — the key is
+    PRESENT but its VALUE is None, which `dict.get(key, default)` does NOT fall back on
+    (only a MISSING key does). `proposed_gtin` must not crash on it even though no current
+    ASK_THE_WAREHOUSE decision actually reaches here with that shape."""
+    d = match.Decision(item_name="x", gtin=None, card="", confidence=1.0, rule="catalog_name",
+                       note="", trace={"rule": "catalog_name", "llm": None, "free": True})
+    assert match.proposed_gtin(d) == ""
+
+
 def test_candidates_for_question_is_a_no_op_when_nothing_was_proposed():
     d = _decide("Torta", llm={"gtin": None, "confidence": 0.0})
     assert d.gtin is None and match.proposed_gtin(d) == ""

@@ -248,7 +248,8 @@ def proposed_gtin(decision) -> str:
     """
     if decision.gtin:
         return str(decision.gtin)
-    return str((decision.trace or {}).get("llm", {}).get("gtin") or "") or ""
+    llm = (decision.trace or {}).get("llm") or {}
+    return str(llm.get("gtin") or "")
 
 
 def candidates_for_question(item_cands: list[dict], catalog: list[dict],
