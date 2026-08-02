@@ -496,3 +496,30 @@ again. That is the point: a changed prompt has not been measured until it has be
   (function definitions AND its `// ===== n8n MAIN =====`-style entry section, if it
   has one) — not just the function you intend to call — and port every hard-fail
   guard the real node has, even if your own test corpus never happens to hit it.
+- **The "empty atomic claim" crash class (#34) has a known, copy-pasteable fix — check EVERY
+  new claim-based n8n workflow for it, don't wait for an incident (#137).** A Postgres node
+  running `UPDATE messages SET processing_at=... WHERE id=(SELECT ... FOR UPDATE SKIP LOCKED)
+  RETURNING ...` still emits ONE output item (`{"success":true}`, no `message_id`) when the
+  claim matched zero rows — n8n does not simply produce zero items. Any node downstream that
+  does `queryReplacement: {{ $('<claim node>').first().json.id }}` then resolves to `undefined`
+  and crashes (`Query Parameters must be a string of comma-separated values...`), and any Odoo
+  post downstream fires with empty content. The fix is a `n8n-nodes-base.filter` node
+  (`typeVersion: 2.3`) immediately after the claim node, condition `$json.message_id notEmpty`
+  (`operator: {"type":"string","operation":"notEmpty","singleValue":true}`,
+  `typeValidation:"loose"`, `looseTypeValidation:true`) — copy the exact shape from
+  `Invoices Forward v2` (`du2O6YGmGyntXBbV`) or `Dodacie Listy EDI` (`1R4WcUFhpIPwEJX1`)'s
+  "Claimed a row?" node via `get_workflow_details`, don't reinvent it. Verify BOTH directions
+  with `test_workflow` before `publish_workflow`: pin the claim node to `{"success":true}` (no
+  `message_id`) and confirm `lastNodeExecuted` is the filter with nothing downstream in
+  `runData`; then pin it to a realistic claimed row and confirm the item still reaches its
+  normal targets unchanged. "Static auto orders" (`O8IYhUESjaWmPMTI`) had this fixed in #137 —
+  any OTHER claim-based workflow added later gets the same check before it ships.
+- **`hooks/block-commit-without-design.sh`'s classifier (`design_gate.py`'s `_CAUSE_RE`)
+  requires the LITERAL words "príčina"/"dôvod"/"spôsoben(é)" (or English "root cause"/
+  "because the") — explaining the root cause in different Slovak words ("Koreň:", "Zistenie:",
+  "čo chýbalo") does NOT satisfy it and the commit gets blocked even though the comment is
+  genuinely a real design writeup** (hit twice in this session, #132 and #137 — filed as
+  `zbynekdrlik/airuleset#219`). Head the design-before-code `gh issue comment` paragraph with
+  the literal word **"Príčina:"** (and "Zvolený prístup:" / "Zamietnutá alternatíva:" for the
+  other two, which DO have wider synonym coverage) to pass on the first try instead of a
+  second wasted comment.

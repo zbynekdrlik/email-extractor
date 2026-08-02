@@ -473,3 +473,34 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   [design](https://github.com/zbynekdrlik/email-extractor/issues/131#issuecomment-5156636401),
   [review](https://github.com/zbynekdrlik/email-extractor/issues/131#issuecomment-5156816711).
   PR #136 (main..dev), merge `d43e200`.
+
+## 2026-08-02 — #132 + #137 (PR #138)
+
+- **#137** (n8n "Static auto orders" `O8IYhUESjaWmPMTI`: poistka proti prázdnemu claimu) —
+  n8n-side only, no repo diff. Confirmed via `get_workflow_details` that `Get Static Orders`
+  (atomic claim) fed `Normalize`/`Get Catalog Snapshot` directly, with `Mark OK`/`Mark
+  Skipped`/`Mark Error` all using `queryReplacement: {{ $('Get Static Orders').first().json.id
+  }}` — same undefined-id crash class as #34, the one that produced 39 Odoo spam messages on
+  "AI auto orders" 2026-08-02. Added a "Claimed a row?" `n8n-nodes-base.filter` node, same
+  shape `Invoices Forward v2`/`Dodacie Listy EDI` already use. Verified with `test_workflow`
+  both directions (empty claim → nothing downstream runs; real claim → unchanged) before
+  `publish_workflow`; confirmed `versionId == activeVersionId` after.
+- **#132** (Static orders Python core: shadow-mode worker) — new `app/orders/static_worker.py`
+  wiring `static_parse` (#68) + `static_edi` (#131) into the worker loop for
+  `category='static_orders'`, SHADOW ONLY (own `_peek_for_shadow`, reuses
+  `worker.resolve_engine`/`_start_run`/`_finish_run`). `static_orders_engine=python` logs and
+  does nothing (#133 is the separate cutover ticket). `worker.run_forever` now also drives
+  `static_worker.tick()` on the same connection/thread. 13 new tests
+  (`tests/test_orders_static_worker.py`) — shadow claims nothing, engine resolver rejects
+  unknown values, day bound honoured, shadow run recorded with `shadow=true`, every parse/
+  build failure path (missing dates, empty order, photo-only, no EAN resolved) records
+  `review` instead of crashing. Commit `6e1dd5f` (feature, no separate RED/GREEN split —
+  greenfield feature, tests written alongside per `tdd-workflow.md`).
+- Design/validation comments: [validated #132](https://github.com/zbynekdrlik/email-extractor/issues/132#issuecomment-5156978825),
+  [design #132](https://github.com/zbynekdrlik/email-extractor/issues/132#issuecomment-5156997604),
+  [validated #137](https://github.com/zbynekdrlik/email-extractor/issues/137#issuecomment-5156940218),
+  [design #137](https://github.com/zbynekdrlik/email-extractor/issues/137#issuecomment-5156998427).
+- Playbook: added the "empty atomic claim" n8n fix recipe (exact filter-node shape +
+  `test_workflow` before/after verification) and a `design_gate.py` classifier gotcha
+  (`_CAUSE_RE` needs the literal word "príčina"/"dôvod", not "koreň"/"zistenie") to
+  `.claude/rules/orders-corpus.md`; filed `zbynekdrlik/airuleset#219` for the classifier gap.
