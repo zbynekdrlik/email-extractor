@@ -591,3 +591,19 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   `#N` mentioned in a COMMIT MESSAGE's prose (e.g. "code review of PR #143 found...")
   — same gotcha `.claude/rules/orders-corpus.md` already documents for #139; avoid
   citing a PR number inside a commit message body that must pass this gate.
+
+## #145 — Odoo 152: zmazať 6 starých správ z e-mailu Výberofka a poslať jednu novú v skrátenom tvare
+
+- Data-fix ticket, no code change → no PR (per issue's own explicit instructions).
+- Verified live: exactly 6 `mail.message` rows in ch.152 (id `20554622`–`20554627`) matched
+  the e-mail (msg 5564, `order_runs.id=33`); backed up (issue comment
+  https://github.com/zbynekdrlik/email-extractor/issues/145#issuecomment-5159613454),
+  then `mail.message/unlink` on exactly those 6 ids.
+- Posted 1 new message (id `21167967`) rendered directly via `report.build_summary()`
+  from the already-stored `order_runs.result`/`held_orders`/`edi_sent` — no reprocess,
+  no model call, no EDI. Verified `/sklad/<key>` nástenka still shows the same 4 open
+  questions (id 8/9/10/12) and `held_orders` (id 2/3/4) unchanged.
+- Docs-only commit `16f0947` (dev): captured the render-from-stored-data pattern in
+  `.claude/rules/orders-corpus.md` for reuse `[no-design: docs-only playbook entry]`.
+- Evidence/close comment:
+  https://github.com/zbynekdrlik/email-extractor/issues/145#issuecomment-5159624370
