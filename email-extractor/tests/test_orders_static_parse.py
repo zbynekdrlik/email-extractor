@@ -11,13 +11,12 @@ import pytest
 
 from app.orders import static_parse as sp
 
-
 # --- to_ascii / clean_invisible -----------------------------------------------------------
 
 def test_to_ascii_folds_slovak_diacritics_and_punctuation():
     assert sp.to_ascii("Šiška žltá ďateľ ťava ňaň ôsmy ĺúbosť ŕeč") == \
         "Siska zlta datel tava nan osmy lubost rec"
-    assert sp.to_ascii("„citát“ – pomlčka…") == '"citat" - pomlcka...'
+    assert sp.to_ascii("“citát” – pomlčka…") == '"citat" - pomlcka...'
 
 
 def test_to_ascii_drops_unmapped_non_ascii():
