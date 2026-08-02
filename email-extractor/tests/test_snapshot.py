@@ -128,6 +128,7 @@ def test_catalog_override_can_add_a_brand_new_card_not_in_the_sheet(pg):
 
 
 def test_retiring_a_catalog_card_excludes_it_even_though_the_sheet_still_has_it(pg):
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)   # the card must exist first
     ok = snapshot.retire_catalog_card(pg, "8588001805889")
     assert ok is True
     sid = snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
@@ -150,7 +151,8 @@ def test_rebuild_from_overrides_reflects_a_new_override_without_refetching_the_s
     assert new_sid != sid
     catalog = {r["gtin"]: r for r in snapshot.load_catalog(pg, new_sid)}
     assert catalog["8588001800013"]["name"] == "Rožok - nový názov"
-    assert snapshot.load_catalog(pg, sid)[1]["name"] == "Rožok štandart 50g", \
+    old_catalog = {r["gtin"]: r for r in snapshot.load_catalog(pg, sid)}
+    assert old_catalog["8588001800013"]["name"] == "Rožok štandart 50g", \
         "the OLD snapshot must not change"
 
 
