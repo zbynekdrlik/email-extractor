@@ -228,6 +228,9 @@ def test_znalosti_product_writes_reachable_via_the_warehouse_link(pg):
     assert c.get("/api/znalosti/products").status_code == 200
     r = c.post("/api/znalosti/products", json={"gtin": "SK1", "name": "od skladu"})
     assert r.status_code == 200
+    # retire (DELETE) is method-agnostic in SKLAD_ZNALOSTI_API too, not just GET/POST —
+    # review finding: this was untested (mirrors the #93/PR#116 SKLAD_PATHS gap)
+    assert c.delete("/api/znalosti/products/SK1").status_code == 200
     assert c.get("/api/messages").status_code == 401
 
 
@@ -299,4 +302,14 @@ def test_znalosti_client_writes_reachable_via_the_warehouse_link(pg):
     assert c.get("/api/znalosti/clients").status_code == 200
     r = c.post("/api/znalosti/clients", json={"ean_edi": "SK1", "name": "od skladu"})
     assert r.status_code == 200
+    # retire (DELETE) is method-agnostic in SKLAD_ZNALOSTI_API too, not just GET/POST —
+    # review finding: this was untested (mirrors the #93/PR#116 SKLAD_PATHS gap)
+    assert c.delete("/api/znalosti/clients", json={"override_id": None, "orig_ean_edi": None,
+                                                    "orig_street": None}).status_code == 404
+    c.post("/api/znalosti/clients", json={"ean_edi": "SK2", "name": "na vyradenie"})
+    with_id = c.get("/api/znalosti/clients?q=vyradenie").get_json()["items"][0]
+    assert c.delete("/api/znalosti/clients",
+                    json={"override_id": with_id["override_id"],
+                          "orig_ean_edi": with_id["orig_ean_edi"],
+                          "orig_street": with_id["orig_street"]}).status_code == 200
     assert c.get("/api/messages").status_code == 401

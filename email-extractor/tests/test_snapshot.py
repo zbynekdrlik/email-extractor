@@ -212,6 +212,29 @@ def test_retiring_a_customer_override_excludes_it(pg):
     assert "8589000020000" in customers, "an unrelated customer must survive untouched"
 
 
+def test_retiring_one_customer_does_not_drop_an_unrelated_blank_identity_customer(pg):
+    """Review finding (code review of #127/#128): `retire_customer`'s orig-identity path
+    used to hardcode ean_edi/street="" as the override's OWN "current identity", which made
+    `_merge_customers` unconditionally exclude EVERY customer with a blank ean_edi AND a
+    blank street from every future merge — not just the one actually being retired. Both
+    fields are legitimately optional (db.py's own `customer_snapshot` comment), so a real
+    customer known only by name/email would silently vanish from matching."""
+    catalog_csv = "GTIN,Názov,doplnok\nG1,Rožok,\n"
+    customer_csv = (
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,E-mail\n"
+        "Zákazník na vyradenie,2000000000864,Martin,Košútka 1,prvy@x.sk\n"
+        "Nevinný okolostojaci bez EAN a ulice,,,,druhy@x.sk\n")
+    snapshot.import_snapshot(pg, catalog_csv, customer_csv)
+    ok = snapshot.retire_customer(pg, override_id=None,
+                                   orig_ean_edi="2000000000864", orig_street="Košútka 1")
+    assert ok is True
+    sid = snapshot.import_snapshot(pg, catalog_csv, customer_csv)
+    names = {r["name"] for r in snapshot.load_customers(pg, sid)}
+    assert "Zákazník na vyradenie" not in names
+    assert "Nevinný okolostojaci bez EAN a ulice" in names, \
+        "an unrelated blank-identity customer must survive"
+
+
 def test_retire_customer_needs_some_identity(pg):
     assert snapshot.retire_customer(pg, override_id=None,
                                      orig_ean_edi=None, orig_street=None) is False
