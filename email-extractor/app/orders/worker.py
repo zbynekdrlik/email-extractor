@@ -13,6 +13,7 @@ very last step of this project:
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 from psycopg.types.json import Json
 
@@ -87,8 +88,13 @@ def _peek_for_shadow(conn, days: int = SHADOW_DAYS) -> dict | None:
 def _as_message(row) -> dict | None:
     if not row:
         return None
+    # #117: memory.resolve's as_of date fence and hold.is_past_deadline both key off this
+    # "today" — without it, a claimed message's date fence in production was always a
+    # silent no-op (as_of=""). Both _claim (real engine=python path) and _peek_for_shadow
+    # build their message dict through this one function, so this covers both.
     return {"message_id": row[0], "subject": row[1] or "", "from_addr": row[2] or "",
-            "from_name": row[3] or "", "combined_text": row[4] or row[5] or ""}
+            "from_name": row[3] or "", "combined_text": row[4] or row[5] or "",
+            "today": datetime.now(UTC).date().isoformat()}
 
 
 # --- run bookkeeping -----------------------------------------------------

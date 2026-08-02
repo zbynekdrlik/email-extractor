@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 
+import psycopg
 from psycopg.types.json import Json
 
 from . import edi
@@ -130,7 +131,7 @@ def list_held(conn, limit: int = 200) -> list[dict]:
 
 # --- releasing ---------------------------------------------------------------
 
-def _redecide(conn, customer_ean: str, decisions: list) -> list:
+def _redecide(conn, customer_ean: str, decisions: list, as_of: str = "") -> list:
     """Give every stored line one more chance against FRESH memory (#93) — a wording just
     taught, per-customer or globally, must decide it NOW, without another LLM call.
 
@@ -139,6 +140,12 @@ def _redecide(conn, customer_ean: str, decisions: list) -> list:
     no-model question again and gets back the identical answer it already had, since
     `decide_without_model` only returns something MORE certain than what is already
     stored — never something weaker.
+
+    `as_of` (#117) keeps the SAME date fence `pipeline.py`'s first pass already applies: a
+    shipment dated after "now" must not decide a release happening now, either. A human
+    answer (`memory.resolve`'s `human` rows) is exempt from `as_of` regardless — see
+    `memory.resolve`'s own docstring — so this never blocks the very answer that triggered
+    the release.
     """
     from . import memory
     from .match import decide_without_model, merge_same_card
@@ -146,7 +153,7 @@ def _redecide(conn, customer_ean: str, decisions: list) -> list:
     changed = False
     out = []
     for d in decisions:
-        recalled = memory.resolve(conn, customer_ean, d.item_name)
+        recalled = memory.resolve(conn, customer_ean, d.item_name, as_of=as_of)
         global_recalled = memory.resolve_global(conn, d.item_name)
         fresh = decide_without_model(d.item_name, [], recalled=recalled,
                                      global_recalled=global_recalled)
@@ -159,8 +166,11 @@ def _redecide(conn, customer_ean: str, decisions: list) -> list:
     return merge_same_card(out) if changed else decisions
 
 
-def _do_release(conn, cfg, row: dict, release_reason: str, upload, post,
-                redecide: bool) -> dict:
+def _ship(conn, cfg, row: dict, upload, post, redecide: bool, as_of: str = "") -> tuple[str, dict]:
+    """Re-decide (if asked) against fresh memory and ship, via the SAME `_ship_one` /
+    `edi.claim_send` ledger the live pipeline already ships through. Returns (status,
+    preview) — never touches `held_orders.status`; callers decide what a returned status
+    means for the row."""
     from . import customer as customer_mod
     from . import report
     from . import upload as upload_mod
@@ -173,10 +183,31 @@ def _do_release(conn, cfg, row: dict, release_reason: str, upload, post,
                                    confidence=1.0, rule="held_release", note="")
     decisions = _load_decisions(row["decisions"])
     if redecide:
-        decisions = _redecide(conn, row["customer_ean"], decisions)
+        decisions = _redecide(conn, row["customer_ean"], decisions, as_of=as_of)
 
-    status, preview = _ship_one(conn, cfg, {"message_id": row["message_id"]}, row["order"],
-                                matched, decisions, row["extracted"], False, upload, post)
+    return _ship_one(conn, cfg, {"message_id": row["message_id"]}, row["order"], matched,
+                     decisions, row["extracted"], False, upload, post)
+
+
+def _mark_message_done_if_clear(conn, message_id: str) -> None:
+    """Every order this message produced has now shipped, been reviewed, or been released —
+    the message is finally done (#93: it stayed unprocessed while it held)."""
+    if not has_open(conn, message_id):
+        conn.execute(
+            """UPDATE messages
+                  SET processed = true, processed_at = now(), processed_by = 'ai_orders',
+                      processing_at = NULL
+                WHERE message_id = %s""", (message_id,))
+
+
+def _do_release(conn, cfg, row: dict, release_reason: str, upload, post,
+                redecide: bool, as_of: str = "") -> dict:
+    """The deadline-sweep shape: ship, and ONLY on success mark the row released. Used by
+    `release_due` (a single periodic sweep — no concurrent-release race to guard against)
+    and directly by tests proving the ledger is the real duplicate-upload backstop.
+    `release_for_question` uses `_release_locked` below instead (#118): it needs to
+    SERIALIZE this same decision per held-order id, which `_do_release` alone cannot do."""
+    status, preview = _ship(conn, cfg, row, upload, post, redecide, as_of=as_of)
     if status == "error":
         # The upload itself failed (e.g. ORION unreachable) — `_ship_one` already released
         # the ledger claim, so this is genuinely retryable. Leave the row 'held': the next
@@ -190,14 +221,7 @@ def _do_release(conn, cfg, row: dict, release_reason: str, upload, post,
             WHERE id = %s""", (release_reason, row["id"]))
     log.info("released held order #%s (%s) for %s / %s -> %s", row["id"], release_reason,
              row["customer_ean"], row["delivery_date"], status)
-    if not has_open(conn, row["message_id"]):
-        # Every order this message produced has now shipped, been reviewed, or been
-        # released — the message is finally done (#93: it stayed unprocessed while it held).
-        conn.execute(
-            """UPDATE messages
-                  SET processed = true, processed_at = now(), processed_by = 'ai_orders',
-                      processing_at = NULL
-                WHERE message_id = %s""", (row["message_id"],))
+    _mark_message_done_if_clear(conn, row["message_id"])
     return {"id": row["id"], "status": status, "preview": preview}
 
 
@@ -208,22 +232,75 @@ def release_for_question(conn, cfg, qid: int, upload=None, post=None) -> list[di
     its question ids is answered. Releasing on the first answer would ship a still-guessed
     line the same way the immediate-partial-ship bug did (#81.1) — so a sibling still-open
     question keeps the whole order held.
+
+    #118: two near-simultaneous answers to SIBLING questions of the same held order can
+    each independently observe "every question answered" under READ COMMITTED and both
+    dispatch a ship. `_release_locked` serializes the whole check-then-ship-then-mark
+    decision per held-order id on its own row lock.
     """
     ids = [r[0] for r in conn.execute(
         "SELECT id FROM held_orders WHERE %s = ANY(question_ids) AND status = 'held'",
         (qid,)).fetchall()]
     released = []
     for hid in ids:
+        result = _release_locked(conn, cfg, hid, upload, post)
+        if result is not None:
+            released.append(result)
+    return released
+
+
+def _release_locked(conn, cfg, hid: int, upload, post) -> dict | None:
+    """One held order's answered-release decision, serialized per-id (#118).
+
+    A short, SEPARATE transaction (its own connection, never `conn`) locks the
+    `held_orders` row `FOR UPDATE` for the WHOLE check-then-ship-then-mark decision — a
+    lock held only around the remaining-count check, then released before shipping, would
+    be provably useless: a second caller unblocked after the first released would just
+    re-read the identical unlocked state and reach the identical "release" decision, since
+    nothing durable was written under the lock. So the lock spans the decision through the
+    final `status = 'released'` write, and the SECOND of two racing sibling answers simply
+    blocks until the first fully finishes (ships and commits, or fails and rolls back to
+    'held') — never a torn double-ship.
+
+    The actual upload/ledger-claim (`_ship_one` via `edi.claim_send` + `upload()`) keeps
+    running on `conn` — the caller's own, pre-existing (autocommit, in production)
+    connection — completely unaffected by this lock transaction's commit or rollback. That
+    preserves the #116 invariant: an already-physically-uploaded document is never undone
+    by a later, unrelated failure. It also means `held_orders.status` only ever flips to
+    'released' AFTER `_ship_one` has fully, successfully RETURNED — never pre-emptively
+    claimed before the ship result is known — matching the existing, deliberate guarantee
+    `tests/test_api.py::test_answering_over_http_commits_the_ledger_even_if_something_
+    after_upload_fails` pins (an exception thrown AFTER a successful upload must leave the
+    row 'held' so a retry can happen).
+    """
+    with psycopg.connect(cfg.pg_dsn) as tx:
+        locked = tx.execute(
+            "SELECT question_ids, status FROM held_orders WHERE id = %s FOR UPDATE",
+            (hid,)).fetchone()
+        if not locked or locked[1] != "held":
+            return None  # already released by a sibling answer that won the race, or gone
+        remaining = tx.execute(
+            "SELECT count(*) FROM order_questions WHERE id = ANY(%s) AND status <> 'answered'",
+            (locked[0],)).fetchone()[0]
+        if remaining:
+            return None
         row = get(conn, hid)
         if not row:
-            continue
-        remaining = conn.execute(
-            "SELECT count(*) FROM order_questions WHERE id = ANY(%s) AND status <> 'answered'",
-            (row["question_ids"],)).fetchone()[0]
-        if remaining:
-            continue
-        released.append(_do_release(conn, cfg, row, "answered", upload, post, redecide=True))
-    return released
+            return None
+        status, preview = _ship(conn, cfg, row, upload, post, redecide=True,
+                                as_of=str(_db_today(conn)))
+        if status == "error":
+            log.warning(
+                "release of held order #%s (answered) for %s / %s did not ship — staying "
+                "held", hid, row["customer_ean"], row["delivery_date"])
+            return {"id": hid, "status": status, "preview": preview}
+        tx.execute(
+            """UPDATE held_orders SET status = 'released', release_reason = 'answered',
+                   released_at = now() WHERE id = %s""", (hid,))
+    log.info("released held order #%s (answered) for %s / %s -> %s", hid,
+             row["customer_ean"], row["delivery_date"], status)
+    _mark_message_done_if_clear(conn, row["message_id"])
+    return {"id": hid, "status": status, "preview": preview}
 
 
 def release_due(conn, cfg, upload=None, post=None, today: str = "") -> list[dict]:
@@ -237,7 +314,8 @@ def release_due(conn, cfg, upload=None, post=None, today: str = "") -> list[dict
         row = get(conn, hid)
         if not row or not is_past_deadline(row["delivery_date"], today):
             continue
-        released.append(_do_release(conn, cfg, row, "deadline", upload, post, redecide=False))
+        released.append(_do_release(conn, cfg, row, "deadline", upload, post, redecide=False,
+                                    as_of=today))
     return released
 
 

@@ -1,6 +1,7 @@
 ---
 paths:
   - "email-extractor/app/orders/**"
+  - "email-extractor/app/httpapi.py"
   - ".github/workflows/ci.yml"
 ---
 
@@ -174,3 +175,34 @@ again. That is the point: a changed prompt has not been measured until it has be
   catalog snapshot the order was originally matched against, and is safe to run over EVERY
   stored decision (not just the pending ones) because a rung that finds nothing simply
   returns `None` and the original decision is kept.
+- **A `httpapi.py` route that pairs an external side effect (upload/HTTP-post) with its own
+  DB "claim" write (the `edi_sent` ledger) must run that pair on an AUTOCOMMIT connection
+  (`_db()`), never inside another route's `_db_tx()` transaction (review finding, #93,
+  PR #116).** `_db_tx()` is a real, rollback-on-error transaction — fine for several writes
+  that must land together, but WRONG when one of them is a claim for a REAL external action
+  that already happened: if anything AFTER the claim fails, the whole transaction —
+  including the claim — rolls back, even though the physical upload cannot be undone, and a
+  retry then double-ships. `hold.release_for_question` was originally called inside
+  `teach.answer`'s `_db_tx()` block in `api_orders_answer`; the fix splits it onto its own
+  `with _db() as c2:` block AFTER `teach.answer`'s transaction commits. Proven, not assumed,
+  by `tests/test_api.py::test_answering_over_http_commits_the_ledger_even_if_something_after_upload_fails`
+  (injects a failure AFTER a faked upload and checks the ledger claim survives). Same
+  invariant `worker.tick`/`hold.release_due` already followed (both use `db.connect()`,
+  autocommit) — the bug was specific to the ONE route that shared a connection across two
+  different modules' writes.
+- **The hold-vs-ship decision must be computed from the POST-`merge_same_card(apply_
+  siblings(...))` decisions, never the raw per-item list `teach.ask` was called against**
+  (review finding, #93, PR #116). `apply_siblings` can rescue an `unmatched` line using an
+  identically-worded line resolved elsewhere in the SAME order — by the time the order-level
+  hold check runs, that line already has a settled rule (`sibling`) and the order may be
+  fully resolved, even though a stale qid is still sitting in the per-item ask list. Gate
+  holding on `any(d.rule in ASK_THE_WAREHOUSE for d in decisions)` computed AFTER the merge,
+  not on "a question was asked for this order at any point during the item loop."
+- **Any NEW `/api/orders/*` route the `/otazky` page's JS fetches must be added to
+  `SKLAD_PATHS`**, or the unauthenticated warehouse-link session (`role == SKLAD_ROLE`) gets
+  a silent 401 and the JS (`catch(e){return}`) swallows it — the feature simply never
+  renders for the actual sklad audience, only for full-admin dashboard logins (review
+  finding, #93, PR #116: `/api/orders/held` was added to the page's JS but not to
+  `SKLAD_PATHS`). The security bar for adding a path: order METADATA only (customer name/
+  EAN, delivery date, question ids, candidates) — never a mail body, an attachment, or spend
+  data (that boundary is the whole point of `SKLAD_PATHS` existing).
