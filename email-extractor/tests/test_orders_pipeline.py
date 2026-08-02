@@ -139,9 +139,11 @@ def test_an_unmatched_item_with_time_left_holds_the_whole_order(pg, env):
                           upload=rec.upload, post=rec.post)
     assert result["status"] == "held"
     assert rec.uploads == [], "nothing ships while the order is held"
-    # the question for the warehouse still reaches Odoo (#102) — that IS the visibility
+    # exactly one short Odoo message for the whole e-mail (#139) — the item-level wording
+    # ("torta") no longer belongs in Odoo, only on the linked nástenka
     assert len(rec.posts) == 1
-    assert "torta" in rec.posts[0] and "Neznáme znenie" in rec.posts[0]
+    assert "torta" not in rec.posts[0]
+    assert "čaká" in rec.posts[0].lower()
     # nothing is learnt from an order that never shipped
     assert pg.execute("SELECT count(*) FROM item_memory").fetchone()[0] == 0
     held = pg.execute(
@@ -162,12 +164,13 @@ def test_an_unmatched_item_at_the_deadline_still_ships_the_rest_and_says_so(pg, 
                           upload=rec.upload, post=rec.post)
     assert result["status"] == "partial"
     assert rec.uploads[0][1].count("LIN") == 1
-    # a genuinely NEW question for the warehouse also reaches Odoo (#102), posted first
-    # (while the item is being decided), then the main order report
-    assert len(rec.posts) == 2
-    assert "torta" in rec.posts[0] and "Neznáme znenie" in rec.posts[0]
-    assert "torta" in rec.posts[1]
-    assert "NEÚPLNÁ" in rec.posts[1].upper()
+    # exactly one short Odoo message (#139): the order shipped partially AND raised a new
+    # question, but it is still ONE processed e-mail — not one post per order plus one per
+    # question. Item-level wording ("torta") is off Odoo; the count/wording of what's
+    # unresolved is what's left.
+    assert len(rec.posts) == 1
+    assert "torta" not in rec.posts[0]
+    assert "neúplných" in rec.posts[0].lower() or "neúplná" in rec.posts[0].lower()
     # only the shipped item is remembered
     assert pg.execute("SELECT count(*) FROM item_memory").fetchone()[0] == 1
     assert pg.execute("SELECT count(*) FROM held_orders").fetchone()[0] == 0
@@ -345,6 +348,31 @@ def test_a_multi_date_email_where_one_order_fails_reports_per_order_status(pg, e
     assert result["status"] == "held", "an email is not done while one of its orders holds"
     assert pg.execute(
         "SELECT delivery_date FROM held_orders").fetchone() == ("05.08.2026",)
+
+
+# --- exactly one Odoo message per processed e-mail (#139) ------------------
+
+def test_a_multi_date_multi_question_email_produces_exactly_one_odoo_message(pg, env):
+    """The real trigger for #139: msg 5564 had 5 delivery dates and 4 new warehouse
+    questions and produced 6 separate Odoo messages in 3 seconds — read on the phone as
+    "a lot of orders failed". Here: two delivery dates, each with one wording the model
+    cannot place, so both orders hold and raise a NEW question. Must be exactly ONE Odoo
+    message for the whole e-mail, not one per order and one per question."""
+    answers = _two_order_answers()
+    answers[0]["orders"][0]["items"][0]["name"] = "babovka"
+    answers[0]["orders"][1]["items"][0]["name"] = "štrúdľa"
+    answers[2] = {"gtin": "NO_MATCH", "confidence": 0.2, "matchedCatalogName": "",
+                 "reason": "nič sa nezhoduje"}
+    answers[3] = {"gtin": "NO_MATCH", "confidence": 0.2, "matchedCatalogName": "",
+                 "reason": "nič sa nezhoduje"}
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), TWO_DATE_MAIL, env,
+                          client=ScriptedClient(answers), upload=rec.upload, post=rec.post)
+    assert result["status"] == "held"
+    assert len(rec.uploads) == 0, "both orders hold — nothing ships yet"
+    assert len(teach.open_questions(pg)) == 2, "both wordings raised their own question"
+    assert len(rec.posts) == 1, "one processed e-mail must post exactly ONE Odoo message"
+    assert "babovka" not in rec.posts[0] and "štrúdľa" not in rec.posts[0]
 
 
 # --- recipient groups are one order, one line (#81.1) ---------------------

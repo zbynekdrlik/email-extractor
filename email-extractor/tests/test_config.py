@@ -54,3 +54,20 @@ def test_public_base_url_is_kept_when_configured(monkeypatch):
     monkeypatch.setenv("PUBLIC_BASE_URL", "http://e0ac7775-email-extractor:8099")
     monkeypatch.setattr(config, "OPTIONS_PATH", config.Path("/nonexistent/options.json"))
     assert config.Config.load().public_base_url == "http://e0ac7775-email-extractor:8099"
+
+
+def test_dashboard_base_url_defaults_empty(monkeypatch):
+    """#139: distinct from public_base_url (the MACHINE address) — a human-facing base URL
+    for links posted from the order worker, outside any HTTP request. Better empty than
+    silently reusing the machine address again (that was the 0.9.10 bug)."""
+    from app import config
+    monkeypatch.delenv("DASHBOARD_BASE_URL", raising=False)
+    monkeypatch.setattr(config, "OPTIONS_PATH", config.Path("/nonexistent/options.json"))
+    assert config.Config.load().dashboard_base_url == ""
+
+
+def test_dashboard_base_url_is_kept_when_configured(monkeypatch):
+    from app import config
+    monkeypatch.setenv("DASHBOARD_BASE_URL", "http://46.224.130.35:8099")
+    monkeypatch.setattr(config, "OPTIONS_PATH", config.Path("/nonexistent/options.json"))
+    assert config.Config.load().dashboard_base_url == "http://46.224.130.35:8099"
