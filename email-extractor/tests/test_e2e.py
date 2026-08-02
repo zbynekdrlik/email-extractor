@@ -244,7 +244,9 @@ def test_the_warehouse_link_can_reach_the_knowledge_base_and_teach_a_wording(liv
     page.fill('input[placeholder^="hľadaj kartu"]', "rožok")
     page.wait_for_selector("text=Rožok štandart 50g")
     page.click("text=Rožok štandart 50g")
-    page.click('button:has-text("Uložiť")')
+    # scoped to the alias form specifically — #127/#128 added a customer-data edit box
+    # ABOVE it on this same page with its own "Uložiť zmeny" button (substring overlap)
+    page.click('.box:has-text("Pridať priradenie") button:has-text("Uložiť")')
 
     page.wait_for_selector("text=domáci rožtek")
     assert memory.resolve(pg, "2000000000777", "domáci rožtek").gtin == "G1"
@@ -258,5 +260,73 @@ def test_the_warehouse_link_can_reach_the_knowledge_base_and_teach_a_wording(liv
     assert memory.resolve(pg, "2000000000777", "domáci rožtek") is None
 
     # still bounded by the same security boundary as /otazky
+    assert page.request.get(f"{live_server}/api/messages").status == 401
+    assert console == [], f"browser console not clean: {console}"
+
+
+def test_znalosti_lets_the_warehouse_curate_products_and_customers_directly(
+        live_server, pg, page):
+    """#127+#128: add/edit/retire a product card and a customer straight from the page —
+    no waiting for the hourly sheet refresh, no order_questions row needed first."""
+    from app.httpapi import sklad_key
+    from app.orders import customer as customer_mod
+    from app.orders import snapshot
+
+    snapshot.import_snapshot(
+        pg,
+        "GTIN,Názov,doplnok\nG1,Rožok štandart 50g,\n",
+        "Názov organizácie,EAN kód EDI,E-mail\nPekáreň Rožok,2000000000777,pekaren@x.sk\n")
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/otazky")
+    page.goto(f"{live_server}/znalosti")
+    page.wait_for_selector("text=Karty výrobkov")
+
+    # --- product card: add, then edit the SAME gtin, then retire it -----------------
+    page.fill('input[placeholder="GTIN"]', "NOVY1")
+    page.fill('input[placeholder="názov karty"]', "Chlieb domáci 1kg")
+    page.click('button:has-text("Uložiť (nový GTIN")')
+    page.wait_for_selector("text=Chlieb domáci 1kg")
+
+    page.fill('input[placeholder="GTIN"]', "NOVY1")
+    page.fill('input[placeholder="názov karty"]', "Chlieb domáci 1kg OPRAVA")
+    page.click('button:has-text("Uložiť (nový GTIN")')
+    page.wait_for_selector("text=Chlieb domáci 1kg OPRAVA")
+
+    page.once("dialog", lambda d: d.accept())
+    page.click('button:has-text("Vyradiť kartu")')
+    page.wait_for_selector("text=Chlieb domáci 1kg OPRAVA", state="detached")
+    sid = snapshot.latest_snapshot_id(pg)
+    assert "NOVY1" not in {r["gtin"] for r in snapshot.load_catalog(pg, sid)}
+
+    # --- customer: add a brand-new one, verify it actually matches by e-mail --------
+    clients_box = page.locator('#wrap .box:has-text("Odberatelia")')
+    clients_box.locator('input[placeholder="EAN kód EDI"]').fill("9998887776")
+    clients_box.locator('input[placeholder="názov firmy"]').fill("Nový odberateľ s.r.o.")
+    clients_box.locator('input[placeholder="e-maily (čiarkou oddelené)"]').fill("novy@odber.sk")
+    clients_box.locator('button:has-text("Uložiť")').click()
+    page.wait_for_selector("text=Nový odberateľ s.r.o.")
+
+    sid2 = snapshot.latest_snapshot_id(pg)
+    customers = snapshot.load_customers(pg, sid2)
+    hit = customer_mod.resolve(customers, "novy@odber.sk", "", "")
+    assert hit is not None and hit.ean_edi == "9998887776"
+
+    # --- customer: edit the EXISTING seeded one from its own detail page ------------
+    page.goto(f"{live_server}/znalosti/2000000000777")
+    page.wait_for_selector("text=Upraviť údaje zákazníka")
+    ean_field = page.locator('.box:has-text("Upraviť údaje zákazníka") '
+                             'input[placeholder="EAN kód EDI"]')
+    assert ean_field.input_value() == "2000000000777"
+    name_field = page.locator('.box:has-text("Upraviť údaje zákazníka") '
+                              'input[placeholder="názov firmy"]')
+    assert name_field.input_value() == "Pekáreň Rožok"
+    name_field.fill("Pekáreň Rožok OPRAVENÉ")
+    page.once("dialog", lambda d: d.accept())
+    page.click('.box:has-text("Upraviť údaje zákazníka") button:has-text("Uložiť zmeny")')
+    page.wait_for_url(f"{live_server}/znalosti/2000000000777")
+    page.wait_for_selector("text=Pekáreň Rožok OPRAVENÉ")
+
     assert page.request.get(f"{live_server}/api/messages").status == 401
     assert console == [], f"browser console not clean: {console}"

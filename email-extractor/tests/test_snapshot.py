@@ -160,6 +160,26 @@ def test_rebuild_from_overrides_is_a_noop_before_any_snapshot_exists(pg):
     assert snapshot.rebuild_from_overrides(pg) is None
 
 
+def test_latest_snapshot_id_tracks_the_current_state_even_when_content_reverts(pg):
+    """Retiring a card can bring the merged content back to EXACTLY what an OLDER
+    snapshot already had — `_freeze` correctly reuses that old id (content-addressed,
+    #59), but `latest_snapshot_id` must still report it as CURRENT, not silently point
+    at a higher-id snapshot that is no longer what the pipeline should be matching
+    against. This is the exact shape retiring a #127 override produces in practice."""
+    original = snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    snapshot.upsert_catalog_card(pg, "TEMP1", "Dočasná karta")
+    with_temp = snapshot.rebuild_from_overrides(pg)
+    assert with_temp != original
+    assert snapshot.latest_snapshot_id(pg) == with_temp
+
+    snapshot.retire_catalog_card(pg, "TEMP1")
+    reverted = snapshot.rebuild_from_overrides(pg)
+    assert reverted == original, "content is back to exactly what it was — same hash, reused id"
+    assert snapshot.latest_snapshot_id(pg) == original, \
+        "latest must track checked_at, not just the highest id ever inserted"
+    assert "TEMP1" not in {r["gtin"] for r in snapshot.load_catalog(pg, snapshot.latest_snapshot_id(pg))}
+
+
 def test_customer_override_replaces_the_sheet_row_it_names(pg):
     """#128's own cited data bug: EAN 2000000000857 says GT1, header/street says GT2."""
     snapshot.upsert_customer(

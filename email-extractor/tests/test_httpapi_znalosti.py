@@ -118,6 +118,18 @@ def test_add_and_list_customer_alias(pg):
     assert len(d["items"]) == 1 and d["items"][0]["source"] == "human"
 
 
+def test_customer_page_data_includes_the_editable_record(pg):
+    """#128: the /znalosti/<ean> edit form needs the full row + override identity, not
+    just the aliases list this endpoint already returned."""
+    _snap(pg)
+    c = _client()
+    _login(c)
+    d = c.get("/api/znalosti/customer/111").get_json()
+    assert d["record"]["ean_edi"] == "111"
+    assert d["record"]["override_id"] is None
+    assert d["record"]["orig_ean_edi"] == "111"
+
+
 def test_delete_customer_alias_is_scoped_to_its_customer(pg):
     _snap(pg)
     c = _client()
