@@ -317,9 +317,19 @@ def _merge_customers(base: list[dict], overrides: list[dict]) -> list[dict]:
     that row's OWN current identity for a still-sheet-only row (so the /znalosti edit
     form can send it back to create the FIRST override for it), or the override's fixed
     original identity otherwise (so a repeat edit keeps suppressing the same sheet row).
+
+    Two things must be excluded from `base`, not just one: the override's ORIGINAL sheet
+    identity (so the row it replaces disappears), AND the override's OWN CURRENT identity
+    (so a row already baked into `base` by an EARLIER merge — e.g. `base` is itself a
+    previously-rebuilt snapshot — is not counted twice once its own override row is
+    appended below; this is what keeps re-merging idempotent for a brand-new customer
+    too, which has no orig identity to exclude by).
     """
-    excluded = {(o["orig_ean_edi"], o["orig_street"])
-                for o in overrides if o["orig_ean_edi"] is not None}
+    excluded = set()
+    for o in overrides:
+        if o["orig_ean_edi"] is not None:
+            excluded.add((o["orig_ean_edi"], o["orig_street"]))
+        excluded.add((o["ean_edi"], o["street"]))
     out = []
     for row in base:
         key = (row.get("ean_edi") or "", row.get("street") or "")
