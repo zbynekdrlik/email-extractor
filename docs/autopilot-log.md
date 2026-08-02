@@ -553,3 +553,41 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   GIT ROOT (`/home/newlevel/devel/n8n/email_extract/docs/`), one level ABOVE the add-on code
   — same root-vs-add-on-dir split `.claude/rules/orders-corpus.md` already documents for
   `pre-push-lint.sh`; don't go looking for `docs/` inside `email-extractor/`.
+
+## #140 — AI objednávky: jediný kandidát v katalógu má prejsť aj bez gramáže (2026-08-02)
+
+- Root cause: `unique_core_card()` (`app/orders/match.py`) required >= 2 core tokens on
+  BOTH the ordered wording and the catalog card name before considering a match at all —
+  meant to stop a generic single word ("rožok") auto-deciding among weight variants (Céder
+  incident), but it also made a genuinely-single-word wording with a genuinely-unique
+  single-word catalog card structurally unreachable, contrary to the explicit product
+  decision ("iba jedna babovka → ber ju, aj bez gramáže").
+- Fix: replaced both `len(...) < 2` floors with `not ...` (>= 1 token) — uniqueness now
+  decided purely by `len(hits) == 1`. Céder-class safety unchanged: 2+ real candidates
+  still return `None` (still asks). Commits: `5413bf7` (version bump 0.9.31),
+  `efba71e` (RED: `test_a_single_word_order_passes_when_the_catalog_has_exactly_one_
+  candidate`, fixture fixes for `test_orders_hold.py`/`test_orders_pipeline.py`/
+  `test_orders_match.py`/`test_orders_static_ean.py`), `522be7b` (GREEN),
+  `6f3a638` (review-fix: pinned the single-token-card superset-absorption tradeoff,
+  mirroring `static_ean.py`'s own `KNOWN_TRADEOFF` acceptance).
+- Verified on the LIVE 30-email corpus (dev2, `--require-all`): 0/32 cases changed
+  outcome, and a rule-level diff of every corpus item (before/after) showed **0 items
+  changed rule/review** — this fix does not resolve the #140 report's own 4 items
+  (babovka/štrúdľa/vianočka kvásková/chlebík granč all have 2+ real live-catalog
+  candidates, correctly still ask), only removes a provably-dead-weight guard for a
+  future genuinely-single-candidate case.
+- Deployed `0.9.31` via `ha addons update e0ac7775_email_extractor`. Verified:
+  `/health` → `{"ok":true,"version":"0.9.31"}`, DOM `v0.9.31` on `/otazky`, and the exact
+  4 items from the #140 incident (Výberofka Levoča, msg 5564) still correctly ask the
+  warehouse (multiple real candidates each) — confirms no regression on the reported case.
+- PR #143 (Closes #140), merge `4b05de1d`.
+- Design/validation/review comments:
+  [design](https://github.com/zbynekdrlik/email-extractor/issues/140#issuecomment-5159267028),
+  [validated](https://github.com/zbynekdrlik/email-extractor/issues/140#issuecomment-5159268326),
+  [review](https://github.com/zbynekdrlik/email-extractor/issues/140#issuecomment-5159419209),
+  [design (review-fix)](https://github.com/zbynekdrlik/email-extractor/issues/140#issuecomment-5159469150),
+  [review (final)](https://github.com/zbynekdrlik/email-extractor/issues/140#issuecomment-5159488393).
+- Playbook: `hooks/block-commit-without-design.sh`'s design gate also latches onto a
+  `#N` mentioned in a COMMIT MESSAGE's prose (e.g. "code review of PR #143 found...")
+  — same gotcha `.claude/rules/orders-corpus.md` already documents for #139; avoid
+  citing a PR number inside a commit message body that must pass this gate.
