@@ -323,3 +323,5 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   `Odoo Vratka Alert` na kanál 368. Byte-exact verifikácia po publish — žiadne
   MCP round-trip poškodenie diakritiky.
   Bump **0.9.22** (n8n-only zmena, žiadny Python kód — konvencia z #51/#55).
+- Design/review komentáre: [design](https://github.com/zbynekdrlik/email-extractor/issues/47#issuecomment-5155534893),
+  [review](https://github.com/zbynekdrlik/email-extractor/issues/47#issuecomment-5155593743).
