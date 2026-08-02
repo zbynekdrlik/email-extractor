@@ -525,6 +525,53 @@ def test_a_line_that_is_a_catalog_card_never_reaches_the_model(pg, env):
     assert run["order_results"][0]["items"][0]["quantity"] == 7
 
 
+# --- #147: the stored question must always offer the engine's own candidate -----
+
+STRUDLA_CATALOG_CSV = (
+    "GTIN,Sklad,Názov,doplnok\n"
+    "G50,1,Rožok štandart 50g,\n"
+    "Z1,1,Zavin tvarohovo-cucoriedkovy 200g,\n"
+    "Z2,1,Zavin makovo-visnovy 200g,\n"
+    "Z3,1,Zavin orechovy 350gr,\n"
+    "Z4,1,Zavin kakaovy 350gr,\n"
+    "Z5,1,Zavin makovy 350gr,\n"
+    "Z6,1,Zavin jablkovo-orechovy 200g,\n"
+    "JS,1,Jablkova strudla 200g,\n"
+    "MS,1,Makova strudla 200g,\n"
+)
+
+
+def test_the_stored_question_always_offers_the_engines_own_candidate(pg):
+    """#147: the live nástenka offered 6 unrelated 'Závin' cards for the wording 'štrúdľa'
+    and NOT the one card the engine itself named as its (rejected, low-confidence)
+    candidate. Root cause: `pipeline._run` scores+truncates `item_cands` to 6 BEFORE the
+    model call — it cannot know which card the model will name — and the SYNONYMS rule in
+    `match._score()` scores every 'zavin' card at 75 vs. 'Jablková štrúdla's plain
+    substring match at 65, pushing the real answer past the [:6] cutoff. The sklad had
+    nothing to click."""
+    sid = snapshot.import_snapshot(pg, STRUDLA_CATALOG_CSV, CUSTOMER_CSV)
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('m2', 'ai_orders')")
+    mail = {"message_id": "m2", "subject": "Objednávka", "from_addr": "sklad@pekaren.sk",
+            "from_name": "Sklad", "combined_text": "na 04.08.2026 prosím 2x štrúdľa",
+            "today": "2026-07-30"}
+    extract_answer = {
+        "senderName": "Sklad", "senderEmail": "sklad@pekaren.sk",
+        "companyName": "Pekáreň Testovacia s.r.o.", "isChangeRequest": False, "notes": "",
+        "orders": [{"orderNumber": "", "deliveryDate": "04.08.2026", "recipientGroup": "",
+                    "items": [{"name": "štrúdľa", "quantity": 2, "unit": "ks",
+                               "sourceQuote": "2x štrúdľa"}]}],
+    }
+    answers = [extract_answer, {"ean_edi": "2000000000001", "confidence": 0.95},
+               {"gtin": "JS", "confidence": 0.56, "matchedCatalogName": "", "reason": ""}]
+    pipeline.run(pg, _cfg(), mail, sid, client=ScriptedClient(answers),
+                upload=lambda *a: True, post=lambda *a, **k: None)
+    qs = teach.open_questions(pg)
+    assert len(qs) == 1
+    cand_gtins = [c["gtin"] for c in qs[0]["candidates"]]
+    assert cand_gtins and cand_gtins[0] == "JS", (
+        f"the engine's own proposed candidate must head the list, got {cand_gtins}")
+
+
 def test_two_shops_on_one_delivery_date_stay_two_orders(pg, env):
     """Beh 26 (#101): the merge key was (date, orderNumber), so two SHOPS ordering for the
     same day collapsed into one order — one EDI file, one shop's name, both shops' pastry.
