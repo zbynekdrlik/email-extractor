@@ -224,6 +224,32 @@ def test_a_single_word_order_passes_when_the_catalog_has_exactly_one_candidate()
     assert (d.gtin, d.rule, d.review) == ("SLI", "unique_card", False)
 
 
+def test_KNOWN_TRADEOFF_a_single_core_token_card_can_absorb_an_extra_unmatched_qualifier():
+    """Documented, accepted-risk boundary (code review on #140, 2026-08-02) — the same
+    shape `app.orders.static_ean`'s identically-named test already accepts for its own,
+    independent matcher (see that test's docstring for the full reasoning).
+
+    Before #140, unique_core_card() required >= 2 core tokens on the CARD side, so a
+    single-word card like 'Bageta 250g' (core tokens: {'bageta'}) could never be reached
+    by this rung at all — the guard made this scenario structurally impossible. Now that
+    the floor is >= 1 token per side, a wording that ADDS an extra qualifier word the
+    catalog does not distinguish ('Bageta cesnaková', when the only bageta card is the
+    unqualified 'Bageta 250g') still resolves: the extra word is absorbed by the SAME
+    superset-containment branch ("all(t in want for t in have)") that a 2+-token card
+    could already use to absorb an extra qualifier BEFORE this change — this is not a
+    new code path, only a card shape that could not reach it before. No weight is
+    stated on either side, so UNIQUE_MAX_RATIO cannot rule it out.
+
+    Accepted for the same reason static_ean.py accepts it: a real single-product card
+    has no OTHER variant to confuse it with, so an unrecognised qualifier word is lower-
+    value information than "there is exactly one card of this kind." Pinned here so any
+    future tightening of this boundary is a deliberate, reviewed diff, not silent drift.
+    """
+    catalog = [{"gtin": "BAG", "name": "Bageta 250g", "alias": ""}]
+    d = _decide("Bageta cesnaková", llm={"gtin": None, "confidence": 0.2}, catalog=catalog)
+    assert (d.gtin, d.rule, d.review) == ("BAG", "unique_card", False)
+
+
 def test_a_wildly_different_weight_is_not_a_typo_and_is_refused():
     """'Chlieb 5 kg' against a 1000 g card is not a mistyped spec, it is the TOTAL
     quantity (the customer wants 5 loaves) — the warehouse must see it."""

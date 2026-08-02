@@ -269,6 +269,14 @@ def unique_core_card(item_name: str, catalog: list[dict]) -> dict | None:
     štandart 50g) — `tests/test_orders_match.py`'s
     `test_a_single_word_order_with_several_catalog_candidates_still_asks` pins that this
     cannot recur.
+
+    Known, accepted tradeoff (code review on #140): dropping the card-side floor to >= 1
+    token means a single-core-token card can now be reached by the SUPERSET-containment
+    branch below too (`all(t in want for t in have)`), so a wording with an extra
+    unrecognised qualifier word can still resolve to it — the same tradeoff
+    `app.orders.static_ean.catalog_match` already accepts for its own matcher. See
+    `tests/test_orders_match.py`'s
+    `test_KNOWN_TRADEOFF_a_single_core_token_card_can_absorb_an_extra_unmatched_qualifier`.
     """
     want = _core_tokens(item_name)
     if not want:
