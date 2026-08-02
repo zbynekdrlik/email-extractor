@@ -194,7 +194,10 @@ def _get_product_ean(item: dict, catalog: list[dict]) -> str | None:
                                    name_map=PRODUCT_EAN_BY_NAME)
 
 
-def _generate_content(order_data: dict, store_ean: str, buyer_name: str) -> str:
+def _generate_content(order_data: dict, store_ean: str, buyer_name: str,
+                       resolved_eans: list[str | None]) -> str:
+    """`resolved_eans` is the per-item EAN, ALREADY resolved once by `build()` — this
+    function never re-runs the catalog lookup."""
     store_name = order_data.get("deliveryLocationName") or \
         f"{order_data.get('partner') or 'KARMEN'} {order_data.get('prevNumber') or ''}"
     hdr = ("HDR" + _pad(SUPPLIER_EAN, 13) + "  "
@@ -209,9 +212,7 @@ def _generate_content(order_data: dict, store_ean: str, buyer_name: str) -> str:
            + _format_date(order_data.get("deliveryDate")) + _pad("", 4) + _pad("", 70))
     lines = [hdr]
     line_no = 0
-    for item in order_data.get("items") or []:
-        catalog = order_data.get("_catalog") or []
-        ean = _get_product_ean(item, catalog)
+    for item, ean in zip(order_data.get("items") or [], resolved_eans, strict=True):
         if not ean:
             continue
         line_no += 1
@@ -250,20 +251,18 @@ def build(order_data: dict, catalog: list[dict]) -> StaticEdi:
     store_ean = get_store_ean(partner, prev_number)
     buyer_name = get_buyer_name(partner)
 
-    od = dict(order_data)
-    od["_catalog"] = catalog
-    content = _generate_content(od, store_ean, buyer_name)
-
     items = order_data.get("items") or []
-    with_ean = [it for it in items if _get_product_ean(it, catalog)]
-    without_ean = [it for it in items if not _get_product_ean(it, catalog)]
+    resolved_eans = [_get_product_ean(it, catalog) for it in items]  # ONE resolve/item
+    content = _generate_content(order_data, store_ean, buyer_name, resolved_eans)
+
+    without_ean = [it for it, ean in zip(items, resolved_eans, strict=True) if not ean]
 
     return StaticEdi(
         content=content,
         filename=_filename(order_data),
         store_ean=store_ean,
         buyer_name=buyer_name,
-        items_with_ean=len(with_ean),
+        items_with_ean=len(items) - len(without_ean),
         items_skipped=len(without_ean),
         skipped_items=[it.get("description") for it in without_ean],
     )
