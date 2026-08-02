@@ -436,3 +436,40 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   [design #128](https://github.com/zbynekdrlik/email-extractor/issues/128#issuecomment-5156188983),
   [review #127](https://github.com/zbynekdrlik/email-extractor/issues/127#issuecomment-5156416200),
   [review #128](https://github.com/zbynekdrlik/email-extractor/issues/128#issuecomment-5156417972).
+
+## #131 — Static orders (Python core): EDI writer parita + reálny korpus (2026-08-02)
+
+- Zistenie: `app/orders/edi.py` je port INÉHO n8n uzla ("ASSEMBLE AND GENERATE EDI" zo
+  "AI auto orders"), nie Static-orders' vlastného `generator` uzla
+  (`O8IYhUESjaWmPMTI`). Riadok-po-riadku porovnanie odhalilo 6 skutočných rozdielov:
+  dátum v HDR z `issueDate` nie `today`, orezanie čísla objednávky sprava (nie zľava),
+  buyer name vs store name ako DVE odlišné polia, vlastný výpočet `storeEAN`
+  (`PARTNER_CONFIG`/`LABAS_STORES`/`KARMEN_CASH_STORES`), diakritika sa MAŽE nie
+  translitrujte, iná konvencia názvu súboru.
+- Nový modul `app/orders/static_edi.py` (samostatný, nie vetva v `edi.py` — rozdiely sú
+  príliš štrukturálne). RED `c5d26bc` → GREEN `d485130`.
+- **Reálny korpus namiesto syntetického:** žiadne úložisko neuchováva skutočne nahraný
+  EDI obsah pre statické objednávky (na rozdiel od AI objednávok, kde `edi_sent` má
+  aspoň hash) a n8n execution history mala len 4 syntetické testovacie behy. Namiesto
+  toho: 12 REÁLNYCH spracovaných e-mailov z Postgres (`messages`,
+  `category='static_orders'`), pokrývajúcich všetkých 4 partnerov, spracovaných cez
+  `static_parse`, overených proti reálnemu `email_events.detail` (12/12 sedí), a
+  spustený SKUTOČNÝ `generator` JS zdroj pod node (nie reimplementácia) pre bajtovo
+  presný "produkčný" výstup. Python `static_edi.py` sedí bajtovo 12/12. Korpus mimo
+  gitu na dev2 (`~/eval-corpus/email-extractor/static-edi`), zapojený do existujúceho
+  `e2e-orders` CI jobu (žiadny nový runner) cez `app/orders/static_edi_corpus_check.py`.
+- **Hĺbkový code review (samostatný subagent) našiel 2 skutočné medzery v presnosti:**
+  (1) `.replace('/', '_')` nahradza v JS len PRVÝ výskyt "/" v čísle objednávky, môj
+  Python nahrádzal VŠETKY — opravené na `.replace("/", "_", 1)`, overené proti
+  reálnemu JS; (2) chýbali 2 "hard-fail" guardy z n8n MAIN sekcie (chýbajúci
+  `prevNumber`, objednávka bez jedinej rozpoznanej položky) — teraz `raise ValueError`
+  presne ako produkčný uzol. Fix `84c6500`.
+- Nasadené v0.9.28 (add-on `e0ac7775_email_extractor`). Overené naživo: DOM verzia
+  "v0.9.28", 0 chýb v konzole, a `static_edi_corpus_check.py` spustený PRIAMO v
+  nasadenom kontajneri proti reálnemu 12-prípadovému korpusu — 12/12 sedí.
+- **Parity-only, žiadny cutover** — `static_edi.py` NIE JE importovaný nikde v živom
+  pipeline (grep-overené v nasadenom kontajneri, 0 zásahov).
+- Design/validácia/review komentáre: [validácia](https://github.com/zbynekdrlik/email-extractor/issues/131#issuecomment-5156638041),
+  [design](https://github.com/zbynekdrlik/email-extractor/issues/131#issuecomment-5156636401),
+  [review](https://github.com/zbynekdrlik/email-extractor/issues/131#issuecomment-5156816711).
+  PR #136 (main..dev), merge `d43e200`.

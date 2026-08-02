@@ -453,3 +453,46 @@ again. That is the point: a changed prompt has not been measured until it has be
   DB query, cleaned up via the API). Never fork for a pure wait — poll via `Monitor`/a
   bounded loop instead, or just accept the Stop-hook-imposed wait; a fork's silence is
   never guaranteed to mean "did nothing."
+- **n8n execution history is NOT a reliable source of real production examples —
+  check it BEFORE assuming it will give you a real corpus (#131).** `search_executions`
+  on the "Static auto orders" workflow (`O8IYhUESjaWmPMTI`) returned only 4 executions
+  TOTAL, all synthetic `example.com`-domain test runs from an earlier investigation —
+  no real production runs were retained at all (execution-data-saving settings prune
+  aggressively). When you need real examples for a corpus, go straight to the
+  add-on's OWN Postgres instead: `messages` (`category=...`, `processed=true`) has the
+  real input text, and — for anything n8n LOGS as it processes (this workflow's own
+  `email_events` table, `stage='uploaded_orion'`) — cross-check your derived data
+  against that logged ground truth before trusting it.
+- **When no store retains the actual REAL output bytes of an n8n Code node (no
+  `edi_sent`-style ledger, no execution history), run the node's OWN VERBATIM JS
+  source under `node` against real input data, instead of trusting a Python
+  reimplementation (#131).** Extract the node's `parameters.jsCode` via
+  `get_workflow_details`, wrap it in `new Function('$', ...)` to mock n8n's `$('Node
+  Name').all()`/`$input.item.json`, and call it directly — this gives byte-exact
+  "production-equivalent" output from the ACTUAL deployed logic, not your own
+  understanding of it. Cross-check the harness's output against whatever ground truth
+  IS logged (e.g. a derived filename vs a real logged filename) before trusting the
+  harness itself. This is the same "run the real node under node" technique
+  `edi_reference.json` already used for a different node — reusable for ANY future
+  n8n Code-node port that needs a byte-exact fixture.
+- **Porting a JS `.replace(needle, replacement)` call (STRING first argument, not a
+  `/g` regex) to Python needs an explicit `count=1` — Python's `str.replace()` with no
+  count replaces ALL occurrences by default, the opposite of JS's single-occurrence
+  default (#131, `generator.js`'s filename builder: `fullOrderNumber.replace('/',
+  '_')` only touches the FIRST '/'; a naive Python `.replace("/", "_")` silently
+  replaced every '/' instead, producing a wrong filename for any order number with 2+
+  slashes).** Same family of gotcha as the earlier `for`-loop-mutating-its-own-index
+  note in this file — a JS built-in's default behavior does not always match its
+  same-named Python counterpart; verify the SPECIFIC semantics (not just the name)
+  before assuming a 1:1 translation, and add a fixture case that actually EXERCISES
+  the edge (a single-occurrence test proves nothing about a multi-occurrence input).
+- **A hand-ported n8n Code node has TWO layers of logic — the pure function(s) (e.g.
+  `generateWincodexOrder`) AND the node's own top-level "MAIN" guard clauses that run
+  before/after calling them.** Porting only the pure function and skipping the guards
+  (`if (!x) throw ...`) is an easy, easy-to-miss omission — deep code review caught it
+  on #131 (a missing `prevNumber` silently produced a fabricated store EAN instead of
+  raising; an order where NOTHING resolved to an EAN silently produced an empty
+  HDR+SUM file instead of raising). When porting a Code node, read the WHOLE node
+  (function definitions AND its `// ===== n8n MAIN =====`-style entry section, if it
+  has one) — not just the function you intend to call — and port every hard-fail
+  guard the real node has, even if your own test corpus never happens to hit it.
