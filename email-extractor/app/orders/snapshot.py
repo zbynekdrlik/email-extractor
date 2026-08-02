@@ -98,12 +98,21 @@ def parse_customers(text: str) -> list[dict]:
 
 
 def _content_hash(catalog: list[dict], customers: list[dict]) -> str:
+    """Order-independent: two logically identical (catalog, customers) pairs must hash
+    the same regardless of the order their rows arrived in. `import_snapshot` sees rows
+    in raw sheet/CSV order; `rebuild_from_overrides` (#127/#128) sees them back out of
+    Postgres sorted by gtin/id — reverting an override (e.g. retiring one right back to
+    what the sheet already had) must be able to land on an EARLIER snapshot's exact
+    hash for `_freeze`'s dedup to reuse it, or every retire would mint a needless new
+    snapshot row even though nothing about the effective content actually changed."""
+    cat_lines = sorted(f'C|{r["gtin"]}|{r["name"]}|{r["alias"]}' for r in catalog)
+    cust_lines = sorted(
+        f'S|{r["ean_edi"]}|{r["name"]}|{",".join(r["emails"])}|'
+        f'{r["city"]}|{r["street"]}|{r["zip"]}' for r in customers)
     h = hashlib.sha256()
-    for r in catalog:
-        h.update(f'C|{r["gtin"]}|{r["name"]}|{r["alias"]}\n'.encode())
-    for r in customers:
-        h.update(f'S|{r["ean_edi"]}|{r["name"]}|{",".join(r["emails"])}|'
-                 f'{r["city"]}|{r["street"]}|{r["zip"]}\n'.encode())
+    for line in cat_lines + cust_lines:
+        h.update(line.encode())
+        h.update(b"\n")
     return h.hexdigest()
 
 
@@ -175,7 +184,13 @@ def rebuild_from_overrides(conn) -> int | None:
 
 
 def latest_snapshot_id(conn) -> int | None:
-    row = conn.execute("SELECT id FROM order_snapshots ORDER BY id DESC LIMIT 1").fetchone()
+    """The CURRENT snapshot — not necessarily the highest id ever inserted. `_freeze`
+    bumps `checked_at` on whichever row it decides represents the content right now,
+    including when it dedup-reuses an OLDER id (content reverted to something an earlier
+    snapshot already had, e.g. retiring a #127/#128 override) — `checked_at` is what
+    actually tracks "current", `id` only tracks "when first seen"."""
+    row = conn.execute(
+        "SELECT id FROM order_snapshots ORDER BY checked_at DESC, id DESC LIMIT 1").fetchone()
     return int(row[0]) if row else None
 
 
