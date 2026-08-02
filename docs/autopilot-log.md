@@ -356,3 +356,28 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   odberatelia), #129 (vypnutie hárku).
 - Design/review komentáre: [design](https://github.com/zbynekdrlik/email-extractor/issues/104#issuecomment-5155849171),
   [review](https://github.com/zbynekdrlik/email-extractor/issues/104#issuecomment-5155952598).
+
+## 2026-08-02 — #68 dokončené, fáza 1 (Python port regexového parsovania, PR #134)
+
+- Faithful 1:1 port `extractor` uzla (n8n workflow "Static auto orders",
+  `O8IYhUESjaWmPMTI`) do `app/orders/static_parse.py` — partner detekcia, číslo
+  objednávky, dátumy, lokalita, 3 rodiny parserov položiek (KARMEN "Vyšlá objednávka",
+  KARMEN_CASH, LABAS). Rovnaký vzťah ako `static_ean.py` má ku `generator`'s
+  `getProductEAN()` — CI-testovaný dôkaz správnosti, **NIE zapojený do živého workera**.
+  RED `tests/test_orders_static_parse.py` (34 testov, syntetické fixtúry) → GREEN `804fa1e`.
+- Kľúčová prekážka pri porte: JS `for`-cyklus s manuálnym `i++` vnútri tela (KARMEN_CASH,
+  LABAS parsery) — Python `for i in range(...)` ignoruje zmenu `i` v tele, takže vyžadovalo
+  preklad na `while i < len(lines):` s explicitným `i += 1`/`i += 2`, aby index presne
+  sledoval JS sémantiku.
+- **STEP 0 zistenie:** ticketov popis väzby "static workflow calls AI auto orders for extra
+  content" je zastaraný — priame čítanie živého workflowu (`get_workflow_details`) ukázalo,
+  že ten uzol (`Call 'AI auto orders'`) je vypnutý (`disabled: true`), mŕtvy koniec bez
+  field-mappingu; skutočný "extra content" mechanizmus je samostatný `Basic LLM Chain`,
+  ktorý AI auto orders vôbec nevolá. Re-pointing NEROBENÝ — nie je čo re-pointovať.
+- Nasadené v0.9.25, overené naživo: modul úspešne beží v nasadenom kontajneri (import +
+  volanie potvrdené cez SSH), 0 chýb v konzole, žiadna regresia na #104's `/znalosti`.
+- Nadväzujúce tickety (fázovanie): #131 (EDI writer parita + reálny korpus), #132
+  (shadow-mode worker, potrebuje #131), #133 (skutočný cutover, potrebuje #132 aj
+  samotný AI-objednávkový cutover).
+- Design/review komentáre: [design](https://github.com/zbynekdrlik/email-extractor/issues/68#issuecomment-5155851542),
+  [review](https://github.com/zbynekdrlik/email-extractor/issues/68#issuecomment-5156057090).

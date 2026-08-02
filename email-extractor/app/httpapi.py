@@ -95,7 +95,8 @@ SKLAD_ACTION = re.compile(r"^/api/orders/question/\d+/(answer|undo)$")
 # SKLAD_PATHS above — wording/gtin/card metadata only, never a mail body or an attachment.
 SKLAD_ZNALOSTI_PAGE = re.compile(r"^/znalosti(/[^/]+)?$")
 SKLAD_ZNALOSTI_API = re.compile(
-    r"^/api/znalosti/(global(/\d+)?|catalog|customers|customer/[^/]+(/\d+)?)$")
+    r"^/api/znalosti/(global(/\d+)?|catalog|customers|customer/[^/]+(/\d+)?"
+    r"|products(/[^/]+)?|clients)$")
 
 
 def sklad_key(secret) -> str:
@@ -644,7 +645,12 @@ def create_app(cfg) -> Flask:
     @app.get("/api/znalosti/customer/<ean>")
     def api_znalosti_customer(ean: str):
         with _db() as c:
-            return jsonify(customer_name=_customer_name(c, ean),
+            # #128: the FIRST matching row when several share this EAN — same fallback
+            # `_customer_name` above already accepts, and the /znalosti/<ean> edit form
+            # only ever addresses one at a time from this page.
+            record = next((r for r in snapshot.customers_for_management(c)
+                          if r["ean_edi"] == ean), None)
+            return jsonify(customer_name=_customer_name(c, ean), record=record,
                            items=memory.list_customer_aliases(c, ean))
 
     @app.post("/api/znalosti/customer/<ean>")
@@ -663,6 +669,86 @@ def create_app(cfg) -> Flask:
     def api_znalosti_customer_delete(ean: str, rid: int):
         with _db() as c:
             ok = memory.delete_item_memory_row(c, rid, ean)
+        return jsonify(ok=True) if ok else (jsonify(error="nenájdené"), 404)
+
+    # ---- /znalosti (#127/#128): direct add/edit/retire of the product cards and
+    # customers themselves, layered as overrides ON TOP of the (still-live, until #129)
+    # sheet read — an override always wins, and is versioned exactly like the sheet
+    # already is (snapshot.rebuild_from_overrides freezes a new snapshot immediately, so
+    # the change is visible on this same page without waiting for the hourly refresh). ----
+
+    @app.get("/api/znalosti/products")
+    def api_znalosti_products():
+        q = _fold((request.args.get("q") or "").strip())
+        with _db() as c:
+            rows = snapshot.catalog_for_management(c)
+        if q:
+            rows = [r for r in rows if q in _fold(r["name"]) or q in _fold(r["gtin"])]
+        rows.sort(key=lambda r: _fold(r["name"]))
+        return jsonify(items=rows[:50])
+
+    @app.post("/api/znalosti/products")
+    def api_znalosti_products_upsert():
+        body = request.get_json(silent=True) or {}
+        gtin = str(body.get("gtin") or "").strip()
+        name = str(body.get("name") or "").strip()
+        if not (gtin and name):
+            return jsonify(error="chýba GTIN alebo názov"), 400
+        with _db() as c:
+            snapshot.upsert_catalog_card(c, gtin, name)
+            snapshot.rebuild_from_overrides(c)
+        return jsonify(ok=True)
+
+    @app.delete("/api/znalosti/products/<gtin>")
+    def api_znalosti_products_retire(gtin: str):
+        with _db() as c:
+            ok = snapshot.retire_catalog_card(c, gtin)
+            if ok:
+                snapshot.rebuild_from_overrides(c)
+        return jsonify(ok=True) if ok else (jsonify(error="nenájdené"), 404)
+
+    @app.get("/api/znalosti/clients")
+    def api_znalosti_clients():
+        q = _fold((request.args.get("q") or "").strip())
+        with _db() as c:
+            rows = snapshot.customers_for_management(c)
+        if q:
+            rows = [r for r in rows if q in _fold(r["name"]) or q in _fold(r["ean_edi"])]
+        rows.sort(key=lambda r: _fold(r["name"]))
+        return jsonify(items=rows[:50])
+
+    def _parse_emails_field(v) -> list[str]:
+        if isinstance(v, list):
+            return [str(e).strip() for e in v if str(e).strip()]
+        return [e.strip() for e in str(v or "").split(",") if e.strip()]
+
+    @app.post("/api/znalosti/clients")
+    def api_znalosti_clients_upsert():
+        body = request.get_json(silent=True) or {}
+        name = str(body.get("name") or "").strip()
+        if not name:
+            return jsonify(error="chýba názov"), 400
+        with _db() as c:
+            rid = snapshot.upsert_customer(
+                c, override_id=body.get("override_id"),
+                orig_ean_edi=body.get("orig_ean_edi"), orig_street=body.get("orig_street"),
+                ean_edi=str(body.get("ean_edi") or "").strip(), name=name,
+                emails=_parse_emails_field(body.get("emails")),
+                city=str(body.get("city") or "").strip(),
+                street=str(body.get("street") or "").strip(),
+                zip_=str(body.get("zip") or "").strip())
+            snapshot.rebuild_from_overrides(c)
+        return jsonify(ok=True, id=rid)
+
+    @app.delete("/api/znalosti/clients")
+    def api_znalosti_clients_retire():
+        body = request.get_json(silent=True) or {}
+        with _db() as c:
+            ok = snapshot.retire_customer(
+                c, override_id=body.get("override_id"),
+                orig_ean_edi=body.get("orig_ean_edi"), orig_street=body.get("orig_street"))
+            if ok:
+                snapshot.rebuild_from_overrides(c)
         return jsonify(ok=True) if ok else (jsonify(error="nenájdené"), 404)
 
     @app.get("/api/orders/spend")
@@ -1173,6 +1259,9 @@ ZNALOSTI_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
  .picked{font-size:13px;color:#1a7f37;margin-top:6px}
  button.add{display:block;width:100%;text-align:center;padding:11px;margin-top:10px;font:inherit;
         border:1px solid #1f6feb;border-radius:10px;background:#ddf4ff;color:#0969da;cursor:pointer}
+ .box>button:not(.add){display:block;width:100%;text-align:center;padding:9px;margin-top:6px;
+        font:inherit;border:1px solid #d0d7de;border-radius:10px;background:#f6f8fa;
+        color:#57606a;cursor:pointer}
  .empty{color:#57606a;padding:6px 2px}
  .who{font-size:13px;color:#57606a;margin-bottom:6px}
 </style></head><body>
@@ -1236,11 +1325,150 @@ function aliasRow(item,onDelete){
   return r;
 }
 
+// #127: direct add/edit/retire of product cards, keyed by GTIN — one form doubles as
+// add (unknown GTIN) and edit (known GTIN); a click on a search result loads it in.
+function productsBox(){
+  const box=el('div','box');
+  box.appendChild(el('h2',null,'Karty výrobkov'));
+  const gtin=el('input');gtin.placeholder='GTIN';
+  const name=el('input');name.placeholder='názov karty';
+  box.appendChild(gtin);box.appendChild(name);
+  const status=el('div','picked','');box.appendChild(status);
+  const list=el('div');
+  async function refresh(q){
+    list.textContent='';
+    const d=await api('/api/znalosti/products'+(q?('?q='+encodeURIComponent(q)):''));
+    if(!d.items.length){list.appendChild(el('div','empty','Zatiaľ nič.'));return}
+    for(const it of d.items){
+      const r=el('div','row');
+      r.appendChild(el('div',null,it.name+'  ('+it.gtin+')'+(it.overridden?' · upravené':'')));
+      const b=el('button',null,'upraviť');
+      b.onclick=()=>{gtin.value=it.gtin;name.value=it.name;status.textContent=''};
+      r.appendChild(b);list.appendChild(r)
+    }
+  }
+  const save=el('button','add','Uložiť (nový GTIN = pridá, existujúci = upraví)');
+  save.onclick=async()=>{
+    if(!gtin.value.trim()||!name.value.trim()){alert('vyplň GTIN aj názov');return}
+    try{await api('/api/znalosti/products',{method:'POST',
+      body:JSON.stringify({gtin:gtin.value.trim(),name:name.value.trim()})});
+      status.textContent='uložené';await refresh(search.value.trim())}
+    catch(e){alert(e.message||'chyba')}
+  };
+  box.appendChild(save);
+  const retire=el('button',null,'Vyradiť kartu s GTIN vyššie');
+  retire.onclick=async()=>{
+    const g=gtin.value.trim();if(!g)return;
+    if(!confirm('Vyradiť kartu '+g+'?'))return;
+    try{await api('/api/znalosti/products/'+encodeURIComponent(g),{method:'DELETE'});
+      gtin.value='';name.value='';status.textContent='vyradené';await refresh(search.value.trim())}
+    catch(e){alert(e.message||'chyba')}
+  };
+  box.appendChild(retire);
+  var search=el('input');search.placeholder='hľadaj kartu (názov alebo GTIN)…';
+  box.appendChild(search);box.appendChild(list);
+  let t=null;search.oninput=()=>{clearTimeout(t);t=setTimeout(()=>refresh(search.value.trim()),200)};
+  refresh('');
+  return box;
+}
+
+// #128: direct add/edit/retire of customers. `editing` tracks the identity the SAVE
+// button targets (null = a brand-new customer); picking a search result fills the form
+// AND the identity, exactly like productsBox does with a bare gtin.
+function clientsBox(){
+  const box=el('div','box');
+  box.appendChild(el('h2',null,'Odberatelia'));
+  const ean=el('input');ean.placeholder='EAN kód EDI';
+  const name=el('input');name.placeholder='názov firmy';
+  const emails=el('input');emails.placeholder='e-maily (čiarkou oddelené)';
+  const city=el('input');city.placeholder='obec';
+  const street=el('input');street.placeholder='ulica';
+  const zip=el('input');zip.placeholder='PSČ';
+  for(const i of [ean,name,emails,city,street,zip])box.appendChild(i);
+  const status=el('div','picked','');box.appendChild(status);
+  let editing=null;
+  function clearForm(){ean.value=name.value=emails.value=city.value=street.value=zip.value='';editing=null}
+  const list=el('div');
+  async function refresh(q){
+    list.textContent='';
+    const d=await api('/api/znalosti/clients'+(q?('?q='+encodeURIComponent(q)):''));
+    if(!d.items.length){list.appendChild(el('div','empty','Zatiaľ nič.'));return}
+    for(const it of d.items){
+      const r=el('div','row');
+      r.appendChild(el('div',null,it.name+'  ('+(it.ean_edi||'bez EAN')+')'+
+        (it.street?(' · '+it.street):'')));
+      const b=el('button',null,'upraviť');
+      b.onclick=()=>{
+        ean.value=it.ean_edi||'';name.value=it.name||'';emails.value=(it.emails||[]).join(', ');
+        city.value=it.city||'';street.value=it.street||'';zip.value=it.zip||'';
+        editing={override_id:it.override_id,orig_ean_edi:it.orig_ean_edi,orig_street:it.orig_street};
+        status.textContent=''
+      };
+      r.appendChild(b);list.appendChild(r)
+    }
+  }
+  const save=el('button','add','Uložiť');
+  save.onclick=async()=>{
+    if(!name.value.trim()){alert('vyplň názov');return}
+    const body={ean_edi:ean.value.trim(),name:name.value.trim(),emails:emails.value.trim(),
+      city:city.value.trim(),street:street.value.trim(),zip:zip.value.trim()};
+    if(editing)Object.assign(body,editing);
+    try{await api('/api/znalosti/clients',{method:'POST',body:JSON.stringify(body)});
+      status.textContent='uložené';await refresh(search.value.trim())}
+    catch(e){alert(e.message||'chyba')}
+  };
+  box.appendChild(save);
+  const retire=el('button',null,'Vyradiť tohto odberateľa');
+  retire.onclick=async()=>{
+    if(!editing){alert('najprv vyber existujúceho odberateľa zo zoznamu');return}
+    if(!confirm('Vyradiť '+(name.value||'tohto odberateľa')+'?'))return;
+    try{await api('/api/znalosti/clients',{method:'DELETE',body:JSON.stringify(editing)});
+      clearForm();status.textContent='vyradené';await refresh(search.value.trim())}
+    catch(e){alert(e.message||'chyba')}
+  };
+  box.appendChild(retire);
+  var search=el('input');search.placeholder='hľadaj odberateľa (názov alebo EAN)…';
+  box.appendChild(search);box.appendChild(list);
+  let t=null;search.oninput=()=>{clearTimeout(t);t=setTimeout(()=>refresh(search.value.trim()),200)};
+  refresh('');
+  return box;
+}
+
+// #128: on the /znalosti/<ean> page, edit THIS customer directly (no search needed —
+// the page already fixes which one). `record` is null only if the ean matches nobody.
+function customerEditBox(record, fallbackName){
+  const box=el('div','box');
+  box.appendChild(el('h2',null,'Upraviť údaje zákazníka'));
+  const ean=el('input');ean.placeholder='EAN kód EDI';ean.value=(record&&record.ean_edi)||EAN;
+  const name=el('input');name.placeholder='názov firmy';
+  name.value=(record&&record.name)||fallbackName||'';
+  const emails=el('input');emails.placeholder='e-maily (čiarkou oddelené)';
+  emails.value=record?(record.emails||[]).join(', '):'';
+  const city=el('input');city.placeholder='obec';city.value=(record&&record.city)||'';
+  const street=el('input');street.placeholder='ulica';street.value=(record&&record.street)||'';
+  const zip=el('input');zip.placeholder='PSČ';zip.value=(record&&record.zip)||'';
+  for(const i of [ean,name,emails,city,street,zip])box.appendChild(i);
+  const b=el('button','add','Uložiť zmeny');
+  b.onclick=async()=>{
+    if(!name.value.trim()){alert('vyplň názov');return}
+    const body={ean_edi:ean.value.trim(),name:name.value.trim(),emails:emails.value.trim(),
+      city:city.value.trim(),street:street.value.trim(),zip:zip.value.trim()};
+    if(record){body.override_id=record.override_id;body.orig_ean_edi=record.orig_ean_edi;
+      body.orig_street=record.orig_street}
+    try{await api('/api/znalosti/clients',{method:'POST',body:JSON.stringify(body)});
+      alert('uložené');location.reload()}
+    catch(e){alert(e.message||'chyba')}
+  };
+  box.appendChild(b);
+  return box;
+}
+
 async function load(){
   const W=document.getElementById('wrap');W.textContent='';
   if(EAN){
     const d=await api('/api/znalosti/customer/'+encodeURIComponent(EAN));
     W.appendChild(el('div','who',(d.customer_name||EAN)+'  ('+EAN+')'));
+    W.appendChild(customerEditBox(d.record,d.customer_name));
     W.appendChild(addForm((wording,gtin,card)=>
       api('/api/znalosti/customer/'+encodeURIComponent(EAN),
          {method:'POST',body:JSON.stringify({wording:wording,gtin:gtin,card:card})}),
@@ -1264,6 +1492,8 @@ async function load(){
     },200)};
     box.appendChild(inp);box.appendChild(cands);
     W.appendChild(box);
+    W.appendChild(productsBox());
+    W.appendChild(clientsBox());
   }
   W.appendChild(el('h2',null,'Globálne priradenia (platia pre každého zákazníka)'));
   W.appendChild(addForm((wording,gtin,card)=>

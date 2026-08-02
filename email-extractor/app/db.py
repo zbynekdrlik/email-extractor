@@ -302,6 +302,42 @@ SCHEMA = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_customer_snapshot_snap ON customer_snapshot(snapshot_id)",
+    # --- #127/#128: direct web curation of product cards + customers, as the sole
+    # manual-edit source layered ON TOP of the (still-live, #129 turns it off) sheet
+    # read. These are NOT snapshotted themselves — they are merged into catalog/
+    # customer rows at freeze time (snapshot.py's `_apply_catalog_overrides`/
+    # `_apply_customer_overrides`), so a manual edit gets the exact same versioning
+    # the sheet already has for free (a new snapshot, old ones stay replayable). ---
+    """
+    CREATE TABLE IF NOT EXISTS catalog_overrides (
+        gtin       TEXT PRIMARY KEY,
+        name       TEXT NOT NULL,
+        retired    BOOLEAN NOT NULL DEFAULT false,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    # Surrogate id, not ean_edi: the sheet legitimately repeats an EAN across branches
+    # and can leave it empty (same comment as customer_snapshot above), and #101 showed
+    # even an e-mail can belong to two customers at once — so ean_edi is not a safe
+    # override identity either. orig_ean_edi/orig_street pin the ORIGINAL sheet row an
+    # override replaces (NULL orig_ean_edi = a brand-new customer, not an edit).
+    """
+    CREATE TABLE IF NOT EXISTS customer_overrides (
+        id           BIGSERIAL PRIMARY KEY,
+        orig_ean_edi TEXT,
+        orig_street  TEXT,
+        ean_edi      TEXT,
+        name         TEXT NOT NULL,
+        emails       TEXT[],
+        city         TEXT,
+        street       TEXT,
+        zip          TEXT,
+        retired      BOOLEAN NOT NULL DEFAULT false,
+        updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_overrides_orig "
+    "ON customer_overrides(orig_ean_edi, orig_street) WHERE orig_ean_edi IS NOT NULL",
     # --- #60: one row per pipeline run, plus the per-item decision trace. The trace is
     # the reason an item matched or did not; today that lives only in the n8n execution,
     # which n8n prunes after ~2 days, so a warehouse complaint can no longer be

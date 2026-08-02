@@ -393,3 +393,15 @@ again. That is the point: a changed prompt has not been measured until it has be
   the SPECIFIC thing that must change instead (e.g.
   `page.wait_for_selector("text=<the deleted item>", state="detached")`), never a generic
   empty-state string that also appears elsewhere on the same page.
+- **Porting an n8n `for`-loop that mutates its own index INSIDE the loop body needs a
+  Python `while`, never `for i in range(...)`** (#68, `static_parse.py` vs. the `extractor`
+  node's `parseKarmenCashItems`/`parseLabasItems`). JS's `for(let i=0;i<len;i++){...i++...}`
+  respects a manual `i++` written inside the body for the NEXT iteration (the loop peeks
+  ahead and consumes an extra line, e.g. a description or an EAN on the following physical
+  line) — Python's `for i in range(len(x))` silently IGNORES any reassignment of `i` inside
+  the body; the next iteration uses the range's own counter regardless. A literal-looking
+  `for i in range(...)` port of such a loop is a real bug (off-by-one item boundaries), not
+  a style choice — translate to `while i < len(x): ...; i += 1 (or += 2 when consuming an
+  extra line)`, mirroring the JS increment exactly. Same class of gotcha applies to ANY
+  future n8n Code-node port in this package (the `generator`/EDI-writer parity work in
+  #131 will very likely hit the same pattern).
