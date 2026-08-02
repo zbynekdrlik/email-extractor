@@ -1173,6 +1173,15 @@ ASK_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
  .empty{color:#57606a;padding:14px 2px}
  .kb{display:block;font-size:13px;color:#57606a;margin-top:8px;text-decoration:none}
  .kb:hover{text-decoration:underline}
+ .slabel{font-size:12px;color:#57606a;margin-top:12px}
+ .search{width:100%;box-sizing:border-box;padding:9px 10px;margin-top:6px;border:1px solid #d0d7de;
+         border-radius:8px;font:inherit}
+ .sres-wrap{margin-top:4px}
+ .sres{padding:10px 12px;border:1px solid #d0d7de;border-radius:8px;margin-top:4px;cursor:pointer;
+       font-size:14px;background:#fff}
+ .sres:hover{background:#ddf4ff}
+ .sres.none{cursor:default;color:#57606a;background:transparent;border-style:dashed}
+ .sres.none:hover{background:transparent}
 </style></head><body>
 <header><h1>&#128230; Otázky skladu</h1><span class="ver" data-testid="version">v__VERSION__</span></header>
 <main id="wrap"><div class="empty">Nahrávam&hellip;</div></main>
@@ -1180,8 +1189,37 @@ ASK_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
 async function api(u,o){const r=await fetch(u,Object.assign({headers:{'Content-Type':'application/json'}},o||{}));
   if(!r.ok){throw new Error((await r.json().catch(()=>({}))).error||('HTTP '+r.status))}return r.json()}
 let render=0;
+// #149: what the warehouse has typed into each open question's catalog search, keyed by
+// question id — the list auto-refreshes every 5s (see setInterval below), and without this
+// the whole card gets rebuilt from scratch mid-typing and wipes what was just typed.
+const searchState={};
 function el(t,cls,txt){const e=document.createElement(t);if(cls)e.className=cls;
   if(txt!==undefined)e.textContent=txt;return e}
+function searchBox(q){
+  const wrap=el('div');
+  const inp=el('input','search');inp.placeholder='hľadaj v celom katalógu (názov karty)…';
+  inp.value=searchState[q.id]||'';
+  const res=el('div','sres-wrap');
+  wrap.appendChild(inp);wrap.appendChild(res);
+  // Same stale-response guard as load()'s `mine=++render`: a slower response for an
+  // earlier keystroke must not overwrite a faster response for a later one.
+  let seq=0;
+  async function run(v){
+    const mine=++seq;
+    if(v.length<2){res.textContent='';return}
+    let d;try{d=await api('/api/znalosti/catalog?q='+encodeURIComponent(v))}catch(e){return}
+    if(mine!==seq)return;      // a later keystroke's response already landed — drop this one
+    res.textContent='';
+    if(!d.items.length){res.appendChild(el('div','sres none','žiadna zhoda'));return}
+    for(const it of d.items){const b=el('div','sres',it.name+'  ('+it.gtin+')');
+      b.onclick=()=>teach(q.id,it.gtin,it.name);res.appendChild(b)}
+  }
+  let t=null;
+  inp.oninput=()=>{searchState[q.id]=inp.value;clearTimeout(t);
+    t=setTimeout(()=>run(inp.value.trim()),200)};
+  if(inp.value.trim().length>=2)run(inp.value.trim());
+  return wrap;
+}
 async function load(){const mine=++render;let d,t;
   try{d=await api('/api/orders/questions');t=await api('/api/orders/taught')}catch(e){return}
   if(mine!==render)return;
@@ -1193,6 +1231,8 @@ async function load(){const mine=++render;let d,t;
     c.appendChild(el('div','why',q.reason||'Ktorý výrobok to je?'));
     for(const cand of (q.candidates||[])){const b=el('button',null,cand.name||cand.gtin);
       b.onclick=()=>teach(q.id,cand.gtin,cand.name||'');c.appendChild(b)}
+    c.appendChild(el('div','slabel','alebo vyhľadaj v celom katalógu:'));
+    c.appendChild(searchBox(q));
     const kb=document.createElement('a');kb.className='kb';kb.textContent='📚 databáza znalostí';
     kb.href='/znalosti/'+encodeURIComponent(q.customer_ean)+'?wording='+encodeURIComponent(q.wording);
     c.appendChild(kb);
@@ -1202,7 +1242,8 @@ async function load(){const mine=++render;let d,t;
       r.appendChild(el('span',null,x.wording+' → '+(x.answer_card||x.answer_gtin)));
       const b=el('button',null,'vrátiť');b.onclick=()=>undo(x.id);r.appendChild(b);W.appendChild(r)}}}
 async function teach(qid,gtin,card){try{await api('/api/orders/question/'+qid+'/answer',
-  {method:'POST',body:JSON.stringify({gtin:gtin,card:card})});await load()}catch(e){alert(e.message||'chyba')}}
+  {method:'POST',body:JSON.stringify({gtin:gtin,card:card})});delete searchState[qid];await load()}
+  catch(e){alert(e.message||'chyba')}}
 async function undo(qid){try{await api('/api/orders/question/'+qid+'/undo',{method:'POST'});
   await load()}catch(e){alert(e.message||'chyba')}}
 load();setInterval(load,5000);

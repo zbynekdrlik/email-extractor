@@ -21,7 +21,7 @@ import logging
 
 from psycopg.types.json import Json
 
-from . import memory
+from . import memory, snapshot
 
 log = logging.getLogger("orders.teach")
 
@@ -118,7 +118,8 @@ def recently_taught(conn, limit: int = 20) -> list[dict]:
 
 
 def answer(conn, qid: int, gtin: str, card: str, by: str = "") -> dict:
-    """Settle a question and teach it. The card must be one that was offered.
+    """Settle a question and teach it. The card must be one that was offered, OR one that
+    exists in the current catalog (#149 — the warehouse's full-catalog search on /otazky).
 
     Teaches on TWO layers (#102): the existing per-customer mapping (unchanged — it is what
     makes THIS customer's answer instant), and a GLOBAL one for every other customer who ever
@@ -133,8 +134,10 @@ def answer(conn, qid: int, gtin: str, card: str, by: str = "") -> dict:
     if q["status"] != "open":
         raise AlreadyAnswered(
             f"question {qid} was answered on {q['answered_at']} with {q['answer_gtin']}")
-    if str(gtin) not in [str(c.get("gtin")) for c in q["candidates"]]:
-        raise NotACandidate(f"{gtin} was not offered for {q['wording']!r}")
+    offered = {str(c.get("gtin")) for c in q["candidates"]}
+    if str(gtin) not in offered and str(gtin) not in snapshot.catalog_gtin_set(conn):
+        raise NotACandidate(
+            f"{gtin} was not offered for {q['wording']!r} and is not in the catalog")
 
     memory.remember(conn, q["customer_ean"], q["wording"], str(gtin), card or "",
                     _today(conn), source="human")

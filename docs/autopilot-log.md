@@ -607,3 +607,32 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   `.claude/rules/orders-corpus.md` for reuse `[no-design: docs-only playbook entry]`.
 - Evidence/close comment:
   https://github.com/zbynekdrlik/email-extractor/issues/145#issuecomment-5159624370
+
+## #147 — Nástenka: v ponuke kariet chýba práve navrhnutý kandidát
+
+- Root cause: `pipeline._run` scores+truncates `item_cands` to top-6 BEFORE the model
+  call (it's the model's INPUT), so the model's own answer can rank below the cutoff —
+  the SYNONYMS rule in `match._score()` scored every "Zavin" card at 75 vs. "Jablková
+  štrúdla"'s plain substring match at 65, silently dropping the exact card the engine
+  proposed. Design comment (root cause + approach + rejected alt):
+  https://github.com/zbynekdrlik/email-extractor/issues/147#issuecomment-5159660009
+- RED: `tests/test_orders_pipeline.py::test_the_stored_question_always_offers_the_engines_own_candidate`
+  (`5f482bd`) reproduces the live bug with a 9-card catalog (6 Zavin distractors + the
+  real "Jablková/Maková štrúdla" cards).
+- GREEN (`64d74d8`): `match.proposed_gtin()` + `match.candidates_for_question()` — the
+  engine's own proposed candidate (from `decision.gtin` or the raw
+  `decision.trace["llm"]["gtin"]` for a rejected `unmatched`) always heads the stored
+  question's candidate list. Review finding fixed in the same PR (`3e2d414`):
+  `proposed_gtin` crashed on an explicit `trace["llm"]=None` (present key, None value —
+  `dict.get(key, default)` doesn't fall back on that).
+- PR #148, merged `3ce0097`. Main CI green (test + e2e-orders + build), 30-email corpus
+  `--require-all` green (only pre-existing `known_defect: "#120"` failures).
+- Deployed v0.9.32. **Code fix alone only changes NEWLY asked questions** — the 4
+  existing OPEN questions from `order_runs.id=33` still had their `candidates` stored
+  under the old buggy logic. Narrow data-repair (same pattern as #145): direct
+  `UPDATE order_questions SET candidates = ...` on ids 9/12/10 only (id 8 was already
+  correct), no reprocess, no model call, `held_orders`/`edi_sent` untouched (verified:
+  3 rows still `held`, `edi_sent` count still 2, all 4 questions still `status='open'`).
+  Verified live via Playwright: all 4 questions now show their proposed candidate as
+  the first button. Evidence:
+  https://github.com/zbynekdrlik/email-extractor/issues/147#issuecomment-5159785104

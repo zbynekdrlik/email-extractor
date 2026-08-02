@@ -214,6 +214,53 @@ def test_the_warehouse_answers_from_the_link_with_no_login(live_server, pg, page
     assert console == [], f"browser console not clean: {console}"
 
 
+def test_the_warehouse_can_search_the_whole_catalog_when_no_candidate_fits(live_server, pg, page):
+    """#149: the warehouse's real complaint — none of the 6 offered candidates is the right
+    card ("chlebík granč"). The warehouse must be able to search the WHOLE catalog straight
+    from the question card and pick any of it; that pick must teach exactly like a candidate
+    click (same endpoint, same release, same memory write) — and no /sklad request may ever
+    reach the mail archive."""
+    from app.httpapi import sklad_key
+    from app.orders import memory, snapshot, teach
+
+    snapshot.import_snapshot(
+        pg,
+        "GTIN,Názov,doplnok\n"
+        "G1,Multicereálny kváskový chlieb 500g,\n"
+        "G2,Jankové buchty malinové 80g,\n"
+        "G3,Chlebík granč 400g,\n",     # the actually-correct card — never offered as a candidate
+        "Názov organizácie,EAN kód EDI,E-mail\nVýberofka Levoča,2000000000042,vyber@x.sk\n")
+    ean = "2000000000042"
+    qid = teach.ask(pg, message_id="e-granc", customer_ean=ean, customer_name="Výberofka Levoča",
+                    wording="chlebík granč", quantity=1, unit="ks",
+                    candidates=[{"gtin": "G1", "name": "Multicereálny kváskový chlieb 500g"},
+                                {"gtin": "G2", "name": "Jankové buchty malinové 80g"}],
+                    delivery_date="08.08.2026", reason="istota 57 % je pod hranicou 70 %")
+    assert qid
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/otazky")
+
+    backend_ver = page.request.get(f"{live_server}/version").text().strip()
+    assert backend_ver in page.locator('[data-testid="version"]').inner_text()
+
+    page.wait_for_selector("text=chlebík granč")
+    # neither offered candidate is the answer — the search box finds the real card, with its
+    # weight visible in the name so a variant can be told apart from another
+    page.fill('input[placeholder^="hľadaj v celom katalógu"]', "granč")
+    page.wait_for_selector("text=Chlebík granč 400g")
+    page.click("text=Chlebík granč 400g")
+
+    # settled exactly like a candidate click: leaves the open list, taught for this customer
+    page.wait_for_selector("text=Naposledy naučené")
+    assert memory.resolve(pg, ean, "chlebík granč").gtin == "G3"
+
+    # the search endpoint it used, and the answer endpoint, reach nothing beyond the questions
+    assert page.request.get(f"{live_server}/api/messages").status == 401
+    assert console == [], f"browser console not clean: {console}"
+
+
 def test_the_warehouse_link_can_reach_the_knowledge_base_and_teach_a_wording(live_server, pg, page):
     """#104: /znalosti is reachable from the same signed link as /otazky and lets the
     warehouse teach a wording->card assignment DIRECTLY, without a pending question."""
