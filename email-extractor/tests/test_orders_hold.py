@@ -10,10 +10,14 @@ pins the four behaviours the issue names explicitly:
   * the deadline path ships what matched, exactly as it always has
   * a late answer after the deadline already shipped never uploads a second document
 """
+import os
+
 import pytest
 
 from app.config import Config
 from app.orders import hold, pipeline, snapshot, teach
+
+PG_DSN = os.environ.get("PG_TEST_DSN")
 
 CATALOG_CSV = (
     "GTIN,Sklad,Názov,doplnok\n"
@@ -84,7 +88,10 @@ def env(pg):
 
 
 def _cfg(**kw):
-    base = dict(pg_dsn="", data_dir="/tmp", orders_shadow=False,
+    # #118: hold.release_for_question opens its OWN separate connection (cfg.pg_dsn) to
+    # lock the held_orders row — must be a real DSN, not "", or that connect() attempt
+    # fails / hits the wrong database.
+    base = dict(pg_dsn=PG_DSN, data_dir="/tmp", orders_shadow=False,
                 odoo_url="", odoo_api_key="", orders_channel_id=0)
     base.update(kw)
     return Config(**base)
@@ -242,6 +249,93 @@ def test_the_edi_ledger_itself_refuses_a_repeated_release_not_just_the_status_fl
                               redecide=False)
     assert second["status"] == "ok", "claim_send refused the duplicate content"
     assert len(rec.uploads) == 1, "no second document reached ORION"
+
+
+# --- #118: two near-simultaneous answers must release the order exactly once ---
+
+def test_two_concurrent_answers_to_sibling_questions_release_it_exactly_once(pg, env):
+    """Proven with two REAL, separate connections racing on the actual row lock — not a
+    mock. Both sibling questions are answered first, then two threads each call
+    `hold.release_for_question` for their OWN qid at (as close as possible to) the same
+    instant. The FOR UPDATE serialization must let exactly ONE of them actually ship."""
+    import threading
+    import time
+
+    import psycopg
+
+    answers = _answers(
+        extra_item={"name": "šiška", "quantity": 3, "unit": "ks", "sourceQuote": "3x šiška"},
+        extra_answer={"gtin": "NO_MATCH", "confidence": 0.1, "matchedCatalogName": "",
+                     "reason": "nič sa nezhoduje"})
+    mail = dict(MAIL, combined_text=MAIL["combined_text"] + ", 3x šiška")
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), mail, env, client=ScriptedClient(answers),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "held"
+    qs = {q["wording"]: q["id"] for q in teach.open_questions(pg)}
+    assert set(qs) == {"torta", "šiška"}
+
+    teach.answer(pg, qs["torta"], gtin="TOR", card="Torta čokoládová", by="sklad")
+    teach.answer(pg, qs["šiška"], gtin="G50", card="Rožok štandart 50g", by="sklad")
+
+    slow_uploads = []
+    upload_lock = threading.Lock()
+
+    def slow_upload(cfg, name, content):
+        time.sleep(0.3)          # widen the window a missing lock would let a racer exploit
+        with upload_lock:
+            slow_uploads.append((name, content))
+        return True
+
+    barrier = threading.Barrier(2)
+    results: dict[str, list] = {}
+
+    def release(key, qid):
+        conn = psycopg.connect(PG_DSN, autocommit=True)
+        try:
+            barrier.wait(timeout=5)
+            results[key] = hold.release_for_question(
+                conn, _cfg(), qid, upload=slow_upload, post=lambda *a, **k: None)
+        finally:
+            conn.close()
+
+    t1 = threading.Thread(target=release, args=("a", qs["torta"]))
+    t2 = threading.Thread(target=release, args=("b", qs["šiška"]))
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+
+    released_total = len(results.get("a") or []) + len(results.get("b") or [])
+    assert released_total == 1, \
+        f"exactly one of the two racing answers may release it, got {released_total}"
+    assert len(slow_uploads) == 1, "exactly one document must actually reach ORION"
+    assert pg.execute("SELECT status FROM held_orders").fetchone() == ("released",)
+
+
+# --- #117: redecide must also gate on a real "today", not an unfiltered history ---
+
+def test_redecide_passes_as_of_so_future_dated_history_never_decides_it(pg):
+    """`hold._redecide` used to call `memory.resolve` with no `as_of` at all — an unanimous
+    but FUTURE-dated shipment (one recorded for a delivery date after "today") could
+    silently decide a re-check that runs on release, exactly the gap #117 filed one level
+    below `pipeline.py`'s own (already-`as_of`-gated) first pass."""
+    from app.orders import memory
+    from app.orders.match import Decision
+
+    for day in ("2026-08-10", "2026-08-11", "2026-08-12"):
+        memory.remember(pg, "2000000000001", "rozok buduci", "G50", "Rožok štandart 50g",
+                        delivered_on=day, source="ship")
+    d = Decision(item_name="rozok buduci", gtin=None, card="", confidence=0.1,
+                rule="unmatched", note="", review=False, trace={}, quantity=5, unit="ks")
+
+    before = hold._redecide(pg, "2000000000001", [d], as_of="2026-08-05")
+    assert before[0].rule == "unmatched", \
+        "as_of before the shipments — the future-dated history must not decide it"
+
+    after = hold._redecide(pg, "2000000000001", [d], as_of="2026-08-15")
+    assert after[0].rule == "history_sure", \
+        "once as_of is past the shipments, the same unanimous history may decide it"
 
 
 # --- the deadline itself ----------------------------------------------------

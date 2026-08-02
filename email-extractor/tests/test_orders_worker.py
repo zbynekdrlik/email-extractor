@@ -4,6 +4,8 @@ The worker runs inside the add-on next to the IMAP poller. Until the engine opti
 flipped, n8n owns the pipeline — so the default must be provably inert, and shadow mode
 must be provably read-only (it may not claim a message n8n still has to process).
 """
+from datetime import UTC, datetime
+
 import pytest
 
 from app.config import Config
@@ -239,3 +241,50 @@ def test_shadow_only_looks_at_recent_mail(pg):
     assert seen == ["fresh"]
     # and the ancient one is never picked up on a later tick either
     assert worker.tick(pg, cfg, pipeline=lambda *a, **k: {"status": "ok", "items": []}) == 0
+
+
+# --- #117: the production claim path must feed a real "today" downstream --
+
+def test_claim_sets_today_to_a_real_date_not_blank(pg):
+    """`memory.resolve`'s `as_of` date fence is only real when the worker actually hands it
+    a date — this pins the exact production gap #117 filed: `_as_message` used to build the
+    message dict WITHOUT a "today" key at all, so `as_of` was always "" downstream."""
+    _msg(pg)
+    row = worker._claim(pg)
+    assert row is not None
+    today = datetime.now(UTC).date().isoformat()
+    assert row["today"] == today, \
+        "the claimed message must carry today's real ISO date, not '' or a stale value"
+
+
+def test_peek_for_shadow_also_sets_today(pg):
+    _snapshot(pg)
+    _msg(pg, mid="fresh")
+    row = worker._peek_for_shadow(pg)
+    assert row is not None
+    assert row["today"] == datetime.now(UTC).date().isoformat()
+
+
+def test_the_production_claim_path_feeds_a_real_today_into_memorys_date_fence(pg):
+    """End-to-end proof, not just a field check: a message claimed through the REAL
+    production path (`worker._claim`, no test ever hand-setting "today") must, when its
+    "today" is passed on to `memory.resolve`, actually exclude a shipment dated in the
+    future relative to right now — the exact behaviour #117 says was silently a no-op in
+    production because `as_of` was always `""`."""
+    from datetime import date, timedelta
+
+    from app.orders import memory
+
+    _msg(pg)
+    ean = "2000000000864"
+    for i in range(3):
+        memory.remember(pg, ean, "rozok buduci", "G1", "Rožok budúci",
+                        delivered_on=(date.today() + timedelta(days=1 + i)).isoformat(),
+                        source="ship")
+    message = worker._claim(pg)
+    assert message is not None
+    # unfiltered, the future-dated deliveries WOULD decide it
+    assert memory.resolve(pg, ean, "rozok buduci").gtin == "G1"
+    # gated by the real, production-supplied "today", they must not
+    assert memory.resolve(pg, ean, "rozok buduci", as_of=message["today"]) is None, \
+        "a shipment dated after today must never decide today's order"
