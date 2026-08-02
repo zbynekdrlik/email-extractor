@@ -176,6 +176,17 @@ def test_the_warehouse_link_opens_ONLY_the_questions_surface():
     assert r.status_code == 302 and "/otazky" in r.headers["Location"]
 
 
+def test_the_warehouse_link_can_also_see_held_orders():
+    """#93 review finding on PR #116: /api/orders/held was missing from SKLAD_PATHS, so
+    the sklad role got a silent 401 and the /otazky held-orders panel never rendered for
+    the warehouse users it was built for. It must at least reach the route (a DB error
+    against the fake DSN here is fine — the point is the auth gate, not the query)."""
+    from app import httpapi
+    _, c = _sklad_client()
+    c.get("/sklad/" + httpapi.sklad_key("t"))
+    assert c.get("/api/orders/held").status_code != 401
+
+
 def test_a_login_is_remembered_so_nobody_retypes_the_password():
     app, c = _sklad_client()
     assert app.permanent_session_lifetime.days >= 365

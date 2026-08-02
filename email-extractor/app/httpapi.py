@@ -75,8 +75,12 @@ def _persistent_secret(data_dir: Path) -> bytes:
 SKLAD_ROLE = "sklad"
 # What the warehouse link may reach — the questions surface, nothing else. It is an
 # UNAUTHENTICATED link, so this list is the whole security boundary: never widen it to
-# anything that reads mails, files or spend.
-SKLAD_PATHS = ("/otazky", "/api/orders/questions", "/api/orders/taught")
+# anything that reads mails, files or spend. `/api/orders/held` (#93) is order metadata of
+# the same shape as questions/taught (customer name, delivery date, question ids) — no mail
+# body, no attachment, no spend — and IS meant to be sklad-visible: the `/otazky` panel
+# fetches it so the warehouse sees what it is holding up, review finding on PR #116 (the
+# panel silently 401'd and never rendered for the sklad role without this).
+SKLAD_PATHS = ("/otazky", "/api/orders/questions", "/api/orders/taught", "/api/orders/held")
 SKLAD_ACTION = re.compile(r"^/api/orders/question/\d+/(answer|undo)$")
 
 

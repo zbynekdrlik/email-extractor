@@ -221,8 +221,18 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
         # matched part now and the taught line later would write two ORION documents for
         # one delivery day (#81.1). Once the delivery date itself arrives there is no more
         # time to wait, so the order ships exactly as it always has (see hold.release_due).
+        #
+        # `order_question_ids` was built from EACH item's OWN rule, before the merge above —
+        # a line that started "unmatched" and got rescued by `apply_siblings` (the same
+        # wording resolved elsewhere in this order) now carries a settled rule (`sibling`),
+        # not one in ASK_THE_WAREHOUSE. Trusting the pre-merge list alone would hold an
+        # order that is already fully, correctly resolved (review finding on PR #116) —
+        # exactly the case `apply_siblings` exists to ship immediately. So the ask-list
+        # gates WHETHER a question exists at all; whether the order still needs one is
+        # re-checked against the POST-merge decisions' rules.
+        still_asking = any(d.rule in ASK_THE_WAREHOUSE for d in decisions)
         held_id = None
-        if (not shadow and matched and not is_change and order_question_ids
+        if (not shadow and matched and not is_change and order_question_ids and still_asking
                 and not hold.is_past_deadline(order.get("deliveryDate", ""), today)):
             held_id = hold.place(conn, message_id=message.get("message_id", ""),
                                  matched=matched, order=order, decisions=decisions,

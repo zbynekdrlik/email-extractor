@@ -100,6 +100,41 @@ def _hold_one_order(pg, env):
     return rec, qid
 
 
+# --- a question about a line that gets RESCUED must not hold the rest of the order ------
+
+def test_a_sibling_rescued_line_does_not_hold_an_otherwise_complete_order(pg, env):
+    """Review finding on PR #116: the hold decision used to be gated on the PRE-merge,
+    per-item question list. When "torta" appears twice in one order and the model
+    resolves it confidently once and unconfidently the other time (real, documented model
+    non-determinism — `match.apply_siblings`'s own CDR Lipová 6 / ČSB incident), the
+    sibling rescue leaves the order fully, correctly resolved. It must ship immediately,
+    not hold on a question that no longer decides anything."""
+    mail = dict(MAIL, combined_text="na 04.08.2026 prosím 2x torta, 3x torta")
+    extract_answer = {
+        "senderName": "Sklad", "senderEmail": "sklad@pekaren.sk",
+        "companyName": "Pekáreň Testovacia s.r.o.", "isChangeRequest": False, "notes": "",
+        "orders": [{"orderNumber": "", "deliveryDate": "04.08.2026", "recipientGroup": "",
+                    "items": [{"name": "torta", "quantity": 2, "unit": "ks",
+                               "sourceQuote": "2x torta"},
+                              {"name": "torta", "quantity": 3, "unit": "ks",
+                               "sourceQuote": "3x torta"}]}],
+    }
+    answers = [extract_answer, {"ean_edi": "2000000000001", "confidence": 0.95},
+              {"gtin": "TOR", "confidence": 0.9, "matchedCatalogName": "", "reason": ""},
+              {"gtin": "NO_MATCH", "confidence": 0.1, "matchedCatalogName": "",
+               "reason": "nič sa nezhoduje"}]
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), mail, env, client=ScriptedClient(answers),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "ok", "sibling rescue already resolved everything — must ship"
+    assert len(rec.uploads) == 1
+    assert rec.uploads[0][1].count("LIN") == 1, "both torta lines merge into one card line"
+    assert pg.execute("SELECT count(*) FROM held_orders").fetchone()[0] == 0
+    # the (now moot) question the unconfident pass raised still exists — harmless, it still
+    # teaches the wording for next time regardless of this order shipping without it
+    assert len(teach.open_questions(pg)) == 1
+
+
 # --- 1. nothing ships until answered ---------------------------------------
 
 def test_a_held_order_uploads_nothing_until_answered(pg, env):
