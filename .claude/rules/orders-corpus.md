@@ -323,3 +323,55 @@ again. That is the point: a changed prompt has not been measured until it has be
   (`ln -s . email-extractor/email-extractor`), push, then `rm` it immediately — this makes the
   hook's root-relative path resolve correctly through the symlink without touching the real
   file layout or git history.
+- **A downstream `If` node condition matching against `$json.error` sees only the TAIL of a
+  long Code-node thrown message, never the start (#47, 2026-08-02).** n8n truncates a Code
+  node's thrown `Error(...)` before it reaches the item that flows into a later node — a
+  condition like `.includes('<phrase from the message START>')` silently NEVER fires, with
+  no error of its own (the branch just never takes the true path). This is the SAME
+  truncation the earlier `#93`/PR #116 note above already flagged for human-readable review
+  comments ("n8n keeps only the tail of long Code-node error messages") — it also applies to
+  MACHINE condition-matching, which is easy to miss since nothing errors, the condition just
+  quietly evaluates false. Fix: match a phrase from the message's END (verify empirically —
+  `test_workflow` + `get_execution` on a real run showed exactly how much survives, ~100-150
+  chars). Caught by the STATIC AUTO ORDERS `extractor` guard's own message: `'Príloha je
+  FOTKA — automat... Môže to byť objednávka aj vratka/doklad: otvor dashboard(...), pozri
+  fotku a vybav ručne.'` — matching on `'Príloha je FOTKA'` (the start) never fired; matching
+  on `'pozri fotku a vybav ručne'` (the tail) did.
+- **`test_workflow` + `prepare_test_pin_data` safely dry-runs a MULTI-BRANCH workflow change
+  before `publish_workflow` — credentialed/HTTP/trigger nodes are simulated, everything else
+  (Code, If, Switch) executes for REAL, so wiring/routing bugs surface with zero risk to
+  production data (#47).** `prepare_test_pin_data` lists every node needing pin data — supply
+  it for ALL of them (even ones a specific test path won't reach; the tool pins them
+  workflow-wide, not conditionally) or the test errors on a missing pin. A node that consumes
+  BINARY data (e.g. `extractFromFile`) needs a `binary` SIBLING key next to `json` in its pin
+  item — `{"json": {...}, "binary": {"data": {"data": "<base64>", "mimeType": "...",
+  "fileName": "...", "fileExtension": "..."}}}` — the tool's own description only mentions
+  the `json` wrapper, but binary-consuming nodes throw ("expects... binary file 'data'... but
+  none was found") without it. Inspect results with `get_execution(includeData:true,
+  nodeNames:[...])` on the returned `executionId` — the per-node `runData` shows exactly which
+  output index (true/false) each `If`/`Switch` took, which is how the truncation bug above was
+  actually caught (a re-run test proved the guard silently fell through).
+- **`setNodeParameter` cannot descend into an ARRAY element nested inside a filter/condition
+  object** (`update_workflow` op `type: "setNodeParameter"`, path
+  `/conditions/conditions/0/rightValue"` → `"cannot descend into non-object at
+  '/conditions/conditions'"`, #47) — this is a NEW concrete failure of the SAME shape the
+  `#51` gotcha above already warns about for `jsonBody`. `updateNodeParameters` with
+  `replace: true` and the FULL parameters object is the reliable fix (as that gotcha already
+  recommends) — don't reach for `setNodeParameter` on anything inside an `If`/`Filter` node's
+  `conditions.conditions[]` array.
+- **The disabled `Call 'AI auto orders'` node inside "Static auto orders"'s error branch is a
+  DEAD END, not a reusable AI-fallback hook (#47 investigation).** It looks like an
+  unfinished attempt to route error-branch items into the sibling "AI auto orders" workflow
+  (`wlORIhkVZISCdZNmBTM4Z`), but that workflow's own trigger (`Triggered by Dispatcher`)
+  IGNORES whatever item invoked it and independently claims the next `category='ai_orders'`
+  row from Postgres (`FOR UPDATE SKIP LOCKED`) — wiring a real item into it would silently
+  process an UNRELATED queued order. It also has zero vision/image capability (its 3 LLM
+  chains read `combinedText` only; `attachments: []` is hardcoded). Don't try to re-enable it
+  without first re-architecting its trigger to accept the passed item — a future ticket
+  needing an AI-fallback-from-static-parser path should build fresh, not resurrect this node.
+- **This n8n instance has exactly ONE accessible project** (`search_projects` →
+  `6Y0BjZ0htnxliu0C`, "Marek Drlik <drlik.marek@gmail.com>", personal; `teamProjectsEnabled:
+  false`) — every credential (`list_credentials`) and every workflow seen so far lives here,
+  so a NEW node needing a credential (Postgres, OpenAI, any `httpHeaderAuth`) can always
+  reuse an existing credential from `list_credentials` without a project-scoping concern;
+  there is nowhere else it could live.
