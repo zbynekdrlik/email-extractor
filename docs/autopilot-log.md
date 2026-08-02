@@ -636,3 +636,29 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   Verified live via Playwright: all 4 questions now show their proposed candidate as
   the first button. Evidence:
   https://github.com/zbynekdrlik/email-extractor/issues/147#issuecomment-5159785104
+
+## 2026-08-02 — #149 (PR #150)
+
+- **#149** (Nástenka: pri otázke musí ísť vybrať ľubovoľný produkt z celého katalógu):
+  `/otazky` (ASK_HTML) gets a per-question live-search box under the 6 quick candidates
+  (#147 ordering untouched) — reuses the ALREADY sklad-allowed `/api/znalosti/catalog`
+  search endpoint, no `SKLAD_PATHS`/`SKLAD_ZNALOSTI_API` allowlist change.
+- RED: `tests/test_orders_teach.py::test_an_answer_outside_the_candidates_but_in_the_full_catalog_is_accepted`
+  + `tests/test_e2e.py::test_the_warehouse_can_search_the_whole_catalog_when_no_candidate_fits`
+  (`556640a`).
+- GREEN (`6531901`): `teach.answer()` accepts a gtin either offered as a candidate OR
+  present in the current catalog snapshot (`snapshot.catalog_gtin_set`, new — same raw
+  source `/api/znalosti/catalog` already reads, so anything search offers is answerable).
+  A search pick teaches/releases/records exactly like a candidate click (same
+  `/api/orders/question/<id>/answer` endpoint).
+- Deep review (`a75b2ee`): 0 Critical/Important, 4 Minor — fixed the stale-response race
+  in the search box's `run()` (mirrors `load()`'s `render` guard) + documented that
+  `catalog_gtin_set`/search read the RAW (non-override-merged) snapshot, same as
+  `/api/znalosti/catalog` already did before this PR (pre-existing, not introduced here).
+- PR #150, merged `ff95d42`. Main CI green (test + e2e-orders 30-email corpus
+  `--require-all` + build). Deployed v0.9.33.
+- Verified live via Playwright on the exact issue #149 case ("chlebík granč", question
+  id 12, `Výberofka Levoča`): typed "chlieb" in its search box, got 24 real catalog
+  matches with weight in the name (e.g. "Multicereálny kváskový chlieb 500g"); zero
+  console errors. Left the question untouched — confirmed still `status='open'` in DB
+  afterward (no answer/reprocess/model call triggered).

@@ -262,6 +262,15 @@ again. That is the point: a changed prompt has not been measured until it has be
   `SKLAD_PATHS`). The security bar for adding a path: order METADATA only (customer name/
   EAN, delivery date, question ids, candidates) — never a mail body, an attachment, or spend
   data (that boundary is the whole point of `SKLAD_PATHS` existing).
+- **Before widening `SKLAD_PATHS`/`SKLAD_ZNALOSTI_API` for a new `/otazky` feature, check
+  whether an ALREADY-allowed endpoint already returns what you need (#149).** A new full-
+  catalog search box on `/otazky` needed "search by name, get gtin+name back" — exactly what
+  `/api/znalosti/catalog` (built earlier for the `/znalosti` page, matched by the existing
+  `SKLAD_ZNALOSTI_API` regex) already does. Reusing it meant the allowlist needed ZERO
+  changes for the new feature, and `teach.answer()`'s broadened validation
+  (`snapshot.catalog_gtin_set`) could read the exact same data source, so nothing the search
+  offers can ever be rejected as "not answerable." Widening the allowlist is for when no
+  existing path fits — check the existing surface first.
 - **A `history.json`/`taught.json` seeding change is NOT always free offline, even though
   it never touches a prompt (#83, PR #121).** `pipeline._run` passes `recalled` (from
   `memory.resolve`) into the per-item MODEL prompt (`_product_input`) as a hint even for
