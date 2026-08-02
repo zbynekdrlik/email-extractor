@@ -154,6 +154,34 @@ def test_an_answer_outside_the_offered_candidates_is_refused(pg):
         teach.answer(pg, qid, gtin="ROZ", card="Rožok štandart 50g", by="sklad")
 
 
+def test_an_answer_outside_the_candidates_but_in_the_full_catalog_is_accepted(pg):
+    """#149: none of the 6 offered candidates may be the right card — the warehouse must be
+    able to search the WHOLE catalog (here: 127 real cards) and answer with any of them. A
+    gtin in the current catalog snapshot, even though `_ask()`'s two candidates never
+    included it, must be accepted exactly like a candidate click — same teach, same release."""
+    from app.orders import snapshot
+    snapshot.import_snapshot(
+        pg, "GTIN,Názov,doplnok\nSLI50,Šiška džemová 50g,\nSLI90,Šiška džemová 90g,\n"
+            "ROZ,Rožok štandart 50g,\n",
+        "Názov organizácie,EAN kód EDI,E-mail\nZákazník A,2000000000001,a@x.sk\n")
+    qid = _ask(pg)   # candidates only offer SLI50/SLI90 — ROZ is the searched-for card
+    q = teach.answer(pg, qid, gtin="ROZ", card="Rožok štandart 50g", by="sklad")
+    assert q["status"] == "answered" and q["answer_gtin"] == "ROZ"
+    assert memory.resolve(pg, EAN, "Šiška").gtin == "ROZ"
+
+
+def test_an_answer_neither_a_candidate_nor_in_the_catalog_is_still_refused(pg):
+    """The broadened check must not become "accept anything" — a gtin that is in neither the
+    offered candidates NOR the current catalog snapshot stays refused."""
+    from app.orders import snapshot
+    snapshot.import_snapshot(
+        pg, "GTIN,Názov,doplnok\nSLI50,Šiška džemová 50g,\nSLI90,Šiška džemová 90g,\n",
+        "Názov organizácie,EAN kód EDI,E-mail\nZákazník A,2000000000001,a@x.sk\n")
+    qid = _ask(pg)
+    with pytest.raises(teach.NotACandidate):
+        teach.answer(pg, qid, gtin="NOPE", card="Neexistujúca karta", by="sklad")
+
+
 def test_an_answer_also_teaches_the_wording_globally(pg):
     """#102: "Šiška" is a product name, not one customer's private word — the SAME answer
     must resolve it for a DIFFERENT customer with no further asking."""
