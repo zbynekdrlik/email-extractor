@@ -1,152 +1,155 @@
-"""Reporting to Odoo + the event timeline (#65).
+"""Reporting to Odoo + the event timeline (#65, shortened #139).
 
-The report is the warehouse's only view of what the automat did. Two properties are
-non-negotiable and both are asserted as properties, not as wording:
+The Odoo message is deliberately short (#139 — 6 messages for one e-mail was read on the
+phone as "a lot of orders failed"): exactly ONE message per processed e-mail, headline
+only, and a link to the warehouse's nástenka for anything that needs a human. Two
+properties are non-negotiable and both are asserted as properties, not as wording:
 
-1. **Nothing is silently dropped** — every item that did NOT reach the EDI file appears
-   in the message, and every item that passed on a weaker rule is named with its reason.
-2. **A partial order says so in the HEADER** — an incomplete order still ships (user
-   decision 2026-07-30, after the warehouse retyped 11-14 items because of one), so the
-   missing items must be impossible to overlook.
+1. **Nothing is silently dropped** — every unresolved order/question is still COUNTED in
+   the message, and the link routes to where the full detail lives.
+2. **No item-level / technical detail leaks into Odoo** — no item names, no tracebacks, no
+   run ids, no JSON. `build_summary` cannot even receive those (it only takes aggregate
+   counts), so this is structural, not a wording choice.
 """
 from app.orders import report
 
 
-def _decision(name, gtin, card="Karta", rule="llm_sure", review=False, note=""):
-    return {"name": name, "quantity": 10, "unit": "ks", "gtin": gtin, "card": card,
-            "rule": rule, "review": review, "note": note or f"rozhodlo {rule}"}
+def _order(status="ok", delivery_date="04.08.2026", item_count=2, missing_count=0,
+          reject_reason=""):
+    return {"status": status, "delivery_date": delivery_date, "item_count": item_count,
+            "missing_count": missing_count, "reject_reason": reject_reason}
 
 
-def _result(**kw):
-    base = {
-        "customer": {"name": "Pekáreň Testovacia s.r.o.", "ean_edi": "2000000000001"},
-        "delivery_date": "04.08.2026",
-        "order_number": "",
-        "items": [_decision("rožok", "G1", "Rožok štandart 50g")],
-        "unverified": [],
-        "is_change_request": False,
-        "notes": "",
-        "edi_filename": "ORDER_000001_20260804_120000000.txt",
-        "shipped": True,
-    }
-    base.update(kw)
-    return base
+# --- one message, the headline -------------------------------------------
+
+def test_a_clean_run_is_short_and_carries_no_link():
+    html = report.build_summary("Pekáreň Testovacia s.r.o.", [_order()], new_questions=0,
+                                link="")
+    assert "Pekáreň Testovacia" in html
+    assert "nástenke" not in html.lower()
+    assert "dashboard" not in html.lower()
 
 
-# --- nothing is dropped ---------------------------------------------------
-
-def test_every_item_that_did_not_ship_appears_in_the_message():
-    html = report.build(_result(items=[
-        _decision("rožok", "G1"),
-        _decision("torta", None, card="", rule="unmatched", note="istota 41 % je pod 70 %"),
-        _decision("chlieb", None, card="", rule="unmatched", note="gramáž nesúhlasí"),
-    ]))
-    assert "torta" in html and "chlieb" in html
-    assert "41" in html and "gramáž" in html, "the REASON must travel with the item"
+def test_a_clean_run_names_what_arrived():
+    html = report.build_summary("Pekáreň Testovacia s.r.o.",
+                                [_order(delivery_date="04.08.2026", item_count=3)])
+    assert "1" in html and "04.08.2026" in html
+    assert "3" in html
 
 
-def test_a_partial_order_names_the_missing_items_in_the_header():
-    """One unmatched item used to kill the whole document; now the order ships and the
-    gap must be at the very top of the message, not at the bottom."""
-    html = report.build(_result(items=[
-        _decision("rožok", "G1"),
-        _decision("torta", None, card="", rule="unmatched", note="nie je v katalógu"),
-    ]))
-    head, tail = html[:len(html) // 2], html[len(html) // 2:]
-    assert "torta" in head, "the missing item must be in the first half of the message"
-    assert "NEÚPLNÁ" in html.upper()
-    assert "rožok" in tail or "rožok" in head
+# --- (c) a link appears whenever anything is unresolved --------------------
+
+def test_a_held_order_gets_the_link():
+    html = report.build_summary("Pekáreň X", [_order(status="held", item_count=2)],
+                                link="http://46.224.130.35:8099/sklad/abc123")
+    assert "http://46.224.130.35:8099/sklad/abc123" in html
+    assert "čaká" in html.lower()
 
 
-def test_items_that_passed_on_a_weaker_rule_are_each_named_with_the_reason():
-    html = report.build(_result(items=[
-        _decision("vianočka", "G2", rule="llm_borderline", review=True,
-                  note="istota 73 % (pod 85 %)"),
-        _decision("slimák 130g", "G3", rule="unique_card", review=True,
-                  note="gramáž objednávky 130 g vs karta 90 g"),
-        _decision("dánske", "G4", rule="history_weight", review=True,
-                  note="odoslané podľa histórie (4x)"),
-        _decision("rožok", "G5", rule="sibling", review=True,
-                  note="tá istá položka bola inde spárovaná"),
-    ]))
-    for wording in ("vianočka", "slimák 130g", "dánske", "rožok"):
-        assert wording in html
-    for reason in ("73", "130 g", "histórie", "inde spárovaná"):
-        assert reason in html
+def test_a_partial_order_gets_the_link():
+    html = report.build_summary("Pekáreň X",
+                                [_order(status="partial", item_count=3, missing_count=1)],
+                                link="http://x/sklad/k")
+    assert "http://x/sklad/k" in html
+    assert "neúplných" in html.lower() or "neúplná" in html.lower()
 
 
-def test_unverified_items_are_reported_too():
-    """An item the model claimed but the email does not prove never ships — the warehouse
-    adds it by hand, so it must be in the message."""
-    html = report.build(_result(unverified=[{"name": "zákusok", "quantity": 3, "unit": "ks"}]))
-    assert "zákusok" in html
+def test_a_partial_order_names_how_many_items_are_missing_in_total():
+    """`missing_count` is collected per order — it must actually be used, not just carried
+    around unread. Uses distinctive numbers (30 + 7 = 37) so the assertion cannot pass by
+    coincidentally matching a digit inside an HTML entity code (e.g. `&#65039;`)."""
+    html = report.build_summary(
+        "Pekáreň X",
+        [_order(status="partial", item_count=50, missing_count=30),
+         _order(status="partial", item_count=40, missing_count=7)],
+        link="http://x/sklad/k")
+    assert "37" in html, "30 + 7 missing items across both partial orders"
 
 
-def test_a_clean_order_does_not_cry_wolf():
-    html = report.build(_result())
-    assert "NEÚPLNÁ" not in html.upper()
-    assert "prekontroluj" not in html.lower()
+def test_new_questions_get_the_link_even_when_every_order_shipped():
+    html = report.build_summary("Pekáreň X", [_order(status="ok")], new_questions=2,
+                                link="http://x/sklad/k")
+    assert "http://x/sklad/k" in html
+    assert "2" in html
 
 
-# --- refusals ------------------------------------------------------------
-
-def test_a_change_request_explains_which_orion_order_to_fix_by_hand():
-    """Deliberately not automated (decision 2026-07-29): the automat must not create a
-    second order, so it tells the warehouse exactly which file to look for."""
-    html = report.build(_result(shipped=False, is_change_request=True,
-                                reject_reason="Email je zmena už zadanej objednávky",
-                                change_prefix="ORDER_000001_20260804_"))
-    assert "ORDER_000001_20260804_" in html
-    assert "ručne" in html.lower()
+def test_a_review_or_error_order_gets_the_link():
+    html = report.build_summary(
+        "Pekáreň X",
+        [_order(status="review", item_count=0, reject_reason="Zákazník nebol nájdený")],
+        link="http://x/sklad/k")
+    assert "http://x/sklad/k" in html
+    assert "Zákazník nebol nájdený" in html
 
 
-def test_an_unknown_customer_is_stated_plainly():
-    html = report.build(_result(shipped=False, customer={"name": "", "ean_edi": ""},
-                                reject_reason="Zákazník nebol nájdený"))
-    assert "nebol nájdený" in html.lower()
+def test_unverified_items_are_still_counted_and_get_the_link():
+    """The AGEL-incident phantom-item safeguard (extract.py's `unverified`) must survive
+    the shortening — a model-claimed item the e-mail text does not prove must remain
+    visible, even though the shortened message no longer lists it by name."""
+    html = report.build_summary("Pekáreň X", [_order(status="ok")], unverified_count=2,
+                                link="http://x/sklad/k")
+    assert "http://x/sklad/k" in html
+    assert "2" in html
 
 
-def test_the_notes_from_the_email_are_carried_over():
-    html = report.build(_result(notes="šofér vyzdvihne vo štvrtok ráno"))
-    assert "šofér vyzdvihne" in html
+def test_no_unverified_items_never_mentions_them():
+    html = report.build_summary("Pekáreň X", [_order(status="ok")], unverified_count=0,
+                                link="http://x/sklad/k")
+    assert "overiť" not in html.lower()
+    assert "http://x/sklad/k" not in html
 
 
-# --- the new-question message (#102) --------------------------------------
-
-def _question(**kw):
-    base = dict(customer_name="Pekáreň Testovacia s.r.o.", wording="Twister", quantity=2,
-               unit="ks", delivery_date="08.08.2026", reason="neznáme znenie",
-               candidates=[{"gtin": "VIA", "name": "Vianočka 400g"},
-                          {"gtin": "SLI", "name": "Slimák kakaový 90g"}])
-    base.update(kw)
-    return base
+def test_no_link_configured_still_says_something_is_unresolved():
+    """Nothing may be silently hidden even when dashboard_base_url is unset (#139) — the
+    message must still say a human is needed, just without a clickable link."""
+    html = report.build_summary("Pekáreň X", [_order(status="held")], link="")
+    assert "http" not in html
+    assert "dashboard" in html.lower() or "otvor" in html.lower()
 
 
-def test_a_new_question_names_the_wording_and_customer():
-    html = report.build_question(_question())
-    assert "Twister" in html and "Pekáreň Testovacia" in html
-    assert "2" in html and "ks" in html
+# --- (b) a clean success never shows the link -------------------------------
+
+def test_a_fully_shipped_multi_order_run_has_no_link():
+    html = report.build_summary(
+        "Pekáreň X", [_order(status="ok", delivery_date="04.08.2026"),
+                      _order(status="ok", delivery_date="05.08.2026")],
+        new_questions=0, link="http://x/sklad/k")
+    assert "http://x/sklad/k" not in html
+    assert "nástenke" not in html.lower()
 
 
-def test_a_new_question_lists_its_candidates():
-    html = report.build_question(_question())
-    assert "Vianočka 400g" in html and "Slimák kakaový 90g" in html
+# --- (d) no item-level / technical detail ever reaches Odoo -----------------
+
+def test_build_summary_cannot_leak_item_names_or_traces():
+    """The function only takes aggregate counts — no items list, no trace, no JSON — so
+    nothing item-level can appear in the message body by construction."""
+    html = report.build_summary(
+        "Pekáreň X",
+        [_order(status="error", reject_reason="Odoslanie do ORIONu zlyhalo: OSError('x')")])
+    assert "Traceback" not in html
+    assert '"trace"' not in html
+    assert "run_id" not in html.lower()
 
 
-def test_a_new_question_says_the_answer_applies_to_every_customer():
-    html = report.build_question(_question())
-    assert "všetkých zákazníkov" in html.lower()
+# --- the warehouse link -----------------------------------------------------
+
+def test_sklad_link_is_empty_when_dashboard_base_url_is_unset():
+    class Cfg:
+        dashboard_base_url = ""
+        secret_key = "s"
+        data_dir = "/tmp"
+    assert report.sklad_link(Cfg()) == ""
 
 
-def test_a_new_question_is_html_safe_against_a_quoted_wording():
-    html = report.build_question(_question(wording='Chlieb "special"'))
-    assert "<script" not in html.lower()
-    assert "&quot;" in html or "&#34;" in html
-
-
-def test_a_new_question_without_candidates_still_renders():
-    html = report.build_question(_question(candidates=[]))
-    assert "Twister" in html
+def test_sklad_link_builds_from_dashboard_base_url_not_public_base_url():
+    class Cfg:
+        dashboard_base_url = "http://46.224.130.35:8099"
+        public_base_url = "http://e0ac7775-email-extractor:8099"
+        secret_key = "s"
+        data_dir = "/tmp"
+    link = report.sklad_link(Cfg())
+    assert link.startswith("http://46.224.130.35:8099/sklad/")
+    assert "e0ac7775" not in link
 
 
 # --- delivery ------------------------------------------------------------

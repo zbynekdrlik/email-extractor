@@ -16,10 +16,8 @@ Dashboard (session login):
 """
 from __future__ import annotations
 
-import hashlib
 import hmac
 import logging
-import os
 import re
 import threading
 import time
@@ -32,7 +30,7 @@ from flask import Flask, abort, jsonify, redirect, request, send_file, session
 from psycopg.types.json import Json
 from werkzeug.exceptions import HTTPException
 
-from . import __version__, db
+from . import __version__, db, linkutil
 from .db import MAX_UID_ATTEMPTS
 from .orders import memory, snapshot
 from .store import message_dir
@@ -65,21 +63,11 @@ def _fold(s: str) -> str:
                    if unicodedata.category(c) != "Mn")
 
 
-def _persistent_secret(data_dir: Path) -> bytes:
-    """Stable Flask session key when secret_key is unset: persist one on the
-    data volume so sessions survive restarts (instead of a per-process random
-    key that logs everyone out on every restart)."""
-    f = data_dir / ".session_secret"
-    try:
-        if f.exists():
-            return f.read_bytes()
-        data_dir.mkdir(parents=True, exist_ok=True)
-        s = os.urandom(32)
-        f.write_bytes(s)
-        return s
-    except OSError:
-        return os.urandom(32)   # read-only fs fallback: ephemeral key
-
+# The Flask session secret + the /sklad/<key> derivation both live in `linkutil` (#139) —
+# the order worker's background thread mints the SAME link with no Flask request at all,
+# so the derivation must not be duplicated here.
+_persistent_secret = linkutil.persistent_secret
+sklad_key = linkutil.sklad_key
 
 SKLAD_ROLE = "sklad"
 # What the warehouse link may reach — the questions surface, nothing else. It is an
@@ -97,14 +85,6 @@ SKLAD_ZNALOSTI_PAGE = re.compile(r"^/znalosti(/[^/]+)?$")
 SKLAD_ZNALOSTI_API = re.compile(
     r"^/api/znalosti/(global(/\d+)?|catalog|customers|customer/[^/]+(/\d+)?"
     r"|products(/[^/]+)?|clients)$")
-
-
-def sklad_key(secret) -> str:
-    """The warehouse link's key: derived from the install's session secret, so it is stable
-    across restarts (the link can be bookmarked) and different on every install."""
-    if isinstance(secret, str):
-        secret = secret.encode()
-    return hmac.new(secret, b"sklad-link-v1", hashlib.sha256).hexdigest()[:32]
 
 
 def create_app(cfg) -> Flask:

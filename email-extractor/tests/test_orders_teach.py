@@ -293,7 +293,10 @@ def test_an_unmatched_line_becomes_a_question_for_the_warehouse(pg):
 
 def test_a_new_question_also_reaches_odoo(pg):
     """#102 point 1: the warehouse reads Odoo, not always the dashboard, so a genuinely NEW
-    question must ALSO be posted there — not just written to order_questions."""
+    question must ALSO be counted into the Odoo summary — not just written to
+    order_questions. #139: the WORDING itself no longer appears in Odoo (that item-level
+    detail moved to the linked /otazky page) — only the fact that a new question exists,
+    plus the link to go answer it."""
     from app.config import Config
     from app.orders import pipeline, snapshot
 
@@ -327,7 +330,10 @@ def test_a_new_question_also_reaches_odoo(pg):
                  orion_host="")
     pipeline.run(pg, cfg, mail, sid, client=Client(), upload=lambda *a, **k: None,
                  post=lambda c, html, **kw: posted.append(html))
-    assert any("jankove buchty" in p for p in posted), "the question must reach Odoo"
+    assert len(posted) == 1, "one processed e-mail must post exactly one Odoo message (#139)"
+    assert "jankove buchty" not in posted[0], \
+        "the wording itself is item-level detail — it belongs on /otazky, not in Odoo"
+    assert "1" in posted[0], "the new question must still be COUNTED in the summary"
 
 
 def test_a_taught_wording_resolves_for_a_different_customer_with_no_model_call(pg):

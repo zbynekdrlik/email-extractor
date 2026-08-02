@@ -1,15 +1,15 @@
-"""Reporting: the Odoo message and the event timeline (#65).
+"""Reporting: the Odoo message and the event timeline (#65, shortened #139).
 
-The message is the warehouse's only view of what the automat did, so two things are
-structural rather than cosmetic:
-
-- **Nothing is dropped silently.** Every item that did not reach the EDI file is listed
-  with the reason it did not, and every item that passed on a weaker rule (borderline
-  confidence, only-card-of-its-kind, history overriding the weight, a sibling line) is
-  named with what decided it.
-- **A partial order says so at the TOP.** An incomplete order still ships (user decision
-  2026-07-30, after the warehouse retyped 11-14 items because one item failed), so the
-  gap must be impossible to overlook.
+**Exactly ONE message per processed e-mail (#139).** The old shape posted one message per
+order AND one per new warehouse question — a single e-mail with 5 delivery dates and 4
+questions produced 6 separate Odoo messages within 3 seconds, read on the phone as "a lot
+of orders failed". `build_summary` replaces that: one short headline for the whole e-mail,
+counted by outcome, with a link to the warehouse's nástenka (`/sklad/<key>`) whenever
+anything needs a human. Item-level detail — names, traces, JSON, run ids — never reaches
+Odoo at all; it lives on the linked page. Nothing is silently dropped by shortening: every
+unresolved order and every open question is still COUNTED here, and the linked page is
+where it is actually resolved (`pipeline.py` is what accumulates the counts and posts
+exactly once per run — see its docstring).
 
 Delivery is Odoo's `discuss.channel/message_post` with `body_is_html` — `mail.message/
 create` posts without notifying anyone.
@@ -23,142 +23,121 @@ from html import escape
 
 from psycopg.types.json import Json
 
+from .. import linkutil
+
 log = logging.getLogger("orders.report")
 
 WORKFLOW = "ai_orders"
 TIMEOUT = 30
 
-# Rules that ship the item but deserve a human glance, with the heading they appear under.
-FLAGGED_RULES = {
-    "llm_borderline": "Prešlo na hranici istoty — prosím prekontrolujte",
-    "unique_card": "Prešlo ako jediný produkt toho druhu v katalógu — prekontrolujte gramáž",
-    "history_weight": "Prešlo podľa histórie dodávok, hoci gramáž nesúhlasí",
-    "history": "Prešlo podľa histórie dodávok",
-    "sibling": "Prešlo podľa zhodnej položky v tom istom maile",
-    "alias_exact_weight": "Prešlo podľa aliasu karty (alias obsahuje gramáž)",
-    "alias_customer": "Prešlo podľa aliasu karty, ktorý menuje zákazníka",
-}
+STATUS_ICON = {"ok": "&#9989;", "partial": "&#9888;&#65039;", "held": "&#8987;",
+               "review": "&#10071;", "error": "&#128721;"}
+STATUS_LABEL = {"ok": "nahraté do ORIONu", "partial": "neúplných (chýba časť položiek)",
+                "held": "čaká na odpoveď skladu", "review": "treba zadať ručne",
+                "error": "zlyhalo pri odosielaní"}
+# Orders in these states are the reason a warehouse action is needed — everything else
+# (a clean "ok") never needs the link.
+NEEDS_ACTION = ("partial", "held", "review", "error")
 
 
-def _item_line(item: dict, with_reason: bool = True) -> str:
-    card = item.get("card") or ""
-    head = escape(str(item.get("name") or "(bez názvu)"))
-    if card:
-        head += " &rarr; " + escape(str(card))
-    qty = item.get("quantity")
-    if qty is not None:
-        head += f' ({escape(str(qty))} {escape(str(item.get("unit") or "ks"))})'
-    if with_reason and item.get("note"):
-        head += " &mdash; " + escape(" ".join(str(item["note"]).split())[:220])
-    return "&bull; " + head
+def sklad_link(cfg) -> str:
+    """The warehouse's `/sklad/<key>` link, built with no HTTP request (the order worker
+    runs on its own thread) — see `linkutil.sklad_url`'s docstring for why this is NOT
+    `cfg.public_base_url`. Returns "" when `dashboard_base_url` is unset."""
+    return linkutil.sklad_url(cfg)
 
 
-def _section(title: str, lines: list[str]) -> str:
-    if not lines:
-        return ""
-    return f"<p><b>{title}:</b><br>" + "<br>".join(lines) + "</p>"
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    """Slovak has three plural forms for a small count: 1 / 2-4 / 0,5+."""
+    if n == 1:
+        return one
+    if 2 <= n <= 4:
+        return few
+    return many
 
 
-def build(result: dict) -> str:
-    """The Odoo message body (HTML, Slovak)."""
-    customer = result.get("customer") or {}
-    items = result.get("items") or []
-    unverified = result.get("unverified") or []
-    shipped = bool(result.get("shipped"))
+def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0,
+                  unverified_count: int = 0, link: str = "") -> str:
+    """The ONE Odoo message for a whole processed e-mail.
 
-    missing = [i for i in items if not i.get("gtin")]
-    ok = [i for i in items if i.get("gtin")]
-    partial = shipped and bool(missing)
+    `orders` is a list of AGGREGATE per-order summaries — never raw decisions or items:
+    `{"status": "ok"|"partial"|"held"|"review"|"error", "delivery_date": str,
+    "item_count": int, "missing_count": int, "reject_reason": str}`. That shape is what
+    makes it structurally impossible for an item name, a trace or a run id to leak into
+    Odoo — the function simply never receives them.
 
-    parts: list[str] = []
-
-    # --- the header carries the bad news first ---------------------------
-    if shipped:
-        head = "Objednávka odoslaná do ORIONu"
-        if partial:
-            head = "⚠️ NEÚPLNÁ objednávka odoslaná do ORIONu"
-        parts.append(f"<h3>{head}</h3>")
-    else:
-        parts.append("<h3>⚠️ Objednávka NEBOLA odoslaná — treba ju zadať ručne</h3>")
-
-    if partial:
-        parts.append(
-            "<p><b>Tieto položky v odoslanej objednávke CHÝBAJÚ</b> — treba ich do ORIONu "
-            "doplniť ručne:<br>"
-            + "<br>".join(_item_line(i) for i in missing) + "</p>")
-    if not shipped:
-        reason = result.get("reject_reason") or ""
-        if reason:
-            parts.append(f"<p><b>Dôvod:</b> {escape(reason)}</p>")
-        if result.get("is_change_request"):
-            prefix = result.get("change_prefix") or ""
-            hint = ("Automat objednávku zámerne NEvytvoril — inak by v ORIONe vznikla "
-                    "objednávka navyše. Oprav ju prosím <b>ručne</b> v ORIONe")
-            if prefix:
-                hint += (f": pôvodný súbor od nás začína <b>{escape(prefix)}</b>")
-            parts.append(f"<p>{hint}.</p>")
-        if missing:
-            parts.append(_section("Položky, ktoré sa nedali priradiť",
-                                  [_item_line(i) for i in missing]))
-
-    # --- what the customer is / what was ordered ------------------------
-    meta = [f"<b>Zákazník:</b> {escape(customer.get('name') or '(nenájdený)')}"]
-    if customer.get("ean_edi"):
-        meta.append(f"<b>EAN:</b> {escape(str(customer['ean_edi']))}")
-    if result.get("delivery_date"):
-        meta.append(f"<b>Dátum dodania:</b> {escape(str(result['delivery_date']))}")
-    if result.get("order_number"):
-        meta.append(f"<b>Číslo objednávky:</b> {escape(str(result['order_number']))}")
-    if result.get("edi_filename"):
-        meta.append(f"<b>Súbor:</b> {escape(str(result['edi_filename']))}")
-    parts.append("<p>" + " &nbsp;|&nbsp; ".join(meta) + "</p>")
-
-    if ok:
-        parts.append(_section("Odoslané položky",
-                              [_item_line(i, with_reason=False) for i in ok]))
-
-    # --- everything that needs a human glance ---------------------------
-    for rule, title in FLAGGED_RULES.items():
-        hits = [i for i in items if i.get("rule") == rule and i.get("review")]
-        parts.append(_section(title, [_item_line(i) for i in hits]))
-
-    if unverified:
-        parts.append(_section(
-            "Položky, ktoré sa nedali overiť v texte e-mailu (treba doplniť ručne)",
-            ["&bull; " + escape(f'{i.get("name", "?")} ({i.get("quantity", "?")} '
-                                f'{i.get("unit", "ks")})') for i in unverified]))
-
-    if result.get("notes"):
-        parts.append(f"<p><b>Poznámky z e-mailu:</b> {escape(str(result['notes']))}</p>")
-
-    return "".join(p for p in parts if p)
-
-
-def build_question(q: dict) -> str:
-    """The Odoo message for a wording the engine could not place on its own (#102).
-
-    Posted ONCE per genuinely NEW (customer, wording) question — the warehouse reads Odoo, not
-    always the dashboard, so this is what makes the question reachable without opening
-    `/otazky`. Whoever answers it (from the dashboard's one-click UI — this message never
-    parses free text) teaches the wording for every future customer, not just this one.
+    `unverified_count` (#139 review finding) is the AGEL-incident phantom-item safeguard
+    (`extract.py`'s `unverified` — a model-claimed item the e-mail text does not prove) —
+    it is an E-MAIL-level count, not per-order (the same list is shared by every order
+    derived from one e-mail), so the caller sums it ONCE, not per order.
     """
-    parts = [f"<h3>❓ Neznáme znenie objednávky — {escape(q.get('customer_name') or '?')}</h3>"]
-    qty, unit = q.get("quantity"), q.get("unit") or "ks"
-    qty_txt = f" ({escape(str(qty))} {escape(str(unit))})" if qty is not None else ""
-    parts.append(f"<p><b>Znenie:</b> „{escape(str(q.get('wording') or ''))}“{qty_txt}</p>")
-    if q.get("delivery_date"):
-        parts.append(f"<p><b>Dátum dodania:</b> {escape(str(q['delivery_date']))}</p>")
-    if q.get("reason"):
-        parts.append(f"<p><b>Dôvod:</b> {escape(str(q['reason']))}</p>")
-    cands = q.get("candidates") or []
-    if cands:
-        parts.append("<p><b>Kandidáti:</b><br>" +
-                     "<br>".join("&bull; " + escape(str(c.get("name", "")))
-                                for c in cands) + "</p>")
-    parts.append(
-        "<p>Odpovedzte prosím jedným klikom na dashboarde extraktora (/otazky, alebo cez "
-        "podpísaný odkaz pre sklad) — odpoveď potom platí pre <b>všetkých zákazníkov</b>, "
-        "kým ju niekto nevráti späť.</p>")
+    orders = orders or []
+    counts: dict[str, int] = {}
+    total_items = 0
+    total_missing = 0
+    dates: list[str] = []
+    reasons: list[str] = []
+    for o in orders:
+        status = o.get("status") or "review"
+        counts[status] = counts.get(status, 0) + 1
+        total_items += int(o.get("item_count") or 0)
+        if status == "partial":
+            total_missing += int(o.get("missing_count") or 0)
+        d = str(o.get("delivery_date") or "")
+        if d and d not in dates:
+            dates.append(d)
+        reason = str(o.get("reject_reason") or "")
+        if reason and reason not in reasons:
+            reasons.append(reason)
+
+    who = escape(customer_name or "(nezistený zákazník)")
+    head = f"<b>{who}</b>"
+    n = len(orders)
+    if n:
+        head += (f" &mdash; {n} " + _plural(n, "objednávka", "objednávky", "objednávok"))
+        if total_items:
+            head += (f", {total_items} " +
+                     _plural(total_items, "položka", "položky", "položiek"))
+        if dates:
+            head += ", termín " + ", ".join(escape(d) for d in dates)
+    parts = [f"<p>{head}</p>"]
+
+    bits = []
+    for status in ("ok", "partial", "held", "review", "error"):
+        if not counts.get(status):
+            continue
+        if status == "partial" and total_missing:
+            bits.append(f"{STATUS_ICON['partial']} {counts['partial']} neúplných "
+                        f"(spolu chýba {total_missing} " +
+                        _plural(total_missing, "položka", "položky", "položiek") + ")")
+        else:
+            bits.append(f"{STATUS_ICON[status]} {counts[status]} {STATUS_LABEL[status]}")
+    if new_questions:
+        bits.append(f"&#10067; {new_questions} " +
+                    _plural(new_questions, "nová otázka", "nové otázky", "nových otázok") +
+                    " pre sklad")
+    if unverified_count:
+        bits.append(f"&#128269; {unverified_count} " +
+                    _plural(unverified_count, "položka sa nedala overiť v texte",
+                            "položky sa nedali overiť v texte",
+                            "položiek sa nedalo overiť v texte"))
+    if bits:
+        parts.append("<p>" + " &nbsp;|&nbsp; ".join(bits) + "</p>")
+
+    # Short, already-human reasons (never a traceback/JSON — those never reach this
+    # function) — capped, so a pathological number of distinct failures still stays short.
+    for reason in reasons[:3]:
+        parts.append(f"<p>{escape(reason)}</p>")
+
+    needs_link = (bool(new_questions) or bool(unverified_count)
+                 or any(counts.get(s) for s in NEEDS_ACTION))
+    if needs_link:
+        if link:
+            parts.append(f'<p>&#128203; Rieš na nástenke: '
+                         f'<a href="{escape(link)}">{escape(link)}</a></p>')
+        else:
+            parts.append("<p>&#128203; Treba doriešiť — otvor dashboard extraktora.</p>")
+
     return "".join(parts)
 
 

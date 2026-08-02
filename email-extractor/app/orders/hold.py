@@ -166,11 +166,12 @@ def _redecide(conn, customer_ean: str, decisions: list, as_of: str = "") -> list
     return merge_same_card(out) if changed else decisions
 
 
-def _ship(conn, cfg, row: dict, upload, post, redecide: bool, as_of: str = "") -> tuple[str, dict]:
+def _ship(conn, cfg, row: dict, upload, post, redecide: bool,
+         as_of: str = "") -> tuple[str, dict, str]:
     """Re-decide (if asked) against fresh memory and ship, via the SAME `_ship_one` /
     `edi.claim_send` ledger the live pipeline already ships through. Returns (status,
-    preview) — never touches `held_orders.status`; callers decide what a returned status
-    means for the row."""
+    preview, reject_reason) — never touches `held_orders.status`; callers decide what a
+    returned status means for the row."""
     from . import customer as customer_mod
     from . import report
     from . import upload as upload_mod
@@ -207,7 +208,7 @@ def _do_release(conn, cfg, row: dict, release_reason: str, upload, post,
     and directly by tests proving the ledger is the real duplicate-upload backstop.
     `release_for_question` uses `_release_locked` below instead (#118): it needs to
     SERIALIZE this same decision per held-order id, which `_do_release` alone cannot do."""
-    status, preview = _ship(conn, cfg, row, upload, post, redecide, as_of=as_of)
+    status, preview, _reason = _ship(conn, cfg, row, upload, post, redecide, as_of=as_of)
     if status == "error":
         # The upload itself failed (e.g. ORION unreachable) — `_ship_one` already released
         # the ledger claim, so this is genuinely retryable. Leave the row 'held': the next
@@ -287,8 +288,8 @@ def _release_locked(conn, cfg, hid: int, upload, post) -> dict | None:
         row = get(conn, hid)
         if not row:
             return None
-        status, preview = _ship(conn, cfg, row, upload, post, redecide=True,
-                                as_of=str(_db_today(conn)))
+        status, preview, _reason = _ship(conn, cfg, row, upload, post, redecide=True,
+                                         as_of=str(_db_today(conn)))
         if status == "error":
             log.warning(
                 "release of held order #%s (answered) for %s / %s did not ship — staying "
