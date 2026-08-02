@@ -129,10 +129,36 @@ def test_the_result_carries_the_per_item_trace_for_order_items(pg, env):
     assert first["gtin"] and first["rule"] and json.dumps(first["trace"])
 
 
-def test_an_unmatched_item_still_ships_the_rest_and_says_so(pg, env):
+def test_an_unmatched_item_with_time_left_holds_the_whole_order(pg, env):
+    """#93: MAIL's delivery date (04.08.2026) is still ahead of its "today" (2026-07-30),
+    so an unresolved line no longer ships the matched part now and the taught line later —
+    that write TWO ORION documents for one delivery day (#81.1). It holds instead."""
     rec = Recorder()
     answers = _answers(items=(("rožok 50g", "G50", 0.95), ("torta", None, 0.2)))
     result = pipeline.run(pg, _cfg(), MAIL, env, client=ScriptedClient(answers),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "held"
+    assert rec.uploads == [], "nothing ships while the order is held"
+    # the question for the warehouse still reaches Odoo (#102) — that IS the visibility
+    assert len(rec.posts) == 1
+    assert "torta" in rec.posts[0] and "Neznáme znenie" in rec.posts[0]
+    # nothing is learnt from an order that never shipped
+    assert pg.execute("SELECT count(*) FROM item_memory").fetchone()[0] == 0
+    held = pg.execute(
+        "SELECT customer_ean, delivery_date, status FROM held_orders").fetchone()
+    assert held == ("2000000000001", "04.08.2026", "held")
+    # the message stays unprocessed while it waits
+    row = pg.execute("SELECT processed FROM messages WHERE message_id='m1'").fetchone()
+    assert row == (False,)
+
+
+def test_an_unmatched_item_at_the_deadline_still_ships_the_rest_and_says_so(pg, env):
+    """Once the delivery date itself has arrived there is no more time to wait — the order
+    ships exactly as it always did, missing line named in the report."""
+    rec = Recorder()
+    answers = _answers(items=(("rožok 50g", "G50", 0.95), ("torta", None, 0.2)))
+    mail = dict(MAIL, today="2026-08-04")   # today IS the delivery date
+    result = pipeline.run(pg, _cfg(), mail, env, client=ScriptedClient(answers),
                           upload=rec.upload, post=rec.post)
     assert result["status"] == "partial"
     assert rec.uploads[0][1].count("LIN") == 1
@@ -144,6 +170,7 @@ def test_an_unmatched_item_still_ships_the_rest_and_says_so(pg, env):
     assert "NEÚPLNÁ" in rec.posts[1].upper()
     # only the shipped item is remembered
     assert pg.execute("SELECT count(*) FROM item_memory").fetchone()[0] == 1
+    assert pg.execute("SELECT count(*) FROM held_orders").fetchone()[0] == 0
 
 
 def test_a_change_request_is_not_uploaded_and_names_the_original_file(pg, env):
@@ -282,6 +309,9 @@ def test_each_order_of_a_multi_date_email_is_reported_separately(pg, env):
 
 
 def test_a_multi_date_email_where_one_order_fails_reports_per_order_status(pg, env):
+    """#93: the second order still has time before its own delivery date (05.08.2026 vs
+    "today" 2026-07-30 in TWO_DATE_MAIL), so its unmatched line HOLDS the order rather
+    than shipping nothing and reporting "review" the moment it is seen."""
     answers = _two_order_answers()
     # The wording must be one the model actually decides: "vianočka 400g" IS a catalog card,
     # so since #86 it is answered for free and a scripted model failure never reaches it.
@@ -292,9 +322,11 @@ def test_a_multi_date_email_where_one_order_fails_reports_per_order_status(pg, e
     result = pipeline.run(pg, _cfg(), TWO_DATE_MAIL, env, client=ScriptedClient(answers),
                           upload=rec.upload, post=rec.post)
     orders = result["order_results"]
-    assert [o["status"] for o in orders] == ["ok", "review"]
-    assert len(rec.uploads) == 1, "the failed order must not be uploaded"
-    assert result["status"] == "partial", "part of the email shipped, part did not"
+    assert [o["status"] for o in orders] == ["ok", "held"]
+    assert len(rec.uploads) == 1, "the held order must not be uploaded yet"
+    assert result["status"] == "held", "an email is not done while one of its orders holds"
+    assert pg.execute(
+        "SELECT delivery_date FROM held_orders").fetchone() == ("05.08.2026",)
 
 
 # --- recipient groups are one order, one line (#81.1) ---------------------

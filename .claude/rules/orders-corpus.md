@@ -151,3 +151,26 @@ again. That is the point: a changed prompt has not been measured until it has be
   schema lists `true` as that field's default; the validator does not apply schema defaults
   for an absent key, so an implicit default must be made explicit in the JSON. This project's
   standing choice is `responsesApiEnabled: true` (top OpenAI tier, Responses API on).
+- **Holding an order (`app/orders/hold.py`, #93) is invisible to the corpus and needs no
+  new cases.** `run_case` forces `orders_shadow=True`, and every hold/release path in
+  `pipeline._run` is gated on `not shadow` — so a case with an unresolved line still just
+  reports "partial"/"review" exactly as before; nothing in the corpus is ever held. If you
+  add a NEW hold-adjacent rung to `match.decide_without_model` (the way #102's
+  `global_taught` was added), the corpus IS affected the normal way (a no-model rung
+  changes `decide_without_model`'s answer) — that follows the existing "brand-new corpus
+  case" rule above, not anything hold-specific.
+- **`hold.py` breaks the `pipeline` \<-\> `hold` import cycle with LAZY imports, not by
+  moving code.** `pipeline.py` imports `hold` at module top (needs `hold.is_past_deadline`/
+  `hold.place`); `hold.py` needs `pipeline._ship_one` to actually SHIP a released order, but
+  does `from .pipeline import _ship_one` INSIDE `_do_release`, never at its own top — a
+  top-level `from . import pipeline` in `hold.py` would deadlock the import (whichever module
+  loads first hits the other's not-yet-defined name). Keep this pattern for any future
+  order-lifecycle module that needs to call back into the pipeline's shipping step.
+- **A held order releases through `_ship_one` unchanged — `hold.release_for_question` only
+  re-derives the DECISIONS first**, via `match.decide_without_model(item_name, [], ...)`
+  called with an EMPTY catalog. That's deliberate, not a shortcut: the only rungs that can
+  fire post-hold are `human_taught`/`global_taught` (this order's OWN wording, just
+  answered) — those need no catalog at all — so passing `[]` avoids persisting/reloading the
+  catalog snapshot the order was originally matched against, and is safe to run over EVERY
+  stored decision (not just the pending ones) because a rung that finds nothing simply
+  returns `None` and the original decision is kept.

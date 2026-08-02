@@ -49,6 +49,14 @@ def _claim(conn) -> dict | None:
                             AND (processing_at IS NULL
                                  OR processing_at < now()
                                     - interval '{CLAIM_STALE_MINUTES} minutes')
+                            -- #93: a message with a question still open for one of its
+                            -- orders is WAITING, not stuck — re-running it would pay for
+                            -- the LLM again for nothing. hold.release_for_question /
+                            -- hold.release_due are what move it on, never a re-claim.
+                            AND NOT EXISTS (
+                                SELECT 1 FROM held_orders h
+                                 WHERE h.message_id = messages.message_id
+                                   AND h.status = 'held')
                           ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
          RETURNING message_id, subject, from_addr, from_name, combined_text, body_text""",
         (CATEGORY, MAX_ATTEMPTS)).fetchone()
@@ -187,12 +195,17 @@ def tick(conn, cfg, pipeline=None) -> int:
     _finish_run(conn, run_id, result.get("status", "ok"), result)
     _check_spend_cap(conn, cfg, shadow=engine != "python")
     if engine == "python":
-        conn.execute(
-            """UPDATE messages
-                  SET processed = true, processed_at = now(), processed_by = %s,
-                      processing_at = NULL
-                WHERE message_id = %s""",
-            (CATEGORY, message["message_id"]))
+        from .hold import has_open
+        # #93: a run that just HELD one of its orders must not be marked processed — the
+        # message stays claimable-by-name-only (excluded from _claim above) until
+        # hold.release_for_question / hold.release_due lets it go.
+        if not has_open(conn, message["message_id"]):
+            conn.execute(
+                """UPDATE messages
+                      SET processed = true, processed_at = now(), processed_by = %s,
+                          processing_at = NULL
+                    WHERE message_id = %s""",
+                (CATEGORY, message["message_id"]))
     return 1
 
 
@@ -224,6 +237,12 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pra
     while not (stop and stop.is_set()):
         try:
             refresh_due(conn, cfg)
+            if resolve_engine(getattr(cfg, "ai_orders_engine", "n8n")) == "python":
+                # #93: the deadline backstop — ship whatever is still held once its
+                # delivery date arrives. Shadow/n8n modes never hold an order, so there is
+                # never anything for this to release there.
+                from .hold import release_due
+                release_due(conn, cfg)
             if tick(conn, cfg, pipeline=pipeline):
                 continue          # more may be waiting; do not sleep between messages
         except Exception:

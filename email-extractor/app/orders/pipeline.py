@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from . import customer, edi, extract, llm, match, memory, report, snapshot, teach
+from . import customer, edi, extract, hold, llm, match, memory, report, snapshot, teach
 from . import upload as upload_mod
 
 log = logging.getLogger("orders.pipeline")
@@ -153,6 +153,8 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                        items=[], result={"shipped": False, "reject_reason": conflict,
                                          "customer": {}, "unverified": [],
                                          "notes": extracted.get("notes", "")})
+    is_change = bool(extracted.get("isChangeRequest"))
+    today = str(message.get("today") or "")
     asked: list[int] = []
     all_items: list[dict] = []
     statuses: list[str] = []
@@ -164,6 +166,7 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
         # one that shop belongs to, not the email's.
         matched = _customer_for(str(order.get("store") or "")) or email_matched
         decisions = []
+        order_question_ids: list[int] = []
         for item in order.get("items") or []:
             recalled = (memory.resolve(conn, matched.ean_edi, item["name"],
                                        as_of=str(message.get("today") or ""))
@@ -200,7 +203,7 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
             # (never a duplicate of one already open) also reaches Odoo (#102) — the warehouse
             # reads Odoo, not always the dashboard.
             if not shadow and matched and decision.rule in ASK_THE_WAREHOUSE:
-                asked.append(teach.ask(
+                qid = teach.ask(
                     conn, message_id=message.get("message_id", ""),
                     customer_ean=matched.ean_edi, customer_name=matched.name,
                     wording=item["name"], quantity=item.get("quantity"),
@@ -208,11 +211,33 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                     candidates=[{"gtin": str(c.get("gtin")), "name": c.get("name", "")}
                                 for c in item_cands[:6]],
                     delivery_date=order.get("deliveryDate", ""), reason=decision.note,
-                    on_new=lambda q: post(cfg, report.build_question(q))))
+                    on_new=lambda q: post(cfg, report.build_question(q)))
+                asked.append(qid)
+                if qid:
+                    order_question_ids.append(qid)
         decisions = match.merge_same_card(match.apply_siblings(decisions))
         all_items.extend(_decision_dict(d) for d in decisions)
-        status, preview = _ship_one(conn, cfg, message, order, matched, decisions,
-                                    extracted, shadow, upload, post)
+        # #93: a question still open for this order holds the WHOLE order — shipping the
+        # matched part now and the taught line later would write two ORION documents for
+        # one delivery day (#81.1). Once the delivery date itself arrives there is no more
+        # time to wait, so the order ships exactly as it always has (see hold.release_due).
+        held_id = None
+        if (not shadow and matched and not is_change and order_question_ids
+                and not hold.is_past_deadline(order.get("deliveryDate", ""), today)):
+            held_id = hold.place(conn, message_id=message.get("message_id", ""),
+                                 matched=matched, order=order, decisions=decisions,
+                                 extracted=extracted, question_ids=order_question_ids)
+            status, preview = "held", {}
+            report.log_event(
+                conn, message.get("message_id", ""), stage="held", status="held",
+                outcome=f"Objednávka čaká na odpoveď skladu ({len(order_question_ids)} "
+                        "otázok) — dodanie "
+                        f"{order.get('deliveryDate', '') or '(bez dátumu)'}",
+                detail={"held_id": held_id, "question_ids": order_question_ids,
+                        "delivery_date": order.get("deliveryDate", "")})
+        else:
+            status, preview = _ship_one(conn, cfg, message, order, matched, decisions,
+                                        extracted, shadow, upload, post)
         statuses.append(status)
         previews.append(preview)
         # One EDI file per order is what n8n produces, so the result must stay per order:
@@ -231,6 +256,9 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
         })
 
     status = ("error" if "error" in statuses else
+              # a held order means this email is not done yet, no matter what its siblings
+              # did — the message stays unprocessed until every held order releases (#93)
+              "held" if "held" in statuses else
               "review" if all(s == "review" for s in statuses) else
               # one order shipped and another went to review is NOT a clean email: saying
               # "ok" would hide a delivery date nobody sent (#78)

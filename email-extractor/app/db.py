@@ -435,6 +435,38 @@ SCHEMA = [
         UNIQUE (customer_ean, delivery_date, content_sha256)
     )
     """,
+    # --- #93: hold an order while its question is unanswered, but only until the delivery
+    # date. Shipping the matched part now and the taught line later would write TWO ORION
+    # documents for one delivery day (#81.1) — so a pending question holds its WHOLE order.
+    # Enough of the run is stored as JSONB to ship it later without another LLM call:
+    # the customer, the order's own dict (delivery date/order number), the extracted
+    # context (isChangeRequest/unverified/notes) and the per-item decisions. ---
+    """
+    CREATE TABLE IF NOT EXISTS held_orders (
+        id              BIGSERIAL PRIMARY KEY,
+        message_id      TEXT NOT NULL,
+        customer_ean    TEXT NOT NULL,
+        customer_name   TEXT,
+        delivery_date   TEXT,
+        order_number    TEXT,
+        store           TEXT,
+        recipient_group TEXT,
+        question_ids    BIGINT[] NOT NULL DEFAULT '{}',
+        order_json      JSONB NOT NULL DEFAULT '{}'::jsonb,
+        extracted_json  JSONB NOT NULL DEFAULT '{}'::jsonb,
+        decisions_json  JSONB NOT NULL DEFAULT '[]'::jsonb,
+        status          TEXT NOT NULL DEFAULT 'held',
+        release_reason  TEXT,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        released_at     TIMESTAMPTZ
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_held_orders_status ON held_orders(status)",
+    # What worker._claim reads to keep a held message out of the re-claim query — without
+    # this a message with an open question would look "just claimed a while ago" once the
+    # 30-minute stale window passes and get run through the LLM again for nothing.
+    "CREATE INDEX IF NOT EXISTS idx_held_orders_open_message "
+    "ON held_orders(message_id) WHERE status = 'held'",
 ]
 
 

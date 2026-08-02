@@ -492,8 +492,12 @@ def create_app(cfg) -> Flask:
 
     @app.post("/api/orders/question/<int:qid>/answer")
     def api_orders_answer(qid: int):
-        """One click: this wording IS this card. Taught for that customer, forever."""
-        from .orders import teach
+        """One click: this wording IS this card. Taught for that customer, forever.
+
+        If this was the LAST open question an order was held for (#93), the answer also
+        releases it — the document is built and uploaded right here, once.
+        """
+        from .orders import hold, teach
         body = request.get_json(silent=True) or {}
         gtin, card = str(body.get("gtin") or ""), str(body.get("card") or "")
         if not gtin:
@@ -501,11 +505,26 @@ def create_app(cfg) -> Flask:
         try:
             with _db_tx() as c:
                 q = teach.answer(c, qid, gtin=gtin, card=card, by="sklad")
+                released = hold.release_for_question(c, cfg, qid)
         except teach.AlreadyAnswered as e:
             return jsonify(error=str(e)), 409
         except teach.NotACandidate as e:
             return jsonify(error=str(e)), 400
-        return jsonify(ok=True, question=q)
+        return jsonify(ok=True, question=q, released=released)
+
+    @app.get("/api/orders/held")
+    def api_orders_held():
+        """Orders waiting on an answer, with their delivery date (#93) — so nothing waits
+        invisibly: every one of these also has an open question on /otazky."""
+        from .orders import hold
+        with _db() as c:
+            items = hold.list_held(c)
+        return jsonify(items=[{
+            "id": i["id"], "customer_name": i["customer_name"], "customer_ean": i["customer_ean"],
+            "delivery_date": i["delivery_date"], "order_number": i["order_number"],
+            "question_ids": i["question_ids"],
+            "created_at": i["created_at"].isoformat() if i["created_at"] else None,
+        } for i in items])
 
     @app.get("/api/orders/taught")
     def api_orders_taught():
@@ -872,7 +891,7 @@ async function loadAsk(){const L=document.getElementById('list');
   if(mine!==askRender)return;
   if(!d.items.length){const e0=document.createElement('div');e0.className='empty';
     e0.textContent='Nič nečaká \u2014 automat si vie poradiť sám.';L.appendChild(e0);
-    return loadTaught(mine)}   // nothing waiting is the NORMAL state: the undo must still be here
+    await loadHeld(mine);return loadTaught(mine)}   // nothing waiting is the NORMAL state: the undo must still be here
   for(const q of d.items){const el=document.createElement('div');el.className='row';
     const head=document.createElement('div');const b=document.createElement('b');
     b.textContent=q.wording;head.appendChild(b);
@@ -886,7 +905,22 @@ async function loadAsk(){const L=document.getElementById('list');
       bt.onclick=()=>teachIt(q.id,c.gtin,c.name||'');acts.appendChild(bt)}
     head.appendChild(who);head.appendChild(why);head.appendChild(acts);
     el.appendChild(head);L.appendChild(el)}
-  loadTaught(mine)}
+  await loadHeld(mine);loadTaught(mine)}
+async function loadHeld(token){const L=document.getElementById('list');let d;
+  // #93: orders waiting on an answer, so nothing waits invisibly \u2014 each one names its
+  // own delivery date, the deadline this project promises it will ship by regardless.
+  try{d=await api('/api/orders/held')}catch(e){return}
+  if(token!==askRender||!d.items.length)return;
+  const h=document.createElement('div');h.className='sub';h.style.padding='8px 10px';
+  h.textContent='Objednávky čakajúce na odpoveď \u2014 odošlú sa po odpovedi, najneskôr v deň dodania:';
+  L.appendChild(h);
+  for(const o of d.items){const el=document.createElement('div');el.className='row';
+    const head=document.createElement('div');const b=document.createElement('b');
+    b.textContent=o.customer_name||o.customer_ean;head.appendChild(b);
+    const who=document.createElement('div');who.className='sub';
+    who.textContent='dodanie '+(o.delivery_date||'?')+(o.order_number?' \u00b7 obj. '+o.order_number:'')
+      +' \u00b7 '+o.question_ids.length+' \u00d7 otázka';
+    head.appendChild(who);el.appendChild(head);L.appendChild(el)}}
 async function loadTaught(token){const L=document.getElementById('list');let d;
   try{d=await api('/api/orders/taught')}catch(e){return}
   if(token!==askRender)return;              // a newer render owns the list now
