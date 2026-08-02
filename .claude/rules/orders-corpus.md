@@ -2,6 +2,7 @@
 paths:
   - "email-extractor/app/orders/**"
   - "email-extractor/app/httpapi.py"
+  - "email-extractor/tests/test_e2e.py"
   - ".github/workflows/ci.yml"
 ---
 
@@ -375,3 +376,20 @@ again. That is the point: a changed prompt has not been measured until it has be
   so a NEW node needing a credential (Postgres, OpenAI, any `httpHeaderAuth`) can always
   reuse an existing credential from `list_credentials` without a project-scoping concern;
   there is nowhere else it could live.
+- **A one-off management CLI in `app/orders/` (like `memory_import.py`, now also
+  `alias_migration.py`, #104) must load config the SAME way** — `config.Config.load()` +
+  `db.connect(cfg.pg_dsn)` + `db.init_schema(conn)` before writing (defensive, idempotent
+  `CREATE TABLE IF NOT EXISTS`) — not a raw `PG_DSN` env var/CLI arg + bare
+  `psycopg.connect()`. A caught-in-review deviation on #104's first draft: taking a DSN
+  directly works locally but skips schema init and doesn't match how every other one-off
+  script in this package runs on the actual add-on (`python -m app.orders.<script>`, no
+  args, reads the add-on's own configured Postgres).
+- **A Playwright `wait_for_selector("text=...")` on a page with MORE THAN ONE section
+  sharing the same empty-state text is a race, not a wait** (#104, `/znalosti` has a
+  per-customer AND a global section, both rendering "Zatiaľ nič." when empty). The
+  selector resolves the INSTANT that text exists ANYWHERE on the page — including a
+  pre-existing match in the OTHER section — so it can pass before the actual re-render
+  (e.g. after a delete) has happened, silently racing the assertion that follows. Wait for
+  the SPECIFIC thing that must change instead (e.g.
+  `page.wait_for_selector("text=<the deleted item>", state="detached")`), never a generic
+  empty-state string that also appears elsewhere on the same page.
