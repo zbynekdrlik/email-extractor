@@ -196,3 +196,57 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   oproti baseline (rovnakých 6 known-defect #83). Žiadny `--live` beh — čistá zmena kódu.
 - PR **#119** — merge `10a6e66`, main CI zelené (test + e2e-orders + build), nasadené
   **v0.9.17**, overené čítaním DOM dashboardu a grep-om nasadeného kódu v kontejneri.
+
+## 2026-08-02 — #83 (rekonštrukcia histórie zákazníckeho znenia, PR #121)
+
+- Nový čistý modul `app/orders/reconstruct.py`: `extract_day_blocks()` rozdelí VLASTNÝ
+  (necitovaný) text archívnej objednávky na bloky podľa dňa; `wordings_for_order()` vráti
+  zákaznícke znenie položiek LEN keď sa ich počet PRESNE zhoduje s nezávisle overeným
+  Odoo zoznamom kariet — inak `None` (žiadne hádanie). RED `ddd1859` → GREEN `f891500`,
+  13 testov, syntetické fixtures, 100 % pokrytie modulu.
+- Jednorazovým skriptom (mimo git, reálne dáta) doplnené do
+  `~/eval-corpus/email-extractor/history.json`: 5 objednávok / 29 riadkov (CÉDER,
+  04.07.–03.08.) dostalo skutočné zákaznícke znenie namiesto `name=card`. Ručne overené
+  proti reálnym e-mailom. Zatvorilo to 1 z 6 `known_defect: "#83"` prípadov
+  (`info-2026-07-24-a61839`) — 1 nové `--live` volanie (~0,15 USD, downstream match pre
+  inú položku, ktorej kontext sa zmenil) zaznamenané do zdieľanej `llm-cache/`.
+- Zvyšných 5 prípadov ostáva `known_defect`, prepojené na **#120** (dôkaz: žiadna
+  Odoo-potvrdená dodávka pred dátumom e-mailu vôbec neexistuje — buď je to prvá
+  objednávka zákazníka, alebo jediná staršia potvrdená dodávka je obeťou #80
+  (n8n zahodilo takmer všetky riadky)). Vyrieši sa samo, keď pribudnú budúce objednávky
+  (`order_items.name`+`card` sa zapisuje na každý beh už teraz).
+- Offline korpus (32 prípadov, `--require-all`): 27/32 prešlo (predtým 26/32), RC=0.
+- PR **#121** — merge `02a4188`, main CI zelené (test + e2e-orders + build), nasadené
+  **v0.9.18** (`ha store reload` + `ha addons update`), overené čítaním DOM dashboardu
+  (`v0.9.18`, `LIVE`, 0 console errorov) a logmi kontajnera
+  (`orders.worker order worker started (engine=n8n shadow=True)`).
+
+## 2026-08-02 — #51 (n8n edi_sent duplicitná ochrana, hotové) + #55 (Header Auth, čaká na 1 ručný krok)
+
+- **#51**: Python engine mal ochranu proti duplicitnému uploadu do ORIONu (`edi_sent`,
+  PR #74) už od 07-30, ale n8n vetva (`AI auto orders` = `wlORIhkVZISCdZNmBTM4Z`,
+  `Static auto orders` = `O8IYhUESjaWmPMTI`) je stále tá, ktorá reálne uploaduje — Python
+  beží iba v shadow móde. Pridaný rovnaký claim-before-upload vzor priamo v n8n: nový
+  `Crypto` uzol hashuje `wincodexContent` s vybieleným dátumom vytvorenia dokladu (offset
+  47:55, rovnaká logika ako `edi.content_hash()`), Postgres SELECT proti `edi_sent`
+  (customer_ean+delivery_date), a podľa rozhodnutia z 2026-08-01: rovnaký obsah → tichý
+  skip; iný obsah v ten istý deň → Odoo kanál 152, marker `❌Objednavka vyzaduje
+  kontrolu` (kompatibilné s parserom denného sumáru); claim sa berie PRED uploadom
+  (`ON CONFLICT DO NOTHING RETURNING id`) a uvoľňuje pri zlyhaní (`Upload a file` predtým
+  nemal error-output vôbec). Overené: hash-blanking logika samostatne v Node.js (rovnaký
+  order na 2 rôzne dni → identický hash), `edi_sent` unique constraint priamo na živej
+  produkčnej DB (syntetické test dáta, upratané), `connections`/`parameters` byte-exact
+  cez `get_workflow_details`. Jedna skutočná chyba nájdená a opravená pri review (uzol za
+  HTTP request node čítal `$json`, ktorý HTTP uzol prepísal na odpoveď Odoo API — presne
+  tá istá pasca, ktorej sa `Log Success Event` vyhýba explicitnou referenciou). Oba
+  workflow publikované, #51 zatvorený.
+- **#55**: Overené naživo — token extraktora je presne v 3 uzloch (`Fetch Attachment`
+  v Dodacie Listy EDI, `Fetch Original eml` + `Fetch Invoice PDF` v Invoices Forward v2).
+  n8n MCP nevie zakladať credentials; skúsil som cez Playwright prihlásiť sa do n8n UI,
+  ale nemám prihlasovacie údaje (nie sú v pamäti, žiadna aktívna session). Položená
+  otázka používateľovi (❓ ASKED, label `needs-answer` na #55) — buď založí Header Auth
+  credential `email-extractor X-Token` sám, alebo pošle prihlasovacie údaje. Node
+  rewiring (presné `id`/`url` všetkých 3 uzlov už zdokumentované v approach komentári) je
+  pripravený, spustí sa hneď ako credential existuje.
+- Bump **0.9.19** (n8n-only zmena pre #51 nemá kód v repe, ale tento log záznam áno →
+  verzia sa bumpuje kvôli nemu).

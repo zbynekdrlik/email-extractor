@@ -206,3 +206,30 @@ again. That is the point: a changed prompt has not been measured until it has be
   `SKLAD_PATHS`). The security bar for adding a path: order METADATA only (customer name/
   EAN, delivery date, question ids, candidates) — never a mail body, an attachment, or spend
   data (that boundary is the whole point of `SKLAD_PATHS` existing).
+- **A `history.json`/`taught.json` seeding change is NOT always free offline, even though
+  it never touches a prompt (#83, PR #121).** `pipeline._run` passes `recalled` (from
+  `memory.resolve`) into the per-item MODEL prompt (`_product_input`) as a hint even for
+  an item `decide_without_model` could NOT resolve on its own — so seeding a NEW history
+  row for one wording can change the exact TEXT of a still-needed model call for a
+  DIFFERENT item on the SAME order (a "predtým dodané…" hint that wasn't there before),
+  which is a genuine cache-key change and shows up offline as
+  `no cached answer for <hash>`, not as a wrong result. Before trusting a memory/history
+  change as "verifies offline for free," run the full corpus with `--dump` before AND
+  after and diff every case's problems, not just the ones you meant to fix — a
+  newly-appearing `no cached answer` on an UNRELATED item is this exact effect, not a bug
+  in your change. Fix it the same way a brand-new case would: isolate the ONE failing case
+  into its own scratch manifest, `--live` re-record just it (cheap — this incident cost 4
+  calls / ~$0.15), hand-check the new answers, copy the new cache files into the shared
+  `llm-cache/`.
+- **Reconstructing a customer's own wording from the archive (#83) — `app/orders/
+  reconstruct.py`.** Pure, DB-free: `wordings_for_order(combined_text, delivery_date,
+  item_count)` splits the email's own (never quoted-reply) text into day-blocks, matches
+  the block by the ORDER's own delivery date, and returns the wording list ONLY when its
+  item count exactly matches the already-Odoo-confirmed shipped card count — `None`
+  otherwise, never a guess. Reusable for any future archive backfill (e.g. issue #120's
+  residual cases, once those customers place enough NEW real orders — nothing in the
+  ARCHIVE can ever help them, since none of them has a single prior Odoo-confirmed
+  delivery containing the needed wording at all). The one-off script that actually walked
+  the real archive (raw email text + Odoo channel-152 dump + frozen catalog/customer
+  snapshot) stays OUTSIDE git next to the other archive-reconstruction tooling
+  (`link.py`, `resolve.py`, `odoo_dump.py`) — real customer data, this repo is public.
