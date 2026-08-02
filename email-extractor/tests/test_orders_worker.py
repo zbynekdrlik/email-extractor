@@ -168,6 +168,58 @@ def test_engine_option_only_accepts_known_values():
     assert worker.resolve_engine("") == "n8n"
 
 
+# --- #93: a message with an open question is WAITING, not stuck -----------
+
+def test_a_message_with_an_open_held_order_is_never_reclaimed(pg):
+    """A held message's `processing_at` is never reset (it is not marked processed either),
+    so once the 30-minute stale window passes it would look re-claimable — except a message
+    with an open `held_orders` row must stay out of the queue no matter how stale the claim
+    looks, or it would be run through the LLM again for nothing."""
+    _msg(pg)
+    _snapshot(pg)
+    pg.execute("UPDATE messages SET processing_at = now() - interval '31 minutes'")
+    pg.execute(
+        """INSERT INTO held_orders (message_id, customer_ean, customer_name, delivery_date,
+                                    question_ids)
+           VALUES ('m1', '2000000000864', 'Pekáreň', '04.08.2026', ARRAY[1]::bigint[])""")
+    cfg = _cfg(ai_orders_engine="python")
+    assert worker.tick(pg, cfg, pipeline=lambda *a, **k: {"status": "ok", "items": []}) == 0
+
+
+def test_a_released_held_order_no_longer_blocks_reclaim(pg):
+    _msg(pg)
+    _snapshot(pg)
+    pg.execute("UPDATE messages SET processing_at = now() - interval '31 minutes'")
+    pg.execute(
+        """INSERT INTO held_orders (message_id, customer_ean, customer_name, delivery_date,
+                                    question_ids, status)
+           VALUES ('m1', '2000000000864', 'Pekáreň', '04.08.2026', ARRAY[1]::bigint[],
+                   'released')""")
+    cfg = _cfg(ai_orders_engine="python")
+    assert worker.tick(pg, cfg, pipeline=lambda *a, **k: {"status": "ok", "items": []}) == 1
+
+
+def test_a_run_that_holds_an_order_is_not_marked_processed(pg):
+    """The worker itself does not know an order was held — `hold.place` (called inside the
+    pipeline) is what leaves the `held_orders` row; the worker only has to notice it before
+    marking the message processed."""
+    _msg(pg)
+    _snapshot(pg)
+    cfg = _cfg(ai_orders_engine="python")
+
+    def pipeline(conn, cfg, message, snapshot_id):
+        conn.execute(
+            """INSERT INTO held_orders (message_id, customer_ean, customer_name,
+                                        delivery_date, question_ids)
+               VALUES (%s, '2000000000864', 'Pekáreň', '04.08.2026', ARRAY[1]::bigint[])""",
+            (message["message_id"],))
+        return {"status": "held", "items": []}
+
+    assert worker.tick(pg, cfg, pipeline=pipeline) == 1
+    row = pg.execute("SELECT processed, processing_at FROM messages").fetchone()
+    assert row[0] is False, "a held order must not mark the message processed"
+
+
 # --- shadow must not chew through the whole archive ----------------------
 
 def test_shadow_only_looks_at_recent_mail(pg):
