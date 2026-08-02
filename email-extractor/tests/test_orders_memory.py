@@ -226,3 +226,87 @@ def test_a_global_answer_is_recorded_with_who_taught_it_and_from_which_question(
         "SELECT question_id, taught_by, created_at FROM global_item_memory "
         "WHERE item_key = %s", (memory.item_key("Twister"),)).fetchone()
     assert row[0] == qid and row[1] == "sklad" and row[2] is not None
+
+
+# --- direct curation (#104): the warehouse teaches a wording WITHOUT waiting for the
+# pipeline to raise an order_questions row. Same underlying tables/rungs as the
+# ask/answer/undo flow above — only the entry point differs. ---------------------------
+
+def test_a_direct_customer_alias_is_stored_and_resolves(pg):
+    rid = memory.add_customer_alias(pg, "111", "rožok", "G1", "Rožok štandart 50g")
+    assert rid is not None
+    hit = memory.resolve(pg, "111", "rožok")
+    assert hit is not None and hit.gtin == "G1" and hit.human is True
+
+
+def test_a_direct_customer_alias_needs_customer_wording_and_gtin(pg):
+    assert memory.add_customer_alias(pg, "", "rožok", "G1", "Rožok 50g") is None
+    assert memory.add_customer_alias(pg, "111", "", "G1", "Rožok 50g") is None
+    assert memory.add_customer_alias(pg, "111", "rožok", "", "Rožok 50g") is None
+
+
+def test_listing_customer_aliases_shows_source_and_timestamp(pg):
+    memory.add_customer_alias(pg, "111", "rožok", "G1", "Rožok štandart 50g")
+    memory.remember(pg, "111", "rožok kváskový", "G2", "Rožok kváskový 70g",
+                    delivered_on="2026-07-15", source="ship")
+    rows = memory.list_customer_aliases(pg, "111")
+    assert len(rows) == 2
+    sources = {r["item_key"]: r["source"] for r in rows}
+    assert sources["rozok"] == "human" and sources["rozok kvaskovy"] == "ship"
+    assert all(r["created_at"] is not None for r in rows)
+
+
+def test_deleting_a_curated_customer_alias_removes_it(pg):
+    rid = memory.add_customer_alias(pg, "111", "rožok", "G1", "Rožok štandart 50g")
+    assert memory.delete_item_memory_row(pg, rid, "111") is True
+    assert memory.resolve(pg, "111", "rožok") is None
+    assert memory.delete_item_memory_row(pg, rid, "111") is False, "already gone"
+
+
+def test_deleting_a_customer_alias_is_scoped_to_its_own_customer(pg):
+    """A /znalosti/<ean> page must never delete another customer's row by guessing an id."""
+    rid = memory.add_customer_alias(pg, "111", "rožok", "G1", "Rožok štandart 50g")
+    assert memory.delete_item_memory_row(pg, rid, "222") is False
+    assert memory.resolve(pg, "111", "rožok") is not None
+
+
+def test_deleting_a_shipment_history_row_is_refused(pg):
+    """source='ship'/'archive' is real delivery history, not a curated assignment — deleting
+    it would silently corrupt memory.resolve()'s day-count majority."""
+    memory.remember(pg, "111", "rožok", "G1", "Rožok štandart 50g",
+                    delivered_on="2026-07-15", source="ship")
+    row = pg.execute("SELECT id FROM item_memory WHERE customer_ean = '111'").fetchone()
+    assert memory.delete_item_memory_row(pg, row[0], "111") is False
+    assert memory.resolve(pg, "111", "rožok", as_of="2026-07-20") is not None
+
+
+def test_a_direct_global_alias_is_stored_and_resolves(pg):
+    rid = memory.add_global_alias(pg, "Twister", "VIA", "Vianočka 400g", by="sklad")
+    assert rid is not None
+    hit = memory.resolve_global(pg, "Twister")
+    assert hit is not None and hit.gtin == "VIA"
+
+
+def test_a_direct_global_alias_needs_wording_and_gtin(pg):
+    assert memory.add_global_alias(pg, "", "VIA", "Vianočka 400g") is None
+    assert memory.add_global_alias(pg, "Twister", "", "Vianočka 400g") is None
+
+
+def test_a_direct_global_alias_does_not_overwrite_an_existing_one(pg):
+    memory.add_global_alias(pg, "Twister", "VIA", "Vianočka 400g", by="sklad")
+    assert memory.add_global_alias(pg, "Twister", "G50", "Rožok 50g", by="sklad2") is None
+    assert memory.resolve_global(pg, "Twister").gtin == "VIA"
+
+
+def test_listing_global_aliases_newest_first(pg):
+    memory.add_global_alias(pg, "Twister", "VIA", "Vianočka 400g", by="sklad")
+    memory.add_global_alias(pg, "Šiška", "SIS", "Šiška 50g", by="sklad")
+    rows = memory.list_global_aliases(pg)
+    assert [r["item_key"] for r in rows] == ["siska", "twister"]
+
+
+def test_deleting_a_direct_global_alias_removes_it(pg):
+    rid = memory.add_global_alias(pg, "Twister", "VIA", "Vianočka 400g", by="sklad")
+    assert memory.delete_global_row(pg, rid) is True
+    assert memory.resolve_global(pg, "Twister") is None
+    assert memory.delete_global_row(pg, rid) is False, "already gone"

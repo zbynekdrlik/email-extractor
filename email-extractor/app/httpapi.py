@@ -23,6 +23,7 @@ import os
 import re
 import threading
 import time
+import unicodedata
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from werkzeug.exceptions import HTTPException
 
 from . import __version__, db
 from .db import MAX_UID_ATTEMPTS
+from .orders import memory, snapshot
 from .store import message_dir
 
 CATEGORIES = ["ai_orders", "invoices", "reklamacie", "dodacie_listy",
@@ -54,6 +56,13 @@ def _valid_date(s: str) -> bool:
 def _escape_like(s: str) -> str:
     """Escape LIKE/ILIKE metacharacters so user input is a literal substring."""
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _fold(s: str) -> str:
+    """Diacritics- and case-insensitive substring match for the /znalosti card/customer
+    search — a warehouse worker types "rozok" and must still find "Rožok"."""
+    return "".join(c for c in unicodedata.normalize("NFD", str(s or "").lower())
+                   if unicodedata.category(c) != "Mn")
 
 
 def _persistent_secret(data_dir: Path) -> bytes:
@@ -82,6 +91,11 @@ SKLAD_ROLE = "sklad"
 # panel silently 401'd and never rendered for the sklad role without this).
 SKLAD_PATHS = ("/otazky", "/api/orders/questions", "/api/orders/taught", "/api/orders/held")
 SKLAD_ACTION = re.compile(r"^/api/orders/question/\d+/(answer|undo)$")
+# #104: the same warehouse link also reaches the knowledge-base page. Same boundary rule as
+# SKLAD_PATHS above — wording/gtin/card metadata only, never a mail body or an attachment.
+SKLAD_ZNALOSTI_PAGE = re.compile(r"^/znalosti(/[^/]+)?$")
+SKLAD_ZNALOSTI_API = re.compile(
+    r"^/api/znalosti/(global(/\d+)?|catalog|customers|customer/[^/]+(/\d+)?)$")
 
 
 def sklad_key(secret) -> str:
@@ -172,7 +186,8 @@ def create_app(cfg) -> Flask:
         if session.get("auth"):
             return None
         if session.get("role") == SKLAD_ROLE:
-            if p in SKLAD_PATHS or SKLAD_ACTION.match(p):
+            if (p in SKLAD_PATHS or SKLAD_ACTION.match(p)
+                    or SKLAD_ZNALOSTI_PAGE.match(p) or SKLAD_ZNALOSTI_API.match(p)):
                 return None
             # Not an error: send the warehouse back to the one page it owns.
             if not p.startswith("/api/"):
@@ -560,6 +575,95 @@ def create_app(cfg) -> Flask:
         except teach.NotACandidate as e:
             return jsonify(error=str(e)), 404
         return jsonify(ok=True, question=q)
+
+    # ---- /znalosti (#104): direct curation of wording->card knowledge, without waiting
+    # for the pipeline to raise an order_questions row first (the ask/answer/undo flow
+    # above only ever reacts to what the pipeline already asked about). ----
+
+    @app.get("/znalosti")
+    @app.get("/znalosti/<ean>")
+    def znalosti_page(ean: str = ""):
+        return ZNALOSTI_HTML.replace("__VERSION__", __version__)
+
+    def _current_catalog(c):
+        sid = snapshot.latest_snapshot_id(c)
+        return snapshot.load_catalog(c, sid) if sid else []
+
+    def _current_customers(c):
+        sid = snapshot.latest_snapshot_id(c)
+        return snapshot.load_customers(c, sid) if sid else []
+
+    def _customer_name(c, ean: str) -> str:
+        for row in _current_customers(c):
+            if row["ean_edi"] == ean:
+                return row["name"]
+        return ""
+
+    @app.get("/api/znalosti/catalog")
+    def api_znalosti_catalog():
+        q = _fold((request.args.get("q") or "").strip())
+        with _db() as c:
+            rows = _current_catalog(c)
+        if q:
+            rows = [r for r in rows if q in _fold(r["name"]) or q in _fold(r["gtin"])]
+        return jsonify(items=[{"gtin": r["gtin"], "name": r["name"]} for r in rows[:30]])
+
+    @app.get("/api/znalosti/customers")
+    def api_znalosti_customers():
+        q = _fold((request.args.get("q") or "").strip())
+        with _db() as c:
+            rows = _current_customers(c)
+        if q:
+            rows = [r for r in rows if q in _fold(r["name"]) or q in _fold(r["ean_edi"])]
+        return jsonify(items=[{"ean_edi": r["ean_edi"], "name": r["name"]} for r in rows[:30]])
+
+    @app.get("/api/znalosti/global")
+    def api_znalosti_global():
+        with _db() as c:
+            return jsonify(items=memory.list_global_aliases(c))
+
+    @app.post("/api/znalosti/global")
+    def api_znalosti_global_add():
+        body = request.get_json(silent=True) or {}
+        wording, gtin = str(body.get("wording") or "").strip(), str(body.get("gtin") or "")
+        if not (wording and gtin):
+            return jsonify(error="chýba znenie alebo karta"), 400
+        with _db() as c:
+            rid = memory.add_global_alias(c, wording, gtin, str(body.get("card") or ""),
+                                          by="sklad")
+        if rid is None:
+            return jsonify(error="toto znenie je už globálne priradené"), 409
+        return jsonify(ok=True, id=rid)
+
+    @app.delete("/api/znalosti/global/<int:rid>")
+    def api_znalosti_global_delete(rid: int):
+        with _db() as c:
+            ok = memory.delete_global_row(c, rid)
+        return jsonify(ok=True) if ok else (jsonify(error="nenájdené"), 404)
+
+    @app.get("/api/znalosti/customer/<ean>")
+    def api_znalosti_customer(ean: str):
+        with _db() as c:
+            return jsonify(customer_name=_customer_name(c, ean),
+                           items=memory.list_customer_aliases(c, ean))
+
+    @app.post("/api/znalosti/customer/<ean>")
+    def api_znalosti_customer_add(ean: str):
+        body = request.get_json(silent=True) or {}
+        wording, gtin = str(body.get("wording") or "").strip(), str(body.get("gtin") or "")
+        if not (wording and gtin):
+            return jsonify(error="chýba znenie alebo karta"), 400
+        with _db() as c:
+            rid = memory.add_customer_alias(c, ean, wording, gtin, str(body.get("card") or ""))
+        if rid is None:
+            return jsonify(error="toto znenie je už tomuto zákazníkovi priradené"), 409
+        return jsonify(ok=True, id=rid)
+
+    @app.delete("/api/znalosti/customer/<ean>/<int:rid>")
+    def api_znalosti_customer_delete(ean: str, rid: int):
+        with _db() as c:
+            ok = memory.delete_item_memory_row(c, rid, ean)
+        return jsonify(ok=True) if ok else (jsonify(error="nenájdené"), 404)
 
     @app.get("/api/orders/spend")
     def api_orders_spend():
@@ -1001,6 +1105,8 @@ ASK_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
  .t button{width:auto;margin:0;border-color:#d0d7de;background:#f6f8fa;color:#57606a;padding:7px 12px}
  h2{font-size:14px;color:#57606a;margin:22px 0 8px}
  .empty{color:#57606a;padding:14px 2px}
+ .kb{display:block;font-size:13px;color:#57606a;margin-top:8px;text-decoration:none}
+ .kb:hover{text-decoration:underline}
 </style></head><body>
 <header><h1>&#128230; Otázky skladu</h1><span class="ver" data-testid="version">v__VERSION__</span></header>
 <main id="wrap"><div class="empty">Nahrávam&hellip;</div></main>
@@ -1021,6 +1127,9 @@ async function load(){const mine=++render;let d,t;
     c.appendChild(el('div','why',q.reason||'Ktorý výrobok to je?'));
     for(const cand of (q.candidates||[])){const b=el('button',null,cand.name||cand.gtin);
       b.onclick=()=>teach(q.id,cand.gtin,cand.name||'');c.appendChild(b)}
+    const kb=document.createElement('a');kb.className='kb';kb.textContent='📚 databáza znalostí';
+    kb.href='/znalosti/'+encodeURIComponent(q.customer_ean)+'?wording='+encodeURIComponent(q.wording);
+    c.appendChild(kb);
     W.appendChild(c)}
   if(t.items.length){W.appendChild(el('h2',null,'Naposledy naučené'));
     for(const x of t.items){const r=el('div','t');
@@ -1031,6 +1140,141 @@ async function teach(qid,gtin,card){try{await api('/api/orders/question/'+qid+'/
 async function undo(qid){try{await api('/api/orders/question/'+qid+'/undo',{method:'POST'});
   await load()}catch(e){alert(e.message||'chyba')}}
 load();setInterval(load,5000);
+</script></body></html>"""
+
+
+# #104: direct curation of wording->card knowledge (no order_questions row required).
+# Same page for /znalosti (global only, + a customer search to jump to one) and
+# /znalosti/<ean> (that customer's own aliases + the global section underneath) — the JS
+# below reads the ean out of location.pathname, exactly like ASK_HTML reads none at all.
+ZNALOSTI_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Databáza znalostí</title>
+<style>
+ *{box-sizing:border-box}
+ body{font:15px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;
+      background:#f6f8fa;color:#1f2328}
+ header{background:#161b22;color:#e6edf3;padding:12px 16px;display:flex;justify-content:space-between;
+        align-items:center;position:sticky;top:0}
+ h1{font-size:16px;margin:0}
+ .ver{font-size:12px;color:#8b949e}
+ main{padding:14px 12px;max-width:760px;margin:0 auto}
+ h2{font-size:14px;color:#57606a;margin:22px 0 8px}
+ .box{background:#fff;border:1px solid #d0d7de;border-radius:12px;padding:14px;margin-bottom:14px}
+ .row{background:#fff;border:1px solid #d0d7de;border-radius:10px;padding:10px 12px;margin-bottom:8px;
+      display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:14px}
+ .row .meta{font-size:12px;color:#57606a}
+ .row button{width:auto;margin:0;border-color:#d0d7de;background:#f6f8fa;color:#57606a;padding:7px 12px;
+             border-radius:8px;font:inherit;cursor:pointer}
+ input{width:100%;padding:9px 10px;margin-top:6px;border:1px solid #d0d7de;border-radius:8px;font:inherit}
+ .cands{margin-top:4px}
+ .cand{padding:8px 10px;border:1px solid #d0d7de;border-radius:8px;margin-top:4px;cursor:pointer;font-size:14px}
+ .cand:hover{background:#ddf4ff}
+ .picked{font-size:13px;color:#1a7f37;margin-top:6px}
+ button.add{display:block;width:100%;text-align:center;padding:11px;margin-top:10px;font:inherit;
+        border:1px solid #1f6feb;border-radius:10px;background:#ddf4ff;color:#0969da;cursor:pointer}
+ .empty{color:#57606a;padding:6px 2px}
+ .who{font-size:13px;color:#57606a;margin-bottom:6px}
+</style></head><body>
+<header><h1>&#128218; Databáza znalostí</h1><span class="ver" data-testid="version">v__VERSION__</span></header>
+<main id="wrap"><div class="empty">Nahrávam&hellip;</div></main>
+<script>
+async function api(u,o){const r=await fetch(u,Object.assign({headers:{'Content-Type':'application/json'}},o||{}));
+  if(!r.ok){throw new Error((await r.json().catch(()=>({}))).error||('HTTP '+r.status))}return r.json()}
+function el(t,cls,txt){const e=document.createElement(t);if(cls)e.className=cls;
+  if(txt!==undefined)e.textContent=txt;return e}
+const parts=location.pathname.split('/').filter(Boolean);
+const EAN=parts.length>1?decodeURIComponent(parts[1]):'';
+const params=new URLSearchParams(location.search);
+const PREFILL=params.get('wording')||'';
+let picked=null;
+
+function pickerBox(inputId,candId,onPick){
+  const wrap=el('div');
+  const inp=el('input');inp.id=inputId;inp.placeholder='hľadaj kartu (názov alebo GTIN)…';
+  const cands=el('div','cands');cands.id=candId;
+  wrap.appendChild(inp);wrap.appendChild(cands);
+  let t=null;
+  inp.oninput=()=>{clearTimeout(t);t=setTimeout(async()=>{
+    const q=inp.value.trim();cands.textContent='';
+    if(q.length<2)return;
+    const d=await api('/api/znalosti/catalog?q='+encodeURIComponent(q));
+    for(const it of d.items){const c=el('div','cand',it.name+'  ('+it.gtin+')');
+      c.onclick=()=>{onPick(it);inp.value=it.name;cands.textContent=''};cands.appendChild(c)}
+  },200)};
+  return wrap;
+}
+
+function addForm(onSubmit,wordingPrefill){
+  const box=el('div','box');
+  box.appendChild(el('h2',null,'Pridať priradenie'));
+  const w=el('input');w.placeholder='znenie (ako to zákazník píše)';w.value=wordingPrefill||'';
+  box.appendChild(w);
+  let chosen=null;
+  const status=el('div','picked','');
+  box.appendChild(pickerBox('','',(it)=>{chosen=it;status.textContent='vybraná karta: '+it.name}));
+  box.appendChild(status);
+  const b=el('button','add','Uložiť');
+  b.onclick=async()=>{
+    if(!w.value.trim()||!chosen){alert('vyplň znenie a vyber kartu zo zoznamu');return}
+    try{await onSubmit(w.value.trim(),chosen.gtin,chosen.name);w.value='';chosen=null;
+      status.textContent='';await load()}catch(e){alert(e.message||'chyba')}
+  };
+  box.appendChild(b);
+  return box;
+}
+
+function aliasRow(item,onDelete){
+  const r=el('div','row');
+  const left=el('div');
+  left.appendChild(el('div',null,item.item_raw+' → '+(item.card||item.gtin)));
+  left.appendChild(el('div','meta',(item.source||item.taught_by||'')+' · '+
+    String(item.created_at||'').slice(0,10)));
+  r.appendChild(left);
+  const curated=(item.source===undefined)||item.source==='human'||item.source==='sheet-import';
+  if(curated){const b=el('button',null,'zmazať');b.onclick=onDelete;r.appendChild(b)}
+  return r;
+}
+
+async function load(){
+  const W=document.getElementById('wrap');W.textContent='';
+  if(EAN){
+    const d=await api('/api/znalosti/customer/'+encodeURIComponent(EAN));
+    W.appendChild(el('div','who',(d.customer_name||EAN)+'  ('+EAN+')'));
+    W.appendChild(addForm((wording,gtin,card)=>
+      api('/api/znalosti/customer/'+encodeURIComponent(EAN),
+         {method:'POST',body:JSON.stringify({wording:wording,gtin:gtin,card:card})}),
+      PREFILL));
+    W.appendChild(el('h2',null,'Priradenia tohto zákazníka'));
+    if(!d.items.length)W.appendChild(el('div','empty','Zatiaľ nič.'));
+    for(const it of d.items){W.appendChild(aliasRow(it,async()=>{
+      try{await api('/api/znalosti/customer/'+encodeURIComponent(EAN)+'/'+it.id,{method:'DELETE'});
+        await load()}catch(e){alert(e.message||'chyba')}}))}
+  } else {
+    const box=el('div','box');
+    box.appendChild(el('h2',null,'Nájsť zákazníka'));
+    const inp=el('input');inp.placeholder='hľadaj zákazníka (názov alebo EAN)…';
+    const cands=el('div','cands');
+    let t=null;
+    inp.oninput=()=>{clearTimeout(t);t=setTimeout(async()=>{
+      const q=inp.value.trim();cands.textContent='';if(q.length<2)return;
+      const d=await api('/api/znalosti/customers?q='+encodeURIComponent(q));
+      for(const c of d.items){const e=el('div','cand',c.name+'  ('+c.ean_edi+')');
+        e.onclick=()=>{location.href='/znalosti/'+encodeURIComponent(c.ean_edi)};cands.appendChild(e)}
+    },200)};
+    box.appendChild(inp);box.appendChild(cands);
+    W.appendChild(box);
+  }
+  W.appendChild(el('h2',null,'Globálne priradenia (platia pre každého zákazníka)'));
+  W.appendChild(addForm((wording,gtin,card)=>
+    api('/api/znalosti/global',{method:'POST',body:JSON.stringify({wording:wording,gtin:gtin,card:card})})));
+  const g=await api('/api/znalosti/global');
+  if(!g.items.length)W.appendChild(el('div','empty','Zatiaľ nič.'));
+  for(const it of g.items){W.appendChild(aliasRow(it,async()=>{
+    try{await api('/api/znalosti/global/'+it.id,{method:'DELETE'});await load()}
+    catch(e){alert(e.message||'chyba')}}))}
+}
+load();
 </script></body></html>"""
 
 

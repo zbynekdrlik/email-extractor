@@ -254,6 +254,105 @@ def _today(conn):
     return conn.execute("SELECT current_date").fetchone()[0]
 
 
+# --- direct curation (#104): the /znalosti page teaches a wording WITHOUT waiting for the
+# pipeline to raise an order_questions row first. Same tables and the same `resolve()`/
+# `resolve_global()` rungs as the ask/answer/undo flow above — only the entry point differs,
+# so nothing in match.py changes to pick these up. ---------------------------------------
+
+def add_customer_alias(conn, customer_ean: str, wording: str, gtin: str, card: str,
+                       source: str = "human") -> int | None:
+    """Teach a wording for ONE customer directly. Writes `item_memory(source='human')` via
+    the same `remember()` path `teach.answer()` uses, dated today — `memory.resolve()`
+    therefore treats it identically to a warehouse click on an order_questions candidate.
+    Returns the new row's id, or None when the (customer, wording, gtin, day) triple
+    already exists (idempotent) or a required field is missing."""
+    if not (customer_ean and item_key(wording) and gtin):
+        return None
+    row = conn.execute(
+        """INSERT INTO item_memory
+               (customer_ean, item_key, item_raw, gtin, card, delivered_on, source)
+           VALUES (%s, %s, %s, %s, %s, %s, %s)
+           ON CONFLICT (customer_ean, item_key, gtin, delivered_on) DO NOTHING
+           RETURNING id""",
+        (str(customer_ean), item_key(wording), str(wording), str(gtin), card or "",
+         _today(conn), source),
+    ).fetchone()
+    return int(row[0]) if row else None
+
+
+def list_customer_aliases(conn, customer_ean: str) -> list[dict]:
+    """Every item_memory row for this customer, newest first — the /znalosti/<ean> page
+    shows source (human/ship/archive/sheet-import) and timestamp for each, so the warehouse
+    can tell a curated assignment from raw delivery history at a glance."""
+    rows = conn.execute(
+        """SELECT id, item_key, item_raw, gtin, card, delivered_on, source, created_at
+             FROM item_memory WHERE customer_ean = %s
+            ORDER BY created_at DESC""", (str(customer_ean),)).fetchall()
+    return [_alias_row(r) for r in rows]
+
+
+CURATED_SOURCES = ("human", "sheet-import")
+
+
+def delete_item_memory_row(conn, row_id: int, customer_ean: str) -> bool:
+    """Delete ONE curated assignment (source='human' or 'sheet-import' only). Scoped to
+    `customer_ean` so a /znalosti/<ean> page can never delete another customer's row by
+    guessing an id, and restricted to curated sources so a real delivery record
+    (source='ship'/'archive') can never be deleted here — removing shipment history would
+    silently corrupt `resolve()`'s day-count majority for every other wording."""
+    row = conn.execute(
+        """DELETE FROM item_memory
+            WHERE id = %s AND customer_ean = %s AND source = ANY(%s)
+           RETURNING id""",
+        (row_id, str(customer_ean), list(CURATED_SOURCES))).fetchone()
+    return row is not None
+
+
+def add_global_alias(conn, wording: str, gtin: str, card: str, by: str = "") -> int | None:
+    """Teach a wording GLOBALLY (#102) directly, with no order_questions row required.
+    Same table and same first-teach-wins conflict rule as `remember_global` — a wording
+    already taught globally must be corrected via `delete_global_row` first. Returns the
+    new id, or None when already taught or a required field is missing."""
+    if not (item_key(wording) and gtin):
+        return None
+    row = conn.execute(
+        """INSERT INTO global_item_memory (item_key, item_raw, gtin, card, question_id,
+                                           taught_by)
+           VALUES (%s, %s, %s, %s, NULL, %s)
+           ON CONFLICT (item_key) DO NOTHING
+           RETURNING id""",
+        (item_key(wording), str(wording), str(gtin), card or "", by or ""),
+    ).fetchone()
+    return int(row[0]) if row else None
+
+
+def list_global_aliases(conn, limit: int = 500) -> list[dict]:
+    """Every globally-taught wording, newest first — the /znalosti page's global section."""
+    rows = conn.execute(
+        """SELECT id, item_key, item_raw, gtin, card, taught_by, created_at
+             FROM global_item_memory ORDER BY created_at DESC LIMIT %s""",
+        (limit,)).fetchall()
+    return [{"id": int(r[0]), "item_key": r[1], "item_raw": r[2] or "", "gtin": r[3],
+             "card": r[4] or "", "taught_by": r[5] or "", "created_at": r[6]} for r in rows]
+
+
+def delete_global_row(conn, row_id: int) -> bool:
+    """Delete ONE global assignment by id. Deliberately NOT scoped by `question_id` (that
+    scoping is `forget_global`'s job for teach.py's undo flow) — a web-curated row has no
+    owning question, and a /znalosti page must be able to correct ANY global mistake,
+    including one originally taught through the ask/answer flow. Does not reopen the
+    original order_questions row (out of scope for direct curation)."""
+    row = conn.execute(
+        "DELETE FROM global_item_memory WHERE id = %s RETURNING id", (row_id,)).fetchone()
+    return row is not None
+
+
+def _alias_row(r) -> dict:
+    return {"id": int(r[0]), "item_key": r[1], "item_raw": r[2] or "", "gtin": r[3],
+            "card": r[4] or "", "delivered_on": str(r[5]), "source": r[6] or "",
+            "created_at": r[7]}
+
+
 def seed_from_archive(conn, orders: list[dict]) -> int:
     """Seed the delivery history from orders we really shipped.
 
