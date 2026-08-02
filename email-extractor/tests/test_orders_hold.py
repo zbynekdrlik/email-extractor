@@ -23,6 +23,12 @@ CATALOG_CSV = (
     "GTIN,Sklad,Názov,doplnok\n"
     "G50,1,Rožok štandart 50g,\n"
     "TOR,1,Torta čokoládová,\n"
+    # A second torta so the bare wording "torta" (used throughout this file to exercise the
+    # HOLD machinery, never matching accuracy) stays genuinely ambiguous and keeps asking —
+    # after #140, match.unique_core_card() no longer requires 2+ core tokens on the card
+    # side, so a single-candidate catalog would auto-resolve "torta" via unique_card and the
+    # tests below would never see a held question at all.
+    "TOR2,1,Torta vanilková,\n"
 )
 CUSTOMER_CSV = (
     "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,E-mail\n"

@@ -91,11 +91,13 @@ def test_KNOWN_TRADEOFF_single_core_token_card_can_absorb_an_extra_qualifier_wor
     """Documented, accepted-risk boundary (review finding on #49, 2026-08-01).
 
     catalog_match's rung 3 requires 2+ core tokens on the ORDERED wording but NOT on
-    the catalog card (unlike app.orders.match.unique_core_card, which requires both
-    sides >= 2) — because the real catalog has legitimate single-word products
-    distinguished only by weight (Lupačka 60g/75g above; see the #49 design comment
-    on the issue). The consequence: an extra qualifier word that is not itself a
-    distinguishing catalog word ("makova") does not block the match as long as the
+    the catalog card (`app.orders.match.unique_core_card` dropped its OWN >= 2 minimum
+    on both sides, #140 — the two modules now agree that a single-core-token CARD is
+    fine; they still differ on the WORDING side, where this module keeps its >= 2
+    floor and match.py has none at all) — because the real catalog has legitimate
+    single-word products distinguished only by weight (Lupačka 60g/75g above; see the
+    #49 design comment on the issue). The consequence: an extra qualifier word that is
+    not itself a distinguishing catalog word ("makova") does not block the match as long as the
     weight agrees — even though "Lupačka makova" is not actually a catalog product.
     Pinned here so any future change to this boundary is a deliberate, reviewed diff
     instead of silent drift.
