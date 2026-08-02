@@ -539,6 +539,22 @@ again. That is the point: a changed prompt has not been measured until it has be
   (`email-extractor/`)** — the SAME root-vs-add-on-dir split already documented above for
   `pre-push-lint.sh`. A worker whose Bash cwd resets to `email-extractor/` will find no
   `docs/` there at all; `cd ..` (or an absolute path) before touching either file.
+- **A code fix to how a `order_questions` row is COMPOSED (e.g. its `candidates` list) only
+  affects NEWLY asked questions — deploying it does NOT change already-OPEN rows, whose
+  data was written under the OLD logic and stays frozen (#147).** `teach.ask` writes
+  `candidates` once, at creation time; there is no re-derive-on-read. When a ticket's
+  acceptance criteria explicitly require an ALREADY-OPEN question to show the fixed
+  behaviour (e.g. "over naživo tie isté N otázok"), the code fix alone is not enough —
+  it needs a narrow, explicit data repair on TOP of the deploy: read the row(s)
+  (`SELECT id, wording, candidates::text FROM order_questions WHERE status='open'`),
+  compute what the NEW logic would have produced (same function the fix added, applied
+  by hand to the known inputs), and `UPDATE order_questions SET candidates = $$[...]$$
+  ::jsonb WHERE id = <id> AND status = 'open'` for exactly the affected id(s) — same
+  class of operation as the `#145` render-from-stored-data pattern below (read stored
+  data, narrow scoped write, never reprocess the email, never touch `held_orders`/
+  `edi_sent`). Verify afterward that `held_orders` row count/status and `edi_sent` count
+  are UNCHANGED and every touched question is still `status='open'` — that is the proof
+  the repair touched only the one column it meant to.
 - **Re-rendering a historical Odoo order message from an already-stored `order_runs` row —
   no reprocess, no model call, no EDI — is a solved, reusable pattern (#145).** When a
   ticket needs a NEW Odoo message for an order that already ran (e.g. re-formatting after a
