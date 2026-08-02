@@ -230,12 +230,17 @@ def test_a_failed_upload_releases_the_ledger_so_it_can_be_retried(pg, env):
     def failing(cfg, name, content):
         raise OSError("ORION unreachable")
 
+    rec = Recorder()
     result = pipeline.run(pg, _cfg(), MAIL, env, client=ScriptedClient(_answers()),
-                          upload=failing, post=lambda *a, **k: None)
+                          upload=failing, post=rec.post)
     assert result["status"] == "error"
     assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 0
     assert pg.execute("SELECT count(*) FROM item_memory").fetchone()[0] == 0, \
         "nothing may be learnt from an order that never arrived"
+    # the raw Python exception must never reach Odoo (#139 review finding) — a
+    # skladníčka reading the message on her phone cannot do anything with "OSError(...)"
+    assert len(rec.posts) == 1
+    assert "OSError" not in rec.posts[0] and "ORION unreachable" not in rec.posts[0]
 
 
 # --- shadow mode ---------------------------------------------------------

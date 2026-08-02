@@ -54,6 +54,18 @@ def test_a_partial_order_gets_the_link():
     assert "neúplných" in html.lower() or "neúplná" in html.lower()
 
 
+def test_a_partial_order_names_how_many_items_are_missing_in_total():
+    """`missing_count` is collected per order — it must actually be used, not just carried
+    around unread. Uses distinctive numbers (30 + 7 = 37) so the assertion cannot pass by
+    coincidentally matching a digit inside an HTML entity code (e.g. `&#65039;`)."""
+    html = report.build_summary(
+        "Pekáreň X",
+        [_order(status="partial", item_count=50, missing_count=30),
+         _order(status="partial", item_count=40, missing_count=7)],
+        link="http://x/sklad/k")
+    assert "37" in html, "30 + 7 missing items across both partial orders"
+
+
 def test_new_questions_get_the_link_even_when_every_order_shipped():
     html = report.build_summary("Pekáreň X", [_order(status="ok")], new_questions=2,
                                 link="http://x/sklad/k")
@@ -68,6 +80,23 @@ def test_a_review_or_error_order_gets_the_link():
         link="http://x/sklad/k")
     assert "http://x/sklad/k" in html
     assert "Zákazník nebol nájdený" in html
+
+
+def test_unverified_items_are_still_counted_and_get_the_link():
+    """The AGEL-incident phantom-item safeguard (extract.py's `unverified`) must survive
+    the shortening — a model-claimed item the e-mail text does not prove must remain
+    visible, even though the shortened message no longer lists it by name."""
+    html = report.build_summary("Pekáreň X", [_order(status="ok")], unverified_count=2,
+                                link="http://x/sklad/k")
+    assert "http://x/sklad/k" in html
+    assert "2" in html
+
+
+def test_no_unverified_items_never_mentions_them():
+    html = report.build_summary("Pekáreň X", [_order(status="ok")], unverified_count=0,
+                                link="http://x/sklad/k")
+    assert "overiť" not in html.lower()
+    assert "http://x/sklad/k" not in html
 
 
 def test_no_link_configured_still_says_something_is_unresolved():
