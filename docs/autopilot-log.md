@@ -325,3 +325,34 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   Bump **0.9.22** (n8n-only zmena, žiadny Python kód — konvencia z #51/#55).
 - Design/review komentáre: [design](https://github.com/zbynekdrlik/email-extractor/issues/47#issuecomment-5155534893),
   [review](https://github.com/zbynekdrlik/email-extractor/issues/47#issuecomment-5155593743).
+
+## 2026-08-02 — #104 dokončené, etapa (c) prezývky (PR #130)
+
+- Priama web kurácia znalosti "znenie → karta", bez čakania na otázku od pipeline. Nové
+  funkcie `memory.py` (`add_customer_alias`/`add_global_alias`/`list_*`/`delete_*`) —
+  per-zákazník ide do `item_memory(source='human')` (rovnaká cesta ako `teach.answer()`),
+  globálne do `global_item_memory` (#102).
+  RED `tests/test_orders_memory.py` (`test_a_direct_customer_alias_is_stored_and_resolves`
+  a 10 ďalších) → GREEN `9efd880`.
+- Migrácia `app/orders/alias_migration.py` (`python -m app.orders.alias_migration`) —
+  jednorazový import stĺpca `doplnok` do `global_item_memory(taught_by='sheet-import')`,
+  idempotentné, first-teach-wins nad ľudským priradením. Odklon od doslovného textu
+  ticketu (ktorý spomínal `item_memory`) — `doplnok` je vlastnosť KARTY, nie zákazníka,
+  zdôvodnené v design komentári na #104.
+  RED `tests/test_orders_alias_migration.py` → GREEN `f7893ad`.
+- Nová stránka `/znalosti` (globálne + vyhľadanie zákazníka) a `/znalosti/<ean>` (jeho
+  priradenia), dostupná cez ten istý podpísaný `/sklad/<key>` odkaz ako `/otazky`;
+  `SKLAD_PATHS` rozšírené o `SKLAD_ZNALOSTI_PAGE`/`SKLAD_ZNALOSTI_API` regexy. Odkaz z
+  každej otvorenej otázky na `/otazky` priamo na predvyplnenú stránku.
+  RED `tests/test_httpapi_znalosti.py` → GREEN `7372dfb`; E2E Playwright test cez reálny
+  prehliadač (`test_e2e.py::test_the_warehouse_link_can_reach_the_knowledge_base_and_teach_a_wording`) — v jej vývoji odhalený a opravený flaky `wait_for_selector` (rovnaký text
+  "Zatiaľ nič." v dvoch sekciách).
+- Review: CLI migrácie zjednotená s `memory_import.py`'s `config.Config.load()` vzorom;
+  `unicodedata` import presunutý na vrch súboru.
+- Nasadené v0.9.24, overené naživo (Playwright na produkcii): pridanie/zmazanie
+  priradenia pre reálneho zákazníka (Gazdovský trh, #101), migrácia naimportovala 18
+  reálnych aliasov z hárku, 0 chýb v konzole.
+- Nadväzujúce tickety podľa vlastného poradia používateľa: #127 (a: výrobky), #128 (b:
+  odberatelia), #129 (vypnutie hárku).
+- Design/review komentáre: [design](https://github.com/zbynekdrlik/email-extractor/issues/104#issuecomment-5155849171),
+  [review](https://github.com/zbynekdrlik/email-extractor/issues/104#issuecomment-5155952598).
