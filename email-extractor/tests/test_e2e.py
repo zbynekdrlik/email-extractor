@@ -212,3 +212,51 @@ def test_the_warehouse_answers_from_the_link_with_no_login(live_server, pg, page
     # the archive is NOT reachable from this link
     assert page.request.get(f"{live_server}/api/messages").status == 401
     assert console == [], f"browser console not clean: {console}"
+
+
+def test_the_warehouse_link_can_reach_the_knowledge_base_and_teach_a_wording(live_server, pg, page):
+    """#104: /znalosti is reachable from the same signed link as /otazky and lets the
+    warehouse teach a wording->card assignment DIRECTLY, without a pending question."""
+    from app.httpapi import sklad_key
+    from app.orders import memory, snapshot, teach
+
+    snapshot.import_snapshot(
+        pg,
+        "GTIN,Názov,doplnok\nG1,Rožok štandart 50g,\n",
+        "Názov organizácie,EAN kód EDI,E-mail\nPekáreň Rožok,2000000000777,pekaren@x.sk\n")
+    teach.ask(pg, message_id="e-kb", customer_ean="2000000000777", customer_name="Pekáreň Rožok",
+             wording="šiška", quantity=1, unit="ks", candidates=[{"gtin": "G1", "name": "x"}])
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/otazky")
+
+    # reached from the questions page, not typed by hand — pre-filled with the customer
+    # and wording the open question was about
+    page.click("a.kb")
+    page.wait_for_url(f"{live_server}/znalosti/2000000000777*")
+    page.wait_for_selector("text=Pekáreň Rožok")
+
+    backend_ver = page.request.get(f"{live_server}/version").text().strip()
+    assert backend_ver in page.locator('[data-testid="version"]').inner_text()
+
+    page.fill('input[placeholder^="znenie"]', "domáci rožtek")
+    page.fill('input[placeholder^="hľadaj kartu"]', "rožok")
+    page.wait_for_selector("text=Rožok štandart 50g")
+    page.click("text=Rožok štandart 50g")
+    page.click('button:has-text("Uložiť")')
+
+    page.wait_for_selector("text=domáci rožtek")
+    assert memory.resolve(pg, "2000000000777", "domáci rožtek").gtin == "G1"
+
+    # curated -> deletable, and gone from both the page and match resolution
+    page.click('.row:has-text("domáci rožtek") button:has-text("zmazať")')
+    # "Zatiaľ nič." also appears (correctly) in the always-empty global section below, so
+    # waiting for it would resolve on that pre-existing match instead of this delete's
+    # re-render — wait for the specific row to actually disappear instead.
+    page.wait_for_selector("text=domáci rožtek", state="detached")
+    assert memory.resolve(pg, "2000000000777", "domáci rožtek") is None
+
+    # still bounded by the same security boundary as /otazky
+    assert page.request.get(f"{live_server}/api/messages").status == 401
+    assert console == [], f"browser console not clean: {console}"
