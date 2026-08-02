@@ -21,6 +21,11 @@ CATALOG = [
      "alias": "domovina, nemocnica agel, eurotrading"},
     {"gtin": "SLI", "name": "Slimák kakaový 90g", "alias": ""},
     {"gtin": "VIA", "name": "Vianočka 400g", "alias": ""},
+    # A second Vianočka card, mirroring the LIVE catalog (#140 diagnosis, 2026-08-02:
+    # "vianočka -> 2 karty"). Without it, "vianočka" would look falsely unique in this
+    # fixture once unique_core_card() no longer requires 2+ core tokens, and would
+    # silently hijack the borderline/no-confidence tests below (#140's own case).
+    {"gtin": "VIA300", "name": "Vianočka 300gr", "alias": ""},
     {"gtin": "DAN90", "name": "Dánske pečivo tvarohové 90g", "alias": ""},
     {"gtin": "DAN60", "name": "Dánske pečivo makové 60g", "alias": ""},
 ]
@@ -201,11 +206,48 @@ def test_the_only_espaldovy_bread_is_taken_despite_the_stated_weight():
     assert (d.gtin, d.rule, d.review) == ("SPA", "unique_card", False)
 
 
-def test_a_single_word_order_never_uses_the_only_card_rule():
-    """'rožok' alone has several catalog variants distinguished by weight; letting the
-    rule fire there returns the Céder incident."""
+def test_a_single_word_order_with_several_catalog_candidates_still_asks():
+    """User decision 2026-08-02 (#140): the count of REAL catalog candidates decides, not
+    the number of words in the wording — but 'rožok' alone still has TWO catalog variants
+    (štandart 50g, kváskový 70g) distinguished only by weight, so it must still ask.
+    Letting a single-word rule fire here unconditionally is exactly the Céder incident
+    (2026-07-24: 'Rožok 70g' shipped as štandart 50g) — this pins that it cannot recur."""
     d = _decide("rožok", llm={"gtin": None, "confidence": 0.2})
     assert d.gtin is None and d.rule == "unmatched"
+
+
+def test_a_single_word_order_passes_when_the_catalog_has_exactly_one_candidate():
+    """User decision 2026-08-02 (#140), verbatim: "ak napisu babovka a my mame iba jednu
+    babovku medzi produktami tak ma vybrat... to je jedno ze zakaznik nenapisal gramaz".
+    'Slimák' alone has exactly ONE matching card in the catalog — nothing to ask about."""
+    d = _decide("Slimák", llm={"gtin": None, "confidence": 0.2})
+    assert (d.gtin, d.rule, d.review) == ("SLI", "unique_card", False)
+
+
+def test_KNOWN_TRADEOFF_a_single_core_token_card_can_absorb_an_extra_unmatched_qualifier():
+    """Documented, accepted-risk boundary (code review on #140, 2026-08-02) — the same
+    shape `app.orders.static_ean`'s identically-named test already accepts for its own,
+    independent matcher (see that test's docstring for the full reasoning).
+
+    Before #140, unique_core_card() required >= 2 core tokens on the CARD side, so a
+    single-word card like 'Bageta 250g' (core tokens: {'bageta'}) could never be reached
+    by this rung at all — the guard made this scenario structurally impossible. Now that
+    the floor is >= 1 token per side, a wording that ADDS an extra qualifier word the
+    catalog does not distinguish ('Bageta cesnaková', when the only bageta card is the
+    unqualified 'Bageta 250g') still resolves: the extra word is absorbed by the SAME
+    superset-containment branch ("all(t in want for t in have)") that a 2+-token card
+    could already use to absorb an extra qualifier BEFORE this change — this is not a
+    new code path, only a card shape that could not reach it before. No weight is
+    stated on either side, so UNIQUE_MAX_RATIO cannot rule it out.
+
+    Accepted for the same reason static_ean.py accepts it: a real single-product card
+    has no OTHER variant to confuse it with, so an unrecognised qualifier word is lower-
+    value information than "there is exactly one card of this kind." Pinned here so any
+    future tightening of this boundary is a deliberate, reviewed diff, not silent drift.
+    """
+    catalog = [{"gtin": "BAG", "name": "Bageta 250g", "alias": ""}]
+    d = _decide("Bageta cesnaková", llm={"gtin": None, "confidence": 0.2}, catalog=catalog)
+    assert (d.gtin, d.rule, d.review) == ("BAG", "unique_card", False)
 
 
 def test_a_wildly_different_weight_is_not_a_typo_and_is_refused():
@@ -313,8 +355,12 @@ def test_the_decision_trace_names_the_rule_and_its_inputs():
 def test_a_gtin_that_is_not_in_the_catalog_is_not_a_match():
     """The model returned a code that exists nowhere in the catalog and the whole corpus run
     died with `'NoneType' object is not subscriptable`. An answer we cannot resolve to a real
-    card is no answer: the item goes to the warehouse named, and the run continues."""
-    catalog = [{"gtin": "G50", "name": "Rožok štandart 50g", "alias": ""}]
+    card is no answer: the item goes to the warehouse named, and the run continues.
+
+    Two 'rožok' variants (#140) so this stays a test of the unknown-GTIN path, not an
+    accidental single-candidate unique_card match."""
+    catalog = [{"gtin": "G50", "name": "Rožok štandart 50g", "alias": ""},
+               {"gtin": "G70", "name": "Rožok kváskový 70g", "alias": ""}]
     d = match.decide(item_name="rožok", catalog=catalog,
                      llm={"gtin": "TOTALLY-MADE-UP", "confidence": 0.97}, recalled=None,
                      customer_name="Pekáreň s.r.o.")
@@ -323,7 +369,9 @@ def test_a_gtin_that_is_not_in_the_catalog_is_not_a_match():
 
 
 def test_a_borderline_answer_with_an_unknown_gtin_also_does_not_match():
-    catalog = [{"gtin": "G50", "name": "Rožok štandart 50g", "alias": ""}]
+    """Two 'rožok' variants (#140), same reason as the test above."""
+    catalog = [{"gtin": "G50", "name": "Rožok štandart 50g", "alias": ""},
+               {"gtin": "G70", "name": "Rožok kváskový 70g", "alias": ""}]
     d = match.decide(item_name="rožok", catalog=catalog,
                      llm={"gtin": "NOPE", "confidence": 0.75}, recalled=None,
                      customer_name="")

@@ -339,9 +339,13 @@ def test_a_multi_date_email_where_one_order_fails_reports_per_order_status(pg, e
     "today" 2026-07-30 in TWO_DATE_MAIL), so its unmatched line HOLDS the order rather
     than shipping nothing and reporting "review" the moment it is seen."""
     answers = _two_order_answers()
-    # The wording must be one the model actually decides: "vianočka 400g" IS a catalog card,
-    # so since #86 it is answered for free and a scripted model failure never reaches it.
-    answers[0]["orders"][1]["items"][0]["name"] = "vianočka veľká sviatočná"
+    # The wording must be one the model actually decides — never a free rung. "vianočka
+    # 400g" IS a catalog card, so since #86 it is answered for free and a scripted model
+    # failure never reaches it. It also cannot contain the single word "vianočka" at all
+    # (#140): once catalog cards with a single core token count too, ANY wording containing
+    # that one word would uniquely resolve to VIA via unique_core_card, again never
+    # reaching the model. A product absent from this test's 3-card catalog dodges both.
+    answers[0]["orders"][1]["items"][0]["name"] = "makový závin s orechmi"
     answers[3] = {"gtin": "NO_MATCH", "confidence": 0.1, "matchedCatalogName": "",
                   "reason": "nič sa nezhoduje"}
     rec = Recorder()

@@ -258,17 +258,33 @@ def _unique_note(card: dict, ordered_w) -> str:
 def unique_core_card(item_name: str, catalog: list[dict]) -> dict | None:
     """The only card of that kind, ignoring the weight.
 
-    Needs 2+ core tokens: one-word orders ("rožok", "šiška") have several catalog
-    variants distinguished precisely by weight, and letting the rule fire there brings
-    back the Céder incident.
+    User decision 2026-08-02 (#140): what decides is the number of REAL candidates in
+    the catalog, not the number of words in the wording — "ak napisu babovka a my mame
+    iba jednu babovku... to je jedno ze zakaznik nenapisal gramaz". A one-word order
+    ("babovka", "slimák") whose catalog has exactly one matching card must not be asked
+    about. "rožok"/"šiška" still have several catalog variants distinguished only by
+    weight, and must still ask — that safety now comes from the candidate COUNT below
+    (2+ hits -> None), not from a minimum word count. Letting it fire unconditionally on
+    a single word is exactly the Céder incident (2026-07-24: "Rožok 70g" shipped as
+    štandart 50g) — `tests/test_orders_match.py`'s
+    `test_a_single_word_order_with_several_catalog_candidates_still_asks` pins that this
+    cannot recur.
+
+    Known, accepted tradeoff (code review on #140): dropping the card-side floor to >= 1
+    token means a single-core-token card can now be reached by the SUPERSET-containment
+    branch below too (`all(t in want for t in have)`), so a wording with an extra
+    unrecognised qualifier word can still resolve to it — the same tradeoff
+    `app.orders.static_ean.catalog_match` already accepts for its own matcher. See
+    `tests/test_orders_match.py`'s
+    `test_KNOWN_TRADEOFF_a_single_core_token_card_can_absorb_an_extra_unmatched_qualifier`.
     """
     want = _core_tokens(item_name)
-    if len(want) < 2:
+    if not want:
         return None
     hits = []
     for card in catalog:
         have = _core_tokens(card.get("name", ""))
-        if len(have) < 2:
+        if not have:
             continue
         if all(t in have for t in want) or all(t in want for t in have):
             hits.append(card)
