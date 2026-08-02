@@ -250,3 +250,39 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   pripravený, spustí sa hneď ako credential existuje.
 - Bump **0.9.19** (n8n-only zmena pre #51 nemá kód v repe, ale tento log záznam áno →
   verzia sa bumpuje kvôli nemu).
+
+## 2026-08-02 — #55 dokončené (Header Auth credential + rotácia tokenu)
+
+- Prekážka z predchádzajúcich behov (n8n MCP nevie zakladať credentials, žiadny
+  prihlasovací prístup do UI) vyriešená priamo cez n8n CLI v kontajneri
+  (`docker exec app_6560bdea_hass-n8n n8n import:credentials`), bez UI a bez
+  Public API kľúča. Zachytená a uprataná jedna pasca: CLI bez explicitného
+  `N8N_USER_FOLDER=/data/n8n` omylom založí NOVÚ, prázdnu inštanciu v `/root/.n8n`
+  s vlastným šifrovacím kľúčom — treba ho vždy nastaviť explicitne (reálny beh
+  n8n má tento env len cez svoj supervisor wrapper, `docker exec` bez neho ho
+  nevidí).
+- Credential `email-extractor X-Token` (Header Auth, id `XgnAWAoB13f1D7kD`)
+  založený vo vlastníckom projekte zhodnom s existujúcim "Email Extractor
+  Postgres" credentialom (Marek Drlik, personal). Všetky 3 uzly (`Fetch
+  Attachment` v Dodacie Listy EDI 1R4WcUFhpIPwEJX1, `Fetch Original eml` +
+  `Fetch Invoice PDF` v Invoices Forward v2 du2O6YGmGyntXBbV) prepnuté na
+  `authentication: genericCredentialType` + `genericAuthType: httpHeaderAuth` +
+  tento credential, `?token=` odstránený z URL, oba workflow publikované.
+- Overené naživo `curl`-om priamo proti nasadenému serveru (rovnaké cesty, aké
+  volajú uzly): všetky 3 s hlavičkou `X-Token` → 200, bez tokenu → 403.
+- Rotácia tokenu (starý `446cd89f...` → nový, len v pamäti/add-on options,
+  NIKDY v gite): credential preimportovaný s novou hodnotou → add-on options
+  aktualizované cez Supervisor API (`/addons/.../options`) → add-on reštartovaný
+  → znova overené: nový token 200, starý token aj bez tokenu 403 na všetkých
+  3 cestách. Poradie minimalizuje okno nesúladu (credential update tesne pred
+  reštartom servera).
+- Grep repa aj `git log --all -p`: starý token sa nikde v gite nikdy nenachádzal.
+  Priamym grepom n8n SQLite DB (mimo repo) našli sa navyše 3 UŽ ARCHIVOVANÉ
+  jednorazové debug workflow ("DL — Dump PDFs (TEMP)", "DL — Eval (SQL)",
+  "TEMP — Sub1 regression test on DL 67832") so starým tokenom v URL — keďže
+  token je už rotovaný (stará hodnota je mŕtva) a tieto workflow sú archivované
+  (nespustiteľné, mimo produkcie), ponechané bez zásahu; zdokumentované na
+  tickete ako informačné zistenie, nie ako riziko.
+- Bump **0.9.21** — žiadna zmena Python kódu (`app/httpapi.py` už od #22
+  prijíma token aj v hlavičke `X-Token`), celá oprava je na strane n8n +
+  add-on options.
