@@ -57,7 +57,7 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
 
 
 def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0,
-                  link: str = "") -> str:
+                  unverified_count: int = 0, link: str = "") -> str:
     """The ONE Odoo message for a whole processed e-mail.
 
     `orders` is a list of AGGREGATE per-order summaries — never raw decisions or items:
@@ -65,16 +65,24 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
     "item_count": int, "missing_count": int, "reject_reason": str}`. That shape is what
     makes it structurally impossible for an item name, a trace or a run id to leak into
     Odoo — the function simply never receives them.
+
+    `unverified_count` (#139 review finding) is the AGEL-incident phantom-item safeguard
+    (`extract.py`'s `unverified` — a model-claimed item the e-mail text does not prove) —
+    it is an E-MAIL-level count, not per-order (the same list is shared by every order
+    derived from one e-mail), so the caller sums it ONCE, not per order.
     """
     orders = orders or []
     counts: dict[str, int] = {}
     total_items = 0
+    total_missing = 0
     dates: list[str] = []
     reasons: list[str] = []
     for o in orders:
         status = o.get("status") or "review"
         counts[status] = counts.get(status, 0) + 1
         total_items += int(o.get("item_count") or 0)
+        if status == "partial":
+            total_missing += int(o.get("missing_count") or 0)
         d = str(o.get("delivery_date") or "")
         if d and d not in dates:
             dates.append(d)
@@ -96,12 +104,23 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
 
     bits = []
     for status in ("ok", "partial", "held", "review", "error"):
-        if counts.get(status):
+        if not counts.get(status):
+            continue
+        if status == "partial" and total_missing:
+            bits.append(f"{STATUS_ICON['partial']} {counts['partial']} neúplných "
+                        f"(spolu chýba {total_missing} " +
+                        _plural(total_missing, "položka", "položky", "položiek") + ")")
+        else:
             bits.append(f"{STATUS_ICON[status]} {counts[status]} {STATUS_LABEL[status]}")
     if new_questions:
         bits.append(f"&#10067; {new_questions} " +
                     _plural(new_questions, "nová otázka", "nové otázky", "nových otázok") +
                     " pre sklad")
+    if unverified_count:
+        bits.append(f"&#128269; {unverified_count} " +
+                    _plural(unverified_count, "položka sa nedala overiť v texte",
+                            "položky sa nedali overiť v texte",
+                            "položiek sa nedalo overiť v texte"))
     if bits:
         parts.append("<p>" + " &nbsp;|&nbsp; ".join(bits) + "</p>")
 
@@ -110,7 +129,8 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
     for reason in reasons[:3]:
         parts.append(f"<p>{escape(reason)}</p>")
 
-    needs_link = bool(new_questions) or any(counts.get(s) for s in NEEDS_ACTION)
+    needs_link = (bool(new_questions) or bool(unverified_count)
+                 or any(counts.get(s) for s in NEEDS_ACTION))
     if needs_link:
         if link:
             parts.append(f'<p>&#128203; Rieš na nástenke: '

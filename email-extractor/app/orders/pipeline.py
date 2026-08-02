@@ -313,10 +313,13 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
             out.update(preview)
             break
     # #139: the ONE Odoo message for this whole processed e-mail, covering every order and
-    # every new question raised above.
+    # every new question raised above. `unverified` is EMAIL-level (extraction runs once
+    # per e-mail, shared unchanged across every order derived from it) — summed ONCE here,
+    # never per order, or a multi-order e-mail would double/triple-count the same list.
     _post_summary(cfg, post, shadow,
                   customer_name=email_matched.name if email_matched else "",
-                  orders=order_summaries, new_questions=len(new_questions))
+                  orders=order_summaries, new_questions=len(new_questions),
+                  unverified_count=len(extracted.get("unverified") or []))
     return out
 
 
@@ -414,9 +417,15 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
     except Exception as e:
         edi.release_send(conn, matched.ean_edi, delivery, built.content)
         log.exception("upload of %s failed", name)
-        result["reject_reason"] = f"Odoslanie do ORIONu zlyhalo: {e!r}"
+        # #139 review finding: the raw Python exception repr is a technical detail (the
+        # exact thing the shortened Odoo message must never carry) — the full detail
+        # stays in the log above and in `error_detail`/`detail=` for the admin-facing
+        # event timeline (`_outcome` below), while Odoo gets one short human sentence.
+        result["reject_reason"] = ("Odoslanie do ORIONu zlyhalo — skús znova alebo nahlás "
+                                   "administrátorovi")
+        result["error_detail"] = repr(e)
         _finish(conn, cfg, message, shadow, post, status="error", items=result["items"],
-                result=result, post_now=post_now)
+                result=result, detail={"error": repr(e)}, post_now=post_now)
         return "error", preview, result["reject_reason"]
 
     result["shipped"] = True
@@ -438,7 +447,7 @@ def _delivery_day(delivery_date: str) -> str:
 
 
 def _post_summary(cfg, post, shadow: bool, customer_name: str, orders: list[dict],
-                  new_questions: int = 0) -> None:
+                  new_questions: int = 0, unverified_count: int = 0) -> None:
     """The ONE Odoo message for a processed e-mail (#139) — every caller of `_finish`/
     `_ship_one` funnels through here exactly once per e-mail (or once per later, standalone
     hold-release event). Never raises: a notification failure must never break order
@@ -446,7 +455,8 @@ def _post_summary(cfg, post, shadow: bool, customer_name: str, orders: list[dict
     if shadow:
         return
     html = report.build_summary(customer_name=customer_name, orders=orders,
-                                new_questions=new_questions, link=report.sklad_link(cfg))
+                                new_questions=new_questions,
+                                unverified_count=unverified_count, link=report.sklad_link(cfg))
     try:
         post(cfg, html)
     except Exception:
@@ -467,7 +477,11 @@ def _finish(conn, cfg, message, shadow, post, status: str, items: list,
                     "item_count": len(items),
                     "missing_count": sum(1 for i in items if not i.get("gtin")),
                     "reject_reason": result.get("reject_reason", ""),
-                }])
+                }],
+                # #139 review finding: the AGEL-incident phantom-item safeguard
+                # (`extract.py`'s `unverified`) must stay visible even after the
+                # shortening — never dropped just because the item list itself is gone.
+                unverified_count=len(result.get("unverified") or []))
         report.log_event(
             conn, message.get("message_id", ""),
             stage="uploaded_orion" if result.get("shipped") else "review",
@@ -490,7 +504,11 @@ def _outcome(status: str, result: dict) -> str:
         if missing:
             text += f" (NEÚPLNÁ — chýba {len(missing)} položiek)"
         return text
-    return result.get("reject_reason") or "Odoo kontrola (AI orders)"
+    # `error_detail` (#139) is the full technical reason (e.g. an upload exception's
+    # repr) for the admin-facing event timeline; `reject_reason` alone is what a
+    # non-technical warehouse worker would read in Odoo, so it stays short there.
+    return (result.get("error_detail") or result.get("reject_reason")
+           or "Odoo kontrola (AI orders)")
 
 
 # --- shadow comparison ---------------------------------------------------
