@@ -539,3 +539,26 @@ again. That is the point: a changed prompt has not been measured until it has be
   (`email-extractor/`)** — the SAME root-vs-add-on-dir split already documented above for
   `pre-push-lint.sh`. A worker whose Bash cwd resets to `email-extractor/` will find no
   `docs/` there at all; `cd ..` (or an absolute path) before touching either file.
+- **Re-rendering a historical Odoo order message from an already-stored `order_runs` row —
+  no reprocess, no model call, no EDI — is a solved, reusable pattern (#145).** When a
+  ticket needs a NEW Odoo message for an order that already ran (e.g. re-formatting after a
+  `report.py` change, correcting a bad post), never re-run the email through the pipeline
+  (risks a duplicate ORION upload, #64's whole reason for existing) — read the SAME data the
+  original run produced and call `report.build_summary()` directly: (1) `order_runs.result`
+  (JSONB) has the exact `order_results` list `pipeline._run` built, including per-order
+  `delivery_date`/`status`/`items` — `missing_count` is `sum(1 for i in items if not
+  i.get('gtin'))` (an `llm_borderline` decision DOES have a `gtin` set, only `unmatched`
+  doesn't, per `match.py`); (2) `held_orders` (filtered by `message_id`) and `edi_sent`
+  (filtered by `customer_ean`) cross-check which delivery dates are still `held` vs already
+  shipped; (3) `new_questions` = the count of `order_questions` rows whose `created_at`
+  falls inside `order_runs.started_at`..`finished_at` for that run (a repeated wording within
+  the SAME run reuses one open question — don't just count held-order `question_ids` naively,
+  they can overlap). The `/sklad/<key>` link (`report.sklad_link`/`linkutil.sklad_url`) needs
+  the LIVE container's own persisted secret — derive it by running a tiny script INSIDE the
+  add-on container (`docker exec -e PYTHONPATH=/app -w /app <container> python3 -c "from app
+  import config, linkutil; print(linkutil.sklad_url(config.Config.load()))"`), never
+  reimplement the HMAC by hand outside — `PYTHONPATH=/app` is required, the container's `sys.path`
+  does not include `/app` by default even though `/app/app/__init__.py` exists there. Running
+  `report.build_summary` itself needs `psycopg` importable (`report.py` imports it at module
+  level for an unrelated function) — a throwaway venv (`python3 -m venv` + `pip install
+  psycopg`) is enough, no container access needed for that part.
