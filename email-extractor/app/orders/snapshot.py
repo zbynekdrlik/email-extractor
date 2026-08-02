@@ -250,8 +250,7 @@ def _load_catalog_overrides(conn) -> dict[str, dict]:
     return {r[0]: {"name": r[1], "retired": r[2]} for r in rows}
 
 
-def _apply_catalog_overrides(conn, catalog: list[dict]) -> list[dict]:
-    overrides = _load_catalog_overrides(conn)
+def _merge_catalog(catalog: list[dict], overrides: dict[str, dict]) -> list[dict]:
     out, seen = [], set()
     for row in catalog:
         ov = overrides.get(row["gtin"])
@@ -269,14 +268,20 @@ def _apply_catalog_overrides(conn, catalog: list[dict]) -> list[dict]:
     return out
 
 
+def _apply_catalog_overrides(conn, catalog: list[dict]) -> list[dict]:
+    return _merge_catalog(catalog, _load_catalog_overrides(conn))
+
+
 def catalog_for_management(conn) -> list[dict]:
     """The current effective catalog (sheet + overrides merged), each row flagged with
-    whether it carries a manual override — what the /znalosti products UI lists."""
+    whether it carries a manual override — what the /znalosti products UI lists. Loads
+    the overrides table ONCE and reuses it for both the merge and the `overridden` flag
+    (review finding: two separate loads for the same read)."""
     sid = latest_snapshot_id(conn)
     base = load_catalog(conn, sid) if sid else []
-    merged = _apply_catalog_overrides(conn, base)
-    overridden = set(_load_catalog_overrides(conn))
-    return [dict(r, overridden=r["gtin"] in overridden) for r in merged]
+    overrides = _load_catalog_overrides(conn)
+    merged = _merge_catalog(base, overrides)
+    return [dict(r, overridden=r["gtin"] in overrides) for r in merged]
 
 
 def upsert_catalog_card(conn, gtin: str, name: str) -> None:
@@ -418,6 +423,14 @@ def retire_customer(conn, *, override_id: int | None, orig_ean_edi: str | None,
         return row is not None
     if orig_ean_edi is None:
         return False
+    # `ean_edi`/`street` here are the override's "current identity" that `_merge_customers`
+    # ALSO excludes from `base` on every merge (needed so a previously-baked-in row of THIS
+    # override does not survive re-merging) — for a fresh retirement marker that was NEVER
+    # active with any other identity, that current identity must be the ORIGINAL one, never
+    # a blank placeholder. A blank placeholder here would make `_merge_customers` exclude
+    # ("", "") from EVERY future merge, silently dropping every OTHER customer that also
+    # legitimately has both fields empty (both are optional per the sheet — #101/db.py's own
+    # schema comment), not just the one actually being retired.
     conn.execute(
         """INSERT INTO customer_overrides
                (orig_ean_edi, orig_street, ean_edi, name, emails, city, street, zip,
@@ -425,5 +438,5 @@ def retire_customer(conn, *, override_id: int | None, orig_ean_edi: str | None,
            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,true,now())
            ON CONFLICT (orig_ean_edi, orig_street) WHERE orig_ean_edi IS NOT NULL
            DO UPDATE SET retired=true, updated_at=now()""",
-        (orig_ean_edi, orig_street, "", "", [], "", "", ""))
+        (orig_ean_edi, orig_street, orig_ean_edi, "", [], "", orig_street or "", ""))
     return True
