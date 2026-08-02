@@ -233,3 +233,38 @@ again. That is the point: a changed prompt has not been measured until it has be
   the real archive (raw email text + Odoo channel-152 dump + frozen catalog/customer
   snapshot) stays OUTSIDE git next to the other archive-reconstruction tooling
   (`link.py`, `resolve.py`, `odoo_dump.py`) — real customer data, this repo is public.
+- **Editing the live "AI auto orders"/"Static auto orders" n8n workflows via `update_workflow`
+  (#51, n8n edi_sent duplicate-upload ledger) — three MCP gotchas that cost real debugging time:**
+  1. `get_workflow_details` **always returns `credentials: null` for every node**, even ones
+     with a real, working credential bound in production (confirmed on the pre-existing `Get AI
+     Orders` node). This is response scrubbing, not evidence your `setNodeCredential` op failed
+     — trust the op's own success response, don't chase a phantom "credential didn't stick" bug.
+  2. `setNodeParameter`'s `path` (JSON Pointer) is **relative to the node's `parameters` object,
+     not the node root** — `path: "/parameters/jsonBody"` creates a WRONG nested
+     `parameters.parameters.jsonBody` instead of `parameters.jsonBody`. Use `path: "/jsonBody"`.
+     (`updateNodeParameters` with a flat `parameters` object + `replace: true` sidesteps this
+     entirely and is usually the safer op for a multi-field node.)
+  3. `httpRequest`'s `jsonBody` field has `@displayOptions.show { sendBody: [true], contentType:
+     ["json"], specifyBody: ["json"] }` — if you set `sendBody`/`specifyBody` but never set
+     `contentType` explicitly (relying on its documented `@default json`), the update silently
+     PRUNES `jsonBody` back to `null` (no error, no warning). Always set `contentType: "json"`
+     explicitly alongside `specifyBody: "json"` when building an HTTP node's JSON body via
+     `update_workflow`.
+  4. **A node placed downstream of an `httpRequest` node sees `$json` = that HTTP call's
+     RESPONSE body, not the request's input data** — the same pitfall the existing `Log Success
+     Event` (downstream of `Odoo Success`) already avoids by referencing
+     `$('ASSEMBLE AND GENERATE EDI [v1]').first().json...` instead of bare `$json`. Any NEW node
+     wired downstream of an Odoo/HTTP notify node must do the same (`$('<upstream node
+     name>').item.json.field`), never plain `$json`.
+- **This repo's git root (`/home/newlevel/devel/n8n/email_extract`) is one level ABOVE the
+  add-on code (`email-extractor/`)**, and an autopilot-worker session's Bash tool cwd resets to
+  the dispatch launch dir (`email-extractor/`) on EVERY call — no `cd` in a prior or same
+  command persists it. `hooks/pre-push-lint.sh` computes root-relative changed-file paths via
+  `git diff` but runs `ruff check` from its OWN process cwd (the launch dir), so a normal push
+  that touches any `.py` file gets falsely blocked with `E902 No such file` even when the code
+  is 100% lint-clean (verified: `ruff check .` from the true root passes). No bypass tag exists
+  for this hook. Filed upstream as `zbynekdrlik/airuleset#218`. Until fixed there, the one-off
+  workaround: create a transient, UNCOMMITTED self-referential symlink inside `email-extractor/`
+  (`ln -s . email-extractor/email-extractor`), push, then `rm` it immediately — this makes the
+  hook's root-relative path resolve correctly through the symlink without touching the real
+  file layout or git history.
