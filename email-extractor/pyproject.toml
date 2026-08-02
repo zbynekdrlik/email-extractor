@@ -20,5 +20,8 @@ addopts = "-q"
 [tool.coverage.run]
 source = ["app"]
 # backfill.py is a one-off operator script with no tests yet — everything the
-# add-on runs in production is measured (#27).
-omit = ["app/backfill.py", "app/orders/memory_import.py", "app/orders/eval_run.py"]
+# add-on runs in production is measured (#27). static_edi_corpus_check.py is the
+# same shape as eval_run.py — a CI-invoked CLI verified by running it against the
+# real corpus on the dev2 self-hosted runner, not by pytest unit tests (#131).
+omit = ["app/backfill.py", "app/orders/memory_import.py", "app/orders/eval_run.py",
+        "app/orders/static_edi_corpus_check.py"]

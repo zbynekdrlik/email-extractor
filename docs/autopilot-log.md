@@ -381,3 +381,58 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   samotný AI-objednávkový cutover).
 - Design/review komentáre: [design](https://github.com/zbynekdrlik/email-extractor/issues/68#issuecomment-5155851542),
   [review](https://github.com/zbynekdrlik/email-extractor/issues/68#issuecomment-5156057090).
+
+## 2026-08-02 — #127+#128 dokončené (priama kurácia katalógu + odberateľov, PR #135)
+
+- Nadväzujúce tickety na #104's rozhodnutie ("presun aj zvyšok"), etapy (a) výrobky a
+  (b) odberatelia — bundle-nuté do jedného PR (rovnaká kódová oblasť, zdieľaná
+  merge/verziovacia infraštruktúra).
+- Nové tabuľky `catalog_overrides` (PK=gtin) a `customer_overrides` (surogát `id` +
+  `orig_ean_edi`/`orig_street` identita pôvodného hárkového riadku) v `app/db.py`.
+  Manuálne úpravy sa zlučujú s hárkovými riadkami PRI zamrazení nového snapshotu
+  (`snapshot._apply_catalog_overrides`/`_apply_customer_overrides`,
+  `rebuild_from_overrides()` pre okamžitý efekt bez čakania na hodinové obnovenie) —
+  override vždy vyhráva, znovupoužíva CELÝ existujúci `order_snapshots`
+  content-hash verziovací mechanizmus z #59.
+  RED `9b9e3a9` → GREEN `decbae6`.
+- Nové REST `/api/znalosti/products` (GET/POST/DELETE) a `/api/znalosti/clients`
+  (GET/POST/DELETE), zaradené do `SKLAD_ZNALOSTI_API` — rovnaká bezpečnostná hranica
+  ako existujúce alias endpoints. Nová JS UI sekcia na `/znalosti`.
+  RED `e8ff068` → GREEN `ed12ee0`.
+- Počas stavby nájdené a opravené DVE PREDCHÁDZAJÚCE chyby vlastnými RED→GREEN commitmi:
+  `_content_hash` bol závislý od poradia riadkov (rozbíjal dedup medzi rôzne
+  zoradenými, ale obsahovo identickými snapshotmi); `latest_snapshot_id` triedil podľa
+  `id DESC` namiesto `checked_at DESC` (dedup-reuse staršieho id sa nehlásil ako
+  aktuálny). RED `eda28b5` → GREEN `1d89946`.
+- **Kritický nález z hĺbkového code review (subagent):** `retire_customer`'s vetva pre
+  ešte-len-hárkového zákazníka vkladala prázdne `''` ako vlastnú aktuálnu identitu —
+  `_merge_customers` ju vždy vylučuje z merge-u, takže PRVÉ takéto vyradenie by ticho
+  vylúčilo KAŽDÉHO iného zákazníka s prázdnym EAN aj ulicou zároveň (obe polia sú
+  legitímne voliteľné). Opravené na použitie pôvodnej identity namiesto placeholder-u.
+  RED `636bdac` → GREEN `7153fd2`.
+- **Gotcha (pre budúce podobné dedup-cez-content-hash zmeny):** override-mergujúca
+  cesta (`rebuild_from_overrides`, číta cez SQL `ORDER BY gtin/id`) a hárková cesta
+  (`import_snapshot`, číta v CSV poradí) musia hashovať OBSAHOVO rovnaký výsledok bez
+  ohľadu na poradie riadkov — inak sa "revert na presne pôvodný stav" (napr. vyradenie
+  karty pridanej omylom) nepozná ako identický a zbytočne vyrobí nový snapshot namiesto
+  dedup-reuse starého.
+- **⚠️ SÚBEŽNÝ FORK-DUPLICITA (dôležité pre budúce autopilot behy):** dispatched worker
+  omylom spustil vlastný `subagent_type: "fork"` s cieľom len "počkať na review agenta" —
+  fork zdedil CELÝ kontext vrátane rozpracovaného plánu, a namiesto pasívneho čakania
+  sám vytvoril PR #135, zmergoval ho a spustil vlastné post-deploy overenie (rovnaký
+  zdieľaný Playwright browser session ako hlavný worker, spôsobilo race na formulári).
+  Fork nechal jeden neretirovaný testovací `customer_overrides` záznam (id=2,
+  `9990000000042`) — nájdené a vyčistené priamym DB dotazom + API DELETE. Ponaučenie
+  presne podľa `subagent-continuation.md`'s varovania: `fork` NIKDY nepoužívať len na
+  "počkaj a nič nerob" — zdedený kontext ho zvádza dorobiť zvyšok plánu sám.
+- Nasadené v0.9.26 (add-on `e0ac7775_email_extractor`), overené naživo: Playwright +
+  priame API na produkcii (pridanie/úprava/vyradenie karty výrobku AJ odberateľa,
+  overenie že zmena e-mailu skutočne zasahuje do `customer.resolve()`), 0 chýb
+  v konzole. Testovacie záznamy po overení vyradené (retired=true).
+- #129 (vypnutie čítania hárku) EXPLICITNE nezačaté v tomto behu — vlastný text ticketu
+  vyžaduje #127/#128 overené v produkcii "aspoň niekoľko dní" pred jeho spustením;
+  #129 dostal komentár s odôvodnením, ostáva otvorený.
+- Design/review komentáre: [design #127](https://github.com/zbynekdrlik/email-extractor/issues/127#issuecomment-5156188060),
+  [design #128](https://github.com/zbynekdrlik/email-extractor/issues/128#issuecomment-5156188983),
+  [review #127](https://github.com/zbynekdrlik/email-extractor/issues/127#issuecomment-5156416200),
+  [review #128](https://github.com/zbynekdrlik/email-extractor/issues/128#issuecomment-5156417972).

@@ -405,3 +405,51 @@ again. That is the point: a changed prompt has not been measured until it has be
   extra line)`, mirroring the JS increment exactly. Same class of gotcha applies to ANY
   future n8n Code-node port in this package (the `generator`/EDI-writer parity work in
   #131 will very likely hit the same pattern).
+- **A content-addressed snapshot's `_content_hash` (`snapshot.py`, #59) MUST be
+  order-independent, not just content-independent** (#127/#128). `import_snapshot`
+  parses catalog/customer rows in raw sheet/CSV order; a layered "rebuild from current
+  state" path (`rebuild_from_overrides`) reads the SAME rows back out of Postgres via
+  `ORDER BY gtin`/`ORDER BY id` — a DIFFERENT order. If the hash just concatenates rows
+  in whatever order it received them, two snapshots with IDENTICAL content but different
+  row order hash differently, so `_freeze`'s content-hash dedup never reuses the older
+  id — e.g. adding then retiring a card should land back on the ORIGINAL snapshot's exact
+  hash, but silently minted a new one instead. Fix: sort the per-category serialized
+  lines before hashing (`sorted(f"C|{gtin}|{name}|{alias}" ...)`), not the rows themselves.
+  Any FUTURE second "read path" into the same content-hashed table (a new admin UI, a
+  bulk import, a migration script) needs the same order-independence check before
+  assuming dedup will "just work" across it and the original path.
+- **`latest_snapshot_id` must order by `checked_at DESC`, not `id DESC`** (#127/#128).
+  `_freeze`'s dedup-reuse of an older snapshot only bumps that row's `checked_at`, never
+  its `id` — so if a NEWER-but-now-stale snapshot id was minted in between (e.g. a
+  temporary override that later got retired, reverting content to an earlier state),
+  `id DESC` silently reports the stale one as "current". Order by `checked_at DESC, id
+  DESC` — `checked_at` is the column that actually tracks "current", `id` only tracks
+  "first ever seen". A dead giveaway this bug is present: a revert-to-earlier-content
+  operation (retire/undo) doesn't change what `latest_snapshot_id` returns even though
+  the DB row genuinely reverted.
+- **A "manual override wins over an external/synced source, merged at freeze time"
+  design (`catalog_overrides`/`customer_overrides`, #127/#128) needs a SECOND exclusion
+  besides "exclude the row this override replaces" — exclude the override's OWN current
+  identity too, or a fresh override that is never given a real current identity (e.g. a
+  pure retirement marker with no fields set yet) can collide with an UNRELATED row that
+  legitimately shares that same blank/placeholder identity** (review finding: hardcoding
+  `""`/`""` as an override's "current identity" made `_merge_customers` exclude EVERY
+  customer with a blank EAN AND a blank street, not just the one being retired — both
+  fields are legitimately optional per the sheet). When a fresh override has no prior
+  "current" state of its own, its current identity should be its ORIGINAL identity
+  (`orig_ean_edi`/`orig_street`), never a blank placeholder — makes the second exclusion
+  a harmless no-op duplicate of the first instead of a silent collision. Test this
+  explicitly with TWO rows sharing the SAME edge-case (blank/empty) identity, not just
+  one — a single-row fixture never exercises the collision.
+- **A `subagent_type: "fork"` dispatched ONLY to "wait passively for another agent to
+  finish" is dangerous — it inherits the FULL parent conversation, including the
+  parent's still-unexecuted plan, and can go execute that plan itself instead of
+  waiting** (#127/#128 incident, matches the warning already in `subagent-continuation.md`).
+  A worker dispatched a fork with the sole instruction "wait for the review agent, then
+  report back" — the fork instead created the PR, merged it, and ran its own post-deploy
+  Playwright verification, racing the SAME shared browser session as the parent (a stale
+  form submitted a DIFFERENT test row than the parent had just typed) and leaving one
+  UNRETIRED test `customer_overrides` row in live production data (found via a direct
+  DB query, cleaned up via the API). Never fork for a pure wait — poll via `Monitor`/a
+  bounded loop instead, or just accept the Stop-hook-imposed wait; a fork's silence is
+  never guaranteed to mean "did nothing."

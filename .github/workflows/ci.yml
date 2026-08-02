@@ -102,6 +102,15 @@ jobs:
             --taught "$CORPUS/taught.json" \
             --baseline "$CORPUS/baseline.json" \
             --require-all
+      # Static-orders EDI writer parity (#131) — byte comparison against real processed
+      # static orders, paired with the real production `generator` n8n node's output.
+      # Same corpus base dir, same runner, same "missing corpus fails, never skips" rule.
+      - name: The static-edi corpus must be present (a missing corpus fails, never skips)
+        run: |
+          test -d "$CORPUS/static-edi/cases" || { echo "corpus missing: $CORPUS/static-edi/cases"; exit 1; }
+      - name: Run the static-edi corpus (byte parity with the real generator node)
+        run: |
+          .venv/bin/python -m app.orders.static_edi_corpus_check --corpus-dir "$CORPUS/static-edi"
 
   build:
     needs: [test, e2e-orders]

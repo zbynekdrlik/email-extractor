@@ -1,0 +1,523 @@
+[
+ {
+  "name": "karmen_basic_two_items",
+  "input": {
+   "order_data": {
+    "partner": "KARMEN",
+    "prevNumber": "19",
+    "fullOrderNumber": "999/26",
+    "issueDate": "01.08.2026",
+    "deliveryDate": "02.08.2026",
+    "deliveryLocationName": "KARMEN 19, Testovo",
+    "items": [
+     {
+      "code": null,
+      "ean": "1112223334445",
+      "description": "Rožok 50g",
+      "quantity": 10
+     },
+     {
+      "code": null,
+      "ean": null,
+      "description": "Chlieb pšenično-ražný 800gr",
+      "quantity": 3
+     }
+    ]
+   },
+   "catalog": [
+    {
+     "gtin": "8588001805609",
+     "name": "Chlieb pšenično-ražný 800gr",
+     "alias": ""
+    },
+    {
+     "gtin": "8588001805692",
+     "name": "Toskánske pečivo 60 gr",
+     "alias": ""
+    },
+    {
+     "gtin": "9999900000009",
+     "name": "Vianočka makova 400g",
+     "alias": "makovka"
+    }
+   ]
+  },
+  "expected": {
+   "content": "HDR8586013743063  999/26                       20260801   8589364472019    KARMEN - velkoobchod potravin s.r.o.                                                                                                                                                                             8589364472019    KARMEN 19, Testovo                                                                                                                                                                 8589364472019                                                                                                                                                                                                                     8586013743063    SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                                                                                                              20260802                                                                          \r\nLIN     1   1112223334445                  10.000PCE            Rozok 50g                                                                                                                                             \r\nLIN     2   8588001805609                   3.000PCE            Chlieb psenicno-razny 800gr                                                                                                                           \r\nSUM",
+   "filename": "KARMEN_999_26_019.txt",
+   "storeEAN": "8589364472019",
+   "buyerName": "KARMEN - velkoobchod potravin s.r.o.",
+   "itemsWithEAN": 2,
+   "itemsSkipped": 0,
+   "skippedItems": []
+  }
+ },
+ {
+  "name": "komfos_catalog_alias_match",
+  "input": {
+   "order_data": {
+    "partner": "KOMFOS",
+    "prevNumber": "77",
+    "fullOrderNumber": "500/26",
+    "issueDate": "03.08.2026",
+    "deliveryDate": "04.08.2026",
+    "deliveryLocationName": "KOMFOS Prešov, Hlavná 1",
+    "items": [
+     {
+      "code": null,
+      "ean": null,
+      "description": "makovka",
+      "quantity": 5.5
+     }
+    ]
+   },
+   "catalog": [
+    {
+     "gtin": "8588001805609",
+     "name": "Chlieb pšenično-ražný 800gr",
+     "alias": ""
+    },
+    {
+     "gtin": "8588001805692",
+     "name": "Toskánske pečivo 60 gr",
+     "alias": ""
+    },
+    {
+     "gtin": "9999900000009",
+     "name": "Vianočka makova 400g",
+     "alias": "makovka"
+    }
+   ]
+  },
+  "expected": {
+   "content": "HDR8586013743063  500/26                       20260803   8589364541077    KOMFOS Presov, s.r.o.                                                                                                                                                                                            8589364541077    KOMFOS Presov, Hlavna 1                                                                                                                                                            8589364541077                                                                                                                                                                                                                     8586013743063    SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                                                                                                              20260804                                                                          \r\nLIN     1   9999900000009                   5.500PCE            makovka                                                                                                                                               \r\nSUM",
+   "filename": "KOMFOS_500_26_077.txt",
+   "storeEAN": "8589364541077",
+   "buyerName": "KOMFOS Presov, s.r.o.",
+   "itemsWithEAN": 1,
+   "itemsSkipped": 0,
+   "skippedItems": []
+  }
+ },
+ {
+  "name": "labas_exact_store_lookup",
+  "input": {
+   "order_data": {
+    "partner": "LABAS",
+    "prevNumber": "GELNICA",
+    "fullOrderNumber": "020260999001",
+    "issueDate": "05.08.2026",
+    "deliveryDate": "06.08.2026",
+    "deliveryLocationName": "LABAS s.r.o. KS/OC GELNICA",
+    "items": [
+     {
+      "code": null,
+      "ean": "9998887776665",
+      "description": "Test polozka",
+      "quantity": 1
+     }
+    ]
+   },
+   "catalog": [
+    {
+     "gtin": "8588001805609",
+     "name": "Chlieb pšenično-ražný 800gr",
+     "alias": ""
+    },
+    {
+     "gtin": "8588001805692",
+     "name": "Toskánske pečivo 60 gr",
+     "alias": ""
+    },
+    {
+     "gtin": "9999900000009",
+     "name": "Vianočka makova 400g",
+     "alias": "makovka"
+    }
+   ]
+  },
+  "expected": {
+   "content": "HDR8586013743063  020260999001                 20260805   8589361831001    LABAS s.r.o.                                                                                                                                                                                                     8589361831001    LABAS s.r.o. KS/OC GELNICA                                                                                                                                                         8589361831001                                                                                                                                                                                                                     8586013743063    SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                                                                                                              20260806                                                                          \r\nLIN     1   9998887776665                   1.000PCE            Test polozka                                                                                                                                          \r\nSUM",
+   "filename": "LABAS_020260999001_GELNICA.txt",
+   "storeEAN": "8589361831001",
+   "buyerName": "LABAS s.r.o.",
+   "itemsWithEAN": 1,
+   "itemsSkipped": 0,
+   "skippedItems": []
+  }
+ },
+ {
+  "name": "karmen_cash_token_subset_store_lookup",
+  "input": {
+   "order_data": {
+    "partner": "KARMEN_CASH",
+    "prevNumber": "ZEMPLINSKA 1A PRESOV",
+    "fullOrderNumber": "020260999002",
+    "issueDate": "07.08.2026",
+    "deliveryDate": "08.08.2026",
+    "deliveryLocationName": "KARMEN CASH AND CARRY, Zemplinska 1a",
+    "items": [
+     {
+      "code": null,
+      "ean": "9998887776666",
+      "description": "Test polozka 2",
+      "quantity": 2
+     }
+    ]
+   },
+   "catalog": [
+    {
+     "gtin": "8588001805609",
+     "name": "Chlieb pšenično-ražný 800gr",
+     "alias": ""
+    },
+    {
+     "gtin": "8588001805692",
+     "name": "Toskánske pečivo 60 gr",
+     "alias": ""
+    },
+    {
+     "gtin": "9999900000009",
+     "name": "Vianočka makova 400g",
+     "alias": "makovka"
+    }
+   ]
+  },
+  "expected": {
+   "content": "HDR8586013743063  020260999002                 20260807   8589364472111    KARMEN - velkoobchod potravin s.r.o.                                                                                                                                                                             8589364472111    KARMEN CASH AND CARRY, Zemplinska 1a                                                                                                                                               8589364472111                                                                                                                                                                                                                     8586013743063    SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                                                                                                              20260808                                                                          \r\nLIN     1   9998887776666                   2.000PCE            Test polozka 2                                                                                                                                        \r\nSUM",
+   "filename": "KARMEN_CASH_020260999002_CASH.txt",
+   "storeEAN": "8589364472111",
+   "buyerName": "KARMEN - velkoobchod potravin s.r.o.",
+   "itemsWithEAN": 1,
+   "itemsSkipped": 0,
+   "skippedItems": []
+  }
+ },
+ {
+  "name": "unmatched_item_is_skipped",
+  "input": {
+   "order_data": {
+    "partner": "KARMEN",
+    "prevNumber": "19",
+    "fullOrderNumber": "999/27",
+    "issueDate": "01.08.2026",
+    "deliveryDate": "02.08.2026",
+    "deliveryLocationName": "KARMEN 19, Testovo",
+    "items": [
+     {
+      "code": null,
+      "ean": "1112223334445",
+      "description": "Rožok 50g",
+      "quantity": 10
+     },
+     {
+      "code": null,
+      "ean": null,
+      "description": "Uplne neznamy produkt XYZ",
+      "quantity": 1
+     }
+    ]
+   },
+   "catalog": [
+    {
+     "gtin": "8588001805609",
+     "name": "Chlieb pšenično-ražný 800gr",
+     "alias": ""
+    },
+    {
+     "gtin": "8588001805692",
+     "name": "Toskánske pečivo 60 gr",
+     "alias": ""
+    },
+    {
+     "gtin": "9999900000009",
+     "name": "Vianočka makova 400g",
+     "alias": "makovka"
+    }
+   ]
+  },
+  "expected": {
+   "content": "HDR8586013743063  999/27                       20260801   8589364472019    KARMEN - velkoobchod potravin s.r.o.                                                                                                                                                                             8589364472019    KARMEN 19, Testovo                                                                                                                                                                 8589364472019                                                                                                                                                                                                                     8586013743063    SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                                                                                                              20260802                                                                          \r\nLIN     1   1112223334445                  10.000PCE            Rozok 50g                                                                                                                                             \r\nSUM",
+   "filename": "KARMEN_999_27_019.txt",
+   "storeEAN": "8589364472019",
+   "buyerName": "KARMEN - velkoobchod potravin s.r.o.",
+   "itemsWithEAN": 1,
+   "itemsSkipped": 1,
+   "skippedItems": [
+    "Uplne neznamy produkt XYZ"
+   ]
+  }
+ },
+ {
+  "name": "long_order_number_truncated_from_front_not_tail",
+  "input": {
+   "order_data": {
+    "partner": "KARMEN",
+    "prevNumber": "19",
+    "fullOrderNumber": "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "issueDate": "01.08.2026",
+    "deliveryDate": "02.08.2026",
+    "deliveryLocationName": "KARMEN 19, Testovo",
+    "items": [
+     {
+      "code": null,
+      "ean": "1112223334445",
+      "description": "Rožok 50g",
+      "quantity": 10
+     }
+    ]
+   },
+   "catalog": [
+    {
+     "gtin": "8588001805609",
+     "name": "Chlieb pšenično-ražný 800gr",
+     "alias": ""
+    },
+    {
+     "gtin": "8588001805692",
+     "name": "Toskánske pečivo 60 gr",
+     "alias": ""
+    },
+    {
+     "gtin": "9999900000009",
+     "name": "Vianočka makova 400g",
+     "alias": "makovka"
+    }
+   ]
+  },
+  "expected": {
+   "content": "HDR8586013743063  ABCDEFGHIJKLMNO              20260801   8589364472019    KARMEN - velkoobchod potravin s.r.o.                                                                                                                                                                             8589364472019    KARMEN 19, Testovo                                                                                                                                                                 8589364472019                                                                                                                                                                                                                     8586013743063    SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                                                                                                              20260802                                                                          \r\nLIN     1   1112223334445                  10.000PCE            Rozok 50g                                                                                                                                             \r\nSUM",
+   "filename": "KARMEN_ABCDEFGHIJKLMNOPQRSTUVWXYZ_019.txt",
+   "storeEAN": "8589364472019",
+   "buyerName": "KARMEN - velkoobchod potravin s.r.o.",
+   "itemsWithEAN": 1,
+   "itemsSkipped": 0,
+   "skippedItems": []
+  }
+ },
+ {
+  "name": "unmapped_non_ascii_is_dropped_not_transliterated",
+  "input": {
+   "order_data": {
+    "partner": "KARMEN",
+    "prevNumber": "19",
+    "fullOrderNumber": "999/28",
+    "issueDate": "01.08.2026",
+    "deliveryDate": "02.08.2026",
+    "deliveryLocationName": "KARMEN 19, Nova – Provadzka",
+    "items": [
+     {
+      "code": null,
+      "ean": "1112223334445",
+      "description": "Rožok 50g",
+      "quantity": 10
+     }
+    ]
+   },
+   "catalog": [
+    {
+     "gtin": "8588001805609",
+     "name": "Chlieb pšenično-ražný 800gr",
+     "alias": ""
+    },
+    {
+     "gtin": "8588001805692",
+     "name": "Toskánske pečivo 60 gr",
+     "alias": ""
+    },
+    {
+     "gtin": "9999900000009",
+     "name": "Vianočka makova 400g",
+     "alias": "makovka"
+    }
+   ]
+  },
+  "expected": {
+   "content": "HDR8586013743063  999/28                       20260801   8589364472019    KARMEN - velkoobchod potravin s.r.o.                                                                                                                                                                             8589364472019    KARMEN 19, Nova - Provadzka                                                                                                                                                        8589364472019                                                                                                                                                                                                                     8586013743063    SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                                                                                                              20260802                                                                          \r\nLIN     1   1112223334445                  10.000PCE            Rozok 50g                                                                                                                                             \r\nSUM",
+   "filename": "KARMEN_999_28_019.txt",
+   "storeEAN": "8589364472019",
+   "buyerName": "KARMEN - velkoobchod potravin s.r.o.",
+   "itemsWithEAN": 1,
+   "itemsSkipped": 0,
+   "skippedItems": []
+  }
+ },
+ {
+  "name": "product_ean_by_code_override",
+  "input": {
+   "order_data": {
+    "partner": "KARMEN",
+    "prevNumber": "19",
+    "fullOrderNumber": "999/29",
+    "issueDate": "01.08.2026",
+    "deliveryDate": "02.08.2026",
+    "deliveryLocationName": "KARMEN 19, Testovo",
+    "items": [
+     {
+      "code": "9485",
+      "ean": null,
+      "description": "Nieco s vlastnym kodom",
+      "quantity": 4
+     }
+    ]
+   },
+   "catalog": [
+    {
+     "gtin": "8588001805609",
+     "name": "Chlieb pšenično-ražný 800gr",
+     "alias": ""
+    },
+    {
+     "gtin": "8588001805692",
+     "name": "Toskánske pečivo 60 gr",
+     "alias": ""
+    },
+    {
+     "gtin": "9999900000009",
+     "name": "Vianočka makova 400g",
+     "alias": "makovka"
+    }
+   ]
+  },
+  "expected": {
+   "content": "HDR8586013743063  999/29                       20260801   8589364472019    KARMEN - velkoobchod potravin s.r.o.                                                                                                                                                                             8589364472019    KARMEN 19, Testovo                                                                                                                                                                 8589364472019                                                                                                                                                                                                                     8586013743063    SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                                                                                                              20260802                                                                          \r\nLIN     1   8588001805609                   4.000PCE            Nieco s vlastnym kodom                                                                                                                                \r\nSUM",
+   "filename": "KARMEN_999_29_019.txt",
+   "storeEAN": "8589364472019",
+   "buyerName": "KARMEN - velkoobchod potravin s.r.o.",
+   "itemsWithEAN": 1,
+   "itemsSkipped": 0,
+   "skippedItems": []
+  }
+ },
+ {
+  "name": "product_ean_by_name_override",
+  "input": {
+   "order_data": {
+    "partner": "KARMEN",
+    "prevNumber": "19",
+    "fullOrderNumber": "999/30",
+    "issueDate": "01.08.2026",
+    "deliveryDate": "02.08.2026",
+    "deliveryLocationName": "KARMEN 19, Testovo",
+    "items": [
+     {
+      "code": null,
+      "ean": null,
+      "description": "LUPACKA 75 gr zvlastna",
+      "quantity": 2
+     }
+    ]
+   },
+   "catalog": [
+    {
+     "gtin": "8588001805609",
+     "name": "Chlieb pšenično-ražný 800gr",
+     "alias": ""
+    },
+    {
+     "gtin": "8588001805692",
+     "name": "Toskánske pečivo 60 gr",
+     "alias": ""
+    },
+    {
+     "gtin": "9999900000009",
+     "name": "Vianočka makova 400g",
+     "alias": "makovka"
+    }
+   ]
+  },
+  "expected": {
+   "content": "HDR8586013743063  999/30                       20260801   8589364472019    KARMEN - velkoobchod potravin s.r.o.                                                                                                                                                                             8589364472019    KARMEN 19, Testovo                                                                                                                                                                 8589364472019                                                                                                                                                                                                                     8586013743063    SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                                                                                                              20260802                                                                          \r\nLIN     1   8588001805777                   2.000PCE            LUPACKA 75 gr zvlastna                                                                                                                                \r\nSUM",
+   "filename": "KARMEN_999_30_019.txt",
+   "storeEAN": "8589364472019",
+   "buyerName": "KARMEN - velkoobchod potravin s.r.o.",
+   "itemsWithEAN": 1,
+   "itemsSkipped": 0,
+   "skippedItems": []
+  }
+ },
+ {
+  "name": "missing_delivery_location_falls_back_to_partner_prevnumber",
+  "input": {
+   "order_data": {
+    "partner": "KARMEN",
+    "prevNumber": "19",
+    "fullOrderNumber": "999/31",
+    "issueDate": "01.08.2026",
+    "deliveryDate": "02.08.2026",
+    "deliveryLocationName": null,
+    "items": [
+     {
+      "code": null,
+      "ean": "1112223334445",
+      "description": "Rožok 50g",
+      "quantity": 10
+     }
+    ]
+   },
+   "catalog": [
+    {
+     "gtin": "8588001805609",
+     "name": "Chlieb pšenično-ražný 800gr",
+     "alias": ""
+    },
+    {
+     "gtin": "8588001805692",
+     "name": "Toskánske pečivo 60 gr",
+     "alias": ""
+    },
+    {
+     "gtin": "9999900000009",
+     "name": "Vianočka makova 400g",
+     "alias": "makovka"
+    }
+   ]
+  },
+  "expected": {
+   "content": "HDR8586013743063  999/31                       20260801   8589364472019    KARMEN - velkoobchod potravin s.r.o.                                                                                                                                                                             8589364472019    KARMEN 19                                                                                                                                                                          8589364472019                                                                                                                                                                                                                     8586013743063    SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                                                                                                              20260802                                                                          \r\nLIN     1   1112223334445                  10.000PCE            Rozok 50g                                                                                                                                             \r\nSUM",
+   "filename": "KARMEN_999_31_019.txt",
+   "storeEAN": "8589364472019",
+   "buyerName": "KARMEN - velkoobchod potravin s.r.o.",
+   "itemsWithEAN": 1,
+   "itemsSkipped": 0,
+   "skippedItems": []
+  }
+ },
+ {
+  "name": "order_number_with_multiple_slashes_only_first_replaced",
+  "input": {
+   "order_data": {
+    "partner": "KARMEN",
+    "prevNumber": "19",
+    "fullOrderNumber": "999/26/1",
+    "issueDate": "01.08.2026",
+    "deliveryDate": "02.08.2026",
+    "deliveryLocationName": "KARMEN 19, Testovo",
+    "items": [
+     {
+      "code": null,
+      "ean": "1112223334445",
+      "description": "Rožok 50g",
+      "quantity": 10
+     }
+    ]
+   },
+   "catalog": [
+    {
+     "gtin": "8588001805609",
+     "name": "Chlieb pšenično-ražný 800gr",
+     "alias": ""
+    }
+   ]
+  },
+  "expected": {
+   "content": "HDR8586013743063  999/26/1                     20260801   8589364472019    KARMEN - velkoobchod potravin s.r.o.                                                                                                                                                                             8589364472019    KARMEN 19, Testovo                                                                                                                                                                 8589364472019                                                                                                                                                                                                                     8586013743063    SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                                                                                                              20260802                                                                          \r\nLIN     1   1112223334445                  10.000PCE            Rozok 50g                                                                                                                                             \r\nSUM",
+   "filename": "KARMEN_999_261_019.txt",
+   "storeEAN": "8589364472019",
+   "buyerName": "KARMEN - velkoobchod potravin s.r.o.",
+   "itemsWithEAN": 1,
+   "itemsSkipped": 0,
+   "skippedItems": []
+  }
+ }
+]
