@@ -455,8 +455,9 @@ SCHEMA = [
         order_json      JSONB NOT NULL DEFAULT '{}'::jsonb,
         extracted_json  JSONB NOT NULL DEFAULT '{}'::jsonb,
         decisions_json  JSONB NOT NULL DEFAULT '[]'::jsonb,
-        status          TEXT NOT NULL DEFAULT 'held',
-        release_reason  TEXT,
+        status          TEXT NOT NULL DEFAULT 'held'
+                            CHECK (status IN ('held', 'released')),
+        release_reason  TEXT CHECK (release_reason IN ('answered', 'deadline')),
         created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
         released_at     TIMESTAMPTZ
     )

@@ -16,7 +16,7 @@ import json
 import pytest
 
 from app.config import Config
-from app.orders import pipeline, snapshot
+from app.orders import pipeline, snapshot, teach
 
 CATALOG_CSV = (
     "GTIN,Sklad,Názov,doplnok\n"
@@ -181,6 +181,24 @@ def test_a_change_request_is_not_uploaded_and_names_the_original_file(pg, env):
     assert result["status"] == "review"
     assert rec.uploads == [], "a second ORION order must never be created"
     assert "ORDER_000001_20260804_" in rec.posts[0]
+
+
+def test_a_change_request_with_an_unmatched_item_never_holds(pg, env):
+    """#93 review finding: the hold condition explicitly excludes `is_change` — a change
+    request is always handled by hand in ORION regardless of matching, so it must go
+    straight to review (today's behaviour) even when one of its lines also raises a
+    warehouse question, never sit waiting in held_orders."""
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), MAIL, env,
+                          client=ScriptedClient(_answers(items=(("torta", None, 0.2),),
+                                                         change=True)),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "review"
+    assert rec.uploads == []
+    assert pg.execute("SELECT count(*) FROM held_orders").fetchone()[0] == 0
+    # the wording still gets a question — a change request neither prevents nor auto-
+    # resolves it, it just isn't why THIS order is stuck (it's stuck on being a change)
+    assert len(teach.open_questions(pg)) == 1
 
 
 def test_an_unknown_customer_stops_the_document(pg, env):

@@ -496,6 +496,18 @@ def create_app(cfg) -> Flask:
 
         If this was the LAST open question an order was held for (#93), the answer also
         releases it — the document is built and uploaded right here, once.
+
+        The release runs on its OWN autocommit connection, deliberately NOT inside the
+        `teach.answer` transaction above (review finding on PR #116): `hold.release_for_
+        question` claims the `edi_sent` ledger row and then calls the real, external
+        `upload()` — if that claim lived inside a rollback-able transaction and something
+        AFTER the upload later failed (e.g. `report.log_event`), the whole transaction,
+        INCLUDING the ledger claim, would roll back even though the document had already
+        been physically delivered to ORION — a retry would then see no claim and upload a
+        SECOND document, exactly the #81.1 defect this feature exists to prevent. Autocommit
+        makes the claim durable the instant it is written, matching the same safe pattern
+        `worker.tick` / `hold.release_due` already use (proven by
+        `test_the_edi_ledger_itself_refuses_a_repeated_release_not_just_the_status_flag`).
         """
         from .orders import hold, teach
         body = request.get_json(silent=True) or {}
@@ -505,11 +517,12 @@ def create_app(cfg) -> Flask:
         try:
             with _db_tx() as c:
                 q = teach.answer(c, qid, gtin=gtin, card=card, by="sklad")
-                released = hold.release_for_question(c, cfg, qid)
         except teach.AlreadyAnswered as e:
             return jsonify(error=str(e)), 409
         except teach.NotACandidate as e:
             return jsonify(error=str(e)), 400
+        with _db() as c2:
+            released = hold.release_for_question(c2, cfg, qid)
         return jsonify(ok=True, question=q, released=released)
 
     @app.get("/api/orders/held")

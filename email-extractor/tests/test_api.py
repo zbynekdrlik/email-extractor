@@ -437,6 +437,84 @@ def test_reclassify_still_works_when_nothing_is_in_flight(pg):
     assert pg.execute("SELECT category FROM messages WHERE id=%s", (mid,)).fetchone()[0] == "invoices"
 
 
+# --- #93 review finding: the /answer route's release must not share ONE rollback-able
+# transaction with teach.answer, or a failure AFTER the real ORION upload rolls back the
+# edi_sent ledger claim too — even though the document was already physically delivered —
+# and a retry re-uploads it (the exact #81.1 double-shipment defect this feature exists to
+# prevent). ---
+
+def test_answering_over_http_commits_the_ledger_even_if_something_after_upload_fails(
+        pg, monkeypatch):
+    from psycopg.types.json import Json
+
+    from app.orders import hold, report
+
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('m93', 'ai_orders')")
+    qid = pg.execute(
+        """INSERT INTO order_questions (message_id, customer_ean, customer_name, wording,
+                                        item_key, quantity, unit, candidates, delivery_date,
+                                        reason)
+           VALUES ('m93', '2000000000864', 'Pekáreň', 'torta', 'torta', 5, 'ks', %s,
+                   '04.08.2026', 'test') RETURNING id""",
+        (Json([{"gtin": "TOR", "name": "Torta čokoládová"}]),)).fetchone()[0]
+    pg.execute(
+        """INSERT INTO held_orders (message_id, customer_ean, customer_name, delivery_date,
+                                    order_number, question_ids, order_json, extracted_json,
+                                    decisions_json)
+           VALUES ('m93', '2000000000864', 'Pekáreň', '04.08.2026', '', %s, %s, %s, %s)""",
+        ([qid], Json({"deliveryDate": "04.08.2026", "orderNumber": ""}),
+         Json({"isChangeRequest": False, "unverified": [], "notes": ""}),
+         Json([{"item_name": "torta", "gtin": None, "card": "", "confidence": 0.1,
+                "rule": "unmatched", "note": "", "review": False, "trace": {},
+                "quantity": 5, "unit": "ks"}])))
+
+    uploads = []
+    monkeypatch.setattr(
+        "app.orders.upload.put",
+        lambda cfg, name, content: uploads.append((name, content)) or True)
+    real_log_event = report.log_event
+    calls = {"n": 0}
+
+    def flaky_log_event(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom — something unrelated fails AFTER the real upload")
+        return real_log_event(*a, **kw)
+
+    monkeypatch.setattr("app.orders.report.log_event", flaky_log_event)
+
+    cfg = Config(pg_dsn=PG_DSN, data_dir="/tmp", api_token="tok", dash_password="secret",
+                 secret_key="test-secret", odoo_url="", odoo_api_key="", orders_channel_id=0)
+    app = create_app(cfg)          # testing=False → Flask turns the raised error into a 500
+    c = app.test_client()
+    _login(c)
+    r = c.post(f"/api/orders/question/{qid}/answer",
+              json={"gtin": "TOR", "card": "Torta čokoládová"})
+    # the request itself fails on the unrelated post-upload crash — expected, and NOT the
+    # point of this test
+    assert r.status_code == 500
+
+    # what MUST hold regardless: the document really was uploaded once, and the ledger claim
+    # for it is DURABLY committed — never rolled back by the surrounding request's failure
+    assert len(uploads) == 1
+    assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 1
+    # the answer itself is not lost either — it committed in its own, earlier transaction
+    assert pg.execute(
+        "SELECT status FROM order_questions WHERE id=%s", (qid,)).fetchone() == ("answered",)
+
+    # proof, not assumption: retrying the SAME release (the question is already answered,
+    # so this re-derives the identical "torta" -> TOR decision and rebuilds the identical
+    # document) must not upload a second document — the ledger is what stops it, and the
+    # row must still be there to retry in the first place (held_orders never advanced past
+    # 'held' — the release itself never finished)
+    assert pg.execute("SELECT status FROM held_orders").fetchone() == ("held",)
+    released = hold.release_for_question(
+        pg, cfg, qid, upload=lambda cfg, name, content: uploads.append((name, content)),
+        post=lambda *a, **k: None)
+    assert len(released) == 1 and released[0]["status"] == "ok"
+    assert len(uploads) == 1, "a retry must never re-upload once the ledger already claimed it"
+
+
 def test_fix_request_and_its_event_commit_together(pg, monkeypatch):
     """A failed second write must not leave an orphan fix row (a duplicate work item)."""
     pg.execute("INSERT INTO messages (message_id, subject) VALUES ('fx@t','Predmet')")

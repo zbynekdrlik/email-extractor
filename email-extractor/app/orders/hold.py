@@ -177,6 +177,14 @@ def _do_release(conn, cfg, row: dict, release_reason: str, upload, post,
 
     status, preview = _ship_one(conn, cfg, {"message_id": row["message_id"]}, row["order"],
                                 matched, decisions, row["extracted"], False, upload, post)
+    if status == "error":
+        # The upload itself failed (e.g. ORION unreachable) — `_ship_one` already released
+        # the ledger claim, so this is genuinely retryable. Leave the row 'held': the next
+        # deadline sweep (or another answer, if a sibling question is still open) simply
+        # tries again, instead of this being permanently lost as a false 'released'.
+        log.warning("release of held order #%s (%s) for %s / %s did not ship — staying held",
+                    row["id"], release_reason, row["customer_ean"], row["delivery_date"])
+        return {"id": row["id"], "status": status, "preview": preview}
     conn.execute(
         """UPDATE held_orders SET status = 'released', release_reason = %s, released_at = now()
             WHERE id = %s""", (release_reason, row["id"]))
