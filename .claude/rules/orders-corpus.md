@@ -523,3 +523,19 @@ again. That is the point: a changed prompt has not been measured until it has be
   the literal word **"Príčina:"** (and "Zvolený prístup:" / "Zamietnutá alternatíva:" for the
   other two, which DO have wider synonym coverage) to pass on the first try instead of a
   second wasted comment.
+
+- **`hooks/block-commit-without-design.sh`'s design-gate can latch onto a `#N` mentioned
+  in the COMMIT MESSAGE ITSELF, not just the actual ticket you're working (#139, 2026-08-02).**
+  A commit message that said "...deep review of PR #141 found..." got blocked demanding a
+  design comment on **#141** (the PR number, not the issue) even though a design comment
+  already existed on the REAL ticket #139. The gate appears to scan the commit message text
+  for any `#N` and require a matching design comment for THAT number. Avoid citing a PR
+  number inside a commit message that also needs to pass this gate — refer to review
+  findings without the `#N` form ("deep review found...", not "review of PR #141 found..."),
+  or post an extra (harmless, cheap) design-shaped comment on that number too if it must be
+  mentioned.
+- **`docs/autopilot-log.md` and `docs/superpowers/specs/` live at the GIT ROOT
+  (`/home/newlevel/devel/n8n/email_extract/docs/`), one level ABOVE the add-on code
+  (`email-extractor/`)** — the SAME root-vs-add-on-dir split already documented above for
+  `pre-push-lint.sh`. A worker whose Bash cwd resets to `email-extractor/` will find no
+  `docs/` there at all; `cd ..` (or an absolute path) before touching either file.

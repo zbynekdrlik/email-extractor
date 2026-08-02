@@ -504,3 +504,52 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   `test_workflow` before/after verification) and a `design_gate.py` classifier gotcha
   (`_CAUSE_RE` needs the literal word "príčina"/"dôvod", not "koreň"/"zistenie") to
   `.claude/rules/orders-corpus.md`; filed `zbynekdrlik/airuleset#219` for the classifier gap.
+
+## 2026-08-02 — #139 (PR #141)
+
+- **Odoo notifications shortened to headline + nástenka link.** Root cause: `report.build()`
+  (long per-order HTML) and `report.build_question()` (per-question) were posted once PER
+  ORDER and once PER NEW QUESTION inside `pipeline._run`'s loop/`teach.ask(on_new=...)` — one
+  real e-mail (msg 5564) with 5 delivery dates + 4 new questions produced 6 Odoo messages in
+  3 seconds, read on the phone as "a lot of orders failed". Verified live in Odoo (channel
+  152, `mail.message/search_read`) BEFORE the fix: exactly those 6 messages, timestamps
+  09:08:33–09:08:36.
+- New `report.build_summary(customer_name, orders, new_questions, unverified_count, link)` —
+  ONE short message per processed e-mail: what arrived, outcome counts (ok/partial/held/
+  review/error), and a link to the existing `/sklad/<key>` nástenka whenever anything is
+  unresolved. Structurally cannot leak item names/traces/JSON/run ids (only aggregate counts
+  in its signature). `pipeline._run` accumulates every order's outcome + every new question
+  during the loop (`post_now=False` on `_ship_one`/`_finish`) and posts exactly once at the
+  end; `hold.py`'s later, standalone single-order release events keep posting immediately
+  (already "one message per thing"), just in the new short shape.
+- New add-on option `dashboard_base_url` (NOT `public_base_url` — that one is the machine
+  address n8n uses over docker, the exact 0.9.10 bug) + shared `app/linkutil.py`
+  (`persistent_secret`/`sklad_key`/`sklad_url`) used by BOTH `httpapi.py` and
+  `orders/report.py`, so the two `/sklad/<key>` derivations can never drift apart.
+- Deep review (dispatched subagent, full diff `c077bd5..41cf134`) found 1 Critical
+  regression before merge: `extract.py`'s `unverified` (AGEL-incident phantom-item
+  safeguard) had NOT been carried into `build_summary`'s aggregate shape and had become
+  fully invisible — fixed with a separate `unverified_count` param, summed ONCE at the
+  e-mail level (never per-order — the list is shared unchanged across every order derived
+  from one e-mail). Also fixed: a failed ORION upload leaked the raw Python exception repr
+  into Odoo (now a short human sentence; full `repr(e)` preserved via a new
+  `result["error_detail"]` field for the admin-facing event timeline only) and wired the
+  previously-unused `missing_count` into the "partial" line.
+- Commits: `c0c7a4c` (version bump 0.9.30), `496f045` [red], `41cf134` [green],
+  `3a4e178` (review-findings tests) [red], `158aa77` (review-findings fix) [green].
+- Deployed live: `ha addons update e0ac7775_email_extractor` → v0.9.30, then
+  `dashboard_base_url=http://46.224.130.35:8099` set via the Supervisor options API
+  (fetch full options → merge → POST — partial POST 400s) + `ha addons restart`. Verified:
+  DOM shows `v0.9.30`, zero console errors, and the REAL `/sklad/<key>` link (computed
+  server-side inside the container via `linkutil.sklad_url`) opens unauthenticated straight
+  to `/otazky` showing the exact same 4 live questions (babovka/štrúdľa/vianočka kvásková/
+  chlebík granč) that previously spammed 6 Odoo messages.
+- Design/validation/review comments:
+  [design](https://github.com/zbynekdrlik/email-extractor/issues/139#issuecomment-5158759052),
+  [validated](https://github.com/zbynekdrlik/email-extractor/issues/139#issuecomment-5158760929),
+  [design (review-fix)](https://github.com/zbynekdrlik/email-extractor/issues/139#issuecomment-5159021123),
+  [review](https://github.com/zbynekdrlik/email-extractor/issues/139#issuecomment-5159081893).
+- Playbook: this repo's `docs/autopilot-log.md` and `docs/superpowers/specs/` live at the
+  GIT ROOT (`/home/newlevel/devel/n8n/email_extract/docs/`), one level ABOVE the add-on code
+  — same root-vs-add-on-dir split `.claude/rules/orders-corpus.md` already documents for
+  `pre-push-lint.sh`; don't go looking for `docs/` inside `email-extractor/`.
