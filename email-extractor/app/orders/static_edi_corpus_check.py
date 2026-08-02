@@ -25,9 +25,19 @@ from . import static_edi
 
 
 def check_case(case: dict) -> list[str]:
-    """Returns a list of mismatch descriptions; empty means the case passed."""
+    """Returns a list of mismatch descriptions; empty means the case passed.
+
+    `static_edi.build()` can raise (e.g. a case with no resolvable EAN) — every real
+    corpus case is a SUCCESSFULLY processed order, so a raise here is itself a
+    regression, not an expected outcome. Caught and reported as a normal FAIL line
+    (still exits non-zero), not a raw traceback that would abort the whole run before
+    reporting the other cases.
+    """
+    try:
+        got = static_edi.build(case["orderData"], case["catalog"])
+    except Exception as exc:  # noqa: BLE001 - report as a case failure, not a crash
+        return [f"build() raised {type(exc).__name__}: {exc}"]
     problems = []
-    got = static_edi.build(case["orderData"], case["catalog"])
     exp = case["expected"]
     if got.content != exp["content"]:
         problems.append("content differs")

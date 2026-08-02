@@ -482,5 +482,42 @@
    "itemsSkipped": 0,
    "skippedItems": []
   }
+ },
+ {
+  "name": "order_number_with_multiple_slashes_only_first_replaced",
+  "input": {
+   "order_data": {
+    "partner": "KARMEN",
+    "prevNumber": "19",
+    "fullOrderNumber": "999/26/1",
+    "issueDate": "01.08.2026",
+    "deliveryDate": "02.08.2026",
+    "deliveryLocationName": "KARMEN 19, Testovo",
+    "items": [
+     {
+      "code": null,
+      "ean": "1112223334445",
+      "description": "Rožok 50g",
+      "quantity": 10
+     }
+    ]
+   },
+   "catalog": [
+    {
+     "gtin": "8588001805609",
+     "name": "Chlieb pšenično-ražný 800gr",
+     "alias": ""
+    }
+   ]
+  },
+  "expected": {
+   "content": "HDR8586013743063  999/26/1                     20260801   8589364472019    KARMEN - velkoobchod potravin s.r.o.                                                                                                                                                                             8589364472019    KARMEN 19, Testovo                                                                                                                                                                 8589364472019                                                                                                                                                                                                                     8586013743063    SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                                                                                                              20260802                                                                          \r\nLIN     1   1112223334445                  10.000PCE            Rozok 50g                                                                                                                                             \r\nSUM",
+   "filename": "KARMEN_999_261_019.txt",
+   "storeEAN": "8589364472019",
+   "buyerName": "KARMEN - velkoobchod potravin s.r.o.",
+   "itemsWithEAN": 1,
+   "itemsSkipped": 0,
+   "skippedItems": []
+  }
  }
 ]

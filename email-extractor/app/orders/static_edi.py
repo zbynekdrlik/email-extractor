@@ -228,7 +228,10 @@ def _filename(order_data: dict) -> str:
     convention, unrelated to `edi.py`'s `ORDER_<ean>_<PO>_<date>_<stamp>.txt`."""
     partner = order_data.get("partner") or "KARMEN"
     full_order_number = order_data.get("fullOrderNumber")
-    order_part = full_order_number.replace("/", "_") if full_order_number else "unknown"
+    # generator.js uses the STRING form of .replace('/', '_') — first occurrence only.
+    # Any remaining '/' survives to the char-strip regex below, which DELETES it (never
+    # replaces it with '_') — e.g. "999/26/1" -> "999_261", not "999_26_1".
+    order_part = full_order_number.replace("/", "_", 1) if full_order_number else "unknown"
     if partner == "KARMEN_CASH":
         prev_part = "CASH"
     else:
@@ -244,8 +247,14 @@ def build(order_data: dict, catalog: list[dict]) -> StaticEdi:
 
     Parameter/field names deliberately mirror `generator.js`'s own so a byte diff
     against `tests/fixtures/static_edi_reference.json` (produced by the real node) is
-    unambiguous.
+    unambiguous. Mirrors the n8n MAIN section's two hard-fail guards too — these are
+    real active production behavior, not just `generateWincodexOrder`'s own logic:
+    a missing `prevNumber` (the node's own guard, before store-EAN resolution) and an
+    order where NO item resolved an EAN (checked after the item loop).
     """
+    if not order_data.get("prevNumber"):
+        raise ValueError("Chýba prevNumber! Uistite sa, že vstup pochádza z extraktora.")
+
     partner = order_data.get("partner") or "KARMEN"
     prev_number = order_data.get("prevNumber")
     store_ean = get_store_ean(partner, prev_number)
@@ -256,6 +265,10 @@ def build(order_data: dict, catalog: list[dict]) -> StaticEdi:
     content = _generate_content(order_data, store_ean, buyer_name, resolved_eans)
 
     without_ean = [it for it, ean in zip(items, resolved_eans, strict=True) if not ean]
+    if items and len(without_ean) == len(items):
+        order_no = order_data.get("fullOrderNumber") or "neznáma"
+        raise ValueError(f"Žiadna položka objednávky {order_no} nemá EAN — "
+                          "EDI sa nedá vytvoriť.")
 
     return StaticEdi(
         content=content,

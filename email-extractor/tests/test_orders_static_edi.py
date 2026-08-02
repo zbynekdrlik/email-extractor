@@ -22,6 +22,8 @@ own Postgres) lives outside git on dev2 per this repo's public/PII policy — se
 import json
 from pathlib import Path
 
+import pytest
+
 from app.orders import static_edi
 
 FIXTURE = json.loads(
@@ -162,3 +164,38 @@ def test_missing_delivery_location_falls_back_to_partner_and_prev_number():
                 if c["name"] == "missing_delivery_location_falls_back_to_partner_prevnumber")
     got = _build(case)
     assert "KARMEN 19" in got.content
+
+
+def test_filename_replaces_only_the_first_slash_in_the_order_number():
+    """generator.js's `fullOrderNumber.replace('/', '_')` is the STRING form — first
+    occurrence only. A second '/' survives to the later char-strip regex and is
+    DELETED there, not turned into another '_' — "999/26/1" becomes "999_261", not
+    "999_26_1". A naive Python `.replace("/", "_")` (no count) replaces ALL of them and
+    would produce a wrong filename for any real order number with 2+ slashes."""
+    case = next(c for c in FIXTURE
+                if c["name"] == "order_number_with_multiple_slashes_only_first_replaced")
+    got = _build(case)
+    assert got.filename == case["expected"]["filename"] == "KARMEN_999_261_019.txt"
+
+
+def test_missing_prev_number_raises():
+    """Mirrors generator.js's own hard guard (`if (!orderData.prevNumber) throw ...`)
+    — a falsy prevNumber must never silently fall through to a fabricated store EAN."""
+    case = next(c for c in FIXTURE if c["name"] == "karmen_basic_two_items")
+    order_data = dict(case["input"]["order_data"])
+    order_data["prevNumber"] = None
+    with pytest.raises(ValueError, match="prevNumber"):
+        static_edi.build(order_data, case["input"]["catalog"])
+
+
+def test_an_order_where_no_item_resolves_an_ean_raises():
+    """Mirrors generator.js's own hard guard (`if (itemsWithEAN.length === 0) throw
+    ...`) — an order with items but NONE resolvable must never silently produce an
+    empty (HDR+SUM only) EDI file."""
+    case = next(c for c in FIXTURE if c["name"] == "karmen_basic_two_items")
+    order_data = dict(case["input"]["order_data"])
+    order_data["items"] = [
+        {"code": None, "ean": None, "description": "Uplne neznamy produkt", "quantity": 1},
+    ]
+    with pytest.raises(ValueError, match="nemá EAN"):
+        static_edi.build(order_data, case["input"]["catalog"])
