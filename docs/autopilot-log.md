@@ -220,3 +220,33 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   **v0.9.18** (`ha store reload` + `ha addons update`), overené čítaním DOM dashboardu
   (`v0.9.18`, `LIVE`, 0 console errorov) a logmi kontajnera
   (`orders.worker order worker started (engine=n8n shadow=True)`).
+
+## 2026-08-02 — #51 (n8n edi_sent duplicitná ochrana, hotové) + #55 (Header Auth, čaká na 1 ručný krok)
+
+- **#51**: Python engine mal ochranu proti duplicitnému uploadu do ORIONu (`edi_sent`,
+  PR #74) už od 07-30, ale n8n vetva (`AI auto orders` = `wlORIhkVZISCdZNmBTM4Z`,
+  `Static auto orders` = `O8IYhUESjaWmPMTI`) je stále tá, ktorá reálne uploaduje — Python
+  beží iba v shadow móde. Pridaný rovnaký claim-before-upload vzor priamo v n8n: nový
+  `Crypto` uzol hashuje `wincodexContent` s vybieleným dátumom vytvorenia dokladu (offset
+  47:55, rovnaká logika ako `edi.content_hash()`), Postgres SELECT proti `edi_sent`
+  (customer_ean+delivery_date), a podľa rozhodnutia z 2026-08-01: rovnaký obsah → tichý
+  skip; iný obsah v ten istý deň → Odoo kanál 152, marker `❌Objednavka vyzaduje
+  kontrolu` (kompatibilné s parserom denného sumáru); claim sa berie PRED uploadom
+  (`ON CONFLICT DO NOTHING RETURNING id`) a uvoľňuje pri zlyhaní (`Upload a file` predtým
+  nemal error-output vôbec). Overené: hash-blanking logika samostatne v Node.js (rovnaký
+  order na 2 rôzne dni → identický hash), `edi_sent` unique constraint priamo na živej
+  produkčnej DB (syntetické test dáta, upratané), `connections`/`parameters` byte-exact
+  cez `get_workflow_details`. Jedna skutočná chyba nájdená a opravená pri review (uzol za
+  HTTP request node čítal `$json`, ktorý HTTP uzol prepísal na odpoveď Odoo API — presne
+  tá istá pasca, ktorej sa `Log Success Event` vyhýba explicitnou referenciou). Oba
+  workflow publikované, #51 zatvorený.
+- **#55**: Overené naživo — token extraktora je presne v 3 uzloch (`Fetch Attachment`
+  v Dodacie Listy EDI, `Fetch Original eml` + `Fetch Invoice PDF` v Invoices Forward v2).
+  n8n MCP nevie zakladať credentials; skúsil som cez Playwright prihlásiť sa do n8n UI,
+  ale nemám prihlasovacie údaje (nie sú v pamäti, žiadna aktívna session). Položená
+  otázka používateľovi (❓ ASKED, label `needs-answer` na #55) — buď založí Header Auth
+  credential `email-extractor X-Token` sám, alebo pošle prihlasovacie údaje. Node
+  rewiring (presné `id`/`url` všetkých 3 uzlov už zdokumentované v approach komentári) je
+  pripravený, spustí sa hneď ako credential existuje.
+- Bump **0.9.19** (n8n-only zmena pre #51 nemá kód v repe, ale tento log záznam áno →
+  verzia sa bumpuje kvôli nemu).
