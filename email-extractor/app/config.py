@@ -41,6 +41,13 @@ class Config:
     dash_password: str = ""
     secret_key: str = ""
     public_base_url: str = ""
+    # The human-facing base URL for links posted OUTSIDE an HTTP request (#139) — the
+    # order worker's Odoo summary needs a clickable /sklad/<key> link, but it runs on a
+    # background thread with no Flask `request.host_url` to read the operator's address
+    # from. Deliberately separate from public_base_url, which is the MACHINE address n8n
+    # uses over the docker network (see `linkutil.sklad_url`'s docstring — 0.9.10 fixed
+    # exactly this confusion once already, never repeat it).
+    dashboard_base_url: str = ""
     # --- order pipeline (#59): the catalog/customer sheet is fetched as CSV and frozen
     # into Postgres. The document id is an option, never committed. ---
     catalog_sheet_id: str = ""
@@ -89,6 +96,7 @@ class Config:
             pg_dsn = f"postgresql://email:{quote_plus(pg_password)}@127.0.0.1:5432/email"
         # No localhost fallback: this value is fetched from another container (#22).
         base = _get(o, "public_base_url", "PUBLIC_BASE_URL", "") or ""
+        dashboard_base = _get(o, "dashboard_base_url", "DASHBOARD_BASE_URL", "") or ""
         return cls(
             imap_host=_get(o, "imap_host", "IMAP_HOST", ""),
             imap_port=int(_get(o, "imap_port", "IMAP_PORT", 993)),
@@ -103,6 +111,7 @@ class Config:
             dash_password=_get(o, "dash_password", "DASH_PASSWORD", ""),
             secret_key=_get(o, "secret_key", "SECRET_KEY", ""),
             public_base_url=base,
+            dashboard_base_url=dashboard_base,
             catalog_sheet_id=_get(o, "catalog_sheet_id", "CATALOG_SHEET_ID", "") or "",
             catalog_gid=str(_get(o, "catalog_gid", "CATALOG_GID", "") or ""),
             customer_gid=str(_get(o, "customer_gid", "CUSTOMER_GID", "") or ""),

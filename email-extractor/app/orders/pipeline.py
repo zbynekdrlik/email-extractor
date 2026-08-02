@@ -10,6 +10,9 @@ part that must not go wrong twice:
   duplicate order in ORION is impossible and a failed one is retryable.
 - **Only what actually shipped is remembered.** Learning from an order that never arrived
   would teach the matcher from a fiction.
+- **Exactly ONE Odoo message per processed e-mail (#139).** Every order's outcome and
+  every new warehouse question is accumulated during `_run` and posted as ONE short
+  summary at the very end (`_post_summary`) — never one message per order or per question.
 """
 from __future__ import annotations
 
@@ -160,6 +163,12 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
     statuses: list[str] = []
     previews: list[dict] = []
     order_results: list[dict] = []
+    # #139: exactly ONE Odoo message per processed e-mail — every order's outcome and
+    # every genuinely new question is accumulated here and posted ONCE, at the very end of
+    # this function, instead of once per order and once per question (the old shape: 5
+    # delivery dates + 4 questions produced 6 separate Odoo messages for one e-mail).
+    order_summaries: list[dict] = []
+    new_questions: list[dict] = []
     for order in orders:
         # Two shops in one file are two customers; everything below — the memory lookup,
         # the alias that names the customer, the question, the EDI header — must be the
@@ -211,7 +220,10 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                     candidates=[{"gtin": str(c.get("gtin")), "name": c.get("name", "")}
                                 for c in item_cands[:6]],
                     delivery_date=order.get("deliveryDate", ""), reason=decision.note,
-                    on_new=lambda q: post(cfg, report.build_question(q)))
+                    # #139: a new question no longer posts its own Odoo message — it is
+                    # counted into the ONE summary this e-mail posts at the end. The
+                    # wording itself stays fully visible on the linked /otazky page.
+                    on_new=new_questions.append)
                 asked.append(qid)
                 if qid:
                     order_question_ids.append(qid)
@@ -232,6 +244,7 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
         # re-checked against the POST-merge decisions' rules.
         still_asking = any(d.rule in ASK_THE_WAREHOUSE for d in decisions)
         held_id = None
+        reject_reason = ""
         if (not shadow and matched and not is_change and order_question_ids and still_asking
                 and not hold.is_past_deadline(order.get("deliveryDate", ""), today)):
             held_id = hold.place(conn, message_id=message.get("message_id", ""),
@@ -246,10 +259,19 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                 detail={"held_id": held_id, "question_ids": order_question_ids,
                         "delivery_date": order.get("deliveryDate", "")})
         else:
-            status, preview = _ship_one(conn, cfg, message, order, matched, decisions,
-                                        extracted, shadow, upload, post)
+            # post_now=False: this order's own Odoo message is folded into the ONE summary
+            # posted at the end of `_run` (#139) — never one post per order.
+            status, preview, reject_reason = _ship_one(
+                conn, cfg, message, order, matched, decisions, extracted, shadow, upload,
+                post, post_now=False)
         statuses.append(status)
         previews.append(preview)
+        order_summaries.append({
+            "delivery_date": order.get("deliveryDate", ""), "status": status,
+            "item_count": len(decisions),
+            "missing_count": sum(1 for d in decisions if not d.gtin),
+            "reject_reason": reject_reason,
+        })
         # One EDI file per order is what n8n produces, so the result must stay per order:
         # flattening hides the second delivery date and its items entirely (#78).
         order_results.append({
@@ -290,6 +312,11 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
         if preview:
             out.update(preview)
             break
+    # #139: the ONE Odoo message for this whole processed e-mail, covering every order and
+    # every new question raised above.
+    _post_summary(cfg, post, shadow,
+                  customer_name=email_matched.name if email_matched else "",
+                  orders=order_summaries, new_questions=len(new_questions))
     return out
 
 
@@ -319,8 +346,15 @@ def _merge_by_day(orders: list[dict]) -> list[dict]:
 
 
 def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
-              upload, post) -> tuple[str, dict]:
-    """Build, send and report ONE order. Returns (status, preview)."""
+              upload, post, post_now: bool = True) -> tuple[str, dict, str]:
+    """Build, send and report ONE order. Returns (status, preview, reject_reason).
+
+    `post_now=False` (used by `_run`'s multi-order loop, #139) still logs the event
+    timeline but never posts its own Odoo message — the caller folds every order of the
+    e-mail into ONE combined summary instead. `hold.py`'s release paths call this with the
+    default `post_now=True`: each release is its own, later, single-order event, so
+    posting immediately there is already "one message per processed thing".
+    """
     items = _as_edi_items(decisions)
     shipped_items = [d for d in decisions if d.gtin]
     missing = [d for d in decisions if not d.gtin]
@@ -341,15 +375,18 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
     if not matched:
         result["reject_reason"] = "Zákazník nebol nájdený v tabuľke zákazníkov"
     elif is_change:
-        result["reject_reason"] = "E-mail je zmena už zadanej objednávky"
-        result["change_prefix"] = edi.change_prefix(matched.ean_edi, delivery, order_no)
+        prefix = edi.change_prefix(matched.ean_edi, delivery, order_no)
+        result["change_prefix"] = prefix
+        result["reject_reason"] = (
+            "E-mail je zmena už zadanej objednávky — uprav ju ručne v ORIONe (pôvodný "
+            f"súbor začína {prefix})")
     elif not shipped_items:
         result["reject_reason"] = "Žiadnu položku sa nedalo priradiť ku karte"
 
     if result.get("reject_reason"):
         _finish(conn, cfg, message, shadow, post, status="review",
-                items=result["items"], result=result)
-        return "review", {}
+                items=result["items"], result=result, post_now=post_now)
+        return "review", {}, result["reject_reason"]
 
     built = edi.build(ean=matched.ean_edi, store=matched.name, orderNumber=order_no,
                       deliveryDate=delivery, items=items)
@@ -359,16 +396,18 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
 
     if shadow:
         # Same verdict, zero side effects: n8n still owns this message.
-        return ("partial" if missing else "ok"), preview
+        return ("partial" if missing else "ok"), preview, ""
 
     if not edi.claim_send(conn, matched.ean_edi, delivery, built.content, name):
         log.warning("EDI for %s / %s already sent — not uploading again",
                     matched.ean_edi, delivery)
         result["shipped"] = True
         result["reject_reason"] = ""
+        # Already reported once for this exact content — never re-post, regardless of
+        # what the caller asked for.
         _finish(conn, cfg, message, shadow, post, status="ok", items=result["items"],
-                result=result, skip_post=True)
-        return "ok", preview
+                result=result, post_now=False)
+        return "ok", preview, ""
 
     try:
         upload(cfg, name, built.content)
@@ -377,8 +416,8 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
         log.exception("upload of %s failed", name)
         result["reject_reason"] = f"Odoslanie do ORIONu zlyhalo: {e!r}"
         _finish(conn, cfg, message, shadow, post, status="error", items=result["items"],
-                result=result)
-        return "error", preview
+                result=result, post_now=post_now)
+        return "error", preview, result["reject_reason"]
 
     result["shipped"] = True
     for d in shipped_items:
@@ -386,8 +425,8 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
                         delivered_on=_delivery_day(delivery), source="ship")
     _finish(conn, cfg, message, shadow, post,
             status="partial" if missing else "ok", items=result["items"], result=result,
-            detail={"edi_file": name, "orion_path": edi.orion_path(name)})
-    return ("partial" if missing else "ok"), preview
+            detail={"edi_file": name, "orion_path": edi.orion_path(name)}, post_now=post_now)
+    return ("partial" if missing else "ok"), preview, ""
 
 
 def _delivery_day(delivery_date: str) -> str:
@@ -398,16 +437,37 @@ def _delivery_day(delivery_date: str) -> str:
     return datetime.now(UTC).date().isoformat()
 
 
+def _post_summary(cfg, post, shadow: bool, customer_name: str, orders: list[dict],
+                  new_questions: int = 0) -> None:
+    """The ONE Odoo message for a processed e-mail (#139) — every caller of `_finish`/
+    `_ship_one` funnels through here exactly once per e-mail (or once per later, standalone
+    hold-release event). Never raises: a notification failure must never break order
+    processing, exactly like the old per-order post it replaces."""
+    if shadow:
+        return
+    html = report.build_summary(customer_name=customer_name, orders=orders,
+                                new_questions=new_questions, link=report.sklad_link(cfg))
+    try:
+        post(cfg, html)
+    except Exception:
+        log.exception("posting the Odoo summary failed")
+
+
 def _finish(conn, cfg, message, shadow, post, status: str, items: list,
-            result: dict, detail: dict | None = None, skip_post: bool = False) -> dict:
-    """Report + event, unless we are shadowing (then: nothing leaves this process)."""
+            result: dict, detail: dict | None = None, post_now: bool = True) -> dict:
+    """Log the event timeline and, when `post_now`, post this SINGLE order/rejected-email
+    as its own one-line Odoo summary (#139) — unless we are shadowing (then nothing leaves
+    this process). `post_now=False` is how `_run`'s multi-order loop defers every order's
+    post into the ONE combined summary `_post_summary` sends at the end of the run."""
     if not shadow:
-        html = report.build(result)
-        if not skip_post:
-            try:
-                post(cfg, html)
-            except Exception:
-                log.exception("posting the Odoo report failed")
+        if post_now:
+            _post_summary(cfg, post, shadow, customer_name=(result.get("customer") or {}).get(
+                "name", ""), orders=[{
+                    "delivery_date": result.get("delivery_date", ""), "status": status,
+                    "item_count": len(items),
+                    "missing_count": sum(1 for i in items if not i.get("gtin")),
+                    "reject_reason": result.get("reject_reason", ""),
+                }])
         report.log_event(
             conn, message.get("message_id", ""),
             stage="uploaded_orion" if result.get("shipped") else "review",
