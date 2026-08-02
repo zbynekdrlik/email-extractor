@@ -178,3 +178,21 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   the "validator warning ≠ broken behavior, check a real execution first" gotcha.
 - Shared PR: **#114** — merged `58d2fb230b`, main CI green (test+e2e-orders+build). No
   add-on version bump (n8n-side + docs only, no app code changed).
+
+## 2026-08-02 — #117 + #118 (follow-ups z #93, bundle, PR #119)
+
+- #117: `worker._as_message()` nikdy nenastavil `"today"`, takže `memory.resolve(as_of=…)`
+  dostával v produkcii prázdny reťazec a jeho dátumová poistka bola no-op — dodávka
+  datovaná PO objednávke mohla ovplyvniť jej rozhodnutie. Wired
+  `datetime.now(UTC).date().isoformat()` (worker.py:97) a `as_of` pretiahnuté cez
+  `hold._redecide` / `_ship` / release cesty. Odpoveď skladu (`human` riadky) je z poistky
+  vyňatá zámerne.
+- #118: `hold.release_for_question` počítal zvyšné otvorené otázky bez zámku — dve súbežné
+  odpovede na súrodenecké otázky jednej objednávky mohli obe vidieť `remaining=1` a ani
+  jedna neuvoľnila. Fix: `SELECT … FROM held_orders WHERE id = %s FOR UPDATE` okolo celého
+  check-then-ship-then-mark rozhodnutia (hold.py:278); ship krok zostáva na vlastnom
+  autocommit spojení podľa opravy z #116.
+- RED `a02799d` → GREEN `d8282b3`; offline korpus (30 prípadov, `--require-all`) bez zmeny
+  oproti baseline (rovnakých 6 known-defect #83). Žiadny `--live` beh — čistá zmena kódu.
+- PR **#119** — merge `10a6e66`, main CI zelené (test + e2e-orders + build), nasadené
+  **v0.9.17**, overené čítaním DOM dashboardu a grep-om nasadeného kódu v kontejneri.
