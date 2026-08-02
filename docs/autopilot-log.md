@@ -196,3 +196,27 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   oproti baseline (rovnakých 6 known-defect #83). Žiadny `--live` beh — čistá zmena kódu.
 - PR **#119** — merge `10a6e66`, main CI zelené (test + e2e-orders + build), nasadené
   **v0.9.17**, overené čítaním DOM dashboardu a grep-om nasadeného kódu v kontejneri.
+
+## 2026-08-02 — #83 (rekonštrukcia histórie zákazníckeho znenia, PR #121)
+
+- Nový čistý modul `app/orders/reconstruct.py`: `extract_day_blocks()` rozdelí VLASTNÝ
+  (necitovaný) text archívnej objednávky na bloky podľa dňa; `wordings_for_order()` vráti
+  zákaznícke znenie položiek LEN keď sa ich počet PRESNE zhoduje s nezávisle overeným
+  Odoo zoznamom kariet — inak `None` (žiadne hádanie). RED `ddd1859` → GREEN `f891500`,
+  13 testov, syntetické fixtures, 100 % pokrytie modulu.
+- Jednorazovým skriptom (mimo git, reálne dáta) doplnené do
+  `~/eval-corpus/email-extractor/history.json`: 5 objednávok / 29 riadkov (CÉDER,
+  04.07.–03.08.) dostalo skutočné zákaznícke znenie namiesto `name=card`. Ručne overené
+  proti reálnym e-mailom. Zatvorilo to 1 z 6 `known_defect: "#83"` prípadov
+  (`info-2026-07-24-a61839`) — 1 nové `--live` volanie (~0,15 USD, downstream match pre
+  inú položku, ktorej kontext sa zmenil) zaznamenané do zdieľanej `llm-cache/`.
+- Zvyšných 5 prípadov ostáva `known_defect`, prepojené na **#120** (dôkaz: žiadna
+  Odoo-potvrdená dodávka pred dátumom e-mailu vôbec neexistuje — buď je to prvá
+  objednávka zákazníka, alebo jediná staršia potvrdená dodávka je obeťou #80
+  (n8n zahodilo takmer všetky riadky)). Vyrieši sa samo, keď pribudnú budúce objednávky
+  (`order_items.name`+`card` sa zapisuje na každý beh už teraz).
+- Offline korpus (32 prípadov, `--require-all`): 27/32 prešlo (predtým 26/32), RC=0.
+- PR **#121** — merge `02a4188`, main CI zelené (test + e2e-orders + build), nasadené
+  **v0.9.18** (`ha store reload` + `ha addons update`), overené čítaním DOM dashboardu
+  (`v0.9.18`, `LIVE`, 0 console errorov) a logmi kontajnera
+  (`orders.worker order worker started (engine=n8n shadow=True)`).
