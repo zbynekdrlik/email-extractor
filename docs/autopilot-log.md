@@ -436,3 +436,71 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   [design #128](https://github.com/zbynekdrlik/email-extractor/issues/128#issuecomment-5156188983),
   [review #127](https://github.com/zbynekdrlik/email-extractor/issues/127#issuecomment-5156416200),
   [review #128](https://github.com/zbynekdrlik/email-extractor/issues/128#issuecomment-5156417972).
+
+## #131 — Static orders (Python core): EDI writer parita + reálny korpus (2026-08-02)
+
+- Zistenie: `app/orders/edi.py` je port INÉHO n8n uzla ("ASSEMBLE AND GENERATE EDI" zo
+  "AI auto orders"), nie Static-orders' vlastného `generator` uzla
+  (`O8IYhUESjaWmPMTI`). Riadok-po-riadku porovnanie odhalilo 6 skutočných rozdielov:
+  dátum v HDR z `issueDate` nie `today`, orezanie čísla objednávky sprava (nie zľava),
+  buyer name vs store name ako DVE odlišné polia, vlastný výpočet `storeEAN`
+  (`PARTNER_CONFIG`/`LABAS_STORES`/`KARMEN_CASH_STORES`), diakritika sa MAŽE nie
+  translitrujte, iná konvencia názvu súboru.
+- Nový modul `app/orders/static_edi.py` (samostatný, nie vetva v `edi.py` — rozdiely sú
+  príliš štrukturálne). RED `c5d26bc` → GREEN `d485130`.
+- **Reálny korpus namiesto syntetického:** žiadne úložisko neuchováva skutočne nahraný
+  EDI obsah pre statické objednávky (na rozdiel od AI objednávok, kde `edi_sent` má
+  aspoň hash) a n8n execution history mala len 4 syntetické testovacie behy. Namiesto
+  toho: 12 REÁLNYCH spracovaných e-mailov z Postgres (`messages`,
+  `category='static_orders'`), pokrývajúcich všetkých 4 partnerov, spracovaných cez
+  `static_parse`, overených proti reálnemu `email_events.detail` (12/12 sedí), a
+  spustený SKUTOČNÝ `generator` JS zdroj pod node (nie reimplementácia) pre bajtovo
+  presný "produkčný" výstup. Python `static_edi.py` sedí bajtovo 12/12. Korpus mimo
+  gitu na dev2 (`~/eval-corpus/email-extractor/static-edi`), zapojený do existujúceho
+  `e2e-orders` CI jobu (žiadny nový runner) cez `app/orders/static_edi_corpus_check.py`.
+- **Hĺbkový code review (samostatný subagent) našiel 2 skutočné medzery v presnosti:**
+  (1) `.replace('/', '_')` nahradza v JS len PRVÝ výskyt "/" v čísle objednávky, môj
+  Python nahrádzal VŠETKY — opravené na `.replace("/", "_", 1)`, overené proti
+  reálnemu JS; (2) chýbali 2 "hard-fail" guardy z n8n MAIN sekcie (chýbajúci
+  `prevNumber`, objednávka bez jedinej rozpoznanej položky) — teraz `raise ValueError`
+  presne ako produkčný uzol. Fix `84c6500`.
+- Nasadené v0.9.28 (add-on `e0ac7775_email_extractor`). Overené naživo: DOM verzia
+  "v0.9.28", 0 chýb v konzole, a `static_edi_corpus_check.py` spustený PRIAMO v
+  nasadenom kontajneri proti reálnemu 12-prípadovému korpusu — 12/12 sedí.
+- **Parity-only, žiadny cutover** — `static_edi.py` NIE JE importovaný nikde v živom
+  pipeline (grep-overené v nasadenom kontajneri, 0 zásahov).
+- Design/validácia/review komentáre: [validácia](https://github.com/zbynekdrlik/email-extractor/issues/131#issuecomment-5156638041),
+  [design](https://github.com/zbynekdrlik/email-extractor/issues/131#issuecomment-5156636401),
+  [review](https://github.com/zbynekdrlik/email-extractor/issues/131#issuecomment-5156816711).
+  PR #136 (main..dev), merge `d43e200`.
+
+## 2026-08-02 — #132 + #137 (PR #138)
+
+- **#137** (n8n "Static auto orders" `O8IYhUESjaWmPMTI`: poistka proti prázdnemu claimu) —
+  n8n-side only, no repo diff. Confirmed via `get_workflow_details` that `Get Static Orders`
+  (atomic claim) fed `Normalize`/`Get Catalog Snapshot` directly, with `Mark OK`/`Mark
+  Skipped`/`Mark Error` all using `queryReplacement: {{ $('Get Static Orders').first().json.id
+  }}` — same undefined-id crash class as #34, the one that produced 39 Odoo spam messages on
+  "AI auto orders" 2026-08-02. Added a "Claimed a row?" `n8n-nodes-base.filter` node, same
+  shape `Invoices Forward v2`/`Dodacie Listy EDI` already use. Verified with `test_workflow`
+  both directions (empty claim → nothing downstream runs; real claim → unchanged) before
+  `publish_workflow`; confirmed `versionId == activeVersionId` after.
+- **#132** (Static orders Python core: shadow-mode worker) — new `app/orders/static_worker.py`
+  wiring `static_parse` (#68) + `static_edi` (#131) into the worker loop for
+  `category='static_orders'`, SHADOW ONLY (own `_peek_for_shadow`, reuses
+  `worker.resolve_engine`/`_start_run`/`_finish_run`). `static_orders_engine=python` logs and
+  does nothing (#133 is the separate cutover ticket). `worker.run_forever` now also drives
+  `static_worker.tick()` on the same connection/thread. 13 new tests
+  (`tests/test_orders_static_worker.py`) — shadow claims nothing, engine resolver rejects
+  unknown values, day bound honoured, shadow run recorded with `shadow=true`, every parse/
+  build failure path (missing dates, empty order, photo-only, no EAN resolved) records
+  `review` instead of crashing. Commit `6e1dd5f` (feature, no separate RED/GREEN split —
+  greenfield feature, tests written alongside per `tdd-workflow.md`).
+- Design/validation comments: [validated #132](https://github.com/zbynekdrlik/email-extractor/issues/132#issuecomment-5156978825),
+  [design #132](https://github.com/zbynekdrlik/email-extractor/issues/132#issuecomment-5156997604),
+  [validated #137](https://github.com/zbynekdrlik/email-extractor/issues/137#issuecomment-5156940218),
+  [design #137](https://github.com/zbynekdrlik/email-extractor/issues/137#issuecomment-5156998427).
+- Playbook: added the "empty atomic claim" n8n fix recipe (exact filter-node shape +
+  `test_workflow` before/after verification) and a `design_gate.py` classifier gotcha
+  (`_CAUSE_RE` needs the literal word "príčina"/"dôvod", not "koreň"/"zistenie") to
+  `.claude/rules/orders-corpus.md`; filed `zbynekdrlik/airuleset#219` for the classifier gap.

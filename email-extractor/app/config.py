@@ -52,6 +52,12 @@ class Config:
     ai_orders_engine: str = "n8n"
     orders_shadow: bool = False
     orders_shadow_days: int = 3
+    # Static orders (#132): shadow-mode comparison ONLY, same naming pattern as the
+    # ai_orders_engine/orders_shadow trio above. "python" is not implemented (#133 is the
+    # separate, not-yet-decided cutover) — static_worker.tick logs and does nothing for it.
+    static_orders_engine: str = "n8n"
+    static_orders_shadow: bool = False
+    static_orders_shadow_days: int = 3
     # The monthly tripwire (#89): warn once past this, never stop shipping orders.
     orders_spend_cap_eur: float = 30.0
     openai_api_key: str = ""
@@ -109,6 +115,13 @@ class Config:
                     "1", "true", "yes", "on"),
             orders_shadow_days=int(
                 _get(o, "orders_shadow_days", "ORDERS_SHADOW_DAYS", 3) or 3),
+            static_orders_engine=str(
+                _get(o, "static_orders_engine", "STATIC_ORDERS_ENGINE", "n8n") or "n8n"),
+            static_orders_shadow=str(
+                _get(o, "static_orders_shadow", "STATIC_ORDERS_SHADOW", "false")).lower() in (
+                    "1", "true", "yes", "on"),
+            static_orders_shadow_days=int(
+                _get(o, "static_orders_shadow_days", "STATIC_ORDERS_SHADOW_DAYS", 3) or 3),
             orders_spend_cap_eur=float(
                 _get(o, "orders_spend_cap_eur", "ORDERS_SPEND_CAP_EUR", 30) or 0),
             openai_api_key=_get(o, "openai_api_key", "OPENAI_API_KEY", "") or "",

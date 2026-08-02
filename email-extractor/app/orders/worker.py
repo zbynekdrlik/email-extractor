@@ -235,11 +235,21 @@ def refresh_due(conn, cfg) -> int | None:
 
 
 def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pragma: no cover
-    """Worker loop, started as a thread by the add-on entrypoint."""
+    """Worker loop, started as a thread by the add-on entrypoint.
+
+    Also drives the static-orders SHADOW worker (#132) on the SAME connection/thread — a
+    static shadow tick is a cheap, non-blocking regex parse (no LLM call), so it does not
+    warrant its own thread, and reusing this loop means it inherits the same reconnect/
+    error handling for free. With the default options (static_orders_shadow off) that call
+    returns 0 immediately, same "provably inert by default" contract as the ai_orders tick.
+    """
     import time as _time
+
+    from . import static_worker
     sleep = sleep or _time.sleep
-    log.info("order worker started (engine=%s shadow=%s)",
-             getattr(cfg, "ai_orders_engine", "n8n"), getattr(cfg, "orders_shadow", False))
+    log.info("order worker started (engine=%s shadow=%s static_shadow=%s)",
+             getattr(cfg, "ai_orders_engine", "n8n"), getattr(cfg, "orders_shadow", False),
+             getattr(cfg, "static_orders_shadow", False))
     while not (stop and stop.is_set()):
         try:
             refresh_due(conn, cfg)
@@ -249,7 +259,9 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pra
                 # never anything for this to release there.
                 from .hold import release_due
                 release_due(conn, cfg)
-            if tick(conn, cfg, pipeline=pipeline):
+            handled = tick(conn, cfg, pipeline=pipeline)
+            handled = static_worker.tick(conn, cfg) or handled
+            if handled:
                 continue          # more may be waiting; do not sleep between messages
         except Exception:
             log.exception("order worker tick failed")

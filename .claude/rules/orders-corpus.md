@@ -453,3 +453,73 @@ again. That is the point: a changed prompt has not been measured until it has be
   DB query, cleaned up via the API). Never fork for a pure wait — poll via `Monitor`/a
   bounded loop instead, or just accept the Stop-hook-imposed wait; a fork's silence is
   never guaranteed to mean "did nothing."
+- **n8n execution history is NOT a reliable source of real production examples —
+  check it BEFORE assuming it will give you a real corpus (#131).** `search_executions`
+  on the "Static auto orders" workflow (`O8IYhUESjaWmPMTI`) returned only 4 executions
+  TOTAL, all synthetic `example.com`-domain test runs from an earlier investigation —
+  no real production runs were retained at all (execution-data-saving settings prune
+  aggressively). When you need real examples for a corpus, go straight to the
+  add-on's OWN Postgres instead: `messages` (`category=...`, `processed=true`) has the
+  real input text, and — for anything n8n LOGS as it processes (this workflow's own
+  `email_events` table, `stage='uploaded_orion'`) — cross-check your derived data
+  against that logged ground truth before trusting it.
+- **When no store retains the actual REAL output bytes of an n8n Code node (no
+  `edi_sent`-style ledger, no execution history), run the node's OWN VERBATIM JS
+  source under `node` against real input data, instead of trusting a Python
+  reimplementation (#131).** Extract the node's `parameters.jsCode` via
+  `get_workflow_details`, wrap it in `new Function('$', ...)` to mock n8n's `$('Node
+  Name').all()`/`$input.item.json`, and call it directly — this gives byte-exact
+  "production-equivalent" output from the ACTUAL deployed logic, not your own
+  understanding of it. Cross-check the harness's output against whatever ground truth
+  IS logged (e.g. a derived filename vs a real logged filename) before trusting the
+  harness itself. This is the same "run the real node under node" technique
+  `edi_reference.json` already used for a different node — reusable for ANY future
+  n8n Code-node port that needs a byte-exact fixture.
+- **Porting a JS `.replace(needle, replacement)` call (STRING first argument, not a
+  `/g` regex) to Python needs an explicit `count=1` — Python's `str.replace()` with no
+  count replaces ALL occurrences by default, the opposite of JS's single-occurrence
+  default (#131, `generator.js`'s filename builder: `fullOrderNumber.replace('/',
+  '_')` only touches the FIRST '/'; a naive Python `.replace("/", "_")` silently
+  replaced every '/' instead, producing a wrong filename for any order number with 2+
+  slashes).** Same family of gotcha as the earlier `for`-loop-mutating-its-own-index
+  note in this file — a JS built-in's default behavior does not always match its
+  same-named Python counterpart; verify the SPECIFIC semantics (not just the name)
+  before assuming a 1:1 translation, and add a fixture case that actually EXERCISES
+  the edge (a single-occurrence test proves nothing about a multi-occurrence input).
+- **A hand-ported n8n Code node has TWO layers of logic — the pure function(s) (e.g.
+  `generateWincodexOrder`) AND the node's own top-level "MAIN" guard clauses that run
+  before/after calling them.** Porting only the pure function and skipping the guards
+  (`if (!x) throw ...`) is an easy, easy-to-miss omission — deep code review caught it
+  on #131 (a missing `prevNumber` silently produced a fabricated store EAN instead of
+  raising; an order where NOTHING resolved to an EAN silently produced an empty
+  HDR+SUM file instead of raising). When porting a Code node, read the WHOLE node
+  (function definitions AND its `// ===== n8n MAIN =====`-style entry section, if it
+  has one) — not just the function you intend to call — and port every hard-fail
+  guard the real node has, even if your own test corpus never happens to hit it.
+- **The "empty atomic claim" crash class (#34) has a known, copy-pasteable fix — check EVERY
+  new claim-based n8n workflow for it, don't wait for an incident (#137).** A Postgres node
+  running `UPDATE messages SET processing_at=... WHERE id=(SELECT ... FOR UPDATE SKIP LOCKED)
+  RETURNING ...` still emits ONE output item (`{"success":true}`, no `message_id`) when the
+  claim matched zero rows — n8n does not simply produce zero items. Any node downstream that
+  does `queryReplacement: {{ $('<claim node>').first().json.id }}` then resolves to `undefined`
+  and crashes (`Query Parameters must be a string of comma-separated values...`), and any Odoo
+  post downstream fires with empty content. The fix is a `n8n-nodes-base.filter` node
+  (`typeVersion: 2.3`) immediately after the claim node, condition `$json.message_id notEmpty`
+  (`operator: {"type":"string","operation":"notEmpty","singleValue":true}`,
+  `typeValidation:"loose"`, `looseTypeValidation:true`) — copy the exact shape from
+  `Invoices Forward v2` (`du2O6YGmGyntXBbV`) or `Dodacie Listy EDI` (`1R4WcUFhpIPwEJX1`)'s
+  "Claimed a row?" node via `get_workflow_details`, don't reinvent it. Verify BOTH directions
+  with `test_workflow` before `publish_workflow`: pin the claim node to `{"success":true}` (no
+  `message_id`) and confirm `lastNodeExecuted` is the filter with nothing downstream in
+  `runData`; then pin it to a realistic claimed row and confirm the item still reaches its
+  normal targets unchanged. "Static auto orders" (`O8IYhUESjaWmPMTI`) had this fixed in #137 —
+  any OTHER claim-based workflow added later gets the same check before it ships.
+- **`hooks/block-commit-without-design.sh`'s classifier (`design_gate.py`'s `_CAUSE_RE`)
+  requires the LITERAL words "príčina"/"dôvod"/"spôsoben(é)" (or English "root cause"/
+  "because the") — explaining the root cause in different Slovak words ("Koreň:", "Zistenie:",
+  "čo chýbalo") does NOT satisfy it and the commit gets blocked even though the comment is
+  genuinely a real design writeup** (hit twice in this session, #132 and #137 — filed as
+  `zbynekdrlik/airuleset#219`). Head the design-before-code `gh issue comment` paragraph with
+  the literal word **"Príčina:"** (and "Zvolený prístup:" / "Zamietnutá alternatíva:" for the
+  other two, which DO have wider synonym coverage) to pass on the first try instead of a
+  second wasted comment.
