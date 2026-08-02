@@ -137,6 +137,61 @@ again. That is the point: a changed prompt has not been measured until it has be
   active version. It still lives in n8n's version history regardless — rotating the
   underlying key is the only way to fully invalidate it, and only whoever owns that
   external service can do that.
+- **Creating a brand-new n8n credential with NO UI/API login and NO valid Public API key
+  (#55, 2026-08-02).** The n8n MCP can only READ credentials (`list_credentials`), never
+  create them — but the n8n add-on container ships its own CLI, and `n8n
+  import:credentials` creates one with no UI/session and no API key at all, encrypting
+  it with the instance's REAL encryption key exactly like the UI would:
+  ```
+  # cred.json: [{"id":"<16-char alnum, like other n8n ids>","name":"...","type":"httpHeaderAuth","data":{"name":"X-Token","value":"<token>"}}]
+  docker cp cred.json <n8n-container>:/tmp/cred.json
+  docker exec -e N8N_USER_FOLDER=/data/n8n <n8n-container> \
+    n8n import:credentials --input=/tmp/cred.json --projectId=<owner project id>
+  ```
+  Three gotchas that will silently go wrong without this exact shape:
+  1. **`N8N_USER_FOLDER` is NOT visible to a plain `docker exec` env** — it's set only by
+     the container's supervisor wrapper around the real n8n process (`docker exec
+     printenv` shows it missing; confirm via `/proc/<n8n-pid>/environ`). Without it, the
+     CLI defaults to `HOME=/root` and **silently creates a whole SEPARATE, empty n8n data
+     directory** (`/root/.n8n/database.sqlite` + a freshly auto-generated encryption
+     key) — it even runs the FULL migration set as if bootstrapping a brand-new instance,
+     which is the tell something is wrong. The import then fails anyway
+     (`SQLITE_CONSTRAINT: NOT NULL constraint failed: credentials_entity.id`, see #2), but
+     even a "successful" import there would land in a database the running server never
+     reads. Always pass `N8N_USER_FOLDER` explicitly (find the real value via the running
+     process's `/proc/<pid>/environ`, not just container env) and delete the stray
+     `/root/.n8n` afterward if it got created.
+  2. **`id` is required in the input JSON** — omitting it throws `NOT NULL constraint
+     failed: credentials_entity.id`. Generate one in the same shape as n8n's own ids
+     (16 alnum chars).
+  3. **`--projectId` decides ownership** — omit it and the credential lands somewhere
+     that may not match the workflow you're about to bind it to. Find the right project
+     via `list_credentials` on an EXISTING credential already used by the target
+     workflow's other nodes (e.g. its Postgres credential) and reuse that credential's
+     `homeProject.id`.
+  **Rotating the value later** = re-run the same `import:credentials` call with the SAME
+  `id` — it overwrites in place, no delete/recreate needed. Delete the temp JSON from
+  both the host AND the container immediately after (`rm`) — it's a plaintext secret.
+- **Updating a supervisor add-on's options (`/data/options.json`) with no UI, only SSH
+  (#55, 2026-08-02).** The Supervisor REST API path is `/addons/<slug>/options`
+  (**not** `/apps/<slug>/...`, despite `ha apps` being the modern CLI alias — that 404s).
+  It requires the FULL merged options object, not just the changed key — POSTing
+  `{"options":{"api_token":"new"}}` alone fails validation ("Missing option
+  'imap_host'..."). Fetch current options first (`GET /addons/<slug>/info` →
+  `.data.options`), merge in the change, POST the whole object:
+  ```
+  docker exec hassio_cli sh -c 'curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" \
+    http://supervisor/addons/<slug>/info'          # read .data.options
+  # merge locally, then:
+  docker exec hassio_cli sh -c 'curl -s -X POST -H "Authorization: Bearer $SUPERVISOR_TOKEN" \
+    -H "Content-Type: application/json" http://supervisor/addons/<slug>/options -d @/tmp/new_opts.json'
+  ha apps restart <slug>          # options only take effect after a restart
+  ```
+  A secret rotated this way (add-on option) and an n8n credential (above) are two
+  INDEPENDENT stores with no atomic swap between them — rotating both in the same
+  minute (credential re-import, then immediately the options POST + restart) is the best
+  achievable; a brief window of 403s on the file APIs during the gap is expected and
+  self-heals via the consumer workflows' existing stale-claim retry (10 min), not a bug.
 - **A node validator warning does not necessarily mean the node is functionally broken —
   check a real recent execution before assuming a behavior change is needed (#108).**
   `n8n-nodes-base.ssh` v1 with `resource: "file"` requires an explicit `operation`
