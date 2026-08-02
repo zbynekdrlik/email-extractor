@@ -201,6 +201,17 @@ def load_catalog(conn, snapshot_id: int) -> list[dict]:
     return [{"gtin": r[0], "name": r[1], "alias": r[2] or ""} for r in rows]
 
 
+def catalog_gtin_set(conn) -> set[str]:
+    """The current catalog snapshot's GTIN set — the SAME source `/api/znalosti/catalog`
+    (the warehouse's full-catalog search, #149) reads, so any card the search offers is
+    guaranteed to be a valid `teach.answer()` target too. Empty when no snapshot exists yet
+    (e.g. most unit tests), which keeps `teach.answer()`'s old candidates-only behaviour."""
+    sid = latest_snapshot_id(conn)
+    if not sid:
+        return set()
+    return {r["gtin"] for r in load_catalog(conn, sid)}
+
+
 def load_customers(conn, snapshot_id: int) -> list[dict]:
     rows = conn.execute(
         """SELECT ean_edi, name, emails, city, street, zip
