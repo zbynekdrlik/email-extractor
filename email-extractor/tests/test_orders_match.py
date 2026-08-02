@@ -342,6 +342,49 @@ def test_candidates_prefer_a_card_whose_alias_names_the_customer():
     assert cands[0]["gtin"] == "CHL"
 
 
+# --- the stored question must offer the engine's own candidate (#147) --------
+
+def test_proposed_gtin_reads_the_raw_llm_answer_for_a_rejected_unmatched_decision():
+    """`unmatched` clears `decision.gtin` (nothing was confirmed), but the raw model
+    answer that got rejected is still in the trace — the question's own note names it."""
+    d = _decide("Rožok 70g", llm={"gtin": "G50", "confidence": 0.2})
+    assert d.rule == "unmatched" and d.gtin is None
+    assert match.proposed_gtin(d) == "G50"
+
+
+def test_proposed_gtin_reads_decision_gtin_for_llm_borderline():
+    # two Dánske pečivo cards match the generic wording -> not unique, borderline decides
+    d = _decide("Dánske pečivo 88g", llm={"gtin": "DAN90", "confidence": 0.75})
+    assert d.rule == "llm_borderline"
+    assert match.proposed_gtin(d) == d.gtin == "DAN90"
+
+
+def test_candidates_for_question_heads_the_list_with_the_proposed_candidate():
+    """#147: a scoring quirk (here: SYNONYMS scores every 'Rožok' sibling above the model's
+    actual pick) can push the model's own answer past the [:6] cutoff computed BEFORE the
+    decision existed. The stored question must always put it first regardless."""
+    d = _decide("Rožok 70g", llm={"gtin": "G50", "confidence": 0.2})
+    truncated = [{"gtin": "G70", "name": "Rožok kváskový 70g"},
+                {"gtin": "SLI", "name": "Slimák kakaový 90g"}]   # G50 already fell out
+    out = match.candidates_for_question(truncated, CATALOG, d)
+    assert [c["gtin"] for c in out] == ["G50", "G70", "SLI"]
+
+
+def test_candidates_for_question_deduplicates_when_already_present():
+    d = _decide("Dánske pečivo 88g", llm={"gtin": "DAN90", "confidence": 0.75})
+    already_first = [{"gtin": "DAN90", "name": "Dánske pečivo tvarohové 90g"},
+                     {"gtin": "SLI", "name": "Slimák kakaový 90g"}]
+    out = match.candidates_for_question(already_first, CATALOG, d)
+    assert [c["gtin"] for c in out] == ["DAN90", "SLI"]
+
+
+def test_candidates_for_question_is_a_no_op_when_nothing_was_proposed():
+    d = _decide("Torta", llm={"gtin": None, "confidence": 0.0})
+    assert d.gtin is None and match.proposed_gtin(d) == ""
+    cands = [{"gtin": "SLI", "name": "Slimák kakaový 90g"}]
+    assert match.candidates_for_question(cands, CATALOG, d) == cands
+
+
 def test_the_decision_trace_names_the_rule_and_its_inputs():
     d = _decide("Rožok 70g", llm={"gtin": "G50", "confidence": 0.95})
     assert d.trace["rule"] == "unmatched"

@@ -212,13 +212,19 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
             # (never a duplicate of one already open) also reaches Odoo (#102) — the warehouse
             # reads Odoo, not always the dashboard.
             if not shadow and matched and decision.rule in ASK_THE_WAREHOUSE:
+                # #147: item_cands was scored/truncated to 6 BEFORE this decision existed,
+                # so the model's own answer can rank below the cutoff (e.g. a SYNONYMS hit
+                # on an unrelated card family). Re-head the list with the engine's actual
+                # proposed candidate, computed AFTER the decision, so the warehouse always
+                # has the one card it needs to confirm.
+                ask_cands = match.candidates_for_question(item_cands, catalog, decision)
                 qid = teach.ask(
                     conn, message_id=message.get("message_id", ""),
                     customer_ean=matched.ean_edi, customer_name=matched.name,
                     wording=item["name"], quantity=item.get("quantity"),
                     unit=item.get("unit", "ks"),
                     candidates=[{"gtin": str(c.get("gtin")), "name": c.get("name", "")}
-                                for c in item_cands[:6]],
+                                for c in ask_cands[:6]],
                     delivery_date=order.get("deliveryDate", ""), reason=decision.note,
                     # #139: a new question no longer posts its own Odoo message — it is
                     # counted into the ONE summary this e-mail posts at the end. The

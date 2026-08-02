@@ -237,6 +237,42 @@ def candidates(item_name: str, catalog: list[dict], customer_name: str = "",
     return scored[:limit]
 
 
+def proposed_gtin(decision) -> str:
+    """The gtin the engine itself proposed for THIS decision, even when it was rejected.
+
+    `decision.gtin` already carries it for `llm_borderline`/`history_weight` (#147's ladder
+    rungs that ask the warehouse but still keep a gtin). For `unmatched` (rejected on
+    confidence or weight) `decision.gtin` is None, but the model's raw answer is still in
+    `decision.trace["llm"]["gtin"]` — that raw value is what the question's own rejection
+    note names ("kandidát „...“"), so it must be the same card offered as a button.
+    """
+    if decision.gtin:
+        return str(decision.gtin)
+    return str((decision.trace or {}).get("llm", {}).get("gtin") or "") or ""
+
+
+def candidates_for_question(item_cands: list[dict], catalog: list[dict],
+                            decision) -> list[dict]:
+    """What the warehouse is shown for a question — the engine's own proposed candidate
+    ALWAYS first, then the nearest other candidates of the same match (#147).
+
+    `item_cands` is scored and truncated BEFORE the model call (it is the model's INPUT,
+    built from wording+catalog alone), so it has no way to know which card the model will
+    actually name — a scoring quirk (e.g. the SYNONYMS rule in `_score()` boosting an
+    unrelated card family) can silently rank the model's own answer below the cutoff.
+    Re-heading the list with the actual decision, computed AFTER the model call, guarantees
+    the one card the warehouse needs to confirm is always clickable.
+    """
+    gtin = proposed_gtin(decision)
+    if not gtin:
+        return item_cands
+    card = _card(catalog, gtin)
+    if not card:
+        return item_cands
+    rest = [c for c in item_cands if str(c.get("gtin")) != gtin]
+    return [card] + rest
+
+
 def _card(catalog: list[dict], gtin) -> dict | None:
     return next((c for c in catalog if str(c.get("gtin")) == str(gtin or "")), None)
 
