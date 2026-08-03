@@ -312,3 +312,59 @@ def test_a_snapshot_can_be_imported_from_frozen_files(pg, tmp_path):
                       (sid,)).fetchone()[0] == 1
     # unchanged content reuses the snapshot instead of piling up copies
     assert snapshot.import_files(pg, str(cat), str(cust)) == sid
+
+
+# --- #159: remembering an answered "who is this customer?" address durably --------
+
+def test_remember_customer_email_appends_to_a_still_sheet_only_row(pg):
+    """#159's own regression bar: an answered customer question must remember the sender
+    address the SAME way #128's own regression test above proves — a real change to what
+    `customer.resolve` matches next time, surviving a snapshot rebuild."""
+    from app.orders import customer as customer_mod
+
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    sid = snapshot.latest_snapshot_id(pg)
+    before = snapshot.load_customers(pg, sid)
+    assert customer_mod.resolve(before, "zilina@farmeria.sk", "", "") is None
+
+    ok = snapshot.remember_customer_email(pg, "2000000000864", "zilina@farmeria.sk")
+    assert ok is True
+    new_sid = snapshot.rebuild_from_overrides(pg)
+    after = snapshot.load_customers(pg, new_sid)
+    hit = customer_mod.resolve(after, "zilina@farmeria.sk", "", "")
+    assert hit is not None and hit.ean_edi == "2000000000864"
+    # the ORIGINAL address is still there too — this APPENDS, never replaces
+    row = next(r for r in after if r["ean_edi"] == "2000000000864")
+    assert "objednavky.pno.martin@gmail.com" in row["emails"]
+    assert "zilina@farmeria.sk" in row["emails"]
+
+
+def test_remember_customer_email_appends_to_an_already_overridden_row(pg):
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    snapshot.upsert_customer(
+        pg, override_id=None, orig_ean_edi="2000000000864", orig_street="Košútka 1",
+        ean_edi="2000000000864", name="Potraviny nie otraviny Martin",
+        emails=["objednavky.pno.martin@gmail.com"], city="Martin", street="Košútka 1",
+        zip_="")
+    ok = snapshot.remember_customer_email(pg, "2000000000864", "novy@x.sk")
+    assert ok is True
+    rows = snapshot.customers_for_management(pg)
+    row = next(r for r in rows if r["ean_edi"] == "2000000000864")
+    assert "novy@x.sk" in row["emails"]
+    assert "objednavky.pno.martin@gmail.com" in row["emails"]
+    # still exactly ONE override row for this customer — an edit, not a duplicate
+    assert pg.execute(
+        "SELECT count(*) FROM customer_overrides WHERE ean_edi='2000000000864'"
+    ).fetchone()[0] == 1
+
+
+def test_remember_customer_email_is_a_noop_when_already_known(pg):
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    assert snapshot.remember_customer_email(
+        pg, "2000000000864", "OBJEDNAVKY.PNO.MARTIN@GMAIL.COM") is False
+    assert pg.execute("SELECT count(*) FROM customer_overrides").fetchone()[0] == 0
+
+
+def test_remember_customer_email_is_a_noop_for_an_unknown_ean(pg):
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    assert snapshot.remember_customer_email(pg, "9999999999999", "x@x.sk") is False

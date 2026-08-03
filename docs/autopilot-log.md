@@ -662,3 +662,31 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   matches with weight in the name (e.g. "Multicereálny kváskový chlieb 500g"); zero
   console errors. Left the question untouched — confirmed still `status='open'` in DB
   afterward (no answer/reprocess/model call triggered).
+
+## #157 — alias 'names_customer' upgrade + merge_same_card silently mismatched CÉDER's 4-day order
+
+- Bump: 0.9.35 -> 0.9.36 (`2dd97f8`).
+- RED (`23e9f5e`): `tests/test_orders_match.py`, new `CEDER_CATALOG` fixture (cards
+  192/253/239/284, the real names/aliases from the incident) — reproduces the exact
+  production trace (`Chlieb olivovo paradajkový`/`multicereálny` wrongly settling as
+  `alias_customer` on card 192; `merge_same_card` summing 3 different wordings into one
+  line of qty 5).
+- GREEN (`2d294eb`): two independent guards in `app/orders/match.py`, both word-level and
+  deterministic (`_distinctive_words` — folded, weights stripped via existing `_norm`, a
+  tiny "chlieb"-family stopword set excluded). (1) `_better_alias_candidate` gates rung 3
+  (`alias_customer`) — if another catalog card's OWN name matches the wording better than
+  the model's pick, the alias note does not confirm and the line falls through the rest
+  of the ladder (typically lands `llm_borderline`, review=True — asks the warehouse).
+  (2) `_wordings_differ` gates `merge_same_card` — a same-(gtin,unit) collision only sums
+  when the two wordings share at least one distinctive word; otherwise the lines stay
+  separate with their own quantities (bucket-per-wording-group rewrite).
+- No prompt/model changes (out of scope by design — avoids invalidating the corpus
+  llm-cache). Card 284's Vianočka case (the SAME mechanism firing CORRECTLY) and the
+  "Chlieb pšenično ražný" -> 192 line the model got right are both pinned unchanged.
+- PR #158, merged `88b4ba4`. Main CI green (test + e2e-orders 30-email corpus + build,
+  unchanged — both guards are conservative enough to touch zero of the existing 30 cases).
+  Deployed v0.9.36; `/health` confirms; `/otazky` DOM shows `v0.9.36`, 0 console errors,
+  live real data (open questions + recently-taught list) rendering correctly.
+- Manual ORION correction for the 4 already-imported CÉDER days stays the user's own job
+  (documented on #157) — this PR is code/tests/deploy only, no reprocessing of msg 5596
+  or any other already-uploaded order.

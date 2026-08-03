@@ -166,3 +166,67 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
         log.info("customer match refused: %s at %.2f (below %.2f)",
                  picked.get("name"), conf, GATE_SURE)
     return None
+
+
+# --- #159: ranking candidates for the WAREHOUSE's "who is this customer?" question ----
+#
+# `candidates_for_question` is DELIBERATELY SEPARATE from `candidates()` above.
+# `candidates()` feeds `_customer_input()`'s MODEL prompt — reordering or rescoring it
+# would change the exact text sent to the model and invalidate the corpus's recorded
+# `llm-cache` (never allowed). This function's output only ever reaches a human's screen.
+
+_PSC_LINE_RE = re.compile(r"\b\d{3}\s?\d{2}\b")
+
+
+def _norm_text(value) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def guess_delivery_address(free_text: str) -> str:
+    """Best-effort delivery-address LINE straight from the e-mail's own raw text (#159) —
+    never from the model, so it can never touch `prompt_hash`. Slovak order signatures
+    routinely put the delivery address on its own line together with a PSČ (postal code);
+    when one is found, that whole line is shown to the warehouse next to the ranked
+    candidates as a plain reading aid — never used to auto-match, only to let a human
+    eyeball it against the candidate below. Empty when no such line exists."""
+    for line in str(free_text or "").splitlines():
+        line = line.strip()
+        if line and _PSC_LINE_RE.search(line):
+            return line[:120]
+    return ""
+
+
+def candidates_for_question(customers: list[dict], sender_email: str, sender_name: str,
+                            company_name: str, free_text: str = "",
+                            limit: int = 5) -> list[dict]:
+    """Ranked customer candidates for the WAREHOUSE's "who is this?" question (#159).
+
+    Adds a signal `candidates()` does not have: does this customer's OWN street or city
+    text appear anywhere in the e-mail's own free text (subject + body)? The 2026-08-03
+    incident showed this ranks the right customer FIRST even when e-mail/name signals are
+    weak or absent — "Na bráne 4, 010 01 Žilina" in the mail matched EAN 2000000000861's
+    street "na bráne 4" and city "Žilina" on the nose, yet street/city was never used as a
+    matching key at all before this. Never an auto-match key — an unmatched sender still
+    ALWAYS gets asked (#62's existing GATE_SURE design already applies to the customer
+    boundary); this only orders the candidate LIST a human is shown.
+    """
+    addr = (_addresses(sender_email) or [""])[0]
+    domain = addr.split("@")[-1] if "@" in addr else ""
+    company = str(company_name or "").lower().strip()
+    text_norm = _norm_text(free_text)
+    scored = []
+    for c in customers:
+        score, exact = _score(c, addr, domain, str(sender_name or "").lower(), company)
+        street = _norm_text(c.get("street", ""))
+        city = _norm_text(c.get("city", ""))
+        address_match = False
+        if text_norm:
+            if street and len(street) > 3 and street in text_norm:
+                score += 70.0
+                address_match = True
+            if city and len(city) > 2 and city in text_norm:
+                score += 20.0
+                address_match = True
+        scored.append(dict(c, score=score, exact_email=exact, address_match=address_match))
+    scored.sort(key=lambda c: -c["score"])
+    return scored[:limit]

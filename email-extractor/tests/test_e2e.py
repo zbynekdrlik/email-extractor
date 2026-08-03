@@ -174,6 +174,74 @@ def test_the_questions_view_survives_the_live_refresh_without_duplicating(live_s
     assert console == [], f"console must be clean: {console}"
 
 
+def test_the_warehouse_answers_who_the_customer_is_from_the_link(live_server, pg, page):
+    """#159: an unrecognized sender is now a WAREHOUSE QUESTION too, rendered on the same
+    /otazky page the product-wording questions already use — through the real browser,
+    from the signed link, no login."""
+    from app.httpapi import sklad_key
+    from app.orders import snapshot, teach
+
+    snapshot.import_snapshot(
+        pg, "GTIN,Názov,doplnok\nG1,Rožok štandart 50g,\n",
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,E-mail\n"
+        "Potraviny nie otraviny Žilina,2000000000861,Žilina,na bráne 4,eva@x.sk\n")
+    qid = teach.ask_customer(
+        pg, message_id="e-cust", sender_email="cudzi@nikde.sk",
+        candidates=[{"ean_edi": "2000000000861", "name": "Potraviny nie otraviny Žilina",
+                    "city": "Žilina", "street": "na bráne 4", "address_match": True}],
+        delivery_date="08.08.2026",
+        context={"sender_email": "cudzi@nikde.sk", "sender_name": "Sklad",
+                "company_name": "Neznáma firma s.r.o.",
+                "delivery_address_guess": "na bráne 4, Žilina"})
+    assert qid
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/otazky")
+
+    page.wait_for_selector("text=cudzi@nikde.sk")
+    page.wait_for_selector("text=Potraviny nie otraviny Žilina")
+    page.click('button:has-text("Potraviny nie otraviny Žilina")')
+
+    page.wait_for_selector("text=Naposledy naučené")
+    q = teach.get(pg, qid)
+    assert q["status"] == "answered" and q["answer_gtin"] == "2000000000861"
+    row = pg.execute(
+        "SELECT emails FROM customer_overrides WHERE ean_edi='2000000000861'").fetchone()
+    assert row and "cudzi@nikde.sk" in row[0]
+
+    assert console == [], f"browser console not clean: {console}"
+
+
+def test_the_warehouse_can_say_it_does_not_know_the_customer(live_server, pg, page):
+    """'neviem, kto to je' (#159) must be reachable from the exact same card — it is the
+    only honest answer when none of the candidates fit."""
+    from app.httpapi import sklad_key
+    from app.orders import teach
+
+    qid = teach.ask_customer(
+        pg, message_id="e-cust2", sender_email="dalsi@nikde.sk",
+        candidates=[{"ean_edi": "2000000000001", "name": "Iný zákazník", "city": "",
+                    "street": "", "address_match": False}],
+        delivery_date="08.08.2026",
+        context={"sender_email": "dalsi@nikde.sk", "sender_name": "", "company_name": "",
+                "delivery_address_guess": ""})
+    assert qid
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/otazky")
+
+    page.wait_for_selector("text=dalsi@nikde.sk")
+    page.click('button:has-text("Neviem, kto to je")')
+    page.wait_for_selector("text=Naposledy naučené")
+    q = teach.get(pg, qid)
+    assert q["status"] == "answered" and q["answer_gtin"] == ""
+    assert pg.execute("SELECT count(*) FROM customer_overrides").fetchone()[0] == 0
+
+    assert console == [], f"browser console not clean: {console}"
+
+
 def test_the_warehouse_answers_from_the_link_with_no_login(live_server, pg, page):
     """The user's ask: the warehouse must not type a password (2026-07-31).
 

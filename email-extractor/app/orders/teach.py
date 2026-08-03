@@ -82,21 +82,20 @@ def ask(conn, message_id: str, customer_ean: str, customer_name: str, wording: s
     return int(existing[0]) if existing else None
 
 
+_COLS = ("id, message_id, customer_ean, customer_name, wording, quantity, unit, "
+        "candidates, delivery_date, reason, status, answer_gtin, answer_card, "
+        "answered_by, answered_at, created_at, kind, context")
+
+
 def get(conn, qid: int) -> dict | None:
     row = conn.execute(
-        """SELECT id, message_id, customer_ean, customer_name, wording, quantity, unit,
-                  candidates, delivery_date, reason, status, answer_gtin, answer_card,
-                  answered_by, answered_at, created_at
-             FROM order_questions WHERE id = %s""", (qid,)).fetchone()
+        f"SELECT {_COLS} FROM order_questions WHERE id = %s", (qid,)).fetchone()
     return _row(row) if row else None
 
 
 def open_questions(conn, limit: int = 100) -> list[dict]:
     rows = conn.execute(
-        """SELECT id, message_id, customer_ean, customer_name, wording, quantity, unit,
-                  candidates, delivery_date, reason, status, answer_gtin, answer_card,
-                  answered_by, answered_at, created_at
-             FROM order_questions WHERE status = 'open'
+        f"""SELECT {_COLS} FROM order_questions WHERE status = 'open'
             ORDER BY created_at LIMIT %s""", (limit,)).fetchall()
     return [_row(r) for r in rows]
 
@@ -109,10 +108,7 @@ def recently_taught(conn, limit: int = 20) -> list[dict]:
     0.9.5 on the live box).
     """
     rows = conn.execute(
-        """SELECT id, message_id, customer_ean, customer_name, wording, quantity, unit,
-                  candidates, delivery_date, reason, status, answer_gtin, answer_card,
-                  answered_by, answered_at, created_at
-             FROM order_questions WHERE status = 'answered'
+        f"""SELECT {_COLS} FROM order_questions WHERE status = 'answered'
             ORDER BY answered_at DESC LIMIT %s""", (limit,)).fetchall()
     return [_row(r) for r in rows]
 
@@ -163,10 +159,32 @@ def undo(conn, qid: int) -> dict:
     (`memory.forget_global` checks `question_id`). A different customer's later, redundant
     answer to the same wording never owns the global row (it was already taught), so undoing
     THAT answer must not erase a mapping some OTHER question is responsible for.
+
+    A `kind='customer'` question (#159) is entirely different data to unteach: its real
+    pick was remembered via `snapshot.remember_customer_email`, not `item_memory` — review
+    finding on PR #161: without this branch, undoing a mis-picked customer only reopened
+    the question while the wrong sender-address binding stayed live in
+    `customer_overrides` forever, silently mis-routing every future order from that
+    address. "neviem, kto to je" (`answer_gtin=""`) never remembered anything, so it is a
+    harmless reopen either way.
     """
     q = get(conn, qid)
     if not q:
         raise NotACandidate(f"question {qid} does not exist")
+    if q.get("kind") == "customer":
+        if q.get("answer_gtin"):
+            from . import snapshot
+            snapshot.forget_customer_email(
+                conn, q["answer_gtin"], (q.get("context") or {}).get("sender_email", ""))
+            snapshot.rebuild_from_overrides(conn)
+        conn.execute(
+            """UPDATE order_questions
+                  SET status = 'open', answer_gtin = NULL, answer_card = NULL,
+                      answered_by = NULL, answered_at = NULL
+                WHERE id = %s""", (qid,))
+        log.warning("customer teaching taken back for question %s (%s)", qid,
+                    (q.get("context") or {}).get("sender_email", ""))
+        return get(conn, qid) or {}
     conn.execute(
         "DELETE FROM item_memory WHERE customer_ean = %s AND item_key = %s"
         " AND source = 'human'", (q["customer_ean"], memory.item_key(q["wording"])))
@@ -186,7 +204,87 @@ def _row(r) -> dict:
             "unit": r[6] or "", "candidates": r[7] or [], "delivery_date": r[8] or "",
             "reason": r[9] or "", "status": r[10], "answer_gtin": r[11],
             "answer_card": r[12], "answered_by": r[13], "answered_at": r[14],
-            "created_at": r[15]}
+            "created_at": r[15], "kind": r[16] or "item", "context": r[17] or {}}
+
+
+# --- #159: the customer-half of the SAME teach-once loop — "who is this customer?" ----
+#
+# Shares the exact same table/index/dashboard/undo machinery `ask`/`answer` above use for
+# products — only `kind='customer'` differs. `customer_ean` is always '' for this kind
+# (the customer is exactly what is unknown), so the dedupe key is `item_key`, built from
+# the SENDER ADDRESS rather than a product wording: a second unresolved order from the
+# same address, before the first is answered, reuses the SAME open question.
+
+def ask_customer(conn, message_id: str, sender_email: str, candidates: list[dict],
+                 delivery_date: str, context: dict, on_new=None) -> int | None:
+    """Raise ONE 'who is this customer?' question. Returns its id — the EXISTING id when
+    one is already open for this sender address, and None when there is no address to key
+    on at all (nothing to dedupe against, nothing a human could even be shown).
+
+    The dedupe key is the address itself, case/whitespace-normalized only — review
+    finding on PR #161: reusing `memory.item_key` (a FUZZY normalizer built for product
+    WORDINGS, which folds '.', '-', '_', '@' all to the same blank separator) let two
+    genuinely different real addresses collapse onto the SAME open question. An e-mail
+    address needs EXACT identity, never fuzzy matching.
+    """
+    key = str(sender_email or "").strip().lower()
+    if not key:
+        return None
+    row = conn.execute(
+        """INSERT INTO order_questions
+               (message_id, customer_ean, customer_name, wording, item_key, kind,
+                candidates, delivery_date, reason, context)
+           VALUES (%s, '', '', %s, %s, 'customer', %s, %s, %s, %s)
+           ON CONFLICT (customer_ean, item_key) WHERE status = 'open' DO NOTHING
+           RETURNING id""",
+        (message_id, sender_email, key, Json(candidates or []), delivery_date or "",
+         "Zákazník nebol nájdený v tabuľke zákazníkov", Json(context or {}))).fetchone()
+    if row:
+        qid = int(row[0])
+        log.info("asking the warehouse who %r is", sender_email)
+        if on_new:
+            try:
+                on_new(get(conn, qid))
+            except Exception:
+                log.exception("notifying about new customer question %s (%r) failed",
+                              qid, sender_email)
+        return qid
+    existing = conn.execute(
+        "SELECT id FROM order_questions WHERE customer_ean = '' AND item_key = %s"
+        " AND status = 'open'", (key,)).fetchone()
+    return int(existing[0]) if existing else None
+
+
+def answer_customer(conn, qid: int, ean_edi: str, name: str, by: str = "") -> dict:
+    """Settle a 'who is this customer?' question. `ean_edi=""` means the warehouse said
+    "neviem, kto to je / nie je to ani jeden z nich" — the question is still marked
+    answered (so it stops asking and the taught list shows it was handled), but the
+    caller (`hold.release_unknown_customer`) is what turns the held order into a visible
+    'review' outcome instead of shipping it; this function never ships anything itself.
+
+    A real pick must be one of the offered candidates — unlike `answer()`'s product half
+    there is no "or anything in the catalog" escape hatch, because the whole point of this
+    question is that the customer is not yet reliably known at all.
+    """
+    q = get(conn, qid)
+    if not q:
+        raise NotACandidate(f"question {qid} does not exist")
+    if q.get("kind") != "customer":
+        raise NotACandidate(f"question {qid} is not a customer question")
+    if q["status"] != "open":
+        raise AlreadyAnswered(
+            f"question {qid} was answered on {q['answered_at']} with {q['answer_gtin']}")
+    if ean_edi:
+        offered = {str(c.get("ean_edi")) for c in q["candidates"]}
+        if str(ean_edi) not in offered:
+            raise NotACandidate(f"{ean_edi} was not offered for question {qid}")
+    conn.execute(
+        """UPDATE order_questions
+              SET status = 'answered', answer_gtin = %s, answer_card = %s,
+                  answered_by = %s, answered_at = now()
+            WHERE id = %s""", (str(ean_edi or ""), name or "", by or "", qid))
+    log.info("customer question %s answered: %r (%s) by %s", qid, ean_edi, name, by)
+    return get(conn, qid) or {}
 
 
 def _today(conn):

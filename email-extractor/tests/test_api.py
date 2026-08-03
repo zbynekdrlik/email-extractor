@@ -515,6 +515,91 @@ def test_answering_over_http_commits_the_ledger_even_if_something_after_upload_f
     assert len(uploads) == 1, "a retry must never re-upload once the ledger already claimed it"
 
 
+# --- #159: answering a customer-kind ('who is this?') question over HTTP ------------
+
+def _seed_customer_question(pg, monkeypatch, sender_email="zilina@farmeria.sk"):
+    """One held order with no known customer, exactly what `pipeline._run` now produces
+    when `matched is None` and there is time left before the delivery date."""
+    from app.orders import snapshot, teach
+
+    snapshot.import_snapshot(
+        pg, "GTIN,Názov,doplnok\nG50,Rožok štandart 50g,\n",
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,E-mail\n"
+        "Pekáreň Testovacia s.r.o.,2000000000001,Martin,Košútka 1,sklad@pekaren.sk\n")
+    pg.execute(
+        "INSERT INTO messages (message_id, category) VALUES ('m159', 'ai_orders')")
+    qid = teach.ask_customer(
+        pg, message_id="m159", sender_email=sender_email,
+        candidates=[{"ean_edi": "2000000000001", "name": "Pekáreň Testovacia s.r.o.",
+                    "city": "Martin", "street": "Košútka 1", "address_match": False}],
+        delivery_date="04.08.2026",
+        context={"sender_email": sender_email, "sender_name": "Sklad", "company_name": "",
+                "delivery_address_guess": ""})
+    from psycopg.types.json import Json
+    pg.execute(
+        """INSERT INTO held_orders (message_id, customer_ean, customer_name, delivery_date,
+                                    order_number, question_ids, order_json, extracted_json,
+                                    decisions_json)
+           VALUES ('m159', '', '', '04.08.2026', '', %s, %s, %s, %s)""",
+        ([qid], Json({"deliveryDate": "04.08.2026", "orderNumber": ""}),
+         Json({"isChangeRequest": False, "unverified": [], "notes": ""}),
+         Json([{"item_name": "rožok 50g", "gtin": "G50", "card": "Rožok štandart 50g",
+                "confidence": 0.95, "rule": "catalog_direct", "note": "", "review": False,
+                "trace": {}, "quantity": 120, "unit": "ks"}])))
+    monkeypatch.setattr("app.orders.upload.put",
+                        lambda cfg, name, content: True)
+    return qid
+
+
+def test_answering_a_customer_question_over_http_picks_a_candidate_and_ships(pg, monkeypatch):
+    qid = _seed_customer_question(pg, monkeypatch)
+    c = _client()
+    _login(c)
+    r = c.post(f"/api/orders/question/{qid}/answer",
+              json={"ean_edi": "2000000000001", "name": "Pekáreň Testovacia s.r.o."})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["question"]["status"] == "answered"
+    assert body["released"] and body["released"][0]["status"] == "ok"
+    assert pg.execute(
+        "SELECT status, customer_ean FROM held_orders WHERE message_id='m159'"
+    ).fetchone() == ("released", "2000000000001")
+    # durably remembered: the next mail from this address resolves with no question
+    row = pg.execute(
+        "SELECT emails FROM customer_overrides WHERE ean_edi='2000000000001'").fetchone()
+    assert row and "zilina@farmeria.sk" in row[0]
+
+
+def test_answering_a_customer_question_with_neviem_never_ships_but_stays_visible(pg,
+                                                                                 monkeypatch):
+    qid = _seed_customer_question(pg, monkeypatch)
+    c = _client()
+    _login(c)
+    r = c.post(f"/api/orders/question/{qid}/answer", json={"unknown": True})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["question"]["status"] == "answered"
+    assert body["question"]["answer_gtin"] == ""
+    assert body["released"] and body["released"][0]["status"] == "review"
+    row = pg.execute(
+        "SELECT status, release_reason FROM held_orders WHERE message_id='m159'").fetchone()
+    assert row == ("released", "answered")
+    assert pg.execute("SELECT count(*) FROM customer_overrides").fetchone()[0] == 0, \
+        "nothing is learned from 'neviem, kto to je'"
+    assert pg.execute(
+        "SELECT processed FROM messages WHERE message_id='m159'").fetchone() == (True,)
+
+
+def test_a_customer_question_outside_the_offered_candidates_is_refused_over_http(pg,
+                                                                                  monkeypatch):
+    qid = _seed_customer_question(pg, monkeypatch)
+    c = _client()
+    _login(c)
+    r = c.post(f"/api/orders/question/{qid}/answer",
+              json={"ean_edi": "9999999999999", "name": "Vymyslený"})
+    assert r.status_code == 400
+
+
 def test_fix_request_and_its_event_commit_together(pg, monkeypatch):
     """A failed second write must not leave an orphan fix row (a duplicate work item)."""
     pg.execute("INSERT INTO messages (message_id, subject) VALUES ('fx@t','Predmet')")

@@ -35,9 +35,6 @@ STATUS_ICON = {"ok": "&#9989;", "partial": "&#9888;&#65039;", "held": "&#8987;",
 STATUS_LABEL = {"ok": "nahraté do ORIONu", "partial": "neúplných (chýba časť položiek)",
                 "held": "čaká na odpoveď skladu", "review": "treba zadať ručne",
                 "error": "zlyhalo pri odosielaní"}
-# Orders in these states are the reason a warehouse action is needed — everything else
-# (a clean "ok") never needs the link.
-NEEDS_ACTION = ("partial", "held", "review", "error")
 
 
 def sklad_link(cfg) -> str:
@@ -62,9 +59,12 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
 
     `orders` is a list of AGGREGATE per-order summaries — never raw decisions or items:
     `{"status": "ok"|"partial"|"held"|"review"|"error", "delivery_date": str,
-    "item_count": int, "missing_count": int, "reject_reason": str}`. That shape is what
-    makes it structurally impossible for an item name, a trace or a run id to leak into
-    Odoo — the function simply never receives them.
+    "item_count": int, "missing_count": int, "reject_reason": str, "change": bool}`.
+    `change` (#159) marks a "review" order whose reason is a change-of-order — it is
+    ALWAYS resolved by hand in ORION and NOTHING is ever queued for it, so it gets its own
+    wording and neither link, never the generic "review" bucket. That shape is what makes
+    it structurally impossible for an item name, a trace or a run id to leak into Odoo —
+    the function simply never receives them.
 
     `unverified_count` (#139 review finding) is the AGEL-incident phantom-item safeguard
     (`extract.py`'s `unverified` — a model-claimed item the e-mail text does not prove) —
@@ -73,13 +73,18 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
     """
     orders = orders or []
     counts: dict[str, int] = {}
+    change_count = 0
     total_items = 0
     total_missing = 0
     dates: list[str] = []
     reasons: list[str] = []
     for o in orders:
         status = o.get("status") or "review"
-        counts[status] = counts.get(status, 0) + 1
+        is_change_order = status == "review" and bool(o.get("change"))
+        if is_change_order:
+            change_count += 1
+        else:
+            counts[status] = counts.get(status, 0) + 1
         total_items += int(o.get("item_count") or 0)
         if status == "partial":
             total_missing += int(o.get("missing_count") or 0)
@@ -112,6 +117,10 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
                         _plural(total_missing, "položka", "položky", "položiek") + ")")
         else:
             bits.append(f"{STATUS_ICON[status]} {counts[status]} {STATUS_LABEL[status]}")
+    if change_count:
+        bits.append(f"{STATUS_ICON['review']} {change_count} " +
+                    _plural(change_count, "žiadosť o zmenu", "žiadosti o zmenu",
+                            "žiadostí o zmenu") + " &mdash; uprav ju ručne v ORIONe")
     if new_questions:
         bits.append(f"&#10067; {new_questions} " +
                     _plural(new_questions, "nová otázka", "nové otázky", "nových otázok") +
@@ -129,10 +138,20 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
     for reason in reasons[:3]:
         parts.append(f"<p>{escape(reason)}</p>")
 
-    needs_link = (bool(new_questions) or bool(unverified_count)
-                 or any(counts.get(s) for s in NEEDS_ACTION))
-    if needs_link:
-        if link:
+    # #159: the link routes to where something is ACTUALLY waiting.
+    #   - held / partial / a fresh question this run: by construction there is a real,
+    #     genuinely open `order_questions`/`held_orders` row — the /sklad link (or, when
+    #     no dashboard_base_url is configured, the same generic hint as the other case).
+    #   - review / error / unverified-only: none of these ever write anything to the
+    #     board (an unmatched customer past its deadline, an extraction-level reject, a
+    #     failed upload, a phantom-item warning the ADMIN dashboard resolves) — point at
+    #     the dashboard generically, never claim something is "waiting" on the sklad key.
+    #   - a change-of-order ALONE: nothing is EVER queued for it (always a human editing
+    #     ORION by hand, already stated in its own reason paragraph above) — neither link.
+    has_board_item = bool(counts.get("held") or counts.get("partial") or new_questions)
+    has_other_action = bool(counts.get("review") or counts.get("error") or unverified_count)
+    if has_board_item or has_other_action:
+        if has_board_item and link:
             parts.append(f'<p>&#128203; Rieš na nástenke: '
                          f'<a href="{escape(link)}">{escape(link)}</a></p>')
         else:

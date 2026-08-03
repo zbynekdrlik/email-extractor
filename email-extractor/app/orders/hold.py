@@ -201,13 +201,52 @@ def _mark_message_done_if_clear(conn, message_id: str) -> None:
                 WHERE message_id = %s""", (message_id,))
 
 
+def _release_as_review(conn, cfg, row: dict, post, reason: str) -> dict:
+    """No real customer to ship to (#159) — convert this held order into the SAME visible
+    'review' outcome any other stuck order already gets, instead of shipping with a blank
+    customer EAN. Shared by `release_unknown_customer` (an explicit "neviem, kto to je"
+    answer) and `_do_release`'s deadline guard below (the delivery date arrived and NOBODY
+    ever answered at all) — both are "there is still no real customer", just reached a
+    different way."""
+    from . import report
+    post = post or (lambda c, html, **kw: report.post_from_config(c, html))
+    html = report.build_summary(customer_name="", orders=[{
+        "delivery_date": row["delivery_date"], "status": "review",
+        "item_count": len(row["decisions"]), "missing_count": 0,
+        "reject_reason": reason}])
+    try:
+        post(cfg, html)
+    except Exception:
+        log.exception("posting the unknown-customer review summary failed")
+    report.log_event(conn, row["message_id"], stage="review", status="review",
+                     outcome=reason, detail={"held_id": row["id"]})
+    conn.execute(
+        """UPDATE held_orders SET status='released', release_reason='answered',
+               released_at=now() WHERE id=%s""", (row["id"],))
+    _mark_message_done_if_clear(conn, row["message_id"])
+    return {"id": row["id"], "status": "review"}
+
+
 def _do_release(conn, cfg, row: dict, release_reason: str, upload, post,
                 redecide: bool, as_of: str = "") -> dict:
     """The deadline-sweep shape: ship, and ONLY on success mark the row released. Used by
     `release_due` (a single periodic sweep — no concurrent-release race to guard against)
     and directly by tests proving the ledger is the real duplicate-upload backstop.
     `release_for_question` uses `_release_locked` below instead (#118): it needs to
-    SERIALIZE this same decision per held-order id, which `_do_release` alone cannot do."""
+    SERIALIZE this same decision per held-order id, which `_do_release` alone cannot do.
+
+    #159 review finding: a row placed while the CUSTOMER was still unknown starts with
+    `customer_ean=""` and stays that way until a REAL answer calls `hold.set_customer` —
+    `_ship`'s `Matched(ean_edi=row["customer_ean"], ...)` is a dataclass instance and is
+    therefore ALWAYS truthy, so `_ship_one`'s `if not matched:` guard never caught this;
+    left unguarded, the deadline sweep would ship a document with a blank customer EAN
+    addressed to nobody. A still-empty `customer_ean` here means nobody ever answered
+    the "who is this?" question before the delivery date — convert to 'review' instead.
+    """
+    if not row["customer_ean"]:
+        return _release_as_review(
+            conn, cfg, row, post,
+            "Zákazník nebol nájdený v tabuľke zákazníkov (do termínu dodania)")
     status, preview, _reason = _ship(conn, cfg, row, upload, post, redecide, as_of=as_of)
     if status == "error":
         # The upload itself failed (e.g. ORION unreachable) — `_ship_one` already released
@@ -302,6 +341,38 @@ def _release_locked(conn, cfg, hid: int, upload, post) -> dict | None:
              row["customer_ean"], row["delivery_date"], status)
     _mark_message_done_if_clear(conn, row["message_id"])
     return {"id": hid, "status": status, "preview": preview}
+
+
+def set_customer(conn, qid: int, ean_edi: str, name: str) -> None:
+    """The unmatched-customer question (#159) is now answered with a REAL pick — tell
+    every held order still waiting on it who it actually belongs to, BEFORE releasing.
+    `release_for_question`/`_ship` build the `Matched` object straight from
+    `held_orders.customer_ean`/`customer_name`, so this must land first — a held order
+    placed while the customer was unknown always started with `customer_ean=''`."""
+    conn.execute(
+        "UPDATE held_orders SET customer_ean=%s, customer_name=%s "
+        "WHERE %s = ANY(question_ids) AND status='held'", (ean_edi, name, qid))
+
+
+def release_unknown_customer(conn, cfg, qid: int, post=None) -> list[dict]:
+    """Release every held order waiting on a customer question the warehouse answered
+    "neviem, kto to je" (#159). Nobody could ship an order with no customer to address it
+    to, so this does NOT ship — it converts the order into the SAME 'review' outcome every
+    other stuck order already gets (report.build_summary's dashboard hint, an
+    email_events row, the message marked processed), instead of leaving it silently stuck
+    'held' forever with no path forward. Shares `_release_as_review` with `_do_release`'s
+    own deadline-guard for the identical "still no real customer" outcome."""
+    ids = [r[0] for r in conn.execute(
+        "SELECT id FROM held_orders WHERE %s = ANY(question_ids) AND status = 'held'",
+        (qid,)).fetchall()]
+    reason = "Zákazník nebol nájdený v tabuľke zákazníkov"
+    released = []
+    for hid in ids:
+        row = get(conn, hid)
+        if not row:
+            continue
+        released.append(_release_as_review(conn, cfg, row, post, reason))
+    return released
 
 
 def release_due(conn, cfg, upload=None, post=None, today: str = "") -> list[dict]:
