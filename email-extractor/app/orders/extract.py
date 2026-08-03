@@ -330,6 +330,21 @@ def run(client, email: dict) -> dict:
         }
     else:
         result = dict(verify(extracted, source), source="model")
+
+    # #163: an order whose deliveryDate the source text never wrote is not a real order —
+    # the model can invent a plausible-looking future day (e.g. re-dating a stale quoted
+    # order onto "next Saturday") with nothing in the mail to back it up. Drop it here,
+    # BEFORE it ever reaches pipeline.py's date_conflict() as if it were a genuine day.
+    grounded, ungrounded = [], []
+    for order in result["orders"]:
+        (grounded if date_grounded(order.get("deliveryDate", ""), source)
+         else ungrounded).append(order)
+    if ungrounded:
+        log.warning(
+            "%d order(s) dropped: deliveryDate not found in the source text: %s",
+            len(ungrounded), [o.get("deliveryDate", "") for o in ungrounded])
+    result["orders"] = grounded
+
     result["prompt_hash"] = client.last_prompt_hash
     return result
 
@@ -438,6 +453,34 @@ def unquote_fully_quoted(text: str, today: str = "") -> str:
         return raw
     unquoted = "\n".join(_unquote_line(ln) for ln in lines)
     return unquoted if _orders_a_day_still_ahead(unquoted, today) else raw
+
+
+# --- the delivery date itself must be grounded (#163) -----------------------
+
+def date_grounded(date_str: str, source: str) -> bool:
+    """Is this delivery date actually written somewhere in the source text?
+
+    The same citation requirement `verify()` already applies to every ITEM
+    (`quote_in_source`/`item_in_source`) — applied here to the date itself. A delivery date
+    is grounded when its (day, month) appears as a written day.month token ANYWHERE in the
+    source (subject + body, quoted content included: a stale quoted date is exactly the
+    evidence that proves an order is stale, so dropping it here would hide the staleness),
+    OR the source names no explicit day.month token at all — the ordinary relative-date case
+    ("zajtra", "pondelok", the prompt's own "no date at all -> tomorrow" default) has nothing
+    written to hold the computed date accountable against, so it is accepted as before.
+
+    Only fails when the text DOES name explicit day(s) and the returned date matches NONE of
+    them — the exact shape of a model re-dating a stale quoted order onto an unwritten day
+    (#163, msg 5679: text says "25.7.", the model invented "08.08.2026" — 8.8 occurs nowhere
+    in the mail).
+    """
+    claimed = _days_in(str(date_str or ""))
+    if not claimed:
+        return True   # unparseable — nothing to hold accountable, don't invent a reject
+    written = _days_in(source)
+    if not written:
+        return True   # no explicit day anywhere -> ordinary relative-date order
+    return bool(claimed & written)
 
 
 def date_conflict(subject: str, dates: list[str], body: str = "") -> str:
