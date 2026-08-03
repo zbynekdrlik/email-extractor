@@ -92,10 +92,23 @@ def place(conn, message_id: str, matched, order: dict, decisions, extracted: dic
 
 
 def has_open(conn, message_id: str) -> bool:
-    """True while any order of this message is still waiting — worker._claim's guard."""
+    """True while any order of this message is still waiting — worker._claim's guard.
+
+    #164: a `mail`-kind question ("is this even an order?") never gets a `held_orders`
+    row (there is no order to hold — see `pipeline._run`'s "no orders" branch), so this
+    now ALSO counts an open `mail`-kind question for the same message. Narrowed to
+    `kind='mail'` deliberately: an open `item`/`customer`/`date`/`line` question already
+    holding an order is covered by the `held_orders` check above, and widening this to
+    EVERY open question kind could let a stray, unrelated open question on an already-
+    shipped order's message block re-claiming something it has nothing to do with.
+    """
     return conn.execute(
-        "SELECT 1 FROM held_orders WHERE message_id = %s AND status = 'held' LIMIT 1",
-        (message_id,)).fetchone() is not None
+        """SELECT 1 FROM held_orders WHERE message_id = %s AND status = 'held'
+           UNION ALL
+           SELECT 1 FROM order_questions
+            WHERE message_id = %s AND kind = 'mail' AND status = 'open'
+           LIMIT 1""",
+        (message_id, message_id)).fetchone() is not None
 
 
 # --- reading ---------------------------------------------------------------
@@ -311,16 +324,16 @@ def _mark_message_done_if_clear(conn, message_id: str) -> None:
                 WHERE message_id = %s""", (message_id,))
 
 
-def _release_as_review(conn, cfg, row: dict, post, reason: str) -> dict:
-    """No real customer to ship to (#159) — convert this held order into the SAME visible
-    'review' outcome any other stuck order already gets, instead of shipping with a blank
-    customer EAN. Shared by `release_unknown_customer` (an explicit "neviem, kto to je"
-    answer) and `_do_release`'s deadline guard below (the delivery date arrived and NOBODY
-    ever answered at all) — both are "there is still no real customer", just reached a
-    different way."""
+def release_to_review(conn, cfg, row: dict, post, reason: str) -> dict:
+    """Convert a held order into the SAME visible 'review' outcome any other stuck order
+    already gets, instead of shipping with a blank/unconfirmed field or leaving it stuck
+    'held' forever with no path forward (#159's original "no real customer" case,
+    generalized by #164 to ANY kind of still-open, deadline-non-shippable question —
+    `release_due`'s new rule below routes through here for date/customer/mail/line
+    questions the same way it already did for an unresolved customer)."""
     from . import report
     post = post or (lambda c, html, **kw: report.post_from_config(c, html))
-    html = report.build_summary(customer_name="", orders=[{
+    html = report.build_summary(customer_name=row.get("customer_name") or "", orders=[{
         "delivery_date": row["delivery_date"], "status": "review",
         "item_count": len(row["decisions"]), "missing_count": 0,
         "reject_reason": reason}])
@@ -354,7 +367,7 @@ def _do_release(conn, cfg, row: dict, release_reason: str, upload, post,
     the "who is this?" question before the delivery date — convert to 'review' instead.
     """
     if not row["customer_ean"]:
-        return _release_as_review(
+        return release_to_review(
             conn, cfg, row, post,
             "Zákazník nebol nájdený v tabuľke zákazníkov (do termínu dodania)")
     status, preview, _reason = _ship(conn, cfg, row, upload, post, redecide, as_of=as_of)
@@ -521,13 +534,29 @@ def set_customer(conn, qid: int, ean_edi: str, name: str) -> None:
         "WHERE %s = ANY(question_ids) AND status='held'", (ean_edi, name, qid))
 
 
+def set_delivery_date(conn, qid: int, date: str) -> None:
+    """The 'ktorý deň platí?' question (#164) is now answered with a REAL date — tell
+    every held order still waiting on it, the SAME way `set_customer` does for a resolved
+    customer, BEFORE releasing. Two places need the answered date: `held_orders.
+    delivery_date` (the column `release_due`'s own deadline fence reads) AND
+    `order_json.deliveryDate` (what `_ship`/`_redecide`/`edi.build` actually read when
+    the order eventually ships) — a held order placed while the date was in DISPUTE
+    always started with whatever ONE candidate date `pipeline._run` happened to store."""
+    conn.execute(
+        """UPDATE held_orders
+              SET delivery_date = %s,
+                  order_json = jsonb_set(order_json, '{deliveryDate}', to_jsonb(%s::text))
+            WHERE %s = ANY(question_ids) AND status = 'held'""",
+        (date, date, qid))
+
+
 def release_unknown_customer(conn, cfg, qid: int, post=None) -> list[dict]:
     """Release every held order waiting on a customer question the warehouse answered
     "neviem, kto to je" (#159). Nobody could ship an order with no customer to address it
     to, so this does NOT ship — it converts the order into the SAME 'review' outcome every
     other stuck order already gets (report.build_summary's dashboard hint, an
     email_events row, the message marked processed), instead of leaving it silently stuck
-    'held' forever with no path forward. Shares `_release_as_review` with `_do_release`'s
+    'held' forever with no path forward. Shares `release_to_review` with `_do_release`'s
     own deadline-guard for the identical "still no real customer" outcome."""
     ids = [r[0] for r in conn.execute(
         "SELECT id FROM held_orders WHERE %s = ANY(question_ids) AND status = 'held'",
@@ -538,13 +567,36 @@ def release_unknown_customer(conn, cfg, qid: int, post=None) -> list[dict]:
         row = get(conn, hid)
         if not row:
             continue
-        released.append(_release_as_review(conn, cfg, row, post, reason))
+        released.append(release_to_review(conn, cfg, row, post, reason))
     return released
 
 
+def _has_non_shippable_open_question(conn, question_ids: list[int]) -> bool:
+    """#164: does this held order still wait on a question whose KIND is not safe to
+    silently ship past the deadline? `item` questions keep today's behaviour (ship what
+    matched, drop what didn't — `deadline_shippable=True`); `customer`/`date`/`mail`/
+    `line` are NOT — shipping past their deadline unanswered would send an unconfirmed
+    customer, an invented date, or a fabricated line, exactly the "never ship a guessed
+    value" constraint this whole ticket exists to close."""
+    if not question_ids:
+        return False
+    from . import teach
+    rows = conn.execute(
+        "SELECT DISTINCT kind FROM order_questions WHERE id = ANY(%s) AND status <> 'answered'",
+        (list(question_ids),)).fetchall()
+    return any(not teach.KINDS[k or "item"].deadline_shippable for (k,) in rows)
+
+
 def release_due(conn, cfg, upload=None, post=None, today: str = "") -> list[dict]:
-    """The deadline backstop: whatever is still waiting when its delivery date arrives ships
-    what matched — exactly like the pipeline always has, just no longer immediate."""
+    """The deadline backstop: whatever is still waiting when its delivery date arrives
+    ships what matched — exactly like the pipeline always has, just no longer immediate.
+
+    #164: a row still waiting on a NON-`deadline_shippable` question (customer/date/mail/
+    line) is the one exception — it goes to `release_to_review` instead, because shipping
+    it would mean sending an unconfirmed customer/date/line the warehouse never actually
+    confirmed. `item`-only holds are completely unaffected (`deadline_shippable=True`
+    keeps the exact pre-#164 ship-what-matched behaviour).
+    """
     today = today or str(_db_today(conn))
     ids = [r[0] for r in conn.execute(
         "SELECT id FROM held_orders WHERE status = 'held'").fetchall()]
@@ -552,6 +604,12 @@ def release_due(conn, cfg, upload=None, post=None, today: str = "") -> list[dict
     for hid in ids:
         row = get(conn, hid)
         if not row or not is_past_deadline(row["delivery_date"], today):
+            continue
+        if _has_non_shippable_open_question(conn, row["question_ids"]):
+            released.append(release_to_review(
+                conn, cfg, row, post,
+                "Termín dodania prišiel, ale otázka (dátum/zákazník/mail/riadok) ešte "
+                "nie je zodpovedaná — treba doriešiť ručne"))
             continue
         released.append(_do_release(conn, cfg, row, "deadline", upload, post, redecide=False,
                                     as_of=today))

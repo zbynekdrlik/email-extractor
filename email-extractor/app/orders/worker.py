@@ -58,6 +58,14 @@ def _claim(conn) -> dict | None:
                                 SELECT 1 FROM held_orders h
                                  WHERE h.message_id = messages.message_id
                                    AND h.status = 'held')
+                            -- #164: a 'mail' question ("is this even an order?") has no
+                            -- held_orders row (there is no order to hold) — same
+                            -- reasoning as the held_orders guard above, narrowed to
+                            -- kind='mail' the same way hold.has_open is.
+                            AND NOT EXISTS (
+                                SELECT 1 FROM order_questions q
+                                 WHERE q.message_id = messages.message_id
+                                   AND q.kind = 'mail' AND q.status = 'open')
                           ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
          RETURNING message_id, subject, from_addr, from_name, combined_text, body_text""",
         (CATEGORY, MAX_ATTEMPTS)).fetchone()

@@ -796,3 +796,35 @@ def test_the_full_exit_matrix_never_lets_a_resolvable_reason_go_silent(pg, env):
     assert result["status"] == "ok"
     assert len(_open_qs()) == before
     assert len(rec.uploads) == 1, "the second run must never re-upload"
+
+
+# --- #164: a taught mail_rules pattern short-circuits BEFORE the LLM call ---------------
+
+def test_a_taught_ignore_rule_skips_extraction_entirely(pg, env):
+    """`ignore` short-circuits before `extract.run` is ever called — the FIRST scripted
+    answer would be the extraction call, so a ScriptedClient with ZERO answers proves the
+    model was never invoked at all."""
+    from app.orders import teach
+    pg.execute(
+        "INSERT INTO mail_rules (sender_norm, subject_key, action) VALUES (%s, %s, 'ignore')",
+        (teach._sender_norm(MAIL["from_addr"]), teach.subject_key(MAIL["subject"])))
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), MAIL, env, client=ScriptedClient([]),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "ok"
+    assert rec.uploads == []
+    assert len(rec.posts) == 1 and "ignorované" in rec.posts[0].lower()
+
+
+def test_a_taught_manual_rule_skips_extraction_and_goes_straight_to_review(pg, env):
+    from app.orders import teach
+    pg.execute(
+        "INSERT INTO mail_rules (sender_norm, subject_key, action) VALUES (%s, %s, 'manual')",
+        (teach._sender_norm(MAIL["from_addr"]), teach.subject_key(MAIL["subject"])))
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), MAIL, env, client=ScriptedClient([]),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "review"
+    assert rec.uploads == []
+    assert len(teach.open_questions(pg)) == 0, "manual is technical — no new question"
+    assert "ručne" in rec.posts[0].lower()

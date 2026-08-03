@@ -16,6 +16,7 @@ part that must not go wrong twice:
 """
 from __future__ import annotations
 
+import enum
 import logging
 from pathlib import Path
 
@@ -23,6 +24,31 @@ from . import customer, edi, extract, hold, llm, match, memory, report, snapshot
 from . import upload as upload_mod
 
 log = logging.getLogger("orders.pipeline")
+
+
+# --- #164: every terminal outcome names WHY (`Reason`), so `_finish` can enforce, once,
+# that a "review"/"error" outcome is EITHER technical (nothing a warehouse click could
+# ever resolve) OR carries at least one board question — never neither. This is the
+# structural fix for the bug the ticket opened with: a "problem" branch that returns
+# early and forgets the board, one at a time, is exactly how #159 left the date-conflict
+# path (156-163) unreachable from the board even after #159 built the machinery.
+class Reason(enum.Enum):
+    SHIP = "ship"                    # ok/partial/held — the invariant does not apply
+    NO_ORDERS = "no_orders"
+    DATE_CONFLICT = "date_conflict"
+    CUSTOMER_UNKNOWN = "customer_unknown"
+    ITEM_OPEN = "item_open"
+    CHANGE_REQUEST = "change_request"
+    LLM_REFUSED = "llm_refused"
+    UPLOAD_FAILED = "upload_failed"
+    DEDUP_ALREADY_SENT = "dedup_already_sent"
+
+
+# Nothing a warehouse click could ever settle — a genuine engineering/instruction matter.
+# Every OTHER "review"/"error" reason MUST carry an open board question, enforced in
+# `_finish` below.
+TECHNICAL_REASONS = {Reason.CHANGE_REQUEST, Reason.LLM_REFUSED, Reason.UPLOAD_FAILED,
+                     Reason.DEDUP_ALREADY_SENT}
 
 # The rungs that mean the engine could not settle the line on its own. Each becomes
 # ONE question for the warehouse (#88) — answering it teaches the wording for good.
@@ -109,24 +135,66 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
     shadow = bool(getattr(cfg, "orders_shadow", False))
     upload = upload or (lambda c, name, content: upload_mod.put(c, name, content))
     post = post or (lambda c, html, **kw: report.post_from_config(c, html))
+    # #164: every genuinely new question of ANY kind, from ANY branch of this run —
+    # declared up front so the early-return branches below (mail rule, refusal, no
+    # orders, date conflict) can feed it exactly like the per-order loop already does.
+    new_questions: list[dict] = []
 
     catalog = snapshot.load_catalog(conn, snapshot_id)
     customers = snapshot.load_customers(conn, snapshot_id)
+
+    # #164: a sender+subject pattern the warehouse already taught (`mail`-kind answer,
+    # `teach.KINDS['mail'].apply`) is checked BEFORE the LLM ever runs — `ignore` saves
+    # the extraction call entirely, `manual` skips straight to the known instruction. A
+    # pure read, so it applies even in shadow (no side effect); nothing to check when the
+    # table has no rows yet (every existing/corpus message).
+    rule = _mail_rule(conn, message.get("from_addr", ""), message.get("subject", ""))
+    if rule == "ignore":
+        # `reject_reason` (not just `notes`) so `report.build_summary` actually prints it —
+        # status="ok" alone renders the generic "nahraté do ORIONu" label, which would be a
+        # lie here (nothing was ever uploaded); the reason line is what makes it honest.
+        note = "Ignorované podľa naučeného pravidla (nie je objednávka)."
+        return _finish(conn, cfg, message, shadow, post, status="ok", items=[],
+                       result={"shipped": False, "reject_reason": note, "customer": {},
+                               "unverified": [], "notes": note})
+    if rule == "manual":
+        return _finish(conn, cfg, message, shadow, post, status="review", items=[],
+                       result={"shipped": False,
+                               "reject_reason": "Podľa naučeného pravidla: je to "
+                                                "objednávka, prepíš ju ručne v ORIONe.",
+                               "customer": {}, "unverified": [], "notes": ""},
+                       reason=Reason.CHANGE_REQUEST)
 
     extracted = extract.run(client, message)
     if extracted.get("refusal"):
         return _finish(conn, cfg, message, shadow, post, status="review", items=[],
                        result={"shipped": False, "reject_reason": extracted["refusal"],
                                "customer": {}, "unverified": extracted.get("unverified", []),
-                               "notes": extracted.get("notes", "")})
+                               "notes": extracted.get("notes", "")},
+                       reason=Reason.LLM_REFUSED)
 
     orders = extracted.get("orders") or []
     if not orders:
-        return _finish(conn, cfg, message, shadow, post, status="review", items=[],
+        # #164 row 2: "is this even an order?" — a board question that TEACHES (a
+        # `mail_rules` row), instead of a dead `review` nobody could ever act on. Never in
+        # shadow: shadow must leave no trace.
+        qids: list[int] = []
+        if not shadow:
+            mq = teach.ask_mail(conn, message_id=message.get("message_id", ""),
+                                sender_email=message.get("from_addr", ""),
+                                subject=message.get("subject", ""),
+                                reason="AI nenašla v e-maile žiadnu objednávku",
+                                on_new=new_questions.append)
+            if mq:
+                qids.append(mq)
+        return _finish(conn, cfg, message, shadow, post,
+                       status="held" if qids else "review", items=[],
                        result={"shipped": False,
                                "reject_reason": "AI nenašla v e-maile žiadnu objednávku",
                                "customer": {}, "unverified": extracted.get("unverified", []),
-                               "notes": extracted.get("notes", "")})
+                               "notes": extracted.get("notes", "")},
+                       reason=Reason.NO_ORDERS, question_ids=qids,
+                       new_questions=len(new_questions))
 
     # The customer is asked of the model ONCE per email — a second call would cost money to
     # answer the same question. It is RESOLVED per order, though: one attachment may hold
@@ -151,17 +219,87 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                                 store=store)
 
     email_matched = matched = _customer_for()
+    is_change = bool(extracted.get("isChangeRequest"))
 
     orders = _merge_by_day(orders)
+    # #164: do NOT move this check to after product matching — that would push mails the
+    # date conflict used to short-circuit into NEW per-item LLM calls, missing the frozen
+    # corpus cache and forcing a paid re-record (see the design comment on #164).
     conflict = extract.date_conflict(message.get("subject", ""),
                                      [o.get("deliveryDate", "") for o in orders],
                                      body=message.get("combined_text", "") or "")
     if conflict:
-        return _finish(conn, cfg, message, shadow, post, status="review",
-                       items=[], result={"shipped": False, "reject_reason": conflict,
-                                         "customer": {}, "unverified": [],
-                                         "notes": extracted.get("notes", "")})
-    is_change = bool(extracted.get("isChangeRequest"))
+        if shadow:
+            return _finish(conn, cfg, message, shadow, post, status="review", items=[],
+                           result={"shipped": False, "reject_reason": conflict,
+                                   "customer": {}, "unverified": [],
+                                   "notes": extracted.get("notes", "")},
+                           reason=Reason.DATE_CONFLICT)
+        first_date = orders[0].get("deliveryDate", "") if orders else ""
+        dates = sorted({str(o.get("deliveryDate") or "") for o in orders
+                        if o.get("deliveryDate")})
+        dq = teach.ask_date(conn, message_id=message.get("message_id", ""), dates=dates,
+                            reason=conflict, delivery_date=first_date,
+                            on_new=new_questions.append)
+        qids = [dq] if dq else []
+        hold_matched = matched
+        # #164 (e).1: the date conflict may ALSO hit an unresolved customer — a SECOND,
+        # independent open question on the SAME held order(s), each released on its own
+        # schedule (`release_for_question` ships only once EVERY id is answered).
+        if matched is None and not is_change:
+            cust_cands = customer.candidates_for_question(
+                customers, sender, extracted.get("senderName", ""),
+                extracted.get("companyName", ""), free_text=free_text)
+            cq = teach.ask_customer(
+                conn, message_id=message.get("message_id", ""), sender_email=sender,
+                candidates=[{"ean_edi": c.get("ean_edi", ""), "name": c.get("name", ""),
+                            "city": c.get("city", ""), "street": c.get("street", ""),
+                            "address_match": bool(c.get("address_match"))}
+                           for c in cust_cands],
+                delivery_date=first_date,
+                context={"sender_email": sender,
+                        "sender_name": extracted.get("senderName", ""),
+                        "company_name": extracted.get("companyName", ""),
+                        "delivery_address_guess": customer.guess_delivery_address(free_text)},
+                on_new=new_questions.append)
+            if cq:
+                qids.append(cq)
+            hold_matched = customer.Matched(ean_edi="", name="", confidence=0.0,
+                                            rule="unmatched", note="")
+        held_ids = [hold.place(conn, message_id=message.get("message_id", ""),
+                               matched=hold_matched, order=order, decisions=[],
+                               extracted=extracted, question_ids=qids)
+                   for order in orders]
+        report.log_event(
+            conn, message.get("message_id", ""), stage="held", status="held",
+            outcome=f"Rozpor dátumu dodania — čaká na sklad ({conflict})",
+            detail={"held_ids": held_ids, "question_ids": qids})
+        order_summaries = [{"delivery_date": o.get("deliveryDate", ""), "status": "held",
+                           "item_count": 0, "missing_count": 0, "reject_reason": ""}
+                          for o in orders]
+        _post_summary(cfg, post, shadow, customer_name=hold_matched.name,
+                      orders=order_summaries, new_questions=len(new_questions),
+                      unverified_count=len(extracted.get("unverified") or []))
+        return {"status": "held", "items": [], "shadow": shadow, "would_ship": False,
+               "customer_ean": hold_matched.ean_edi, "customer_name": hold_matched.name,
+               "delivery_date": first_date, "orders": len(orders), "order_results": [],
+               "question_ids": qids}
+
+    # #164 row 8 (report.py's phantom-item safeguard): a claimed line the source text
+    # could not prove is not silently dropped — the warehouse confirms whether it really
+    # belongs, and the answer teaches NOTHING (there is no stable key for a one-off
+    # fabrication) — the value is purely that a fabricated line never ships unconfirmed.
+    # Skipped when `orders` ended up empty (handled exclusively by the `mail` question
+    # above — asking both would be a confusing double-ask for the same underlying doubt).
+    if not shadow:
+        for item in extracted.get("unverified") or []:
+            teach.ask_line(conn, message_id=message.get("message_id", ""),
+                           wording=item.get("name", ""), quantity=item.get("quantity"),
+                           unit=item.get("unit", "ks"),
+                           reason="Táto položka sa nenašla doslovne v texte e-mailu — "
+                                 "platí naozaj?",
+                           on_new=new_questions.append)
+
     today = str(message.get("today") or "")
     asked: list[int] = []
     all_items: list[dict] = []
@@ -173,7 +311,6 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
     # this function, instead of once per order and once per question (the old shape: 5
     # delivery dates + 4 questions produced 6 separate Odoo messages for one e-mail).
     order_summaries: list[dict] = []
-    new_questions: list[dict] = []
     for order in orders:
         # Two shops in one file are two customers; everything below — the memory lookup,
         # the alias that names the customer, the question, the EDI header — must be the
@@ -313,11 +450,37 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                 detail={"held_id": held_id, "question_ids": order_question_ids,
                         "delivery_date": order.get("deliveryDate", "")})
         else:
+            # #164 row 4: the customer is unresolved AND the deadline already passed (the
+            # `if` above only excludes the NOT-yet-past-deadline case) — this particular
+            # order can wait no longer, but the sender should still be ASKED, so the
+            # answer teaches the mapping for the NEXT order from the same address instead
+            # of leaving this exact dead end unreachable forever. Never in shadow, never
+            # for a change request (row 5 stays purely technical).
+            ship_question_ids = list(order_question_ids)
+            if not shadow and matched is None and not is_change:
+                cust_cands = customer.candidates_for_question(
+                    customers, sender, extracted.get("senderName", ""),
+                    extracted.get("companyName", ""), free_text=free_text)
+                cq = teach.ask_customer(
+                    conn, message_id=message.get("message_id", ""), sender_email=sender,
+                    candidates=[{"ean_edi": c.get("ean_edi", ""), "name": c.get("name", ""),
+                                "city": c.get("city", ""), "street": c.get("street", ""),
+                                "address_match": bool(c.get("address_match"))}
+                               for c in cust_cands],
+                    delivery_date=order.get("deliveryDate", ""),
+                    context={"sender_email": sender,
+                            "sender_name": extracted.get("senderName", ""),
+                            "company_name": extracted.get("companyName", ""),
+                            "delivery_address_guess":
+                                customer.guess_delivery_address(free_text)},
+                    on_new=new_questions.append)
+                if cq:
+                    ship_question_ids.append(cq)
             # post_now=False: this order's own Odoo message is folded into the ONE summary
             # posted at the end of `_run` (#139) — never one post per order.
             status, preview, reject_reason = _ship_one(
                 conn, cfg, message, order, matched, decisions, extracted, shadow, upload,
-                post, post_now=False)
+                post, post_now=False, question_ids=ship_question_ids)
         statuses.append(status)
         previews.append(preview)
         order_summaries.append({
@@ -363,7 +526,11 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
            "customer_name": email_matched.name if email_matched else "",
            "customer_rule": email_matched.rule if email_matched else "unmatched",
            "delivery_date": (orders[0].get("deliveryDate") or "") if orders else "",
-           "orders": len(orders), "order_results": order_results}
+           "orders": len(orders), "order_results": order_results,
+           # #164: every genuinely NEW question this run raised (any kind) — the same
+           # observable the early-return branches above already carry, so a caller never
+           # has to special-case "this status came from an early return vs the main loop".
+           "question_ids": [q["id"] for q in new_questions if q and q.get("id")]}
     # In shadow mode the preview IS the deliverable: it is what would have been uploaded.
     for preview in previews:
         if preview:
@@ -406,7 +573,8 @@ def _merge_by_day(orders: list[dict]) -> list[dict]:
 
 
 def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
-              upload, post, post_now: bool = True) -> tuple[str, dict, str]:
+              upload, post, post_now: bool = True,
+              question_ids: list[int] | None = None) -> tuple[str, dict, str]:
     """Build, send and report ONE order. Returns (status, preview, reject_reason).
 
     `post_now=False` (used by `_run`'s multi-order loop, #139) still logs the event
@@ -414,6 +582,11 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
     e-mail into ONE combined summary instead. `hold.py`'s release paths call this with the
     default `post_now=True`: each release is its own, later, single-order event, so
     posting immediately there is already "one message per processed thing".
+
+    `question_ids` (#164): board questions this order's caller ALREADY raised before
+    calling here (e.g. the per-item `teach.ask` loop in `_run`) — threaded into `_finish`'s
+    invariant check so a "no card matched" reject that already has open item questions is
+    correctly recognized as resolvable-on-the-board, not silently technical.
     """
     items = _as_edi_items(decisions)
     shipped_items = [d for d in decisions if d.gtin]
@@ -432,20 +605,27 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
         "shipped": False,
     }
 
+    reason = Reason.SHIP
     if not matched:
         result["reject_reason"] = "Zákazník nebol nájdený v tabuľke zákazníkov"
+        # #164: an unmatched customer whose real reject reason is a change-of-order stays
+        # TECHNICAL (row 5) — never a board question, always a manual ORION edit.
+        reason = Reason.CHANGE_REQUEST if is_change else Reason.CUSTOMER_UNKNOWN
     elif is_change:
         prefix = edi.change_prefix(matched.ean_edi, delivery, order_no)
         result["change_prefix"] = prefix
         result["reject_reason"] = (
             "E-mail je zmena už zadanej objednávky — uprav ju ručne v ORIONe (pôvodný "
             f"súbor začína {prefix})")
+        reason = Reason.CHANGE_REQUEST
     elif not shipped_items:
         result["reject_reason"] = "Žiadnu položku sa nedalo priradiť ku karte"
+        reason = Reason.ITEM_OPEN
 
     if result.get("reject_reason"):
         _finish(conn, cfg, message, shadow, post, status="review",
-                items=result["items"], result=result, post_now=post_now)
+                items=result["items"], result=result, post_now=post_now, reason=reason,
+                question_ids=question_ids)
         return "review", {}, result["reject_reason"]
 
     built = edi.build(ean=matched.ean_edi, store=matched.name, orderNumber=order_no,
@@ -482,7 +662,8 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
                                    "administrátorovi")
         result["error_detail"] = repr(e)
         _finish(conn, cfg, message, shadow, post, status="error", items=result["items"],
-                result=result, detail={"error": repr(e)}, post_now=post_now)
+                result=result, detail={"error": repr(e)}, post_now=post_now,
+                reason=Reason.UPLOAD_FAILED)
         return "error", preview, result["reject_reason"]
 
     result["shipped"] = True
@@ -521,11 +702,36 @@ def _post_summary(cfg, post, shadow: bool, customer_name: str, orders: list[dict
 
 
 def _finish(conn, cfg, message, shadow, post, status: str, items: list,
-            result: dict, detail: dict | None = None, post_now: bool = True) -> dict:
+            result: dict, detail: dict | None = None, post_now: bool = True,
+            reason: Reason = Reason.SHIP, question_ids: list[int] | None = None,
+            new_questions: int = 0) -> dict:
     """Log the event timeline and, when `post_now`, post this SINGLE order/rejected-email
     as its own one-line Odoo summary (#139) — unless we are shadowing (then nothing leaves
     this process). `post_now=False` is how `_run`'s multi-order loop defers every order's
-    post into the ONE combined summary `_post_summary` sends at the end of the run."""
+    post into the ONE combined summary `_post_summary` sends at the end of the run.
+
+    #164: the invariant. A "review"/"error" outcome is either TECHNICAL (`reason` in
+    `TECHNICAL_REASONS` — nothing a warehouse click could ever resolve) or must carry at
+    least one open board question (`question_ids`). A caller that reaches here having
+    forgotten both is exactly the bug this ticket exists to close structurally — it is
+    logged CRITICAL and a fallback generic question is raised right here, so production
+    degrades to "a human is asked something vague" instead of silently vanishing (never in
+    shadow — shadow leaves no trace, by design, regardless of this check).
+    """
+    question_ids = list(question_ids or [])
+    if not shadow and status in ("review", "error") and reason not in TECHNICAL_REASONS \
+            and not question_ids:
+        log.critical("outcome %s (reason=%s) for %s produced NO board question and is "
+                     "not technical — raising a fallback board question", status,
+                     reason.value, message.get("message_id", ""))
+        qid = teach.ask_mail(
+            conn, message_id=message.get("message_id", ""),
+            sender_email=message.get("from_addr", ""), subject=message.get("subject", ""),
+            reason=f"Nezvyčajný stav ({reason.value}) — over ručne, čo sa s týmto mailom "
+                  "stalo.")
+        if qid:
+            question_ids = [qid]
+            new_questions += 1
     if not shadow:
         if post_now:
             _post_summary(cfg, post, shadow, customer_name=(result.get("customer") or {}).get(
@@ -535,15 +741,18 @@ def _finish(conn, cfg, message, shadow, post, status: str, items: list,
                     "missing_count": sum(1 for i in items if not i.get("gtin")),
                     "reject_reason": result.get("reject_reason", ""),
                 }],
+                new_questions=new_questions,
                 # #139 review finding: the AGEL-incident phantom-item safeguard
                 # (`extract.py`'s `unverified`) must stay visible even after the
                 # shortening — never dropped just because the item list itself is gone.
                 unverified_count=len(result.get("unverified") or []))
         report.log_event(
             conn, message.get("message_id", ""),
-            stage="uploaded_orion" if result.get("shipped") else "review",
+            stage="uploaded_orion" if result.get("shipped") else
+                 ("held" if status == "held" else "review"),
             status="ok" if status in ("ok", "partial") else status,
-            outcome=_outcome(status, result), detail=detail or {})
+            outcome=_outcome(status, result), detail={**(detail or {}),
+                                                       "question_ids": question_ids})
     return {"status": status, "items": items, "shadow": shadow,
             "would_ship": bool(result.get("shipped")) or status in ("ok", "partial"),
             # keep the shape identical on the reject paths, so a consumer never has to
@@ -551,7 +760,7 @@ def _finish(conn, cfg, message, shadow, post, status: str, items: list,
             "customer_ean": (result.get("customer") or {}).get("ean_edi", ""),
             "customer_name": (result.get("customer") or {}).get("name", ""),
             "delivery_date": result.get("delivery_date", ""),
-            "orders": 0, "order_results": []}
+            "orders": 0, "order_results": [], "question_ids": question_ids}
 
 
 def _outcome(status: str, result: dict) -> str:
@@ -622,3 +831,14 @@ def _sender_address(message: dict, extracted: dict, customers: list[dict]) -> st
     if stated and stated.lower() in known:
         return stated
     return envelope or stated
+
+
+def _mail_rule(conn, sender_email: str, subject: str) -> str | None:
+    """What the warehouse already taught about mail shaped like this (#164) — `ignore`
+    (not an order) or `manual` (an order, always handled by hand), or `None` when nothing
+    is taught yet. A pure read: safe to run unconditionally, before the LLM call it is
+    meant to save."""
+    row = conn.execute(
+        "SELECT action FROM mail_rules WHERE sender_norm = %s AND subject_key = %s",
+        (teach._sender_norm(sender_email), teach.subject_key(subject))).fetchone()
+    return row[0] if row else None
