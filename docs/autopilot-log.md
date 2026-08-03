@@ -912,3 +912,49 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   pattern (atomic reclaim, confirm-with-retry, advisory-lock-guarded backfill migration,
   the DROP-COLUMN test technique) + `.claude/rules/deploy.md` gained the
   `sudo`-resets-env `PGPASSWORD` gotcha for post-deploy DB verification.
+
+## #151 — EDI import confirmation must key on archCodex, never the Z- prefix
+
+- Issue #151 (`Potvrdenie importu do ORIONu: nahratie súboru nie je dôkaz, že ho
+  Communicator vzal`). Version bump `a2509ec` (0.9.43 → 0.9.44). Live read-only SFTP
+  check against production ORION (before any code change) proved the ticket's own
+  proposed signal (`Z-` filename prefix) is wrong: both files named in the ticket were
+  already in `in/archCodex` (i.e. imported) with NO `Z-` prefix, hours after upload —
+  posted as the "stále platný" validation comment + the design comment on #151.
+- `app/orders/confirm.py` (new) — periodic sweep wired into `worker.run_forever` next
+  to `hold.release_due`, gated on `ai_orders_engine=python`. Decision table: `archCodex`
+  presence (with or without `Z-`) → imported, silent; `unconfirmed` → failed, alert
+  immediately; still in `in/` under a configurable timeout (default 60 min) → silent;
+  past it → timeout alert; gone from all three directories → `unknown`, alert
+  immediately (never silent success). Every terminal state permanently drops the row
+  out of the sweep — a file is alerted at most once, no separate dedup bookkeeping.
+  `edi_sent` gained 3 additive columns (`import_status`/`import_confirmed_at`/
+  `import_checked_at`) via the SAME advisory-lock DO-block pattern #153 used for
+  `uploaded_at`, with pre-existing rows backfilled straight to `imported` (never
+  retroactively swept — avoids an alert flood on deploy).
+  `report.post_from_config` gained an optional `channel_id` override (new
+  `delivery_notes_channel_id` option) so a `DESADV_*` alert can route to the
+  delivery-notes channel instead of the orders one.
+- RED: `tests/test_orders_confirm.py` failed on `ImportError` (module didn't exist) on
+  commit `3154429`; GREEN on `5c4d709`. Self-review caught + fixed a real regression
+  (`f72eb94`): splitting `put()`'s connect logic for `list_dirs()` moved
+  `client.connect()` outside the try/finally that closes it — a socket leak on a failed
+  connect. Deep `requesting-code-review` pass (general-purpose subagent) found 3 🟡 +
+  4 🔵, all addressed on `1e61994`: an undelivered alert (transient Odoo failure, or
+  Odoo simply unconfigured) used to mark the row terminal anyway, silently and
+  permanently losing that one alert — now a row only becomes terminal once the alert
+  genuinely delivers, and an undelivered one retries next sweep; a `listdir()` failure
+  now backs off by the normal throttle interval instead of hammering ORION every ~15s
+  worker tick; `tests/test_orders_upload.py` added (`upload.py` had zero coverage
+  before this ticket) plus edge-case tests for a blank filename and the exact timeout
+  boundary.
+- PR #179, merged `23b48eb`. Main CI green (test, e2e-orders, build). Deployed v0.9.44
+  via `ha addons update`; `/health` confirms `{"ok":true,"version":"0.9.44"}`; dashboard
+  DOM shows `v0.9.44`. Live Postgres check: all 48 `edi_sent` rows (incl. both files
+  named in the ticket, `ORDER_000846_20260805_110834114.txt` and
+  `ORDER_000846_20260806_110835190.txt`) show `import_status='imported'` via the
+  migration backfill — worker log confirms `order worker started (engine=python
+  shadow=False static_shadow=False)` with no errors after the new code deployed.
+- Playbook: `.claude/rules/n8n-workflow-edits.md` corrected — the `Z-` prefix is NOT the
+  imported signal, `archCodex` presence is (with or without it); the old claim was
+  actively misleading.
