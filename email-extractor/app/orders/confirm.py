@@ -131,13 +131,27 @@ def _text_unknown(row: dict, _timeout: int) -> str:
 _ALERT_TEXT = {"failed": _text_failed, "timeout": _text_timeout, "unknown": _text_unknown}
 
 
-def _alert(conn, cfg, post, row: dict, status: str, timeout_minutes: int) -> None:
+def _alert(conn, cfg, post, row: dict, status: str, timeout_minutes: int) -> bool:
+    """Returns whether the alert was genuinely delivered. Review finding (PR #179): the
+    row used to be marked terminal REGARDLESS of whether this succeeded — a transient
+    Odoo failure, or Odoo simply being unconfigured (`post_from_config` returns `None`
+    with only a `log.warning`, no exception), silently and PERMANENTLY lost the one alert
+    for that file, which is exactly the "never silent" failure this whole ticket exists to
+    close, just moved one layer up. The caller now only marks a row terminal once this
+    returns True — a failed/undelivered alert leaves the row pending, so the NEXT sweep
+    re-decides and re-attempts delivery instead of losing it."""
     html = "<p>" + _ALERT_TEXT[status](row, timeout_minutes) + "</p>"
     try:
-        post(cfg, html, channel_id=_channel_for(row["filename"], cfg))
+        result = post(cfg, html, channel_id=_channel_for(row["filename"], cfg))
     except Exception:
-        log.exception("posting the import-confirmation alert failed (edi_sent #%s, %s)",
-                      row["id"], status)
+        log.exception("posting the import-confirmation alert failed (edi_sent #%s, %s) — "
+                      "will retry next sweep", row["id"], status)
+        return False
+    if result is None:
+        log.warning("import-confirmation alert for edi_sent #%s (%s) was not delivered "
+                    "(Odoo not configured?) — will retry next sweep", row["id"], status)
+        return False
+    return True
 
 
 # --- the sweep -------------------------------------------------------------
@@ -162,13 +176,30 @@ def sweep(conn, cfg, listdir=None, post=None, now=None) -> int:
     try:
         dirs = listdir()
     except Exception:
-        log.exception("import-confirmation sweep: could not list ORION directories")
+        log.exception("import-confirmation sweep: could not list ORION directories — "
+                      "will retry next sweep")
+        # Review finding (PR #179): without this, a due row whose import_checked_at is
+        # already stale stays immediately due again — a sustained ORION-side outage would
+        # retry the SFTP connection on every single worker tick (~15s) with no backoff.
+        # Advancing checked_at here makes a listdir failure back off by the SAME
+        # import_confirm_interval_minutes throttle a normal check already respects.
+        conn.execute("UPDATE edi_sent SET import_checked_at = now() WHERE id = ANY(%s)",
+                    ([r["id"] for r in rows],))
         return 0
 
     changed = 0
     for row in rows:
         status = _decide(row, dirs, timeout, now)
         if status is None:
+            log.debug("EDI import check: %s (edi_sent #%s) still pending", row["filename"],
+                      row["id"])
+            conn.execute("UPDATE edi_sent SET import_checked_at = now() WHERE id = %s",
+                        (row["id"],))
+            continue
+        if status in _ALERT_STATUSES and not _alert(conn, cfg, post, row, status, timeout):
+            # Undelivered — stay pending (import_status left NULL) so the next due sweep
+            # re-decides and retries delivery instead of losing this alert forever. Still
+            # advance checked_at so this respects the normal throttle, not a tight retry.
             conn.execute("UPDATE edi_sent SET import_checked_at = now() WHERE id = %s",
                         (row["id"],))
             continue
@@ -180,6 +211,4 @@ def sweep(conn, cfg, listdir=None, post=None, now=None) -> int:
         changed += 1
         log.info("EDI import check: %s (%s / %s, edi_sent #%s) -> %s", row["filename"],
                  row["customer_ean"], row["delivery_date"], row["id"], status)
-        if status in _ALERT_STATUSES:
-            _alert(conn, cfg, post, row, status, timeout)
     return changed

@@ -138,6 +138,30 @@ def test_a_file_gone_from_all_three_directories_alerts_as_unknown_never_silent(p
     assert _status(pg, rid) == "unknown"
 
 
+def test_a_row_with_no_recorded_filename_alerts_as_unknown_immediately(pg):
+    """A blank filename can never be looked up in any of the three folders — it must
+    never be silently treated as pending forever, or as a clean import."""
+    rid = _insert(pg, "15", "", uploaded_minutes_ago=0)
+    posts = PostRecorder()
+    confirm.sweep(pg, _cfg(),
+                  listdir=lambda: {"in": set(), "archCodex": set(), "unconfirmed": set()},
+                  post=posts)
+    assert len(posts.calls) == 1
+    assert _status(pg, rid) == "unknown"
+
+
+def test_the_exact_timeout_boundary_counts_as_timeout(pg):
+    """`_decide` uses >=, not > — a file exactly at the configured timeout is already a
+    real problem, not one tick away from one."""
+    rid = _insert(pg, "16", "ORDER_l.txt", uploaded_minutes_ago=60)
+    posts = PostRecorder()
+    confirm.sweep(pg, _cfg(import_confirm_timeout_minutes=60),
+                  listdir=lambda: {"in": {"ORDER_l.txt"}, "archCodex": set(),
+                                   "unconfirmed": set()},
+                  post=posts)
+    assert _status(pg, rid) == "timeout"
+
+
 # --- dedup: a resolved row is never rechecked or alerted twice ------------------------
 
 def test_an_already_resolved_row_is_never_swept_or_alerted_again(pg):
@@ -178,6 +202,85 @@ def test_the_per_row_throttle_skips_a_recently_checked_row(pg):
     n = confirm.sweep(pg, _cfg(import_confirm_interval_minutes=5), listdir=boom,
                       post=PostRecorder())
     assert n == 0
+
+
+# --- an alert must never be lost just because delivery failed once ---------------------
+
+def test_a_failed_alert_delivery_is_never_lost_and_is_retried_next_sweep(pg):
+    """Review finding on PR #179: the row used to be marked terminal (dropping it out of
+    due_rows forever) REGARDLESS of whether the alert actually reached Odoo — a transient
+    post failure silently and permanently lost the one alert for that file, exactly the
+    'never silent' failure #151 exists to close, just moved one layer up."""
+    rid = _insert(pg, "12", "ORDER_i.txt", uploaded_minutes_ago=1)
+
+    class FlakyPost:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, cfg, html, **kw):
+            self.calls += 1
+            if self.calls == 1:
+                raise OSError("Odoo API unreachable")
+            return {"id": 1}
+
+    post = FlakyPost()
+    listdir = lambda: {"in": set(), "archCodex": set(),  # noqa: E731
+                       "unconfirmed": {"ORDER_i.txt"}}
+
+    n1 = confirm.sweep(pg, _cfg(), listdir=listdir, post=post)
+    assert n1 == 0, "an undelivered alert must not count as resolved"
+    assert post.calls == 1
+    row = pg.execute(
+        "SELECT import_status, import_checked_at FROM edi_sent WHERE id = %s",
+        (rid,)).fetchone()
+    assert row[0] is None, "still unresolved — must stay eligible for a retry"
+    assert row[1] is not None, "the throttle must still advance, no tight retry loop"
+
+    # simulate the throttle interval passing, exactly like a later worker tick would see
+    pg.execute("UPDATE edi_sent SET import_checked_at = now() - interval '10 minutes' "
+              "WHERE id = %s", (rid,))
+    n2 = confirm.sweep(pg, _cfg(), listdir=listdir, post=post)
+    assert n2 == 1
+    assert post.calls == 2, "the retry must genuinely re-attempt delivery"
+    assert _status(pg, rid) == "failed"
+
+
+def test_an_alert_that_odoo_never_delivers_keeps_retrying_not_silently_dropped(pg):
+    """`report.post_from_config` returns None (not an exception) when Odoo is simply
+    unconfigured — that must be treated the same as a delivery failure, not as success."""
+    rid = _insert(pg, "13", "ORDER_j.txt", uploaded_minutes_ago=1)
+
+    def never_delivers(cfg, html, **kw):
+        return None
+
+    n = confirm.sweep(pg, _cfg(), listdir=lambda: {"in": set(), "archCodex": set(),
+                                                    "unconfirmed": {"ORDER_j.txt"}},
+                      post=never_delivers)
+    assert n == 0
+    assert _status(pg, rid) is None
+
+
+# --- a listdir failure backs off, it does not hammer ORION every tick ------------------
+
+def test_a_listdir_failure_backs_off_by_the_normal_throttle_not_a_tight_retry_loop(pg):
+    """Review finding on PR #179: without advancing import_checked_at here, a sustained
+    ORION-side outage would retry the SFTP connection on every single worker tick
+    (~15s) — this makes a listdir failure back off by the SAME interval a normal check
+    already respects."""
+    rid = _insert(pg, "14", "ORDER_k.txt", uploaded_minutes_ago=1)
+
+    def boom():
+        raise OSError("connection refused")
+
+    n = confirm.sweep(pg, _cfg(import_confirm_interval_minutes=5), listdir=boom,
+                      post=PostRecorder())
+    assert n == 0
+    row = pg.execute(
+        "SELECT import_status, import_checked_at FROM edi_sent WHERE id = %s",
+        (rid,)).fetchone()
+    assert row[0] is None
+    assert row[1] is not None, "must back off — a bare listdir failure updates nothing"
+    assert confirm.due_rows(pg, 5) == [], "must not be immediately due again"
 
 
 # --- channel routing: ORDER_* vs DESADV_* -----------------------------------------------
