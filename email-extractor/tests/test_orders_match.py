@@ -580,8 +580,11 @@ def test_the_alias_customer_note_does_not_confirm_a_wording_a_different_card_mat
     end up asking the warehouse, not silently shipping the wrong card."""
     d = _decide("Chlieb olivovo paradajkový", llm={"gtin": "192", "confidence": 0.75},
                 customer="CÉDER", catalog=CEDER_CATALOG)
-    assert d.gtin != "192"
+    # The proposed gtin from the model is still carried (so the warehouse question can
+    # offer it as a candidate, per candidates_for_question) — what must change is that it
+    # no longer settles silently as "alias_customer": it is flagged for review instead.
     assert d.rule != "alias_customer"
+    assert d.review is True
 
 
 def test_the_misled_alias_line_lands_on_a_rule_the_pipeline_asks_the_warehouse_about():
@@ -600,8 +603,8 @@ def test_a_second_mismatched_wording_from_the_same_incident_is_also_rejected():
     nothing with card 192 either, and matches card 239 instead."""
     d = _decide("Chlieb multicereálny", llm={"gtin": "192", "confidence": 0.72},
                 customer="CÉDER", catalog=CEDER_CATALOG)
-    assert d.gtin != "192"
     assert d.rule != "alias_customer"
+    assert d.review is True
 
 
 def test_the_alias_customer_note_still_confirms_when_no_other_card_matches_better():

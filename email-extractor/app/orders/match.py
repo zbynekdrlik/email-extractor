@@ -166,6 +166,65 @@ def alias_parts(card: dict) -> list[str]:
             if len(p.strip()) >= 4]
 
 
+# Generic product-CATEGORY words: common to dozens of catalog cards, so they discriminate
+# nothing between them. "chlieb" is common to every bread card in the catalog; the CÉDER
+# incident (#157) needed exactly this excluded, since both the ordered wording AND the
+# wrongly-confirmed card's own name contained it.
+GENERIC_PRODUCT_WORDS = {"chlieb", "chleba", "chlebom", "chlebu"}
+
+
+def _distinctive_words(name: str) -> set[str]:
+    """The words that actually tell one product apart from another: folded (diacritics/
+    case-insensitive), weights stripped (`_norm`), short and generic-category words
+    dropped. Used to decide whether a customer's wording and a catalog card's name are
+    genuinely talking about the SAME product, not just loosely resembling each other."""
+    return {w for w in _norm(name).split() if len(w) >= 4 and w not in GENERIC_PRODUCT_WORDS}
+
+
+def _better_alias_candidate(item_name: str, llm_card: dict | None,
+                            catalog: list[dict]) -> dict | None:
+    """A catalog card whose OWN name matches the customer's distinctive wording better
+    than the model's pick does — the sign that an alias 'names_customer' note is about
+    to confirm the WRONG card (#157).
+
+    A card's alias note ("objednava ... CÉDER") is proof that customer buys THAT card
+    for SOME wording — never proof that THIS particular line is it. "Chlieb olivovo
+    paradajkový" shares its distinctive words ('olivovo', 'paradajkový') with card 253's
+    own name and shares NONE with card 192's, even though card 192 carries the note; the
+    note therefore confirms nothing here. The identical mechanism must keep confirming
+    card 284 ("Vianočka 400g") for the same customer on the same day, because there the
+    wording and the card's OWN name genuinely agree and no other card scores higher.
+
+    Returns None (nothing overrides the model's pick) both in the ordinary case — no
+    other card matches better — and when the wording carries no distinctive word at all
+    (too little signal in the wording to compare anything against)."""
+    item_words = _distinctive_words(item_name)
+    if not item_words:
+        return None
+    llm_hits = len(item_words & _distinctive_words((llm_card or {}).get("name", "")))
+    best_card, best_hits = None, llm_hits
+    for card in catalog:
+        if llm_card is not None and str(card.get("gtin")) == str(llm_card.get("gtin")):
+            continue
+        hits = len(item_words & _distinctive_words(card.get("name", "")))
+        if hits > best_hits:
+            best_card, best_hits = card, hits
+    return best_card
+
+
+def _wordings_differ(a: str, b: str) -> bool:
+    """True when two customer wordings share NO distinctive word at all — the sign that
+    two DIFFERENT products both resolved to the same card (#157: "Chlieb olivovo
+    paradajkový" and "Chlieb pšenično ražný" share nothing), not that the same product
+    was simply written twice. Either wording carrying no distinctive word at all (too
+    short/generic to compare) is treated as agreeing — there is nothing to disagree
+    ABOUT, and the ordinary "same wording repeated" case must keep merging."""
+    wa, wb = _distinctive_words(a), _distinctive_words(b)
+    if not wa or not wb:
+        return False
+    return not (wa & wb)
+
+
 def decide_without_model(item_name: str, catalog: list[dict], recalled=None,
                          global_recalled=None) -> Decision | None:
     """The rungs that need no model call — or None when the line genuinely needs one (#86).
@@ -394,9 +453,17 @@ def decide(item_name: str, llm: dict, catalog: list[dict], recalled=None,
 
     # 3 — the card's alias names the ordering customer: it IS that customer's card.
     if llm_gtin and conf > 0 and alias_names_customer and not weight_conflict:
-        return done("alias_customer", str(llm_gtin), llm_card["name"], max(conf, 0.95),
-                    f"Potvrdené aliasom karty — alias menuje zákazníka „{customer_name}“ "
-                    f"(pôvodná istota modelu {round(conf * 100)} %).")
+        # #157: the note only proves the customer buys llm_card for SOME wording — if
+        # another card's own name matches THIS wording better, the note confirms
+        # nothing; fall through to the ordinary ladder below (history / unique-card /
+        # the model's own raw confidence), exactly as if there were no alias help.
+        better = _better_alias_candidate(item_name, llm_card, catalog)
+        trace["alias"]["overridden_by"] = better.get("name") if better else None
+        if not better:
+            return done("alias_customer", str(llm_gtin), llm_card["name"], max(conf, 0.95),
+                        f"Potvrdené aliasom karty — alias menuje zákazníka "
+                        f"„{customer_name}“ (pôvodná istota modelu "
+                        f"{round(conf * 100)} %).")
 
     # 4 — history below the gate (including when the model matched nothing at all).
     if recalled and (conf < GATE_SURE or not llm_gtin):
@@ -479,15 +546,28 @@ def apply_siblings(decisions: list[Decision]) -> list[Decision]:
 
 
 def merge_same_card(decisions: list[Decision]) -> list[Decision]:
-    """One card is ONE order line: repeated cards add up.
+    """One card is ONE order line: repeated cards add up — but only when the customer's
+    OWN wording agrees they are the same product.
 
     Two recipient groups, or two wordings that resolve to the same card, used to produce two
     LIN lines for one GTIN — a double order line in ORION and, when a reader keeps only one
     of them, a lost quantity (#81.1). Unmatched items are left alone: they are reported by
     name, and different unmatched wordings are different problems.
+
+    #157 (CÉDER, 2026-08-03): a same-gtin match is not always a genuine duplicate — it can
+    be the RESULT of two independently wrong decisions over two different wordings (three
+    different breads all mis-resolved to one card, then summed into one line of 5 pieces,
+    silently dropping the other two products). A gtin collision between MATERIALLY
+    different wordings (`_wordings_differ`, #157) is treated as a signal, not a duplicate:
+    those lines stay separate, each keeping its own quantity, instead of being silently
+    collapsed into one. A wording repeated verbatim (or near enough — sharing at least one
+    distinctive word) still merges exactly as before.
     """
     out: list[Decision] = []
-    by_gtin: dict[tuple[str, str], Decision] = {}
+    # Several INDEPENDENT accumulator buckets can exist per (gtin, unit): one per distinct
+    # wording group that has appeared so far. A new decision joins the first bucket whose
+    # wording does not materially differ from it; if none matches, it starts its own.
+    buckets: dict[tuple[str, str], list[Decision]] = {}
     for d in decisions:
         if not d.gtin:
             out.append(d)
@@ -495,9 +575,11 @@ def merge_same_card(decisions: list[Decision]) -> list[Decision]:
         # The UNIT is part of the identity: adding 2 kg to 3 ks would ship "5" of something
         # ambiguous. Only lines that agree on the unit may be added up.
         key = (d.gtin, (d.unit or "").strip().lower())
-        first = by_gtin.get(key)
+        group = buckets.setdefault(key, [])
+        first = next((g for g in group if not _wordings_differ(g.item_name, d.item_name)),
+                    None)
         if first is None:
-            by_gtin[key] = d
+            group.append(d)
             out.append(d)
             continue
         first.quantity = (first.quantity or 0) + (d.quantity or 0)
