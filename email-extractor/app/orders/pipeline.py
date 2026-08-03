@@ -611,18 +611,26 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
     }
 
     reason = Reason.SHIP
-    if not matched:
-        result["reject_reason"] = "Zákazník nebol nájdený v tabuľke zákazníkov"
-        # #164: an unmatched customer whose real reject reason is a change-of-order stays
-        # TECHNICAL (row 5) — never a board question, always a manual ORION edit.
-        reason = Reason.CHANGE_REQUEST if is_change else Reason.CUSTOMER_UNKNOWN
-    elif is_change:
-        prefix = edi.change_prefix(matched.ean_edi, delivery, order_no)
-        result["change_prefix"] = prefix
-        result["reject_reason"] = (
-            "E-mail je zmena už zadanej objednávky — uprav ju ručne v ORIONe (pôvodný "
-            f"súbor začína {prefix})")
+    if is_change:
+        # A change request is ALWAYS technical (row 5) — never a board question, always a
+        # manual ORION edit — regardless of whether the customer is also known. Checked
+        # BEFORE `not matched` (a genuine change request, matched or not, should always
+        # say so; #170 follow-up) — `change_prefix` needs a real EAN, so an unmatched
+        # customer gets the plain wording without the "original file starts with" hint.
         reason = Reason.CHANGE_REQUEST
+        if matched:
+            prefix = edi.change_prefix(matched.ean_edi, delivery, order_no)
+            result["change_prefix"] = prefix
+            result["reject_reason"] = (
+                "E-mail je zmena už zadanej objednávky — uprav ju ručne v ORIONe (pôvodný "
+                f"súbor začína {prefix})")
+        else:
+            result["reject_reason"] = (
+                "E-mail je zmena už zadanej objednávky od nerozpoznaného zákazníka — "
+                "uprav ju ručne v ORIONe.")
+    elif not matched:
+        result["reject_reason"] = "Zákazník nebol nájdený v tabuľke zákazníkov"
+        reason = Reason.CUSTOMER_UNKNOWN
     elif not shipped_items:
         result["reject_reason"] = "Žiadnu položku sa nedalo priradiť ku karte"
         reason = Reason.ITEM_OPEN
