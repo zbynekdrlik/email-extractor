@@ -365,13 +365,17 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                 # proposed candidate, computed AFTER the decision, so the warehouse always
                 # has the one card it needs to confirm.
                 ask_cands = match.candidates_for_question(item_cands, catalog, decision)
+                # #160: never pad the shortlist to a fixed count with a weakly-related
+                # card — only the proposed candidate plus anything that genuinely
+                # clears a relevance floor.
+                shown_cands = match.plausible_candidates(ask_cands)
                 qid = teach.ask(
                     conn, message_id=message.get("message_id", ""),
                     customer_ean=matched.ean_edi, customer_name=matched.name,
                     wording=item["name"], quantity=item.get("quantity"),
                     unit=item.get("unit", "ks"),
                     candidates=[{"gtin": str(c.get("gtin")), "name": c.get("name", "")}
-                                for c in ask_cands[:6]],
+                                for c in shown_cands],
                     delivery_date=order.get("deliveryDate", ""), reason=decision.note,
                     # #139: a new question no longer posts its own Odoo message — it is
                     # counted into the ONE summary this e-mail posts at the end. The
