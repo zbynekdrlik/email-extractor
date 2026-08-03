@@ -52,6 +52,13 @@ WEIGHT_TOLERANCE = 0.1
 # beyond this ratio the only-card rule must not fire.
 UNIQUE_MAX_RATIO = 3
 CANDIDATES = 25
+# #160: the score `candidates()` already computes per card is what tells a genuinely
+# related alternative (a name/alias substring hit, or a known SYNONYMS family match —
+# both land >= 60 on real catalog data) apart from a coincidental single shared word
+# (a generic style adjective like "kváskový" shared by every sourdough-style product
+# regardless of category — lands ~15). 50 sits with headroom below the genuine-match
+# range and above the coincidental one; below it a card is noise, not an alternative.
+PLAUSIBLE_CANDIDATE_SCORE = 50.0
 CUSTOMER_STOPWORDS = {"as", "sro", "spol", "ltd", "pobocka", "prevadzka", "sklad", "stores"}
 SYNONYMS = [
     (("strudla", "strudlia"), ("zavin",)),
@@ -331,6 +338,36 @@ def candidates_for_question(item_cands: list[dict], catalog: list[dict],
         return item_cands
     rest = [c for c in item_cands if str(c.get("gtin")) != gtin]
     return [card] + rest
+
+
+def plausible_candidates(ask_cands: list[dict], limit: int = 6) -> list[dict]:
+    """What the warehouse is actually SHOWN as buttons for a question (#160): the
+    engine's own proposed candidate (`ask_cands[0]`, always re-headed there by
+    `candidates_for_question` — always kept so the warehouse can confirm it, regardless
+    of its own score) plus only the OTHER candidates whose `score` clears a real
+    relevance floor (`PLAUSIBLE_CANDIDATE_SCORE`) — never padded to `limit` with
+    whatever ranked next.
+
+    The incident this fixes: "Kváskový slimák s pizzovou plnkou" has no catalog card.
+    The old `ask_cands[:6]` slice padded the shortlist out to six with
+    `Chlieb tradičny kváskový pšenično-ražný 700gr` — a 700 g bread loaf that shares
+    only the generic style word "kváskový" with the order (`_score()` == 15, the same
+    a genuinely unrelated card gets from one incidental word) — sitting right next to
+    the model's own honest low-confidence guess. That turned "this product does not
+    exist" into "pick one of these six", and the warehouse picked the wrong card.
+
+    When nothing beyond the proposed candidate clears the bar, the list stays short —
+    often just the one card. That is not a dead end: every item question on the real
+    warehouse page also carries a full-catalog search box (#149) and a "databáza
+    znalostí" link to add a genuinely missing card by hand — the existing, already-
+    unconditional escape, never bypassed by a shorter list.
+    """
+    if not ask_cands:
+        return []
+    head, rest = ask_cands[0], ask_cands[1:]
+    plausible = [c for c in rest
+                if float(c.get("score", 0) or 0) >= PLAUSIBLE_CANDIDATE_SCORE]
+    return [head] + plausible[:max(0, limit - 1)]
 
 
 def _card(catalog: list[dict], gtin) -> dict | None:

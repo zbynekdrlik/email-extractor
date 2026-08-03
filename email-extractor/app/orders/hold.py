@@ -222,9 +222,10 @@ def _ask_still_ambiguous(conn, row: dict, decisions: list, still_asking: list,
                          _recalled_cache: dict | None = None) -> tuple[list[int], list[str]]:
     """Raise a fresh warehouse question for every decision STILL in `ASK_THE_WAREHOUSE`
     after a real-catalog `_redecide` (#162) — mirrors `pipeline._run`'s own per-item ask
-    loop exactly (same `teach.ask`/`match.candidates`/`match.candidates_for_question`
-    machinery), just outside the `_run` per-email loop and spending no model call (the
-    first pass already paid for the stored `Decision`).
+    loop exactly (same `teach.ask`/`match.candidates`/`match.candidates_for_question`/
+    `match.plausible_candidates` machinery, #160), just outside the `_run` per-email
+    loop and spending no model call (the first pass already paid for the stored
+    `Decision`).
 
     Returns `(new_question_ids, unaskable_item_names)` — `unaskable` is populated only
     in the near-impossible case `teach.ask` itself refuses (e.g. a blank wording key);
@@ -249,12 +250,15 @@ def _ask_still_ambiguous(conn, row: dict, decisions: list, still_asking: list,
         item_cands = match.candidates(d.item_name, catalog, customer_name=row["customer_name"],
                                       memory_gtin=recalled.gtin if recalled else "")
         ask_cands = match.candidates_for_question(item_cands, catalog, d)
+        # #160: mirrors pipeline._run's own shortlist-quality filter exactly — never pad
+        # to a fixed count with a weakly-related card.
+        shown_cands = match.plausible_candidates(ask_cands)
         qid = teach.ask(
             conn, message_id=row["message_id"], customer_ean=row["customer_ean"],
             customer_name=row["customer_name"], wording=d.item_name, quantity=d.quantity,
             unit=d.unit,
             candidates=[{"gtin": str(c.get("gtin")), "name": c.get("name", "")}
-                       for c in ask_cands[:6]],
+                       for c in shown_cands],
             delivery_date=row["delivery_date"], reason=d.note)
         if qid:
             new_qids.append(qid)
