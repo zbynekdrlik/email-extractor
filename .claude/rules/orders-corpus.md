@@ -772,3 +772,46 @@ again. That is the point: a changed prompt has not been measured until it has be
   `SELECT count(*) total, count(uploaded_at) confirmed, count(*) FILTER (WHERE
   uploaded_at IS NULL) unconfirmed FROM edi_sent` — see `deploy.md`'s
   `PGPASSWORD`-through-`sudo` gotcha for how to actually run that query on the box.
+- **A "classify + notify" sweep must NOT persist a row as terminal until the notification
+  itself genuinely succeeds — else a real problem is silently and permanently lost, just
+  one layer above the thing the sweep exists to catch (#151, review-caught on PR #179).**
+  `confirm.sweep`'s first draft classified an uploaded EDI file (imported/failed/timeout/
+  unknown) and immediately wrote that status as terminal — which drops the row out of the
+  sweep's own `WHERE import_status IS NULL` filter forever — REGARDLESS of whether the
+  Odoo alert for a non-`imported` outcome actually delivered. A transient Odoo API failure,
+  or Odoo simply being unconfigured (`report.post_from_config` returns `None` with only a
+  `log.warning`, no exception), silently ate the one alert for that file with zero
+  remaining trace anywhere queryable. Fix: `_alert()` returns whether delivery genuinely
+  succeeded (`False` on either an exception OR a `None`/falsy result — both mean
+  "never reached the warehouse"), and the caller only marks a row terminal once it has;
+  an undelivered alert leaves the row pending so the NEXT sweep re-decides and re-attempts
+  delivery. Same principle applies to ANY future periodic sweep in this package that pairs
+  a DB-state transition with an external notification (Odoo post, future webhook, etc.) —
+  the notification succeeding is part of the state transition, not a fire-and-forget
+  side effect of it.
+- **A `listdir()`/SFTP failure inside a periodic sweep must still advance the per-row
+  throttle timestamp for the rows it was about to check, or a sustained outage retries
+  the connection on every worker tick with no backoff** (#151, review-caught on PR #179).
+  `confirm.sweep`'s `except Exception` around `listdir()` originally just logged and
+  returned — leaving `import_checked_at` untouched meant an already-due row stayed
+  immediately due again, so an ORION-side outage would hammer a fresh SFTP connect+listdir
+  on every ~15s `worker.run_forever` tick instead of backing off by the configured
+  `import_confirm_interval_minutes`. Fix: on a `listdir()` failure, `UPDATE ... SET
+  import_checked_at = now() WHERE id = ANY(<the rows that were due this pass>)` before
+  returning — reuses the SAME throttle a successful check already respects, no new
+  backoff mechanism needed. Any future sweep with a similar "list once, decide per row"
+  shape should back off its due-rows on a listing failure the same way.
+- **Splitting a `connect()` + `close()` pair that shares one `try/finally` into a reusable
+  helper can silently move `connect()` OUTSIDE the block that closes on failure — check
+  this explicitly when refactoring any paramiko/SSH-style connect helper** (#151,
+  self-caught during code review before merge, `app/orders/upload.py`). The original
+  single-function `put()` had `client.connect(...)` and the matching `client.close()`
+  inside the SAME `try/finally`, so a failed `connect()` still got cleaned up. Extracting
+  the shared setup into `_connect(cfg)` for reuse by the new `list_dirs(cfg)` initially
+  moved the `client.connect(...)` call BEFORE/OUTSIDE any try block — a connect failure
+  then leaked a partially-open `SSHClient` with no `.close()` ever called. Fix: wrap
+  `connect()` itself in `try/except Exception: client.close(); raise` inside `_connect()`.
+  Pinned by `tests/test_orders_upload.py::test_connect_closes_the_client_when_connect_
+  itself_fails` (fake `paramiko.SSHClient` via `unittest.mock.patch("paramiko.SSHClient",
+  ...)`, `connect.side_effect = OSError(...)`, assert `close()` was still called) — this
+  file also gave `upload.py` its FIRST test coverage at all; it had none before #151.
