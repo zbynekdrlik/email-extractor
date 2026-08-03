@@ -41,6 +41,9 @@ Skip decorative/banner/tiny images. See `docs/superpowers/specs/`.
 
 Load the matching skill BEFORE working on that area (don't re-derive):
 - n8n workflows / nodes / MCP → load `using-n8n-skills` then the matching `n8n-*` skill
+- úprava n8n objednávkových workflow (statické objednávky, dodacie, faktúry, reklamácie) →
+  `.claude/rules/n8n-workflow-edits.md` — načítaj PRED úpravou (nemá `paths:`, tie workflow
+  nežijú v repozitári, takže sa nenačíta sám)
 - problém/chyba popísaná v Odoo Discuss (dodacie/objednávky/reklamácie, aj s fotkami) → load `.claude/skills/odoo-reported-issues`
 - extraction quality / OCR tuning → see `docs/superpowers/specs/` + the spike memory
 - prílohy / formáty (xlsx, xls, ods, fods, csv) → `.claude/rules/extraction-formats.md` (auto-loads on `app/extract.py`)
