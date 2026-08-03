@@ -150,7 +150,11 @@ def test_a_stale_quoted_order_re_dated_by_the_model_is_not_shipped():
                          {"combined_text": STALE_QUOTE_MAIL, "today": "2026-08-03",
                           "subject": "RE: catering 25.7. SL"})
     assert result["orders"] == []
-    assert "08.08" not in json.dumps(result)
+    # the invented date may still be NAMED (so a human can see what was rejected and why —
+    # #163 review finding), but never ASSERTED as a real delivery date the way the live
+    # incident's "objednávka je na 08.08.2026" did.
+    assert "objednávka je na 08.08" not in json.dumps(result)
+    assert "nenašiel" in result["notes"]
 
 
 def test_date_grounded_accepts_an_explicit_day_that_is_actually_written():
@@ -165,6 +169,45 @@ def test_date_grounded_allows_a_relative_date_with_no_explicit_day_anywhere():
     """'na zajtra' names no day.month at all — nothing in the text to hold the computed
     date accountable against, so the ordinary relative-date order still ships."""
     assert extract.date_grounded("31.07.2026", FREE_TEXT_MAIL)
+
+
+def test_a_weekly_range_broken_down_by_weekday_still_grounds_every_day():
+    """'od 06.07. - 11.07.' with a per-weekday breakdown legitimately derives every day in
+    between, even though the individual weekdays' digits are never repeated (#163 corpus
+    regression: kcrealpoprad-2026-07-02-f2e65e / kcrealpoprad-2026-07-30-df487f)."""
+    text = "Subject: Objednávka od 06.07. - 11.07. pre PNO Poprad\n\nBody: Pondelok:\nUtorok:\n"
+    for d in ("06.07.2026", "07.07.2026", "08.07.2026", "09.07.2026", "10.07.2026",
+             "11.07.2026"):
+        assert extract.date_grounded(d, text), d
+    assert not extract.date_grounded("15.07.2026", text)   # outside the written range
+
+
+TABLE_WITH_A_STALE_SUBJECT_DATE_MAIL = (
+    "Subject: Objednávka 20.07.\n\nBody: dobrý deň\n\nAttachments:\n=====\n"
+    "Č.mat.dodavat.,EAN kus,Název,Množství\n"
+    "12345,8588001800013,Rožok štandart 50g,120\n"
+    "=====\n"
+)
+
+
+def test_a_table_parsed_order_is_also_dropped_when_its_header_date_is_ungrounded():
+    """The table branch takes ITEMS from the parsed grid but the header fields (including
+    deliveryDate) still come from the model — so an invented date must be caught there too,
+    not just on the free-text path."""
+    class FakeTableStaleDateClient:
+        last_prompt_hash = "abc123abc123"
+
+        def json_call(self, system, user, schema, name="result"):
+            return {"orders": [{"deliveryDate": "08.08.2026", "recipientGroup": "",
+                                "items": []}]}
+
+    result = extract.run(FakeTableStaleDateClient(),
+                         {"combined_text": TABLE_WITH_A_STALE_SUBJECT_DATE_MAIL,
+                          "today": "2026-08-03", "subject": "Objednávka 20.07."})
+    assert result["source"] == "table"
+    assert result["orders"] == []
+    assert "objednávka je na 08.08" not in json.dumps(result)
+    assert "nenašiel" in result["notes"]
 
 
 # --- 3) sanity guards ----------------------------------------------------

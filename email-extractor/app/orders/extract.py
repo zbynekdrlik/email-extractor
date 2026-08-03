@@ -341,9 +341,15 @@ def run(client, email: dict) -> dict:
         (grounded if date_grounded(order.get("deliveryDate", ""), source)
          else ungrounded).append(order)
     if ungrounded:
-        log.warning(
-            "%d order(s) dropped: deliveryDate not found in the source text: %s",
-            len(ungrounded), [o.get("deliveryDate", "") for o in ungrounded])
+        dates = [o.get("deliveryDate", "") for o in ungrounded]
+        log.warning("%d order(s) dropped: deliveryDate not found in the source text: %s",
+                   len(ungrounded), dates)
+        # review finding (#163): a log line alone leaves no trace anywhere a human ever
+        # reads (Odoo, `order_runs.result`) — fold it into `notes` too, the one field that
+        # already survives into both, without inventing a new pipeline.py/report.py field.
+        note = ("Dátum dodania sa nenašiel v texte e-mailu, objednávka nebola vytvorená: "
+                + ", ".join(dates))
+        result["notes"] = f"{result['notes']} {note}".strip() if result.get("notes") else note
     result["orders"] = grounded
 
     result["prompt_hash"] = client.last_prompt_hash
@@ -477,13 +483,16 @@ def _range_days(source: str) -> set[tuple[int, int]]:
         span = re.findall(r"(\d{1,2})\s*\.\s*(\d{1,2})", m.group(0))
         if len(span) != 2:
             continue
+        # 2000 and 2004 are both leap years, four apart — a placeholder pair that lets a
+        # literal "29.02." endpoint construct cleanly in EITHER branch below, instead of
+        # raising ValueError and silently dropping the whole range.
         try:
-            start = date(2001, int(span[0][1]), int(span[0][0]))
-            end = date(2001, int(span[1][1]), int(span[1][0]))
+            start = date(2000, int(span[0][1]), int(span[0][0]))
+            end = date(2000, int(span[1][1]), int(span[1][0]))
         except ValueError:
             continue
         if end < start:
-            end = date(2002, end.month, end.day)   # wraps into the next year (Dec -> Jan)
+            end = date(2004, end.month, end.day)   # wraps into the next year (Dec -> Jan)
         cur = start
         while cur <= end and (cur - start).days < 40:   # a "week" range, not unbounded
             days.add((cur.day, cur.month))
