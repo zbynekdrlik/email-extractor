@@ -437,6 +437,14 @@ def _validate_item(q: dict, choice: str, by: str) -> None:
 
 
 def _apply_item(conn, cfg, q: dict, choice: str, by: str) -> dict:
+    """`choice` is the picked gtin. httpapi's LIVE dispatch still calls `answer()`
+    directly with the click's own `card` text (a cosmetic label only) rather than through
+    this registry entry — see teach.py's module docstring reference in the #164 design
+    comment for why: the register's single-string `choice` contract (shared with mail/
+    date/line) has no slot for a second field, and `card` is display-only (never used to
+    decide anything), so this wrapper is the CORRECT, tested reference the register's own
+    consistency checks (KINDS iteration, escape-hatch test) exercise — not yet httpapi's
+    live path for item/customer, which keeps its full-fidelity gtin+card body unchanged."""
     from . import hold
     answered = answer(conn, q["id"], gtin=choice, card="", by=by)
     released = hold.release_for_question(conn, cfg, q["id"])

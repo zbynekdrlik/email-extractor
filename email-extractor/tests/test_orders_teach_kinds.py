@@ -163,3 +163,80 @@ def test_mail_kind_undo_retracts_only_its_own_rule(pg):
     assert pg.execute("SELECT count(*) FROM mail_rules WHERE question_id=%s",
                       (mq2,)).fetchone()[0] == 1
     assert teach.get(pg, mq1)["status"] == "open"
+
+
+# --- item / customer kinds — the registry's reference implementation -------------------
+#
+# httpapi's LIVE dispatch for item/customer keeps its own full-fidelity gtin+card /
+# ean_edi+name bodies unchanged (see `_apply_item`'s docstring) — these prove the
+# registry entries themselves are correct, not dead code, matching what the "learns +
+# escape hatch" test above already exercises for `validate`.
+
+def test_item_kind_present_apply_undo(pg, monkeypatch):
+    monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    qid = teach.ask(pg, message_id="mk6", customer_ean="2000000000001",
+                    customer_name="Pekáreň Testovacia s.r.o.", wording="Šiška",
+                    quantity=10, unit="ks",
+                    candidates=[{"gtin": "SLI50", "name": "Šiška džemová 50g"}])
+    q = teach.get(pg, qid)
+    kind = teach.KINDS["item"]
+    presented = kind.present(q)
+    assert presented["kind"] == "item" and presented["options"][0]["value"] == "SLI50"
+    extra = kind.apply(pg, _cfg(), q, "SLI50", "sklad")
+    assert extra["question"]["status"] == "answered"
+    from app.orders import memory
+    assert memory.resolve(pg, "2000000000001", "Šiška").gtin == "SLI50"
+    kind.undo(pg, teach.get(pg, qid))
+    assert memory.resolve(pg, "2000000000001", "Šiška") is None
+
+
+def test_customer_kind_present_apply_undo(pg, monkeypatch):
+    monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    qid = teach.ask_customer(
+        pg, message_id="mk7", sender_email="zilina@farmeria.sk",
+        candidates=[{"ean_edi": "2000000000001", "name": "Pekáreň Testovacia s.r.o.",
+                    "city": "Martin", "street": "Košútka 1", "address_match": False}],
+        delivery_date="04.08.2026",
+        context={"sender_email": "zilina@farmeria.sk", "sender_name": "Sklad",
+                "company_name": "", "delivery_address_guess": ""})
+    q = teach.get(pg, qid)
+    kind = teach.KINDS["customer"]
+    presented = kind.present(q)
+    assert presented["kind"] == "customer"
+    assert presented["options"][0]["value"] == "2000000000001"
+    extra = kind.apply(pg, _cfg(), q, "2000000000001", "sklad")
+    assert extra["question"]["status"] == "answered"
+    row = pg.execute("SELECT emails FROM customer_overrides WHERE ean_edi='2000000000001'"
+                     ).fetchone()
+    assert row and "zilina@farmeria.sk" in row[0]
+    kind.undo(pg, teach.get(pg, qid))
+    row = pg.execute("SELECT emails FROM customer_overrides WHERE ean_edi='2000000000001'"
+                     ).fetchone()
+    assert row is None or "zilina@farmeria.sk" not in (row[0] or [])
+
+
+def test_customer_kind_apply_with_blank_choice_is_the_neviem_path(pg):
+    qid = teach.ask_customer(
+        pg, message_id="mk8", sender_email="neznamy@x.sk",
+        candidates=[{"ean_edi": "2000000000001", "name": "Pekáreň", "city": "", "street": "",
+                    "address_match": False}],
+        delivery_date="04.08.2026",
+        context={"sender_email": "neznamy@x.sk", "sender_name": "", "company_name": "",
+                "delivery_address_guess": ""})
+    q = teach.get(pg, qid)
+    extra = teach.KINDS["customer"].apply(pg, _cfg(), q, "", "sklad")
+    assert extra["question"]["answer_gtin"] == ""
+    assert extra["released"] == []  # no held order exists for this bare question
+
+
+def test_mail_and_date_kind_present_shapes():
+    mail_q = {"id": 1, "kind": "mail", "wording": "Objednávka", "reason": "r",
+             "payload": {"sender_email": "a@b.sk"}, "candidates": []}
+    date_q = {"id": 2, "kind": "date", "wording": "", "reason": "rozpor", "candidates": []}
+    line_q = {"id": 3, "kind": "line", "wording": "x", "reason": "r", "quantity": 1,
+             "payload": {"unit": "ks"}, "candidates": []}
+    for q, kind_name in ((mail_q, "mail"), (date_q, "date"), (line_q, "line")):
+        p = teach.KINDS[kind_name].present(q)
+        assert p["qid"] == q["id"] and p["kind"] == kind_name and p["unknown_label"]
