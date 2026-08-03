@@ -22,10 +22,17 @@ def _connect(cfg):
         raise OSError("orion_host is not configured")
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(host, port=int(getattr(cfg, "orion_port", 22) or 22),
-                   username=getattr(cfg, "orion_user", ""),
-                   password=getattr(cfg, "orion_pass", ""),
-                   timeout=CONNECT_TIMEOUT, allow_agent=False, look_for_keys=False)
+    try:
+        client.connect(host, port=int(getattr(cfg, "orion_port", 22) or 22),
+                       username=getattr(cfg, "orion_user", ""),
+                       password=getattr(cfg, "orion_pass", ""),
+                       timeout=CONNECT_TIMEOUT, allow_agent=False, look_for_keys=False)
+    except Exception:
+        # A failed connect() can still leave a partially-open transport/socket behind —
+        # close it before propagating, same safety the original single-function put()
+        # had (its connect() call lived inside the same try/finally as close()).
+        client.close()
+        raise
     return client
 
 
