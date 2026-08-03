@@ -437,6 +437,17 @@ SCHEMA = [
     # question, and asking twice is the notification noise the user removed everywhere else.
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_order_questions_open "
     "ON order_questions(customer_ean, item_key) WHERE status = 'open'",
+    # --- #159: a SECOND question kind sharing this same table/index/dashboard — "who is
+    # this customer?" instead of "which card is this wording?". `kind='item'` is every
+    # existing row (default, unchanged); `kind='customer'` rows always carry
+    # customer_ean='' (the customer is exactly what is unknown) and item_key = a
+    # normalized key on the SENDER ADDRESS, so the SAME unique-open index above dedupes
+    # them for free. `context` carries what a human needs to answer (sender e-mail/name,
+    # company name, a best-effort delivery-address line pulled from the mail's own raw
+    # text) — never from the model, so it can never touch prompt_hash. ---
+    "ALTER TABLE order_questions ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'item'",
+    "ALTER TABLE order_questions ADD COLUMN IF NOT EXISTS "
+    "context JSONB NOT NULL DEFAULT '{}'::jsonb",
     # --- #102: a wording the ladder cannot place at all (0 catalog matches, e.g. "Twister")
     # is not one customer's nickname — it is a product name, and the answer is the same for
     # every customer. A DEDICATED table, not a sentinel EAN inside item_memory: a sentinel

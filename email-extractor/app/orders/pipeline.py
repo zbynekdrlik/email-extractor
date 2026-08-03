@@ -132,6 +132,11 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
     # answer the same question. It is RESOLVED per order, though: one attachment may hold
     # two shops of the same chain side by side, and then each half has its own EAN (#101).
     sender = _sender_address(message, extracted, customers)
+    # #159: the RAW e-mail text (never the model's own reading of it — nothing here may
+    # touch prompt_hash) — used only to RANK an unmatched-customer question's candidates
+    # and to guess a delivery-address line for the warehouse to eyeball, never to decide
+    # anything on its own.
+    free_text = f"{message.get('subject', '')}\n{message.get('combined_text', '') or ''}"
     cands = customer.candidates(customers, sender,
                                 extracted.get("senderName", ""),
                                 extracted.get("companyName", ""))
@@ -251,7 +256,50 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
         still_asking = any(d.rule in ASK_THE_WAREHOUSE for d in decisions)
         held_id = None
         reject_reason = ""
-        if (not shadow and matched and not is_change and order_question_ids and still_asking
+        # #159: an UNRECOGNIZED customer is a warehouse question exactly like an
+        # unmatched ITEM already is (#93) — never a silent dead end. Gated the same way
+        # the item-hold branch below is: never in shadow, never for a change request
+        # (always resolved by hand regardless of who it's from), and only while there is
+        # still time before the delivery date (the same deadline backstop #93 already
+        # gives unmatched items — past it, ship-or-review exactly as before).
+        if (not shadow and matched is None and not is_change
+                and not hold.is_past_deadline(order.get("deliveryDate", ""), today)):
+            cust_cands = customer.candidates_for_question(
+                customers, sender, extracted.get("senderName", ""),
+                extracted.get("companyName", ""), free_text=free_text)
+            cq = teach.ask_customer(
+                conn, message_id=message.get("message_id", ""), sender_email=sender,
+                candidates=[{"ean_edi": c.get("ean_edi", ""), "name": c.get("name", ""),
+                            "city": c.get("city", ""), "street": c.get("street", ""),
+                            "address_match": bool(c.get("address_match"))}
+                           for c in cust_cands],
+                delivery_date=order.get("deliveryDate", ""),
+                context={"sender_email": sender,
+                        "sender_name": extracted.get("senderName", ""),
+                        "company_name": extracted.get("companyName", ""),
+                        "delivery_address_guess": customer.guess_delivery_address(free_text)},
+                on_new=new_questions.append)
+            if cq:
+                held_id = hold.place(
+                    conn, message_id=message.get("message_id", ""),
+                    matched=customer.Matched(ean_edi="", name="", confidence=0.0,
+                                             rule="unmatched", note=""),
+                    order=order, decisions=decisions, extracted=extracted,
+                    question_ids=[cq])
+                status, preview = "held", {}
+                report.log_event(
+                    conn, message.get("message_id", ""), stage="held", status="held",
+                    outcome="Objednávka čaká, kým sklad povie, kto je zákazník — dodanie "
+                            f"{order.get('deliveryDate', '') or '(bez dátumu)'}",
+                    detail={"held_id": held_id, "question_id": cq,
+                            "delivery_date": order.get("deliveryDate", "")})
+            else:
+                # no sender address to even key a question on (e.g. every address field
+                # blank) — fall through to the same reject `_ship_one` always gave
+                status, preview, reject_reason = _ship_one(
+                    conn, cfg, message, order, matched, decisions, extracted, shadow,
+                    upload, post, post_now=False)
+        elif (not shadow and matched and not is_change and order_question_ids and still_asking
                 and not hold.is_past_deadline(order.get("deliveryDate", ""), today)):
             held_id = hold.place(conn, message_id=message.get("message_id", ""),
                                  matched=matched, order=order, decisions=decisions,
@@ -277,6 +325,9 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
             "item_count": len(decisions),
             "missing_count": sum(1 for d in decisions if not d.gtin),
             "reject_reason": reject_reason,
+            # #159: a "review" whose reason is a change-of-order gets its own wording and
+            # neither link in report.build_summary — never the generic "review" bucket.
+            "change": bool(matched and is_change and status == "review"),
         })
         # One EDI file per order is what n8n produces, so the result must stay per order:
         # flattening hides the second delivery date and its items entirely (#78).

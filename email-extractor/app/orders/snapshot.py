@@ -458,3 +458,37 @@ def retire_customer(conn, *, override_id: int | None, orig_ean_edi: str | None,
            DO UPDATE SET retired=true, updated_at=now()""",
         (orig_ean_edi, orig_street, orig_ean_edi, "", [], "", orig_street or "", ""))
     return True
+
+
+# --- #159: remembering an answered "who is this customer?" address durably -----------
+
+def remember_customer_email(conn, ean_edi: str, email: str) -> bool:
+    """Append `email` to the chosen customer's e-mail list — the durable half of
+    "answering teaches it forever": the next mail from this address then resolves via
+    `customer.resolve`'s exact-address rule with no question asked at all. Layered on the
+    SAME #128 override mechanism every /znalosti edit already uses, so it survives a sheet
+    refresh (`_apply_customer_overrides` always wins over the sheet for the same identity)
+    with no separate store needed — the caller still has to `rebuild_from_overrides` to
+    make it effective immediately, exactly like every other override write in this module.
+
+    No-op (returns False) when the address is already known for that customer, or
+    `ean_edi` does not match any CURRENT customer (sheet-derived or already overridden).
+    """
+    email = (email or "").strip().lower()
+    if not email or not ean_edi:
+        return False
+    rows = [r for r in customers_for_management(conn)
+           if str(r.get("ean_edi") or "") == str(ean_edi)]
+    if not rows:
+        return False
+    row = rows[0]
+    emails = list(row.get("emails") or [])
+    if email in [e.lower() for e in emails]:
+        return False
+    emails.append(email)
+    upsert_customer(conn, override_id=row.get("override_id"),
+                    orig_ean_edi=row.get("orig_ean_edi"), orig_street=row.get("orig_street"),
+                    ean_edi=row.get("ean_edi") or "", name=row.get("name") or "",
+                    emails=emails, city=row.get("city") or "", street=row.get("street") or "",
+                    zip_=row.get("zip") or "")
+    return True

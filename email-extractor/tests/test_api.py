@@ -520,8 +520,12 @@ def test_answering_over_http_commits_the_ledger_even_if_something_after_upload_f
 def _seed_customer_question(pg, monkeypatch, sender_email="zilina@farmeria.sk"):
     """One held order with no known customer, exactly what `pipeline._run` now produces
     when `matched is None` and there is time left before the delivery date."""
-    from app.orders import teach
+    from app.orders import snapshot, teach
 
+    snapshot.import_snapshot(
+        pg, "GTIN,Názov,doplnok\nG50,Rožok štandart 50g,\n",
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,E-mail\n"
+        "Pekáreň Testovacia s.r.o.,2000000000001,Martin,Košútka 1,sklad@pekaren.sk\n")
     pg.execute(
         "INSERT INTO messages (message_id, category) VALUES ('m159', 'ai_orders')")
     qid = teach.ask_customer(

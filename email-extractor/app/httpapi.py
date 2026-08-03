@@ -490,9 +490,47 @@ def create_app(cfg) -> Flask:
         with _db() as c:
             return jsonify(items=teach.open_questions(c))
 
+    def _api_orders_answer_customer(qid: int, q: dict, body: dict):
+        """#159: the customer-half of the same click — "this order belongs to THIS
+        customer", or "neviem, kto to je". A real pick durably remembers the sender
+        address (#128's override mechanism) and releases through the SAME `_ship_one`/
+        `edi.claim_send` ledger as the product half, now that the customer is known —
+        `hold.set_customer` must land BEFORE `release_for_question`, which builds the
+        `Matched` object straight from `held_orders.customer_ean`/`customer_name`. Both
+        the remember-write and the release run on ONE autocommit connection, same
+        reasoning as the product half's own docstring above (a real external upload must
+        never share a rollback-able transaction with anything after it).
+        """
+        from .orders import hold, teach
+        unknown = bool(body.get("unknown"))
+        ean_edi = "" if unknown else str(body.get("ean_edi") or "")
+        name = "" if unknown else str(body.get("name") or "")
+        if not unknown and not ean_edi:
+            return jsonify(error="chýba zákazník"), 400
+        try:
+            with _db_tx() as c:
+                answered = teach.answer_customer(c, qid, ean_edi=ean_edi, name=name,
+                                                 by="sklad")
+        except teach.AlreadyAnswered as e:
+            return jsonify(error=str(e)), 409
+        except teach.NotACandidate as e:
+            return jsonify(error=str(e)), 400
+        if not ean_edi:
+            with _db() as c2:
+                released = hold.release_unknown_customer(c2, cfg, qid)
+            return jsonify(ok=True, question=answered, released=released)
+        sender_email = (q.get("context") or {}).get("sender_email", "")
+        with _db() as c2:
+            snapshot.remember_customer_email(c2, ean_edi, sender_email)
+            snapshot.rebuild_from_overrides(c2)
+            hold.set_customer(c2, qid, ean_edi, name)
+            released = hold.release_for_question(c2, cfg, qid)
+        return jsonify(ok=True, question=answered, released=released)
+
     @app.post("/api/orders/question/<int:qid>/answer")
     def api_orders_answer(qid: int):
-        """One click: this wording IS this card. Taught for that customer, forever.
+        """One click: this wording IS this card. Taught for that customer, forever. Or,
+        for a `kind='customer'` question (#159), this order belongs to THIS customer.
 
         If this was the LAST open question an order was held for (#93), the answer also
         releases it — the document is built and uploaded right here, once.
@@ -511,6 +549,13 @@ def create_app(cfg) -> Flask:
         """
         from .orders import hold, teach
         body = request.get_json(silent=True) or {}
+        with _db() as c0:
+            q0 = teach.get(c0, qid)
+        if not q0:
+            return jsonify(error="otázka neexistuje"), 404
+        if q0.get("kind") == "customer":
+            return _api_orders_answer_customer(qid, q0, body)
+
         gtin, card = str(body.get("gtin") or ""), str(body.get("card") or "")
         if not gtin:
             return jsonify(error="chýba karta"), 400
@@ -1081,6 +1126,22 @@ async function loadAsk(){const L=document.getElementById('list');
     await loadHeld(mine);return loadTaught(mine)}   // nothing waiting is the NORMAL state: the undo must still be here
   for(const q of d.items){const el=document.createElement('div');el.className='row';
     const head=document.createElement('div');const b=document.createElement('b');
+    // #159: a 'customer' question asks WHO placed the order, not WHICH card a wording is
+    if(q.kind==='customer'){const ctx=q.context||{};
+      b.textContent='Nezn\u00e1my z\u00e1kazn\u00edk: '+(ctx.sender_email||q.wording);head.appendChild(b);
+      const who=document.createElement('div');who.className='sub';
+      who.textContent=[ctx.sender_name,ctx.company_name,ctx.delivery_address_guess]
+        .filter(Boolean).join(' \u00b7 ')+' \u00b7 dodanie '+(q.delivery_date||'?');
+      const why=document.createElement('div');why.className='sub';why.textContent=q.reason||'';
+      const acts=document.createElement('div');acts.className='acts';
+      for(const c of (q.candidates||[])){const bt=document.createElement('button');bt.className='btn';
+        const addr=[c.street,c.city].filter(Boolean).join(', ');
+        bt.textContent=(c.name||c.ean_edi)+(addr?' ('+addr+')':'')+(c.address_match?' \u2713':'');
+        bt.onclick=()=>answerCustomerIt(q.id,c.ean_edi,c.name||'');acts.appendChild(bt)}
+      const ub=document.createElement('button');ub.className='btn';ub.textContent='Neviem, kto to je';
+      ub.onclick=()=>answerCustomerIt(q.id,'','',true);acts.appendChild(ub);
+      head.appendChild(who);head.appendChild(why);head.appendChild(acts);
+      el.appendChild(head);L.appendChild(el);continue}
     b.textContent=q.wording;head.appendChild(b);
     head.appendChild(document.createTextNode(' \u00b7 '+(q.quantity||'')+' '+(q.unit||'')));
     const who=document.createElement('div');who.className='sub';
@@ -1103,7 +1164,7 @@ async function loadHeld(token){const L=document.getElementById('list');let d;
   L.appendChild(h);
   for(const o of d.items){const el=document.createElement('div');el.className='row';
     const head=document.createElement('div');const b=document.createElement('b');
-    b.textContent=o.customer_name||o.customer_ean;head.appendChild(b);
+    b.textContent=o.customer_name||o.customer_ean||'(neznámy zákazník)';head.appendChild(b);
     const who=document.createElement('div');who.className='sub';
     who.textContent='dodanie '+(o.delivery_date||'?')+(o.order_number?' \u00b7 obj. '+o.order_number:'')
       +' \u00b7 '+o.question_ids.length+' \u00d7 otázka';
@@ -1129,6 +1190,9 @@ async function undoIt(qid){try{await api('/api/orders/question/'+qid+'/undo',{me
 async function teachIt(qid,gtin,card){try{await api('/api/orders/question/'+qid+'/answer',
   {method:'POST',body:JSON.stringify({gtin:gtin,card:card})});await loadAsk();await askBadgeRefresh()}
   catch(e){alert(e.message||'chyba')}}
+async function answerCustomerIt(qid,ean_edi,name,unknown){try{await api('/api/orders/question/'+qid+'/answer',
+  {method:'POST',body:JSON.stringify(unknown?{unknown:true}:{ean_edi:ean_edi,name:name})});
+  await loadAsk();await askBadgeRefresh()}catch(e){alert(e.message||'chyba')}}
 async function askBadgeRefresh(){try{const d=await api('/api/orders/questions');
   const b=document.getElementById('askBadge');b.textContent=d.items.length?String(d.items.length):'';
   b.style.color='#d29922'}catch(e){}}
@@ -1220,12 +1284,37 @@ function searchBox(q){
   if(inp.value.trim().length>=2)run(inp.value.trim());
   return wrap;
 }
+// #159: "who is this customer?" candidates render as name + address (+ a ✓ badge when
+// the ranking already found the address in the mail), plus a "neviem, kto to je" escape.
+function customerQuestionCard(q){
+  const ctx=q.context||{};const c=el('div','q');
+  c.appendChild(el('div','who','Neznámy zákazník'+(q.delivery_date?' · na '+q.delivery_date:'')));
+  c.appendChild(el('div','w',ctx.sender_email||q.wording));
+  const bits=[];
+  if(ctx.sender_name)bits.push('meno: '+ctx.sender_name);
+  if(ctx.company_name)bits.push('firma: '+ctx.company_name);
+  if(ctx.delivery_address_guess)bits.push('adresa v maile: '+ctx.delivery_address_guess);
+  c.appendChild(el('div','why',(q.reason||'Kto to objednal?')+(bits.length?' — '+bits.join(' · '):'')));
+  for(const cand of (q.candidates||[])){
+    const addr=[cand.street,cand.city].filter(Boolean).join(', ');
+    const label=(cand.name||cand.ean_edi)+(addr?'  ('+addr+')':'')+(cand.address_match?'  ✓ adresa sedí':'');
+    const b=el('button',null,label);
+    b.onclick=()=>answerCustomer(q.id,cand.ean_edi,cand.name||'');c.appendChild(b)}
+  const nb=el('button',null,'Neviem, kto to je');
+  nb.style.borderColor='#d0d7de';nb.style.background='#f6f8fa';nb.style.color='#57606a';
+  nb.onclick=()=>answerCustomer(q.id,'','',true);c.appendChild(nb);
+  return c}
+async function answerCustomer(qid,ean_edi,name,unknown){try{await api('/api/orders/question/'+qid+'/answer',
+  {method:'POST',body:JSON.stringify(unknown?{unknown:true}:{ean_edi:ean_edi,name:name})});await load()}
+  catch(e){alert(e.message||'chyba')}}
 async function load(){const mine=++render;let d,t;
   try{d=await api('/api/orders/questions');t=await api('/api/orders/taught')}catch(e){return}
   if(mine!==render)return;
   const W=document.getElementById('wrap');W.textContent='';
   if(!d.items.length)W.appendChild(el('div','empty','Nič nečaká. Ďakujem!'));
-  for(const q of d.items){const c=el('div','q');
+  for(const q of d.items){
+    if(q.kind==='customer'){W.appendChild(customerQuestionCard(q));continue}
+    const c=el('div','q');
     c.appendChild(el('div','who',(q.customer_name||q.customer_ean)+(q.delivery_date?' · na '+q.delivery_date:'')));
     c.appendChild(el('div','w',q.wording+(q.quantity?'  —  '+q.quantity+' '+(q.unit||'ks'):'')));
     c.appendChild(el('div','why',q.reason||'Ktorý výrobok to je?'));

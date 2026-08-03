@@ -304,6 +304,53 @@ def _release_locked(conn, cfg, hid: int, upload, post) -> dict | None:
     return {"id": hid, "status": status, "preview": preview}
 
 
+def set_customer(conn, qid: int, ean_edi: str, name: str) -> None:
+    """The unmatched-customer question (#159) is now answered with a REAL pick — tell
+    every held order still waiting on it who it actually belongs to, BEFORE releasing.
+    `release_for_question`/`_ship` build the `Matched` object straight from
+    `held_orders.customer_ean`/`customer_name`, so this must land first — a held order
+    placed while the customer was unknown always started with `customer_ean=''`."""
+    conn.execute(
+        "UPDATE held_orders SET customer_ean=%s, customer_name=%s "
+        "WHERE %s = ANY(question_ids) AND status='held'", (ean_edi, name, qid))
+
+
+def release_unknown_customer(conn, cfg, qid: int, post=None) -> list[dict]:
+    """Release every held order waiting on a customer question the warehouse answered
+    "neviem, kto to je" (#159). Nobody could ship an order with no customer to address it
+    to, so this does NOT ship — it converts the order into the SAME 'review' outcome every
+    other stuck order already gets (report.build_summary's dashboard hint, an
+    email_events row, the message marked processed), instead of leaving it silently stuck
+    'held' forever with no path forward."""
+    from . import report
+    post = post or (lambda c, html, **kw: report.post_from_config(c, html))
+    ids = [r[0] for r in conn.execute(
+        "SELECT id FROM held_orders WHERE %s = ANY(question_ids) AND status = 'held'",
+        (qid,)).fetchall()]
+    released = []
+    reason = "Zákazník nebol nájdený v tabuľke zákazníkov"
+    for hid in ids:
+        row = get(conn, hid)
+        if not row:
+            continue
+        html = report.build_summary(customer_name="", orders=[{
+            "delivery_date": row["delivery_date"], "status": "review",
+            "item_count": len(row["decisions"]), "missing_count": 0,
+            "reject_reason": reason}])
+        try:
+            post(cfg, html)
+        except Exception:
+            log.exception("posting the unknown-customer review summary failed")
+        report.log_event(conn, row["message_id"], stage="review", status="review",
+                         outcome=reason, detail={"held_id": hid, "question_id": qid})
+        conn.execute(
+            """UPDATE held_orders SET status='released', release_reason='answered',
+                   released_at=now() WHERE id=%s""", (hid,))
+        _mark_message_done_if_clear(conn, row["message_id"])
+        released.append({"id": hid, "status": "review"})
+    return released
+
+
 def release_due(conn, cfg, upload=None, post=None, today: str = "") -> list[dict]:
     """The deadline backstop: whatever is still waiting when its delivery date arrives ships
     what matched — exactly like the pipeline always has, just no longer immediate."""
