@@ -26,6 +26,16 @@ sideways to another node, which is why that node in particular needs the payload
 **Real incident (2026-08-03, #152):** a dedup guard was inserted before `Convert to File`;
 every static order died on `The value in "wincodexContent" is not set` and 13 orders were lost.
 
+## Proving a workflow fix — repro locally, and keep the repro OUT of this repo
+
+There is no CI for these workflows, so the RED/GREEN proof is a local harness: pull the real
+failing run with `get_execution … includeData:true`, then replay the Code-node bodies with
+`new Function('$', '$input', code)` and stub `$('<node>')` to the captured outputs. That
+reproduces the exact production error before the fix and passes after it.
+
+Keep that harness in the session scratchpad, **never commit it** — it is built from a real
+customer order (partner, EANs, quantities) and this repo is public.
+
 ## 2. A claim taken BEFORE a side effect must be released on EVERY failure path
 
 The pattern `INSERT claim → do the side effect → mark done` is right, but the claim row is a
