@@ -839,3 +839,44 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   debugging time) + `.claude/rules/orders-corpus.md` gained 3 entries (the register's
   item/customer live-dispatch split, the shadow-gate reasoning for a pipeline-skipping
   short-circuit vs. a memory-read, the multi-kind-hold + `deadline_shippable` interaction).
+
+## 2026-08-03 — #160: item-question shortlist padding
+
+- Issue #160: "Kváskový slimák s pizzovou plnkou" (no catalog card) got a padded 6-card
+  shortlist including an unrelated 700g bread loaf (score 15, one incidental shared word
+  "kváskový") right next to the model's own honest low-confidence guess; the warehouse
+  picked a wrong sweet card that wasn't even in the shortlist (found via full-catalog
+  search). The wrong-shipment half was already resolved live via the warehouse's own
+  `vrátiť`/undo (verified: exactly one `edi_sent` row, memory fully corrected) before this
+  PR — this ticket's remaining scope was the CODE fix for the padding itself.
+- Design comment posted before code: root cause (`ask_cands[:6]` in pipeline.py/hold.py
+  had no relevance floor at all) + chosen approach (`match.plausible_candidates()`, a
+  post-decision/post-LLM display filter using the score `candidates()` already computes,
+  floor 50.0) + rejected alternative (extending `GENERIC_PRODUCT_WORDS` — rejected, feeds
+  LIVE ladder-decision rungs, not just display).
+- RED: `tests/test_orders_match.py::test_plausible_candidates_*` (668086f) — failed with
+  `AttributeError: module 'app.orders.match' has no attribute 'plausible_candidates'`.
+  GREEN: `fea43b8` adds `match.plausible_candidates()`, wires it into both call sites
+  (pipeline.py's per-item ask, hold.py's `_ask_still_ambiguous` mirrored re-ask).
+  Follow-up commits: `1529a2b` (docstring precision from self-review), `cefc6a9`
+  (boundary test at score == floor, from the independent deep-review subagent's one Minor
+  finding).
+- No new question `kind` needed — every item question on the real `/sklad` warehouse page
+  already, unconditionally, carries a full-catalog search box (#149) + a "databáza
+  znalostí" add-a-new-card link; that is the sanctioned "nothing plausible" escape.
+- Purely a post-LLM display filter: does not touch `match.candidates()` (the model's own
+  prompt input), the prompt files, or ORDER_SCHEMA/PRODUCT_SCHEMA — `e2e-orders` (the
+  frozen-LLM-cache gate) stayed green with no re-record needed, confirming hash-safety.
+- PR #173, merged `63f81b5`. Main CI green (test, e2e-orders, build). Deployed v0.9.42 via
+  `ha addons update`; `/health` confirms `{"ok":true,"version":"0.9.42"}`; dashboard AND
+  `/sklad/<key>` DOM both show `v0.9.42`; `/sklad/<key>` renders live ("Nič nečaká."),
+  "Naposledy naučené" list shows the real taught mapping (`Kváskový slimák s pizzovou
+  plnkou → Toskánsky slimák 100g`) from the earlier live undo.
+- Doc-only follow-up PR #174 (playbook notes), merged `d64dd51` — no version bump, no
+  redeploy needed.
+- Playbook: `.claude/rules/orders-corpus.md` gained an entry (an item question's escape
+  hatch — search box + add-a-new-card link — already exists; a shortlist-quality problem
+  is a `candidates()`-score-floor fix, not a new #164 kind) + `.claude/rules/
+  local-testing.md` gained a note (captured pytest -q output can end at `[100%]` with no
+  trailing summary line even on a green run — verify via exit code + absence of failure
+  markers).
