@@ -395,6 +395,54 @@ def test_candidates_for_question_is_a_no_op_when_nothing_was_proposed():
     assert match.candidates_for_question(cands, CATALOG, d) == cands
 
 
+# --- #160: the shown shortlist must never be padded with weak candidates ------------
+
+def test_plausible_candidates_never_pads_with_a_weakly_related_card():
+    """The real incident: 'Kváskový slimák s pizzovou plnkou' has no catalog card. The
+    old `ask_cands[:6]` slice padded the shortlist out to six with a 700 g bread loaf
+    that only shares the generic style word 'kváskový' with the order (a real
+    `match._score()` run on the live cards gives it 15, same as an unrelated sweet
+    'Slimák kakaový' card gets from one incidental word) — right next to the model's
+    own honest low-confidence guess (also 15, since 'slimák' alone is a weak literal
+    overlap here) and a genuinely related 'uzol' family card the codebase's own
+    SYNONYMS rule already scores at 75. Only the proposed card and the genuinely
+    related one may reach the warehouse."""
+    ask_cands = [
+        {"gtin": "TOS", "name": "Toskánsky slimák 100g"},  # re-headed proposed card
+        {"gtin": "MEX", "name": "Mexický uzol 100g", "score": 75.0},
+        {"gtin": "LOAF", "name": "Chlieb tradičny kváskový pšenično-ražný 700gr",
+         "score": 15.0},
+    ]
+    out = match.plausible_candidates(ask_cands)
+    assert [c["gtin"] for c in out] == ["TOS", "MEX"]
+
+
+def test_plausible_candidates_can_be_reduced_to_just_the_proposed_card():
+    """When NOTHING beyond the proposed card clears the relevance floor, the shortlist
+    stays honestly short — never padded to reach a fixed count. The warehouse still has
+    the full-catalog search box and the databáza znalostí link, unconditionally."""
+    ask_cands = [
+        {"gtin": "TOS", "name": "Toskánsky slimák 100g"},
+        {"gtin": "LOAF", "name": "Chlieb tradičny kváskový pšenično-ražný 700gr",
+         "score": 15.0},
+        {"gtin": "SLI", "name": "Slimák kakaový 90g", "score": 15.0},
+    ]
+    out = match.plausible_candidates(ask_cands)
+    assert [c["gtin"] for c in out] == ["TOS"]
+
+
+def test_plausible_candidates_respects_the_limit():
+    ask_cands = [{"gtin": "TOS", "name": "x"}] + [
+        {"gtin": f"C{i}", "name": f"c{i}", "score": 90.0} for i in range(10)]
+    out = match.plausible_candidates(ask_cands, limit=6)
+    assert len(out) == 6
+    assert out[0]["gtin"] == "TOS"
+
+
+def test_plausible_candidates_handles_an_empty_list():
+    assert match.plausible_candidates([]) == []
+
+
 def test_the_decision_trace_names_the_rule_and_its_inputs():
     d = _decide("Rožok 70g", llm={"gtin": "G50", "confidence": 0.95})
     assert d.trace["rule"] == "unmatched"
