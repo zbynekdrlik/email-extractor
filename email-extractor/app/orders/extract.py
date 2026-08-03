@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
+from datetime import date, timedelta
 from pathlib import Path
 
 log = logging.getLogger("orders.extract")
@@ -457,29 +458,69 @@ def unquote_fully_quoted(text: str, today: str = "") -> str:
 
 # --- the delivery date itself must be grounded (#163) -----------------------
 
+def _range_days(source: str) -> set[tuple[int, int]]:
+    """Every (day, month) spanned by an explicit range in the text ("06.07. - 11.07."),
+    inclusive of both ends.
+
+    A week written as a range and then broken down by weekday name ("Pondelok: ...
+    Utorok: ...") DERIVES its individual days from that range — the same "reading the
+    email, not inventing days" reasoning `date_conflict()` already applies (its own
+    `derives_days`), extended here into the actual calendar days a delivery date is
+    allowed to land on.
+    """
+    days: set[tuple[int, int]] = set()
+    for m in _RANGE.finditer(source):
+        # `_RANGE`'s own match may end right at the second date's month digits with no
+        # trailing dot ("11.07" — the range regex does not require one), so `_SUBJ_DAY`
+        # (which DOES require a trailing dot) can miss that endpoint; a plain day.month
+        # pair-finder is used here instead, scoped to just this one matched span.
+        span = re.findall(r"(\d{1,2})\s*\.\s*(\d{1,2})", m.group(0))
+        if len(span) != 2:
+            continue
+        try:
+            start = date(2001, int(span[0][1]), int(span[0][0]))
+            end = date(2001, int(span[1][1]), int(span[1][0]))
+        except ValueError:
+            continue
+        if end < start:
+            end = date(2002, end.month, end.day)   # wraps into the next year (Dec -> Jan)
+        cur = start
+        while cur <= end and (cur - start).days < 40:   # a "week" range, not unbounded
+            days.add((cur.day, cur.month))
+            cur += timedelta(days=1)
+    return days
+
+
 def date_grounded(date_str: str, source: str) -> bool:
-    """Is this delivery date actually written somewhere in the source text?
+    """Is this delivery date actually written (or derivable) in the source text?
 
     The same citation requirement `verify()` already applies to every ITEM
     (`quote_in_source`/`item_in_source`) — applied here to the date itself. A delivery date
-    is grounded when its (day, month) appears as a written day.month token ANYWHERE in the
-    source (subject + body, quoted content included: a stale quoted date is exactly the
-    evidence that proves an order is stale, so dropping it here would hide the staleness),
-    OR the source names no explicit day.month token at all — the ordinary relative-date case
-    ("zajtra", "pondelok", the prompt's own "no date at all -> tomorrow" default) has nothing
-    written to hold the computed date accountable against, so it is accepted as before.
+    is grounded when:
 
-    Only fails when the text DOES name explicit day(s) and the returned date matches NONE of
-    them — the exact shape of a model re-dating a stale quoted order onto an unwritten day
-    (#163, msg 5679: text says "25.7.", the model invented "08.08.2026" — 8.8 occurs nowhere
-    in the mail).
+    - its (day, month) appears as a written day.month token ANYWHERE in the source
+      (subject + body, quoted content included: a stale quoted date is exactly the
+      evidence that proves an order is stale, so dropping it here would hide the
+      staleness), OR
+    - it falls inside an explicit range written in the text ("od 06.07. - 11.07." legitimately
+      derives every day 06.07.-11.07., even though a per-weekday breakdown never repeats each
+      one's digits — `_range_days` above), OR
+    - the source names no explicit day.month token (and no range) at all — the ordinary
+      relative-date case ("zajtra", "pondelok", the prompt's own "no date at all -> tomorrow"
+      default) has nothing written to hold the computed date accountable against, so it is
+      accepted as before.
+
+    Only fails when the text DOES name explicit day(s)/a range and the returned date matches
+    NONE of them — the exact shape of a model re-dating a stale quoted order onto an
+    unwritten day (#163, msg 5679: text says "25.7." with no range, the model invented
+    "08.08.2026" — 8.8 occurs nowhere in the mail and no range could derive it either).
     """
     claimed = _days_in(str(date_str or ""))
     if not claimed:
         return True   # unparseable — nothing to hold accountable, don't invent a reject
-    written = _days_in(source)
+    written = _days_in(source) | _range_days(source)
     if not written:
-        return True   # no explicit day anywhere -> ordinary relative-date order
+        return True   # no explicit day or range anywhere -> ordinary relative-date order
     return bool(claimed & written)
 
 
