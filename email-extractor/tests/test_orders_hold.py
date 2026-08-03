@@ -530,6 +530,43 @@ def test_answering_the_re_asked_item_then_finally_ships_the_order(pg, env):
     ).fetchone()[0] == 1
 
 
+def test_a_line_that_cannot_even_be_asked_about_is_never_silently_dropped(pg, env):
+    """#162 constraint 4: if a still-ambiguous line cannot even be turned into a question
+    (here: a wording that folds to an empty memory key — `teach.ask` itself refuses it),
+    the order must still surface it visibly (stay held, name it in the Odoo notification)
+    rather than silently shipping without it."""
+    from app.orders import teach
+    from app.orders.match import Decision
+
+    qid = teach.ask_customer(
+        pg, message_id="m1", sender_email="zilina@farmeria.sk",
+        candidates=[{"ean_edi": "2000000000001", "name": "Pekáreň Testovacia s.r.o.",
+                    "city": "Martin", "street": "Košútka 1", "address_match": True}],
+        delivery_date="04.08.2026",
+        context={"sender_email": "zilina@farmeria.sk", "sender_name": "Sklad",
+                "company_name": "", "delivery_address_guess": ""})
+    matched = customer.Matched(ean_edi="", name="", confidence=0.0, rule="unmatched", note="")
+    order = {"deliveryDate": "04.08.2026", "orderNumber": "", "store": "", "items": [
+        {"name": "!!!", "quantity": 1, "unit": "ks"}]}
+    decisions = [Decision(item_name="!!!", gtin=None, card="", confidence=0.1, rule="unmatched",
+                          note="nič sa nezhoduje", review=False, trace={}, quantity=1, unit="ks")]
+    hid = hold.place(pg, message_id="m1", matched=matched, order=order, decisions=decisions,
+                     extracted={"isChangeRequest": False, "unverified": [], "notes": ""},
+                     question_ids=[qid])
+
+    teach.answer_customer(pg, qid, ean_edi="2000000000001",
+                          name="Pekáreň Testovacia s.r.o.", by="sklad")
+    hold.set_customer(pg, qid, "2000000000001", "Pekáreň Testovacia s.r.o.")
+    rec = Recorder()
+    released = hold.release_for_question(pg, _cfg(), qid, upload=rec.upload, post=rec.post)
+
+    assert len(released) == 1 and released[0]["status"] == "held"
+    assert rec.uploads == [], "never ship a line nobody could even be asked about"
+    assert hold.get(pg, hid)["status"] == "held"
+    assert len(rec.posts) == 1
+    assert "!!!" in rec.posts[0], "the unaskable item must be named, not silently dropped"
+
+
 def test_a_customer_unknown_order_with_only_unambiguous_items_still_ships_immediately(pg, env):
     """Regression guard for the live message 5661 case (#159's driving incident): every
     line already resolved at first pass, only the customer was unknown — answering the
