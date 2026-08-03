@@ -13,9 +13,12 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
+
+import psycopg
 
 log = logging.getLogger("orders.edi")
 
@@ -196,25 +199,94 @@ def content_hash(content: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+# #153: how long a bare (unconfirmed) claim is trusted to mean "another worker may
+# genuinely be mid-upload right now". Plays the SAME role as db.CLAIM_STALE_MINUTES
+# does for the messages.processing_at claim guard — but is a DELIBERATELY SEPARATE
+# constant, not an import of that one: db.CLAIM_STALE_MINUTES exists to match an
+# EXTERNAL n8n dispatcher's own hardcoded re-claim window (n8n owns that number, not
+# this code), while this one is a purely internal Python-owned choice for a completely
+# different table. They currently share a value by coincidence, not by contract —
+# importing one into the other would wrongly couple two independent knobs.
+CLAIM_STALE_MINUTES = 10
+
+
 def claim_send(conn, customer_ean: str, delivery_date: str, content: str,
                name: str) -> bool:
-    """Claim the right to upload this exact document. False = already sent.
+    """Claim the right to upload this exact document, or reclaim an orphaned one.
 
-    Claimed BEFORE the upload: a crash between claim and upload is recoverable through
-    `release_send`, while a duplicate upload is not recoverable at all — it creates a
-    second order in ORION (#51).
+    False = a CONFIRMED upload already exists for this identity, or another claim is
+    still fresh (< CLAIM_STALE_MINUTES) and may be mid-upload right now.
+
+    Two-phase (#153): a bare claim (uploaded_at IS NULL) is only provisional. A crash
+    between claim and upload is recoverable through `release_send` when the run is
+    still alive to run its `except` block — but a run that dies harder (killed,
+    restarted) never gets that chance, and the claim survives as an orphan. Reading an
+    unconfirmed, stale orphan as "already sent" loses the order silently forever; a
+    real duplicate upload is the alternative and is NOT recoverable — it creates a
+    second order in ORION (#51). Reclaiming the orphan is therefore the safe direction.
+
+    The reclaim is atomic: `DO UPDATE ... WHERE` is evaluated by Postgres per-row as
+    part of conflict resolution itself, so two workers racing this same call can never
+    both win — only one INSERT's conflicting UPDATE actually matches the WHERE clause
+    and returns a row; the other sees no row updated and gets nothing back.
     """
     row = conn.execute(
         """INSERT INTO edi_sent (customer_ean, delivery_date, content_sha256, filename)
            VALUES (%s, %s, %s, %s)
-           ON CONFLICT (customer_ean, delivery_date, content_sha256) DO NOTHING
+           ON CONFLICT (customer_ean, delivery_date, content_sha256)
+           DO UPDATE SET sent_at = now(), filename = EXCLUDED.filename
+           WHERE edi_sent.uploaded_at IS NULL
+             AND edi_sent.sent_at < now() - make_interval(mins => %s)
            RETURNING id""",
-        (str(customer_ean or ""), str(delivery_date or ""), content_hash(content), name),
+        (str(customer_ean or ""), str(delivery_date or ""), content_hash(content), name,
+         CLAIM_STALE_MINUTES),
     ).fetchone()
     if row is None:
-        log.warning("EDI already sent for %s / %s — refusing a duplicate upload",
-                    customer_ean, delivery_date)
+        log.warning("EDI already sent (or claimed within %sm) for %s / %s — refusing "
+                    "a duplicate upload", CLAIM_STALE_MINUTES, customer_ean, delivery_date)
     return row is not None
+
+
+def confirm_sent(conn, customer_ean: str, delivery_date: str, content: str,
+                 pg_dsn: str = "") -> None:
+    """Stamp the claim as a genuinely CONFIRMED upload — call this ONLY after the
+    upload actually succeeded, never optimistically alongside the claim. Until this
+    runs, the claim stays reclaimable by `claim_send` once it goes stale (#153).
+
+    By the time this runs the document is ALREADY physically in ORION — losing this
+    one write is strictly worse than the few seconds a retry costs, because an
+    unconfirmed claim left behind would eventually go stale and `claim_send` would
+    reclaim it for a genuine SECOND upload (review finding, PR #176: this narrows that
+    residual window from "the whole upload" down to "this one UPDATE", not to zero).
+    Retries a few times; a `pg_dsn` lets it replace `conn` with a fresh connection
+    between attempts, since a dropped connection cannot simply be reused. If every
+    attempt still fails, this re-raises — the caller's own failure handling (retrying
+    the whole message later) then surfaces the problem loudly instead of silently
+    losing the confirmation.
+    """
+    ean = str(customer_ean or "")
+    delivery = str(delivery_date or "")
+    chash = content_hash(content)
+    stmt = ("UPDATE edi_sent SET uploaded_at = now() "
+            "WHERE customer_ean = %s AND delivery_date = %s AND content_sha256 = %s")
+    attempts = 4
+    for attempt in range(1, attempts + 1):
+        try:
+            conn.execute(stmt, (ean, delivery, chash))
+            log.info("EDI confirmed sent for %s / %s", customer_ean, delivery_date)
+            return
+        except Exception:
+            log.exception("confirm_sent attempt %d/%d failed for %s / %s — the "
+                          "document IS already uploaded, only the confirmation write "
+                          "failed so far", attempt, attempts, customer_ean, delivery_date)
+            if attempt == attempts:
+                raise
+            if pg_dsn:
+                try:
+                    conn = psycopg.connect(pg_dsn, autocommit=True)
+                except Exception:
+                    log.exception("reconnect for confirm_sent retry failed")
+            time.sleep(1)
 
 
 def release_send(conn, customer_ean: str, delivery_date: str, content: str) -> None:

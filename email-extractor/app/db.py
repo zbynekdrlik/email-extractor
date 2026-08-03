@@ -482,6 +482,52 @@ SCHEMA = [
         UNIQUE (customer_ean, delivery_date, content_sha256)
     )
     """,
+    # --- #153: two-phase confirmation. A row is inserted as a CLAIM before the upload
+    # happens; without a way to tell "claimed" from "genuinely uploaded" apart, a run
+    # that dies between the claim and the upload (crash, kill, restart — anything
+    # outside the `except` around upload()) leaves an orphan row that the next attempt
+    # reads as "already sent" and silently drops the order forever (13 real orders,
+    # 2026-08-03). NULL = claim only; set = the upload actually succeeded.
+    #
+    # The DO block adds the column AND backfills every row that already existed AT THAT
+    # EXACT MOMENT, in the same breath, guarded by "does the column exist yet" so it can
+    # only ever fire once. That is deliberately NOT a hardcoded cutoff timestamp: the
+    # add-on is a single process, and init_schema() runs at startup before any message
+    # is processed (see main.py) — so every row present when this block first runs was
+    # written by the OLD one-phase code (claim immediately followed by upload, with no
+    # gap represented in the DB) and is real, historical, physically-delivered EDI. A
+    # hardcoded cutoff would fail in one of two directions instead: too early wrongly
+    # treats an order shipped just before deploy as an orphan (triggering exactly the
+    # duplicate upload this fix exists to prevent); too late could backfill — and
+    # thereby hide — a genuinely new orphan created by the NEW two-phase code after
+    # deploy. Tying the backfill to the column's own creation has neither failure mode.
+    #
+    # init_schema() is not ONLY called by main.py's single-process startup — the
+    # one-off admin CLI tools (backfill.py, alias_migration.py, eval_run.py,
+    # memory_import.py) call it too, from their own separate connections, and are
+    # documented as safe to run at any time (review finding, PR #176). Without the
+    # advisory lock below, two such callers could both pass the "column missing" check
+    # before either commits, race the ALTER, and the loser would crash on
+    # duplicate_column — or, worse, run its OWN backfill sometime AFTER the winner's
+    # migration already completed and real new activity started, silently confirming a
+    # genuinely fresh orphan. `pg_advisory_xact_lock` fully serializes every caller
+    # through this block (held only for the DO block's own implicit transaction, so it
+    # self-releases immediately under this autocommit connection) — the second caller
+    # then re-evaluates the IF and correctly finds the column already there.
+    """
+    DO $$
+    BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('email-extractor:edi_sent.uploaded_at#153'));
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema = 'public' AND table_name = 'edi_sent'
+               AND column_name = 'uploaded_at'
+        ) THEN
+            ALTER TABLE edi_sent ADD COLUMN uploaded_at TIMESTAMPTZ;
+            UPDATE edi_sent SET uploaded_at = sent_at WHERE uploaded_at IS NULL;
+        END IF;
+    END $$
+    """,
     # --- #93: hold an order while its question is unanswered, but only until the delivery
     # date. Shipping the matched part now and the taught line later would write TWO ORION
     # documents for one delivery day (#81.1) — so a pending question holds its WHOLE order.

@@ -119,6 +119,10 @@ def test_a_clean_order_is_built_uploaded_reported_and_remembered(pg, env):
     assert pg.execute("SELECT count(*) FROM item_memory").fetchone()[0] == 2
     assert pg.execute(
         "SELECT count(*) FROM edi_sent").fetchone()[0] == 1
+    # #153: a real, successful ship must CONFIRM the ledger claim, not leave it as a
+    # bare (reclaimable-after-10-min) claim.
+    assert pg.execute(
+        "SELECT uploaded_at FROM edi_sent").fetchone()[0] is not None
 
 
 def test_the_result_carries_the_per_item_trace_for_order_items(pg, env):
