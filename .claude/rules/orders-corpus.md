@@ -717,3 +717,16 @@ again. That is the point: a changed prompt has not been measured until it has be
   unconfirmed date/customer/line at the deadline the way an item-only hold still correctly
   does — check `teach.KINDS[<kind>].deadline_shippable` before assuming a new kind's
   deadline behaviour, never copy the item-only "ship what matched" default blindly.
+- **An `item`-kind question ALREADY has its "nothing matches, this product might not
+  exist" escape — check the real warehouse page (`ASK_HTML` in `httpapi.py`) BEFORE
+  assuming a new #164 question `kind` is needed (#160).** Every item question,
+  unconditionally, renders a full-catalog search box (`searchBox(q)`, #149) plus a
+  "📚 databáza znalostí" link that opens `/znalosti/<ean>?wording=...` — a page that can
+  ADD a brand-new catalog card by GTIN (#127's `productsBox()`, "nový GTIN = pridá").
+  That is the sanctioned "the product is genuinely missing" path; it predates #164 and
+  needs no new `kind`. (The dashboard's OWN `/otazky` item-card renderer, separate HTML
+  from `/sklad`, has neither the search box nor a Neviem button for item kind either —
+  only `/sklad`'s does; don't assume feature parity between the two item-card renderers.)
+  A candidate-SHORTLIST quality problem ("the offered cards are padded with unrelated
+  ones") is fixed by tightening what `candidates()`'s scores let through
+  (`match.plausible_candidates`, #160), not by inventing a parallel escape.
