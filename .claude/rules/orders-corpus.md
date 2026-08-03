@@ -730,3 +730,45 @@ again. That is the point: a changed prompt has not been measured until it has be
   A candidate-SHORTLIST quality problem ("the offered cards are padded with unrelated
   ones") is fixed by tightening what `candidates()`'s scores let through
   (`match.plausible_candidates`, #160), not by inventing a parallel escape.
+- **The `edi_sent` upload ledger went two-phase (`uploaded_at`, #153) — a reusable
+  pattern for any FUTURE "insert a claim before a real external side effect" table.**
+  `edi.claim_send()`'s `INSERT ... ON CONFLICT (...) DO UPDATE ... WHERE
+  <not-yet-confirmed> AND <stale> RETURNING id` is Postgres's own atomic reclaim: two
+  concurrent claimants can never both win, because the `WHERE` on `DO UPDATE` is
+  evaluated per-row as part of conflict resolution itself — no application-level
+  locking needed. `edi.confirm_sent()` is called ONLY after the real upload genuinely
+  returns success (never alongside the claim), and itself RETRIES with reconnect
+  (`pg_dsn` param) instead of raising on the first failure — by the time it runs, the
+  external side effect ALREADY happened, so losing the confirmation write is strictly
+  worse than the retry's latency (a still-unconfirmed claim would eventually go stale
+  and get reclaimed for a genuine SECOND real upload).
+  **Backfilling pre-existing rows when adding the "confirmed" column needs a lock, not
+  just an existence check, or a SEPARATE `init_schema()` caller can race it.** This
+  project's `init_schema()` isn't only called by `main.py`'s single process at
+  startup — the one-off admin CLI tools (`backfill.py`, `alias_migration.py`,
+  `eval_run.py`, `memory_import.py`) call it too, from their own connections, and are
+  documented as safe to run anytime. A bare `IF NOT EXISTS (SELECT ... information_
+  schema.columns ...) THEN ALTER TABLE ... ADD COLUMN; UPDATE ... WHERE col IS NULL;
+  END IF` inside a `DO $$ ... $$` block lets two callers both pass the existence check
+  before either commits — the loser then either crashes on `duplicate_column` (if the
+  ALTER has no `IF NOT EXISTS` of its own) or, worse, runs its OWN unconditional
+  backfill AFTER the winner's migration already completed and real new claims may have
+  started arriving, silently confirming a genuinely fresh orphan. Fix: wrap the whole
+  check-then-migrate body in `PERFORM pg_advisory_xact_lock(hashtext('<unique
+  string>'))` as the FIRST statement inside the DO block — it fully serializes every
+  caller through the gate (self-releases at the end of the block's own implicit
+  transaction under an autocommit connection), so the second caller's existence check
+  correctly sees the column already there and skips entirely. Also filter
+  `table_schema = 'public'` on the `information_schema.columns` check, not just
+  `table_name` (harmless here, but free to get right).
+  **Testing a backfill-on-migration path**: `pg.execute("ALTER TABLE ... DROP COLUMN
+  ...")`, insert a row directly (simulating a pre-migration historical row), then
+  re-call `db.init_schema(pg)` and assert the column + backfilled value came back —
+  reusable for any future self-healing-migration test in this project (the session-
+  scoped `_schema` fixture connection is safe to DROP/re-ADD a column on mid-test, as
+  long as the SAME test restores it via `init_schema` before any assertion that could
+  fail, since later tests reuse that same connection).
+  **Post-deploy verification of a backfill**: read the live table directly —
+  `SELECT count(*) total, count(uploaded_at) confirmed, count(*) FILTER (WHERE
+  uploaded_at IS NULL) unconfirmed FROM edi_sent` — see `deploy.md`'s
+  `PGPASSWORD`-through-`sudo` gotcha for how to actually run that query on the box.

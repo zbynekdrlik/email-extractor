@@ -63,3 +63,11 @@ warning; both alias the same command.)
 - **No `sqlite3` CLI inside the n8n add-on container** (only relevant if you're cross-
   checking n8n's own DB) — use node's bundled sqlite3 module instead; `docker exec`
   output truncates around 64 KB, so large dumps need chunking/base64.
+- **`sudo docker exec -e PGPASSWORD app_... psql ...` silently fails with "no password
+  supplied"** even after `export PGPASSWORD=...` in the same SSH session — `sudo`
+  resets the environment by default, so the bare `-e PGPASSWORD` (no `=value`, meant to
+  forward the caller's own env var) never reaches the container. Fix: pass the literal
+  value inline through a nested shell instead of relying on env forwarding across
+  `sudo`: `sudo docker exec app_e0ac7775_email_extractor sh -c "PGPASSWORD=<pw> psql -h
+  127.0.0.1 -U email -d email -c '<query>'"` (#153 post-deploy DB verification —
+  confirming the edi_sent.uploaded_at backfill landed on the 48 live rows).
