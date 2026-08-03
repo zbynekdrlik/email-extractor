@@ -515,6 +515,34 @@ SCHEMA = [
     # 30-minute stale window passes and get run through the LLM again for nothing.
     "CREATE INDEX IF NOT EXISTS idx_held_orders_open_message "
     "ON held_orders(message_id) WHERE status = 'held'",
+    # --- #164: every board-resolvable dead end funnels through the SAME order_questions
+    # table/index/dashboard the item(#88)/customer(#159) questions already use — a
+    # kind-agnostic `payload` (what the kind needs to answer/apply) and `answer` (what was
+    # picked, for the NEW kinds' unified {"choice": ...} contract) generalize it instead of
+    # bespoke columns per new kind. Additive only: a live open item/customer row has
+    # payload='{}' / answer=NULL by default and keeps working with no backfill. ---
+    "ALTER TABLE order_questions ADD COLUMN IF NOT EXISTS payload jsonb NOT NULL "
+    "DEFAULT '{}'::jsonb",
+    "ALTER TABLE order_questions ADD COLUMN IF NOT EXISTS answer jsonb",
+    # --- #164: what a 'mail' question ("is this even an order?") teaches — a sender +
+    # normalized-subject pattern, so the SAME kind of mail from the SAME sender stops
+    # asking. `ignore` short-circuits BEFORE the LLM call (saves the extraction cost too);
+    # `manual` still costs nothing extra but skips straight to a 'review' outcome with the
+    # taught instruction, never re-asking. `question_id` traces the rule back to the
+    # question that created it (mirrors `global_item_memory.question_id`), so `teach.undo`
+    # can retract only the rule ITS OWN question created. ---
+    """
+    CREATE TABLE IF NOT EXISTS mail_rules (
+        id            BIGSERIAL PRIMARY KEY,
+        sender_norm   TEXT NOT NULL,
+        subject_key   TEXT NOT NULL,
+        action        TEXT NOT NULL CHECK (action IN ('ignore', 'manual')),
+        question_id   BIGINT REFERENCES order_questions(id),
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_rules_key "
+    "ON mail_rules(sender_norm, subject_key)",
 ]
 
 

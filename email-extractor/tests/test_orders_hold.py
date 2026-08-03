@@ -653,3 +653,86 @@ def test_a_customer_unknown_order_with_only_unambiguous_items_still_ships_immedi
     assert len(released) == 1 and released[0]["status"] == "ok"
     assert len(rec.uploads) == 1
     assert hold.get(pg, hid)["status"] == "released"
+
+
+# --- #164: a held order can wait on TWO INDEPENDENT question kinds at once -------------
+#
+# The design's own named regression: date-conflict resolution (#164) can hold an order on
+# a `date` question AND (independently) an `item` question at the same time. Releasing
+# must wait for BOTH — answering only one must not ship a still-guessed value for the
+# other — and once both are answered, the EDI must carry the HUMAN-PICKED date, not
+# whatever the mail happened to say first.
+
+def test_a_hold_with_date_and_item_questions_ships_only_once_both_are_answered(pg, env):
+    from app.orders.match import Decision
+
+    matched = customer.Matched(ean_edi="2000000000001", name="Pekáreň Testovacia s.r.o.",
+                               confidence=1.0, rule="llm", note="")
+    order = {"deliveryDate": "04.08.2026", "orderNumber": "", "recipientGroup": "",
+             "store": "", "items": []}
+    date_qid = teach.ask_date(
+        pg, message_id="m1", dates=["04.08.2026", "05.08.2026"],
+        reason="Predmet hovorí 04.08., objednávka je na 05.08. — dva rôzne dni",
+        delivery_date="04.08.2026")
+    item_qid = teach.ask(
+        pg, message_id="m1", customer_ean="2000000000001",
+        customer_name="Pekáreň Testovacia s.r.o.", wording="torta", quantity=5, unit="ks",
+        candidates=[{"gtin": "TOR", "name": "Torta čokoládová"}])
+    decisions = [Decision(item_name="torta", gtin=None, card="", confidence=0.1,
+                          rule="unmatched", note="nič sa nezhoduje", review=False, trace={},
+                          quantity=5, unit="ks")]
+    hid = hold.place(pg, message_id="m1", matched=matched, order=order, decisions=decisions,
+                     extracted={"isChangeRequest": False, "unverified": [], "notes": ""},
+                     question_ids=[date_qid, item_qid])
+    rec = Recorder()
+
+    # Answer the DATE only — the item question is still open, so the order must stay held.
+    hold.set_delivery_date(pg, date_qid, "05.08.2026")
+    from psycopg.types.json import Json as _Json
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s, answered_by='sklad', "
+              "answered_at=now() WHERE id=%s", (_Json({"choice": "05.08.2026"}), date_qid))
+    released = hold.release_for_question(pg, _cfg(), date_qid, upload=rec.upload, post=rec.post)
+    assert released == [], "the item question is still open — must not release yet"
+    assert rec.uploads == []
+    assert hold.get(pg, hid)["status"] == "held"
+    # the answered date already landed on the row, ready for whenever it DOES release
+    row = pg.execute("SELECT delivery_date, order_json->>'deliveryDate' FROM held_orders "
+                     "WHERE id=%s", (hid,)).fetchone()
+    assert row == ("05.08.2026", "05.08.2026")
+
+    # Now answer the ITEM — every question id is answered, so it ships, WITH the
+    # human-picked date (never the original 04.08. the mail's subject/body disagreed on).
+    teach.answer(pg, item_qid, gtin="TOR", card="Torta čokoládová", by="sklad")
+    released = hold.release_for_question(pg, _cfg(), item_qid, upload=rec.upload, post=rec.post)
+    assert len(released) == 1 and released[0]["status"] == "ok"
+    assert len(rec.uploads) == 1
+    name, _content = rec.uploads[0]
+    assert "20260805" in name, "EDI filename must carry the human-picked date (05.08), not 04.08"
+    assert hold.get(pg, hid)["status"] == "released"
+    assert pg.execute(
+        "SELECT count(*) FROM item_memory WHERE source='human' AND gtin='TOR'"
+    ).fetchone()[0] == 1
+
+
+def test_release_due_never_ships_a_still_open_non_shippable_question(pg, env):
+    """#164's `deadline_shippable` rule: a hold waiting on a `date` question (unlike an
+    `item`-only hold) must NEVER auto-ship at the deadline — that would send an invented
+    delivery date nobody confirmed. It converts to 'review' instead, with zero uploads,
+    and the question stays open (never silently marked answered)."""
+    matched = customer.Matched(ean_edi="2000000000001", name="Pekáreň Testovacia s.r.o.",
+                               confidence=1.0, rule="llm", note="")
+    order = {"deliveryDate": "05.08.2026", "orderNumber": "", "recipientGroup": "",
+             "store": "", "items": []}
+    date_qid = teach.ask_date(pg, message_id="m2", dates=["04.08.2026", "05.08.2026"],
+                              reason="rozpor dátumu", delivery_date="05.08.2026")
+    hid = hold.place(pg, message_id="m2", matched=matched, order=order, decisions=[],
+                     extracted={"isChangeRequest": False, "unverified": [], "notes": ""},
+                     question_ids=[date_qid])
+    rec = Recorder()
+    released = hold.release_due(pg, _cfg(), upload=rec.upload, post=rec.post,
+                                today="2026-08-06")
+    assert len(released) == 1 and released[0]["status"] == "review"
+    assert rec.uploads == [], "the deadline must never ship an unconfirmed date"
+    assert hold.get(pg, hid)["status"] == "released"
+    assert teach.get(pg, date_qid)["status"] == "open", \
+        "the deadline sweep must never silently answer the question for the warehouse"

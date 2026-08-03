@@ -527,6 +527,44 @@ def create_app(cfg) -> Flask:
             released = hold.release_for_question(c2, cfg, qid)
         return jsonify(ok=True, question=answered, released=released)
 
+    def _api_orders_answer_generic(qid: int, q: dict, body: dict):
+        """#164: the SAME dispatch endpoint, generalized for kinds beyond item/customer
+        (mail/date/line) — a UNIFIED `{"choice": ..., "by": ...}` body, routed through
+        `teach.KINDS[q['kind']]`. `choice` blank/`"unknown"` is the universal escape
+        hatch (constraint 5 of #164): the question stays OPEN and visible instead of
+        being silently marked answered with nothing."""
+        from .orders import teach
+        kind = teach.KINDS.get(q.get("kind", ""))
+        if not kind:
+            return jsonify(error=f"neznámy druh otázky: {q.get('kind')!r}"), 400
+        if q.get("status") != "open":
+            return jsonify(error=f"otázka {qid} je už zodpovedaná"), 409
+        raw = body.get("choice")
+        choice = "" if raw in (None, "unknown") else str(raw)
+        by = str(body.get("by") or "sklad")
+        try:
+            kind.validate(q, choice, by)
+        except teach.NotACandidate as e:
+            return jsonify(error=str(e)), 400
+        if not choice:
+            return jsonify(ok=True, question=q, released=[])
+        # Same split as the item/customer branches above (review finding on PR #116,
+        # reused here): the answer itself commits in its own transaction; `apply` (which
+        # for `date` releases a held order — a REAL external upload) runs afterward on an
+        # autocommit connection, so a later, unrelated failure can never roll back an
+        # already-physically-uploaded document.
+        with _db_tx() as c:
+            c.execute(
+                """UPDATE order_questions
+                      SET status = 'answered', answer = %s, answered_by = %s,
+                          answered_at = now()
+                    WHERE id = %s""", (Json({"choice": choice}), by, qid))
+        with _db() as c2:
+            extra = kind.apply(c2, cfg, q, choice, by) or {}
+        with _db() as c3:
+            answered = teach.get(c3, qid)
+        return jsonify(ok=True, question=answered, released=extra.get("released", []))
+
     @app.post("/api/orders/question/<int:qid>/answer")
     def api_orders_answer(qid: int):
         """One click: this wording IS this card. Taught for that customer, forever. Or,
@@ -555,6 +593,8 @@ def create_app(cfg) -> Flask:
             return jsonify(error="otázka neexistuje"), 404
         if q0.get("kind") == "customer":
             return _api_orders_answer_customer(qid, q0, body)
+        if q0.get("kind") in ("mail", "date", "line"):
+            return _api_orders_answer_generic(qid, q0, body)
 
         gtin, card = str(body.get("gtin") or ""), str(body.get("card") or "")
         if not gtin:
@@ -593,11 +633,22 @@ def create_app(cfg) -> Flask:
 
     @app.post("/api/orders/question/<int:qid>/undo")
     def api_orders_undo(qid: int):
-        """Take a mistaken teaching back — it would otherwise decide that line forever."""
+        """Take a mistaken teaching back — it would otherwise decide that line forever.
+
+        #164: `mail` is the ONE new kind that actually teaches something durable outside
+        `order_questions` itself (a `mail_rules` row) — routed through its own registered
+        `undo` so that row is retracted too. `date`/`line` teach nothing (`learns` says
+        so), so plain `teach.undo` (which only ever touches `item_memory`/customer data,
+        a harmless no-op for them) already does the right thing — reopen, nothing else.
+        """
         from .orders import teach
         try:
             with _db_tx() as c:
-                q = teach.undo(c, qid)
+                q0 = teach.get(c, qid)
+                if not q0:
+                    return jsonify(error="otázka neexistuje"), 404
+                q = (teach.KINDS["mail"].undo(c, q0) if q0.get("kind") == "mail"
+                    else teach.undo(c, qid))
         except teach.NotACandidate as e:
             return jsonify(error=str(e)), 404
         return jsonify(ok=True, question=q)
@@ -1142,6 +1193,22 @@ async function loadAsk(){const L=document.getElementById('list');
       ub.onclick=()=>answerCustomerIt(q.id,'','',true);acts.appendChild(ub);
       head.appendChild(who);head.appendChild(why);head.appendChild(acts);
       el.appendChild(head);L.appendChild(el);continue}
+    // #164: ONE generic renderer for every OTHER new kind (mail/date/line) — the
+    // candidates carry their own {value,label}; a universal "Neviem" escape posts
+    // {"choice":"unknown"} through the same dispatch endpoint (stays open, never silent).
+    if(q.kind==='mail'||q.kind==='date'||q.kind==='line'){
+      const titles={mail:'Je to vôbec objednávka?',date:'Ktorý deň dodávky platí?',
+        line:'Platí ešte táto položka?'};
+      b.textContent=titles[q.kind]||q.kind;head.appendChild(b);
+      const who=document.createElement('div');who.className='sub';who.textContent=q.wording||'';
+      const why=document.createElement('div');why.className='sub';why.textContent=q.reason||'';
+      const acts=document.createElement('div');acts.className='acts';
+      for(const c of (q.candidates||[])){const bt=document.createElement('button');bt.className='btn';
+        bt.textContent=c.label||c.value;bt.onclick=()=>answerGenericIt(q.id,c.value);acts.appendChild(bt)}
+      const ub=document.createElement('button');ub.className='btn';ub.textContent='Neviem';
+      ub.onclick=()=>answerGenericIt(q.id,'unknown');acts.appendChild(ub);
+      head.appendChild(who);head.appendChild(why);head.appendChild(acts);
+      el.appendChild(head);L.appendChild(el);continue}
     b.textContent=q.wording;head.appendChild(b);
     head.appendChild(document.createTextNode(' \u00b7 '+(q.quantity||'')+' '+(q.unit||'')));
     const who=document.createElement('div');who.className='sub';
@@ -1193,6 +1260,9 @@ async function teachIt(qid,gtin,card){try{await api('/api/orders/question/'+qid+
 async function answerCustomerIt(qid,ean_edi,name,unknown){try{await api('/api/orders/question/'+qid+'/answer',
   {method:'POST',body:JSON.stringify(unknown?{unknown:true}:{ean_edi:ean_edi,name:name})});
   await loadAsk();await askBadgeRefresh()}catch(e){alert(e.message||'chyba')}}
+async function answerGenericIt(qid,choice){try{await api('/api/orders/question/'+qid+'/answer',
+  {method:'POST',body:JSON.stringify({choice:choice})});await loadAsk();await askBadgeRefresh()}
+  catch(e){alert(e.message||'chyba')}}
 async function askBadgeRefresh(){try{const d=await api('/api/orders/questions');
   const b=document.getElementById('askBadge');b.textContent=d.items.length?String(d.items.length):'';
   b.style.color='#d29922'}catch(e){}}
@@ -1284,6 +1354,26 @@ function searchBox(q){
   if(inp.value.trim().length>=2)run(inp.value.trim());
   return wrap;
 }
+// #164: ONE generic card for every kind BEYOND item/customer (mail/date/line) — each
+// candidate button posts {"choice": <value>} through the SAME dispatch endpoint, plus a
+// universal "Neviem" escape that posts {"choice":"unknown"} (stays open, never silent).
+const GENERIC_TITLE={mail:'Je to vôbec objednávka?',date:'Ktorý deň dodávky platí?',
+  line:'Platí ešte táto položka?'};
+function genericQuestionCard(q){
+  const c=el('div','q');
+  c.appendChild(el('div','who',GENERIC_TITLE[q.kind]||q.kind));
+  c.appendChild(el('div','w',q.wording||''));
+  c.appendChild(el('div','why',q.reason||''));
+  for(const opt of (q.candidates||[])){
+    const b=el('button',null,opt.label||opt.value);
+    b.onclick=()=>answerGeneric(q.id,opt.value);c.appendChild(b)}
+  const nb=el('button',null,'Neviem');
+  nb.style.borderColor='#d0d7de';nb.style.background='#f6f8fa';nb.style.color='#57606a';
+  nb.onclick=()=>answerGeneric(q.id,'unknown');c.appendChild(nb);
+  return c}
+async function answerGeneric(qid,choice){try{await api('/api/orders/question/'+qid+'/answer',
+  {method:'POST',body:JSON.stringify({choice:choice})});await load()}
+  catch(e){alert(e.message||'chyba')}}
 // #159: "who is this customer?" candidates render as name + address (+ a ✓ badge when
 // the ranking already found the address in the mail), plus a "neviem, kto to je" escape.
 function customerQuestionCard(q){
@@ -1314,6 +1404,8 @@ async function load(){const mine=++render;let d,t;
   if(!d.items.length)W.appendChild(el('div','empty','Nič nečaká. Ďakujem!'));
   for(const q of d.items){
     if(q.kind==='customer'){W.appendChild(customerQuestionCard(q));continue}
+    if(q.kind==='mail'||q.kind==='date'||q.kind==='line'){
+      W.appendChild(genericQuestionCard(q));continue}
     const c=el('div','q');
     c.appendChild(el('div','who',(q.customer_name||q.customer_ean)+(q.delivery_date?' · na '+q.delivery_date:'')));
     c.appendChild(el('div','w',q.wording+(q.quantity?'  —  '+q.quantity+' '+(q.unit||'ks'):'')));

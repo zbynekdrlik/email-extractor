@@ -255,8 +255,21 @@ def test_two_different_unresolved_senders_are_asked_separately(pg):
     assert len(teach.open_questions(pg)) == 2
 
 
-def test_asking_with_no_sender_address_at_all_returns_none(pg):
-    assert _ask_customer(pg, sender_email="") is None
+def test_asking_with_no_sender_address_at_all_falls_back_to_a_per_message_key(pg):
+    """#164 row 4: a blank sender address used to make `ask_customer` refuse outright
+    (`None`), which was `pipeline._run`'s "no sender address to even key a question on"
+    dead end — the order shipped/rejected with NOBODY ever able to answer. Now it falls
+    back to a synthetic per-message key (`cust:<message_id>`) so the warehouse can still
+    be asked and the order can still be HELD for an answer."""
+    qid = _ask_customer(pg, sender_email="")
+    assert qid is not None
+    q = teach.get(pg, qid)
+    assert q["kind"] == "customer" and q["status"] == "open"
+    # A second call for the SAME message reuses the same synthetic key (idempotent retry).
+    assert _ask_customer(pg, sender_email="", message_id="m1") == qid
+    # A DIFFERENT message with no address gets its OWN question, never collapsed together.
+    other = _ask_customer(pg, sender_email="", message_id="m2")
+    assert other != qid
 
 
 def test_two_addresses_differing_only_by_punctuation_are_never_deduped_together(pg):
