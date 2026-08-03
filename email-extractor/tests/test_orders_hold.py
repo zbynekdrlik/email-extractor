@@ -489,7 +489,8 @@ def test_answering_the_customer_re_asks_a_still_ambiguous_item_instead_of_shippi
     rec = Recorder()
     released = hold.release_for_question(pg, _cfg(), qid, upload=rec.upload, post=rec.post)
 
-    assert released == [], "still ambiguous — must not ship, must not report a release"
+    assert len(released) == 1 and released[0]["status"] == "held", \
+        "still ambiguous — must not ship (a 'held' result, never 'ok'/'partial')"
     assert rec.uploads == [], "never ship a line that is still genuinely unresolved"
     row = hold.get(pg, hid)
     assert row["status"] == "held", "stays held on the fresh item question"
