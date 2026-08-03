@@ -222,9 +222,10 @@ def _ask_still_ambiguous(conn, row: dict, decisions: list, still_asking: list,
                          _recalled_cache: dict | None = None) -> tuple[list[int], list[str]]:
     """Raise a fresh warehouse question for every decision STILL in `ASK_THE_WAREHOUSE`
     after a real-catalog `_redecide` (#162) — mirrors `pipeline._run`'s own per-item ask
-    loop exactly (same `teach.ask`/`match.candidates`/`match.candidates_for_question`
-    machinery), just outside the `_run` per-email loop and spending no model call (the
-    first pass already paid for the stored `Decision`).
+    loop exactly (same `teach.ask`/`match.candidates`/`match.candidates_for_question`/
+    `match.plausible_candidates` machinery, #160), just outside the `_run` per-email
+    loop and spending no model call (the first pass already paid for the stored
+    `Decision`).
 
     Returns `(new_question_ids, unaskable_item_names)` — `unaskable` is populated only
     in the near-impossible case `teach.ask` itself refuses (e.g. a blank wording key);

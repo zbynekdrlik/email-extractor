@@ -54,9 +54,10 @@ UNIQUE_MAX_RATIO = 3
 CANDIDATES = 25
 # #160: the score `candidates()` already computes per card is what tells a genuinely
 # related alternative (a name/alias substring hit, or a known SYNONYMS family match —
-# both land >= 60) apart from a coincidental single shared word (a generic style
-# adjective like "kváskový" shared by every sourdough-style product regardless of
-# category — lands ~15). Below this floor a card is noise, not an alternative.
+# both land >= 60 on real catalog data) apart from a coincidental single shared word
+# (a generic style adjective like "kváskový" shared by every sourdough-style product
+# regardless of category — lands ~15). 50 sits with headroom below the genuine-match
+# range and above the coincidental one; below it a card is noise, not an alternative.
 PLAUSIBLE_CANDIDATE_SCORE = 50.0
 CUSTOMER_STOPWORDS = {"as", "sro", "spol", "ltd", "pobocka", "prevadzka", "sklad", "stores"}
 SYNONYMS = [
