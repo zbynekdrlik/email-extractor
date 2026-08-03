@@ -12,6 +12,7 @@ order in ORION (#51), so it is made impossible rather than unlikely.
 import json
 from pathlib import Path
 
+from app import db
 from app.orders import edi
 
 FIXTURE = json.loads(
@@ -122,6 +123,80 @@ def test_a_failed_upload_is_released_so_it_can_be_retried(pg):
     assert edi.claim_send(pg, "111", "04.08.2026", built.content, "f1.txt") is True
     edi.release_send(pg, "111", "04.08.2026", built.content)
     assert edi.claim_send(pg, "111", "04.08.2026", built.content, "f1.txt") is True
+
+
+# --- #153: claim vs. confirmed upload — an orphaned claim must be reclaimed, never a
+# silent permanent skip. 13 real orders were lost this way on 2026-08-03 (a crash between
+# `claim_send` and `upload` that never reached `release_send`). ---
+
+def test_an_orphaned_stale_claim_is_reclaimed_not_silently_skipped(pg):
+    """The run that made this claim died before ever uploading or releasing it (killed
+    process, restart, anything outside the `except` around `upload()`). The old code
+    read the surviving row as "already sent" and lost the order forever. A claim older
+    than the freshness window and never confirmed must be reclaimable."""
+    built = edi.build(**FIXTURE[0]["input"])
+    assert edi.claim_send(pg, "153", "04.08.2026", built.content, "f1.txt") is True
+    # simulate the run dying: nothing released, nothing confirmed, just old
+    pg.execute("UPDATE edi_sent SET sent_at = now() - interval '11 minutes' "
+              "WHERE customer_ean = '153'")
+    assert edi.claim_send(pg, "153", "04.08.2026", built.content, "f2.txt") is True, \
+        "a stale, never-confirmed claim must be reclaimed — never silently skipped"
+    assert pg.execute(
+        "SELECT count(*) FROM edi_sent WHERE customer_ean = '153'").fetchone()[0] == 1, \
+        "reclaim updates the SAME row — never inserts a duplicate"
+    assert pg.execute(
+        "SELECT filename FROM edi_sent WHERE customer_ean = '153'").fetchone()[0] == "f2.txt"
+
+
+def test_a_confirmed_upload_still_blocks_a_duplicate_no_matter_how_old(pg):
+    """A CONFIRMED send is a real, physical delivery — it must block a duplicate
+    forever, unlike a bare claim which is only provisional until confirmed."""
+    built = edi.build(**FIXTURE[0]["input"])
+    assert edi.claim_send(pg, "154", "04.08.2026", built.content, "f1.txt") is True
+    edi.confirm_sent(pg, "154", "04.08.2026", built.content)
+    pg.execute("UPDATE edi_sent SET sent_at = now() - interval '1 year' "
+              "WHERE customer_ean = '154'")
+    assert edi.claim_send(pg, "154", "04.08.2026", built.content, "f2.txt") is False, \
+        "a CONFIRMED upload blocks a duplicate regardless of age"
+
+
+def test_a_fresh_unconfirmed_claim_still_blocks_a_concurrent_duplicate(pg):
+    """Inside the freshness window another worker may genuinely be mid-upload right
+    now — reclaiming it would race a real upload in flight."""
+    built = edi.build(**FIXTURE[0]["input"])
+    assert edi.claim_send(pg, "155", "04.08.2026", built.content, "f1.txt") is True
+    assert edi.claim_send(pg, "155", "04.08.2026", built.content, "f2.txt") is False, \
+        "a fresh, still-unconfirmed claim must not be reclaimed"
+
+
+def test_confirm_sent_stamps_the_upload_so_it_is_never_reclaimed(pg):
+    built = edi.build(**FIXTURE[0]["input"])
+    edi.claim_send(pg, "156", "04.08.2026", built.content, "f1.txt")
+    row = pg.execute(
+        "SELECT uploaded_at FROM edi_sent WHERE customer_ean = '156'").fetchone()
+    assert row[0] is None, "claimed but not yet confirmed"
+    edi.confirm_sent(pg, "156", "04.08.2026", built.content)
+    row = pg.execute(
+        "SELECT uploaded_at FROM edi_sent WHERE customer_ean = '156'").fetchone()
+    assert row[0] is not None
+
+
+def test_pre_migration_rows_are_backfilled_as_confirmed_not_left_as_orphans(pg):
+    """Every row that existed before `uploaded_at` was added was written by the OLD
+    one-phase code (claim immediately followed by upload) — it must become CONFIRMED
+    the moment the column is added, never a 'reclaimable orphan' that would trigger a
+    duplicate delivery once the 10-minute window passes."""
+    pg.execute("ALTER TABLE edi_sent DROP COLUMN uploaded_at")
+    pg.execute(
+        """INSERT INTO edi_sent (customer_ean, delivery_date, content_sha256, filename,
+                                 sent_at)
+           VALUES ('157', '04.08.2026', 'deadbeef', 'historical.txt',
+                   now() - interval '30 days')""")
+    db.init_schema(pg)   # re-run the migration: the column comes back, and so does the backfill
+    row = pg.execute(
+        "SELECT uploaded_at, sent_at FROM edi_sent WHERE customer_ean = '157'").fetchone()
+    assert row[0] is not None and row[0] == row[1], \
+        "a pre-existing row must be backfilled as confirmed, not left NULL/orphaned"
 
 
 def test_the_document_date_is_injectable_so_parity_does_not_expire_overnight():
