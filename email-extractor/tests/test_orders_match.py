@@ -553,3 +553,117 @@ def test_a_catalog_certain_match_beats_a_stale_global_answer():
 def test_with_no_global_teaching_nothing_changes():
     assert match.decide_without_model("Twister", CATALOG) is None
     assert match.decide_without_model("Twister", CATALOG, global_recalled=None) is None
+
+
+# --- #157: an alias 'names the customer' note must not confirm a wrong guess -----------
+
+# The real CÉDER catalog slice from the incident: card 192 carries a human alias note
+# naming the customer (a general "this customer buys this card" fact), while the two
+# cards the customer's four-day order actually needed (253, 239) carry no such note at
+# all. Card 284 mirrors the SAME alias mechanism firing CORRECTLY for the same customer
+# on a different card, on the same day — it must keep working.
+CEDER_CATALOG = [
+    {"gtin": "192", "name": "Chlieb tradičny kváskový pšenično-ražný 700gr",
+     "alias": "objednava Caffetteria Tazza, CÉDER"},
+    {"gtin": "253", "name": "Olivovo-paradajkový kváskový  chlieb 500g", "alias": ""},
+    {"gtin": "239", "name": "Multicereálny kváskový chlieb 500g", "alias": ""},
+    {"gtin": "284", "name": "Vianočka 400g", "alias": "objednava galdi caffe, céder"},
+]
+
+
+def test_the_alias_customer_note_does_not_confirm_a_wording_a_different_card_matches_better():
+    """2026-08-03, CÉDER (#157): 'Chlieb olivovo paradajkový' shares its distinctive words
+    ('olivovo', 'paradajkový') with card 253's OWN name and none at all with card 192 — so
+    card 192's 'objednava ... CÉDER' alias note proves CÉDER buys card 192 for SOME
+    wording, never that THIS line is it. The line must NOT settle as alias_customer; it
+    must fall through to the ordinary ladder (here: the model's own borderline score) and
+    end up asking the warehouse, not silently shipping the wrong card."""
+    d = _decide("Chlieb olivovo paradajkový", llm={"gtin": "192", "confidence": 0.75},
+                customer="CÉDER", catalog=CEDER_CATALOG)
+    # The proposed gtin from the model is still carried (so the warehouse question can
+    # offer it as a candidate, per candidates_for_question) — what must change is that it
+    # no longer settles silently as "alias_customer": it is flagged for review instead.
+    assert d.rule != "alias_customer"
+    assert d.review is True
+
+
+def test_the_misled_alias_line_lands_on_a_rule_the_pipeline_asks_the_warehouse_about():
+    """Same incident, checked against the actual set the pipeline asks about
+    (`ASK_THE_WAREHOUSE` in pipeline.py) so this test breaks if that set is ever
+    renamed without updating the guard's expectation."""
+    from app.orders.pipeline import ASK_THE_WAREHOUSE
+    d = _decide("Chlieb olivovo paradajkový", llm={"gtin": "192", "confidence": 0.75},
+                customer="CÉDER", catalog=CEDER_CATALOG)
+    assert d.rule in ASK_THE_WAREHOUSE
+    assert d.review is True
+
+
+def test_a_second_mismatched_wording_from_the_same_incident_is_also_rejected():
+    """The second wrongly-merged line from the same order — 'Chlieb multicereálny' shares
+    nothing with card 192 either, and matches card 239 instead."""
+    d = _decide("Chlieb multicereálny", llm={"gtin": "192", "confidence": 0.72},
+                customer="CÉDER", catalog=CEDER_CATALOG)
+    assert d.rule != "alias_customer"
+    assert d.review is True
+
+
+def test_the_alias_customer_note_still_confirms_when_no_other_card_matches_better():
+    """The SAME mechanism must keep working when it is right: 'Vianočka 400g' matches
+    card 284's own name, and no other CÉDER card matches it better, so the alias note
+    naming CÉDER still confirms it — exactly as it did live on 2026-08-03."""
+    d = _decide("Vianočka 400g", llm={"gtin": "284", "confidence": 0.6},
+                customer="CÉDER", catalog=CEDER_CATALOG)
+    assert (d.gtin, d.rule, d.review) == ("284", "alias_customer", False)
+
+
+def test_the_correctly_matched_wording_in_the_same_incident_is_unaffected():
+    """The line the model got right ('Chlieb pšenično ražný' -> card 192, which literally
+    IS 'pšenično-ražný' in the card's own name) must still resolve to 192 — the guard only
+    blocks the note when a DIFFERENT card matches the wording better, not this one."""
+    d = _decide("Chlieb pšenično ražný", llm={"gtin": "192", "confidence": 0.8},
+                customer="CÉDER", catalog=CEDER_CATALOG)
+    assert d.gtin == "192"
+
+
+# --- #157: merge_same_card must not sum materially different wordings -----------------
+
+def _dec(item_name, gtin, card, quantity, rule="llm_sure", confidence=0.9, unit="ks"):
+    return match.Decision(item_name=item_name, gtin=gtin, card=card, confidence=confidence,
+                          rule=rule, note="", review=False, trace={}, quantity=quantity,
+                          unit=unit)
+
+
+def test_merge_same_card_still_sums_identical_wordings():
+    """The ordinary case this function exists for (#81.1) must keep working: the same
+    wording, resolved to the same card on two different lines, is one EDI line."""
+    a = _dec("Rožok 70g", "G70", "Rožok kváskový 70g", 3)
+    b = _dec("Rožok 70g", "G70", "Rožok kváskový 70g", 2)
+    out = match.merge_same_card([a, b])
+    assert len(out) == 1
+    assert out[0].quantity == 5
+
+
+def test_merge_same_card_does_not_sum_materially_different_wordings():
+    """2026-08-03, CÉDER (#157): three different customer wordings all resolved to card
+    192 and were summed into one EDI line of 5 pieces, silently dropping cards 253 and
+    239. Materially different wordings landing on the same gtin must stay separate lines
+    with their OWN quantities, not be collapsed into one."""
+    a = _dec("Chlieb olivovo paradajkový", "192", "Chlieb tradičny ... 700gr", 1)
+    b = _dec("Chlieb multicereálny", "192", "Chlieb tradičny ... 700gr", 2)
+    c = _dec("Chlieb pšenično ražný", "192", "Chlieb tradičny ... 700gr", 2)
+    out = match.merge_same_card([a, b, c])
+    assert len(out) == 3
+    assert sorted(d.quantity for d in out) == [1, 2, 2]
+    assert sum(d.quantity for d in out) == 5
+
+
+def test_merge_same_card_keeps_a_materially_different_wording_as_its_own_bucket():
+    """A materially-different wording repeated on TWO lines still merges with itself —
+    only the mismatch against the FIRST wording is what must not sum."""
+    a = _dec("Chlieb olivovo paradajkový", "192", "x", 1)
+    b = _dec("Chlieb pšenično ražný", "192", "x", 2)
+    c = _dec("Chlieb pšenično ražný", "192", "x", 3)
+    out = match.merge_same_card([a, b, c])
+    assert len(out) == 2
+    by_qty = sorted(d.quantity for d in out)
+    assert by_qty == [1, 5]
