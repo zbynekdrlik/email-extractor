@@ -200,15 +200,20 @@ def test_no_address_hit_in_the_free_text_never_boosts_anyone():
     assert all(c["address_match"] is False for c in cands)
 
 
-def test_the_address_signal_never_replaces_asking_for_an_unmatched_sender():
-    """Never an auto-match key (#159) — this only orders the LIST shown to a human; the
-    caller still always asks. Proven at the pipeline level, but pinned here too: nothing
-    in this function decides anything on its own, it only returns a ranked list."""
+def test_the_address_signal_only_ranks_never_filters_or_decides():
+    """Never an auto-match key (#159) — this only ORDERS the list shown to a human; the
+    caller (pipeline.py) still always asks regardless of score. Pinned here as: even the
+    address-matched candidate's LOWER-scoring siblings stay in the returned list — the
+    function ranks, it never drops a candidate or narrows down to a single "decided"
+    answer just because one scored far higher (review finding on PR #161: the previous
+    version of this test only asserted `len(cands) > 1`, which is true even if the
+    function silently filtered — this checks the actual siblings survive by identity)."""
     cands = customer.candidates_for_question(
         FARMERIA, sender_email="zilina@farmeria.sk", sender_name="", company_name="",
         free_text=FARMERIA_MAIL_TEXT)
-    assert isinstance(cands, list) and len(cands) > 1, \
-        "ranking returns candidates to CHOOSE from, never a single decided answer"
+    eans = {c["ean_edi"] for c in cands}
+    assert eans == {"2000000000861", "2000000000864", "8589000020001"}, \
+        "all three candidates survive — none dropped just because one scored higher"
 
 
 def test_email_and_name_signals_still_work_without_any_address_hit():

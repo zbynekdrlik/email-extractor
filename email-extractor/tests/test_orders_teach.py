@@ -259,6 +259,20 @@ def test_asking_with_no_sender_address_at_all_returns_none(pg):
     assert _ask_customer(pg, sender_email="") is None
 
 
+def test_two_addresses_differing_only_by_punctuation_are_never_deduped_together(pg):
+    """Adversarial review finding on PR #161: the dedupe key used to reuse
+    `memory.item_key` — a FUZZY product-wording normalizer that folds '.', '-', '_', '@'
+    all to the same blank separator. Two DIFFERENT real senders whose addresses differ
+    only by that kind of punctuation must never collapse onto the SAME open question —
+    answering it for one would silently ship the OTHER sender's order under the wrong
+    customer's identity too."""
+    a = _ask_customer(pg, sender_email="a.b@x.com")
+    b = _ask_customer(pg, sender_email="a-b@x.com")
+    c = _ask_customer(pg, sender_email="a_b@x.com")
+    assert len({a, b, c}) == 3, "three genuinely different addresses, three questions"
+    assert len(teach.open_questions(pg)) == 3
+
+
 def test_an_item_question_and_a_customer_question_never_collide(pg):
     """A plain item question always carries a REAL customer_ean; a customer question is
     always keyed on customer_ean='' — but both dedupe on (customer_ean, item_key), so this
@@ -306,6 +320,46 @@ def test_answer_customer_refuses_an_item_kind_question(pg):
     qid = _ask(pg)
     with pytest.raises(teach.NotACandidate):
         teach.answer_customer(pg, qid, ean_edi="SLI50", name="x", by="sklad")
+
+
+def test_undo_on_a_customer_question_also_reverts_the_remembered_email(pg):
+    """Adversarial review finding on PR #161: `undo` only ever cleared `item_memory` — a
+    customer-kind question's real pick is remembered entirely OUTSIDE `teach.answer_
+    customer` (httpapi.py's `snapshot.remember_customer_email`), so undo left the wrong
+    sender-address binding live forever: every future order from that address would keep
+    silently auto-resolving to the WRONG customer via `customer.resolve`'s `exact_email`
+    rule at confidence 0.99, with no further review."""
+    from app.orders import snapshot
+
+    snapshot.import_snapshot(
+        pg, "GTIN,Názov,doplnok\nG1,Rožok,\n",
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,E-mail\n"
+        "Potraviny nie otraviny Žilina,2000000000861,Žilina,na bráne 4,eva@x.sk\n")
+    qid = _ask_customer(pg)
+    teach.answer_customer(pg, qid, ean_edi="2000000000861",
+                          name="Potraviny nie otraviny Žilina", by="sklad")
+    # exactly what httpapi.py's answer flow does right after teach.answer_customer
+    snapshot.remember_customer_email(pg, "2000000000861", "zilina@farmeria.sk")
+    snapshot.rebuild_from_overrides(pg)
+    before = next(r for r in snapshot.customers_for_management(pg)
+                 if r["ean_edi"] == "2000000000861")
+    assert "zilina@farmeria.sk" in before["emails"]
+
+    teach.undo(pg, qid)
+    assert teach.get(pg, qid)["status"] == "open"
+    after = next(r for r in snapshot.customers_for_management(pg)
+                if r["ean_edi"] == "2000000000861")
+    assert "zilina@farmeria.sk" not in after["emails"], \
+        "undo must revert the remembered address, or every future order keeps mis-resolving"
+    assert "eva@x.sk" in after["emails"], "the customer's ORIGINAL address must survive"
+
+
+def test_undo_on_an_unknown_customer_answer_is_a_harmless_reopen(pg):
+    """'neviem' never remembered anything — undoing it must not error, just reopen."""
+    qid = _ask_customer(pg)
+    teach.answer_customer(pg, qid, ean_edi="", name="", by="sklad")
+    q = teach.undo(pg, qid)
+    assert q["status"] == "open"
 
 
 # --- what the engine does with it ----------------------------------------

@@ -420,3 +420,28 @@ def test_releasing_an_unknown_customer_answer_never_ships_but_becomes_visible(pg
     # the message is finally done — never left unprocessed forever
     assert pg.execute(
         "SELECT processed FROM messages WHERE message_id='m1'").fetchone() == (True,)
+
+
+def test_the_deadline_sweep_never_ships_a_still_unresolved_customer(pg, env):
+    """Adversarial review finding on PR #161: `_do_release` used to reconstruct a
+    `Matched` straight from `held_orders.customer_ean`/`customer_name` unconditionally —
+    a `Matched` instance is ALWAYS truthy even with `ean_edi=""`, so `_ship_one`'s
+    `if not matched:` guard never caught a still-unresolved customer reaching the
+    deadline unanswered. Left unfixed, the order would ship to ORION with a blank
+    customer EAN and a "Zakaznik" placeholder store name — exactly the wrong-customer-
+    ship class of incident #159 exists to prevent, just relocated to the deadline sweep.
+    It must instead become the SAME visible 'review' outcome an explicit 'neviem, kto to
+    je' answer already gets — never shipped, never silently ships to nobody."""
+    qid, hid = _hold_unmatched_customer(pg, env)
+    rec = Recorder()
+    released = hold.release_due(pg, _cfg(), upload=rec.upload, post=rec.post,
+                                today="2026-08-04")   # the delivery date itself
+    assert len(released) == 1 and released[0]["status"] == "review"
+    assert rec.uploads == [], "must never ship to ORION with no real customer"
+    row = pg.execute(
+        "SELECT status, customer_ean FROM held_orders WHERE id=%s", (hid,)).fetchone()
+    assert row == ("released", ""), "stays released, customer never fabricated"
+    assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 0
+    # the customer question itself is untouched by the deadline sweep — still open,
+    # so a late answer (or a human reading /otazky) can still resolve it
+    assert teach.get(pg, qid)["status"] == "open"
