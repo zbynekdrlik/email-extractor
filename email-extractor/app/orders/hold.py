@@ -142,7 +142,7 @@ def _current_catalog(conn) -> list[dict]:
 
 
 def _redecide(conn, customer_ean: str, decisions: list, as_of: str = "",
-             catalog: list[dict] | None = None) -> list:
+             catalog: list[dict] | None = None, _recalled_cache: dict | None = None) -> list:
     """Give every stored line one more chance against FRESH memory (#93) AND the REAL
     catalog (#162), without another LLM call.
 
@@ -169,17 +169,29 @@ def _redecide(conn, customer_ean: str, decisions: list, as_of: str = "",
     answer (`memory.resolve`'s `human` rows) is exempt from `as_of` regardless — see
     `memory.resolve`'s own docstring — so this never blocks the very answer that triggered
     the release.
+
+    `_recalled_cache` (#162 review finding) is an internal `{item_name: Recalled|None}`
+    memo, keyed by `item_name` (safe: `memory.resolve` depends only on `customer_ean` +
+    `item_name` + `as_of`, all fixed for one call) — pass the SAME dict a caller also
+    hands `_ask_still_ambiguous` and neither ever re-fetches a wording the other already
+    looked up. `None` (the default) means "no caller wants to share the cache" — an
+    ordinary local dict is used and simply discarded.
     """
     from . import memory
     from .match import decide_without_model, merge_same_card
 
     if catalog is None:
         catalog = _current_catalog(conn)
+    cache = {} if _recalled_cache is None else _recalled_cache
 
     changed = False
     out = []
     for d in decisions:
-        recalled = memory.resolve(conn, customer_ean, d.item_name, as_of=as_of)
+        if d.item_name in cache:
+            recalled = cache[d.item_name]
+        else:
+            recalled = memory.resolve(conn, customer_ean, d.item_name, as_of=as_of)
+            cache[d.item_name] = recalled
         global_recalled = memory.resolve_global(conn, d.item_name)
         fresh = decide_without_model(d.item_name, catalog, recalled=recalled,
                                      global_recalled=global_recalled)
@@ -193,7 +205,8 @@ def _redecide(conn, customer_ean: str, decisions: list, as_of: str = "",
 
 
 def _ask_still_ambiguous(conn, row: dict, decisions: list, still_asking: list,
-                         catalog: list[dict], as_of: str) -> tuple[list[int], list[str]]:
+                         catalog: list[dict], as_of: str,
+                         _recalled_cache: dict | None = None) -> tuple[list[int], list[str]]:
     """Raise a fresh warehouse question for every decision STILL in `ASK_THE_WAREHOUSE`
     after a real-catalog `_redecide` (#162) — mirrors `pipeline._run`'s own per-item ask
     loop exactly (same `teach.ask`/`match.candidates`/`match.candidates_for_question`
@@ -204,13 +217,22 @@ def _ask_still_ambiguous(conn, row: dict, decisions: list, still_asking: list,
     in the near-impossible case `teach.ask` itself refuses (e.g. a blank wording key);
     never silently drop those either — the caller surfaces them, per #162's own
     constraint 4.
+
+    `_recalled_cache`: see `_redecide`'s docstring — pass the SAME dict `_redecide` was
+    given for this same release, so a `still_asking` line (which `_redecide` already
+    looked up moments earlier) never pays for `memory.resolve` twice.
     """
     from . import match, memory, teach
 
+    cache = {} if _recalled_cache is None else _recalled_cache
     new_qids: list[int] = []
     unaskable: list[str] = []
     for d in still_asking:
-        recalled = memory.resolve(conn, row["customer_ean"], d.item_name, as_of=as_of)
+        if d.item_name in cache:
+            recalled = cache[d.item_name]
+        else:
+            recalled = memory.resolve(conn, row["customer_ean"], d.item_name, as_of=as_of)
+            cache[d.item_name] = recalled
         item_cands = match.candidates(d.item_name, catalog, customer_name=row["customer_name"],
                                       memory_gtin=recalled.gtin if recalled else "")
         ask_cands = match.candidates_for_question(item_cands, catalog, d)
@@ -265,6 +287,13 @@ def _ship(conn, cfg, row: dict, upload, post, redecide: bool,
                                    confidence=1.0, rule="held_release", note="")
     decisions = _load_decisions(row["decisions"])
     if redecide:
+        # #162 review finding: every CURRENT call site now passes `redecide=False` —
+        # `_release_locked` redecides itself (needs the decided rules BEFORE deciding
+        # whether to ship or ask again, which this flag alone cannot express) and
+        # `_do_release`/`release_due` never redecides at all (the deadline sweep ships
+        # the ORIGINALLY stored decisions, unchanged, by design). Kept as a real,
+        # working parameter rather than removed — a future direct caller (or a test
+        # proving `_ship` redecides in isolation) can still ask for it.
         decisions = _redecide(conn, row["customer_ean"], decisions, as_of=as_of)
 
     return _ship_one(conn, cfg, {"message_id": row["message_id"]}, row["order"], matched,
@@ -393,6 +422,17 @@ def _release_locked(conn, cfg, hid: int, upload, post) -> dict | None:
     `tests/test_api.py::test_answering_over_http_commits_the_ledger_even_if_something_
     after_upload_fails` pins (an exception thrown AFTER a successful upload must leave the
     row 'held' so a retry can happen).
+
+    #162: when a still-ambiguous line needs a fresh question, `teach.ask`'s `INSERT`
+    below runs on `conn` (autocommit — durable the instant it is written), and the
+    `held_orders.question_ids`/`decisions_json` write that RECORDS it runs on `tx`
+    (durable only once this whole `with tx:` block commits) — the SAME `conn`-durable-
+    now vs `tx`-durable-at-block-end split this docstring already describes for the ship
+    path above. A crash between the two would leave an orphan `order_questions` row not
+    yet referenced by any `held_orders.question_ids` — harmless and self-healing:
+    `teach.ask`'s own `ON CONFLICT (customer_ean, item_key) WHERE status = 'open' DO
+    NOTHING` + existing-id fallback means the NEXT release attempt for this row re-asks
+    the same wording and gets back the SAME question id, never a duplicate.
     """
     with psycopg.connect(cfg.pg_dsn) as tx:
         locked = tx.execute(
@@ -410,8 +450,13 @@ def _release_locked(conn, cfg, hid: int, upload, post) -> dict | None:
             return None
         as_of = str(_db_today(conn))
         catalog = _current_catalog(conn)
+        # Shared between `_redecide` and `_ask_still_ambiguous` below (#162 review
+        # finding) — a `still_asking` line's `memory.resolve` was already looked up by
+        # `_redecide` a few lines earlier; the SAME dict lets `_ask_still_ambiguous`
+        # reuse it instead of paying for the identical lookup twice.
+        recalled_cache: dict = {}
         decisions = _redecide(conn, row["customer_ean"], _load_decisions(row["decisions"]),
-                              as_of=as_of, catalog=catalog)
+                              as_of=as_of, catalog=catalog, _recalled_cache=recalled_cache)
 
         # #162: a customer-unknown hold never got a chance to ask about its ambiguous
         # items on the first pass (the whole point of ASK_THE_WAREHOUSE gating on
@@ -427,7 +472,8 @@ def _release_locked(conn, cfg, hid: int, upload, post) -> dict | None:
         still_asking = [d for d in decisions if d.rule in ASK_THE_WAREHOUSE]
         if still_asking:
             new_qids, unaskable = _ask_still_ambiguous(conn, row, decisions, still_asking,
-                                                        catalog, as_of)
+                                                        catalog, as_of,
+                                                        _recalled_cache=recalled_cache)
             all_qids = list(dict.fromkeys(list(locked[0] or []) + new_qids))
             tx.execute(
                 """UPDATE held_orders SET question_ids = %s, decisions_json = %s

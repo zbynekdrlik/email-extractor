@@ -223,14 +223,24 @@ again. That is the point: a changed prompt has not been measured until it has be
   top-level `from . import pipeline` in `hold.py` would deadlock the import (whichever module
   loads first hits the other's not-yet-defined name). Keep this pattern for any future
   order-lifecycle module that needs to call back into the pipeline's shipping step.
-- **A held order releases through `_ship_one` unchanged — `hold.release_for_question` only
-  re-derives the DECISIONS first**, via `match.decide_without_model(item_name, [], ...)`
-  called with an EMPTY catalog. That's deliberate, not a shortcut: the only rungs that can
-  fire post-hold are `human_taught`/`global_taught` (this order's OWN wording, just
-  answered) — those need no catalog at all — so passing `[]` avoids persisting/reloading the
-  catalog snapshot the order was originally matched against, and is safe to run over EVERY
-  stored decision (not just the pending ones) because a rung that finds nothing simply
-  returns `None` and the original decision is kept.
+- **A held order releases through `_ship_one` unchanged — `hold.release_for_question`
+  re-derives the DECISIONS first via `hold._redecide`, against the REAL current catalog
+  snapshot (#162, `hold._current_catalog`), not an empty one.** Earlier (pre-#162) this
+  passed `decide_without_model(item_name, [], ...)` an EMPTY catalog — safe for the
+  already-known-customer item-hold path, where the only rungs that could ever fire
+  post-hold were `human_taught`/`global_taught` (every genuinely ambiguous line already
+  had its own tracked, now-answered question, so no catalog rung was ever needed). That
+  assumption does NOT hold for a customer-unknown hold (#159): no item question was ever
+  raised on the first pass, so a still-unmatched line's only free chance to resolve is
+  the real catalog (`catalog_name`/`alias_exact`/`history_sure`) plus this now-known
+  customer's own memory. `_release_locked` then checks every redecided decision's rule
+  against `pipeline.ASK_THE_WAREHOUSE` (lazy-imported per the pattern above): anything
+  STILL ambiguous gets a FRESH `teach.ask` question and the row stays `held` a second
+  time — it is never shipped with the line silently dropped. Safe to redecide EVERY
+  stored decision, not just the pending ones, because a rung that finds nothing simply
+  returns `None` and the original decision is kept. See `hold._redecide`'s own docstring
+  for the full detail (including the `_recalled_cache` sharing with
+  `hold._ask_still_ambiguous`).
 - **A `httpapi.py` route that pairs an external side effect (upload/HTTP-post) with its own
   DB "claim" write (the `edi_sent` ledger) must run that pair on an AUTOCOMMIT connection
   (`_db()`), never inside another route's `_db_tx()` transaction (review finding, #93,

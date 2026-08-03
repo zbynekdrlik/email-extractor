@@ -478,6 +478,79 @@ def _hold_unmatched_customer_with_ambiguous_item(pg, env):
     return qid, hid
 
 
+def _hold_unmatched_customer_with_two_ambiguous_items(pg, env):
+    """Same shape, but TWO independently ambiguous items — "torta" (the catalog's own
+    genuine TOR/TOR2 ambiguity) and "neznáma pochúťka" (no catalog card matches it at
+    all). Exercises the interaction the fix itself introduces: `_ask_still_ambiguous`
+    can raise MORE THAN ONE fresh question for the SAME held row in one redecide, and
+    `_release_locked` unions them into `question_ids` — review finding on PR #165."""
+    from app.orders import teach
+    from app.orders.match import Decision
+
+    qid = teach.ask_customer(
+        pg, message_id="m1", sender_email="zilina@farmeria.sk",
+        candidates=[{"ean_edi": "2000000000001", "name": "Pekáreň Testovacia s.r.o.",
+                    "city": "Martin", "street": "Košútka 1", "address_match": True}],
+        delivery_date="04.08.2026",
+        context={"sender_email": "zilina@farmeria.sk", "sender_name": "Sklad",
+                "company_name": "", "delivery_address_guess": ""})
+    matched = customer.Matched(ean_edi="", name="", confidence=0.0, rule="unmatched", note="")
+    order = {"deliveryDate": "04.08.2026", "orderNumber": "", "store": "", "items": [
+        {"name": "torta", "quantity": 5, "unit": "ks"},
+        {"name": "neznáma pochúťka", "quantity": 2, "unit": "ks"}]}
+    decisions = [
+        Decision(item_name="torta", gtin=None, card="", confidence=0.1, rule="unmatched",
+                note="nič sa nezhoduje", review=False, trace={}, quantity=5, unit="ks"),
+        Decision(item_name="neznáma pochúťka", gtin=None, card="", confidence=0.1,
+                 rule="unmatched", note="nič sa nezhoduje", review=False, trace={},
+                 quantity=2, unit="ks"),
+    ]
+    hid = hold.place(pg, message_id="m1", matched=matched, order=order, decisions=decisions,
+                     extracted={"isChangeRequest": False, "unverified": [], "notes": ""},
+                     question_ids=[qid])
+    return qid, hid
+
+
+def test_two_fresh_item_questions_from_one_redecide_both_must_be_answered(pg, env):
+    """#162 review finding: `_ask_still_ambiguous` can raise MORE THAN ONE fresh question
+    in a single redecide. The held row must union both into `question_ids` and stay held
+    until EVERY one of them is answered — answering just one must not release it, exactly
+    like the pre-existing sibling-question guard for the already-known-customer path."""
+    qid, hid = _hold_unmatched_customer_with_two_ambiguous_items(pg, env)
+    teach.answer_customer(pg, qid, ean_edi="2000000000001",
+                          name="Pekáreň Testovacia s.r.o.", by="sklad")
+    hold.set_customer(pg, qid, "2000000000001", "Pekáreň Testovacia s.r.o.")
+    rec = Recorder()
+    released = hold.release_for_question(pg, _cfg(), qid, upload=rec.upload, post=rec.post)
+    assert len(released) == 1 and released[0]["status"] == "held"
+    assert rec.uploads == []
+
+    fresh_qs = {q["wording"]: q["id"] for q in teach.open_questions(pg)}
+    assert set(fresh_qs) == {"torta", "neznáma pochúťka"}
+    row = hold.get(pg, hid)
+    assert set(row["question_ids"]) >= set(fresh_qs.values()), \
+        "the held row must track BOTH fresh questions, not just one"
+
+    # answer only "torta" — the sibling "neznáma pochúťka" question is still open, so
+    # the order must stay held, exactly like the pre-existing sibling-question guard
+    teach.answer(pg, fresh_qs["torta"], gtin="TOR", card="Torta čokoládová", by="sklad")
+    released = hold.release_for_question(pg, _cfg(), fresh_qs["torta"], upload=rec.upload,
+                                         post=rec.post)
+    assert released == [], "a sibling item question is still open — must stay held"
+    assert rec.uploads == []
+    assert hold.get(pg, hid)["status"] == "held"
+
+    # answer the second — NOW it may finally ship, one document, both lines
+    teach.answer(pg, fresh_qs["neznáma pochúťka"], gtin="G50", card="Rožok štandart 50g",
+                by="sklad")
+    released = hold.release_for_question(pg, _cfg(), fresh_qs["neznáma pochúťka"],
+                                         upload=rec.upload, post=rec.post)
+    assert len(released) == 1 and released[0]["status"] == "ok"
+    assert len(rec.uploads) == 1
+    assert rec.uploads[0][1].count("LIN") == 2
+    assert hold.get(pg, hid)["status"] == "released"
+
+
 def test_answering_the_customer_re_asks_a_still_ambiguous_item_instead_of_shipping(pg, env):
     """The #162 gap: answering the customer question must NOT ship the order with the
     "torta" line silently dropped — it must raise a FRESH item question and hold the
