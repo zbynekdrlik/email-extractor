@@ -685,8 +685,10 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
 
     # #153: only NOW is the upload genuinely confirmed — never optimistically alongside
     # the claim. Until this runs, the claim stays reclaimable if this run dies before
-    # reaching it (see edi.claim_send's docstring).
-    edi.confirm_sent(conn, matched.ean_edi, delivery, built.content)
+    # reaching it (see edi.claim_send's docstring). confirm_sent retries internally
+    # (review finding, PR #176) since the document is already physically uploaded by
+    # this point — losing the confirmation write is worse than the retry's latency.
+    edi.confirm_sent(conn, matched.ean_edi, delivery, built.content, pg_dsn=cfg.pg_dsn)
     result["shipped"] = True
     for d in shipped_items:
         memory.remember(conn, matched.ean_edi, d.item_name, d.gtin, d.card,

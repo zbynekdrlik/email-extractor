@@ -13,9 +13,12 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
+
+import psycopg
 
 log = logging.getLogger("orders.edi")
 
@@ -197,8 +200,13 @@ def content_hash(content: str) -> str:
 
 
 # #153: how long a bare (unconfirmed) claim is trusted to mean "another worker may
-# genuinely be mid-upload right now". Mirrors db.CLAIM_STALE_MINUTES's role for the
-# messages.processing_at claim guard — same shape, different table.
+# genuinely be mid-upload right now". Plays the SAME role as db.CLAIM_STALE_MINUTES
+# does for the messages.processing_at claim guard — but is a DELIBERATELY SEPARATE
+# constant, not an import of that one: db.CLAIM_STALE_MINUTES exists to match an
+# EXTERNAL n8n dispatcher's own hardcoded re-claim window (n8n owns that number, not
+# this code), while this one is a purely internal Python-owned choice for a completely
+# different table. They currently share a value by coincidence, not by contract —
+# importing one into the other would wrongly couple two independent knobs.
 CLAIM_STALE_MINUTES = 10
 
 
@@ -239,15 +247,46 @@ def claim_send(conn, customer_ean: str, delivery_date: str, content: str,
     return row is not None
 
 
-def confirm_sent(conn, customer_ean: str, delivery_date: str, content: str) -> None:
+def confirm_sent(conn, customer_ean: str, delivery_date: str, content: str,
+                 pg_dsn: str = "") -> None:
     """Stamp the claim as a genuinely CONFIRMED upload — call this ONLY after the
     upload actually succeeded, never optimistically alongside the claim. Until this
-    runs, the claim stays reclaimable by `claim_send` once it goes stale (#153)."""
-    conn.execute(
-        """UPDATE edi_sent SET uploaded_at = now()
-            WHERE customer_ean = %s AND delivery_date = %s AND content_sha256 = %s""",
-        (str(customer_ean or ""), str(delivery_date or ""), content_hash(content)))
-    log.info("EDI confirmed sent for %s / %s", customer_ean, delivery_date)
+    runs, the claim stays reclaimable by `claim_send` once it goes stale (#153).
+
+    By the time this runs the document is ALREADY physically in ORION — losing this
+    one write is strictly worse than the few seconds a retry costs, because an
+    unconfirmed claim left behind would eventually go stale and `claim_send` would
+    reclaim it for a genuine SECOND upload (review finding, PR #176: this narrows that
+    residual window from "the whole upload" down to "this one UPDATE", not to zero).
+    Retries a few times; a `pg_dsn` lets it replace `conn` with a fresh connection
+    between attempts, since a dropped connection cannot simply be reused. If every
+    attempt still fails, this re-raises — the caller's own failure handling (retrying
+    the whole message later) then surfaces the problem loudly instead of silently
+    losing the confirmation.
+    """
+    ean = str(customer_ean or "")
+    delivery = str(delivery_date or "")
+    chash = content_hash(content)
+    stmt = ("UPDATE edi_sent SET uploaded_at = now() "
+            "WHERE customer_ean = %s AND delivery_date = %s AND content_sha256 = %s")
+    attempts = 4
+    for attempt in range(1, attempts + 1):
+        try:
+            conn.execute(stmt, (ean, delivery, chash))
+            log.info("EDI confirmed sent for %s / %s", customer_ean, delivery_date)
+            return
+        except Exception:
+            log.exception("confirm_sent attempt %d/%d failed for %s / %s — the "
+                          "document IS already uploaded, only the confirmation write "
+                          "failed so far", attempt, attempts, customer_ean, delivery_date)
+            if attempt == attempts:
+                raise
+            if pg_dsn:
+                try:
+                    conn = psycopg.connect(pg_dsn, autocommit=True)
+                except Exception:
+                    log.exception("reconnect for confirm_sent retry failed")
+            time.sleep(1)
 
 
 def release_send(conn, customer_ean: str, delivery_date: str, content: str) -> None:

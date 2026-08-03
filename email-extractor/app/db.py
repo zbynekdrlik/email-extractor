@@ -501,12 +501,27 @@ SCHEMA = [
     # duplicate upload this fix exists to prevent); too late could backfill — and
     # thereby hide — a genuinely new orphan created by the NEW two-phase code after
     # deploy. Tying the backfill to the column's own creation has neither failure mode.
+    #
+    # init_schema() is not ONLY called by main.py's single-process startup — the
+    # one-off admin CLI tools (backfill.py, alias_migration.py, eval_run.py,
+    # memory_import.py) call it too, from their own separate connections, and are
+    # documented as safe to run at any time (review finding, PR #176). Without the
+    # advisory lock below, two such callers could both pass the "column missing" check
+    # before either commits, race the ALTER, and the loser would crash on
+    # duplicate_column — or, worse, run its OWN backfill sometime AFTER the winner's
+    # migration already completed and real new activity started, silently confirming a
+    # genuinely fresh orphan. `pg_advisory_xact_lock` fully serializes every caller
+    # through this block (held only for the DO block's own implicit transaction, so it
+    # self-releases immediately under this autocommit connection) — the second caller
+    # then re-evaluates the IF and correctly finds the column already there.
     """
     DO $$
     BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('email-extractor:edi_sent.uploaded_at#153'));
         IF NOT EXISTS (
             SELECT 1 FROM information_schema.columns
-             WHERE table_name = 'edi_sent' AND column_name = 'uploaded_at'
+             WHERE table_schema = 'public' AND table_name = 'edi_sent'
+               AND column_name = 'uploaded_at'
         ) THEN
             ALTER TABLE edi_sent ADD COLUMN uploaded_at TIMESTAMPTZ;
             UPDATE edi_sent SET uploaded_at = sent_at WHERE uploaded_at IS NULL;
