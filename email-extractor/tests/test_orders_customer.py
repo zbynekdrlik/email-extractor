@@ -157,3 +157,72 @@ def test_without_a_block_header_a_shared_address_still_refuses_to_guess():
     assert customer.resolve(GT, sender_email="petra.durkosova@gazdovskytrh.sk",
                             sender_name="", company_name="",
                             llm={"ean_edi": "", "confidence": 0.2}) is None
+
+
+# --- #159: ranking candidates for the WAREHOUSE's "who is this?" question ------
+#
+# `candidates_for_question` is a SEPARATE function from `candidates()` above on purpose:
+# `candidates()` feeds the model's own prompt (`_customer_input`), and reordering or
+# rescoring it would change the exact text sent to the model — a corpus `llm-cache` miss.
+# This one only ever reaches a human's screen.
+
+FARMERIA = [
+    {"ean_edi": "2000000000861", "name": "Potraviny nie otraviny Žilina",
+     "emails": ["evakozakova9@gmail.com"], "city": "Žilina", "street": "na bráne 4",
+     "zip": "01001"},
+    {"ean_edi": "2000000000864", "name": "Potraviny nie otraviny Martin",
+     "emails": ["objednavky.pno.martin@gmail.com"], "city": "Martin",
+     "street": "Košútka 1", "zip": ""},
+    {"ean_edi": "8589000020001", "name": "TESCO STORES SR, a.s. — Ružinov",
+     "emails": ["faktury@tesco.com"], "city": "Bratislava", "street": "Cesta na Senec",
+     "zip": ""},
+]
+
+# The 2026-08-03 incident, verbatim: the sender is unknown to the table (a fresh gmail
+# address), but the delivery address in the mail's own text is the SAME street/city EAN
+# 2000000000861 is registered under — different case, and the mail also carries a PSČ the
+# candidate row does not.
+FARMERIA_MAIL_TEXT = "obj pekaova\n8 položiek\nNa bráne 4, 010 01 Žilina\ntermín 06.08.2026"
+
+
+def test_the_address_signal_ranks_the_right_customer_first_even_with_no_email_or_name_hit():
+    cands = customer.candidates_for_question(
+        FARMERIA, sender_email="zilina@farmeria.sk", sender_name="", company_name="",
+        free_text=FARMERIA_MAIL_TEXT)
+    assert cands[0]["ean_edi"] == "2000000000861"
+    assert cands[0]["address_match"] is True
+
+
+def test_no_address_hit_in_the_free_text_never_boosts_anyone():
+    cands = customer.candidates_for_question(
+        FARMERIA, sender_email="zilina@farmeria.sk", sender_name="", company_name="",
+        free_text="objednávka bez akejkoľvek adresy v texte")
+    assert all(c["address_match"] is False for c in cands)
+
+
+def test_the_address_signal_never_replaces_asking_for_an_unmatched_sender():
+    """Never an auto-match key (#159) — this only orders the LIST shown to a human; the
+    caller still always asks. Proven at the pipeline level, but pinned here too: nothing
+    in this function decides anything on its own, it only returns a ranked list."""
+    cands = customer.candidates_for_question(
+        FARMERIA, sender_email="zilina@farmeria.sk", sender_name="", company_name="",
+        free_text=FARMERIA_MAIL_TEXT)
+    assert isinstance(cands, list) and len(cands) > 1, \
+        "ranking returns candidates to CHOOSE from, never a single decided answer"
+
+
+def test_email_and_name_signals_still_work_without_any_address_hit():
+    """The existing `_score` signals (exact/domain e-mail, company/sender name) must
+    still be used — the address is an ADDITIONAL signal, not a replacement."""
+    cands = customer.candidates_for_question(
+        FARMERIA, sender_email="objednavky.pno.martin@gmail.com", sender_name="",
+        company_name="", free_text="")
+    assert cands[0]["ean_edi"] == "2000000000864"
+
+
+def test_guess_delivery_address_finds_the_line_carrying_a_postal_code():
+    assert customer.guess_delivery_address(FARMERIA_MAIL_TEXT) == "Na bráne 4, 010 01 Žilina"
+
+
+def test_guess_delivery_address_is_empty_when_no_postal_code_appears():
+    assert customer.guess_delivery_address("objednávka bez adresy") == ""

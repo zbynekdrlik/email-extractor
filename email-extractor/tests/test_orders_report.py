@@ -15,9 +15,9 @@ from app.orders import report
 
 
 def _order(status="ok", delivery_date="04.08.2026", item_count=2, missing_count=0,
-          reject_reason=""):
+          reject_reason="", change=False):
     return {"status": status, "delivery_date": delivery_date, "item_count": item_count,
-            "missing_count": missing_count, "reject_reason": reject_reason}
+            "missing_count": missing_count, "reject_reason": reject_reason, "change": change}
 
 
 # --- one message, the headline -------------------------------------------
@@ -73,23 +73,84 @@ def test_new_questions_get_the_link_even_when_every_order_shipped():
     assert "2" in html
 
 
-def test_a_review_or_error_order_gets_the_link():
+# --- #159: the link points at where something is REALLY waiting, never a generic bucket ---
+
+def test_a_plain_review_reason_is_named_but_gets_no_sklad_link():
+    """08-03 fix: a "review" status with nothing ever written to `order_questions`/
+    `held_orders` (e.g. "no item matched a card") used to get the SAME /sklad link as a
+    genuinely held order — pointing the warehouse at an empty board. Now it points at the
+    dashboard generically instead, never the sklad key."""
     html = report.build_summary(
         "Pekáreň X",
         [_order(status="review", item_count=0, reject_reason="Zákazník nebol nájdený")],
         link="http://x/sklad/k")
-    assert "http://x/sklad/k" in html
+    assert "http://x/sklad/k" not in html
     assert "Zákazník nebol nájdený" in html
+    assert "dashboard" in html.lower() or "otvor" in html.lower()
 
 
-def test_unverified_items_are_still_counted_and_get_the_link():
+def test_an_error_order_gets_no_sklad_link_either():
+    html = report.build_summary(
+        "Pekáreň X", [_order(status="error", reject_reason="Odoslanie do ORIONu zlyhalo")],
+        link="http://x/sklad/k")
+    assert "http://x/sklad/k" not in html
+    assert "dashboard" in html.lower() or "otvor" in html.lower()
+
+
+# "partial" keeps the /sklad link (unchanged, see `test_a_partial_order_gets_the_link`
+# above): by construction, a partial ship always has a genuinely open `order_questions`
+# row for whatever it could not match — either freshly asked this run, or one left open
+# from an earlier hold the deadline sweep just released. Only a status that NEVER
+# correlates with a real board item (review/error/unverified-only, and never a
+# change-of-order) loses the link.
+
+
+# --- #159: a change-of-order gets its OWN wording and NEITHER link -----------------
+
+def test_a_change_of_order_gets_its_own_wording_and_no_link_at_all():
+    """08-03 CÉDER incident: nothing is EVER queued for a change request (it is always
+    resolved by hand in ORION, stated plainly in the reason paragraph already), so the
+    message must carry neither the /sklad link nor the generic dashboard hint — and the
+    bit must say "žiadosť o zmenu", never the generic "treba zadať ručne"."""
+    html = report.build_summary(
+        "CÉDER s.r.o.",
+        [_order(status="review", item_count=1,
+               reject_reason="E-mail je zmena už zadanej objednávky — uprav ju ručne "
+                             "v ORIONe (pôvodný súbor začína ORDER_000647_20260808_)",
+               change=True)],
+        link="http://x/sklad/k")
+    assert "http://x/sklad/k" not in html
+    assert "nástenke" not in html.lower()
+    assert "dashboard" not in html.lower() and "otvor" not in html.lower()
+    assert "žiadosť o zmenu" in html.lower()
+    assert "treba zadať ručne" not in html.lower()
+    assert "ORDER_000647_20260808_" in html, "the useful original-file detail must survive"
+
+
+def test_a_change_of_order_alongside_a_real_held_order_still_gets_the_link():
+    """The exclusion is per-message, not absolute: when something ELSE in the same run IS
+    genuinely queued, the link belongs in the message regardless of the change order."""
+    html = report.build_summary(
+        "Zákazník", [_order(status="held", item_count=2),
+                    _order(status="review", change=True,
+                          reject_reason="E-mail je zmena už zadanej objednávky")],
+        link="http://x/sklad/k")
+    assert "http://x/sklad/k" in html
+    assert "žiadosť o zmenu" in html.lower()
+
+
+def test_unverified_items_are_still_counted_and_pointed_at_the_dashboard():
     """The AGEL-incident phantom-item safeguard (extract.py's `unverified`) must survive
     the shortening — a model-claimed item the e-mail text does not prove must remain
-    visible, even though the shortened message no longer lists it by name."""
+    visible, even though the shortened message no longer lists it by name. It is resolved
+    from the message detail on the ADMIN dashboard, never from the sklad board (there is
+    no order_questions/held_orders row for it at all) — so it gets the dashboard hint, not
+    the /sklad link (#159's generalized rule)."""
     html = report.build_summary("Pekáreň X", [_order(status="ok")], unverified_count=2,
                                 link="http://x/sklad/k")
-    assert "http://x/sklad/k" in html
+    assert "http://x/sklad/k" not in html
     assert "2" in html
+    assert "dashboard" in html.lower() or "otvor" in html.lower()
 
 
 def test_no_unverified_items_never_mentions_them():

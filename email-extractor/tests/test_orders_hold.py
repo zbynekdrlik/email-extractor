@@ -15,7 +15,7 @@ import os
 import pytest
 
 from app.config import Config
-from app.orders import hold, pipeline, snapshot, teach
+from app.orders import customer, hold, pipeline, snapshot, teach
 
 PG_DSN = os.environ.get("PG_TEST_DSN")
 
@@ -351,3 +351,72 @@ def test_is_past_deadline():
     assert hold.is_past_deadline("04.08.2026", "2026-08-05") is True
     assert hold.is_past_deadline("04.08.2026", "2026-08-03") is False
     assert hold.is_past_deadline("", "2026-08-03") is True, "no date to wait for"
+
+
+# --- #159: releasing an order held on an UNMATCHED CUSTOMER (kind='customer') -----
+
+def _hold_unmatched_customer(pg, env):
+    """Same shape as `_hold_one_order`, but for the customer-unknown branch: place a held
+    row + a customer-kind question by hand, exactly what `pipeline._run` now does when
+    `matched is None`."""
+    from app.orders import teach
+
+    qid = teach.ask_customer(
+        pg, message_id="m1", sender_email="zilina@farmeria.sk",
+        candidates=[{"ean_edi": "2000000000001", "name": "Pekáreň Testovacia s.r.o.",
+                    "city": "Martin", "street": "Košútka 1", "address_match": True}],
+        delivery_date="04.08.2026",
+        context={"sender_email": "zilina@farmeria.sk", "sender_name": "Sklad",
+                "company_name": "", "delivery_address_guess": ""})
+    matched = customer.Matched(ean_edi="", name="", confidence=0.0, rule="unmatched", note="")
+    order = {"deliveryDate": "04.08.2026", "orderNumber": "", "store": "", "items": [
+        {"name": "rožok 50g", "quantity": 120, "unit": "ks"}]}
+    from app.orders.match import Decision
+    decisions = [Decision(item_name="rožok 50g", gtin="G50", card="Rožok štandart 50g",
+                          confidence=0.95, rule="catalog_direct", note="", review=False,
+                          trace={}, quantity=120, unit="ks")]
+    hid = hold.place(pg, message_id="m1", matched=matched, order=order, decisions=decisions,
+                     extracted={"isChangeRequest": False, "unverified": [], "notes": ""},
+                     question_ids=[qid])
+    return qid, hid
+
+
+def test_setting_the_customer_updates_every_held_row_waiting_on_the_question(pg, env):
+    qid, hid = _hold_unmatched_customer(pg, env)
+    hold.set_customer(pg, qid, "2000000000001", "Pekáreň Testovacia s.r.o.")
+    row = hold.get(pg, hid)
+    assert row["customer_ean"] == "2000000000001"
+    assert row["customer_name"] == "Pekáreň Testovacia s.r.o."
+
+
+def test_answering_with_a_real_customer_then_releasing_ships_it(pg, env):
+    qid, hid = _hold_unmatched_customer(pg, env)
+    teach.answer_customer(pg, qid, ean_edi="2000000000001",
+                          name="Pekáreň Testovacia s.r.o.", by="sklad")
+    hold.set_customer(pg, qid, "2000000000001", "Pekáreň Testovacia s.r.o.")
+    rec = Recorder()
+    released = hold.release_for_question(pg, _cfg(), qid, upload=rec.upload, post=rec.post)
+    assert len(released) == 1 and released[0]["status"] == "ok"
+    assert len(rec.uploads) == 1
+    assert pg.execute("SELECT status FROM held_orders WHERE id=%s", (hid,)).fetchone() \
+        == ("released",)
+
+
+def test_releasing_an_unknown_customer_answer_never_ships_but_becomes_visible(pg, env):
+    """'neviem, kto to je' (#159) — the order must never ship with no real customer, but
+    must reach a normal, VISIBLE terminal state — never left silently stuck 'held'."""
+    qid, hid = _hold_unmatched_customer(pg, env)
+    teach.answer_customer(pg, qid, ean_edi="", name="", by="sklad")
+    rec = Recorder()
+    released = hold.release_unknown_customer(pg, _cfg(), qid, post=rec.post)
+    assert len(released) == 1 and released[0]["status"] == "review"
+    assert rec.uploads == []
+    row = pg.execute(
+        "SELECT status, release_reason FROM held_orders WHERE id=%s", (hid,)).fetchone()
+    assert row == ("released", "answered")
+    assert len(rec.posts) == 1
+    assert "nájdený" in rec.posts[0].lower() or "review" in rec.posts[0].lower() \
+        or "doriešiť" in rec.posts[0].lower()
+    # the message is finally done — never left unprocessed forever
+    assert pg.execute(
+        "SELECT processed FROM messages WHERE message_id='m1'").fetchone() == (True,)

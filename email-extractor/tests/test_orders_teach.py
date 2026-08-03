@@ -212,6 +212,102 @@ def test_answering_twice_is_refused_rather_than_silently_overwritten(pg):
         teach.answer(pg, qid, gtin="SLI90", card="Šiška džemová 90g", by="sklad")
 
 
+# --- #159: the customer-half of the same teach-once loop — "who is this?" -------
+
+CUST_CANDS = [{"ean_edi": "2000000000861", "name": "Potraviny nie otraviny Žilina",
+              "city": "Žilina", "street": "na bráne 4", "address_match": True},
+             {"ean_edi": "2000000000864", "name": "Potraviny nie otraviny Martin",
+              "city": "Martin", "street": "Košútka 1", "address_match": False}]
+CUST_CONTEXT = {"sender_email": "zilina@farmeria.sk", "sender_name": "Sklad",
+                "company_name": "", "delivery_address_guess": "Na bráne 4, 010 01 Žilina"}
+
+
+def _ask_customer(pg, sender_email="zilina@farmeria.sk", **kw):
+    return teach.ask_customer(
+        pg, message_id=kw.get("message_id", "m1"), sender_email=sender_email,
+        candidates=kw.get("candidates", CUST_CANDS),
+        delivery_date=kw.get("delivery_date", "06.08.2026"),
+        context=kw.get("context", CUST_CONTEXT))
+
+
+def test_an_unrecognized_sender_becomes_one_kind_customer_question(pg):
+    qid = _ask_customer(pg)
+    q = teach.get(pg, qid)
+    assert q["kind"] == "customer"
+    assert q["customer_ean"] == "" and q["customer_name"] == ""
+    assert q["status"] == "open"
+    assert [c["ean_edi"] for c in q["candidates"]] == \
+        ["2000000000861", "2000000000864"]
+    assert q["context"]["sender_email"] == "zilina@farmeria.sk"
+    assert q["context"]["delivery_address_guess"] == "Na bráne 4, 010 01 Žilina"
+
+
+def test_the_same_unresolved_sender_is_never_asked_about_twice(pg):
+    first = _ask_customer(pg)
+    again = _ask_customer(pg, message_id="m2")
+    assert again == first, "one open question per unresolved sender address"
+    assert len([q for q in teach.open_questions(pg) if q["kind"] == "customer"]) == 1
+
+
+def test_two_different_unresolved_senders_are_asked_separately(pg):
+    _ask_customer(pg, sender_email="a@nikde.sk")
+    _ask_customer(pg, sender_email="b@nikde.sk")
+    assert len(teach.open_questions(pg)) == 2
+
+
+def test_asking_with_no_sender_address_at_all_returns_none(pg):
+    assert _ask_customer(pg, sender_email="") is None
+
+
+def test_an_item_question_and_a_customer_question_never_collide(pg):
+    """A plain item question always carries a REAL customer_ean; a customer question is
+    always keyed on customer_ean='' — but both dedupe on (customer_ean, item_key), so this
+    pins that the two kinds genuinely cannot collide even by coincidence."""
+    item_qid = _ask(pg, wording="zilina farmeria sk")   # deliberately close to the email key
+    cust_qid = _ask_customer(pg, sender_email="zilina@farmeria.sk")
+    assert item_qid != cust_qid
+    assert len(teach.open_questions(pg)) == 2
+
+
+def test_answering_a_customer_question_with_a_real_pick(pg):
+    qid = _ask_customer(pg)
+    q = teach.answer_customer(pg, qid, ean_edi="2000000000861",
+                              name="Potraviny nie otraviny Žilina", by="sklad")
+    assert q["status"] == "answered"
+    assert q["answer_gtin"] == "2000000000861"
+    assert q["answer_card"] == "Potraviny nie otraviny Žilina"
+    assert teach.open_questions(pg) == []
+
+
+def test_answering_with_unknown_is_a_blank_answer_never_a_candidate(pg):
+    """'neviem, kto to je' (#159) — the question is settled with NO customer chosen."""
+    qid = _ask_customer(pg)
+    q = teach.answer_customer(pg, qid, ean_edi="", name="", by="sklad")
+    assert q["status"] == "answered"
+    assert q["answer_gtin"] == ""
+
+
+def test_answering_a_customer_question_outside_the_offered_candidates_is_refused(pg):
+    qid = _ask_customer(pg)
+    with pytest.raises(teach.NotACandidate):
+        teach.answer_customer(pg, qid, ean_edi="9999999999999", name="Vymyslený", by="sklad")
+
+
+def test_answering_a_customer_question_twice_is_refused(pg):
+    qid = _ask_customer(pg)
+    teach.answer_customer(pg, qid, ean_edi="2000000000861", name="Žilina", by="sklad")
+    with pytest.raises(teach.AlreadyAnswered):
+        teach.answer_customer(pg, qid, ean_edi="2000000000864", name="Martin", by="sklad")
+
+
+def test_answer_customer_refuses_an_item_kind_question(pg):
+    """The wrong endpoint pointed at the wrong kind must fail loudly, not silently
+    misinterpret a product gtin as a customer ean_edi."""
+    qid = _ask(pg)
+    with pytest.raises(teach.NotACandidate):
+        teach.answer_customer(pg, qid, ean_edi="SLI50", name="x", by="sklad")
+
+
 # --- what the engine does with it ----------------------------------------
 
 def test_a_taught_wording_decides_with_no_model_call(pg):

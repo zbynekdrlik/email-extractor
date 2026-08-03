@@ -186,6 +186,23 @@ def test_a_change_request_is_not_uploaded_and_names_the_original_file(pg, env):
     assert "ORDER_000001_20260804_" in rec.posts[0]
 
 
+def test_a_change_request_gets_its_own_wording_and_no_board_link(pg, env):
+    """08-03 CÉDER incident: a change-of-order used to be mislabeled with the generic
+    "treba zadať ručne" review wording AND wrongly carried a /sklad link — nothing is EVER
+    queued for a change request (it is always resolved by hand in ORION), so the message
+    must say "žiadosť o zmenu" and never point at the board."""
+    rec = Recorder()
+    result = pipeline.run(
+        pg, _cfg(dashboard_base_url="http://46.224.130.35:8099", secret_key="s"), MAIL, env,
+        client=ScriptedClient(_answers(change=True)), upload=rec.upload, post=rec.post)
+    assert result["status"] == "review"
+    assert len(rec.posts) == 1
+    assert "žiadosť o zmenu" in rec.posts[0].lower()
+    assert "treba zadať ručne" not in rec.posts[0].lower()
+    assert "nástenke" not in rec.posts[0].lower()
+    assert "/sklad/" not in rec.posts[0]
+
+
 def test_a_change_request_with_an_unmatched_item_never_holds(pg, env):
     """#93 review finding: the hold condition explicitly excludes `is_change` — a change
     request is always handled by hand in ORION regardless of matching, so it must go
@@ -204,7 +221,13 @@ def test_a_change_request_with_an_unmatched_item_never_holds(pg, env):
     assert len(teach.open_questions(pg)) == 1
 
 
-def test_an_unknown_customer_stops_the_document(pg, env):
+# --- #159: an unrecognized customer is a WAREHOUSE QUESTION, not a dead end -------
+
+def test_an_unknown_customer_with_time_left_holds_and_asks_who_it_is(pg, env):
+    """The order must not silently leave the pipeline — it becomes ONE customer-kind
+    question on the board and the whole order holds, exactly like an unmatched ITEM
+    already does (#93), instead of the old dead end (`status="review"` with nothing ever
+    written to `order_questions`/`held_orders` — #159's own root cause)."""
     rec = Recorder()
     answers = _answers()
     answers[0]["senderEmail"] = "cudzi@nikde.sk"      # the address is in no customer row
@@ -213,9 +236,59 @@ def test_an_unknown_customer_stops_the_document(pg, env):
     mail = dict(MAIL, from_addr="cudzi@nikde.sk")
     result = pipeline.run(pg, _cfg(), mail, env, client=ScriptedClient(answers),
                           upload=rec.upload, post=rec.post)
+    assert result["status"] == "held"
+    assert rec.uploads == []
+    assert len(rec.posts) == 1
+    assert "čaká" in rec.posts[0].lower()
+    qs = teach.open_questions(pg)
+    assert len(qs) == 1 and qs[0]["kind"] == "customer"
+    assert qs[0]["context"]["sender_email"] == "cudzi@nikde.sk"
+    held = pg.execute(
+        "SELECT customer_ean, delivery_date, status FROM held_orders").fetchone()
+    assert held == ("", "04.08.2026", "held")
+    row = pg.execute("SELECT processed FROM messages WHERE message_id='m1'").fetchone()
+    assert row == (False,)
+
+
+def test_an_unknown_customer_at_the_deadline_still_reviews_and_says_so(pg, env):
+    """Once the delivery date itself arrives there is no more time left to wait for an
+    answer — same deadline backstop principle #93 already applies to unmatched items, and
+    the old "review, nothing queued" behaviour is exactly right here (nobody could ship an
+    order with no customer to address it to)."""
+    rec = Recorder()
+    answers = _answers()
+    answers[0]["senderEmail"] = "cudzi@nikde.sk"
+    answers[0]["companyName"] = "Neznáma firma s.r.o."
+    answers[1] = {"ean_edi": "", "confidence": 0.1}
+    mail = dict(MAIL, from_addr="cudzi@nikde.sk", today="2026-08-04")   # today IS the delivery date
+    result = pipeline.run(pg, _cfg(), mail, env, client=ScriptedClient(answers),
+                          upload=rec.upload, post=rec.post)
     assert result["status"] == "review"
     assert rec.uploads == []
     assert "nájdený" in rec.posts[0].lower()
+    assert pg.execute("SELECT count(*) FROM held_orders").fetchone()[0] == 0
+
+
+def test_an_unknown_customer_question_ranks_candidates_by_address_signal(pg, env):
+    """The candidate list a human sees is ranked using the delivery address found in the
+    e-mail's own text — proven end-to-end through the pipeline, not just at
+    `customer.candidates_for_question()`'s own unit level."""
+    extra_customer_csv = CUSTOMER_CSV + (
+        "Potraviny nie otraviny Žilina,2000000000861,Žilina,na bráne 4,,,"
+        "evakozakova9@gmail.com\n")
+    sid = snapshot.import_snapshot(pg, CATALOG_CSV, extra_customer_csv)
+    rec = Recorder()
+    answers = _answers()
+    answers[0]["senderEmail"] = "cudzi@nikde.sk"
+    answers[0]["companyName"] = ""
+    answers[1] = {"ean_edi": "", "confidence": 0.1}
+    mail = dict(MAIL, from_addr="cudzi@nikde.sk",
+               combined_text=MAIL["combined_text"] + "\nNa bráne 4, 010 01 Žilina")
+    result = pipeline.run(pg, _cfg(), mail, sid, client=ScriptedClient(answers),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "held"
+    qs = teach.open_questions(pg)
+    assert qs[0]["candidates"][0]["ean_edi"] == "2000000000861"
 
 
 def test_the_same_order_is_never_uploaded_twice(pg, env):
