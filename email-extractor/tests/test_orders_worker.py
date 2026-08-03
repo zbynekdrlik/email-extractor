@@ -201,6 +201,32 @@ def test_a_released_held_order_no_longer_blocks_reclaim(pg):
     assert worker.tick(pg, cfg, pipeline=lambda *a, **k: {"status": "ok", "items": []}) == 1
 
 
+def test_a_message_with_an_open_mail_question_is_never_reclaimed(pg):
+    """#164: a 'mail' question ("is this even an order?") has NO held_orders row at all —
+    there is no order to hold — so `_claim` needs its OWN guard for it, not just the
+    held_orders one above."""
+    from app.orders import teach
+    _msg(pg)
+    _snapshot(pg)
+    pg.execute("UPDATE messages SET processing_at = now() - interval '31 minutes'")
+    teach.ask_mail(pg, message_id="m1", sender_email="x@y.sk", subject="Info",
+                   reason="AI nenašla objednávku")
+    cfg = _cfg(ai_orders_engine="python")
+    assert worker.tick(pg, cfg, pipeline=lambda *a, **k: {"status": "ok", "items": []}) == 0
+
+
+def test_an_answered_mail_question_no_longer_blocks_reclaim(pg):
+    from app.orders import teach
+    _msg(pg)
+    _snapshot(pg)
+    pg.execute("UPDATE messages SET processing_at = now() - interval '31 minutes'")
+    qid = teach.ask_mail(pg, message_id="m1", sender_email="x@y.sk", subject="Info",
+                         reason="AI nenašla objednávku")
+    pg.execute("UPDATE order_questions SET status='answered' WHERE id=%s", (qid,))
+    cfg = _cfg(ai_orders_engine="python")
+    assert worker.tick(pg, cfg, pipeline=lambda *a, **k: {"status": "ok", "items": []}) == 1
+
+
 def test_a_run_that_holds_an_order_is_not_marked_processed(pg):
     """The worker itself does not know an order was held — `hold.place` (called inside the
     pipeline) is what leaves the `held_orders` row; the worker only has to notice it before
