@@ -75,11 +75,20 @@ class Config:
     odoo_api_key: str = ""
     odoo_db: str = "odoo"
     orders_channel_id: int = 0
+    # #151: the delivery-note (DESADV_*) counterpart of orders_channel_id — see
+    # orders/confirm.py's _channel_for. Falls back to orders_channel_id when unset.
+    delivery_notes_channel_id: int = 0
     orion_host: str = ""
     orion_port: int = 22
     orion_user: str = ""
     orion_pass: str = ""
     orion_dir: str = "C:\\ORION\\COMMUNICATOR\\data\\in"
+    # #151: import-confirmation sweep (orders/confirm.py). Communicator sweeps ORION's
+    # `in/` roughly every 25-30 minutes, so 60 minutes is two missed sweeps before we
+    # call it a real problem; 5 minutes keeps the SFTP `listdir` load on the ORION box
+    # low while a file is still legitimately waiting.
+    import_confirm_timeout_minutes: int = 60
+    import_confirm_interval_minutes: int = 5
 
     @classmethod
     def load(cls) -> Config:
@@ -142,10 +151,18 @@ class Config:
             odoo_api_key=_get(o, "odoo_api_key", "ODOO_API_KEY", "") or "",
             odoo_db=_get(o, "odoo_db", "ODOO_DB", "odoo") or "odoo",
             orders_channel_id=int(_get(o, "orders_channel_id", "ORDERS_CHANNEL_ID", 0) or 0),
+            delivery_notes_channel_id=int(
+                _get(o, "delivery_notes_channel_id", "DELIVERY_NOTES_CHANNEL_ID", 0) or 0),
             orion_host=_get(o, "orion_host", "ORION_HOST", "") or "",
             orion_port=int(_get(o, "orion_port", "ORION_PORT", 22) or 22),
             orion_user=_get(o, "orion_user", "ORION_USER", "") or "",
             orion_pass=_get(o, "orion_pass", "ORION_PASS", "") or "",
             orion_dir=_get(o, "orion_dir", "ORION_DIR",
                            "C:\\ORION\\COMMUNICATOR\\data\\in"),
+            import_confirm_timeout_minutes=int(
+                _get(o, "import_confirm_timeout_minutes",
+                     "IMPORT_CONFIRM_TIMEOUT_MINUTES", 60) or 60),
+            import_confirm_interval_minutes=int(
+                _get(o, "import_confirm_interval_minutes",
+                     "IMPORT_CONFIRM_INTERVAL_MINUTES", 5) or 5),
         )

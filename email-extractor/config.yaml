@@ -47,10 +47,13 @@ options:
   odoo_api_key: ""
   odoo_db: "odoo"
   orders_channel_id: 0
+  delivery_notes_channel_id: 0
   orion_host: ""
   orion_port: 22
   orion_user: ""
   orion_pass: ""
+  import_confirm_timeout_minutes: 60
+  import_confirm_interval_minutes: 5
 schema:
   imap_host: str
   imap_port: int
@@ -85,7 +88,10 @@ schema:
   odoo_api_key: password?
   odoo_db: str?
   orders_channel_id: int?
+  delivery_notes_channel_id: int?
   orion_host: str?
   orion_port: int?
   orion_user: str?
   orion_pass: password?
+  import_confirm_timeout_minutes: int?
+  import_confirm_interval_minutes: int?

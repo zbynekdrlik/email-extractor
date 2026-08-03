@@ -267,6 +267,11 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pra
                 # never anything for this to release there.
                 from .hold import release_due
                 release_due(conn, cfg)
+                # #151: has Communicator actually taken what we uploaded? Shadow/n8n modes
+                # never upload through this engine, so edi_sent never gets a row for
+                # confirm.sweep to find there either — same gating as release_due above.
+                from . import confirm
+                confirm.sweep(conn, cfg)
             handled = tick(conn, cfg, pipeline=pipeline)
             handled = static_worker.tick(conn, cfg) or handled
             if handled:

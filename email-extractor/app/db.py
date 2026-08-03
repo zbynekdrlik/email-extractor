@@ -528,6 +528,39 @@ SCHEMA = [
         END IF;
     END $$
     """,
+    # --- #151: import CONFIRMATION. Uploading a file to `in/` is not proof Communicator
+    # ever took it — this is the state the periodic sweep in `orders/confirm.py` writes.
+    # NULL = not yet resolved (still watched); 'imported'/'failed'/'timeout'/'unknown' are
+    # all terminal (see confirm.py's docstring for what each means and why 'unknown' — a
+    # file gone from `in`, `archCodex` AND `unconfirmed` — is treated as unresolved and
+    # alerted, never as silent success).
+    #
+    # Same advisory-lock DO-block shape as the `uploaded_at` migration above, and the same
+    # reasoning for backfilling pre-existing rows rather than leaving them NULL: every row
+    # already CONFIRMED uploaded (`uploaded_at IS NOT NULL`) when this block first runs
+    # predates the whole import-confirmation feature and was, in the overwhelming
+    # majority, imported long ago without incident — sweeping all of them retroactively
+    # the moment this ships would flood Odoo with alerts for ancient, already-settled
+    # orders instead of watching NEW uploads going forward (the ticket's actual ask). A
+    # row with `uploaded_at IS NULL` (still just a claim, never confirmed) is left alone —
+    # import confirmation is meaningless before the upload itself is confirmed. ---
+    """
+    DO $$
+    BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('email-extractor:edi_sent.import_status#151'));
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema = 'public' AND table_name = 'edi_sent'
+               AND column_name = 'import_status'
+        ) THEN
+            ALTER TABLE edi_sent ADD COLUMN import_status TEXT;
+            ALTER TABLE edi_sent ADD COLUMN import_confirmed_at TIMESTAMPTZ;
+            ALTER TABLE edi_sent ADD COLUMN import_checked_at TIMESTAMPTZ;
+            UPDATE edi_sent SET import_status = 'imported', import_confirmed_at = uploaded_at
+             WHERE uploaded_at IS NOT NULL AND import_status IS NULL;
+        END IF;
+    END $$
+    """,
     # --- #93: hold an order while its question is unanswered, but only until the delivery
     # date. Shipping the matched part now and the taught line later would write TWO ORION
     # documents for one delivery day (#81.1) — so a pending question holds its WHOLE order.
