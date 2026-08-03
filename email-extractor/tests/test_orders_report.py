@@ -234,6 +234,42 @@ def test_posting_uses_message_post_with_html_enabled():
     assert "Bearer k" == sent["headers"]["Authorization"]
 
 
+def test_post_from_config_channel_id_overrides_the_configured_orders_channel():
+    """#151: a delivery-note import alert must reach the delivery-notes channel, not the
+    orders one, without touching every other caller's default behaviour."""
+    sent = {}
+
+    def transport(url, headers, payload):
+        sent.update(payload=payload)
+        return {"id": 1}
+
+    class Cfg:
+        odoo_url = "https://erp.example.sk"
+        odoo_api_key = "k"
+        odoo_db = "odoo"
+        orders_channel_id = 152
+
+    report.post_from_config(Cfg(), "<p>x</p>", transport=transport, channel_id=243)
+    assert sent["payload"]["ids"] == [243]
+
+
+def test_post_from_config_falls_back_to_orders_channel_when_no_channel_id_given():
+    sent = {}
+
+    def transport(url, headers, payload):
+        sent.update(payload=payload)
+        return {"id": 1}
+
+    class Cfg:
+        odoo_url = "https://erp.example.sk"
+        odoo_api_key = "k"
+        odoo_db = "odoo"
+        orders_channel_id = 152
+
+    report.post_from_config(Cfg(), "<p>x</p>", transport=transport)
+    assert sent["payload"]["ids"] == [152]
+
+
 def test_an_event_is_written_for_the_timeline(pg):
     pg.execute("INSERT INTO messages (message_id, category) VALUES ('m1', 'ai_orders')")
     report.log_event(pg, "m1", stage="uploaded_orion", status="ok",

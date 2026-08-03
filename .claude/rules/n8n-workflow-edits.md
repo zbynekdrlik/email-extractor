@@ -68,12 +68,20 @@ on the ORION box (`orion_host` in the add-on options; SFTP with paramiko from in
 add-on container, since the LAN address is not routable from the dev machines):
 
 - `C:\ORION\COMMUNICATOR\data\in` — uploaded, waiting for WINCODEX/Communicator
-- `C:\ORION\COMMUNICATOR\data\in\archCodex` — already imported (our `ORDER_`/`DESADV_` files
-  come back with a `Z-` prefix; `KARMEN_`/`KOMFOS_` files keep their name)
+- `C:\ORION\COMMUNICATOR\data\in\archCodex` — **already imported — this is the signal, not
+  the `Z-` prefix** (corrected #151, 2026-08-03: live evidence showed a file already sitting
+  in `archCodex` — therefore imported — with NO `Z-` prefix a full hour later, while the
+  last `Z-` rename in `archCodex` had happened 5+ hours earlier. The `Z-` rename is a
+  separate, infrequent, uncontrolled batch job Communicator/WINCODEX runs independently of
+  the actual import — keying a check on it reports a safely-imported order as "unconfirmed"
+  for hours. Check for presence in `archCodex` WITH OR WITHOUT the `Z-` prefix; never
+  require the prefix. `KARMEN_`/`KOMFOS_` files, unrelated to us, keep their own name either
+  way.)
 - `C:\ORION\COMMUNICATOR\data\in\unconfirmed` — import failed
 
 Communicator sweeps roughly every 25–30 min, so a file uploaded minutes ago is legitimately
-still sitting in `in`. Automatic import confirmation is #151.
+still sitting in `in`. Automatic import confirmation (`app/orders/confirm.py`, keyed on
+`archCodex`/`unconfirmed` presence, never on `Z-`) shipped in #151.
 
 ## Re-sending orders after an incident — order of operations is binding
 

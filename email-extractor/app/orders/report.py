@@ -190,14 +190,18 @@ def post(url: str, api_key: str, db: str, channel_id: int, html: str,
     return (transport or _http)(endpoint, headers, payload)
 
 
-def post_from_config(cfg, html: str, transport=None) -> dict | None:
-    """Post using the add-on options; returns None when Odoo is not configured."""
-    if not (getattr(cfg, "odoo_url", "") and getattr(cfg, "odoo_api_key", "")
-            and getattr(cfg, "orders_channel_id", 0)):
+def post_from_config(cfg, html: str, transport=None, channel_id: int | None = None) -> dict | None:
+    """Post using the add-on options; returns None when Odoo is not configured.
+
+    `channel_id` (#151) overrides `cfg.orders_channel_id` — a delivery-note import alert
+    routes to the delivery-notes channel instead of the orders one. Omitted/falsy keeps
+    the original behaviour (every existing caller), so this is purely additive."""
+    channel = int(channel_id) if channel_id else int(getattr(cfg, "orders_channel_id", 0) or 0)
+    if not (getattr(cfg, "odoo_url", "") and getattr(cfg, "odoo_api_key", "") and channel):
         log.warning("Odoo not configured — report not delivered")
         return None
     return post(cfg.odoo_url, cfg.odoo_api_key, getattr(cfg, "odoo_db", "odoo"),
-                cfg.orders_channel_id, html, transport=transport)
+                channel, html, transport=transport)
 
 
 # --- timeline ------------------------------------------------------------
