@@ -35,3 +35,13 @@ foreground run in the same turn is exactly how this collides.
 If you ever DO get a hang: find the blocking backend with the query above and
 `SELECT pg_terminate_backend(<pid>)` for the one that's `idle in transaction` — it's safe,
 it's always a stray test connection on a throwaway local DB, never anything live.
+
+## The final "N passed in Xs" summary line can be MISSING from captured output (#160)
+
+`.venv/bin/python -m pytest tests/ -q > out.log 2>&1` on this box has, at least once, ended
+the captured file right at the last `[100%]` progress line with NO trailing summary line at
+all — even though the run was fully green (exit code 0). Don't treat a missing summary as a
+hang, a truncated capture, or a reason to re-run: verify success from **exit code 0 AND zero
+`F`/`E`/`s`/`x` characters** in the dot-progress output (`python3 -c "print(collections.
+Counter(ch for ch in open('out.log').read() if ch not in '.\n[] %0123456789'))"` — an empty
+Counter means every test passed) rather than grepping for `"passed in"`.
