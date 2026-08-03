@@ -691,3 +691,29 @@ again. That is the point: a changed prompt has not been measured until it has be
   general rule: `item_key()` is for WORDINGS (where fuzzy collapsing typos/spacing IS the
   point); reach for it only when that fuzziness is actually wanted, never as a generic
   "make this a safe dict/index key" helper.
+- **The board-question kind register (`teach.KINDS`, #164) has FIVE kinds — item, customer,
+  mail, date, line — but httpapi.py's LIVE `/api/orders/question/<qid>/answer` dispatch
+  only routes `mail`/`date`/`line` through it.** `item`/`customer` keep their own,
+  pre-#164, full-fidelity code paths (`teach.answer`+`hold.release_for_question` /
+  `_api_orders_answer_customer`) because the register's single-string `{"choice": ...}`
+  contract has no slot for `card`/`name` (cosmetic display text) — `KINDS["item"].apply`/
+  `KINDS["customer"].apply` exist as CORRECT, directly-tested reference wrappers (see their
+  docstrings + `tests/test_orders_teach_kinds.py`), not as httpapi's actual dispatch path
+  for those two kinds. A NEW kind (a 6th) is the one thing that MUST go through the
+  register from day one — `mail`/`date`/`line` are the pattern to copy, not item/customer.
+- **`pipeline._mail_rule` (the taught "ignore"/"manual" mail_rules short-circuit) is
+  gated `if not shadow`, deliberately — a memory READ that only INFORMS a decision the
+  model still makes is fine in shadow (see `global_taught` elsewhere in this file), but
+  `_mail_rule` SKIPS THE ENTIRE EXTRACTION PIPELINE, which would corrupt shadow's
+  verdict-vs-n8n comparison, not just add/remove a side effect. Any FUTURE short-circuit
+  that skips calling the model (not just skips a teach/hold write) needs the same
+  `not shadow` gate, not the "pure read, fine in shadow" reasoning that applies to a
+  memory lookup.
+- **A held order with MULTIPLE independent open questions (e.g. `date` + `item`, #164) is
+  released only once EVERY one of them is answered — `release_for_question`'s existing
+  "count of `status <> 'answered'` among `question_ids`" check already does this for free,
+  no new code needed.** `release_due`'s NEW `deadline_shippable` gate
+  (`hold._has_non_shippable_open_question`) is what stops it from auto-shipping an
+  unconfirmed date/customer/line at the deadline the way an item-only hold still correctly
+  does — check `teach.KINDS[<kind>].deadline_shippable` before assuming a new kind's
+  deadline behaviour, never copy the item-only "ship what matched" default blindly.

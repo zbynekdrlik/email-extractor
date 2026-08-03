@@ -49,3 +49,4 @@ Load the matching skill BEFORE working on that area (don't re-derive):
 - prílohy / formáty (xlsx, xls, ods, fods, csv) → `.claude/rules/extraction-formats.md` (auto-loads on `app/extract.py`)
 - AI objednávky (matching, korpus, CI gate) → `.claude/rules/orders-corpus.md` (auto-loads on `app/orders/**`)
 - nasadenie na živý HA add-on → `.claude/rules/deploy.md` (auto-loads on config.yaml/app/__init__.py/Dockerfile)
+- lokálne spúšťanie pytest proti dev1 test-Postgres → `.claude/rules/local-testing.md` (auto-loads on `email-extractor/tests/**`)
