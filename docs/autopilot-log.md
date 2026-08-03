@@ -736,3 +736,30 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   (the driving message 5661 was independently resolved by a separate override addition
   before this PR merged) — verified via the full automated suite (unit through
   Playwright e2e) instead; never reprocessed message 5661 or any other message.
+
+## 2026-08-03 — #162 (PR #165)
+
+- **#162** (unmatched-customer hold release skipped item-level re-asking — an ambiguous
+  item could silently ship partial): `hold._redecide` now defaults to the REAL current
+  catalog snapshot (`hold._current_catalog`) instead of an always-empty one, still no
+  model call. `hold._release_locked` checks every redecided decision's rule against
+  `pipeline.ASK_THE_WAREHOUSE`: anything still ambiguous raises a fresh `teach.ask`
+  question (new `hold._ask_still_ambiguous`, mirrors `pipeline._run`'s own per-item ask)
+  and the row stays `held` a second time (`question_ids`/`decisions_json` updated) —
+  never ships with the line silently dropped. A line `teach.ask` itself can't even raise
+  a question for (empty-after-normalizing wording) is named in the Odoo notification
+  instead of vanishing (`hold._post_still_held`).
+- RED `b0d1e07`/`c0faadf`, GREEN `6e9178b`, extra coverage `82d4fcf`. Deep adversarial
+  review (dispatched subagent, verified RED→GREEN empirically by reverting the fix) found
+  0 🔴, 2 🟡 (missing multi-question test; stale `orders-corpus.md` playbook entry), 5 🔵
+  (all addressed) — fixed in `a4705ce`: added the multi-fresh-question test, rewrote the
+  stale playbook paragraph, shared a `_recalled_cache` between `_redecide`/
+  `_ask_still_ambiguous`, documented the now-dead `_ship(redecide=True)` branch and the
+  narrow self-healing conn/tx write-order window, corrected `report.build_summary`'s
+  docstring for the one sanctioned item-wording exception.
+- PR #165, merged `9f0bf0b`. Main CI green (test + e2e-orders 30-email corpus, unchanged
+  prompts). Deployed v0.9.38 via `ha addons update`; `/health` confirms; `/` and `/otazky`
+  DOM both show `v0.9.38`, 0 console errors; `/otazky` "Otázky skladu" tab loads cleanly.
+  No live customer-unknown order with a genuinely ambiguous item existed to exercise
+  end-to-end — verified via the full local test suite (20 tests in `test_orders_hold.py`,
+  92.3% overall coverage) instead; never reprocessed any live message.
