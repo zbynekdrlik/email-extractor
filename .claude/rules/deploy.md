@@ -47,6 +47,15 @@ warning; both alias the same command.)
 
 ## Known gotchas
 
+- **`ha addons info <slug> --raw-json` nests everything under `.data`** — `jq
+  '{version, state, update_available}'` on the raw output silently returns all-`null`
+  (valid JSON, wrong keys) because the real fields are `.data.version`/`.data.state`/
+  `.data.update_available`. The PLAIN `ha addons info <slug>` (no `--raw-json`) prints a
+  flattened YAML-ish dump with `version:`/`state:` at the top level instead — use THAT for
+  a quick human read, and `.data.<field>` when piping `--raw-json` through `jq` (#163,
+  2026-08-03). Also strip the "`addons` is deprecated, use `apps`" warning line before
+  parsing if you don't redirect stderr — it doesn't break `jq` here (jq reads stdout only)
+  but it's easy to mistake for the reason a filter came back empty.
 - **`scp` to this box fails** ("subsystem request failed", SFTP subsystem likely
   disabled). Base64-encode locally, pipe through `ssh ... "echo '<b64>' | base64 -d >
   /tmp/x"`, then `docker cp` from the HOST into the container if the file needs to land

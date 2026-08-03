@@ -763,3 +763,34 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   No live customer-unknown order with a genuinely ambiguous item existed to exercise
   end-to-end — verified via the full local test suite (20 tests in `test_orders_hold.py`,
   92.3% overall coverage) instead; never reprocessed any live message.
+
+## 2026-08-03 — #163: reject a delivery date the model invents
+
+- Root cause: `extract.verify()`/`extract.run()` citation-checked every ITEM against the
+  source text but had no equivalent check for `deliveryDate` — the model could invent a
+  future day (re-dating a stale month-old quoted order onto "next Saturday") with nothing
+  in the mail to back it up, and `date_conflict()` then asserted it as a genuine second
+  date. Live incident: msg id 5679, subject "RE: catering 25.7. SL", model claimed
+  08.08.2026 — occurs nowhere in the text.
+- Version bump `08fa700` (0.9.38 -> 0.9.39). RED `f366d30`
+  (`test_a_stale_quoted_order_re_dated_by_the_model_is_not_shipped`), GREEN `edcba28`
+  (`extract.date_grounded()` wired into `extract.run()`, filters `result["orders"]` before
+  it reaches `pipeline.py`).
+- e2e-orders corpus (30-case, offline) caught a real regression from the first version of
+  the fix: `weekly_free_text`/`weekly_five_days` cases write a week as an explicit range
+  ("od 06.07. - 11.07.") broken down by weekday name — individual days never repeat their
+  digits, so the naive literal-citation check wrongly dropped 4 legitimate orders each.
+  Fixed in `7e0f4d9` by deriving every day spanned by an explicit range (`_range_days`).
+  Pre-verified against the LIVE corpus on dev2 (cached CI-runner checkout + scratch
+  Postgres containers, see `.claude/rules/orders-corpus.md`) BEFORE re-pushing — saved a
+  second CI round-trip.
+- Deep code review (dispatched subagent) found 0 🔴, 1 🟡 (missing table-branch test), 2 🔵
+  (Feb-29 placeholder-year edge case in `_range_days`; a dropped order was only visible in
+  a log line) — all fixed in `c99bdab`.
+- PR #166, merged `9f8ae43`. Main CI green (test + e2e-orders unchanged prompts + build).
+  Deployed v0.9.39 via `ha addons update`; `/health` confirms `{"ok":true,"version":
+  "0.9.39"}`; `/` and `/otazky` DOM both show `v0.9.39`. Functional verification: ran the
+  DEPLOYED container's own code (`docker exec ... python3 -c ...`) against the exact
+  msg-5679 shape — confirmed it drops the order and states the date could not be found,
+  never asserting 08.08.2026 as fact. Never reprocessed message 5679 or any other live
+  message.
