@@ -690,3 +690,49 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
 - Manual ORION correction for the 4 already-imported CÉDER days stays the user's own job
   (documented on #157) — this PR is code/tests/deploy only, no reprocessing of msg 5596
   or any other already-uploaded order.
+
+## #159 — unmatched customer was a silent dead end; change-of-order got the wrong board link
+
+- Bump: 0.9.36 -> 0.9.37 (`af2a1a8`).
+- RED (`48819ce`): new coverage across `customer.py`, `teach.py`, `hold.py`,
+  `snapshot.py`, `pipeline.py`, `report.py`, `httpapi.py`, `test_e2e.py` — pins the
+  target behaviour (customer-kind question+hold, ranked candidates, durable remember,
+  "neviem" stays visible, `/sklad` link generalized, change-of-order gets its own
+  wording+no link) all failing against unmodified code.
+- GREEN (`95685a3`): `order_questions` gets `kind`/`context` columns (item default,
+  customer new); `customer.candidates_for_question()` ranks by a street/city substring
+  signal against the mail's OWN raw text — deliberately separate from `customer.
+  candidates()` (feeds the model prompt / `prompt_hash`, untouched); `teach.
+  ask_customer`/`answer_customer`, `hold.set_customer`/`release_unknown_customer`,
+  `snapshot.remember_customer_email` (durable via the existing #128 override
+  mechanism); `pipeline._run`'s `matched is None` branch holds + asks instead of
+  reviewing; `report.build_summary`'s link now checks whether a run genuinely left
+  something open, and a change-of-order gets its own "žiadosť o zmenu" wording +
+  neither link (coordinator addendum, the 08-03 CÉDER incident).
+- Deep adversarial review (independent subagent) on PR #161 found 2 real bugs before
+  merge: (1) the deadline sweep could ship an order with a BLANK customer EAN if a
+  customer-unknown hold reached its delivery deadline unanswered (`Matched` is always
+  truthy even with `ean_edi=""`, so `_ship_one`'s `if not matched:` guard never caught
+  it) — fixed with a shared `hold._release_as_review` helper + a guard in `_do_release`.
+  (2) `teach.undo` on a customer question never reverted the remembered sender e-mail
+  (`snapshot.remember_customer_email` lives entirely outside `teach.answer_customer`) —
+  every future order from that address would keep silently mis-resolving to the wrong
+  customer; fixed with a `kind=='customer'` branch + new `snapshot.forget_customer_
+  email`. Also fixed a narrower dedupe-key collision (`ask_customer` reused a FUZZY
+  product-wording normalizer that folded `.`/`-`/`_`/`@`; now the address itself,
+  case/whitespace-normalized only). RED+GREEN in `fd7d297`/`dfef9da`.
+- A third review finding — item-level ambiguity silently dropped when the customer was
+  initially unknown (release re-decides against an empty catalog, no item question was
+  ever raised in that path) — needs a genuine design fork (re-run full matching vs.
+  raise a fresh item hold); filed as its own follow-up issue, out of scope for this PR.
+  Does not affect the driving live incident (msg 5661: every item already resolved
+  0.81-0.96, only the customer failed).
+- PR #161, merged `0e7f341`. Main CI green (test + e2e-orders 30-email corpus
+  `--require-all`, unchanged prompts/schema — confirmed zero cache misses + build).
+  Deployed v0.9.37 via `ha addons update`; `/health` confirms; schema migration
+  (`kind`/`context` columns) verified live via `\d order_questions`; `/` and `/otazky`
+  DOM both show `v0.9.37`, 0 console errors, existing taught-list/undo functionality
+  unaffected. No currently-open customer question existed live to exercise end-to-end
+  (the driving message 5661 was independently resolved by a separate override addition
+  before this PR merged) — verified via the full automated suite (unit through
+  Playwright e2e) instead; never reprocessed message 5661 or any other message.
