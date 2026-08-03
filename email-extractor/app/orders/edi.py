@@ -196,25 +196,58 @@ def content_hash(content: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+# #153: how long a bare (unconfirmed) claim is trusted to mean "another worker may
+# genuinely be mid-upload right now". Mirrors db.CLAIM_STALE_MINUTES's role for the
+# messages.processing_at claim guard — same shape, different table.
+CLAIM_STALE_MINUTES = 10
+
+
 def claim_send(conn, customer_ean: str, delivery_date: str, content: str,
                name: str) -> bool:
-    """Claim the right to upload this exact document. False = already sent.
+    """Claim the right to upload this exact document, or reclaim an orphaned one.
 
-    Claimed BEFORE the upload: a crash between claim and upload is recoverable through
-    `release_send`, while a duplicate upload is not recoverable at all — it creates a
-    second order in ORION (#51).
+    False = a CONFIRMED upload already exists for this identity, or another claim is
+    still fresh (< CLAIM_STALE_MINUTES) and may be mid-upload right now.
+
+    Two-phase (#153): a bare claim (uploaded_at IS NULL) is only provisional. A crash
+    between claim and upload is recoverable through `release_send` when the run is
+    still alive to run its `except` block — but a run that dies harder (killed,
+    restarted) never gets that chance, and the claim survives as an orphan. Reading an
+    unconfirmed, stale orphan as "already sent" loses the order silently forever; a
+    real duplicate upload is the alternative and is NOT recoverable — it creates a
+    second order in ORION (#51). Reclaiming the orphan is therefore the safe direction.
+
+    The reclaim is atomic: `DO UPDATE ... WHERE` is evaluated by Postgres per-row as
+    part of conflict resolution itself, so two workers racing this same call can never
+    both win — only one INSERT's conflicting UPDATE actually matches the WHERE clause
+    and returns a row; the other sees no row updated and gets nothing back.
     """
     row = conn.execute(
         """INSERT INTO edi_sent (customer_ean, delivery_date, content_sha256, filename)
            VALUES (%s, %s, %s, %s)
-           ON CONFLICT (customer_ean, delivery_date, content_sha256) DO NOTHING
+           ON CONFLICT (customer_ean, delivery_date, content_sha256)
+           DO UPDATE SET sent_at = now(), filename = EXCLUDED.filename
+           WHERE edi_sent.uploaded_at IS NULL
+             AND edi_sent.sent_at < now() - make_interval(mins => %s)
            RETURNING id""",
-        (str(customer_ean or ""), str(delivery_date or ""), content_hash(content), name),
+        (str(customer_ean or ""), str(delivery_date or ""), content_hash(content), name,
+         CLAIM_STALE_MINUTES),
     ).fetchone()
     if row is None:
-        log.warning("EDI already sent for %s / %s — refusing a duplicate upload",
-                    customer_ean, delivery_date)
+        log.warning("EDI already sent (or claimed within %sm) for %s / %s — refusing "
+                    "a duplicate upload", CLAIM_STALE_MINUTES, customer_ean, delivery_date)
     return row is not None
+
+
+def confirm_sent(conn, customer_ean: str, delivery_date: str, content: str) -> None:
+    """Stamp the claim as a genuinely CONFIRMED upload — call this ONLY after the
+    upload actually succeeded, never optimistically alongside the claim. Until this
+    runs, the claim stays reclaimable by `claim_send` once it goes stale (#153)."""
+    conn.execute(
+        """UPDATE edi_sent SET uploaded_at = now()
+            WHERE customer_ean = %s AND delivery_date = %s AND content_sha256 = %s""",
+        (str(customer_ean or ""), str(delivery_date or ""), content_hash(content)))
+    log.info("EDI confirmed sent for %s / %s", customer_ean, delivery_date)
 
 
 def release_send(conn, customer_ean: str, delivery_date: str, content: str) -> None:

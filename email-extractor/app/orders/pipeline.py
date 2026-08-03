@@ -683,6 +683,10 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
                 reason=Reason.UPLOAD_FAILED)
         return "error", preview, result["reject_reason"]
 
+    # #153: only NOW is the upload genuinely confirmed — never optimistically alongside
+    # the claim. Until this runs, the claim stays reclaimable if this run dies before
+    # reaching it (see edi.claim_send's docstring).
+    edi.confirm_sent(conn, matched.ean_edi, delivery, built.content)
     result["shipped"] = True
     for d in shipped_items:
         memory.remember(conn, matched.ean_edi, d.item_name, d.gtin, d.card,
