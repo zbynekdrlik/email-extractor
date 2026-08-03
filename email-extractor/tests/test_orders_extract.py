@@ -115,6 +115,58 @@ def test_an_order_with_no_verifiable_item_is_not_kept():
     assert len(result["unverified"]) == 1
 
 
+# --- 2b) the delivery DATE is citation-checked too (#163) -----------------
+#
+# Real incident: msg id 5679, subject "RE: catering 25.7. SL", arrived 2026-08-03. The
+# body is a delivery-note follow-up quoting an order sent 2026-07-22 for "sobotu 25.7." —
+# over a month in the past by the time the reply arrived. The model, applying the prompt's
+# own "a delivery date can never be in the past" rule with nothing else to go on, invented
+# 08.08.2026 (simply the next Saturday after "today") — a string that occurs NOWHERE in the
+# source text. That fabricated date must never be treated as a real delivery date.
+
+STALE_QUOTE_MAIL = (
+    "Subject: RE: catering 25.7. SL\n"
+    "From: ondus@example.com\n"
+    "Body: uz ano, isla to prave kolegyna nahrat na dodak.\n\n"
+    "> Dna 22.7.2026 napisal:\n"
+    "> Dobry den, prosim objednat nasledovne na sobotu 25.7.:\n"
+    "> 10x rozok 50g\n"
+)
+
+
+class _FakeStaleDateClient:
+    """Mimics the real model's bug: returns a deliveryDate the source text never wrote."""
+    last_prompt_hash = "abc123abc123"
+
+    def json_call(self, system, user, schema, name="result"):
+        return {"orders": [{"deliveryDate": "08.08.2026", "recipientGroup": "", "items": [
+            {"name": "rozok 50g", "quantity": 10, "unit": "ks",
+             "sourceQuote": "10x rozok 50g"},
+        ]}]}
+
+
+def test_a_stale_quoted_order_re_dated_by_the_model_is_not_shipped():
+    result = extract.run(_FakeStaleDateClient(),
+                         {"combined_text": STALE_QUOTE_MAIL, "today": "2026-08-03",
+                          "subject": "RE: catering 25.7. SL"})
+    assert result["orders"] == []
+    assert "08.08" not in json.dumps(result)
+
+
+def test_date_grounded_accepts_an_explicit_day_that_is_actually_written():
+    assert extract.date_grounded("25.07.2026", "prosim objednat na 25.7. dakujem")
+
+
+def test_date_grounded_rejects_an_invented_day_absent_from_the_source():
+    assert not extract.date_grounded("08.08.2026", "objednavka na sobotu 25.7. prosim")
+
+
+def test_date_grounded_allows_a_relative_date_with_no_explicit_day_anywhere():
+    """'na zajtra' names no day.month at all — nothing in the text to hold the computed
+    date accountable against, so the ordinary relative-date order still ships."""
+    assert extract.date_grounded("31.07.2026", FREE_TEXT_MAIL)
+
+
 # --- 3) sanity guards ----------------------------------------------------
 
 def test_a_price_list_read_as_an_order_is_refused():
