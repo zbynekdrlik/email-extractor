@@ -587,3 +587,15 @@ again. That is the point: a changed prompt has not been measured until it has be
   `report.build_summary` itself needs `psycopg` importable (`report.py` imports it at module
   level for an unrelated function) — a throwaway venv (`python3 -m venv` + `pip install
   psycopg`) is enough, no container access needed for that part.
+- **A `git commit -m "<message with literal backticks>"` on this Bash tool silently
+  strips everything between the backtick pairs — bash treats them as command
+  substitution even inside the `-m` argument (#157).** A design/root-cause commit
+  message for `match.py` almost always quotes function/identifier names in backticks
+  (`_distinctive_words`, `alias_customer`, ...) — writing it as a plain `-m "..."` with
+  those backticks left literal loses that text from the committed message with NO error
+  (only stray `command not found` noise on stderr, easy to miss). Same fix as
+  `gh-cli-recipes.md` already prescribes for `gh issue create`/`gh pr create` bodies with
+  backticks/`$`/`%`: write the message to a file (or a single-quoted heredoc) and pass it
+  via `git commit -F <file>`/`git commit -F -`, never an inline double-quoted `-m` string
+  containing backticks. Since the commit already landed once mangled, do NOT `--amend`
+  to fix it (never rewrites history) — just get the NEXT commit right.
