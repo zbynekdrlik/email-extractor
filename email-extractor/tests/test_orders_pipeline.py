@@ -221,6 +221,30 @@ def test_a_change_request_with_an_unmatched_item_never_holds(pg, env):
     assert len(teach.open_questions(pg)) == 1
 
 
+def test_a_change_request_from_an_unrecognized_customer_still_says_change_request(pg, env):
+    """#170 follow-up from #164: `_ship_one` used to check `not matched` BEFORE
+    `is_change`, so a change-request order whose customer also happened to be unmatched
+    reported the generic "Zákazník nebol nájdený" wording, never mentioning it was a
+    change request at all. `is_change` is now checked first (`change_prefix` needs a real
+    EAN, so the wording is the plain "unrecognized customer" variant, not the file-prefix
+    one) — still purely technical, never a board question."""
+    rec = Recorder()
+    answers = _answers(change=True)
+    answers[0]["senderEmail"] = "cudzi@nikde.sk"
+    answers[0]["companyName"] = "Neznáma firma s.r.o."
+    answers[1] = {"ean_edi": "", "confidence": 0.1}
+    mail = dict(MAIL, from_addr="cudzi@nikde.sk")
+    before = len(teach.open_questions(pg))
+    result = pipeline.run(pg, _cfg(), mail, env, client=ScriptedClient(answers),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "review"
+    assert rec.uploads == []
+    assert "zmena" in rec.posts[0].lower()
+    assert "nebol nájdený" not in rec.posts[0].lower()
+    assert len(teach.open_questions(pg)) == before, "change request stays technical"
+    assert pg.execute("SELECT count(*) FROM held_orders").fetchone()[0] == 0
+
+
 # --- #159: an unrecognized customer is a WAREHOUSE QUESTION, not a dead end -------
 
 def test_an_unknown_customer_with_time_left_holds_and_asks_who_it_is(pg, env):
