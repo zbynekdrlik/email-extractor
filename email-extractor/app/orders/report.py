@@ -63,8 +63,14 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
     `change` (#159) marks a "review" order whose reason is a change-of-order — it is
     ALWAYS resolved by hand in ORION and NOTHING is ever queued for it, so it gets its own
     wording and neither link, never the generic "review" bucket. That shape is what makes
-    it structurally impossible for an item name, a trace or a run id to leak into Odoo —
-    the function simply never receives them.
+    it structurally impossible for a TRACE or a RUN ID to leak into Odoo — the function
+    simply never receives them. The one deliberate, sanctioned exception (#162):
+    `reject_reason` MAY carry a specific ITEM WORDING when an order stays held on a line
+    that could not even be turned into a warehouse question (`hold._post_still_held`) —
+    the warehouse genuinely needs to see WHICH line is stuck, and #162's own "never
+    silently drop a line" requirement outranks the general no-item-detail rule for that
+    one narrow case. `reject_reason` is still always `escape()`d below, so this is a
+    visibility choice, never an injection risk.
 
     `unverified_count` (#139 review finding) is the AGEL-incident phantom-item safeguard
     (`extract.py`'s `unverified` — a model-claimed item the e-mail text does not prove) —

@@ -223,14 +223,24 @@ again. That is the point: a changed prompt has not been measured until it has be
   top-level `from . import pipeline` in `hold.py` would deadlock the import (whichever module
   loads first hits the other's not-yet-defined name). Keep this pattern for any future
   order-lifecycle module that needs to call back into the pipeline's shipping step.
-- **A held order releases through `_ship_one` unchanged — `hold.release_for_question` only
-  re-derives the DECISIONS first**, via `match.decide_without_model(item_name, [], ...)`
-  called with an EMPTY catalog. That's deliberate, not a shortcut: the only rungs that can
-  fire post-hold are `human_taught`/`global_taught` (this order's OWN wording, just
-  answered) — those need no catalog at all — so passing `[]` avoids persisting/reloading the
-  catalog snapshot the order was originally matched against, and is safe to run over EVERY
-  stored decision (not just the pending ones) because a rung that finds nothing simply
-  returns `None` and the original decision is kept.
+- **A held order releases through `_ship_one` unchanged — `hold.release_for_question`
+  re-derives the DECISIONS first via `hold._redecide`, against the REAL current catalog
+  snapshot (#162, `hold._current_catalog`), not an empty one.** Earlier (pre-#162) this
+  passed `decide_without_model(item_name, [], ...)` an EMPTY catalog — safe for the
+  already-known-customer item-hold path, where the only rungs that could ever fire
+  post-hold were `human_taught`/`global_taught` (every genuinely ambiguous line already
+  had its own tracked, now-answered question, so no catalog rung was ever needed). That
+  assumption does NOT hold for a customer-unknown hold (#159): no item question was ever
+  raised on the first pass, so a still-unmatched line's only free chance to resolve is
+  the real catalog (`catalog_name`/`alias_exact`/`history_sure`) plus this now-known
+  customer's own memory. `_release_locked` then checks every redecided decision's rule
+  against `pipeline.ASK_THE_WAREHOUSE` (lazy-imported per the pattern above): anything
+  STILL ambiguous gets a FRESH `teach.ask` question and the row stays `held` a second
+  time — it is never shipped with the line silently dropped. Safe to redecide EVERY
+  stored decision, not just the pending ones, because a rung that finds nothing simply
+  returns `None` and the original decision is kept. See `hold._redecide`'s own docstring
+  for the full detail (including the `_recalled_cache` sharing with
+  `hold._ask_still_ambiguous`).
 - **A `httpapi.py` route that pairs an external side effect (upload/HTTP-post) with its own
   DB "claim" write (the `edi_sent` ledger) must run that pair on an AUTOCOMMIT connection
   (`_db()`), never inside another route's `_db_tx()` transaction (review finding, #93,
@@ -599,3 +609,37 @@ again. That is the point: a changed prompt has not been measured until it has be
   via `git commit -F <file>`/`git commit -F -`, never an inline double-quoted `-m` string
   containing backticks. Since the commit already landed once mangled, do NOT `--amend`
   to fix it (never rewrites history) — just get the NEXT commit right.
+- **`hooks/block-commit-without-design.sh`'s `#N`-in-commit-message gate (see the
+  `#139` entry above) ALSO latches onto a freshly-`gh issue create`'d follow-up number,
+  not just a PR number (#159/#161, 2026-08-03).** A commit whose message named the
+  brand-new follow-up ticket it had just filed ("... filed as #162, out of scope here")
+  got blocked demanding a design comment on **#162** — a ticket that, by construction,
+  is an un-designed deferred follow-up with nothing to post. Same fix as before, applied
+  more broadly: before committing, grep the drafted commit message for ANY bare `#N`
+  (not just a PR number) and rephrase it out entirely ("filed as a separate follow-up
+  ticket", never "filed as #N") rather than trying to satisfy the gate for a number that
+  was never meant to carry a design decision.
+- **A `Matched` dataclass instance (`app/orders/customer.py`) is ALWAYS truthy, even
+  when constructed as a placeholder with `ean_edi=""` (#159, review-caught on PR #161).**
+  `_ship_one`'s `if not matched:` guard is the ONLY place that is supposed to catch "no
+  real customer" — it works for `matched is None`, but NOT for a `Matched(ean_edi="",
+  ...)` sentinel (the shape `pipeline.py` uses to `hold.place()` an order while the
+  customer is still unknown). Any code path that reconstructs a `Matched` straight from
+  a DB column that might still be blank (`held_orders.customer_ean`, as the deadline
+  sweep does) must check the COLUMN's blankness itself BEFORE building the `Matched`,
+  never rely on `if not matched:` downstream to catch it — the object being non-`None`
+  hides the emptiness. `matched.rule` cannot be used to tell a placeholder apart from a
+  real match after a `held_orders` round-trip either: `hold.place()` never persists
+  `rule` into the table, and every release path rebuilds it as `rule="held_release"`
+  regardless of what it originally was.
+- **Don't reuse `memory.item_key()` (the FUZZY product-wording normalizer — folds
+  `.`/`-`/`_`/`@`/spaces all to one blank separator) as a dedupe key for anything that
+  needs EXACT identity, like an e-mail address (#159, review-caught on PR #161).**
+  `teach.ask_customer()` first keyed its "one open question per unresolved sender" dedupe
+  on `memory.item_key(sender_email)`, which folded `a.b@x.com`/`a-b@x.com`/`a_b@x.com`
+  onto the SAME key — two genuinely different real senders would have collapsed onto one
+  open question, and answering it for one would silently apply to the other's order too.
+  The fix was simply `sender_email.strip().lower()` with no punctuation folding. The
+  general rule: `item_key()` is for WORDINGS (where fuzzy collapsing typos/spacing IS the
+  point); reach for it only when that fuzziness is actually wanted, never as a generic
+  "make this a safe dict/index key" helper.
