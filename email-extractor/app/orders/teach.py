@@ -159,10 +159,32 @@ def undo(conn, qid: int) -> dict:
     (`memory.forget_global` checks `question_id`). A different customer's later, redundant
     answer to the same wording never owns the global row (it was already taught), so undoing
     THAT answer must not erase a mapping some OTHER question is responsible for.
+
+    A `kind='customer'` question (#159) is entirely different data to unteach: its real
+    pick was remembered via `snapshot.remember_customer_email`, not `item_memory` — review
+    finding on PR #161: without this branch, undoing a mis-picked customer only reopened
+    the question while the wrong sender-address binding stayed live in
+    `customer_overrides` forever, silently mis-routing every future order from that
+    address. "neviem, kto to je" (`answer_gtin=""`) never remembered anything, so it is a
+    harmless reopen either way.
     """
     q = get(conn, qid)
     if not q:
         raise NotACandidate(f"question {qid} does not exist")
+    if q.get("kind") == "customer":
+        if q.get("answer_gtin"):
+            from . import snapshot
+            snapshot.forget_customer_email(
+                conn, q["answer_gtin"], (q.get("context") or {}).get("sender_email", ""))
+            snapshot.rebuild_from_overrides(conn)
+        conn.execute(
+            """UPDATE order_questions
+                  SET status = 'open', answer_gtin = NULL, answer_card = NULL,
+                      answered_by = NULL, answered_at = NULL
+                WHERE id = %s""", (qid,))
+        log.warning("customer teaching taken back for question %s (%s)", qid,
+                    (q.get("context") or {}).get("sender_email", ""))
+        return get(conn, qid) or {}
     conn.execute(
         "DELETE FROM item_memory WHERE customer_ean = %s AND item_key = %s"
         " AND source = 'human'", (q["customer_ean"], memory.item_key(q["wording"])))
@@ -197,9 +219,16 @@ def ask_customer(conn, message_id: str, sender_email: str, candidates: list[dict
                  delivery_date: str, context: dict, on_new=None) -> int | None:
     """Raise ONE 'who is this customer?' question. Returns its id — the EXISTING id when
     one is already open for this sender address, and None when there is no address to key
-    on at all (nothing to dedupe against, nothing a human could even be shown)."""
-    key = memory.item_key(f"neznamy zakaznik {sender_email}")
-    if not (sender_email and key):
+    on at all (nothing to dedupe against, nothing a human could even be shown).
+
+    The dedupe key is the address itself, case/whitespace-normalized only — review
+    finding on PR #161: reusing `memory.item_key` (a FUZZY normalizer built for product
+    WORDINGS, which folds '.', '-', '_', '@' all to the same blank separator) let two
+    genuinely different real addresses collapse onto the SAME open question. An e-mail
+    address needs EXACT identity, never fuzzy matching.
+    """
+    key = str(sender_email or "").strip().lower()
+    if not key:
         return None
     row = conn.execute(
         """INSERT INTO order_questions
