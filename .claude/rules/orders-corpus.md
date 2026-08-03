@@ -632,6 +632,54 @@ again. That is the point: a changed prompt has not been measured until it has be
   real match after a `held_orders` round-trip either: `hold.place()` never persists
   `rule` into the table, and every release path rebuilds it as `rule="held_release"`
   regardless of what it originally was.
+- **Pre-verify a `app/orders/**` change against the LIVE 30-case corpus on dev2 BEFORE
+  pushing, when the change is risky enough that a CI round-trip feels wasteful (#163,
+  2026-08-03).** `e2e-orders` runs on the dev2 self-hosted runner, which already has a
+  cached checkout + venv at `~/actions-runner-emailextract/_work/email-extractor/
+  email-extractor/email-extractor` and long-lived scratch Postgres containers (`docker ps`
+  — `ee-eval-pg` on host port 55434, `email-extractor-testpg` on 15433, `postgres`/
+  `postgres`). `scp` your locally-edited file straight into that checkout's `app/orders/`
+  (the `pre-deploy-clean-tree.sh` hook blocks this from a dirty local tree — this is not a
+  production deploy, so bypass it deliberately with `# airuleset:deploy-dirty-ok`), then run
+  the SAME command the CI step runs (`ci.yml`'s `e2e-orders` job), with `CORPUS`/`PG_DSN`/
+  `LLM_CACHE_DIR` as **real `export`ed shell vars, not inline prefix assignments** — `VAR=x
+  cmd --arg=$VAR` does NOT expand `$VAR` in the SAME command's own arguments (prefix
+  assignments only populate the child's environment, not the current line's word
+  expansion), which silently produced `FileNotFoundError: /catalog.csv` the first time:
+  ```
+  export CORPUS=/home/newlevel/eval-corpus/email-extractor
+  export PG_DSN="postgresql://postgres:postgres@localhost:55434/postgres"
+  export LLM_CACHE_DIR="$CORPUS/llm-cache"
+  cd ~/actions-runner-emailextract/_work/email-extractor/email-extractor/email-extractor
+  .venv/bin/python -m app.orders.eval_run --manifest "$CORPUS/manifest.json" \
+    --catalog "$CORPUS/catalog.csv" --customers "$CORPUS/customers.csv" \
+    --history "$CORPUS/history.json" --taught "$CORPUS/taught.json" \
+    --baseline "$CORPUS/baseline.json" --require-all
+  ```
+  `git checkout -- app/orders/extract.py` in that checkout afterward to leave it clean for
+  the next real CI run. This caught a real regression (two `weekly_free_text`/
+  `weekly_five_days` cases) BEFORE a second wasted push+CI cycle.
+- **Any NEW model-extracted field needs its OWN citation check — item citation
+  (`quote_in_source`/`item_in_source`) does not automatically cover other fields the model
+  returns (#163).** `deliveryDate` had no equivalent check until the model was caught
+  inventing one (re-dating a stale quoted order onto an unwritten future day). When adding
+  or trusting any new field out of `extracted`/`ORDER_SCHEMA`, ask: is this field
+  citation-checked against `source`, or just trusted verbatim? `extract.date_grounded()` is
+  the template for a new one — grounded when the value's text appears literally in
+  `source`, OR is derivable from something written (e.g. an explicit range, see
+  `_range_days`), OR the source gives no evidence at all to check against (nothing to hold
+  a purely-relative/defaulted value accountable for).
+- **`_RANGE`'s own match can end without the trailing dot `_SUBJ_DAY` requires** ("06.07. -
+  11.07" — the range regex doesn't require a dot after the SECOND date's month digits, but
+  `_SUBJ_DAY` does) — `_SUBJ_DAY.findall()` on a `_RANGE` match's own text can silently
+  return only ONE of the two endpoints. Use a plain `re.findall(r"(\d{1,2})\s*\.\s*(\d{1,2})",
+  ...)` pair-finder scoped to just that matched span instead when you need BOTH endpoints
+  of a range.
+- **Constructing a placeholder `datetime.date` from day/month digits with no real year
+  (to do date-range arithmetic without one) — use a LEAP year, or a literal `29.02.`
+  raises `ValueError` and silently drops the whole computation** (`except ValueError:
+  continue` swallows it with no trace). `_range_days` uses `2000`/`2004` (both leap,
+  four apart) as the placeholder pair for exactly this reason.
 - **Don't reuse `memory.item_key()` (the FUZZY product-wording normalizer — folds
   `.`/`-`/`_`/`@`/spaces all to one blank separator) as a dedupe key for anything that
   needs EXACT identity, like an e-mail address (#159, review-caught on PR #161).**
