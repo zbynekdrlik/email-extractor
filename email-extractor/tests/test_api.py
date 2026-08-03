@@ -619,3 +619,82 @@ def test_fix_request_and_its_event_commit_together(pg, monkeypatch):
     assert r.status_code == 500
     assert pg.execute("SELECT count(*) FROM fix_requests").fetchone()[0] == 0, \
         "the fix row must roll back with the failed event write"
+
+
+# --- #164: the register must not break a LIVE, already-open legacy item/customer row,
+# and the sklad-role link must reach every registered kind through the SAME existing URLs
+# (SKLAD_PATHS/SKLAD_ACTION are byte-identical — the security boundary never widens).
+
+def test_legacy_rows_and_the_sklad_boundary_survive_the_new_kind_register(pg, monkeypatch):
+    from app.httpapi import SKLAD_ACTION, SKLAD_PATHS, sklad_key
+    from app.orders import memory, snapshot, teach
+
+    # SKLAD_PATHS itself is the whole security boundary for the unauthenticated warehouse
+    # link — it must be byte-identical to before the register existed.
+    assert SKLAD_PATHS == ("/otazky", "/api/orders/questions", "/api/orders/taught",
+                           "/api/orders/held")
+    assert SKLAD_ACTION.match("/api/orders/question/123/answer")
+    assert SKLAD_ACTION.match("/api/orders/question/123/undo")
+
+    snapshot.import_snapshot(
+        pg, "GTIN,Názov,doplnok\nSLI50,Šiška džemová 50g,\n",
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,E-mail\n"
+        "Pekáreň Testovacia s.r.o.,2000000000001,Martin,Košútka 1,sklad@pekaren.sk\n")
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('m164', 'ai_orders')")
+
+    # An "old-shaped" open row of EACH pre-#164 kind — `teach.ask`/`ask_customer` never set
+    # `payload`/`answer` themselves, so these rows are indistinguishable from ones written
+    # before the migration ever ran (default `payload='{}'`, `answer=NULL`).
+    item_qid = teach.ask(pg, message_id="m164", customer_ean="2000000000001",
+                         customer_name="Pekáreň Testovacia s.r.o.", wording="Šiška",
+                         quantity=30, unit="ks",
+                         candidates=[{"gtin": "SLI50", "name": "Šiška džemová 50g"}])
+    cust_qid = teach.ask_customer(
+        pg, message_id="m164", sender_email="zilina@farmeria.sk",
+        candidates=[{"ean_edi": "2000000000001", "name": "Pekáreň Testovacia s.r.o.",
+                    "city": "Martin", "street": "Košútka 1", "address_match": False}],
+        delivery_date="04.08.2026",
+        context={"sender_email": "zilina@farmeria.sk", "sender_name": "Sklad",
+                "company_name": "", "delivery_address_guess": ""})
+    mail_qid = teach.ask_mail(pg, message_id="m164b", sender_email="niekto@example.com",
+                              subject="Info", reason="AI nenašla objednávku")
+    assert pg.execute("SELECT payload, answer FROM order_questions WHERE id=%s",
+                      (item_qid,)).fetchone() == ({}, None)
+
+    monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
+    c = _client()
+    _login(c)
+
+    rendered = {q["id"] for q in c.get("/api/orders/questions").get_json()["items"]}
+    assert {item_qid, cust_qid, mail_qid} <= rendered
+
+    # Legacy item kind: EXACTLY the old side effect (item_memory human row) + undo reverts.
+    r = c.post(f"/api/orders/question/{item_qid}/answer",
+              json={"gtin": "SLI50", "card": "Šiška džemová 50g"})
+    assert r.status_code == 200
+    assert memory.resolve(pg, "2000000000001", "Šiška").gtin == "SLI50"
+    assert c.post(f"/api/orders/question/{item_qid}/undo").status_code == 200
+    assert memory.resolve(pg, "2000000000001", "Šiška") is None
+
+    # Legacy customer kind: EXACTLY the old side effect (customer_overrides row) + undo.
+    r = c.post(f"/api/orders/question/{cust_qid}/answer",
+              json={"ean_edi": "2000000000001", "name": "Pekáreň Testovacia s.r.o."})
+    assert r.status_code == 200
+    row = pg.execute("SELECT emails FROM customer_overrides WHERE ean_edi='2000000000001'"
+                     ).fetchone()
+    assert row and "zilina@farmeria.sk" in row[0]
+    assert c.post(f"/api/orders/question/{cust_qid}/undo").status_code == 200
+    row = pg.execute("SELECT emails FROM customer_overrides WHERE ean_edi='2000000000001'"
+                     ).fetchone()
+    assert row is None or "zilina@farmeria.sk" not in (row[0] or [])
+
+    # The sklad-role link (no password) reaches the NEW `mail` kind through the SAME
+    # already-allowed URLs — no widening needed, since the endpoint is id-based, not
+    # kind-scoped.
+    sc = _client()
+    assert sc.get("/sklad/" + sklad_key("test-secret")).status_code == 302
+    r = sc.post(f"/api/orders/question/{mail_qid}/answer", json={"choice": "not_order"})
+    assert r.status_code == 200
+    assert pg.execute("SELECT action FROM mail_rules WHERE question_id=%s",
+                      (mail_qid,)).fetchone() == ("ignore",)
+    assert sc.get("/api/messages").status_code == 401, "the link still reaches nothing else"

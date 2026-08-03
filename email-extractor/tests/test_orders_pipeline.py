@@ -676,3 +676,123 @@ def test_two_recipient_groups_of_the_same_shop_still_merge(pg, env):
     ]
     merged = pipeline._merge_by_day(orders)
     assert len(merged) == 1 and len(merged[0]["items"]) == 2
+
+
+# --- #164: the full exit-matrix replay ------------------------------------------------
+#
+# Every terminal "reason" `pipeline.py` can produce, replayed in ONE place. Each row
+# proves the invariant `_finish` now enforces: a "review"/"error" outcome is EITHER
+# TECHNICAL (nothing a warehouse click could ever resolve — 0 new questions, no board
+# link) OR carries at least one NEW board question — never neither. A new branch added
+# later that forgets the board falls back to the `_finish` invariant's own generic `mail`
+# question rather than going silent — this table pins the NORMAL path for every reason so
+# a future regression shows up as a wrong row here, not as a silent production gap.
+
+def test_the_full_exit_matrix_never_lets_a_resolvable_reason_go_silent(pg, env):
+    def _open_qs():
+        return teach.open_questions(pg)
+
+    # 1. LLM_REFUSED — technical, no question, no board link.
+    refusal_items = [{"name": f"item{i}", "quantity": 1, "unit": "ks",
+                      "sourceQuote": f"1x item{i}"} for i in range(12)]
+    refusal_answer = {
+        "senderName": "Sklad", "senderEmail": "sklad@pekaren.sk",
+        "companyName": "Pekáreň Testovacia s.r.o.", "isChangeRequest": False, "notes": "",
+        "orders": [{"orderNumber": "", "deliveryDate": "04.08.2026", "recipientGroup": "",
+                    "items": refusal_items}],
+    }
+    rec = Recorder()
+    mail1 = dict(MAIL, message_id="mx1")
+    before = len(_open_qs())
+    result = pipeline.run(pg, _cfg(dashboard_base_url='http://test.local:8099', secret_key='s'), mail1, env, client=ScriptedClient([refusal_answer]),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "review" and result.get("question_ids", []) == []
+    assert len(_open_qs()) == before, "LLM_REFUSED is technical — no board question"
+    assert len(rec.posts) == 1 and "nástenke" not in rec.posts[0].lower()
+
+    # 2. NO_ORDERS — resolvable: becomes a `mail`-kind board question.
+    no_orders_answer = {
+        "senderName": "Sklad", "senderEmail": "sklad@pekaren.sk",
+        "companyName": "", "isChangeRequest": False, "notes": "", "orders": [],
+    }
+    rec = Recorder()
+    mail2 = dict(MAIL, message_id="mx2")
+    before = len(_open_qs())
+    result = pipeline.run(pg, _cfg(dashboard_base_url='http://test.local:8099', secret_key='s'), mail2, env, client=ScriptedClient([no_orders_answer]),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "held" and len(result.get("question_ids", [])) == 1
+    new = _open_qs()
+    assert len(new) == before + 1
+    assert new[-1]["kind"] == "mail"
+    assert len(rec.posts) == 1 and "nástenke" in rec.posts[0].lower()
+
+    # 3. DATE_CONFLICT — resolvable: becomes a `date`-kind board question, order(s) held.
+    conflict_answer = {
+        "senderName": "Sklad", "senderEmail": "sklad@pekaren.sk",
+        "companyName": "Pekáreň Testovacia s.r.o.", "isChangeRequest": False, "notes": "",
+        "orders": [{"orderNumber": "", "deliveryDate": "08.08.2026", "recipientGroup": "",
+                    "items": [{"name": "rožok 50g", "quantity": 10, "unit": "ks",
+                               "sourceQuote": "10x rožok 50g"}]}],
+    }
+    rec = Recorder()
+    mail3 = dict(MAIL, message_id="mx3", subject="Objednávka 29.06.2026",
+                combined_text="na 08.08.2026 prosím 10x rožok 50g")
+    answers3 = [conflict_answer, {"ean_edi": "2000000000001", "confidence": 0.95}]
+    before = len(_open_qs())
+    before_held = pg.execute("SELECT count(*) FROM held_orders").fetchone()[0]
+    result = pipeline.run(pg, _cfg(dashboard_base_url='http://test.local:8099', secret_key='s'), mail3, env, client=ScriptedClient(answers3),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "held" and len(result.get("question_ids", [])) == 1
+    new = _open_qs()
+    assert len(new) == before + 1 and new[-1]["kind"] == "date"
+    assert pg.execute("SELECT count(*) FROM held_orders").fetchone()[0] == before_held + 1
+    assert len(rec.posts) == 1 and "nástenke" in rec.posts[0].lower()
+
+    # 4. CHANGE_REQUEST — technical, no question, no board link (own #159 wording).
+    rec = Recorder()
+    mail4 = dict(MAIL, message_id="mx4")
+    before = len(_open_qs())
+    result = pipeline.run(pg, _cfg(dashboard_base_url='http://test.local:8099', secret_key='s'), mail4, env, client=ScriptedClient(_answers(change=True)),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "review"
+    assert len(_open_qs()) == before, "CHANGE_REQUEST is technical — no board question"
+    assert len(rec.posts) == 1 and "nástenke" not in rec.posts[0].lower()
+
+    # 5. ITEM_OPEN — resolvable: an already-raised item question threads through and the
+    # order holds (matched customer, plenty of time before the delivery date).
+    rec = Recorder()
+    mail5 = dict(MAIL, message_id="mx5")
+    before = len(_open_qs())
+    result = pipeline.run(pg, _cfg(dashboard_base_url='http://test.local:8099', secret_key='s'), mail5, env,
+                          client=ScriptedClient(_answers(items=(("torta", None, 0.2),))),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "held" and len(result.get("question_ids", [])) == 1
+    new = _open_qs()
+    assert len(new) == before + 1 and new[-1]["kind"] == "item"
+    assert len(rec.posts) == 1 and "nástenke" in rec.posts[0].lower()
+
+    # 6. UPLOAD_FAILED — technical, no question, no board link.
+    def failing(cfg, name, content):
+        raise OSError("ORION unreachable")
+
+    rec = Recorder()
+    mail6 = dict(MAIL, message_id="mx6")
+    before = len(_open_qs())
+    result = pipeline.run(pg, _cfg(dashboard_base_url='http://test.local:8099', secret_key='s'), mail6, env, client=ScriptedClient(_answers()),
+                          upload=failing, post=rec.post)
+    assert result["status"] == "error"
+    assert len(_open_qs()) == before, "UPLOAD_FAILED is technical — no board question"
+    assert len(rec.posts) == 1 and "nástenke" not in rec.posts[0].lower()
+
+    # 7. DEDUP_ALREADY_SENT — ships "ok" both times; the invariant does not even apply
+    # (only review/error are gated), and no NEW question is ever raised for a re-run.
+    rec = Recorder()
+    mail7 = dict(MAIL, message_id="mx7")
+    pipeline.run(pg, _cfg(dashboard_base_url='http://test.local:8099', secret_key='s'), mail7, env, client=ScriptedClient(_answers()),
+                upload=rec.upload, post=rec.post)
+    before = len(_open_qs())
+    result = pipeline.run(pg, _cfg(dashboard_base_url='http://test.local:8099', secret_key='s'), mail7, env, client=ScriptedClient(_answers()),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "ok"
+    assert len(_open_qs()) == before
+    assert len(rec.uploads) == 1, "the second run must never re-upload"
