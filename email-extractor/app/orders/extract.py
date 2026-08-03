@@ -292,7 +292,8 @@ def run(client, email: dict) -> dict:
     A recognized table replaces the model's item list but keeps its header fields (dates,
     PO number, sender) — those are not in the grid.
     """
-    source = clean_text(email.get("combined_text") or "")
+    source = unquote_fully_quoted(clean_text(email.get("combined_text") or ""),
+                                  today=email.get("today") or "")
     user = (f"{today_header(email.get('today'))}\n\n"
             f"FROM: {email.get('from_name', '')} <{email.get('from_addr', '')}>\n"
             f"SUBJECT: {email.get('subject', '')}\n\n--- ORDER EMAIL ---\n{source}\n--- END ---")
@@ -360,6 +361,83 @@ def _body_only(text: str) -> str:
 def _days_in(text: str) -> set[tuple[int, int]]:
     """Every explicit day.month written in the text."""
     return {(int(d), int(m)) for d, m, _, _ in _SUBJ_DAY.findall(text or "")}
+
+
+# --- a body that is quoted from line one is the order itself (#155) ---------
+
+_QUOTE_PREFIX = re.compile(r"^\s*(?:>\s*)+")
+# The envelope THIS add-on writes around the customer's text, plus the `===== file =====`
+# attachment separator. None of it is customer content, so none of it may decide whether
+# the customer's own text is quoted.
+_ENVELOPE_LINE = re.compile(r"^(?:Subject|From|To|Date|Body|Attachments)\s*:", re.IGNORECASE)
+
+
+def _today_day_month(today: str) -> tuple[int, int] | None:
+    """(day, month) from `today`, accepting both `DD.MM.YYYY` and `YYYY-MM-DD`."""
+    s = str(today or "").strip()
+    parts = re.findall(r"\d+", s)
+    if len(parts) < 3:
+        return None
+    if re.match(r"^\d{4}\b", s):
+        return int(parts[2]), int(parts[1])
+    return int(parts[0]), int(parts[1])
+
+
+def _orders_a_day_still_ahead(text: str, today: str) -> bool:
+    """Does the text ask for a day that has NOT already passed?
+
+    The guard for the one case where unquoting would be harmful: an empty reply whose
+    client quoted an OLD thread. That body is last week's order, and a past delivery date
+    is not refused downstream — it ships (`pipeline` only skips the hold). So a quoted body
+    is only accepted when at least one day it names is still ahead; otherwise the message
+    keeps its old outcome, "no order found → enter by hand", which is the safe one.
+
+    A relative-date order ("na pondelok") names no day to judge, and without a reference
+    day nothing can be judged — both stay accepted rather than being blocked on a guess.
+    """
+    ref = _today_day_month(today)
+    days = _days_in(_body_only(text))
+    if not ref or not days:
+        return True
+    tday, tmonth = ref
+    # `month + 6 < tmonth` = the order wraps into next year (December mail, January order).
+    return any((m, d) >= (tmonth, tday) or m + 6 < tmonth for d, m in days)
+
+
+def _unquote_line(line: str) -> str:
+    """Drop the quote marker, keeping an envelope prefix (`Body: > …`) intact."""
+    if _ENVELOPE_LINE.match(line.strip()):
+        head, sep, rest = line.partition(":")
+        return f"{head}{sep} {_QUOTE_PREFIX.sub('', rest.lstrip())}".rstrip()
+    return _QUOTE_PREFIX.sub("", line)
+
+
+def unquote_fully_quoted(text: str, today: str = "") -> str:
+    """Strip `>` markers when the customer's WHOLE body is quoted (#155).
+
+    Some mail clients quote every line of the message being composed, and customers do
+    re-send a week's order that way. `prompts/extract.md` tells the model to ignore lines
+    starting with `>` — correctly, so that a reply's old thread is not read as today's
+    order — so such an email arrives at the model as nothing at all: CÉDER's four-day
+    order (5.–8.8.) came back as "no order found" and was never entered.
+
+    Markers are stripped ONLY when the body has no unquoted text of its own. A normal
+    reply that adds fresh lines above an old thread keeps them, so the history goes on
+    being ignored.
+
+    This runs on the SAME string the model, the citation check and the table parser all
+    read, so an item the model quotes without its `>` stays findable in the source —
+    unquoting for the model alone would drop real items as unverifiable, which is the
+    zero-width-space failure (#41, the AGEL order) all over again.
+    """
+    raw = str(text or "")
+    lines = raw.splitlines()
+    content = [s for s in (ln.strip() for ln in lines)
+               if s and not _ENVELOPE_LINE.match(s) and not s.startswith("=====")]
+    if not content or not all(_QUOTE_PREFIX.match(s) for s in content):
+        return raw
+    unquoted = "\n".join(_unquote_line(ln) for ln in lines)
+    return unquoted if _orders_a_day_still_ahead(unquoted, today) else raw
 
 
 def date_conflict(subject: str, dates: list[str], body: str = "") -> str:

@@ -319,3 +319,81 @@ def test_a_date_range_in_the_body_is_not_a_contradiction_either():
     body = "Body: objednávka od 06.07. - 11.07. pre PNO Poprad, denne 30 x Rožok 70g"
     assert not extract.date_conflict(
         "objednávka", ["06.07.2026", "08.07.2026", "11.07.2026"], body=body)
+
+
+# --- an email whose WHOLE body is quoted is still an order (#155) ------------
+
+# The real 2026-08-03 mail from CÉDER (msg 5596), shortened: the customer's client quoted
+# every single line, so the prompt's "ignore lines starting with >" rule emptied the email
+# and a four-day order was reported as "AI nenašla v e-maile žiadnu objednávku".
+CEDER_FULLY_QUOTED = (
+    "Subject: objednávka 5.-8.8.\n\nFrom: info@resortceder.sk\n\n"
+    "Body: > Dobrý deň,\n> \n> na 5.8. streda poprosím:\n> \n> Rožok 70g : 30 x\n> \n"
+    "> Chlieb multicereálny : 2 x\n> \n> Vianočka - 1 x\n> \n"
+    "> na 6.8. štvrtok poprosím:\n> \n> Rožok 70g : 30 x\n> \n> Vianočka - 1 x\n"
+)
+
+
+def test_a_fully_quoted_email_body_is_unquoted_so_the_order_is_read():
+    out = extract.unquote_fully_quoted(CEDER_FULLY_QUOTED)
+    assert not [ln for ln in out.splitlines() if ln.lstrip().startswith(">")]
+    assert "na 5.8. streda poprosím:" in out
+    assert "na 6.8. štvrtok poprosím:" in out
+    assert "Rožok 70g : 30 x" in out
+    # the envelope the add-on itself adds must survive intact
+    assert "From: info@resortceder.sk" in out
+    assert "Subject: objednávka 5.-8.8." in out
+
+
+def test_a_reply_that_adds_fresh_lines_keeps_its_quote_markers():
+    """Only a body with NO unquoted text of its own is unquoted.
+
+    A normal reply — fresh order on top, last week's thread below — must keep the markers,
+    otherwise the old thread's items would be read as part of today's order.
+    """
+    mail = ("Body: Dobrý deň, na 12.8. poprosím:\n\nRožok 70g : 10 x\n\n"
+            "> na 5.8. streda poprosím:\n> Rožok 70g : 30 x\n")
+    assert extract.unquote_fully_quoted(mail) == mail
+
+
+def test_nested_quoting_is_unquoted_too():
+    mail = "Body: >> Dobrý deň,\n>> na 5.8. poprosím:\n>> Rožok 70g : 30 x\n"
+    out = extract.unquote_fully_quoted(mail)
+    assert "na 5.8. poprosím:" in out
+    assert not [ln for ln in out.splitlines() if ln.lstrip().startswith(">")]
+
+
+def test_a_normal_unquoted_email_is_returned_unchanged():
+    assert extract.unquote_fully_quoted(KOSIK_MAIL) == KOSIK_MAIL
+
+
+def test_a_quoted_body_whose_days_have_all_passed_is_left_alone():
+    """The guard on the fix: an empty reply that quotes an OLD thread must not become an order.
+
+    A past delivery date is not refused downstream — `pipeline` only skips the hold and
+    ships — so last week's quoted order would go to ORION a second time. Such a message
+    keeps its old outcome instead: no order found, enter by hand.
+    """
+    stale = ("Subject: Re: objednávka\n\nFrom: info@resortceder.sk\n\n"
+             "Body: > Dobrý deň,\n> \n> na 5.8. streda poprosím:\n> Rožok 70g : 30 x\n")
+    assert extract.unquote_fully_quoted(stale, today="20.08.2026") == stale
+    # …while the same mail read on the day it was sent IS the order
+    assert ">" not in extract.unquote_fully_quoted(stale, today="03.08.2026")
+
+
+def test_a_quoted_order_with_no_written_day_is_still_read():
+    """"na pondelok" names no day to compare, so the guard must not block it."""
+    mail = "Body: > Dobrý deň,\n> na pondelok poprosím:\n> Rožok 70g : 30 x\n"
+    assert "na pondelok poprosím:" in extract.unquote_fully_quoted(mail, today="03.08.2026")
+
+
+def test_the_extraction_source_is_unquoted_so_citations_can_be_verified():
+    """`run()` must feed the UNQUOTED text to the model AND to the citation check.
+
+    Both read the same `source`, so an item quoted by the model as `Rožok 70g : 30 x`
+    (without the `>`) has to be findable in it — otherwise a real item would be dropped as
+    unverifiable, the AGEL zero-width failure all over again.
+    """
+    source = extract.unquote_fully_quoted(extract.clean_text(CEDER_FULLY_QUOTED))
+    assert extract.quote_in_source("Rožok 70g : 30 x", source)
+    assert extract.quote_in_source("Chlieb multicereálny : 2 x", source)
