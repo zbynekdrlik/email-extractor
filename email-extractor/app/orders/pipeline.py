@@ -145,10 +145,15 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
 
     # #164: a sender+subject pattern the warehouse already taught (`mail`-kind answer,
     # `teach.KINDS['mail'].apply`) is checked BEFORE the LLM ever runs — `ignore` saves
-    # the extraction call entirely, `manual` skips straight to the known instruction. A
-    # pure read, so it applies even in shadow (no side effect); nothing to check when the
-    # table has no rows yet (every existing/corpus message).
-    rule = _mail_rule(conn, message.get("from_addr", ""), message.get("subject", ""))
+    # the extraction call entirely, `manual` skips straight to the known instruction.
+    # `not shadow` ONLY: unlike a memory READ that merely informs a decision the model
+    # still makes, this SKIPS the entire extraction pipeline — shadow's whole contract is
+    # "run the same pipeline as live, just claim/upload/teach nothing" (its comparison
+    # against n8n would be corrupted if a taught rule silently changed the verdict itself,
+    # not just a side effect). The 30-email corpus runs forced-shadow and has no
+    # mail_rules rows anyway, so this never touches it.
+    rule = None if shadow else _mail_rule(
+        conn, message.get("from_addr", ""), message.get("subject", ""))
     if rule == "ignore":
         # `reject_reason` (not just `notes`) so `report.build_summary` actually prints it —
         # status="ok" alone renders the generic "nahraté do ORIONu" label, which would be a
