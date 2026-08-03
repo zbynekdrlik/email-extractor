@@ -794,3 +794,48 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   msg-5679 shape — confirmed it drops the order and states the date could not be found,
   never asserting 08.08.2026 as fact. Never reprocessed message 5679 or any other live
   message.
+
+## #164 — every board-resolvable dead end funnels through one place (2026-08-03)
+
+- Root cause: `pipeline._run` had eight terminal branches, only two (item #88, customer
+  #159) ever wrote a board question. Live proof cited in the ticket: message 5679's
+  date-conflict branch discarded the already-resolved customer and returned "review" with
+  zero rows in `order_questions`/`held_orders`.
+- Design: `Reason` enum + `TECHNICAL_REASONS`, enforced as an invariant inside `_finish`
+  (a "review"/"error" outcome must be technical OR carry an open question — a fallback
+  generic `mail` question fires + logs CRITICAL otherwise). Kind-agnostic `teach.KINDS`
+  register (item/customer/mail/date/line), each declaring `learns` + `deadline_shippable`
+  (enforced non-empty at import). New `mail_rules` table (sender+subject pattern →
+  ignore/manual, short-circuits BEFORE the LLM call, `not shadow`-gated). New
+  `hold.set_delivery_date` + `release_due`'s `deadline_shippable` rule (a hold still
+  waiting on a non-shippable question converts to review at the deadline instead of
+  auto-shipping an unconfirmed date/customer/line).
+- Commits: `c89edc1` (version bump) → `8820b12` [red: 3 named regression tests against the
+  pre-implementation baseline, via `git stash` isolation] → `bcd1def` [green:
+  implementation] → `aa5eaaa` (shadow-mode mail_rules fix, found in self-review) →
+  `538fdb3` (worker._claim mail-kind exclusion test) → `3c6bcca` (item/customer registry
+  coverage). RED tests: `test_a_hold_with_date_and_item_questions_ships_only_once_both_
+  are_answered` + `test_release_due_never_ships_a_still_open_non_shippable_question`
+  (`tests/test_orders_hold.py`), `test_the_full_exit_matrix_never_lets_a_resolvable_
+  reason_go_silent` (`tests/test_orders_pipeline.py`),
+  `test_legacy_rows_and_the_sklad_boundary_survive_the_new_kind_register`
+  (`tests/test_api.py`) — all failed against pre-implementation code (`teach.ask_date`/
+  `ask_mail` did not exist), all pass after.
+- Self-review before push caught 3 real bugs: the mail_rules short-circuit would have
+  corrupted shadow-mode's diff-vs-n8n comparison (fixed, `not shadow` gate);
+  `worker._claim`'s SQL had no exclusion for an open `mail`-kind question (it has no
+  `held_orders` row, unlike item/customer/date holds — added + tested); an existing test
+  (`test_asking_with_no_sender_address_at_all_returns_none`) assumed the OLD
+  `ask_customer` contract and needed rewriting for the new `cust:<message_id>` fallback
+  key.
+- PR #168, merged `e8c22c5`. Main CI green (test, e2e-orders — unchanged prompts/schemas,
+  build). Local coverage 92.18% (CI gate 85%). Deployed v0.9.40 via `ha addons update`;
+  `/health` confirms `{"ok":true,"version":"0.9.40"}`; DOM (`/`, `/otazky`) both show
+  `v0.9.40`; migration confirmed live (`mail_rules` table + `order_questions.payload`/
+  `answer` columns present in the production DB); `/otazky` renders cleanly, zero console
+  errors.
+- Playbook: new `.claude/rules/local-testing.md` (concurrent local `pytest` runs against
+  the SAME dev1 test Postgres corrupt/hang each other — hit twice this session, cost real
+  debugging time) + `.claude/rules/orders-corpus.md` gained 3 entries (the register's
+  item/customer live-dispatch split, the shadow-gate reasoning for a pipeline-skipping
+  short-circuit vs. a memory-read, the multi-kind-hold + `deadline_shippable` interaction).
