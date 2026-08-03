@@ -445,3 +445,100 @@ def test_the_deadline_sweep_never_ships_a_still_unresolved_customer(pg, env):
     # the customer question itself is untouched by the deadline sweep — still open,
     # so a late answer (or a human reading /otazky) can still resolve it
     assert teach.get(pg, qid)["status"] == "open"
+
+
+# --- #162: a genuinely ambiguous ITEM in a customer-unknown order must be re-asked,
+# never silently shipped partial, once the customer is resolved --------------------
+
+def _hold_unmatched_customer_with_ambiguous_item(pg, env):
+    """Same as `_hold_unmatched_customer`, but the order's ONLY item is "torta" — with
+    two catalog cards (TOR/TOR2) genuinely ambiguous, exactly the shape #162 describes:
+    no item question was ever raised on the first pass (the customer was unknown, so
+    `pipeline._run`'s `if not shadow and matched and ...` never fired), and the stored
+    decision is "unmatched" with no gtin."""
+    from app.orders import teach
+    from app.orders.match import Decision
+
+    qid = teach.ask_customer(
+        pg, message_id="m1", sender_email="zilina@farmeria.sk",
+        candidates=[{"ean_edi": "2000000000001", "name": "Pekáreň Testovacia s.r.o.",
+                    "city": "Martin", "street": "Košútka 1", "address_match": True}],
+        delivery_date="04.08.2026",
+        context={"sender_email": "zilina@farmeria.sk", "sender_name": "Sklad",
+                "company_name": "", "delivery_address_guess": ""})
+    matched = customer.Matched(ean_edi="", name="", confidence=0.0, rule="unmatched", note="")
+    order = {"deliveryDate": "04.08.2026", "orderNumber": "", "store": "", "items": [
+        {"name": "torta", "quantity": 5, "unit": "ks"}]}
+    decisions = [Decision(item_name="torta", gtin=None, card="", confidence=0.1,
+                          rule="unmatched", note="nič sa nezhoduje", review=False, trace={},
+                          quantity=5, unit="ks")]
+    hid = hold.place(pg, message_id="m1", matched=matched, order=order, decisions=decisions,
+                     extracted={"isChangeRequest": False, "unverified": [], "notes": ""},
+                     question_ids=[qid])
+    return qid, hid
+
+
+def test_answering_the_customer_re_asks_a_still_ambiguous_item_instead_of_shipping(pg, env):
+    """The #162 gap: answering the customer question must NOT ship the order with the
+    "torta" line silently dropped — it must raise a FRESH item question and hold the
+    order a second time."""
+    qid, hid = _hold_unmatched_customer_with_ambiguous_item(pg, env)
+    teach.answer_customer(pg, qid, ean_edi="2000000000001",
+                          name="Pekáreň Testovacia s.r.o.", by="sklad")
+    hold.set_customer(pg, qid, "2000000000001", "Pekáreň Testovacia s.r.o.")
+    rec = Recorder()
+    released = hold.release_for_question(pg, _cfg(), qid, upload=rec.upload, post=rec.post)
+
+    assert released == [], "still ambiguous — must not ship, must not report a release"
+    assert rec.uploads == [], "never ship a line that is still genuinely unresolved"
+    row = hold.get(pg, hid)
+    assert row["status"] == "held", "stays held on the fresh item question"
+
+    open_qs = teach.open_questions(pg)
+    item_qs = [q for q in open_qs if q["wording"] == "torta"]
+    assert len(item_qs) == 1, "a fresh, visible item question must exist — never a silent drop"
+    assert item_qs[0]["customer_ean"] == "2000000000001"
+    assert item_qs[0]["id"] in row["question_ids"], \
+        "the held row must now track the new item question, or it can never release again"
+    # the notification is visible, not just a log line
+    assert len(rec.posts) == 1
+    assert "otázk" in rec.posts[0].lower() or "held" in rec.posts[0].lower()
+
+
+def test_answering_the_re_asked_item_then_finally_ships_the_order(pg, env):
+    """Once the fresh item question from #162 is itself answered, the order finally
+    ships — with both the customer AND the item resolved, exactly one document."""
+    qid, hid = _hold_unmatched_customer_with_ambiguous_item(pg, env)
+    teach.answer_customer(pg, qid, ean_edi="2000000000001",
+                          name="Pekáreň Testovacia s.r.o.", by="sklad")
+    hold.set_customer(pg, qid, "2000000000001", "Pekáreň Testovacia s.r.o.")
+    rec = Recorder()
+    hold.release_for_question(pg, _cfg(), qid, upload=rec.upload, post=rec.post)
+    assert rec.uploads == []
+
+    item_qid = next(q["id"] for q in teach.open_questions(pg) if q["wording"] == "torta")
+    teach.answer(pg, item_qid, gtin="TOR", card="Torta čokoládová", by="sklad")
+    released = hold.release_for_question(pg, _cfg(), item_qid, upload=rec.upload, post=rec.post)
+
+    assert len(released) == 1 and released[0]["status"] == "ok"
+    assert len(rec.uploads) == 1
+    assert rec.uploads[0][1].count("LIN") == 1
+    assert hold.get(pg, hid)["status"] == "released"
+    assert pg.execute(
+        "SELECT count(*) FROM item_memory WHERE source='human' AND item_key='torta'"
+    ).fetchone()[0] == 1
+
+
+def test_a_customer_unknown_order_with_only_unambiguous_items_still_ships_immediately(pg, env):
+    """Regression guard for the live message 5661 case (#159's driving incident): every
+    line already resolved at first pass, only the customer was unknown — answering the
+    customer question must ship right away, no needless second hold."""
+    qid, hid = _hold_unmatched_customer(pg, env)
+    teach.answer_customer(pg, qid, ean_edi="2000000000001",
+                          name="Pekáreň Testovacia s.r.o.", by="sklad")
+    hold.set_customer(pg, qid, "2000000000001", "Pekáreň Testovacia s.r.o.")
+    rec = Recorder()
+    released = hold.release_for_question(pg, _cfg(), qid, upload=rec.upload, post=rec.post)
+    assert len(released) == 1 and released[0]["status"] == "ok"
+    assert len(rec.uploads) == 1
+    assert hold.get(pg, hid)["status"] == "released"
