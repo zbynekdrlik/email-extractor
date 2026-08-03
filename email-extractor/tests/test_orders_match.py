@@ -443,6 +443,18 @@ def test_plausible_candidates_handles_an_empty_list():
     assert match.plausible_candidates([]) == []
 
 
+def test_plausible_candidates_includes_a_candidate_exactly_at_the_floor():
+    """The floor check is `>=`, not `>` — a candidate scoring exactly
+    PLAUSIBLE_CANDIDATE_SCORE must still be shown, not just anything above it."""
+    ask_cands = [
+        {"gtin": "TOS", "name": "Toskánsky slimák 100g"},
+        {"gtin": "AT_FLOOR", "name": "Rožok kváskový 70g",
+         "score": match.PLAUSIBLE_CANDIDATE_SCORE},
+    ]
+    out = match.plausible_candidates(ask_cands)
+    assert [c["gtin"] for c in out] == ["TOS", "AT_FLOOR"]
+
+
 def test_the_decision_trace_names_the_rule_and_its_inputs():
     d = _decide("Rožok 70g", llm={"gtin": "G50", "confidence": 0.95})
     assert d.trace["rule"] == "unmatched"
