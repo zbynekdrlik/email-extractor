@@ -880,3 +880,35 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   local-testing.md` gained a note (captured pytest -q output can end at `[100%]` with no
   trailing summary line even on a green run — verify via exit code + absence of failure
   markers).
+
+## #153 — edi_sent two-phase confirmation (orphaned claim silently skipped an order)
+
+- Root cause: `edi.claim_send` inserted a CLAIM row before `upload()` and only released
+  it (`release_send`) inside the `except` around `upload()` — a run that died OUTSIDE
+  that branch (crash/kill/restart) left an orphan claim that the next attempt read as
+  "already sent" and silently dropped the order (13 real orders lost, 2026-08-03).
+- Fix: additive `edi_sent.uploaded_at` (self-healing `db.SCHEMA`/`init_schema`, no
+  separate migration system). `claim_send` is now an atomic `INSERT ... ON CONFLICT ...
+  DO UPDATE ... WHERE uploaded_at IS NULL AND sent_at < 10min ago RETURNING id` — a
+  stale unconfirmed claim is reclaimed; a confirmed upload (any age) or a fresh claim
+  (<10min, another worker may be mid-upload) still blocks a duplicate. New
+  `edi.confirm_sent()` stamps it, called from `pipeline._ship_one` only after `upload()`
+  genuinely succeeds, and retries with reconnect (review finding) since losing that one
+  write is worse than the retry's latency. Pre-existing rows are backfilled as confirmed
+  inside the same migration step that adds the column, serialized via
+  `pg_advisory_xact_lock` against the project's OTHER `init_schema()` callers (one-off
+  CLI tools) — a second review finding, since only the main app's single-process
+  ordering was originally argued as safe.
+- RED: `tests/test_orders_edi.py::test_an_orphaned_stale_claim_is_reclaimed_not_
+  silently_skipped` + 4 more failed with `UndefinedColumn` on commit `76a6a22`; GREEN on
+  `f045aaa`. Deep `requesting-code-review` pass found 2 🟡 + 2 🔵, all fixed on `8f4ed8b`.
+- PR #176, merged `7fc344c`. Main CI green (test, e2e-orders, build). Deployed v0.9.43
+  via `ha addons update`; `/health` confirms `{"ok":true,"version":"0.9.43"}`; live
+  Postgres check post-deploy: `edi_sent` has the `uploaded_at` column, 48/48 existing
+  rows backfilled as confirmed, 0 left unconfirmed. Dashboard DOM shows `v0.9.43`.
+- Doc-only follow-up PR #177 (playbook notes), merged `a34ed0d` — no version bump, no
+  redeploy needed (no application code changed).
+- Playbook: `.claude/rules/orders-corpus.md` gained the two-phase-confirmation ledger
+  pattern (atomic reclaim, confirm-with-retry, advisory-lock-guarded backfill migration,
+  the DROP-COLUMN test technique) + `.claude/rules/deploy.md` gained the
+  `sudo`-resets-env `PGPASSWORD` gotcha for post-deploy DB verification.
