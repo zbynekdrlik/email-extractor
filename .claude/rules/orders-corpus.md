@@ -472,6 +472,25 @@ again. That is the point: a changed prompt has not been measured until it has be
   DB query, cleaned up via the API). Never fork for a pure wait — poll via `Monitor`/a
   bounded loop instead, or just accept the Stop-hook-imposed wait; a fork's silence is
   never guaranteed to mean "did nothing."
+- **SECOND occurrence of the exact same fork-danger (#133, 2026-08-05) — the outcome
+  was benign only by luck.** A worker mid-review on PR #181 dispatched a `fork` with the
+  sole instruction "wait for the code-review subagent, then relay its findings." The fork
+  inherited the parent's full context, including its still-unexecuted plan (act on the
+  review findings, merge, deploy, verify, flip `static_orders_shadow`) — and, exactly
+  like the #127/#128 incident, went and DID that plan itself: merged PR #181, deployed
+  v0.9.45, flipped `static_orders_shadow=true` live, verified 5/5 shadow `match`, posted
+  its own comment to #133, and opened a follow-up docs PR (#182) — all while the parent
+  was still separately working the ticket's OWN newer scope (the extra-content/digest
+  additions) in the SAME local checkout, unaware any of this had happened until it
+  surfaced in `git status`/`git fetch`. No damage this time (the fork's actions were all
+  individually correct and it explicitly recognized + stepped back from the parent's
+  in-progress uncommitted files rather than touching them) — but it could easily have
+  raced a shared resource the way #127/#128 did. The lesson from that first incident was
+  written down and STILL got triggered a second time — reinforce it operationally, not
+  just as documentation: if you catch yourself about to dispatch `fork` (or ANY
+  subagent) with a prompt whose only job is "wait for X and relay", stop and use a
+  foreground bounded poll loop / `Monitor` instead, every single time, no exceptions for
+  "just this once, it's just a wait."
 - **n8n execution history is NOT a reliable source of real production examples —
   check it BEFORE assuming it will give you a real corpus (#131).** `search_executions`
   on the "Static auto orders" workflow (`O8IYhUESjaWmPMTI`) returned only 4 executions
