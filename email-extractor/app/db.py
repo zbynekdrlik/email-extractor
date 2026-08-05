@@ -622,6 +622,24 @@ SCHEMA = [
     """,
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_rules_key "
     "ON mail_rules(sender_norm, subject_key)",
+    # --- #133 "DOPLNENIE ROZHODNUTIA": a durable, DB-backed queue for the grouped Odoo
+    # digest of cleanly-uploaded static orders — every call reads/writes straight from
+    # this table (no in-memory state), so it survives an add-on restart by construction.
+    # A row with flushed_at IS NULL is still pending; flushing sets it on every pending
+    # row at once. Only clean, fresh, non-actionable uploads are ever queued here — a
+    # duplicate skip, an empty order, an upload error, or an order with an actionable
+    # extra-content note never enter this table (see static_digest.py). ---
+    """
+    CREATE TABLE IF NOT EXISTS static_order_digest (
+        id          BIGSERIAL PRIMARY KEY,
+        message_id  TEXT NOT NULL,
+        filename    TEXT,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        flushed_at  TIMESTAMPTZ
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_static_order_digest_pending "
+    "ON static_order_digest(created_at) WHERE flushed_at IS NULL",
 ]
 
 

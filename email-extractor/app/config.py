@@ -90,6 +90,11 @@ class Config:
     # low while a file is still legitimately waiting.
     import_confirm_timeout_minutes: int = 60
     import_confirm_interval_minutes: int = 5
+    # #133 "DOPLNENIE ROZHODNUTIA": grouped Odoo digest for cleanly-uploaded static
+    # orders (see static_digest.py) — batch-size and idle-timeout triggers, tunable
+    # without a code change.
+    static_digest_batch_size: int = 30
+    static_digest_idle_minutes: int = 60
 
     @classmethod
     def load(cls) -> Config:
@@ -166,4 +171,8 @@ class Config:
             import_confirm_interval_minutes=int(
                 _get(o, "import_confirm_interval_minutes",
                      "IMPORT_CONFIRM_INTERVAL_MINUTES", 5) or 5),
+            static_digest_batch_size=int(
+                _get(o, "static_digest_batch_size", "STATIC_DIGEST_BATCH_SIZE", 30) or 30),
+            static_digest_idle_minutes=int(
+                _get(o, "static_digest_idle_minutes", "STATIC_DIGEST_IDLE_MINUTES", 60) or 60),
         )

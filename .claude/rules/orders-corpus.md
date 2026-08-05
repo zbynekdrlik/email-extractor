@@ -472,6 +472,25 @@ again. That is the point: a changed prompt has not been measured until it has be
   DB query, cleaned up via the API). Never fork for a pure wait — poll via `Monitor`/a
   bounded loop instead, or just accept the Stop-hook-imposed wait; a fork's silence is
   never guaranteed to mean "did nothing."
+- **SECOND occurrence of the exact same fork-danger (#133, 2026-08-05) — the outcome
+  was benign only by luck.** A worker mid-review on PR #181 dispatched a `fork` with the
+  sole instruction "wait for the code-review subagent, then relay its findings." The fork
+  inherited the parent's full context, including its still-unexecuted plan (act on the
+  review findings, merge, deploy, verify, flip `static_orders_shadow`) — and, exactly
+  like the #127/#128 incident, went and DID that plan itself: merged PR #181, deployed
+  v0.9.45, flipped `static_orders_shadow=true` live, verified 5/5 shadow `match`, posted
+  its own comment to #133, and opened a follow-up docs PR (#182) — all while the parent
+  was still separately working the ticket's OWN newer scope (the extra-content/digest
+  additions) in the SAME local checkout, unaware any of this had happened until it
+  surfaced in `git status`/`git fetch`. No damage this time (the fork's actions were all
+  individually correct and it explicitly recognized + stepped back from the parent's
+  in-progress uncommitted files rather than touching them) — but it could easily have
+  raced a shared resource the way #127/#128 did. The lesson from that first incident was
+  written down and STILL got triggered a second time — reinforce it operationally, not
+  just as documentation: if you catch yourself about to dispatch `fork` (or ANY
+  subagent) with a prompt whose only job is "wait for X and relay", stop and use a
+  foreground bounded poll loop / `Monitor` instead, every single time, no exceptions for
+  "just this once, it's just a wait."
 - **n8n execution history is NOT a reliable source of real production examples —
   check it BEFORE assuming it will give you a real corpus (#131).** `search_executions`
   on the "Static auto orders" workflow (`O8IYhUESjaWmPMTI`) returned only 4 executions
@@ -815,3 +834,21 @@ again. That is the point: a changed prompt has not been measured until it has be
   itself_fails` (fake `paramiko.SSHClient` via `unittest.mock.patch("paramiko.SSHClient",
   ...)`, `connect.side_effect = OSError(...)`, assert `close()` was still called) — this
   file also gave `upload.py` its FIRST test coverage at all; it had none before #151.
+- **`edi_sent` is a SHARED ledger, not a Python-only table — n8n's own "Static auto
+  orders" workflow writes into it too, with the IDENTICAL content-hash algorithm
+  (#133, verified live via the n8n MCP against `O8IYhUESjaWmPMTI`'s `Check Already
+  Sent`/`Claim Send` Postgres nodes).** Its `Compute Content Hash` Crypto node computes
+  `SHA256(content.slice(0,47) + '        ' (8 spaces) + content.slice(55))` — byte-for-
+  byte the SAME normalization `app/orders/edi.py`'s `content_hash()` does
+  (`DOC_DATE_AT=47`, `DOC_DATE_LEN=8`), over the SAME `(customer_ean, delivery_date,
+  content_sha256, filename)` columns, on the SAME Postgres credential ("Email Extractor
+  Postgres"). This means: (1) `edi.claim_send`/`confirm_sent`/`release_send` can be
+  reused AS-IS for the static-orders Python engine with zero new ledger table — dedup
+  works across BOTH engines during any transition window; (2) a shadow-mode diff against
+  n8n's REAL output is a genuine byte-for-byte comparison
+  (`SELECT content_sha256, filename FROM edi_sent WHERE customer_ean=<store_ean> AND
+  delivery_date=<date> ORDER BY id DESC LIMIT 1`), not a heuristic. `get_workflow_details`
+  strips node-level `credentials` from its response (same known gap as the #51 entry
+  above) — confirm which Postgres credential is wired by elimination via
+  `list_credentials(type:postgres)` (only one exists in this instance) rather than
+  expecting to see it directly on the node.
