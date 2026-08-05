@@ -1,42 +1,67 @@
-"""Static-orders SHADOW-mode worker (#132): wires `static_parse` + `static_edi` (#131) into
-the worker loop for `category='static_orders'`, for comparison against n8n's own "Static auto
-orders" workflow (`O8IYhUESjaWmPMTI`). Same shape `worker.py` already uses for `ai_orders`
-shadow mode — see that module's docstring — with ONE deliberate difference: static orders are
-1287/month (8x the AI-orders volume) on live production, so a direct cutover is out of scope
-here (#133 decides that later). This module can therefore ONLY ever shadow:
+"""Static-orders worker (#68 groundwork, #133 the real cutover): wires `static_parse` +
+`static_ean` + `static_edi` into the worker loop for `category='static_orders'`.
+
+Three modes, the same shape `worker.py` already uses for `ai_orders` (see that module's
+docstring) — because n8n still owns the "Static auto orders" workflow (`O8IYhUESjaWmPMTI`)
+until the user flips the switch:
 
 - `static_orders_engine=n8n`, `static_orders_shadow=false` (DEFAULT) — completely inert.
 - `static_orders_engine=n8n`, `static_orders_shadow=true` — parses with `static_parse` and
-  builds the EDI with `static_edi` for comparison only: **claims nothing and marks nothing**,
-  exactly like `worker.py`'s `_peek_for_shadow` — the message must stay exactly as n8n expects
-  to find it. Results land in `order_runs(shadow=true)` / `order_items` only.
-- `static_orders_engine=python` — NOT implemented. #133 (the actual cutover) is a separate,
-  not-yet-decided ticket; flipping this option must fail loudly in the log and change nothing,
-  never crash the add-on's loop and never look like a processed message (same contract
-  `worker.tick` used while ITS pipeline was pending, #61).
-
-No LLM is involved (static parsing is pure regex + a deterministic EDI writer), so unlike
-`ai_orders` shadow this costs nothing per run — the day bound below exists anyway, for the same
-reason `worker._peek_for_shadow`'s exists: comparison against n8n on CURRENT mail, never a
-replay of the whole archive on every tick.
+  builds the EDI with `static_edi` for comparison only: **claims nothing and marks
+  nothing** — the message must stay exactly as n8n expects to find it. Since #133 the
+  comparison is no longer one-sided: n8n's OWN "Check Already Sent"/"Claim Send" Postgres
+  nodes write into the SAME `edi_sent` table the Python engine uses, with the IDENTICAL
+  `content_sha256` algorithm (SHA256 of the document with bytes 47:55 — the header's date
+  field — blanked first; verified LIVE via the n8n MCP against the real workflow, 2026-
+  08-05 — this is exactly `edi.content_hash`). So when a real n8n upload for the same
+  order (`customer_ean=store_ean`, `delivery_date`) already exists, the Python-built
+  content is compared to it BYTE-FOR-BYTE, and the verdict is stored in
+  `order_runs.result->>'shadow_verdict'` (`match` / `mismatch` / `would_fallback` /
+  `empty_order` / `no_n8n_output` — see `run_shadow`). A multi-day clean window is
+  provable straight from the DB:
+  `SELECT result->>'shadow_verdict', count(*) FROM order_runs r JOIN messages m
+     USING (message_id) WHERE r.shadow AND m.category='static_orders' GROUP BY 1;`
+  `no_n8n_output` is EXPECTED, not a failure: the shadow tick picks the newest
+  not-yet-shadowed message the moment it appears, which can race ahead of n8n's own
+  (independent, slower) claim/dispatch — it means "not yet comparable", never "wrong".
+- `static_orders_engine=python` — claims with the SAME protocol `worker._claim` uses
+  (`processing_at`/`attempts`, the `held_orders`/`mail`-question guards) and owns the
+  message. Parses, resolves every item's EAN; only when EVERY item resolves does it build
+  + upload, through the SAME two-phase `edi_sent` ledger the AI engine (and n8n) already
+  use (`edi.claim_send`/`confirm_sent`/`release_send`) — a claim taken before the upload
+  is released on EVERY failure path. If parsing fails, the order is a photo, the header is
+  incomplete (`static_edi.build`'s own hard-fail guards), or ANY single item cannot be
+  resolved to an EAN, the WHOLE message falls back to the AI pipeline (`pipeline.run`,
+  under the SAME claim) — there is deliberately NO silent per-item skip (today's n8n
+  behaviour — dropping an unresolved line from the EDI — is the defect this ticket
+  removes, not a shape to preserve). The AI pipeline holds the order and asks the
+  warehouse via the nástenka, which teaches the wording forever. An Odoo alert is posted
+  ONLY on a genuine upload error — at ~32 static orders/day (8x AI-orders volume, #133
+  design comment) a per-order success post would flood the channel the way n8n's own
+  "extra content" LLM branch already does today (deliberately NOT ported here).
 """
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
+from html import escape
 
-from . import snapshot, static_ean, static_edi, static_parse, worker
+from . import edi, report, snapshot, static_ean, static_edi, static_parse, worker
+from . import upload as upload_mod
 
 log = logging.getLogger("orders.static_worker")
 
 CATEGORY = "static_orders"
 SHADOW_DAYS = 3
+WORKFLOW = "static_orders"
 
 # Reused as-is (worker.py's engine validation has no ai_orders-specific coupling): "n8n" and
 # "python" are the only recognized values, anything else raises.
 resolve_engine = worker.resolve_engine
 
-# The extractor's three "cannot proceed" exceptions all mean the same thing for shadow
-# purposes: report a reviewable run, never crash the tick.
+# The extractor's three "cannot proceed" exceptions all mean the same thing: report a
+# reviewable run in shadow, or fall back to the AI pipeline in the live engine — never
+# crash the tick.
 _PARSE_ERRORS = (static_parse.MissingInputText, static_parse.PhotoOrderNeedsVision,
                  static_parse.OrderExtractionError)
 
@@ -72,6 +97,33 @@ def _items_with_ean(items: list[dict], catalog: list[dict]) -> list[dict]:
     return out
 
 
+# --- shadow diff against the REAL n8n upload (#133) -------------------------
+
+def _n8n_sent(conn, customer_ean: str, delivery_date: str) -> dict | None:
+    """The most recent `edi_sent` row n8n's OWN "Claim Send" node wrote for this identity.
+    Same table, same `content_sha256` algorithm as `edi.content_hash` — see this module's
+    own docstring for the live-verified proof."""
+    row = conn.execute(
+        """SELECT content_sha256, filename FROM edi_sent
+            WHERE customer_ean = %s AND delivery_date = %s
+            ORDER BY id DESC LIMIT 1""",
+        (str(customer_ean or ""), str(delivery_date or ""))).fetchone()
+    if not row:
+        return None
+    return {"content_sha256": row[0], "filename": row[1]}
+
+
+def _diff_against_n8n(conn, built, delivery_date: str) -> tuple[str, str]:
+    real = _n8n_sent(conn, built.store_ean, delivery_date)
+    if real is None:
+        return ("no_n8n_output",
+                "n8n zatiaľ túto objednávku (podľa EAN prevádzky + dátumu) neposlalo")
+    ours = edi.content_hash(built.content)
+    if ours == real["content_sha256"]:
+        return "match", ""
+    return "mismatch", f"iný obsah než n8n (súbor n8n: {real['filename']!r})"
+
+
 def run_shadow(conn, message: dict, snapshot_id: int) -> dict:
     """Parse + build for ONE message. Never uploads, never posts, never writes message
     state — the caller (`tick`) only ever records the result into `order_runs`/`order_items`.
@@ -81,13 +133,15 @@ def run_shadow(conn, message: dict, snapshot_id: int) -> dict:
         parsed = static_parse.parse_static_order(
             text, has_attachments=bool(message.get("has_attachments")))
     except _PARSE_ERRORS as e:
-        return {"status": "review", "items": [], "reject_reason": str(e)}
+        return {"status": "review", "items": [], "reject_reason": str(e),
+                "shadow_verdict": "would_fallback", "shadow_note": str(e)}
 
     if parsed.get("skip"):
         # A valid header with zero item lines never needs the catalog (nothing to match) —
         # skip the load, not just the match.
         return {"status": "review", "items": [], "reject_reason": parsed.get("skipReason", ""),
-                "partner": parsed.get("partner", "")}
+                "partner": parsed.get("partner", ""),
+                "shadow_verdict": "empty_order", "shadow_note": ""}
 
     catalog = snapshot.load_catalog(conn, snapshot_id)
     items = _items_with_ean(parsed.get("items") or [], catalog)
@@ -96,38 +150,226 @@ def run_shadow(conn, message: dict, snapshot_id: int) -> dict:
         built = static_edi.build(parsed, catalog)
     except ValueError as e:
         return {"status": "review", "items": items, "reject_reason": str(e),
-                "partner": parsed.get("partner", "")}
+                "partner": parsed.get("partner", ""),
+                "shadow_verdict": "would_fallback", "shadow_note": str(e)}
 
     status = "ok" if built.items_skipped == 0 else "partial"
+    if built.items_skipped:
+        # #133: the live engine never uploads a partial EDI — an unresolved item routes
+        # the whole message to the AI pipeline instead. So a shadow run that WOULD have
+        # skipped an item is "would_fallback", never compared against n8n's own output.
+        verdict = "would_fallback"
+        note = (f"{built.items_skipped} položka/y bez EAN — Python engine by objednávku "
+                "poslal na AI, nie čiastočný EDI")
+    else:
+        verdict, note = _diff_against_n8n(conn, built, parsed.get("deliveryDate", ""))
     return {"status": status, "items": items, "partner": parsed.get("partner", ""),
             "delivery_date": parsed.get("deliveryDate", ""),
             "order_number": parsed.get("fullOrderNumber", ""),
             "edi_filename": built.filename, "edi_preview": built.content,
-            "items_with_ean": built.items_with_ean, "items_skipped": built.items_skipped}
+            "items_with_ean": built.items_with_ean, "items_skipped": built.items_skipped,
+            "shadow_verdict": verdict, "shadow_note": note}
 
 
-def tick(conn, cfg) -> int:
-    """Process at most one `static_orders` message, SHADOW ONLY. Returns 0 or 1."""
+# --- engine=python: real claim, same protocol worker._claim uses -----------
+
+def _claim(conn) -> dict | None:
+    row = conn.execute(
+        f"""UPDATE messages SET processing_at = now(), attempts = COALESCE(attempts, 0) + 1
+             WHERE id = (SELECT id FROM messages
+                          WHERE category = %s AND processed = false
+                            AND COALESCE(attempts, 0) < %s
+                            AND (processing_at IS NULL
+                                 OR processing_at < now()
+                                    - interval '{worker.CLAIM_STALE_MINUTES} minutes')
+                            -- same #93/#164 guards worker._claim uses: a message still
+                            -- waiting on a warehouse answer (from a fallback that held it)
+                            -- is WAITING, not stuck — never re-claim it.
+                            AND NOT EXISTS (
+                                SELECT 1 FROM held_orders h
+                                 WHERE h.message_id = messages.message_id
+                                   AND h.status = 'held')
+                            AND NOT EXISTS (
+                                SELECT 1 FROM order_questions q
+                                 WHERE q.message_id = messages.message_id
+                                   AND q.kind = 'mail' AND q.status = 'open')
+                          ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
+         RETURNING message_id, subject, from_addr, from_name, combined_text, body_text,
+                   has_attachments""",
+        (CATEGORY, worker.MAX_ATTEMPTS)).fetchone()
+    return _as_message(row)
+
+
+def _as_message(row) -> dict | None:
+    if not row:
+        return None
+    # #117 (mirrored from worker._as_message): "today" is what feeds memory.resolve's
+    # as_of date fence and hold.is_past_deadline downstream, inside the AI-pipeline
+    # fallback — without it those silently no-op.
+    return {"message_id": row[0], "subject": row[1] or "", "from_addr": row[2] or "",
+            "from_name": row[3] or "", "combined_text": row[4] or row[5] or "",
+            "has_attachments": bool(row[6]),
+            "today": datetime.now(UTC).date().isoformat()}
+
+
+def _fallback_to_ai(conn, cfg, message: dict, snapshot_id: int, note: str,
+                    pipeline=None) -> dict:
+    """Route this ALREADY-CLAIMED message through the AI pipeline instead of a silent
+    per-item skip or a dead end (#133 design decision, 2026-08-05). Same claim — the AI
+    pipeline neither re-claims nor releases `messages.processing_at`; it holds unresolved
+    lines and asks the warehouse via the nástenka, teaching the wording forever."""
+    log.info("static order %s falls back to the AI pipeline: %s", message["message_id"], note)
+    if pipeline is None:
+        from . import pipeline as pipeline_mod
+        pipeline = pipeline_mod.run
+    result = dict(pipeline(conn, cfg, message, snapshot_id) or {})
+    result["static_fallback"] = note
+    return result
+
+
+def _ship(conn, cfg, message: dict, parsed: dict, built, upload=None, post=None) -> dict:
+    """Upload ONE fully-resolved static order — the only path that ever writes to ORION
+    from this module. Mirrors `pipeline._ship_one`'s claim/upload/confirm shape."""
+    upload = upload or (lambda c, name, content: upload_mod.put(c, name, content))
+    post = post or (lambda c, html: report.post_from_config(c, html))
+    store_ean = built.store_ean
+    delivery = parsed.get("deliveryDate", "")
+    order_no = parsed.get("fullOrderNumber", "")
+    partner = parsed.get("partner", "")
+
+    if not edi.claim_send(conn, store_ean, delivery, built.content, built.filename):
+        # #133: a duplicate/already-sent skip must never look, in the timeline, like a
+        # fresh genuine upload — its own stage, never "uploaded_orion".
+        log.warning("static EDI for %s / %s already sent — not uploading again",
+                    store_ean, delivery)
+        report.log_event(
+            conn, message["message_id"], stage="duplicate_skip", status="ok",
+            outcome=f"EDI už bolo odoslané skôr: {built.filename} — preskočené",
+            detail={"filename": built.filename}, workflow=WORKFLOW)
+        return {"status": "ok", "items": [], "shipped": True, "edi_filename": built.filename,
+                "partner": partner, "order_number": order_no, "delivery_date": delivery}
+
+    try:
+        upload(cfg, built.filename, built.content)
+    except Exception as e:
+        edi.release_send(conn, store_ean, delivery, built.content)
+        log.exception("static order upload of %s failed", built.filename)
+        note = ("Odoslanie statickej objednávky do ORIONu zlyhalo — skús znova alebo "
+               "nahlás administrátorovi")
+        html = (f"<p><b>{escape(partner)} {escape(order_no)}</b> &mdash; {note} "
+               f"({escape(built.filename)})</p>")
+        try:
+            post(cfg, html)
+        except Exception:
+            log.exception("posting the static-order upload-failure alert failed")
+        report.log_event(
+            conn, message["message_id"], stage="review", status="error", outcome=note,
+            detail={"error": repr(e), "filename": built.filename}, workflow=WORKFLOW)
+        return {"status": "error", "items": [], "shipped": False, "reject_reason": note,
+                "partner": partner, "order_number": order_no, "delivery_date": delivery}
+
+    edi.confirm_sent(conn, store_ean, delivery, built.content,
+                     pg_dsn=getattr(cfg, "pg_dsn", ""))
+    outcome = f"EDI vytvorené: {built.filename}"
+    report.log_event(
+        conn, message["message_id"], stage="uploaded_orion", status="ok", outcome=outcome,
+        detail={"edi_file": built.filename, "orion_path": edi.orion_path(built.filename)},
+        workflow=WORKFLOW)
+    return {"status": "ok", "items": [], "shipped": True, "edi_filename": built.filename,
+            "partner": partner, "order_number": order_no, "delivery_date": delivery}
+
+
+def run_live(conn, cfg, message: dict, snapshot_id: int, pipeline=None, upload=None,
+            post=None) -> dict:
+    """The claimed message's real, live outcome — either a genuine ORION upload, a benign
+    no-op (empty order / duplicate), or a fallback to the AI pipeline. Never silently
+    drops an item."""
+    text = message.get("combined_text", "")
+    try:
+        parsed = static_parse.parse_static_order(
+            text, has_attachments=bool(message.get("has_attachments")))
+    except _PARSE_ERRORS as e:
+        return _fallback_to_ai(conn, cfg, message, snapshot_id, str(e), pipeline=pipeline)
+
+    if parsed.get("skip"):
+        # A valid header, zero item lines (KARMEN's "BEZ OBJEDNAVKY") — a genuine empty
+        # order, not a parsing failure. Nothing to ship, nothing to ask about.
+        note = "Objednávka bez položiek (BEZ OBJEDNAVKY) — nič na odoslanie."
+        report.log_event(conn, message["message_id"], stage="empty_order", status="ok",
+                         outcome=note, detail={"partner": parsed.get("partner", "")},
+                         workflow=WORKFLOW)
+        return {"status": "ok", "items": [], "shipped": False, "reject_reason": note,
+                "partner": parsed.get("partner", "")}
+
+    catalog = snapshot.load_catalog(conn, snapshot_id)
+    items = _items_with_ean(parsed.get("items") or [], catalog)
+    missing = [it["name"] for it in items if not it["gtin"]]
+    if missing:
+        # #133: NO silent per-item skip — ANY unresolved item sends the WHOLE order to the
+        # AI pipeline, which holds it and asks the warehouse instead of dropping the line.
+        note = f"{len(missing)} položka/y bez EAN: {', '.join(missing[:3])}"
+        return _fallback_to_ai(conn, cfg, message, snapshot_id, note, pipeline=pipeline)
+
+    try:
+        built = static_edi.build(parsed, catalog)
+    except ValueError as e:
+        # static_edi.build's own hard-fail guards (missing prevNumber, or — belt and
+        # braces — no item resolved an EAN, which the pre-check above already prevents).
+        return _fallback_to_ai(conn, cfg, message, snapshot_id, str(e), pipeline=pipeline)
+
+    return _ship(conn, cfg, message, parsed, built, upload=upload, post=post)
+
+
+def tick(conn, cfg, pipeline=None, upload=None, post=None) -> int:
+    """Process at most one `static_orders` message. Returns 0 or 1.
+
+    `pipeline`/`upload`/`post` are injected so the claim/fallback/upload guarantees can be
+    tested without the LLM stack or a real ORION host; production passes the real ones.
+    """
     engine = resolve_engine(getattr(cfg, "static_orders_engine", "n8n"))
     shadow = bool(getattr(cfg, "static_orders_shadow", False))
-    if not shadow:
-        return 0
-    if engine == "python":
-        # #133 (the real cutover) is not built yet — fail loudly in the log, do nothing,
-        # never crash the add-on's loop. Same contract worker.tick used pre-#61.
-        log.error("static_orders_engine=python is not implemented yet (#133) — "
-                  "shadow=%s requested, doing nothing", shadow)
+    if engine != "python" and not shadow:
         return 0
 
     snapshot_id = snapshot.latest_snapshot_id(conn)
     if not snapshot_id:
-        log.warning("no catalog snapshot yet — static shadow worker idle")
+        log.warning("no catalog snapshot yet — static worker idle")
         return 0
+
+    if engine == "python":
+        message = _claim(conn)
+        if not message:
+            return 0
+        run_id = worker._start_run(conn, message["message_id"], snapshot_id, shadow=False)
+        try:
+            result = run_live(conn, cfg, message, snapshot_id, pipeline=pipeline,
+                              upload=upload, post=post)
+        except Exception as e:
+            log.exception("static order pipeline failed for %s", message["message_id"])
+            worker._finish_run(conn, run_id, "error", None, error=repr(e))
+            # Release the claim: a crashed run must be retryable and must never look
+            # processed — mirrors worker.tick's own exception handling exactly.
+            conn.execute(
+                "UPDATE messages SET processing_at = NULL WHERE message_id = %s",
+                (message["message_id"],))
+            return 0
+        worker._finish_run(conn, run_id, result.get("status", "ok"), result)
+        worker._check_spend_cap(conn, cfg, shadow=False)
+        from .hold import has_open
+        # A run that just HELD this message (via the AI-pipeline fallback) must not be
+        # marked processed — same #93 contract worker.tick already follows.
+        if not has_open(conn, message["message_id"]):
+            conn.execute(
+                """UPDATE messages
+                      SET processed = true, processed_at = now(), processed_by = %s,
+                          processing_at = NULL
+                    WHERE message_id = %s""",
+                (CATEGORY, message["message_id"]))
+        return 1
 
     message = _peek_for_shadow(conn, getattr(cfg, "static_orders_shadow_days", SHADOW_DAYS))
     if not message:
         return 0
-
     run_id = worker._start_run(conn, message["message_id"], snapshot_id, shadow=True)
     result = run_shadow(conn, message, snapshot_id)
     worker._finish_run(conn, run_id, result.get("status", "ok"), result)
