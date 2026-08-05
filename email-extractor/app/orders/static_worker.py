@@ -36,9 +36,19 @@ until the user flips the switch:
   behaviour — dropping an unresolved line from the EDI — is the defect this ticket
   removes, not a shape to preserve). The AI pipeline holds the order and asks the
   warehouse via the nástenka, which teaches the wording forever. An Odoo alert is posted
-  ONLY on a genuine upload error — at ~32 static orders/day (8x AI-orders volume, #133
-  design comment) a per-order success post would flood the channel the way n8n's own
-  "extra content" LLM branch already does today (deliberately NOT ported here).
+  ONLY on a genuine upload error — never on a routine clean upload (see the digest
+  below). Extra-content detection is RECALIBRATED, not dropped ("ZMENA ROZHODNUTIA",
+  2026-08-05): `static_extra.residual_text` deterministically subtracts the recognized
+  template from the raw mail text; only when meaningful text remains does ONE LLM call
+  (`static_extra.py`) judge whether it is an actionable customer addition (a different
+  delivery place, a date/quantity change, a question) — n8n's old branch was USEFUL but
+  fired on almost every mail, which this fixes without losing the capability. An
+  actionable note gets its own immediate Odoo message, quoting the residual text.
+
+  A clean, fresh upload with NO actionable note never posts its own message either —
+  it is queued into a durable digest (`static_digest.py`, "DOPLNENIE ROZHODNUTIA",
+  2026-08-05) and reported as ONE grouped Odoo message once the batch fills or the
+  queue has sat idle past a timeout, both tunable via config.
 """
 from __future__ import annotations
 
@@ -47,7 +57,18 @@ import logging
 from datetime import UTC, datetime
 from html import escape
 
-from . import edi, report, snapshot, static_ean, static_edi, static_parse, worker
+from . import (
+    edi,
+    llm,
+    report,
+    snapshot,
+    static_digest,
+    static_ean,
+    static_edi,
+    static_extra,
+    static_parse,
+    worker,
+)
 from . import upload as upload_mod
 
 log = logging.getLogger("orders.static_worker")
@@ -241,7 +262,69 @@ def _fallback_to_ai(conn, cfg, message: dict, snapshot_id: int, note: str,
     return result
 
 
-def _ship(conn, cfg, message: dict, parsed: dict, built, upload=None, post=None) -> dict:
+def _merge_spend(a: dict | None, b: dict | None) -> dict | None:
+    """Add two `llm.Client.spend()` dicts together — needed when BOTH the extra-content
+    check and an AI-pipeline fallback call the model for the SAME message; `spend.record`
+    overwrites `order_runs`' spend columns rather than accumulating, so losing either
+    side here would silently under-report that run's real cost."""
+    if not a:
+        return b
+    if not b:
+        return a
+    out = dict(a)
+    for key in ("calls", "cached_calls", "tokens_in", "tokens_cached", "tokens_out",
+               "tokens_reasoning"):
+        out[key] = int(a.get(key, 0) or 0) + int(b.get(key, 0) or 0)
+    out["cost_usd"] = float(a.get("cost_usd", 0) or 0) + float(b.get("cost_usd", 0) or 0)
+    out["model"] = a.get("model") or b.get("model")
+    return out
+
+
+def _maybe_notify_extra_content(conn, cfg, message: dict, text: str, parsed: dict,
+                                post=None, llm_client=None) -> dict:
+    """Deterministic pre-filter first, LLM only when it finds something (#133 "ZMENA
+    ROZHODNUTIA", 2026-08-05). Runs independently of whatever the ship/fallback outcome
+    ends up being — the notification is an add-on, never a blocker. Never raises: a
+    failed check degrades to "not actionable", exactly like a failed Odoo post degrades
+    to "not delivered" elsewhere in this module.
+
+    Returns `{"actionable": bool, "spend": dict|None}`.
+    """
+    residual = static_extra.residual_text(text)
+    if not static_extra.has_meaningful_residual(residual):
+        return {"actionable": False, "spend": None}
+
+    client = llm_client or llm.from_config(cfg)
+    try:
+        answer = client.json_call(static_extra.prompt(), residual, static_extra.SCHEMA,
+                                  name="extra_content")
+    except Exception:
+        log.exception("extra-content check failed for %s — treating as non-actionable",
+                      message["message_id"])
+        spend = client.spend() if hasattr(client, "spend") else None
+        return {"actionable": False, "spend": spend}
+    spend = client.spend() if hasattr(client, "spend") else None
+    if not answer.get("actionable"):
+        return {"actionable": False, "spend": spend}
+
+    post = post or (lambda c, html: report.post_from_config(c, html))
+    quote = residual[:400]
+    html = (f"<p><b>{escape(parsed.get('partner') or '')} "
+           f"{escape(parsed.get('fullOrderNumber') or '')}</b> &mdash; zákazník dopísal "
+           f"do mailu: „{escape(quote)}“</p>")
+    try:
+        post(cfg, html)
+    except Exception:
+        log.exception("posting the extra-content alert failed for %s", message["message_id"])
+    report.log_event(
+        conn, message["message_id"], stage="extra_content", status="ok",
+        outcome=f"Zákazník dopísal text: {quote}", detail={"residual": residual},
+        workflow=WORKFLOW, rollup=False)
+    return {"actionable": True, "spend": spend}
+
+
+def _ship(conn, cfg, message: dict, parsed: dict, built, upload=None, post=None,
+          actionable_note: bool = False) -> dict:
     """Upload ONE fully-resolved static order — the only path that ever writes to ORION
     from this module. Mirrors `pipeline._ship_one`'s claim/upload/confirm shape."""
     upload = upload or (lambda c, name, content: upload_mod.put(c, name, content))
@@ -253,7 +336,8 @@ def _ship(conn, cfg, message: dict, parsed: dict, built, upload=None, post=None)
 
     if not edi.claim_send(conn, store_ean, delivery, built.content, built.filename):
         # #133: a duplicate/already-sent skip must never look, in the timeline, like a
-        # fresh genuine upload — its own stage, never "uploaded_orion".
+        # fresh genuine upload — its own stage, never "uploaded_orion" — and it is NOT a
+        # fresh upload, so it never enters the digest count either.
         log.warning("static EDI for %s / %s already sent — not uploading again",
                     store_ean, delivery)
         report.log_event(
@@ -289,12 +373,17 @@ def _ship(conn, cfg, message: dict, parsed: dict, built, upload=None, post=None)
         conn, message["message_id"], stage="uploaded_orion", status="ok", outcome=outcome,
         detail={"edi_file": built.filename, "orion_path": edi.orion_path(built.filename)},
         workflow=WORKFLOW)
+    if not actionable_note:
+        # #133 "DOPLNENIE ROZHODNUTIA": a clean upload with nothing extra to say never
+        # posts its own message — it joins the durable digest instead (batch/idle flush).
+        static_digest.queue(conn, message["message_id"], built.filename)
+        static_digest.maybe_flush_batch(conn, cfg, post=post)
     return {"status": "ok", "items": [], "shipped": True, "edi_filename": built.filename,
             "partner": partner, "order_number": order_no, "delivery_date": delivery}
 
 
 def run_live(conn, cfg, message: dict, snapshot_id: int, pipeline=None, upload=None,
-            post=None) -> dict:
+            post=None, llm_client=None) -> dict:
     """The claimed message's real, live outcome — either a genuine ORION upload, a benign
     no-op (empty order / duplicate), or a fallback to the AI pipeline. Never silently
     drops an item."""
@@ -303,7 +392,15 @@ def run_live(conn, cfg, message: dict, snapshot_id: int, pipeline=None, upload=N
         parsed = static_parse.parse_static_order(
             text, has_attachments=bool(message.get("has_attachments")))
     except _PARSE_ERRORS as e:
+        # No recognized template to diff against — the whole message (extraction AND
+        # its own notification) becomes the AI pipeline's job.
         return _fallback_to_ai(conn, cfg, message, snapshot_id, str(e), pipeline=pipeline)
+
+    # #133 "ZMENA ROZHODNUTIA": the extra-content check runs independently of the ship
+    # outcome below — an actionable note is reported even if the order itself falls back
+    # or errors ("notifikácia je doplnok, nie blokáda").
+    extra = _maybe_notify_extra_content(conn, cfg, message, text, parsed, post=post,
+                                        llm_client=llm_client)
 
     if parsed.get("skip"):
         # A valid header, zero item lines (KARMEN's "BEZ OBJEDNAVKY") — a genuine empty
@@ -312,8 +409,11 @@ def run_live(conn, cfg, message: dict, snapshot_id: int, pipeline=None, upload=N
         report.log_event(conn, message["message_id"], stage="empty_order", status="ok",
                          outcome=note, detail={"partner": parsed.get("partner", "")},
                          workflow=WORKFLOW)
-        return {"status": "ok", "items": [], "shipped": False, "reject_reason": note,
-                "partner": parsed.get("partner", "")}
+        result = {"status": "ok", "items": [], "shipped": False, "reject_reason": note,
+                 "partner": parsed.get("partner", "")}
+        if extra["spend"]:
+            result["spend"] = extra["spend"]
+        return result
 
     catalog = snapshot.load_catalog(conn, snapshot_id)
     items = _items_with_ean(parsed.get("items") or [], catalog)
@@ -322,24 +422,43 @@ def run_live(conn, cfg, message: dict, snapshot_id: int, pipeline=None, upload=N
         # #133: NO silent per-item skip — ANY unresolved item sends the WHOLE order to the
         # AI pipeline, which holds it and asks the warehouse instead of dropping the line.
         note = f"{len(missing)} položka/y bez EAN: {', '.join(missing[:3])}"
-        return _fallback_to_ai(conn, cfg, message, snapshot_id, note, pipeline=pipeline)
+        result = _fallback_to_ai(conn, cfg, message, snapshot_id, note, pipeline=pipeline)
+        merged = _merge_spend(result.get("spend"), extra["spend"])
+        if merged:
+            result["spend"] = merged
+        return result
 
     try:
         built = static_edi.build(parsed, catalog)
     except ValueError as e:
         # static_edi.build's own hard-fail guards (missing prevNumber, or — belt and
         # braces — no item resolved an EAN, which the pre-check above already prevents).
-        return _fallback_to_ai(conn, cfg, message, snapshot_id, str(e), pipeline=pipeline)
+        result = _fallback_to_ai(conn, cfg, message, snapshot_id, str(e), pipeline=pipeline)
+        merged = _merge_spend(result.get("spend"), extra["spend"])
+        if merged:
+            result["spend"] = merged
+        return result
 
-    return _ship(conn, cfg, message, parsed, built, upload=upload, post=post)
+    result = _ship(conn, cfg, message, parsed, built, upload=upload, post=post,
+                   actionable_note=extra["actionable"])
+    if extra["spend"]:
+        result["spend"] = extra["spend"]
+    return result
 
 
-def tick(conn, cfg, pipeline=None, upload=None, post=None) -> int:
-    """Process at most one `static_orders` message. Returns 0 or 1.
+def tick(conn, cfg, pipeline=None, upload=None, post=None, llm_client=None) -> int:
+    """Process at most one `static_orders` message. Returns 0 or 1 (whether a MESSAGE was
+    handled — a digest flush alone, with no message, still returns 0).
 
-    `pipeline`/`upload`/`post` are injected so the claim/fallback/upload guarantees can be
-    tested without the LLM stack or a real ORION host; production passes the real ones.
+    `pipeline`/`upload`/`post`/`llm_client` are injected so the claim/fallback/upload/
+    extra-content guarantees can be tested without the LLM stack or a real ORION host;
+    production passes the real ones.
     """
+    # #133 "DOPLNENIE ROZHODNUTIA": the idle-flush check runs on EVERY tick, regardless
+    # of engine/shadow — if the engine is ever flipped back to n8n with rows still
+    # pending, they must still eventually flush rather than sit forever.
+    static_digest.flush_idle(conn, cfg, post=post)
+
     engine = resolve_engine(getattr(cfg, "static_orders_engine", "n8n"))
     shadow = bool(getattr(cfg, "static_orders_shadow", False))
     if engine != "python" and not shadow:
@@ -357,7 +476,7 @@ def tick(conn, cfg, pipeline=None, upload=None, post=None) -> int:
         run_id = worker._start_run(conn, message["message_id"], snapshot_id, shadow=False)
         try:
             result = run_live(conn, cfg, message, snapshot_id, pipeline=pipeline,
-                              upload=upload, post=post)
+                              upload=upload, post=post, llm_client=llm_client)
         except Exception as e:
             log.exception("static order pipeline failed for %s", message["message_id"])
             worker._finish_run(conn, run_id, "error", None, error=repr(e))
