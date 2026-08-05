@@ -333,10 +333,8 @@ def test_dedup_no_repeat_message_while_the_carryover_incident_persists(pg):
     assert n == 0
     assert len(posts.calls) == 1, "a NEW carryover row folds into the SAME open incident, no new message"
 
-    incident = pg.execute(
-        "SELECT file_count FROM import_alert_incidents WHERE kind='carryover' "
-        "AND closed_at IS NULL").fetchone()
-    assert incident[0] == 2, "the incident's running count grows even though it's silent"
+    incident = confirm._open_incident(pg, 152, "carryover")
+    assert incident["file_count"] == 2, "the incident's running count grows even though it's silent"
 
 
 def test_an_incident_left_open_across_a_day_boundary_produces_the_reminder_not_a_new_alert(pg):
@@ -459,6 +457,71 @@ def test_an_all_clear_fires_once_when_the_carryover_incident_resolves(pg):
                        post=posts, now=later.replace(hour=16))
     assert n2 == 0
     assert len(posts.calls) == 2, "the all-clear must never repeat"
+
+
+def test_an_unrelated_import_never_falsely_clears_a_different_open_incident(pg):
+    """Deep-review finding (PR #184): the first cut cleared an incident off a GLOBAL
+    'something, somewhere, was imported' signal. A completely unrelated healthy order
+    importing on a DIFFERENT channel must never falsely close a still-genuinely-stuck
+    incident — the stuck files would then never get their reminder, having been wrongly
+    marked resolved."""
+    stuck_rid = _insert_at(pg, "iso1", "ORDER_iso1.txt", uploaded_at=MON_EVENING)
+    posts = PostRecorder()
+    confirm.sweep(pg, _cfg(),
+                  listdir=lambda: {"in": {"ORDER_iso1.txt"}, "archCodex": set(),
+                                   "unconfirmed": set()},
+                  post=posts, now=TUE_MORNING)
+    assert len(posts.calls) == 1
+    incident_before = pg.execute(
+        "SELECT closed_at FROM import_alert_incidents WHERE kind='carryover'").fetchone()
+    assert incident_before[0] is None
+
+    # a totally unrelated, healthy order (different customer, uploaded fresh, never a
+    # carryover) imports cleanly on the SAME sweep
+    healthy_rid = _insert_at(pg, "iso2", "ORDER_iso2.txt", uploaded_at=TUE_MORNING)
+    n = confirm.sweep(pg, _cfg(),
+                      listdir=lambda: {"in": {"ORDER_iso1.txt"},
+                                       "archCodex": {"ORDER_iso2.txt"},
+                                       "unconfirmed": set()},
+                      post=posts, now=TUE_MORNING.replace(minute=30))
+    assert n == 1
+    assert _status(pg, healthy_rid) == "imported"
+    assert _status(pg, stuck_rid) is None, "the genuinely stuck file is untouched"
+
+    incident_after = pg.execute(
+        "SELECT closed_at FROM import_alert_incidents WHERE kind='carryover'").fetchone()
+    assert incident_after[0] is None, \
+        "an unrelated import must NEVER close a different, still-unresolved incident"
+    assert len(posts.calls) == 1, "no spurious all-clear was ever sent"
+
+
+def test_file_count_is_never_inflated_by_rediscovering_the_same_stuck_row(pg):
+    """Deep-review finding (PR #184): the first cut incremented a counter column every
+    time a group was handled — a SINGLE stuck carryover row, rediscovered on every
+    throttle cycle while still unresolved, inflated its own incident's reported count
+    without bound. Membership must be deduplicated per row, not blindly counted."""
+    rid = _insert_at(pg, "cnt1", "ORDER_cnt1.txt", uploaded_at=MON_EVENING)
+    posts = PostRecorder()
+    confirm.sweep(pg, _cfg(),
+                  listdir=lambda: {"in": {"ORDER_cnt1.txt"}, "archCodex": set(),
+                                   "unconfirmed": set()},
+                  post=posts, now=TUE_MORNING)
+    incident = confirm._open_incident(pg, 152, "carryover")
+    assert incident["file_count"] == 1
+
+    # the SAME still-unresolved row is rediscovered on several later throttle cycles
+    for i in range(4):
+        pg.execute("UPDATE edi_sent SET import_checked_at = now() - interval '10 minutes' "
+                  "WHERE id = %s", (rid,))
+        confirm.sweep(pg, _cfg(),
+                      listdir=lambda: {"in": {"ORDER_cnt1.txt"}, "archCodex": set(),
+                                       "unconfirmed": set()},
+                      post=posts, now=TUE_MORNING.replace(minute=30 + i))
+
+    incident_after = confirm._open_incident(pg, 152, "carryover")
+    assert incident_after["file_count"] == 1, \
+        "the SAME row rediscovered repeatedly must count once, not once per rediscovery"
+    assert len(posts.calls) == 1, "still just the original opening alert — no reminder yet"
 
 
 def test_no_all_clear_is_ever_sent_when_no_alert_was_sent_first(pg):

@@ -189,36 +189,65 @@ def _all_clear_html(kind: str) -> str:
 
 
 # --- incidents (durable, per channel + kind) --------------------------------
+#
+# Review finding on PR #184: the first cut cleared/counted incidents off a GLOBAL proxy
+# ("something, somewhere, was imported" / a blindly-incremented counter). Reproduced live:
+# an unrelated healthy order importing on a DIFFERENT channel falsely closed a still-open
+# incident (a genuine stuck file never got a second alert), and a persistently-rediscovered
+# carryover row inflated its own incident's reported count without bound (≈49 after one
+# reminder cycle for a SINGLE stuck file). Both are fixed the same way: incident membership
+# is now tracked per ROW (`import_alert_incident_members`, `edi_sent_id` PRIMARY KEY-deduped
+# per incident), so both "how many files, really" and "is THIS incident's own set of files
+# actually resolved" are answered from the incident's own members, never a proxy.
 
 def _open_incident(conn, channel_id: int, kind: str) -> dict | None:
     row = conn.execute(
-        """SELECT id, opened_at, last_alert_at, file_count FROM import_alert_incidents
+        """SELECT id, opened_at, last_alert_at FROM import_alert_incidents
             WHERE channel_id = %s AND kind = %s AND closed_at IS NULL
             ORDER BY id DESC LIMIT 1""", (channel_id, kind)).fetchone()
     if not row:
         return None
-    return {"id": row[0], "opened_at": row[1], "last_alert_at": row[2], "file_count": row[3]}
+    count = conn.execute(
+        "SELECT count(*) FROM import_alert_incident_members WHERE incident_id = %s",
+        (row[0],)).fetchone()[0]
+    return {"id": row[0], "opened_at": row[1], "last_alert_at": row[2],
+            "file_count": int(count)}
 
 
-def _last_import_confirmed_at(conn):
-    row = conn.execute(
-        "SELECT max(import_confirmed_at) FROM edi_sent WHERE import_status = 'imported'"
-    ).fetchone()
-    return row[0] if row else None
+def _add_members(conn, incident_id: int, rows: list[dict]) -> None:
+    """De-duplicated by construction (PRIMARY KEY (incident_id, edi_sent_id)) — a
+    carryover row rediscovered on every throttle cycle while still unresolved is only
+    ever counted ONCE, which is what keeps `file_count` accurate."""
+    for row in rows:
+        conn.execute(
+            """INSERT INTO import_alert_incident_members (incident_id, edi_sent_id)
+               VALUES (%s, %s) ON CONFLICT DO NOTHING""", (incident_id, row["id"]))
 
 
 def _check_incidents_for_clear(conn, cfg, post, now: datetime) -> None:
-    """Independent of whatever this sweep pass found — an incident closes the moment
-    something has been confirmed imported SINCE it opened, proving the pipeline works
-    again (she's back and clicking, or Codex/ORION recovered)."""
-    last_import = _last_import_confirmed_at(conn)
-    if not last_import:
-        return
+    """An incident closes once EVERY row that was ever part of it has left the pending
+    state — self-healed to `imported`, or reclassified under a DIFFERENT kind's own
+    incident (either way, no longer THIS incident's concern) — a per-incident,
+    member-scoped check, never a global "something, somewhere, was imported" proxy.
+
+    Only `carryover` incidents ever auto-clear this way. `failed`/`unknown` are genuine
+    anomalies (a file that landed in "unconfirmed", or vanished entirely) with no
+    automatic re-resolution signal at all — auto-clearing them off an unrelated
+    coincidence would be the exact same false-signal bug in a different shape, so they
+    stay open (silently deduped, periodically reminded) until a human resolves them.
+    """
     open_incidents = conn.execute(
-        """SELECT id, channel_id, kind FROM import_alert_incidents
-            WHERE closed_at IS NULL AND opened_at < %s""", (last_import,)).fetchall()
-    for incident_id, channel_id, kind in open_incidents:
-        html = _all_clear_html(kind)
+        """SELECT id, channel_id FROM import_alert_incidents
+            WHERE closed_at IS NULL AND kind = 'carryover'""").fetchall()
+    for incident_id, channel_id in open_incidents:
+        still_pending = conn.execute(
+            """SELECT 1 FROM import_alert_incident_members m
+                JOIN edi_sent e ON e.id = m.edi_sent_id
+               WHERE m.incident_id = %s AND e.import_status IS NULL
+               LIMIT 1""", (incident_id,)).fetchone()
+        if still_pending:
+            continue
+        html = _all_clear_html("carryover")
         try:
             result = post(cfg, html, channel_id=channel_id)
         except Exception:
@@ -231,7 +260,8 @@ def _check_incidents_for_clear(conn, cfg, post, now: datetime) -> None:
             continue
         conn.execute("UPDATE import_alert_incidents SET closed_at = %s WHERE id = %s",
                     (now, incident_id))
-        log.info("import-alert incident #%s (%s/%s) cleared", incident_id, kind, channel_id)
+        log.info("import-alert incident #%s (carryover/%s) cleared", incident_id,
+                 channel_id)
 
 
 def _handle_group(conn, cfg, post, channel_id: int, kind: str, rows: list[dict],
@@ -255,18 +285,21 @@ def _handle_group(conn, cfg, post, channel_id: int, kind: str, rows: list[dict],
             log.warning("grouped import-alert (%s/%s) was not delivered (Odoo not "
                        "configured?) — will retry next sweep", kind, channel_id)
             return False
-        conn.execute(
-            """INSERT INTO import_alert_incidents
-                   (channel_id, kind, file_count, opened_at, last_alert_at)
-               VALUES (%s, %s, %s, %s, %s)""",
-            (channel_id, kind, len(rows), now, now))
+        new_id = conn.execute(
+            """INSERT INTO import_alert_incidents (channel_id, kind, opened_at, last_alert_at)
+               VALUES (%s, %s, %s, %s) RETURNING id""",
+            (channel_id, kind, now, now)).fetchone()[0]
+        _add_members(conn, int(new_id), rows)
         log.info("opened import-alert incident (%s/%s): %d file(s)", kind, channel_id,
                  len(rows))
         return True
 
+    _add_members(conn, incident["id"], rows)
     due_for_reminder = (now - incident["last_alert_at"]) >= timedelta(hours=reminder_hours)
     if due_for_reminder:
-        html = _reminder_html(kind, incident)
+        # Re-read AFTER adding members so the reminder text's count is accurate.
+        current = _open_incident(conn, channel_id, kind)
+        html = _reminder_html(kind, current)
         try:
             result = post(cfg, html, channel_id=channel_id)
             delivered = result is not None
@@ -278,9 +311,6 @@ def _handle_group(conn, cfg, post, channel_id: int, kind: str, rows: list[dict],
             conn.execute(
                 "UPDATE import_alert_incidents SET last_alert_at = %s WHERE id = %s",
                 (now, incident["id"]))
-    conn.execute(
-        "UPDATE import_alert_incidents SET file_count = file_count + %s WHERE id = %s",
-        (len(rows), incident["id"]))
     return True
 
 
