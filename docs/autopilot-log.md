@@ -1060,3 +1060,58 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   post-deploy). Ticket stays OPEN.
 - Playbook: `.claude/rules/orders-corpus.md` gained the second fork-dispatched-to-wait
   incident entry (see above).
+
+## #133 continued — import confirmation is a manual morning click, not an automatic sweep
+
+- Same ticket, PR #184: a real production incident during review of PR #182 — the old
+  ~60-minute "Communicator sweeps automatically" model in `confirm.py` (shared by BOTH
+  AI and static pipelines) posted 5 separate per-file Odoo alerts at 18:18 for one order
+  sitting unaccepted since the afternoon. User correction: ORION import is a MANUAL
+  daily click by the warehouse, never automatic — a file sitting in `in/` overnight or
+  over a weekend is completely normal.
+- Killed the timeout alert entirely. Replaced with a carryover check active only past a
+  configured local morning hour (`import_morning_check_hour`, default 10:00), skipping
+  Saturday/Sunday by default (each independently configurable) — a Friday-evening/
+  weekend upload first checked the following Monday. Every alert-worthy condition
+  (carryover/failed/unknown) groups into a durable, per-(channel,kind) incident instead
+  of one message per file: first detection posts ONE grouped message; while open,
+  further detections fold in silently (one reminder after a configurable threshold,
+  default 4h); resolves with one all-clear. A carryover row is deliberately NEVER given
+  a terminal status, so it self-heals to 'imported' whenever it's actually accepted
+  (fixes a real gap: the old 'timeout' status was terminal, so a file was never
+  re-checked again even after later being genuinely imported).
+- Also fixed the stale "Communicator sweeps every 25-30 min" claim in
+  `.claude/rules/n8n-workflow-edits.md`.
+- Design comment + validation comment posted before the first commit, as always.
+  Confirm.py's test file fully rewritten (33 tests) — old fixtures used relative
+  "minutes ago" timestamps; the new carryover/weekend/reminder logic needed explicit,
+  controllable calendar dates (fixed Monday–Sunday dates in August 2026) and an
+  explicit `now` parameter threaded through every incident timestamp write, not bare
+  SQL `now()` — mixing the two (test-injected `now` vs real SQL `now()` for the SAME
+  comparison) silently broke 3 tests the first time around (the reminder/all-clear
+  timing math compared a real wall-clock timestamp against a fictional one).
+- Deep `requesting-code-review` pass (general-purpose subagent, ran the full test suite
+  itself) found **2 Critical** bugs in the first cut, both reproduced live and fixed
+  + regression-tested in the same PR: (1) the all-clear check read a GLOBAL "something,
+  somewhere, was imported" proxy instead of the specific incident's own rows — an
+  unrelated healthy import on a different channel could falsely close a still-genuinely
+  -stuck incident; (2) `file_count` was a blindly-incremented counter — a single stuck
+  carryover row, rediscovered every throttle cycle while unresolved, inflated its own
+  count without bound. Both fixed by tracking incident MEMBERSHIP per row (new
+  `import_alert_incident_members` table, PRIMARY-KEY-deduped), so both "how many files"
+  and "is this incident resolved" are answered from the incident's own members, never a
+  global proxy. `failed`/`unknown` incidents now deliberately never auto-clear at all
+  (no automatic re-resolution signal exists for them; auto-clearing off a coincidence
+  would be the same bug in a different shape) — they stay open until a human resolves
+  them. Also hardened "at most one open incident per (channel,kind)" as a DB UNIQUE
+  index (was a plain index).
+- PR #184 merged (`e045561`), main CI green, deployed **v0.9.47** — `/health` + dashboard
+  DOM confirm. Live data repair: 5 rows from today's real false-alarm incident (PNO
+  Poprad, `import_status='timeout'`) reset to NULL after confirming via live SFTP that
+  all 5 files are still genuinely sitting in `in/` (nothing lost) — the first real
+  worker tick after deploy re-checked them and correctly left them silently pending
+  (same-day upload, not yet a carryover), no false alert, no error.
+- Ticket #133 now spans 4 PRs (#181 real engine, #182 extra-content+digest, #183 docs,
+  #184 this fix) — all merged, all deployed. Ticket stays OPEN (the engine flip +
+  n8n workflow deactivation remain a separate, later decision after the multi-day
+  shadow window).
