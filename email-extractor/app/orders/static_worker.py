@@ -42,6 +42,7 @@ until the user flips the switch:
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 from datetime import UTC, datetime
 from html import escape
@@ -217,12 +218,25 @@ def _fallback_to_ai(conn, cfg, message: dict, snapshot_id: int, note: str,
     """Route this ALREADY-CLAIMED message through the AI pipeline instead of a silent
     per-item skip or a dead end (#133 design decision, 2026-08-05). Same claim — the AI
     pipeline neither re-claims nor releases `messages.processing_at`; it holds unresolved
-    lines and asks the warehouse via the nástenka, teaching the wording forever."""
+    lines and asks the warehouse via the nástenka, teaching the wording forever.
+
+    The AI pipeline's REAL-vs-SHADOW behaviour is driven entirely by `cfg.orders_shadow`
+    (`pipeline._run`) — a flag that belongs to the AI engine's OWN, separate, still
+    undecided cutover (`config.py`) and has nothing to do with `static_orders_engine`.
+    If that flag happened to be `True` while `static_orders_engine=python` is live, an
+    unmodified `cfg` would silently run this fallback in SHADOW mode: no claim, no hold,
+    no teach, no upload, no Odoo post, no event logged — `tick`'s own `has_open` check
+    would then see nothing held and mark the message processed anyway, permanently
+    losing the order with zero trace (review finding on PR #181). Forcing a LIVE copy of
+    `cfg` here, independent of whatever `orders_shadow` happens to be set to, is what
+    makes this fallback safe regardless of the AI engine's own unrelated toggle.
+    """
     log.info("static order %s falls back to the AI pipeline: %s", message["message_id"], note)
     if pipeline is None:
         from . import pipeline as pipeline_mod
         pipeline = pipeline_mod.run
-    result = dict(pipeline(conn, cfg, message, snapshot_id) or {})
+    live_cfg = dataclasses.replace(cfg, orders_shadow=False)
+    result = dict(pipeline(conn, live_cfg, message, snapshot_id) or {})
     result["static_fallback"] = note
     return result
 

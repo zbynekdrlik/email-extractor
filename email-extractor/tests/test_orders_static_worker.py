@@ -267,6 +267,29 @@ def test_python_engine_upload_failure_releases_the_claim_and_alerts_odoo(pg):
     assert ev == ("review", "error")
 
 
+def test_python_engine_upload_and_odoo_alert_both_fail_still_releases_the_claim(pg):
+    """Review finding on PR #181: the nested try/except around the failure-alert post
+    had zero test coverage — an Odoo outage must never leave an orphaned edi_sent claim
+    or crash the tick, on top of the upload itself already having failed."""
+    _msg(pg)
+    _snapshot(pg)
+
+    def failing_upload(c, name, content):
+        raise OSError("connection refused")
+
+    def failing_post(c, html):
+        raise RuntimeError("odoo unreachable")
+
+    assert static_worker.tick(
+        pg, _python_cfg(), upload=failing_upload, post=failing_post) == 1
+    assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 0, \
+        "the claim must still be released even when the follow-up alert ALSO fails"
+    run = pg.execute("SELECT status FROM order_runs").fetchone()
+    assert run[0] == "error"
+    ev = pg.execute("SELECT stage, status FROM email_events WHERE message_id='m1'").fetchone()
+    assert ev == ("review", "error")
+
+
 def test_python_engine_duplicate_edi_sent_is_skipped_never_reuploaded(pg):
     sid = _snapshot(pg)
     parsed, built = _static_built(pg, sid)
@@ -396,6 +419,43 @@ def test_python_engine_a_held_order_from_fallback_is_not_marked_processed(pg):
     assert static_worker.tick(pg, _python_cfg(), pipeline=pipeline) == 1
     row = pg.execute("SELECT processed, processing_at FROM messages").fetchone()
     assert row[0] is False, "a held order must not mark the message processed"
+
+
+def test_python_engine_fallback_forces_live_cfg_even_when_ai_orders_shadow_is_on(pg):
+    """CRITICAL review finding on PR #181: `orders_shadow` is the AI ENGINE's OWN,
+    completely unrelated, still-undecided shadow toggle (config.py). Before this fix, an
+    unmodified `cfg` handed straight to `pipeline.run()` meant that if an operator ever
+    left `orders_shadow=True` (e.g. while shadow-testing the AI engine's own future
+    cutover) at the same time `static_orders_engine=python` is live, EVERY static-order
+    fallback would silently run the AI pipeline in SHADOW mode — no claim, no hold, no
+    teach, no upload, no Odoo post, no event — and the message would still be marked
+    processed (nothing was ever held), permanently losing the order with zero trace.
+
+    The fake pipeline below models the real `pipeline._run`'s cfg-sensitivity (shadow=
+    True -> writes nothing; shadow=False -> holds for real) so this test actually
+    exercises the cfg the fallback constructs, not just a fallback that ignores cfg."""
+    _msg(pg, text=UNPARSEABLE_TEXT)
+    _snapshot(pg)
+    seen = {}
+
+    def fake_pipeline(conn, cfg, message, snapshot_id):
+        seen["orders_shadow"] = cfg.orders_shadow
+        if cfg.orders_shadow:
+            return {"status": "review", "items": [], "shadow": True}
+        conn.execute(
+            """INSERT INTO held_orders (message_id, customer_ean, customer_name,
+                                        delivery_date, question_ids)
+               VALUES (%s, '2000000000864', 'Pekáreň', '04.08.2026', ARRAY[1]::bigint[])""",
+            (message["message_id"],))
+        return {"status": "held", "items": [], "shadow": False}
+
+    cfg = _python_cfg(orders_shadow=True)   # the AI engine's own, unrelated flag left ON
+    assert static_worker.tick(pg, cfg, pipeline=fake_pipeline) == 1
+    assert seen["orders_shadow"] is False, \
+        "the fallback must force orders_shadow=False, never trust the caller's own cfg"
+    row = pg.execute("SELECT processed FROM messages").fetchone()
+    assert row[0] is False, \
+        "a real held order (proof the fallback ran LIVE) must not mark processed"
 
 
 def test_python_engine_never_reclaims_a_message_with_an_open_held_order(pg):
