@@ -528,12 +528,18 @@ SCHEMA = [
         END IF;
     END $$
     """,
-    # --- #151: import CONFIRMATION. Uploading a file to `in/` is not proof Communicator
-    # ever took it — this is the state the periodic sweep in `orders/confirm.py` writes.
-    # NULL = not yet resolved (still watched); 'imported'/'failed'/'timeout'/'unknown' are
-    # all terminal (see confirm.py's docstring for what each means and why 'unknown' — a
-    # file gone from `in`, `archCodex` AND `unconfirmed` — is treated as unresolved and
-    # alerted, never as silent success).
+    # --- #151: import CONFIRMATION. Uploading a file to `in/` is not proof it ever
+    # reached ORION — this is the state the periodic sweep in `orders/confirm.py`
+    # writes. NULL = not yet resolved AND still watched, which INCLUDES a carryover
+    # (#133, 2026-08-05: a file still legitimately waiting for the warehouse's manual
+    # morning acceptance click is deliberately never given a terminal status, so it
+    # self-heals to 'imported' the moment it's accepted); 'imported'/'failed'/'unknown'
+    # are the only TERMINAL values (see confirm.py's docstring for what each means and
+    # why 'unknown' — a file gone from `in`, `archCodex` AND `unconfirmed` — is treated
+    # as unresolved and alerted, never as silent success). The old 'timeout' value
+    # (a ~60-minute "Communicator will pick it up automatically" alert, based on a wrong
+    # model — import is manual, not automatic) is REMOVED; it will never be written
+    # again, though historical rows may still carry it.
     #
     # Same advisory-lock DO-block shape as the `uploaded_at` migration above, and the same
     # reasoning for backfilling pre-existing rows rather than leaving them NULL: every row
@@ -640,6 +646,48 @@ SCHEMA = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_static_order_digest_pending "
     "ON static_order_digest(created_at) WHERE flushed_at IS NULL",
+    # --- #133 (2026-08-05 correction): a durable, per-(channel, kind) INCIDENT for the
+    # grouped import-confirmation alert (app/orders/confirm.py) — replaces the old
+    # one-message-per-file timeout alert. `kind` is 'carryover' (still unaccepted from a
+    # prior day) / 'failed' (landed in ORION's "unconfirmed" folder) / 'unknown' (vanished
+    # from all three watched folders). At most one OPEN (closed_at IS NULL) row per
+    # (channel_id, kind) at a time — every function in confirm.py reads/writes straight
+    # from this table, no in-memory state, so it survives an add-on restart by
+    # construction. ---
+    """
+    CREATE TABLE IF NOT EXISTS import_alert_incidents (
+        id            BIGSERIAL PRIMARY KEY,
+        channel_id    BIGINT NOT NULL,
+        kind          TEXT NOT NULL CHECK (kind IN ('carryover', 'failed', 'unknown')),
+        opened_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_alert_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        closed_at     TIMESTAMPTZ
+    )
+    """,
+    # UNIQUE (not just an index): "at most one open incident per (channel, kind)" is an
+    # invariant `_open_incident`'s own SELECT relies on — make it DB-enforced, not just
+    # implicit from the single-threaded worker loop being the only caller today (review
+    # suggestion, PR #184).
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_import_alert_incidents_open "
+    "ON import_alert_incidents(channel_id, kind) WHERE closed_at IS NULL",
+    # --- review finding on PR #184: the FIRST cut cleared/counted incidents off a
+    # GLOBAL proxy ("something, somewhere, was imported" / a blindly-incremented
+    # counter) — reproduced live: an unrelated healthy order importing on a DIFFERENT
+    # channel falsely closed a still-open incident, and a persistently-rediscovered
+    # carryover row inflated its own incident's reported count without bound. This
+    # child table tracks EXACTLY which `edi_sent` row belongs to which incident, so both
+    # "how many files, really" (count of members) and "is THIS incident's own set of
+    # files actually resolved" (are all members no longer NULL-status) are answered
+    # from the incident's own members, never a proxy. The PRIMARY KEY is what makes a
+    # rediscovered row a no-op re-insert (`ON CONFLICT DO NOTHING`), not a re-count. ---
+    """
+    CREATE TABLE IF NOT EXISTS import_alert_incident_members (
+        incident_id BIGINT NOT NULL REFERENCES import_alert_incidents(id) ON DELETE CASCADE,
+        edi_sent_id BIGINT NOT NULL REFERENCES edi_sent(id) ON DELETE CASCADE,
+        added_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (incident_id, edi_sent_id)
+    )
+    """,
 ]
 
 

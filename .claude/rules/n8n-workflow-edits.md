@@ -79,9 +79,19 @@ add-on container, since the LAN address is not routable from the dev machines):
   way.)
 - `C:\ORION\COMMUNICATOR\data\in\unconfirmed` — import failed
 
-Communicator sweeps roughly every 25–30 min, so a file uploaded minutes ago is legitimately
-still sitting in `in`. Automatic import confirmation (`app/orders/confirm.py`, keyed on
-`archCodex`/`unconfirmed` presence, never on `Z-`) shipped in #151.
+**Correction (2026-08-05, #133) — import is a MANUAL step, not an automatic sweep.** The
+earlier claim here ("Communicator sweeps roughly every 25–30 min") was WRONG — files move
+out of `in/` ONLY when pani skladníčka (the warehouse) manually clicks "prijať objednávky
+z ORIONu" in CODEX, once each morning when she arrives. A file legitimately sits in `in/`
+all evening, overnight, and over the weekend — that is NORMAL, not a stuck import. Real
+incident: `confirm.py`'s original 60-minute-timeout model fired 5 separate per-file "stuck"
+alerts at 18:18 for orders sitting unaccepted since the afternoon — a false alarm, deleted
+by the user. Import confirmation (`app/orders/confirm.py`, keyed on `archCodex`/
+`unconfirmed` presence, never on `Z-`) now alerts only on a genuine anomaly (`unconfirmed`
+presence, or vanishing from all three folders) or a CARRYOVER (still unaccepted from a
+PRIOR day, checked once the configured morning hour arrives, default 10:00, skipping
+Saturday/Sunday by default) — grouped per incident, never one message per file. See
+`confirm.py`'s own module docstring for the full model.
 
 ## Re-sending orders after an incident — order of operations is binding
 

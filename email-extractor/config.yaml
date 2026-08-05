@@ -1,5 +1,5 @@
 name: Email OCR Extractor
-version: "0.9.46"
+version: "0.9.47"
 slug: email_extractor
 description: Reads an IMAP mailbox, OCR-extracts the body + all attachments, and writes Postgres for n8n. Bundles its own Postgres on /data (leave pg_dsn empty, set pg_password).
 url: https://github.com/zbynekdrlik/email-extractor
@@ -52,8 +52,11 @@ options:
   orion_port: 22
   orion_user: ""
   orion_pass: ""
-  import_confirm_timeout_minutes: 60
   import_confirm_interval_minutes: 5
+  import_morning_check_hour: 10
+  import_morning_check_skip_saturday: true
+  import_morning_check_skip_sunday: true
+  import_alert_reminder_hours: 4
   static_digest_batch_size: 30
   static_digest_idle_minutes: 60
 schema:
@@ -95,7 +98,10 @@ schema:
   orion_port: int?
   orion_user: str?
   orion_pass: password?
-  import_confirm_timeout_minutes: int?
   import_confirm_interval_minutes: int?
+  import_morning_check_hour: int?
+  import_morning_check_skip_saturday: bool?
+  import_morning_check_skip_sunday: bool?
+  import_alert_reminder_hours: int?
   static_digest_batch_size: int?
   static_digest_idle_minutes: int?

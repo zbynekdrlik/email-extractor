@@ -33,7 +33,8 @@ def pg(_schema):
         "TRUNCATE messages, attachments, email_events, fix_requests, order_snapshots, "
         "item_memory, edi_sent, order_runs, order_spend_alerts, order_questions, "
         "global_item_memory, held_orders, catalog_overrides, customer_overrides, "
-        "mail_rules, static_order_digest "
+        "mail_rules, static_order_digest, import_alert_incidents, "
+        "import_alert_incident_members "
         "RESTART IDENTITY CASCADE")
     return _schema
 

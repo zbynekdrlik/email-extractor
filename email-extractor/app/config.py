@@ -84,12 +84,26 @@ class Config:
     orion_user: str = ""
     orion_pass: str = ""
     orion_dir: str = "C:\\ORION\\COMMUNICATOR\\data\\in"
-    # #151: import-confirmation sweep (orders/confirm.py). Communicator sweeps ORION's
-    # `in/` roughly every 25-30 minutes, so 60 minutes is two missed sweeps before we
-    # call it a real problem; 5 minutes keeps the SFTP `listdir` load on the ORION box
-    # low while a file is still legitimately waiting.
-    import_confirm_timeout_minutes: int = 60
+    # #151: import-confirmation sweep (orders/confirm.py). 5 minutes keeps the SFTP
+    # `listdir` load on the ORION box low while a file is still legitimately waiting.
+    # (2026-08-05 #133 correction: the old `import_confirm_timeout_minutes` — a
+    # ~60-minute "Communicator will pick it up automatically" alert — is REMOVED
+    # entirely; import is a MANUAL morning click, not an automatic sweep. See
+    # `import_morning_check_hour`/`import_morning_check_skip_saturday`/
+    # `import_morning_check_skip_sunday`/`import_alert_reminder_hours` below.)
     import_confirm_interval_minutes: int = 5
+    # #133 (2026-08-05 correction): once past this LOCAL (Europe/Bratislava) hour, a file
+    # still sitting in ORION's `in/` from a PRIOR day is a genuine carryover worth
+    # alerting on (grouped, deduped per incident) — the warehouse's own daily "prijať
+    # objednávky z ORIONu" click hasn't happened yet that day. Skips Saturday/Sunday by
+    # default (the warehouse doesn't work weekends) — a Friday-evening/weekend upload is
+    # first checked the following Monday.
+    import_morning_check_hour: int = 10
+    import_morning_check_skip_saturday: bool = True
+    import_morning_check_skip_sunday: bool = True
+    # #133: while an import-alert incident (carryover/failed/unknown) stays open, at most
+    # one reminder is sent after this many hours — never a repeat per file.
+    import_alert_reminder_hours: int = 4
     # #133 "DOPLNENIE ROZHODNUTIA": grouped Odoo digest for cleanly-uploaded static
     # orders (see static_digest.py) — batch-size and idle-timeout triggers, tunable
     # without a code change.
@@ -165,12 +179,22 @@ class Config:
             orion_pass=_get(o, "orion_pass", "ORION_PASS", "") or "",
             orion_dir=_get(o, "orion_dir", "ORION_DIR",
                            "C:\\ORION\\COMMUNICATOR\\data\\in"),
-            import_confirm_timeout_minutes=int(
-                _get(o, "import_confirm_timeout_minutes",
-                     "IMPORT_CONFIRM_TIMEOUT_MINUTES", 60) or 60),
             import_confirm_interval_minutes=int(
                 _get(o, "import_confirm_interval_minutes",
                      "IMPORT_CONFIRM_INTERVAL_MINUTES", 5) or 5),
+            import_morning_check_hour=int(
+                _get(o, "import_morning_check_hour", "IMPORT_MORNING_CHECK_HOUR", 10) or 10),
+            import_morning_check_skip_saturday=str(
+                _get(o, "import_morning_check_skip_saturday",
+                     "IMPORT_MORNING_CHECK_SKIP_SATURDAY", "true")).lower() in (
+                    "1", "true", "yes", "on"),
+            import_morning_check_skip_sunday=str(
+                _get(o, "import_morning_check_skip_sunday",
+                     "IMPORT_MORNING_CHECK_SKIP_SUNDAY", "true")).lower() in (
+                    "1", "true", "yes", "on"),
+            import_alert_reminder_hours=int(
+                _get(o, "import_alert_reminder_hours", "IMPORT_ALERT_REMINDER_HOURS", 4)
+                or 4),
             static_digest_batch_size=int(
                 _get(o, "static_digest_batch_size", "STATIC_DIGEST_BATCH_SIZE", 30) or 30),
             static_digest_idle_minutes=int(
