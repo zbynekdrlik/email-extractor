@@ -289,3 +289,22 @@ def test_a_review_event_marks_the_message_for_the_warehouse(pg):
                      outcome="Odoo kontrola (AI orders)")
     row = pg.execute("SELECT proc_status FROM messages WHERE message_id='m2'").fetchone()
     assert row[0] == "review"
+
+
+def test_workflow_can_be_overridden_so_static_orders_are_never_mislabeled_ai_orders(pg):
+    """#133: the static-orders engine shares this same timeline — an event it logs must
+    never look, on the admin dashboard, like it came from the AI pipeline."""
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('m3', 'static_orders')")
+    report.log_event(pg, "m3", stage="uploaded_orion", status="ok",
+                     outcome="EDI vytvorené: KARMEN_1_007.txt", workflow="static_orders")
+    row = pg.execute(
+        "SELECT workflow, stage, status FROM email_events WHERE message_id='m3'").fetchone()
+    assert row == ("static_orders", "uploaded_orion", "ok")
+
+
+def test_workflow_defaults_to_ai_orders_when_not_given(pg):
+    """Every pre-existing caller must keep its old behaviour unchanged."""
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('m4', 'ai_orders')")
+    report.log_event(pg, "m4", stage="review", status="review", outcome="x")
+    row = pg.execute("SELECT workflow FROM email_events WHERE message_id='m4'").fetchone()
+    assert row[0] == "ai_orders"

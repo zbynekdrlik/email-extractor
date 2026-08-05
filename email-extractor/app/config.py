@@ -59,9 +59,10 @@ class Config:
     ai_orders_engine: str = "n8n"
     orders_shadow: bool = False
     orders_shadow_days: int = 3
-    # Static orders (#132): shadow-mode comparison ONLY, same naming pattern as the
-    # ai_orders_engine/orders_shadow trio above. "python" is not implemented (#133 is the
-    # separate, not-yet-decided cutover) — static_worker.tick logs and does nothing for it.
+    # Static orders (#132 shadow-mode groundwork, #133 the real cutover): same naming
+    # pattern as the ai_orders_engine/orders_shadow trio above. "python" claims the
+    # message for real (static_worker.tick) — flipping this to "python" in production is
+    # a deliberate, separate operator decision (default stays "n8n" until the user acts).
     static_orders_engine: str = "n8n"
     static_orders_shadow: bool = False
     static_orders_shadow_days: int = 3

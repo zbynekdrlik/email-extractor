@@ -207,15 +207,22 @@ def post_from_config(cfg, html: str, transport=None, channel_id: int | None = No
 # --- timeline ------------------------------------------------------------
 
 def log_event(conn, message_id: str, stage: str, status: str, outcome: str = "",
-              detail: dict | None = None, rollup: bool = True) -> None:
+              detail: dict | None = None, rollup: bool = True,
+              workflow: str | None = None) -> None:
     """One row in the shared `email_events` timeline.
 
     The existing rollup trigger copies stage/status/outcome (and edi_file/orion_path)
     onto the message, which is what the dashboard reads — so this is also how the
     Python engine keeps the dashboard truthful.
+
+    `workflow` (#133) overrides the module default (`WORKFLOW = "ai_orders"`) — the
+    static-orders engine passes `workflow="static_orders"` so the admin timeline never
+    mislabels a static order's own event as belonging to the AI pipeline. Every existing
+    caller keeps its old behaviour unchanged (still tags "ai_orders") by simply not
+    passing it.
     """
     conn.execute(
         """INSERT INTO email_events
                (message_id, workflow, stage, status, outcome, detail, rollup)
            VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-        (message_id, WORKFLOW, stage, status, outcome, Json(detail or {}), rollup))
+        (message_id, workflow or WORKFLOW, stage, status, outcome, Json(detail or {}), rollup))
