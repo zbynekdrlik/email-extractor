@@ -45,7 +45,10 @@ SCHEMA = {
 }
 
 # Mirrors the header-field regexes `static_parse.py`'s own functions use — see this
-# module's docstring for why these are a deliberate, documented duplicate.
+# module's docstring for why these are a deliberate, documented duplicate. `Prev\.:\d+`
+# has NO `\s*` between the colon and the digits, matching `static_parse.py`'s own
+# `Prev\.:(\d+)` exactly (review finding, PR #182 — a stray `\s*` here would silently
+# widen what counts as "template" beyond what the real parser recognizes).
 _HEADER_PATTERNS = [
     re.compile(r"Vy[šs]l[áa] objedn[áa]vka [čc]\.:\s*\d+\s*/\s*\d+"),
     re.compile(r"OBJEDN[ÁA]VKA [čc]\.:\s*\d+", re.I),
@@ -53,35 +56,56 @@ _HEADER_PATTERNS = [
     re.compile(r"Term[íi]n dodania:\s*\d{2}\.\d{2}\.\d{2,4}"),
     re.compile(r"D[áa]tum dodania tovaru\s*:?\s*\d{2}\.\d{2}\.\d{2,4}"),
     re.compile(r"D[áa]tum vystavenia:\s*\d{2}\.\d{2}\.\d{2,4}"),
-    re.compile(r"Prev\.:\s*\d+"),
+    re.compile(r"Prev\.:\d+"),
     re.compile(r"KARMEN\s+\d+,\s*[^\n]+"),
     re.compile(r"Term[íi]n dod[áa]vky:[^\n]*\n(?:KOMFOS[^\n]+)"),
     re.compile(r"prev[áa]dzka:\s*KARMEN CASH AND CARRY\s+[^\n]+", re.I),
     re.compile(r"KARMEN CASH AND CARRY[^\n]*\n[^\n]+\n[^\n]+", re.I),
     re.compile(r"LABA[ŠS]\s+s\.r\.o\.\s+KS/OC\s+.+?(?:MOBIL|E[‐\-]?mail|TEL)", re.I),
     re.compile(r"LABA[ŠS]\s+s\.r\.o\.\s+KS/OC\s+[^\n]+", re.I),
+    # #182 review finding: the KARMEN_CASH/BARIS template has a SECOND header line
+    # ("Int. kód a názov tovaru") ABOVE the "Katalógové číslo..." item-block anchor
+    # below — `extract_order_data`'s OWN dispatch regex keys on this exact phrase to
+    # even choose `parse_karmen_cash_items`, so it is unambiguously part of the
+    # template, not customer content. Without this, EVERY KARMEN_CASH order
+    # false-positived the LLM check on this one line alone.
+    re.compile(r"Int\.\s*k[óo]d a n[áa]zov tovaru[^\n]*"),
 ]
 
 # Mirrors the item-block section bookends `parse_vysla_items`/`parse_karmen_cash_items`/
 # `parse_labas_items` search for — the WHOLE matched span (bookends + every item/
 # description line in between) is consumed as one blob, which is what correctly handles
 # the two-physical-lines-per-item KARMEN_CASH/LABAS layouts without needing a separate
-# per-line item classifier.
+# per-line item classifier. Each end-boundary alternation is followed by `[^\n]*` so the
+# WHOLE boundary line (e.g. "Celková hmotnosť: 12,3 kg", not just the anchor word) is
+# consumed — `static_parse.py`'s own regex only reads its capture GROUP (which stops
+# right after the anchor word), so it never needed this; this module consumes the whole
+# MATCH, so a trailing value on that same line would otherwise leak through as "residual"
+# (review finding, PR #182).
 _ITEM_BLOCK_PATTERNS = [
-    re.compile(r"Mno[žz]stvo\s*\n[\s\S]*?\n(?:N[áa]kupn[áa] cena spolu)"),
+    re.compile(r"Mno[žz]stvo\s*\n[\s\S]*?\n(?:N[áa]kupn[áa] cena spolu)[^\n]*"),
     re.compile(r"Katal[óo]gov[ée] [čc][íí]slo[^\n]*\n[\s\S]*?\n"
-              r"(?:Pozn[áa]mka:|Rekapitul[áa]cia:)"),
-    re.compile(r"Celkom\s*\n[\s\S]*?\n(?:Celkov[áa] hmotnos|Celkov[áa] suma)"),
+              r"(?:Pozn[áa]mka:|Rekapitul[áa]cia:)[^\n]*"),
+    re.compile(r"Celkom\s*\n[\s\S]*?\n(?:Celkov[áa] hmotnos|Celkov[áa] suma)[^\n]*"),
 ]
 
-# Boilerplate LINES (signature, contact, legal disclaimer, decorative separators) that
-# survive outside the header/item spans above — stripped so a routine footer never looks
-# like a customer addition.
+# Boilerplate LINES (contact details, legal disclaimer, decorative separators) that
+# survive outside the header/item spans and the signature-block truncation above —
+# stripped so a routine footer never looks like a customer addition. Narrowed/removed
+# after a review finding (PR #182): the previous `^Vaš[a]\b` matched ANY line starting
+# with the very common Slovak possessive "Vaša" (e.g. a genuine complaint "Vaša faktúra
+# bola nesprávna...") — REMOVED entirely rather than narrowed, because no safe scope
+# reliably tells a boilerplate "Vaša <company>" signature line apart from a genuine
+# "Vaša/Vaše ..." sentence (a signature repeating the company name is already covered by
+# `_truncate_at_signoff`, which cuts the WHOLE block after "S pozdravom"/"Ďakujem(e)").
+# The previous `tel\.?:?\s*[+\d]` was NOT anchored to the line's full content, so any
+# line merely MENTIONING a phone number (even alongside a real request) was dropped
+# whole — now scoped so it can only match a line that IS (not merely contains) a phone
+# number.
 _BOILERPLATE_LINE_PATTERNS = [
     re.compile(r"^S\s+pozdravom\b", re.I),
-    re.compile(r"^Vaš[a]\b", re.I),
-    re.compile(r"tel\.?:?\s*[+\d]", re.I),
-    re.compile(r"e-?mail:?\s*\S+@\S+", re.I),
+    re.compile(r"^tel\.?:?\s*[+\d][\d\s/]*$", re.I),
+    re.compile(r"^e-?mail:?\s*\S+@\S+\s*$", re.I),
     re.compile(r"^-{2,}\s*$"),
     re.compile(r"T[áa]to\s+spr[áa]va\s+bola\s+vygenerovan", re.I),
     re.compile(r"^I[ČC]O:?", re.I),
@@ -112,10 +136,13 @@ def _truncate_at_signoff(text: str) -> str:
 
 
 def _strip_consumed(text: str) -> str:
+    # `finditer`, not just the first `search` hit (review finding, PR #182) — a
+    # forwarded/replied mail can contain the SAME template twice (a quoted original
+    # below a customer's own note); consuming only the first copy left the second
+    # sitting in the residual, wasting an LLM call on the order's own template text.
     spans: list[tuple[int, int]] = []
     for pattern in (*_HEADER_PATTERNS, *_ITEM_BLOCK_PATTERNS):
-        m = pattern.search(text)
-        if m:
+        for m in pattern.finditer(text):
             spans.append(m.span())
     if not spans:
         return text

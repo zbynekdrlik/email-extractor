@@ -483,6 +483,46 @@ def test_python_engine_actionable_extra_content_posts_immediately_and_skips_the_
         "the extra-content LLM call's cost must be recorded"
 
 
+def test_python_engine_an_undelivered_extra_content_alert_is_marked_error_not_ok(pg):
+    """Review finding on PR #182: a failed/undelivered actionable-note alert must never
+    be logged as a genuine "ok" success — that would silently hide exactly the miss this
+    feature exists to catch. `post` returning None mirrors report.post_from_config's
+    "Odoo not configured" contract; a raised exception is the other failure shape."""
+    text = KARMEN_TEXT + "\nProsim zmente adresu dodania, sme v inych priestoroch.\n"
+    _msg(pg, text=text)
+    _snapshot(pg)
+    client = _FakeLlmClient(actionable=True, reason="zmena adresy")
+    assert static_worker.tick(
+        pg, _python_cfg(), upload=lambda *a, **k: True,
+        post=lambda c, h: None, llm_client=client) == 1
+    ev = pg.execute(
+        "SELECT stage, status, detail->>'delivered' FROM email_events "
+        "WHERE message_id='m1' AND stage='extra_content'").fetchone()
+    assert ev == ("extra_content", "error", "false")
+    # the order itself still shipped and is still processed — this is a notification
+    # miss, never a reason to hold the order or crash the tick
+    row = pg.execute("SELECT processed FROM messages").fetchone()
+    assert row[0] is True
+
+
+def test_python_engine_extra_content_alert_exception_also_marks_error(pg):
+    text = KARMEN_TEXT + "\nProsim zmente adresu dodania, sme v inych priestoroch.\n"
+    _msg(pg, text=text)
+    _snapshot(pg)
+    client = _FakeLlmClient(actionable=True, reason="zmena adresy")
+
+    def failing_post(c, h):
+        raise RuntimeError("odoo unreachable")
+
+    assert static_worker.tick(
+        pg, _python_cfg(), upload=lambda *a, **k: True,
+        post=failing_post, llm_client=client) == 1
+    ev = pg.execute(
+        "SELECT status FROM email_events WHERE message_id='m1' "
+        "AND stage='extra_content'").fetchone()
+    assert ev == ("error",)
+
+
 def test_python_engine_non_actionable_residual_is_silent(pg):
     """A stray non-actionable addition still costs the LLM call (residual existed) but
     must NOT post anything and the order still joins the digest normally."""

@@ -309,16 +309,34 @@ def _maybe_notify_extra_content(conn, cfg, message: dict, text: str, parsed: dic
 
     post = post or (lambda c, html: report.post_from_config(c, html))
     quote = residual[:400]
+    reason = str(answer.get("reason") or "")
     html = (f"<p><b>{escape(parsed.get('partner') or '')} "
            f"{escape(parsed.get('fullOrderNumber') or '')}</b> &mdash; zákazník dopísal "
            f"do mailu: „{escape(quote)}“</p>")
+    # #182 review finding: a failed OR undelivered ("Odoo not configured" — post_from_
+    # config returns None, no exception) alert must never be logged as a genuine "ok"
+    # success — this note was ALREADY judged actionable, so silently mislabeling its
+    # delivery outcome would hide exactly the kind of miss this feature exists to catch
+    # (same "never mark terminal on an undelivered alert" principle confirm.py's sweep
+    # already applies — this one-shot check has no natural retry loop, so the honest fix
+    # here is an honest status, not a fabricated success).
+    delivered = True
     try:
-        post(cfg, html)
+        result = post(cfg, html)
+        delivered = result is not None
     except Exception:
         log.exception("posting the extra-content alert failed for %s", message["message_id"])
+        delivered = False
+    if not delivered:
+        log.warning("extra-content alert for %s was NOT delivered (post failed or Odoo "
+                   "not configured) — the actionable note is only recorded here, not "
+                   "on the phone", message["message_id"])
     report.log_event(
-        conn, message["message_id"], stage="extra_content", status="ok",
-        outcome=f"Zákazník dopísal text: {quote}", detail={"residual": residual},
+        conn, message["message_id"], stage="extra_content",
+        status="ok" if delivered else "error",
+        outcome=(f"Zákazník dopísal text: {quote}" if delivered else
+                f"Zákazník dopísal text (UPOZORNENIE SA NEPOSLALO): {quote}"),
+        detail={"residual": residual, "reason": reason, "delivered": delivered},
         workflow=WORKFLOW, rollup=False)
     return {"actionable": True, "spend": spend}
 
