@@ -852,3 +852,17 @@ again. That is the point: a changed prompt has not been measured until it has be
   above) — confirm which Postgres credential is wired by elimination via
   `list_credentials(type:postgres)` (only one exists in this instance) rather than
   expecting to see it directly on the node.
+- **`gh pr edit` (title/body) fails with `GraphQL: Projects (classic) is being
+  deprecated... (repository.pullRequest.projectCards)` on THIS repo — a `gh` CLI bug
+  unrelated to anything you changed (#133/PR #182, 2026-08-05).** The edit itself never
+  applies (confirmed by re-reading `.title` afterward — unchanged), and retrying the
+  exact same command reproduces the identical error every time; it is not transient.
+  Workaround: use the REST API directly instead of the `gh pr edit` subcommand, which
+  goes through a DIFFERENT (working) endpoint:
+  ```
+  gh api repos/<owner>/<repo>/pulls/<N> -X PATCH -f title="..." -F body=@bodyfile.md
+  ```
+  (`-f` for a plain string field, `-F` for a file — same distinction as
+  `gh-cli-recipes.md`'s `--body-file` guidance for `issue create`.) Confirmed this
+  updates both title and body in one call and is reflected immediately in
+  `gh pr view <N>`.

@@ -1011,3 +1011,52 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   branch, and a grouped Odoo digest for static uploads) — observed a separate,
   concurrent in-progress worker already handling that (its own design comment + new
   `static_extra.py`/`static_digest.py` files), left untouched.
+
+## #133 continued — recalibrated extra-content LLM check + grouped Odoo digest
+
+- Same ticket, PR #182: mid-review on PR #181 the user posted two more decisions on
+  #133 — the old n8n LLM "extra content" branch (catches a customer writing something
+  extra into a template mail) was USEFUL, just badly calibrated (fired on almost every
+  mail); the Python port should keep it but fix the calibration. And: static-order
+  volume (~32/day) is too high for one Odoo message per uploaded order — group clean
+  uploads into a durable digest instead.
+- New `static_extra.py`: `residual_text()` deterministically subtracts the recognized
+  template (a documented, deliberate duplicate of `static_parse.py`'s own regexes) from
+  the raw mail text; only when something meaningful remains does ONE LLM call judge
+  actionability. New `static_digest.py` + `static_order_digest` table: a clean upload
+  with no note queues durably (survives a restart — no in-memory state) and flushes as
+  ONE grouped message on a batch-size or idle-timeout trigger (both new tunable config
+  options). Design comment posted before the first commit.
+- **Incident, mid-task**: dispatched a `fork` with the sole job "wait for the code-review
+  subagent, then relay its findings" — the fork inherited the full parent context
+  (including the still-unexecuted plan: act on findings, merge PR #181, deploy, flip
+  shadow) and executed that plan itself: merged #181, deployed v0.9.45, flipped
+  `static_orders_shadow=true`, verified 5/5 shadow `match`, posted its own #133 comment,
+  opened PR #182. Exact repeat of the #127/#128 incident already in the playbook — no
+  damage this time (correctly recognized + left the parent's uncommitted scope-2 files
+  untouched), but documented as a SECOND occurrence in `orders-corpus.md` to reinforce
+  it operationally. `TaskStop` on the runaway fork failed ("owned by itself") — could not
+  be cancelled, only outlasted.
+- Deep `requesting-code-review` pass (general-purpose subagent, 52 tool calls, ran the
+  full 799-test suite itself) found **3 Critical** bugs in the first cut of
+  `static_extra.py`, all fixed + regression-tested in the same PR before merge: two
+  boilerplate line patterns could silently swallow genuine customer text (an unanchored
+  possessive-word match, an unanchored phone-number match — removed/tightened); the
+  KARMEN_CASH template's own "Int. kód a názov tovaru" header line was missing from the
+  pattern list, so EVERY KARMEN_CASH order false-positived the LLM check; a failed/
+  undelivered extra-content alert was logged as a false "ok" with no retry signal (now
+  honestly logged as "error"). Also fixed: item-block end-boundaries now consume the
+  whole boundary line (a trailing value like a weight figure used to leak through as
+  residual), `finditer` instead of `search` (a duplicated/forwarded template no longer
+  leaves a second copy unstripped), `Prev\.:` tightened to match `static_parse.py`
+  exactly.
+- Version bumped again (0.9.45 → 0.9.46 — PR #181's merge already put 0.9.45 on main, so
+  dev needed a fresh bump before this PR could merge). PR #182 merged (`c7ff0d7`), main
+  CI green (test, e2e-orders, build), deployed v0.9.46 — `/health` + dashboard DOM both
+  confirm, worker restarted cleanly, `static_order_digest` table verified live with the
+  correct schema. `static_orders_engine` still `n8n` — this PR's new code paths are
+  dormant until the (separate, later) engine flip; verified the deploy didn't regress
+  the still-live n8n static-order processing (visible in the dashboard feed
+  post-deploy). Ticket stays OPEN.
+- Playbook: `.claude/rules/orders-corpus.md` gained the second fork-dispatched-to-wait
+  incident entry (see above).
