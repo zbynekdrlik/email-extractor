@@ -815,3 +815,21 @@ again. That is the point: a changed prompt has not been measured until it has be
   itself_fails` (fake `paramiko.SSHClient` via `unittest.mock.patch("paramiko.SSHClient",
   ...)`, `connect.side_effect = OSError(...)`, assert `close()` was still called) — this
   file also gave `upload.py` its FIRST test coverage at all; it had none before #151.
+- **`edi_sent` is a SHARED ledger, not a Python-only table — n8n's own "Static auto
+  orders" workflow writes into it too, with the IDENTICAL content-hash algorithm
+  (#133, verified live via the n8n MCP against `O8IYhUESjaWmPMTI`'s `Check Already
+  Sent`/`Claim Send` Postgres nodes).** Its `Compute Content Hash` Crypto node computes
+  `SHA256(content.slice(0,47) + '        ' (8 spaces) + content.slice(55))` — byte-for-
+  byte the SAME normalization `app/orders/edi.py`'s `content_hash()` does
+  (`DOC_DATE_AT=47`, `DOC_DATE_LEN=8`), over the SAME `(customer_ean, delivery_date,
+  content_sha256, filename)` columns, on the SAME Postgres credential ("Email Extractor
+  Postgres"). This means: (1) `edi.claim_send`/`confirm_sent`/`release_send` can be
+  reused AS-IS for the static-orders Python engine with zero new ledger table — dedup
+  works across BOTH engines during any transition window; (2) a shadow-mode diff against
+  n8n's REAL output is a genuine byte-for-byte comparison
+  (`SELECT content_sha256, filename FROM edi_sent WHERE customer_ean=<store_ean> AND
+  delivery_date=<date> ORDER BY id DESC LIMIT 1`), not a heuristic. `get_workflow_details`
+  strips node-level `credentials` from its response (same known gap as the #51 entry
+  above) — confirm which Postgres credential is wired by elimination via
+  `list_credentials(type:postgres)` (only one exists in this instance) rather than
+  expecting to see it directly on the node.

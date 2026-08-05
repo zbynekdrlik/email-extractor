@@ -958,3 +958,56 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
 - Playbook: `.claude/rules/n8n-workflow-edits.md` corrected — the `Z-` prefix is NOT the
   imported signal, `archCodex` presence is (with or without it); the old claim was
   actively misleading.
+
+## #133 — static orders: real python engine + AI fallback + shadow diff vs n8n
+
+- Issue #133 (`Static orders (Python core): skutočný cutover z n8n na Python`), scoped to
+  the code side only per the user's 2026-08-05T16:01 comment — the engine flip and n8n
+  workflow deactivation are a separate, later decision; the ticket stays open.
+  `static_worker.tick`'s `engine=python` branch was a deliberate no-op (#132) — this wired
+  it up for real: `_claim` (same protocol `worker._claim` uses), parse, resolve every
+  item's EAN, build + upload through the SAME two-phase `edi_sent` ledger the AI engine
+  AND n8n's own "Claim Send"/"Check Already Sent" nodes already share (verified live via
+  the n8n MCP — see the `orders-corpus.md` playbook entry). No silent per-item skip
+  (today's n8n behaviour is the defect this ticket removes): parsing failure, a photo
+  order, a header defect, or ANY unresolved EAN routes the WHOLE message to the AI
+  pipeline under the same claim. `run_shadow` now diffs the Python-built EDI against
+  n8n's real `edi_sent` row by content hash and persists a verdict
+  (`match`/`mismatch`/`would_fallback`/`empty_order`/`no_n8n_output`) in
+  `order_runs.result`.
+- Design comment posted before the first commit (`Príncina:`/`Zvolený prístup:`/
+  `Zamietnutá alternatíva:`), per the design-gate discipline. Live-verified ticket
+  validity posted first (current add-on options read via SSH, current code state
+  confirmed).
+- 24 new/changed tests (`test_orders_static_worker.py`, `test_orders_report.py`) — claim/
+  release on every failure path (upload exception, a crash mid-fallback), the
+  `held_orders`/`mail`-question re-claim guards, all four fallback triggers, the
+  duplicate/empty-order distinct event stages, and all five shadow-diff verdicts. Full
+  suite green locally (zero F/E/s/x) before every push.
+- PR #181. Deep `requesting-code-review` pass (general-purpose subagent) found ONE
+  **Critical**: `_fallback_to_ai` forwarded `cfg` unchanged into `pipeline.run()` —
+  `cfg.orders_shadow` is the AI engine's OWN, unrelated, still-undecided shadow toggle;
+  left `True` while `static_orders_engine=python` is live, EVERY static-order fallback
+  would silently run in AI-shadow mode (no claim, no hold, no upload, no event) while
+  `tick`'s own `has_open` check still marked the message processed — an order lost with
+  zero trace. Fixed (`8ed1243`) with `dataclasses.replace(cfg, orders_shadow=False)`
+  before calling the AI pipeline, pinned by a regression test that models the real
+  pipeline's shadow-sensitivity. Also fixed 2 Minor (a stale config.py comment, missing
+  double-failure-path test coverage). Merged `a358e12`, main CI green (test, e2e-orders,
+  build).
+- Deployed v0.9.45 via `ha addons update`; `/health` + dashboard DOM both confirm
+  `v0.9.45`. `static_orders_shadow` flipped to `true` (via the Supervisor options API —
+  full merged-options POST, per the existing gotcha in `orders-corpus.md`),
+  `static_orders_engine` untouched (`n8n`). Worker restarted cleanly:
+  `order worker started (engine=python shadow=False static_shadow=True)`. First 5 shadow
+  runs after restart, read live from Postgres: **5/5 `match`** — the Python-built EDI is
+  byte-identical to what n8n actually uploaded, on real production orders.
+- Playbook: `.claude/rules/orders-corpus.md` gained the `edi_sent`-is-shared-with-n8n
+  finding (exact hash algorithm + column shapes, live-verified via the n8n MCP) — the
+  reusable fact that let both the ledger reuse and the shadow diff work without a new
+  table.
+- Note for whoever picks up the flip decision later: while this PR was in review, the
+  user posted two more #133 comments expanding scope (a recalibrated "extra content" LLM
+  branch, and a grouped Odoo digest for static uploads) — observed a separate,
+  concurrent in-progress worker already handling that (its own design comment + new
+  `static_extra.py`/`static_digest.py` files), left untouched.
