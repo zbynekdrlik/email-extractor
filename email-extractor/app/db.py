@@ -640,6 +640,27 @@ SCHEMA = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_static_order_digest_pending "
     "ON static_order_digest(created_at) WHERE flushed_at IS NULL",
+    # --- #133 (2026-08-05 correction): a durable, per-(channel, kind) INCIDENT for the
+    # grouped import-confirmation alert (app/orders/confirm.py) — replaces the old
+    # one-message-per-file timeout alert. `kind` is 'carryover' (still unaccepted from a
+    # prior day) / 'failed' (landed in ORION's "unconfirmed" folder) / 'unknown' (vanished
+    # from all three watched folders). At most one OPEN (closed_at IS NULL) row per
+    # (channel_id, kind) at a time — every function in confirm.py reads/writes straight
+    # from this table, no in-memory state, so it survives an add-on restart by
+    # construction. ---
+    """
+    CREATE TABLE IF NOT EXISTS import_alert_incidents (
+        id            BIGSERIAL PRIMARY KEY,
+        channel_id    BIGINT NOT NULL,
+        kind          TEXT NOT NULL CHECK (kind IN ('carryover', 'failed', 'unknown')),
+        opened_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_alert_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        file_count    INTEGER NOT NULL DEFAULT 0,
+        closed_at     TIMESTAMPTZ
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_import_alert_incidents_open "
+    "ON import_alert_incidents(channel_id, kind) WHERE closed_at IS NULL",
 ]
 
 
