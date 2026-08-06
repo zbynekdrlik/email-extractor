@@ -182,6 +182,28 @@ def test_a_weekly_range_broken_down_by_weekday_still_grounds_every_day():
     assert not extract.date_grounded("15.07.2026", text)   # outside the written range
 
 
+def test_date_grounded_accepts_an_announced_day_with_no_trailing_dot():
+    """Real CÉDER incident wording (#190, messages.id=6091): customers routinely write
+    'na 10.8 poprosím' with NO trailing dot after the month digits — this must ground the
+    delivery date exactly like the dotted form ('na 10.8.') already does.
+
+    A second, DOTTED date ("5.7.2026") is included so the text names an explicit day —
+    without it, `date_grounded`'s own "nothing written at all -> accept" default would make
+    this pass vacuously, whether or not the no-dot form is actually recognized.
+    """
+    text = "Objednávka 5.7.2026\n\nDobrý deň, na 10.8 poprosím: Rožok 70g : 5 x"
+    assert extract.date_grounded("10.08.2026", text)
+
+
+def test_a_weight_after_na_is_not_read_as_a_written_date():
+    """The '#187 quoted-text guard (a unit word right after "na D.M" is a weight, not a
+    date) extended to the general "was this day written anywhere" scan (#190): 'na 3.5 kg'
+    must not let an invented 03.05 delivery date pass as grounded, even though 3/5 are both
+    individually valid calendar values."""
+    text = "Objednávka na 5.7. a chlieb na 3.5 kg poprosím."
+    assert not extract.date_grounded("03.05.2026", text)
+
+
 TABLE_WITH_A_STALE_SUBJECT_DATE_MAIL = (
     "Subject: Objednávka 20.07.\n\nBody: dobrý deň\n\nAttachments:\n=====\n"
     "Č.mat.dodavat.,EAN kus,Název,Množství\n"
@@ -368,6 +390,17 @@ def test_two_orders_where_the_body_names_only_one_day_go_to_a_human():
     assert problem and "28.6." in problem
 
 
+def test_two_orders_where_the_body_names_one_announced_day_with_no_dot_go_to_a_human():
+    """Same gap as #190's date_grounded fix, through date_conflict's body-day check: the
+    body written the CÉDER way ('na 28.6 poprosím', no trailing dot) must still be seen as
+    the one written day, not silently invisible to this check either."""
+    problem = extract.date_conflict(
+        subject="Objednávka 29.6.2026",
+        dates=["28.06.2026", "29.06.2026"],
+        body="Dobrý deň, prosíme o dodanie na 28.6 poprosím. Ďakujeme.")
+    assert problem and "28.6." in problem
+
+
 def test_a_body_naming_both_ordered_days_is_not_a_contradiction():
     """The normal multi-day order: the body itself lists every day it asks for."""
     assert not extract.date_conflict(
@@ -471,6 +504,20 @@ def test_a_quoted_body_whose_days_have_all_passed_is_left_alone():
     """
     stale = ("Subject: Re: objednávka\n\nFrom: info@resortceder.sk\n\n"
              "Body: > Dobrý deň,\n> \n> na 5.8. streda poprosím:\n> Rožok 70g : 30 x\n")
+    assert extract.unquote_fully_quoted(stale, today="20.08.2026") == stale
+    # …while the same mail read on the day it was sent IS the order
+    assert ">" not in extract.unquote_fully_quoted(stale, today="03.08.2026")
+
+
+def test_a_quoted_body_with_a_no_dot_announced_day_that_has_passed_is_left_alone():
+    """Same guard as the test above, but the ONLY evidence in the stale thread is the
+    no-dot announced form ('na 5.8 streda', #190's real CÉDER wording) — before #190,
+    `_orders_a_day_still_ahead` found NO written day at all for this text (its own
+    'nothing written -> accept' default), so a stale quoted thread naming ONLY a no-dot
+    date would be WRONGLY unquoted and re-read as a fresh order — the exact
+    duplicate-shipment risk this whole guard exists to prevent (review finding on #190)."""
+    stale = ("Subject: Re: objednávka\n\nFrom: info@resortceder.sk\n\n"
+             "Body: > Dobrý deň,\n> \n> na 5.8 streda poprosím:\n> Rožok 70g : 30 x\n")
     assert extract.unquote_fully_quoted(stale, today="20.08.2026") == stale
     # …while the same mail read on the day it was sent IS the order
     assert ">" not in extract.unquote_fully_quoted(stale, today="03.08.2026")

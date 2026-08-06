@@ -13,6 +13,13 @@ Abbreviated names are normal: "moravsky koláč tvaroh" is "Moravský koláč tv
   often NAMES the customers a card belongs to; when it names the customer who ordered,
   that IS their card — 0.95 or higher, even if the ordered name states no weight and
   several weight variants exist. (2026-07-27: Nemocnica AGEL Levoča.)
+  **EXCEPT** when the ordered wording clearly names a SPECIFIC, DIFFERENT product — its own
+  words match a DIFFERENT catalog card's name better than the alias-bearing one's. The alias
+  note only proves this customer buys THAT card for SOME wording — it never proves THIS
+  wording is it. In that case, score your actual best-fitting card instead, even below 0.95.
+  (2026-08-06: CÉDER's "Chlieb olivovo paradajkový"/"Chlieb multicereálny" wrongly confirmed
+  at high confidence by an alias note naming CÉDER on an unrelated "pšenično-ražný" card that
+  shares none of those words.)
 - **"PREDTÝM DODANÉ"**, when given, is our own shipment history for THIS customer and THIS
   exact wording. It is what the customer actually receives, so pick it with 0.95 or higher
   — not a guess. The only exception is a weight in the ordered name that contradicts it.
