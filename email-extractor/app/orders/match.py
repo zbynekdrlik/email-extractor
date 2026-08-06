@@ -220,6 +220,25 @@ def _better_alias_candidate(item_name: str, llm_card: dict | None,
     return best_card
 
 
+# Slovak wordings are heavily inflected — a customer's short noun form ("oliva",
+# "tekvička") and the catalog card's adjective form ("olivovo", "tekvicový") are the
+# SAME product but share no exact token. Proven against the real 35-case eval corpus
+# (#195): exact set-equality between distinctive words produced 2 false positives
+# there (both genuine matches, both blocked). A shared prefix of this length is
+# treated as the same stem — long enough that the two real incidents this ticket
+# documents ("olivovo"/"paradajkový" vs "tradičny"/"kváskový"/"pšenično"/"ražný",
+# "multicereálny" vs the same) still share none, short enough to absorb ordinary
+# Slovak inflection.
+STEM_PREFIX = 4
+
+
+def _lexical_overlap(item_words: set[str], card_words: set[str]) -> set[str]:
+    """Item words that share a stem (`STEM_PREFIX`-length prefix) with some card word —
+    used by the #195 lexical-gap guard, never by `_better_alias_candidate` above (that
+    mechanism is pre-existing, #157/#186, and already corpus-validated as exact-match)."""
+    return {w for w in item_words if any(w[:STEM_PREFIX] == c[:STEM_PREFIX] for c in card_words)}
+
+
 def _card_reference_words(card: dict, customer_name: str) -> set[str]:
     """The words describing the ARTICLE printed on this card: its own name, plus any
     alias phrase that describes the GOODS — never a phrase that merely names the
@@ -570,7 +589,7 @@ def decide(item_name: str, llm: dict, catalog: list[dict], recalled=None,
             # answer could have.
             item_words = _distinctive_words(item_name)
             card_words = _card_reference_words(llm_card, customer_name)
-            overlap = item_words & card_words
+            overlap = _lexical_overlap(item_words, card_words)
             lexical_gap = bool(item_words and card_words and not overlap)
             trace["lexical_guard"] = {"item_words": sorted(item_words),
                                       "card_words": sorted(card_words),

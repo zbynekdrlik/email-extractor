@@ -799,6 +799,17 @@ def test_a_product_describing_alias_counts_toward_the_overlap():
     assert d.rule == "llm_sure"
 
 
+def test_a_stem_shared_with_a_different_grammatical_form_still_counts_as_overlap():
+    """Real eval-corpus finding (#195): 'oliva' (noun) vs the card's 'olivovo'
+    (adjective) are the same product in different Slovak grammatical forms — exact
+    token equality misses this and wrongly blocks a genuine match."""
+    catalog = [{"gtin": "X3", "name": "Olivovo-paradajkový kváskový chlieb 500g",
+               "alias": ""}]
+    d = _decide("Chlieb oliva-paradajka", llm={"gtin": "X3", "confidence": 0.98},
+                catalog=catalog)
+    assert d.rule == "llm_sure"
+
+
 def test_card_reference_words_excludes_an_alias_phrase_naming_the_customer():
     """#195 point 3, unit-tested directly on the helper: a mixed alias (one phrase
     naming the customer, one describing the goods) must contribute only the
