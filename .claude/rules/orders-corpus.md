@@ -44,6 +44,22 @@ again. That is the point: a changed prompt has not been measured until it has be
 `--sample` makes each iteration of that re-record ~6x cheaper (measured: $4.50/30 cases full
 → ~$0.75/5 cases sampled) without losing type coverage.
 
+**Running `--live` from a plain checkout (not the live add-on) needs `OPENAI_API_KEY`
+exported explicitly (#188/#189, 2026-08-06)** — the add-on's own `openai_api_key` option
+only reaches `config.Config.load()` when running INSIDE the deployed container; a scratch
+run on dev2's runner checkout (or anywhere else) has no add-on options to read and fails
+with `no OpenAI API key configured` unless you `export OPENAI_API_KEY=...` first (value:
+`openai-api-key.md` memory).
+
+**A full 35-case `--live` re-record takes 20-25 minutes — launch it DETACHED on the
+remote side, never as a plain foreground SSH command with a guessed inner `timeout`**
+(#189, 2026-08-06: a `timeout 590 ...` guess killed the run mid-way through case 14/35,
+EXIT=124, with the first 14 cases' cache writes still usable but the run itself wasted).
+Use `nohup bash -c '... ; echo $? > /tmp/x.exit' > /tmp/x.log 2>&1 & disown` over SSH (the
+SSH command returns immediately), then poll `/tmp/x.exit` from a separate SSH call every
+~15s until it appears — this survives your own polling connections dropping/timing out,
+since the actual work is detached from any one SSH session.
+
 ## Rules when you touch this
 
 - **A new warehouse complaint becomes a corpus case BEFORE its fix is written.** The corpus
