@@ -160,6 +160,30 @@ def test_no_unverified_items_never_mentions_them():
     assert "http://x/sklad/k" not in html
 
 
+# --- #187 review finding: the extraction stage's own notice must actually reach Odoo ---
+
+def test_a_note_is_rendered_as_its_own_short_paragraph():
+    html = report.build_summary(
+        "Pekáreň X", [_order(status="ok")],
+        notes="V citovanom texte e-mailu (za '>') je dátum 11.8., ktorý ešte neprešiel.")
+    assert "11.8" in html
+    assert "citovanom" in html
+
+
+def test_no_note_never_adds_an_empty_paragraph():
+    html_with = report.build_summary("Pekáreň X", [_order(status="ok")], notes="niečo")
+    html_without = report.build_summary("Pekáreň X", [_order(status="ok")], notes="")
+    assert "niečo" in html_with
+    assert "niečo" not in html_without
+
+
+def test_a_note_is_escaped_like_reject_reason():
+    html = report.build_summary("Pekáreň X", [_order(status="ok")],
+                                notes="<script>alert(1)</script>")
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+
+
 def test_no_link_configured_still_says_something_is_unresolved():
     """Nothing may be silently hidden even when dashboard_base_url is unset (#139) — the
     message must still say a human is needed, just without a clickable link."""

@@ -125,6 +125,39 @@ def test_a_clean_order_is_built_uploaded_reported_and_remembered(pg, env):
         "SELECT uploaded_at FROM edi_sent").fetchone()[0] is not None
 
 
+# --- #187 review finding: `notes` must not be silently dropped between extract.run()
+# and either the pipeline's return value or the ONE Odoo message a run posts ------------
+
+def test_a_note_from_extraction_reaches_both_the_return_value_and_odoo(pg, env):
+    answers = _answers()
+    answers[0] = dict(answers[0], notes="Text poznámky pre sklad.")
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), MAIL, env, client=ScriptedClient(answers),
+                          upload=rec.upload, post=rec.post)
+    assert result["notes"] == "Text poznámky pre sklad."
+    assert len(rec.posts) == 1
+    assert "Text poznámky pre sklad." in rec.posts[0]
+
+
+def test_a_note_survives_the_no_orders_early_return_too(pg, env):
+    """The gap the review flagged: `_finish()`'s early-return paths did not propagate
+    `notes` at all — exactly the shape a mixed body whose fresh content produced no
+    order (everything real sat in the quoted block) would hit."""
+    extract_answer = {
+        "senderName": "Sklad", "senderEmail": "sklad@pekaren.sk",
+        "companyName": "Pekáreň Testovacia s.r.o.", "isChangeRequest": False,
+        "notes": "V citovanom texte je dátum 11.8., objednávka preň nevznikla.",
+        "orders": [],
+    }
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), MAIL, env, client=ScriptedClient([extract_answer]),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] in ("held", "review")
+    assert result["notes"] == "V citovanom texte je dátum 11.8., objednávka preň nevznikla."
+    assert len(rec.posts) == 1
+    assert "11.8" in rec.posts[0]
+
+
 def test_the_result_carries_the_per_item_trace_for_order_items(pg, env):
     result = pipeline.run(pg, _cfg(), MAIL, env, client=ScriptedClient(_answers()),
                           upload=lambda *a: True, post=lambda *a, **k: None)

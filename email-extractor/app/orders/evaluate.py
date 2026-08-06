@@ -102,6 +102,22 @@ def _compare_items(want: dict, got: dict, label: str, problems: list[str]) -> in
     return hits
 
 
+def _check_notes(expected: dict, actual: dict, problems: list[str]) -> None:
+    """#187: optional `expected["notes_contains"]` (one substring, or a list of them) —
+    every one of them must appear in `actual["notes"]`. Without this, a case could pin a
+    genuine warehouse-facing notice (e.g. a quoted second order that produced no order of
+    its own) with no way to prove it actually reached the pipeline's output rather than
+    only a log line — exactly the gap #187's own bug hid behind."""
+    want = expected.get("notes_contains")
+    if not want:
+        return
+    needles = [want] if isinstance(want, str) else list(want)
+    notes = str(actual.get("notes") or "")
+    for needle in needles:
+        if needle not in notes:
+            problems.append(f"v poznámkach chýba „{needle}“ (notes: {notes!r})")
+
+
 def score(expected: dict, actual: dict) -> Score:
     """Compare one case's outcome. Item order and numeric formatting are not differences.
 
@@ -120,6 +136,9 @@ def score(expected: dict, actual: dict) -> Score:
             str(expected.get("customer_ean") or "") != str(actual.get("customer_ean") or "")):
         problems.append(f"iný zákazník: čakáme {expected.get('customer_ean')!r}, "
                         f"dostali {actual.get('customer_ean')!r}")
+
+    # #187: EMAIL-level, so it applies regardless of which shape below fires.
+    _check_notes(expected, actual, problems)
 
     if expected.get("orders") is not None:
         return _score_per_order(expected, actual, problems)
@@ -244,7 +263,12 @@ def _actual_from_run(result: dict) -> dict:
     return {"customer_ean": result.get("customer_ean", ""),
             "delivery_date": result.get("delivery_date", ""),
             "items": items, "order_results": orders,
-            "shipped": result.get("status") in ("ok", "partial")}
+            "shipped": result.get("status") in ("ok", "partial"),
+            # #187: EMAIL-level, same for every order derived from one email — carried
+            # through so a case can assert something the extraction stage surfaced there
+            # (e.g. a quoted second order that produced no order of its own) actually
+            # reached the output, not just the log.
+            "notes": result.get("notes", "")}
 
 
 def run_case(conn, cfg, case: dict, snapshot_id: int, client=None) -> Result:

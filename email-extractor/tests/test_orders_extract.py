@@ -492,3 +492,77 @@ def test_the_extraction_source_is_unquoted_so_citations_can_be_verified():
     source = extract.unquote_fully_quoted(extract.clean_text(CEDER_FULLY_QUOTED))
     assert extract.quote_in_source("Rožok 70g : 30 x", source)
     assert extract.quote_in_source("Chlieb multicereálny : 2 x", source)
+
+
+# --- #187: a genuine second order hiding in quoted text must be surfaced, not dropped --
+
+def test_a_quoted_second_order_with_a_still_ahead_date_is_surfaced_not_dropped():
+    """A mixed body — fresh order on top, a genuine SECOND order quoted below for a later
+    still-ahead day. Synthetic fixture, but reproducing the EXACT wording shape of the
+    real 2026-08-06 incident mail (messages.id=6091): 'na 10.8 poprosím' / '>>-quoted na
+    11.8 poprosím' — NO trailing dot after the day.month, which real customers routinely
+    omit. The model (mimicked here) correctly ignores the quoted '>' lines per the prompt
+    and returns only the fresh order — `run()` must still notice the quoted day was never
+    turned into an order and surface it in `notes`, so a human decides whether it is a
+    real second order or a stale quoted template."""
+    mail = ("Subject: objednávka\n\nFrom: synthetic@example.test\n\n"
+            "Body: Dobrý deň,\n\nna 10.8 poprosím:\n\n"
+            "Rožok 70g : 5 x\n\n"
+            ">> Dobrý deň ,\n>> \n>> na 11.8 poprosím:\n>> \n>> Rožok 70g : 5 x\n"
+            ">> Ďakujeme Testovacia Zákazníčka\n")
+
+    class FakeClient:
+        last_prompt_hash = "abc123abc123"
+
+        def json_call(self, system, user, schema, name="result"):
+            return {"orders": [{"deliveryDate": "10.08.2026", "recipientGroup": "",
+                                "items": [{"name": "Rožok 70g", "quantity": 5, "unit": "ks",
+                                           "sourceQuote": "Rožok 70g : 5 x"}]}]}
+
+    result = extract.run(FakeClient(), {"combined_text": mail, "today": "2026-08-06",
+                                       "subject": "objednávka"})
+    assert [o["deliveryDate"] for o in result["orders"]] == ["10.08.2026"]
+    assert "11.8" in result["notes"]
+
+
+def test_a_quoted_date_with_a_trailing_dot_is_also_recognized():
+    """Both wordings ('na 11.8' and 'na 11.8.') must be caught — some customers do write
+    the trailing dot, only the incident mail itself happened not to."""
+    quoted = "Body: Dobrý deň.\n> na 11.8. poprosím: Rožok 70g : 5 x\n"
+    assert extract.quoted_future_dates_uncovered(quoted, "2026-08-06", set()) == [(11, 8)]
+
+
+def test_a_quoted_date_already_covered_by_a_produced_order_is_not_flagged():
+    """The same day named both fresh and quoted (e.g. quoted just for context, not a real
+    second order) must not be reported as dropped — an order for it already exists."""
+    quoted = ("Body: Dobrý deň, na 10.8 poprosím:\nRožok 70g : 5 x\n"
+              "> na 10.8 poprosím: Rožok 70g : 5 x\n")
+    assert extract.quoted_future_dates_uncovered(quoted, "2026-08-06", {(10, 8)}) == []
+
+
+def test_a_quoted_stale_date_is_not_flagged():
+    """A quoted day already in the past must not be flagged — same 'still ahead' guard
+    `unquote_fully_quoted`'s own stale-thread check already applies."""
+    quoted = "Body: Dobrý deň.\n> na 1.8. poprosím: Rožok 70g : 5 x\n"
+    assert extract.quoted_future_dates_uncovered(quoted, "2026-08-06", set()) == []
+
+
+def test_a_quoted_order_with_no_written_day_names_nothing_to_surface():
+    """'na pondelok' names no day.month at all — nothing to compare, so nothing to flag."""
+    quoted = "Body: Dobrý deň.\n> na pondelok poprosím: Rožok 70g : 5 x\n"
+    assert extract.quoted_future_dates_uncovered(quoted, "2026-08-06", set()) == []
+
+
+def test_a_weight_after_na_is_not_read_as_a_date():
+    """Review finding: 'na' precedes a WEIGHT too ('chlieb na 3.5 kg'), not only a date —
+    day=3/month=5 are both individually plausible, so the calendar-range check alone
+    would not catch this; the immediately-following unit word must."""
+    quoted = "Body: Dobrý deň.\n> chlieb na 3.5 kg poprosím: Rožok 70g : 5 x\n"
+    assert extract.quoted_future_dates_uncovered(quoted, "2026-08-06", set()) == []
+
+
+def test_a_price_after_na_is_not_read_as_a_date():
+    """'na 1.50 eur' — month=50 is not a real month; the calendar-range check alone
+    catches this one."""
+    quoted = "Body: Dobrý deň.\n> cena na 1.50 eur poprosím: Rožok 70g : 5 x\n"
+    assert extract.quoted_future_dates_uncovered(quoted, "2026-08-06", set()) == []

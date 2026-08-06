@@ -85,6 +85,37 @@ def test_an_order_that_should_have_gone_to_review_and_shipped_instead_fails():
     assert any("kontrol" in p.lower() for p in score.problems)
 
 
+# --- #187: notes_contains --------------------------------------------------
+
+def test_notes_contains_passes_when_the_substring_is_present():
+    expected = dict(EXPECTED, notes_contains="11.8")
+    score = evaluate.score(expected, _actual(notes="citovaný text spomína 11.8."))
+    assert score.passed is True
+
+
+def test_notes_contains_fails_and_names_the_missing_substring_when_absent():
+    expected = dict(EXPECTED, notes_contains="11.8")
+    score = evaluate.score(expected, _actual(notes=""))
+    assert score.passed is False
+    assert any("11.8" in p for p in score.problems)
+
+
+def test_notes_contains_accepts_a_list_and_requires_every_entry():
+    expected = dict(EXPECTED, notes_contains=["11.8", "citovanom"])
+    score = evaluate.score(expected, _actual(notes="v citovanom texte je 11.8."))
+    assert score.passed is True
+
+    score2 = evaluate.score(expected, _actual(notes="len 11.8. bez toho druhého slova"))
+    assert score2.passed is False
+    assert any("citovanom" in p for p in score2.problems)
+
+
+def test_notes_contains_is_not_asserted_when_absent_from_expected():
+    """A case with no `notes_contains` never fails on whatever ended up in notes."""
+    score = evaluate.score(EXPECTED, _actual(notes="čokoľvek úplne iné"))
+    assert score.passed is True
+
+
 # --- aggregation ---------------------------------------------------------
 
 def test_results_are_aggregated_per_type_so_one_type_cannot_hide_another():
@@ -226,6 +257,20 @@ def test_a_dropped_second_order_fails_and_names_the_date():
     s = evaluate.score(MULTI, _multi_actual(only_first))
     assert s.passed is False
     assert any("05.08.2026" in p for p in s.problems)
+
+
+def test_notes_contains_applies_to_the_per_order_shape_too():
+    """#187: notes is EMAIL-level, so it must be checked regardless of which of the two
+    expected shapes (flat vs `orders: [...]`) the case uses."""
+    expected = dict(MULTI, notes_contains="11.8")
+    s = evaluate.score(expected, _multi_actual(_multi_actual()["order_results"]))
+    assert s.passed is False
+    assert any("11.8" in p for p in s.problems)
+
+    s2 = evaluate.score(
+        expected,
+        {**_multi_actual(_multi_actual()["order_results"]), "notes": "citované 11.8."})
+    assert s2.passed is True
 
 
 def test_a_wrong_item_inside_the_second_order_fails():
