@@ -60,6 +60,59 @@ SSH command returns immediately), then poll `/tmp/x.exit` from a separate SSH ca
 ~15s until it appears — this survives your own polling connections dropping/timing out,
 since the actual work is detached from any one SSH session.
 
+**Running `eval_run.py` offline OUTSIDE the container (a scratch dev2 checkout, #195,
+2026-08-06) needs BOTH `PG_DSN` and `LLM_CACHE_DIR` exported explicitly** — the module
+defaults `llm_cache_dir` to `/data/llm-cache` (`app/config.py`), which only exists
+inside the deployed add-on container. Without `LLM_CACHE_DIR` pointed at the corpus's
+own `llm-cache/` directory, EVERY case fails with an identical-looking
+`no cached answer for <hash> (prompt <hash>)` — the SAME extract-prompt hash on every
+failure line is the tell (the run never gets past the first, shared extraction call),
+not a sign the cache itself is stale. Working invocation from a checkout:
+```
+PG_DSN="postgresql://postgres:postgres@localhost:<port>/postgres" \
+LLM_CACHE_DIR="/home/newlevel/eval-corpus/email-extractor/llm-cache" \
+.venv/bin/python -m app.orders.eval_run --manifest … --catalog … --customers … \
+  --history … --taught … --baseline … --require-all
+```
+`ee-eval-pg` (port 55434, `POSTGRES_PASSWORD=postgres`) is a dedicated dev2 container
+for exactly this — check `docker ps -a` for it before assuming a fresh one is needed.
+
+**A composed SSH one-liner silently drops its own `cd` clause when built as a bash
+string across several edit attempts (#195)** — the fix that actually works reliably is
+writing the full multi-line command (with the `cd /path/to/email-extractor &&` prefix)
+to a scratch FILE first, then running `ssh dev2 "$(cat that-file)"`. Composing the
+string inline, even carefully, produced several silent no-op `.venv/bin/python: No such
+file or directory` failures in a row before switching to the file-based form fixed it
+immediately — if an SSH one-liner keeps failing on a missing `.venv`/relative path with
+no other explanation, suspect the `cd` never made it into the actual command sent, and
+switch to the file-based form rather than re-typing the same string again.
+
+**A stray leftover script literally named `/tmp/inspect.py` (from an EARLIER,
+unrelated debugging session) silently shadows the stdlib `inspect` module for any
+Python script run from bare `/tmp` (#195)** — Python auto-prepends the running
+script's OWN directory to `sys.path`, so `python /tmp/my_scratch_script.py` picks up
+`/tmp/inspect.py` INSTEAD of the real `inspect` module the moment anything
+(`dataclasses`, among many stdlib modules) imports it, producing a confusing
+`AttributeError: module 'inspect' has no attribute 'get_annotations'` that looks like
+a Python-version problem but isn't. Never run a scratch investigation script from
+bare `/tmp` on a shared dev box — always `mkdir` a fresh, uniquely-named subdirectory
+first (e.g. `/tmp/claude-inspect/`) and run from there.
+
+**Slovak word comparison for "is this the same product?" needs a shared STEM, not
+exact token equality (#195, found via real corpus validation — not guessable up
+front).** A customer's short noun form ("oliva", "tekvička") and a catalog card's
+adjective form ("olivovo", "tekvicový") are grammatically different but the SAME
+product; comparing whole `_distinctive_words()`-style tokens for exact set membership
+treats them as unrelated. `app/orders/match.py`'s new `_lexical_overlap()` (#195)
+compares a fixed-length prefix (`STEM_PREFIX = 4`) instead — cheap, no real stemmer
+dependency, and empirically validated against the full 35-case corpus (0 false
+positives after the fix, vs 2 with exact-match). Any FUTURE Slovak-wording comparison
+in this codebase should default to this same stem-prefix approach rather than
+re-discovering the same false-positive class from scratch; `_better_alias_candidate`
+(#157/#186) still uses exact-match deliberately and is corpus-validated as-is — don't
+"fix" it without re-validating against the corpus first, exact-match may be
+intentional there for cards it was tuned against.
+
 ## Rules when you touch this
 
 - **A new warehouse complaint becomes a corpus case BEFORE its fix is written.** The corpus
