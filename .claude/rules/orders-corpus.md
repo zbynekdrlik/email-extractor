@@ -44,6 +44,22 @@ again. That is the point: a changed prompt has not been measured until it has be
 `--sample` makes each iteration of that re-record ~6x cheaper (measured: $4.50/30 cases full
 → ~$0.75/5 cases sampled) without losing type coverage.
 
+**Running `--live` from a plain checkout (not the live add-on) needs `OPENAI_API_KEY`
+exported explicitly (#188/#189, 2026-08-06)** — the add-on's own `openai_api_key` option
+only reaches `config.Config.load()` when running INSIDE the deployed container; a scratch
+run on dev2's runner checkout (or anywhere else) has no add-on options to read and fails
+with `no OpenAI API key configured` unless you `export OPENAI_API_KEY=...` first (value:
+`openai-api-key.md` memory).
+
+**A full 35-case `--live` re-record takes 20-25 minutes — launch it DETACHED on the
+remote side, never as a plain foreground SSH command with a guessed inner `timeout`**
+(#189, 2026-08-06: a `timeout 590 ...` guess killed the run mid-way through case 14/35,
+EXIT=124, with the first 14 cases' cache writes still usable but the run itself wasted).
+Use `nohup bash -c '... ; echo $? > /tmp/x.exit' > /tmp/x.log 2>&1 & disown` over SSH (the
+SSH command returns immediately), then poll `/tmp/x.exit` from a separate SSH call every
+~15s until it appears — this survives your own polling connections dropping/timing out,
+since the actual work is detached from any one SSH session.
+
 ## Rules when you touch this
 
 - **A new warehouse complaint becomes a corpus case BEFORE its fix is written.** The corpus
@@ -61,6 +77,14 @@ again. That is the point: a changed prompt has not been measured until it has be
   blindly — it may itself have been wrong, exactly the #193 finding), (3) add it to
   `manifest.json`/`llm-cache`/`baseline.json` on dev2 in the SAME PR the fix ships in. A fix
   with no corpus case is a fix nobody will notice regressing.
+- **EXTENSION (#196): the SAME PR also adds a row to the app's own `match_incidents`
+  table** (`app/db.py`, `occurred_on`/`description`/`issue_ref UNIQUE`) — this is what
+  `reliability.days_since_incident()` reports on the dashboard/daily digest as "days
+  since the last confirmed incident", live-computed, never a hand-maintained constant.
+  Two records for one real incident: the dev2 corpus case (what regresses if the SAME
+  mistake recurs) and the `match_incidents` row (when the warehouse can start trusting
+  the system a little more). Forgetting the second one doesn't break CI — it just quietly
+  keeps the trust metric wrong, so treat it as mandatory as the corpus case itself.
 - **Assert only what you can prove.** `items` when the shipped record gives the cards,
   `item_count` when only the number of lines is provable, the delivery date alone when neither
   is. A guessed GTIN frozen into the baseline is worse than no assertion.

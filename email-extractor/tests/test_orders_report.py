@@ -332,3 +332,63 @@ def test_workflow_defaults_to_ai_orders_when_not_given(pg):
     report.log_event(pg, "m4", stage="review", status="review", outcome="x")
     row = pg.execute("SELECT workflow FROM email_events WHERE message_id='m4'").fetchone()
     assert row[0] == "ai_orders"
+
+
+# --- #196: the daily match-provenance digest ------------------------------
+
+def _stats(**over):
+    base = {"day": "2026-08-05", "runs": 10, "orders": 12, "errors": 0,
+           "items": 100, "deterministic": 70, "llm": 20, "review": 10}
+    base.update(over)
+    return base
+
+
+def test_the_digest_names_the_day_and_the_headline_counts():
+    html = report.build_daily_digest(_stats(), days_since_incident=3)
+    assert "2026-08-05" in html
+    assert "10" in html and "12" in html and "100" in html
+
+
+def test_the_digest_shows_all_three_provenance_buckets_with_percentages():
+    html = report.build_daily_digest(_stats(), days_since_incident=3)
+    assert "70" in html and "70 %" in html
+    assert "20" in html and "20 %" in html
+    assert "10" in html and "10 %" in html
+
+
+def test_errors_are_only_mentioned_when_there_are_any():
+    clean = report.build_daily_digest(_stats(errors=0), days_since_incident=3)
+    assert "zlyhan" not in clean.lower()
+    dirty = report.build_daily_digest(_stats(errors=2), days_since_incident=3)
+    assert "2" in dirty and "zlyhan" in dirty.lower()
+
+
+def test_no_incident_ever_recorded_is_rendered_honestly_not_as_zero():
+    html = report.build_daily_digest(_stats(), days_since_incident=None)
+    assert "žiadny potvrdený incident" in html.lower()
+    assert "0 d" not in html.lower()
+
+
+def test_days_since_incident_is_named_in_slovak_plural_form():
+    one = report.build_daily_digest(_stats(), days_since_incident=1)
+    assert "1 deň" in one
+    few = report.build_daily_digest(_stats(), days_since_incident=3)
+    assert "3 dni" in few
+    many = report.build_daily_digest(_stats(), days_since_incident=11)
+    assert "11 dní" in many
+
+
+def test_a_nothing_processed_day_still_renders_cleanly():
+    html = report.build_daily_digest(
+        {"day": "2026-08-05", "runs": 0, "orders": 0, "errors": 0, "items": 0,
+         "deterministic": 0, "llm": 0, "review": 0}, days_since_incident=5)
+    assert "2026-08-05" in html
+    assert "%" not in html   # no percentages computed against zero items
+
+
+def test_the_link_is_only_rendered_when_given():
+    no_link = report.build_daily_digest(_stats(), days_since_incident=3, link="")
+    assert "<a href" not in no_link
+    with_link = report.build_daily_digest(_stats(), days_since_incident=3,
+                                          link="http://x/sklad/k")
+    assert 'href="http://x/sklad/k"' in with_link

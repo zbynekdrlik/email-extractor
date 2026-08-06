@@ -849,6 +849,20 @@ def create_app(cfg) -> Flask:
                        free_pct=round(share["pct"], 1), free=share["free"],
                        decisions=share["total"], top_runs=top)
 
+    @app.get("/api/orders/digest")
+    def api_orders_digest():
+        """#196: the same match-provenance stats + 'days since incident' the daily Odoo
+        digest carries — the warehouse's measurable, live basis for trust, on the
+        dashboard too, not only in the Odoo channel."""
+        from .orders import reliability
+        with _db() as c:
+            today = reliability.provenance_stats_for_day(c)
+            yesterday = reliability.provenance_stats_for_day(
+                c, c.execute(
+                    "SELECT to_char(now() - interval '1 day', 'YYYY-MM-DD')").fetchone()[0])
+            since = reliability.days_since_incident(c)
+        return jsonify(today=today, yesterday=yesterday, days_since_incident=since)
+
     @app.get("/api/imap-failures")
     def api_imap_failures():
         """Emails that could not be ingested at all (#20) — they have no messages row,
@@ -1024,6 +1038,7 @@ DASH_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
   <span class="live" id="livetog">● <span id="livelbl">LIVE</span></span>
   <span class="ver" data-testid="version">v__VERSION__</span>
   <span class="ver" id="spendBadge" data-testid="spend" title="náklady objednávkového automatu za tento mesiac"></span>
+  <span class="ver" id="reliabilityBadge" data-testid="reliability" title="spoľahlivosť AI objednávok — dní od posledného potvrdeného incidentu, včerajší prehľad rozhodnutí"></span>
   <a class="ver" href="/logout">odhlásiť</a>
 </header>
 <div class="chips" id="chips"></div>
@@ -1272,10 +1287,17 @@ async function spendBadgeRefresh(){try{const d=await api('/api/orders/spend');
   b.style.color=(d.cap_eur&&d.cost_eur>d.cap_eur)?'#f85149':'#6e7681'}catch(e){}}
 async function imapBadgeRefresh(){try{const d=await api('/api/imap-failures');
   const b=document.getElementById('imapBadge');b.textContent=d.total?String(d.total):'';b.style.color='#f85149'}catch(e){}}
+async function reliabilityBadgeRefresh(){try{const d=await api('/api/orders/digest');
+  const b=document.getElementById('reliabilityBadge');
+  const since=d.days_since_incident;
+  const y=d.yesterday||{};
+  const sinceTxt=(since==null)?'bez záznamu incidentu':(since+' '+(since===1?'deň':(since>=2&&since<=4?'dni':'dní'))+' bez incidentu');
+  b.textContent=sinceTxt+(y.items?(' · včera '+y.deterministic+'/'+y.llm+'/'+y.review+' (isté/AI/kontrola)'):'');
+  b.style.color=(since!=null&&since<3)?'#f85149':'#6e7681'}catch(e){}}
 document.getElementById('livetog').onclick=()=>{live=!live;document.getElementById('livetog').style.color=live?'#3fb950':'#6e7681';document.getElementById('livelbl').textContent=live?'LIVE':'pauza'};
 let deb;q.oninput=()=>{clearTimeout(deb);deb=setTimeout(loadList,350)};
 for(const el of [fcat,fstate,ffrom,fto])el.onchange=loadList;
-loadList();imapBadgeRefresh();spendBadgeRefresh();askBadgeRefresh();setInterval(askBadgeRefresh,30000);timer=setInterval(tick,5000);setInterval(imapBadgeRefresh,30000);setInterval(spendBadgeRefresh,60000);
+loadList();imapBadgeRefresh();spendBadgeRefresh();askBadgeRefresh();reliabilityBadgeRefresh();setInterval(askBadgeRefresh,30000);timer=setInterval(tick,5000);setInterval(imapBadgeRefresh,30000);setInterval(spendBadgeRefresh,60000);setInterval(reliabilityBadgeRefresh,60000);
 </script></body></html>"""
 
 

@@ -55,7 +55,7 @@ TECHNICAL_REASONS = {Reason.CHANGE_REQUEST, Reason.LLM_REFUSED, Reason.UPLOAD_FA
 # What a human can actually settle. `unique_card` is NOT here (#103): a product we make
 # in exactly one gramáž has no alternative to choose between, so asking is noise.
 ASK_THE_WAREHOUSE = ("unmatched", "llm_borderline", "history_weight",
-                    "llm_sure_alias_conflict")
+                    "llm_sure_alias_conflict", "llm_sure_lexical_gap")
 
 PROMPTS = Path(__file__).with_name("prompts")
 

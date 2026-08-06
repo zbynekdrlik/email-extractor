@@ -220,6 +220,40 @@ def _better_alias_candidate(item_name: str, llm_card: dict | None,
     return best_card
 
 
+# Slovak wordings are heavily inflected — a customer's short noun form ("oliva",
+# "tekvička") and the catalog card's adjective form ("olivovo", "tekvicový") are the
+# SAME product but share no exact token. Proven against the real 35-case eval corpus
+# (#195): exact set-equality between distinctive words produced 2 false positives
+# there (both genuine matches, both blocked). A shared prefix of this length is
+# treated as the same stem — long enough that the two real incidents this ticket
+# documents ("olivovo"/"paradajkový" vs "tradičny"/"kváskový"/"pšenično"/"ražný",
+# "multicereálny" vs the same) still share none, short enough to absorb ordinary
+# Slovak inflection.
+STEM_PREFIX = 4
+
+
+def _lexical_overlap(item_words: set[str], card_words: set[str]) -> set[str]:
+    """Item words that share a stem (`STEM_PREFIX`-length prefix) with some card word —
+    used by the #195 lexical-gap guard, never by `_better_alias_candidate` above (that
+    mechanism is pre-existing, #157/#186, and already corpus-validated as exact-match)."""
+    return {w for w in item_words if any(w[:STEM_PREFIX] == c[:STEM_PREFIX] for c in card_words)}
+
+
+def _card_reference_words(card: dict, customer_name: str) -> set[str]:
+    """The words describing the ARTICLE printed on this card: its own name, plus any
+    alias phrase that describes the GOODS — never a phrase that merely names the
+    ordering customer (#195 point 3). An alias like "objednava ... CÉDER" is proof the
+    customer buys this card for SOME wording, never proof of this one — crediting it
+    toward a lexical-overlap check would defeat the point of the check."""
+    words = set(_distinctive_words(card.get("name", "")))
+    cust_toks = customer_tokens(customer_name)
+    for part in alias_parts(card):
+        if cust_toks and any(t in part for t in cust_toks):
+            continue
+        words |= _distinctive_words(part)
+    return words
+
+
 def _wordings_differ(a: str, b: str) -> bool:
     """True when two customer wordings share NO distinctive word at all — the sign that
     two DIFFERENT products both resolved to the same card (#157: "Chlieb olivovo
@@ -546,6 +580,26 @@ def decide(item_name: str, llm: dict, catalog: list[dict], recalled=None,
                     f"„{alias_better['name']}“ sedí so znením lepšie (pôvodný kandidát "
                     f"modelu „{llm_card['name']}“) — prosím prekontrolujte.",
                     review=True)
+            # #195: a class-level, cause-independent tripwire — regardless of WHY the
+            # model is confident, a wording sharing literally no distinctive content
+            # word with the card it names (its own name, or a non-customer-naming
+            # alias, #195 point 3) must not auto-ship. Both real incidents this
+            # ticket cites are alias-caused and already blocked by #186 above; this
+            # is the safety net for every OTHER cause a future confident-but-wrong
+            # answer could have.
+            item_words = _distinctive_words(item_name)
+            card_words = _card_reference_words(llm_card, customer_name)
+            overlap = _lexical_overlap(item_words, card_words)
+            lexical_gap = bool(item_words and card_words and not overlap)
+            trace["lexical_guard"] = {"item_words": sorted(item_words),
+                                      "card_words": sorted(card_words),
+                                      "overlap": sorted(overlap), "fired": lexical_gap}
+            if lexical_gap:
+                return done(
+                    "llm_sure_lexical_gap", None, "", conf,
+                    f"Model si je istý ({round(conf * 100)} %), ale znenie "
+                    f"„{item_name}“ nemá s kartou „{llm_card['name']}“ spoločné "
+                    "žiadne rozlišujúce slovo — prosím prekontrolujte.", review=True)
             return done("llm_sure", str(llm_gtin), llm_card["name"], conf,
                         llm.get("reason") or "Spárované modelom.")
         return done("llm_borderline", str(llm_gtin), llm_card["name"], conf,

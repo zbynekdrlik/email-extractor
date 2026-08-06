@@ -742,6 +742,88 @@ def test_a_sure_confidence_still_confirms_when_no_other_card_matches_better():
     assert d.review is False
 
 
+# --- #195: a class-level, cause-independent lexical tripwire for llm_sure -------------
+#
+# #186 only blocks a SURE match when an alias note is the reason the model was
+# confident (`alias_names_customer`). The model can be confidently wrong for reasons
+# that have nothing to do with an alias at all — a hallucinated gtin, a future prompt
+# regression, anything. These cases use CATALOG (no alias names the test customer),
+# so `alias_better` never enters the picture and only the NEW guard is exercised.
+
+def test_a_sure_match_sharing_no_content_word_with_the_card_is_not_shipped():
+    """'Slimák makový' and CHL's own name ('Chlieb pšenično-ražný rezaný 1000 gr')
+    share no distinctive word at all, and CHL's alias here doesn't name the test
+    customer either — #186's mechanism is not involved."""
+    d = _decide("Slimák makový", llm={"gtin": "CHL", "confidence": 0.9})
+    assert d.rule != "llm_sure"
+    assert d.gtin is None
+    assert d.review is True
+
+
+def test_the_lexical_gap_line_lands_on_a_rule_the_pipeline_asks_the_warehouse_about():
+    from app.orders.pipeline import ASK_THE_WAREHOUSE
+    d = _decide("Slimák makový", llm={"gtin": "CHL", "confidence": 0.9})
+    assert d.rule in ASK_THE_WAREHOUSE
+
+
+def test_the_lexical_guard_verdict_is_recorded_in_the_trace():
+    """#195 point 4: the guard's own inputs and verdict must be diagnosable later."""
+    d = _decide("Slimák makový", llm={"gtin": "CHL", "confidence": 0.9})
+    guard = d.trace["lexical_guard"]
+    assert guard["fired"] is True
+    assert guard["overlap"] == []
+    assert "slimak" in guard["item_words"]
+
+
+def test_a_sure_match_with_genuine_wording_overlap_still_ships():
+    """The ordinary case must keep working: 'Rožok kváskový' genuinely shares words
+    with card G70's own name."""
+    d = _decide("Rožok kváskový", llm={"gtin": "G70", "confidence": 0.9})
+    assert d.rule == "llm_sure"
+    assert d.gtin == "G70"
+    assert d.trace["lexical_guard"]["fired"] is False
+
+
+def test_a_wording_with_no_distinctive_word_at_all_is_not_gated():
+    """Too short/generic to compare against anything — trust the model rather than
+    block on an empty signal, mirroring `_wordings_differ`'s own convention."""
+    d = _decide("chlieb", llm={"gtin": "CHL", "confidence": 0.9})
+    assert d.rule == "llm_sure"
+
+
+def test_a_product_describing_alias_counts_toward_the_overlap():
+    """#195 point 3: an alias phrase that describes the GOODS (not the customer) still
+    counts as a legitimate lexical match."""
+    catalog = [{"gtin": "X1", "name": "Torta oriešková 500g", "alias": "bageta cesnakova"}]
+    d = _decide("Bageta cesnaková", llm={"gtin": "X1", "confidence": 0.9}, catalog=catalog)
+    assert d.rule == "llm_sure"
+
+
+def test_a_stem_shared_with_a_different_grammatical_form_still_counts_as_overlap():
+    """Real eval-corpus finding (#195): 'oliva' (noun) vs the card's 'olivovo'
+    (adjective) are the same product in different Slovak grammatical forms — exact
+    token equality misses this and wrongly blocks a genuine match."""
+    catalog = [{"gtin": "X3", "name": "Olivovo-paradajkový kváskový chlieb 500g",
+               "alias": ""}]
+    d = _decide("Chlieb oliva-paradajka", llm={"gtin": "X3", "confidence": 0.98},
+                catalog=catalog)
+    assert d.rule == "llm_sure"
+
+
+def test_card_reference_words_excludes_an_alias_phrase_naming_the_customer():
+    """#195 point 3, unit-tested directly on the helper: a mixed alias (one phrase
+    naming the customer, one describing the goods) must contribute only the
+    product-describing phrase's words. (In `decide()`'s own ladder this exclusion is
+    unreachable at rung 5 — a customer-naming alias is either resolved earlier by
+    rung 3/#186, never falls through to here — this pins the helper's own contract
+    so it stays correct if the ladder is ever reordered.)"""
+    card = {"name": "Torta čokoládová 500g",
+           "alias": "objednava firma xyz, bageta cesnakova"}
+    words = match._card_reference_words(card, "firma xyz")
+    assert {"bageta", "cesnakova"} <= words
+    assert "firma" not in words
+
+
 # --- #157: merge_same_card must not sum materially different wordings -----------------
 
 def _dec(item_name, gtin, card, quantity, rule="llm_sure", confidence=0.9, unit="ks"):

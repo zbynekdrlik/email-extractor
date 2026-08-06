@@ -51,6 +51,18 @@ def test_init_schema_idempotent(pg):
     assert n == 1
 
 
+def test_schema_seeds_the_two_known_match_incidents(pg):
+    """#196: match_incidents is append-only and self-seeding (idempotent, ON CONFLICT DO
+    NOTHING) — 'days since incident' must never depend on a separate manual step a
+    future deploy could forget."""
+    db.init_schema(pg)   # the pg fixture already truncated it — reseed, then check
+    rows = {r[0] for r in pg.execute("SELECT issue_ref FROM match_incidents").fetchall()}
+    assert rows == {"#157", "#186"}
+    db.init_schema(pg)   # idempotent: re-running must not duplicate or error (UNIQUE)
+    n = pg.execute("SELECT count(*) FROM match_incidents").fetchone()[0]
+    assert n == 2
+
+
 def test_classified_trigger_logs_on_category_change(pg):
     pg.execute("INSERT INTO messages (message_id) VALUES ('cls')")
     pg.execute("UPDATE messages SET category='ai_orders' WHERE message_id='cls'")
