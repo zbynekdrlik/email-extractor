@@ -1214,3 +1214,51 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
 - Deploy: PR #194 merged (`b07ef426e7916c3108babdec183f98ea4020b148`), main CI green
   (test+e2e-orders+build), deployed **v0.9.49** — `/health` 200 + dashboard DOM confirm
   `v0.9.49`, `/otazky` (Otázky skladu) loads live with 0 pending, worker started clean.
+
+## 2026-08-06 — #195 + #196 (batch, PR #197)
+
+- **#195** (class-level lexical tripwire for `llm_sure`): `match.decide()`'s SURE rung
+  gains a cause-independent guard right after #186's `alias_better` check — a wording
+  sharing NO distinctive content word with the card's own name/non-customer-naming
+  alias downgrades to new rung `llm_sure_lexical_gap` (gtin cleared, review=True,
+  added to `pipeline.ASK_THE_WAREHOUSE`) instead of shipping. New
+  `_card_reference_words()`/`_lexical_overlap()` in `match.py`. Verdict recorded in
+  `trace["lexical_guard"]`.
+  RED `3fbd50a` → GREEN `b6e4f2e`. **Corpus validation (dev2, 35 cases, offline,
+  `--require-all`) found 2 real false positives** on the first (exact-token-match)
+  implementation — "oliva" vs the card's "olivovo", "tekvička" vs "tekvicový", both
+  genuine Slovak inflection of the same product. Fixed by comparing a shared
+  `STEM_PREFIX`-length (4-char) prefix instead of exact equality: `c8b9c24`. Re-run:
+  0 regressions, gate PASSED (only the 5 pre-existing `known_defect: #120` cases
+  fail, unrelated). Both real incidents this ticket cites (run 112/241, corpus cases
+  `resortceder-2026-08-03-db6d8af5`/`resortceder-2026-08-06-89d1855d`) are already
+  caught by #186's `alias_better` mechanism — #195 is deliberately the broader,
+  cause-independent safety net, not a re-fix.
+- **#196** (daily match-provenance digest + dashboard): new `match_incidents` table
+  (append-only, self-seeded with the two real incidents #195 found — #157/#186) backs
+  `reliability.days_since_incident()`, always live-computed. New
+  `app/orders/reliability.py`: `provenance_stats_for_day()` buckets `order_items`
+  (shadow=false only) into deterministic/AI-rung(`llm_sure`)/held-for-review
+  (`ASK_THE_WAREHOUSE`) + per-run error/order counts; `maybe_post_daily_digest()`
+  posts once per calendar day (new `order_digest_sent` claim table, same pattern as
+  `spend.cap_tripped`) through the existing Odoo channel, wired into `worker.tick()`.
+  New `report.build_daily_digest()`, new `/api/orders/digest` route + a dashboard
+  header badge (`reliabilityBadge`). Feature work (no RED/GREEN split): `db4bf21`.
+  Playbook: `.claude/rules/orders-corpus.md`'s #188 standing rule extended — a future
+  incident-fix PR adds a `match_incidents` row in the same PR as the corpus case.
+- Version bump `ec31bd2`: 0.9.49 → 0.9.50.
+- Design/validated/review comments posted on both issues before code / before merge
+  (per repo convention — see issue comment threads).
+- Tests: `tests/test_orders_match.py` (10 new #195 tests), `tests/test_orders_
+  reliability.py` (new file, 14 tests), `tests/test_orders_report.py` (+7 digest
+  tests), `tests/test_db.py` (+1 seed test), `tests/test_httpapi.py` (+2 auth tests).
+  Full suite green (`pytest -q`, zero F/E), `ruff check .` clean.
+- Shared PR: **#197** — merge `5faaed03334843f804ed56e97cd59220b87a6691`, main CI
+  green (test+e2e-orders+build). Deployed **v0.9.50**: `/health` 200, dashboard DOM
+  confirms `v0.9.50`, worker started clean (`engine=python shadow=False
+  static_shadow=True`), 0 console errors. Functional: `/api/orders/digest` +
+  the new `reliabilityBadge` show REAL live production data ("0 dní bez incidentu ·
+  včera 31/54/2 (isté/AI/kontrola)" — the 2026-08-06 seeded incident makes 0 days
+  correct as of deploy day); today's live stats show `llm=24, review=0` — the new
+  #195 guard is live and not falsely flagging genuine matches (0 `llm_sure_lexical_gap`
+  rows in production yet, consistent with the guard being rare-case-only).
