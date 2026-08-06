@@ -399,9 +399,47 @@ def _body_only(text: str) -> str:
     return re.sub(r"^(Subject|From|To|Date):.*$", "", text, flags=re.MULTILINE)
 
 
+# An explicit day.month ANNOUNCED with "na" needs no trailing dot (#190). Real customer
+# wording routinely omits it ("na 11.8 poprosím" — verified live on the 2026-08-06 CÉDER
+# incident mail itself, messages.id=6091: neither "10.8" nor "11.8" carries a trailing dot
+# anywhere in the message). `_SUBJ_DAY` above stays STRICT (trailing dot required) — it is
+# also used, unwidened, by `date_conflict()`'s own direct subject-only single-day check,
+# which needs "exactly one candidate" precision and every real subject line seen in this
+# corpus so far already writes the trailing dot ("Objednávka 29.6.2026", "Objednávka od
+# 06.07. - 11.07."). `_days_in()` below is the shared "was this day WRITTEN anywhere" scan
+# (feeds `date_grounded`, `_orders_a_day_still_ahead`, and `date_conflict`'s BODY check) —
+# it is widened here to ALSO catch the no-dot form, guarded by the announcing word "na" so
+# a bare decimal quantity ("3.5 kg") is never misread as a date. This is the SAME guard
+# `quoted_future_dates_uncovered` already used, narrower, for quoted text only (#187) —
+# reused here, not reinvented, and now shared by both.
+_ANNOUNCED_DAY = re.compile(
+    r"\bna\s+(\d{1,2})\s*\.\s*(\d{1,2})(?:\s*\.\s*(\d{4}|\d{2}))?\b", re.IGNORECASE)
+# "na" also precedes a WEIGHT or a PRICE ("chlieb na 3.5 kg", "cena na 1.50 eur"), not only
+# a date — a unit/currency word immediately after still rules those out (a calendar-range
+# check alone lets "3.5" through, since day=3/month=5 are both individually plausible).
+_ANNOUNCED_DAY_UNIT_AFTER = re.compile(r"^\s*(?:kg|gr|g|ml|l|eur|€|ks|x)\b", re.IGNORECASE)
+
+
+def _announced_days_in(text: str) -> set[tuple[int, int]]:
+    """(day, month) pairs from an explicit 'na D.M[.Y]' mention, trailing dot optional,
+    guarded against a weight/price immediately following (#190/#187)."""
+    text = text or ""
+    out: set[tuple[int, int]] = set()
+    for m in _ANNOUNCED_DAY.finditer(text):
+        day, month = int(m.group(1)), int(m.group(2))
+        if not (1 <= day <= 31 and 1 <= month <= 12):
+            continue
+        if _ANNOUNCED_DAY_UNIT_AFTER.match(text[m.end():]):
+            continue
+        out.add((day, month))
+    return out
+
+
 def _days_in(text: str) -> set[tuple[int, int]]:
-    """Every explicit day.month written in the text."""
-    return {(int(d), int(m)) for d, m, _, _ in _SUBJ_DAY.findall(text or "")}
+    """Every explicit day.month written in the text — the strict dotted form
+    ("11.8."/"11.8.2026") plus the announced-but-undotted form ("na 11.8", #190)."""
+    strict = {(int(d), int(m)) for d, m, _, _ in _SUBJ_DAY.findall(text or "")}
+    return strict | _announced_days_in(text)
 
 
 # --- a body that is quoted from line one is the order itself (#155) ---------
@@ -494,36 +532,10 @@ def _quoted_body_only(text: str) -> str:
     return "\n".join(lines)
 
 
-# `_SUBJ_DAY` requires a TRAILING dot after the month digits ("11.8."/"11.8.2026") — real
-# customer wording routinely omits it ("na 11.8 poprosím", verified live on the 2026-08-06
-# incident mail itself: neither "10.8" nor "11.8" carries a trailing dot anywhere in the
-# message). `_SUBJ_DAY` is deliberately left alone here — it is shared by `date_grounded`/
-# `date_conflict`/`_orders_a_day_still_ahead`, and loosening it there risks a genuine
-# decimal number ("3.5 kg") being misread as a date; that is a separate, wider-blast-radius
-# investigation (filed as a follow-up, issue 190). This detector only needs the
-# ANNOUNCING word Slovak orders already always use before a date ("na 11.8", "na
-# 11.8.2026" — every date example in this codebase's own prompts/tests uses "na …"), which
-# rules out a bare decimal without requiring the trailing dot.
-_QUOTED_DAY = re.compile(
-    r"\bna\s+(\d{1,2})\s*\.\s*(\d{1,2})(?:\s*\.\s*(\d{4}|\d{2}))?\b", re.IGNORECASE)
-# Review finding: "na" precedes a WEIGHT or a PRICE too ("chlieb na 3.5 kg", "cena na
-# 1.50 eur"), not only a date — the bare _QUOTED_DAY pattern matches both. A calendar
-# range check alone still lets "3.5" through (day=3/month=5 are both plausible), so this
-# also refuses a match immediately followed by a unit word.
-_QUOTED_DAY_UNIT_AFTER = re.compile(r"^\s*(?:kg|gr|g|ml|l|eur|€|ks|x)\b", re.IGNORECASE)
-
-
-def _quoted_days_in(text: str) -> set[tuple[int, int]]:
-    text = text or ""
-    out: set[tuple[int, int]] = set()
-    for m in _QUOTED_DAY.finditer(text):
-        day, month = int(m.group(1)), int(m.group(2))
-        if not (1 <= day <= 31 and 1 <= month <= 12):
-            continue
-        if _QUOTED_DAY_UNIT_AFTER.match(text[m.end():]):
-            continue
-        out.add((day, month))
-    return out
+# `_ANNOUNCED_DAY`/`_announced_days_in` (defined above, next to `_days_in`) used to live
+# here as `_QUOTED_DAY`/`_quoted_days_in`, scoped only to quoted text — #190 generalized
+# them to the whole "was this day written anywhere" scan, so `quoted_future_dates_uncovered`
+# below now just calls the shared helper on the quoted-only text.
 
 
 def quoted_future_dates_uncovered(source: str, today: str,
@@ -542,7 +554,7 @@ def quoted_future_dates_uncovered(source: str, today: str,
     quoted portion is not a miss.
     """
     ref = _today_day_month(today)
-    quoted_days = _quoted_days_in(_quoted_body_only(source))
+    quoted_days = _announced_days_in(_quoted_body_only(source))
     if not ref or not quoted_days:
         return []
     tday, tmonth = ref
