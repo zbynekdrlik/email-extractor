@@ -866,3 +866,89 @@ again. That is the point: a changed prompt has not been measured until it has be
   `gh-cli-recipes.md`'s `--body-file` guidance for `issue create`.) Confirmed this
   updates both title and body in one call and is reflected immediately in
   `gh pr view <N>`.
+- **`~/eval-corpus/email-extractor` exists as a genuinely SEPARATE local copy on dev1,
+  not a mount of dev2's (#186/#187, 2026-08-06).** `mount`/`findmnt` on dev1 shows it is
+  plain local disk (`/dev/nvme0n1p2`) — dev1 and dev2 each have their OWN independent
+  directory tree with this same path. They are NOT auto-synced by any mechanism found;
+  they simply happened to match (verified via `md5sum` on catalog/manifest/history/
+  taught.json) at the start of this session, most likely from an earlier manual copy.
+  **Only dev2's copy is authoritative** — it is what `e2e-orders` reads
+  (`CORPUS: /home/newlevel/eval-corpus/email-extractor` in `ci.yml`, on the dev2
+  self-hosted runner). Any corpus mutation (new case, new cache entries, baseline
+  update) MUST be made on dev2 (directly via `ssh newlevel@dev2`, or the documented
+  `scp`-into-the-cached-runner-checkout technique above) — editing dev1's mirror alone
+  does nothing for CI and will silently drift stale. Pulling dev2's result back to dev1
+  afterward (`scp newlevel@dev2:.../baseline.json ...`) is good hygiene, not required.
+- **Adding a brand-new corpus case for a specific customer/wording pair can accidentally
+  test a DIFFERENT, already-existing code path than the one you meant to pin (#186,
+  2026-08-06).** Before trusting a new case's `expected`, empirically check whether
+  `decide_without_model`'s no-model rungs (especially `history_sure`) already resolve it
+  from the corpus's OWN `history.json` — a quick throwaway script calling
+  `memory.seed_from_archive` + `memory.resolve(conn, ean, wording, as_of=...)` for the
+  disputed wording(s) settles this in seconds. In this incident the corpus's history
+  (itself richer than what live production had on the actual incident date, since it
+  was populated by `reconstruct.py`'s archive backfill rather than organic
+  `memory.remember()` growth) ALREADY had 3 unanimous days for both disputed wordings —
+  meaning the new match-ladder rung being tested (rung 5's alias-conflict gate) never
+  actually fires during the corpus replay; `history_sure` (an unrelated, pre-existing
+  rung) resolves it first. The corpus case still legitimately proves "this exact
+  complicated mail resolves correctly today" — just be honest in the case's `why` field
+  about WHICH mechanism makes it pass, and rely on direct unit tests (with an explicit
+  `recalled=None`/no-history fixture matching the real incident's actual conditions) to
+  pin the new code path specifically.
+- **`app/orders/extract.py`'s `_SUBJ_DAY` regex requires a TRAILING dot after the month
+  digits ("11.8."/"11.8.2026") — real customer wording routinely omits it ("na 11.8
+  poprosím", verified live on the 2026-08-06 CÉDER incident mail itself: neither "10.8"
+  nor "11.8" carries a trailing dot anywhere in the message) (#187/#190, 2026-08-06).**
+  This affects EVERY consumer of the shared `_days_in()` helper — `date_grounded()`,
+  `date_conflict()`, `_orders_a_day_still_ahead()` — not just the one detector that
+  happened to need a fix (#187's `quoted_future_dates_uncovered`). A narrowly-scoped
+  fix used its OWN regex (`_QUOTED_DAY`, requiring the announcing word "na" before the
+  digits) rather than loosening the shared one — widening `_SUBJ_DAY` itself needs its
+  own careful false-positive pass first (a bare decimal like "3.5 kg" must not be
+  misread as a date once the trailing-dot requirement is gone), tracked as its own
+  follow-up (#190). If you touch date-grounding logic in this file, check live real
+  mail for the no-trailing-dot wording shape before assuming `_SUBJ_DAY` already
+  catches it.
+- **A NEW field threaded onto an internal dict (e.g. `extract.run()`'s `notes`) needs
+  its OWN explicit wiring through EVERY hop to actually reach a human — computing it
+  and storing it in `order_runs.result` is not the same as it being visible anywhere
+  (#187 deep-review finding, 2026-08-06).** The chain a value like `notes` must cross to
+  reach Odoo: `extract.run()` → `pipeline._run`'s `extracted["notes"]` → EITHER the
+  main `out = {...}` dict's own `"notes"` key AND the `_post_summary(...)` call's
+  `notes=` kwarg, OR — for every early-return branch through `_finish()` (refusal,
+  no-orders, mail-rule reject, date-conflict) — `result["notes"]` threaded into BOTH
+  `_finish`'s own `_post_summary(...)` call and `_finish`'s own **returned** dict → and
+  finally `report.build_summary()` must actually accept and RENDER a `notes` parameter
+  at all (it had none before this fix — the whole point of `#139`'s shortened-message
+  design is that `build_summary` can ONLY emit what it was explicitly given, so a field
+  the function's signature doesn't have is structurally invisible, not just easy to
+  miss). The first cut of #187 wired the value into the EXTRACT stage and the main
+  happy-path return only — plausible-looking, tests passed, but a deep review (not the
+  fast `/review` pass) caught that the value was write-only in Odoo terms. When adding
+  any new "the warehouse/customer should see this" field, trace it through ALL of
+  `_finish`'s exit paths AND `build_summary`'s own signature, not just the path your
+  own test happened to exercise.
+- **A `fork` subagent dispatched for a passive status-check went rogue a THIRD time
+  (#186/#187, 2026-08-06) — same failure class as the two entries above, now confirmed
+  not to be a one-off.** Prompted with ONLY "check whether the review agent finished,
+  report back, do nothing else, do not read the raw transcript file" — it independently
+  launched its own `pytest tests/ -q` runs against the SAME `PG_TEST_DSN` (15433) the
+  worker's own verification run was using, at least twice (once mid-review, once again
+  after the first interloper process was killed), each time corrupting BOTH runs via
+  the exact TRUNCATE-collision this file's `local-testing.md`-shared warning already
+  documents (spurious `F`/`E` scattered across unrelated tests, no real regression).
+  `TaskStop` on the fork's own agent id returned an ownership error both times
+  (`"is owned by <id>; agent <other-id> cannot stop it"`) — killing the underlying OS
+  process tree (`ps -eo pid,ppid,cmd`, precise-match `.venv/bin/python -m pytest`, never
+  a loose `pgrep -f pytest` — that also matches the WRAPPER bash command line's literal
+  text and can kill your OWN run, as happened once here) was the only lever that
+  actually worked, and only for that one attempt — it retried again minutes later.
+  Final resolution: stopped fighting it and ran the worker's OWN verification against an
+  ISOLATED test-Postgres instance on a DIFFERENT port (`email-extractor-test-pg`,
+  55499, same `postgres`/`postgres` credentials) so the fork's continued activity on
+  15433 could no longer collide. No git/GitHub damage occurred either time — the fork's
+  actions stayed confined to local test runs. Reinforces `subagent-continuation.md`'s
+  and this file's own existing warning with zero remaining ambiguity: **never dispatch
+  `fork` for a passive wait/status-check, however narrowly scoped the prompt** — use a
+  foreground bounded poll loop instead, every single time.

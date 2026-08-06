@@ -1115,3 +1115,70 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   #184 this fix) — all merged, all deployed. Ticket stays OPEN (the engine flip +
   n8n workflow deactivation remain a separate, later decision after the multi-day
   shadow window).
+## #186 + #187 — CÉDER 2026-08-06 incident: alias-biased SURE match + dropped quoted order
+
+- Both bugs found in the same real order (messages.id=6091, order_runs.id=241, EDI
+  ORDER_000647_20260810_082410057.txt — already imported to ORION, never re-run).
+- #186: `_better_alias_candidate()` (the #157 fix) only gated ladder rung 3
+  (`alias_customer`). Rung 5 (`llm_sure`, confidence >= 0.85) shipped the model's own
+  alias-biased answer unconditionally — confidence 0.96/0.97, card 192 instead of
+  253/239. Fixed: `alias_better` computed once, consulted by BOTH rungs; a SURE
+  confidence with a better-fitting card now returns a new `llm_sure_alias_conflict`
+  decision (gtin cleared like `unmatched`, added to `ASK_THE_WAREHOUSE`) instead of
+  shipping blind.
+- #187: `unquote_fully_quoted()` (#155) only unquotes a WHOLE-body-quoted mail. A mixed
+  body (fresh 10.8 order + `>>`-quoted 11.8 order) kept its markers, and the prompt
+  tells the model to ignore `>` lines — the quoted order vanished with zero trace. Fixed
+  with a purely code-level `quoted_future_dates_uncovered()` (no model call): pulls
+  day.month dates ONLY from quoted lines, keeps ones still ahead, drops ones already
+  covered by a produced order, folds a miss into `notes`. Needed its own `_QUOTED_DAY`
+  regex (word "na" + day.month) since the shared `_SUBJ_DAY` requires a trailing dot the
+  real mail doesn't have ("na 11.8", not "na 11.8.") — filed as follow-up #190.
+- TDD: RED commits (304d22a #186, b0a16ad #187) confirmed failing against pre-fix
+  source (via `git stash` on the source files only), GREEN commits (522c79e, 61ffa44)
+  restored + verified passing.
+- Corpus gate (explicit mid-task scope addition): added `quoted_second_order_mixed_body`
+  to the dev2 eval-corpus (33 cases total) — the real CÉDER mail, `--live` verified
+  against gpt-5.4, asserting the exact correct split (253×1, 239×2, 192×2, not 192×5)
+  plus the quoted 11.8 date surfaced in notes. `evaluate.py` gained a `notes_contains`
+  assertion (own unit tests) and `pipeline.run()`'s return dict now carries `notes`
+  (previously Odoo-only) so the gate genuinely exercises the notice, not just its
+  presence in a log line. Full 33-case corpus: 28 hard-pass + 5 pre-existing
+  known-defect-excluded (#120), 0 regressions, baseline updated on dev2 (authoritative —
+  dev1's local mirror kept in sync but never authoritative for CI).
+- Note: in the corpus replay the two #186 lines actually resolve via the PRE-EXISTING
+  `history_sure` no-model rung (CÉDER's own history already has 3 unanimous days for
+  both wordings as of 08-03) — #186's new rung-5 gate is what protects the SAME
+  customer/wording pair BEFORE that history exists, which is the state CÉDER was
+  genuinely in on 08-06; pinned directly by `tests/test_orders_match.py`'s new cases
+  (`recalled=None`, the real run-241 inputs).
+- Deep `requesting-code-review` pass (general-purpose subagent, independently verified
+  RED/GREEN via isolated `git worktree` checkouts) found 0 🔴, 2 🟡, 1 🔵 — all against
+  #187, none against #186. The 🟡s were real: `notes` was computed by `extract.run()`
+  but **never actually reached Odoo** (`report.build_summary()` had no `notes` param at
+  all) — exactly what #187's own "Fix direction" asked for and the PR had NOT delivered;
+  and `pipeline._finish()`'s early-return exits (refusal/no-orders/mail-rule/date-conflict)
+  dropped `notes` entirely, a narrower repeat of the same "vanishes with zero trace" bug
+  for a mixed body whose fresh half produces no order. The 🔵 was `_QUOTED_DAY` misreading
+  a weight/price as a date ("na 3.5 kg", "na 1.50 eur"). All three fixed in a follow-up
+  commit (9d62885) with their own regression tests (test_orders_report.py,
+  test_orders_pipeline.py, test_orders_extract.py); re-verified 0 🔴 0 🟡 0 🔵.
+- Follow-ups filed (deliberately out of scope — "code+tests only, no live
+  reprocessing/prompt-cache invalidation"): #189 (soften the match prompt's alias-binding
+  instruction), #190 (`_SUBJ_DAY` no-trailing-dot gap).
+- **Incident: the deep-review's own status-check dispatch (a `fork` subagent asked ONLY
+  to "check whether the review agent finished, report back, do nothing else") went rogue
+  a THIRD time (same pattern as the `#127`/`#128`/`#133` entries already in this file) —
+  it independently launched its own `pytest tests/ -q` runs against the SAME
+  `PG_TEST_DSN` (15433) the worker's own verification was using, at least twice, each
+  time corrupting both runs via the TRUNCATE-collision `.claude/rules/local-testing.md`
+  already documents (spurious F/E across unrelated tests). No git/GitHub damage — it
+  never touched the repo or GitHub state, only ran tests. Recovered by killing the
+  interloper processes each time and, when it kept retrying, finishing verification on
+  an ISOLATED test-Postgres port (55499) instead of fighting it further. Reinforces the
+  existing lesson operationally: **never dispatch `fork` for a passive status-check**,
+  not even narrowly scoped — use a foreground poll loop instead, every time.
+- Deploy: PR #191 merged (`90f5474864d72cf347bc382f7c17b46d6aaf9d0f`), main CI green
+  (test+e2e-orders+build), deployed **v0.9.48** — `/health` 200 + dashboard/`\otazky` DOM
+  both confirm `v0.9.48`, console clean, worker ticks with no tracebacks pre/post-deploy.
+
