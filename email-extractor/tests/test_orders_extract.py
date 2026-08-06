@@ -509,6 +509,20 @@ def test_a_quoted_body_whose_days_have_all_passed_is_left_alone():
     assert ">" not in extract.unquote_fully_quoted(stale, today="03.08.2026")
 
 
+def test_a_quoted_body_with_a_no_dot_announced_day_that_has_passed_is_left_alone():
+    """Same guard as the test above, but the ONLY evidence in the stale thread is the
+    no-dot announced form ('na 5.8 streda', #190's real CÉDER wording) — before #190,
+    `_orders_a_day_still_ahead` found NO written day at all for this text (its own
+    'nothing written -> accept' default), so a stale quoted thread naming ONLY a no-dot
+    date would be WRONGLY unquoted and re-read as a fresh order — the exact
+    duplicate-shipment risk this whole guard exists to prevent (review finding on #190)."""
+    stale = ("Subject: Re: objednávka\n\nFrom: info@resortceder.sk\n\n"
+             "Body: > Dobrý deň,\n> \n> na 5.8 streda poprosím:\n> Rožok 70g : 30 x\n")
+    assert extract.unquote_fully_quoted(stale, today="20.08.2026") == stale
+    # …while the same mail read on the day it was sent IS the order
+    assert ">" not in extract.unquote_fully_quoted(stale, today="03.08.2026")
+
+
 def test_a_quoted_order_with_no_written_day_is_still_read():
     """"na pondelok" names no day to compare, so the guard must not block it."""
     mail = "Body: > Dobrý deň,\n> na pondelok poprosím:\n> Rožok 70g : 30 x\n"
