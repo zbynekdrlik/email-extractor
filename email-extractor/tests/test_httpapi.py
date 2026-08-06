@@ -50,6 +50,13 @@ def test_api_requires_session_401():
     assert _client(token="secret").get("/api/messages").status_code == 401
 
 
+def test_orders_digest_requires_a_session():
+    """#196: same admin-dashboard security boundary as /api/orders/spend — aggregate
+    stats only, but not sklad-visible (see test_the_warehouse_link_opens_ONLY_the_
+    questions_surface below, which pins that it stays out of SKLAD_PATHS)."""
+    assert _client(token="secret").get("/api/orders/digest").status_code == 401
+
+
 def test_dashboard_served_after_login():
     c = _client(token="secret", dash="pw")
     assert c.post("/login", data={"password": "pw"}).status_code == 302
@@ -170,6 +177,7 @@ def test_the_warehouse_link_opens_ONLY_the_questions_surface():
     c.get("/sklad/" + httpapi.sklad_key("t"))
     assert c.get("/api/messages").status_code == 401
     assert c.get("/api/orders/spend").status_code == 401
+    assert c.get("/api/orders/digest").status_code == 401
     assert c.get("/api/fix-queue").status_code == 401
     assert c.get("/eml/e1").status_code == 403
     r = c.get("/")

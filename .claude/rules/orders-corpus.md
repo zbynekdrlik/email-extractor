@@ -77,6 +77,14 @@ since the actual work is detached from any one SSH session.
   blindly — it may itself have been wrong, exactly the #193 finding), (3) add it to
   `manifest.json`/`llm-cache`/`baseline.json` on dev2 in the SAME PR the fix ships in. A fix
   with no corpus case is a fix nobody will notice regressing.
+- **EXTENSION (#196): the SAME PR also adds a row to the app's own `match_incidents`
+  table** (`app/db.py`, `occurred_on`/`description`/`issue_ref UNIQUE`) — this is what
+  `reliability.days_since_incident()` reports on the dashboard/daily digest as "days
+  since the last confirmed incident", live-computed, never a hand-maintained constant.
+  Two records for one real incident: the dev2 corpus case (what regresses if the SAME
+  mistake recurs) and the `match_incidents` row (when the warehouse can start trusting
+  the system a little more). Forgetting the second one doesn't break CI — it just quietly
+  keeps the trust metric wrong, so treat it as mandatory as the corpus case itself.
 - **Assert only what you can prove.** `items` when the shipped record gives the cards,
   `item_count` when only the number of lines is provable, the delivery date alone when neither
   is. A guessed GTIN frozen into the baseline is worse than no assertion.

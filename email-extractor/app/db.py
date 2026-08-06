@@ -688,6 +688,39 @@ SCHEMA = [
         PRIMARY KEY (incident_id, edi_sent_id)
     )
     """,
+    # --- #196: a small, append-only, HONEST log of confirmed wrong-shipment incidents
+    # (never a hand-maintained "days since X" constant that ages — "days since the last
+    # incident" is always LIVE-computed as now() - max(occurred_on)). Deliberately
+    # distinct from `import_alert_incidents` above (that table is about ORION import
+    # CONFIRMATION alerts; this one is about MATCH-QUALITY trust). Seeded once with the
+    # two real incidents this batch (#195) already found corpus-cased on dev2 — every
+    # FUTURE incident-fix PR adds a row here in the SAME PR it adds the dev2 corpus case
+    # (`.claude/rules/orders-corpus.md`'s #188 standing rule). ---
+    """
+    CREATE TABLE IF NOT EXISTS match_incidents (
+        id          BIGSERIAL PRIMARY KEY,
+        occurred_on DATE NOT NULL,
+        description TEXT NOT NULL,
+        issue_ref   TEXT NOT NULL UNIQUE,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    """
+    INSERT INTO match_incidents (occurred_on, description, issue_ref) VALUES
+        ('2026-08-03', 'CÉDER: alias-note bias skladom nepotvrdenú kartu (chlieb) — '
+                       'oprava #157', '#157'),
+        ('2026-08-06', 'CÉDER: sebaisté (0.96-0.97) modelové rozhodnutie s tou istou '
+                       'alias-bias príčinou — oprava #186/#189', '#186')
+    ON CONFLICT (issue_ref) DO NOTHING
+    """,
+    # One post per calendar day, never once per worker tick — same "claim, don't
+    # spam" pattern order_spend_alerts already uses for the monthly cap.
+    """
+    CREATE TABLE IF NOT EXISTS order_digest_sent (
+        day     DATE PRIMARY KEY,
+        sent_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
 ]
 
 

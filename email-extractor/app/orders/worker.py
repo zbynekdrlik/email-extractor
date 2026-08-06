@@ -155,6 +155,18 @@ def _check_spend_cap(conn, cfg, shadow: bool) -> None:
         log.exception("the spend-cap check failed")
 
 
+def _check_daily_digest(conn, cfg, shadow: bool) -> None:
+    """#196: the daily match-provenance digest. `reliability.maybe_post_daily_digest`
+    already claims once-per-day and never raises — this wrapper only exists so a
+    genuinely unexpected failure (e.g. the claim insert itself) still cannot take an
+    order down with it, the same guarantee `_check_spend_cap` gives its own check."""
+    try:
+        from . import reliability
+        reliability.maybe_post_daily_digest(conn, cfg, shadow=shadow)
+    except Exception:
+        log.exception("the daily digest check failed")
+
+
 # --- one tick ------------------------------------------------------------
 
 def tick(conn, cfg, pipeline=None) -> int:
@@ -208,6 +220,7 @@ def tick(conn, cfg, pipeline=None) -> int:
 
     _finish_run(conn, run_id, result.get("status", "ok"), result)
     _check_spend_cap(conn, cfg, shadow=engine != "python")
+    _check_daily_digest(conn, cfg, shadow=engine != "python")
     if engine == "python":
         from .hold import has_open
         # #93: a run that just HELD one of its orders must not be marked processed — the

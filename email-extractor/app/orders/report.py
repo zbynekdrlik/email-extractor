@@ -179,6 +179,58 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
     return "".join(parts)
 
 
+def build_daily_digest(stats: dict, days_since_incident: int | None, link: str = "") -> str:
+    """The ONE daily match-provenance digest (#196) — the warehouse's measurable basis
+    for trust, posted through the same Odoo channel as the other order notifications.
+
+    `stats` is `reliability.provenance_stats_for_day`'s return shape: per-day counts of
+    processed e-mails/orders/lines, bucketed by how each line was decided
+    (deterministic / the AI rung `llm_sure` / held for review) plus outright errors.
+    `days_since_incident` is `None` (rendered honestly, never a fake "0 days") when no
+    incident has ever been recorded yet.
+    """
+    day = escape(str(stats.get("day", "")))
+    runs = int(stats.get("runs") or 0)
+    orders = int(stats.get("orders") or 0)
+    items = int(stats.get("items") or 0)
+    det = int(stats.get("deterministic") or 0)
+    llm_n = int(stats.get("llm") or 0)
+    review = int(stats.get("review") or 0)
+    errors = int(stats.get("errors") or 0)
+
+    parts = [f"<p><b>Denný prehľad AI objednávok &mdash; {day}</b></p>"]
+    head = (f"{runs} " + _plural(runs, "spracovaný e-mail", "spracované e-maily",
+                                 "spracovaných e-mailov") +
+           f", {orders} " + _plural(orders, "objednávka", "objednávky", "objednávok"))
+    if items:
+        head += f", {items} " + _plural(items, "položka", "položky", "položiek")
+    parts.append(f"<p>{head}</p>")
+
+    if items:
+        det_pct, llm_pct, review_pct = (round(100.0 * n / items) for n in (det, llm_n, review))
+        parts.append(
+            "<p>"
+            f"&#9989; {det} ({det_pct} %) bez rizika (karta bola istá bez modelu, alebo "
+            "ju model len potvrdil) &nbsp;|&nbsp; "
+            f"&#129302; {llm_n} ({llm_pct} %) rozhodol samotný model &nbsp;|&nbsp; "
+            f"&#10071; {review} ({review_pct} %) čaká na kontrolu skladu"
+            "</p>")
+    if errors:
+        parts.append(f"<p>&#128721; {errors} " +
+                     _plural(errors, "zlyhanie", "zlyhania", "zlyhaní") + "</p>")
+
+    if days_since_incident is None:
+        parts.append("<p>&#8987; Zatiaľ nemáme zaznamenaný žiadny potvrdený incident.</p>")
+    else:
+        parts.append(f"<p>&#128197; {days_since_incident} " +
+                     _plural(days_since_incident, "deň", "dni", "dní") +
+                     " od posledného potvrdeného incidentu.</p>")
+    if link:
+        parts.append(f'<p>&#128203; Nástenka: '
+                     f'<a href="{escape(link)}">{escape(link)}</a></p>')
+    return "".join(parts)
+
+
 # --- delivery ------------------------------------------------------------
 
 def _http(url: str, headers: dict, payload: dict) -> dict:
