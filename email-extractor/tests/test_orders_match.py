@@ -685,6 +685,63 @@ def test_the_correctly_matched_wording_in_the_same_incident_is_unaffected():
     assert d.gtin == "192"
 
 
+# --- #186: the alias-bias finding must gate a SURE model answer too, not just rung 3 ---
+
+# 2026-08-06, CÉDER run 241 (messages.id=6091): the #157 fix above only gated rung 3
+# (alias_customer). The model itself answered gtin=192 at confidence 0.96/0.97 for these
+# same two wordings — comfortably above GATE_SURE (0.85) — so the ladder shipped rung 5
+# (llm_sure) unconditionally, never consulting the better-candidate finding at all.
+
+def test_a_sure_model_confidence_does_not_ship_an_alias_biased_wrong_card():
+    """The model's own SURE confidence (0.96) for 'Chlieb olivovo paradajkový' must not
+    ship card 192 either — card 253's own name fits the wording, card 192's doesn't."""
+    d = _decide("Chlieb olivovo paradajkový", llm={"gtin": "192", "confidence": 0.96},
+                customer="CÉDER", catalog=CEDER_CATALOG)
+    assert d.rule != "llm_sure"
+    # gtin cleared (like `unmatched`) — nothing here may claim the wrong card is right.
+    assert d.gtin is None
+    assert d.review is True
+
+
+def test_the_alias_conflict_line_lands_on_a_rule_the_pipeline_asks_the_warehouse_about():
+    """Same incident, checked against the actual set `pipeline.py` asks about, so this
+    test breaks if that set is ever renamed without updating the guard's expectation."""
+    from app.orders.pipeline import ASK_THE_WAREHOUSE
+    d = _decide("Chlieb olivovo paradajkový", llm={"gtin": "192", "confidence": 0.96},
+                customer="CÉDER", catalog=CEDER_CATALOG)
+    assert d.rule in ASK_THE_WAREHOUSE
+
+
+def test_a_second_sure_confidence_line_from_the_same_incident_is_also_blocked():
+    """'Chlieb multicereálny' — the model answered 192 at 0.97 confidence; card 239 is
+    the one that actually fits the wording."""
+    d = _decide("Chlieb multicereálny", llm={"gtin": "192", "confidence": 0.97},
+                customer="CÉDER", catalog=CEDER_CATALOG)
+    assert d.rule != "llm_sure"
+    assert d.gtin is None
+    assert d.review is True
+
+
+def test_the_models_original_candidate_stays_visible_in_trace_for_the_warehouse_question():
+    """The gtin is cleared, but `proposed_gtin()` (what the warehouse question actually
+    offers as a button, #147) still needs the model's own guess — it lives in
+    `trace['llm']['gtin']`, the same fallback every other rejected-on-purpose decision
+    already relies on (`unmatched`)."""
+    d = _decide("Chlieb olivovo paradajkový", llm={"gtin": "192", "confidence": 0.96},
+                customer="CÉDER", catalog=CEDER_CATALOG)
+    assert d.trace["llm"]["gtin"] == "192"
+    assert match.proposed_gtin(d) == "192"
+
+
+def test_a_sure_confidence_still_confirms_when_no_other_card_matches_better():
+    """The mechanism must keep shipping when the alias note IS right, at SURE confidence
+    too: 'Vianočka 400g' -> card 284, and no other CÉDER card matches it better."""
+    d = _decide("Vianočka 400g", llm={"gtin": "284", "confidence": 0.9},
+                customer="CÉDER", catalog=CEDER_CATALOG)
+    assert d.gtin == "284"
+    assert d.review is False
+
+
 # --- #157: merge_same_card must not sum materially different wordings -----------------
 
 def _dec(item_name, gtin, card, quantity, rule="llm_sure", confidence=0.9, unit="ks"):
