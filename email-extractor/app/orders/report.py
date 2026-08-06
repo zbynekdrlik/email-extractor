@@ -54,7 +54,7 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
 
 
 def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0,
-                  unverified_count: int = 0, link: str = "") -> str:
+                  unverified_count: int = 0, link: str = "", notes: str = "") -> str:
     """The ONE Odoo message for a whole processed e-mail.
 
     `orders` is a list of AGGREGATE per-order summaries — never raw decisions or items:
@@ -76,6 +76,14 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
     (`extract.py`'s `unverified` — a model-claimed item the e-mail text does not prove) —
     it is an E-MAIL-level count, not per-order (the same list is shared by every order
     derived from one e-mail), so the caller sums it ONCE, not per order.
+
+    `notes` (#187 review finding) is `extract.run()`'s own short, already-human-readable
+    notice — e.g. a still-ahead date named only in quoted ('>') text that never became an
+    order (#187), or a deliveryDate the source text never wrote (#163). Before this
+    parameter existed the value was computed and stored in `order_runs.result`/
+    `held_orders`, but never actually rendered anywhere a human reads outcomes — silently
+    write-only. Same short-plain-Slovak-sentence shape as `reject_reason`, so it renders
+    the same way: `escape()`d, its own paragraph, never a raw trace/JSON/run id.
     """
     orders = orders or []
     counts: dict[str, int] = {}
@@ -143,6 +151,11 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
     # function) — capped, so a pathological number of distinct failures still stays short.
     for reason in reasons[:3]:
         parts.append(f"<p>{escape(reason)}</p>")
+
+    # #187 review finding: the extraction stage's own notice (a dropped quoted order, an
+    # ungrounded date, ...) must actually reach a human, not just order_runs.result/logs.
+    if notes:
+        parts.append(f"<p>&#128221; {escape(notes)}</p>")
 
     # #159: the link routes to where something is ACTUALLY waiting.
     #   - held / partial / a fresh question this run: by construction there is a real,

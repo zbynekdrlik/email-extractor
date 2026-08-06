@@ -551,3 +551,18 @@ def test_a_quoted_order_with_no_written_day_names_nothing_to_surface():
     """'na pondelok' names no day.month at all — nothing to compare, so nothing to flag."""
     quoted = "Body: Dobrý deň.\n> na pondelok poprosím: Rožok 70g : 5 x\n"
     assert extract.quoted_future_dates_uncovered(quoted, "2026-08-06", set()) == []
+
+
+def test_a_weight_after_na_is_not_read_as_a_date():
+    """Review finding: 'na' precedes a WEIGHT too ('chlieb na 3.5 kg'), not only a date —
+    day=3/month=5 are both individually plausible, so the calendar-range check alone
+    would not catch this; the immediately-following unit word must."""
+    quoted = "Body: Dobrý deň.\n> chlieb na 3.5 kg poprosím: Rožok 70g : 5 x\n"
+    assert extract.quoted_future_dates_uncovered(quoted, "2026-08-06", set()) == []
+
+
+def test_a_price_after_na_is_not_read_as_a_date():
+    """'na 1.50 eur' — month=50 is not a real month; the calendar-range check alone
+    catches this one."""
+    quoted = "Body: Dobrý deň.\n> cena na 1.50 eur poprosím: Rožok 70g : 5 x\n"
+    assert extract.quoted_future_dates_uncovered(quoted, "2026-08-06", set()) == []

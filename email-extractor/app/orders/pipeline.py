@@ -285,11 +285,12 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                           for o in orders]
         _post_summary(cfg, post, shadow, customer_name=hold_matched.name,
                       orders=order_summaries, new_questions=len(new_questions),
-                      unverified_count=len(extracted.get("unverified") or []))
+                      unverified_count=len(extracted.get("unverified") or []),
+                      notes=extracted.get("notes", ""))
         return {"status": "held", "items": [], "shadow": shadow, "would_ship": False,
                "customer_ean": hold_matched.ean_edi, "customer_name": hold_matched.name,
                "delivery_date": first_date, "orders": len(orders), "order_results": [],
-               "question_ids": qids}
+               "question_ids": qids, "notes": extracted.get("notes", "")}
 
     # #164 row 8 (report.py's phantom-item safeguard): a claimed line the source text
     # could not prove is not silently dropped — the warehouse confirms whether it really
@@ -557,7 +558,8 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
     _post_summary(cfg, post, shadow,
                   customer_name=email_matched.name if email_matched else "",
                   orders=order_summaries, new_questions=len(new_questions),
-                  unverified_count=len(extracted.get("unverified") or []))
+                  unverified_count=len(extracted.get("unverified") or []),
+                  notes=extracted.get("notes", ""))
     return out
 
 
@@ -713,16 +715,23 @@ def _delivery_day(delivery_date: str) -> str:
 
 
 def _post_summary(cfg, post, shadow: bool, customer_name: str, orders: list[dict],
-                  new_questions: int = 0, unverified_count: int = 0) -> None:
+                  new_questions: int = 0, unverified_count: int = 0, notes: str = "") -> None:
     """The ONE Odoo message for a processed e-mail (#139) — every caller of `_finish`/
     `_ship_one` funnels through here exactly once per e-mail (or once per later, standalone
     hold-release event). Never raises: a notification failure must never break order
-    processing, exactly like the old per-order post it replaces."""
+    processing, exactly like the old per-order post it replaces.
+
+    `notes` (#187 review finding): the extraction stage's own short, human-readable
+    notice (e.g. a quoted second order that never became an order) was computed and
+    stored, but nothing ever rendered it where a human actually reads outcomes — Odoo.
+    Threaded through to `report.build_summary` so it is no longer write-only.
+    """
     if shadow:
         return
     html = report.build_summary(customer_name=customer_name, orders=orders,
                                 new_questions=new_questions,
-                                unverified_count=unverified_count, link=report.sklad_link(cfg))
+                                unverified_count=unverified_count, link=report.sklad_link(cfg),
+                                notes=notes)
     try:
         post(cfg, html)
     except Exception:
@@ -773,7 +782,11 @@ def _finish(conn, cfg, message, shadow, post, status: str, items: list,
                 # #139 review finding: the AGEL-incident phantom-item safeguard
                 # (`extract.py`'s `unverified`) must stay visible even after the
                 # shortening — never dropped just because the item list itself is gone.
-                unverified_count=len(result.get("unverified") or []))
+                unverified_count=len(result.get("unverified") or []),
+                # #187 review finding: this was silently dropped on every _finish-based
+                # exit path (refusal, no-orders, mail-rule reject, ...) — only the main
+                # happy/mixed path ever threaded it through.
+                notes=result.get("notes", ""))
         report.log_event(
             conn, message.get("message_id", ""),
             stage="uploaded_orion" if result.get("shipped") else
@@ -788,7 +801,10 @@ def _finish(conn, cfg, message, shadow, post, status: str, items: list,
             "customer_ean": (result.get("customer") or {}).get("ean_edi", ""),
             "customer_name": (result.get("customer") or {}).get("name", ""),
             "delivery_date": result.get("delivery_date", ""),
-            "orders": 0, "order_results": [], "question_ids": question_ids}
+            "orders": 0, "order_results": [], "question_ids": question_ids,
+            # #187 review finding: preserved into the return value on EVERY exit path,
+            # not just the main happy/mixed one.
+            "notes": result.get("notes", "")}
 
 
 def _outcome(status: str, result: dict) -> str:

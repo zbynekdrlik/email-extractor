@@ -500,16 +500,30 @@ def _quoted_body_only(text: str) -> str:
 # message). `_SUBJ_DAY` is deliberately left alone here — it is shared by `date_grounded`/
 # `date_conflict`/`_orders_a_day_still_ahead`, and loosening it there risks a genuine
 # decimal number ("3.5 kg") being misread as a date; that is a separate, wider-blast-radius
-# investigation (filed as a follow-up, #<TBD-on-file>). This detector only needs the
+# investigation (filed as a follow-up, issue 190). This detector only needs the
 # ANNOUNCING word Slovak orders already always use before a date ("na 11.8", "na
 # 11.8.2026" — every date example in this codebase's own prompts/tests uses "na …"), which
 # rules out a bare decimal without requiring the trailing dot.
 _QUOTED_DAY = re.compile(
     r"\bna\s+(\d{1,2})\s*\.\s*(\d{1,2})(?:\s*\.\s*(\d{4}|\d{2}))?\b", re.IGNORECASE)
+# Review finding: "na" precedes a WEIGHT or a PRICE too ("chlieb na 3.5 kg", "cena na
+# 1.50 eur"), not only a date — the bare _QUOTED_DAY pattern matches both. A calendar
+# range check alone still lets "3.5" through (day=3/month=5 are both plausible), so this
+# also refuses a match immediately followed by a unit word.
+_QUOTED_DAY_UNIT_AFTER = re.compile(r"^\s*(?:kg|gr|g|ml|l|eur|€|ks|x)\b", re.IGNORECASE)
 
 
 def _quoted_days_in(text: str) -> set[tuple[int, int]]:
-    return {(int(d), int(m)) for d, m, _ in _QUOTED_DAY.findall(text or "")}
+    text = text or ""
+    out: set[tuple[int, int]] = set()
+    for m in _QUOTED_DAY.finditer(text):
+        day, month = int(m.group(1)), int(m.group(2))
+        if not (1 <= day <= 31 and 1 <= month <= 12):
+            continue
+        if _QUOTED_DAY_UNIT_AFTER.match(text[m.end():]):
+            continue
+        out.add((day, month))
+    return out
 
 
 def quoted_future_dates_uncovered(source: str, today: str,
