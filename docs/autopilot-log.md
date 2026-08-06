@@ -1182,3 +1182,35 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   (test+e2e-orders+build), deployed **v0.9.48** — `/health` 200 + dashboard/`\otazky` DOM
   both confirm `v0.9.48`, console clean, worker ticks with no tracebacks pre/post-deploy.
 
+
+## 2026-08-06 — batch #188 #189 #190 (CI corpus backfill + prompt softening + no-dot date fix)
+
+- **#190** (`extract.py` `_SUBJ_DAY` misses a day.month with no trailing dot): RED
+  `72fc896` (3 tests: `date_grounded` no-dot case, weight-after-na guard, `date_conflict`
+  body-day no-dot case), GREEN `b890aaa` (widened `_days_in()` via a new generalized
+  `_ANNOUNCED_DAY`/`_announced_days_in`, reusing #187's `_QUOTED_DAY` guard; `_SUBJ_DAY`
+  and `date_conflict`'s strict subject check left untouched). Deep review found a bonus
+  fix (`unquote_fully_quoted`/`_orders_a_day_still_ahead` also affected — a stale
+  no-dot-dated whole-quoted thread could have been wrongly unquoted/re-shipped);
+  follow-up test `d00d97e`.
+- **#188** (CI eval corpus backfill + standing rule): read-only sweep of production
+  `messages`/`order_runs` on the HA box; added 2 new verified corpus cases directly on
+  dev2 (outside git) — `resortceder-2026-08-03-db6d8af5` (4-day whole-quoted CÉDER order,
+  confirms #186's alias-bias fix independently) and `domovina-2026-08-03-000201dd` (PDF
+  attachment, 2 dates, garbled subject date). 35-case corpus, `--require-all` exit 0,
+  baseline updated. Standing rule added to `.claude/rules/orders-corpus.md`: `6c58f54`.
+  Sweep surfaced a real historical wrong shipment (same #186 class, 3 days earlier,
+  undetected) — filed as #193 (left open, business/customer decision, not code).
+- **#189** (soften alias-names-customer prompt): `9108eee` — carve-out in
+  `match_product.md` for wording that clearly names a different product than the
+  alias-bearing card. Validated with a full `--live` re-record of the 35-case corpus:
+  30/35 pass (5 pre-existing known-defect #120 cases, unrelated), zero regressions,
+  #186's own CÉDER case still passes.
+- Deep code review (general-purpose subagent, adversarial): 2 Important findings, both
+  resolved (1 fixed with a new test, 1 explained — #190's real trigger mail already has
+  a corpus case from #187's PR, doesn't mechanically depend on #190's fix; the genuinely
+  new mechanism has no real-world mail yet, stays pytest-only per the corpus's own
+  "real customer email only" rule). 3 Minor findings pre-existing, out of scope.
+- Deploy: PR #194 merged (`b07ef426e7916c3108babdec183f98ea4020b148`), main CI green
+  (test+e2e-orders+build), deployed **v0.9.49** — `/health` 200 + dashboard DOM confirm
+  `v0.9.49`, `/otazky` (Otázky skladu) loads live with 0 pending, worker started clean.
