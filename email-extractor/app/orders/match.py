@@ -19,7 +19,8 @@ The ladder, highest first. The first three rungs need NO model call at all
   2 history_weight      unanimous history, 3+ delivery days                 -> beats weight guard
   3 alias_customer      the card's alias names the ordering customer        -> beats the gate
   4 history             history (below the gate)                            -> beats the gate
-  5 llm_sure            model confidence >= 0.85
+  5 llm_sure            model confidence >= 0.85                           -> unless #186 below fires
+  5 llm_sure_alias_conflict  #186: rung 3's alias-bias finding blocks a SURE model answer too
   6 unique_card         exactly one card of that kind in the catalog        -> beats weight guard
   7 llm_borderline      model confidence 0.70-0.85                          -> flagged
   8 sibling             same wording resolved elsewhere in the same email    (applied per order)
@@ -454,10 +455,20 @@ def decide(item_name: str, llm: dict, catalog: list[dict], recalled=None,
     alias_exact_weight = any(re.search(r"\d+(?:[.,]\d+)?\s*(kg|g|gr)\b", p, re.I)
                              for p in matched_parts)
     alias_names_customer = bool(alias) and any(t in alias for t in cust_toks)
+    # #186: computed ONCE, used by BOTH the alias_customer rung (3) below AND the SURE
+    # model rung (5) further down — an alias note that merely names the customer proves
+    # the customer buys llm_card for SOME wording, never that THIS wording is it; a
+    # DIFFERENT card whose own name fits the wording better means the note (and the
+    # model's own confidence, which the same prompt instruction biases) confirms nothing,
+    # at ANY confidence level (2026-08-06, CÉDER run 241: 0.96/0.97 confidence, still
+    # wrong — #157's original fix only gated rung 3, never rung 5).
+    alias_better = (_better_alias_candidate(item_name, llm_card, catalog)
+                    if alias_names_customer else None)
 
     trace = {"llm": {"gtin": llm.get("gtin"), "confidence": llm.get("confidence"),
                      "unknown_gtin": unknown_gtin},
-             "alias": {"exact_parts": matched_parts, "names_customer": alias_names_customer},
+             "alias": {"exact_parts": matched_parts, "names_customer": alias_names_customer,
+                      "overridden_by": alias_better.get("name") if alias_better else None},
              "history": None if not recalled else {
                  "gtin": recalled.gtin, "days": recalled.strength,
                  "unanimous": recalled.unanimous, "weight_override": recalled.weight_override},
@@ -494,9 +505,7 @@ def decide(item_name: str, llm: dict, catalog: list[dict], recalled=None,
         # another card's own name matches THIS wording better, the note confirms
         # nothing; fall through to the ordinary ladder below (history / unique-card /
         # the model's own raw confidence), exactly as if there were no alias help.
-        better = _better_alias_candidate(item_name, llm_card, catalog)
-        trace["alias"]["overridden_by"] = better.get("name") if better else None
-        if not better:
+        if not alias_better:
             return done("alias_customer", str(llm_gtin), llm_card["name"], max(conf, 0.95),
                         f"Potvrdené aliasom karty — alias menuje zákazníka "
                         f"„{customer_name}“ (pôvodná istota modelu "
@@ -523,6 +532,20 @@ def decide(item_name: str, llm: dict, catalog: list[dict], recalled=None,
     # 5 / 7 — the model, once the weight guard agrees.
     if llm_gtin and conf >= GATE_MIN and not weight_conflict:
         if conf >= GATE_SURE:
+            # #186: rung 3 already found a better-fitting card for this wording and fell
+            # through (see `alias_better` above) — a SURE raw model confidence must not
+            # ship the same alias-biased answer either. The gtin is cleared (like
+            # `unmatched`) rather than kept: the model's proposed candidate stays visible
+            # to the warehouse via `trace["llm"]["gtin"]` (`proposed_gtin()`), but nothing
+            # here claims it is correct.
+            if alias_better:
+                return done(
+                    "llm_sure_alias_conflict", None, "", conf,
+                    f"Model si je istý ({round(conf * 100)} %), ale alias karty len "
+                    f"menuje zákazníka „{customer_name}“ — karta "
+                    f"„{alias_better['name']}“ sedí so znením lepšie (pôvodný kandidát "
+                    f"modelu „{llm_card['name']}“) — prosím prekontrolujte.",
+                    review=True)
             return done("llm_sure", str(llm_gtin), llm_card["name"], conf,
                         llm.get("reason") or "Spárované modelom.")
         return done("llm_borderline", str(llm_gtin), llm_card["name"], conf,
