@@ -48,6 +48,19 @@ again. That is the point: a changed prompt has not been measured until it has be
 
 - **A new warehouse complaint becomes a corpus case BEFORE its fix is written.** The corpus
   only grows.
+- **STANDING RULE (#188): every production-incident fix PR is INCOMPLETE without a corpus
+  case for the mail that triggered it.** Three real incidents (#157, #186, #187) all shipped
+  from a shape the 30-case corpus did not cover at the time — nothing forced the fix PR to
+  also grow the corpus, so the SAME class of gap (alias-heavy customer wording, multi-date
+  single mails, whole-quoted bodies) recurred silently (see #193: the exact #186 alias-bias
+  class had ALREADY shipped a wrong bread substitution to a real customer 3 days before the
+  incident that got it noticed and fixed). Before closing ANY ticket whose root cause is a
+  real customer mail that broke extraction/matching: (1) pull that mail from `messages`/
+  `order_runs` on the HA box (read-only), (2) verify the CURRENT code's actual output for it
+  via the corpus's own `--live` procedure (never freeze the historically-shipped value
+  blindly — it may itself have been wrong, exactly the #193 finding), (3) add it to
+  `manifest.json`/`llm-cache`/`baseline.json` on dev2 in the SAME PR the fix ships in. A fix
+  with no corpus case is a fix nobody will notice regressing.
 - **Assert only what you can prove.** `items` when the shipped record gives the cards,
   `item_count` when only the number of lines is provable, the delivery date alone when neither
   is. A guessed GTIN frozen into the baseline is worse than no assertion.
