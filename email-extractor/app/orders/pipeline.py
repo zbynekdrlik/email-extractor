@@ -529,6 +529,10 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
     # evaluation harness (#66) both compare on them, not just on the item list.
     out = {"status": status, "items": all_items, "prompt_hash": client.last_prompt_hash,
            "shadow": shadow,
+           # #187: EMAIL-level (extraction runs once, shared unchanged across every order
+           # derived from it) — the evaluation harness (#66) needs it to assert that a
+           # genuine second order hiding in quoted text got surfaced, not silently dropped.
+           "notes": extracted.get("notes", ""),
            "would_ship": any(s in ("ok", "partial") for s in statuses),
            # The email-level customer, NOT the last order's: a two-shop email has no single
            # customer, and reporting whichever shop happened to be last would be a lie.

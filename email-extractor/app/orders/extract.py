@@ -352,6 +352,25 @@ def run(client, email: dict) -> dict:
         result["notes"] = f"{result['notes']} {note}".strip() if result.get("notes") else note
     result["orders"] = grounded
 
+    # #187: a genuine SECOND order hiding in quoted ('>') text must not vanish with zero
+    # trace. `unquote_fully_quoted` only strips markers when the WHOLE body is quoted; a
+    # mixed body (fresh content above, a real second order quoted below) keeps them, and
+    # the prompt tells the model to ignore '>'-prefixed lines entirely — so the quoted
+    # order never reaches the model's output at all, not even as an "ungrounded" order.
+    covered_days: set[tuple[int, int]] = set()
+    for order in grounded:
+        covered_days |= _days_in(order.get("deliveryDate", "") or "")
+    missed_quoted = quoted_future_dates_uncovered(
+        source, email.get("today") or "", covered_days)
+    if missed_quoted:
+        dates_str = ", ".join(f"{d}.{m}." for d, m in missed_quoted)
+        log.warning("quoted ('>') text names a still-ahead date with no order produced: %s",
+                   dates_str)
+        note = (f"V citovanom texte e-mailu (za '>') je dátum {dates_str}, ktorý ešte "
+               f"neprešiel, no objednávka preň nevznikla — skontrolujte, či ide o novú "
+               f"objednávku, alebo len starý citovaný text.")
+        result["notes"] = f"{result['notes']} {note}".strip() if result.get("notes") else note
+
     result["prompt_hash"] = client.last_prompt_hash
     return result
 
@@ -460,6 +479,62 @@ def unquote_fully_quoted(text: str, today: str = "") -> str:
         return raw
     unquoted = "\n".join(_unquote_line(ln) for ln in lines)
     return unquoted if _orders_a_day_still_ahead(unquoted, today) else raw
+
+
+# --- a genuine second order hiding in quoted text must be surfaced, not dropped (#187) -
+
+def _quoted_body_only(text: str) -> str:
+    """Just the QUOTED ('>'-prefixed) lines of the body, markers dropped — the portion the
+    prompt (`prompts/extract.md`) tells the model to ignore entirely."""
+    lines = []
+    for ln in _body_only(text).splitlines():
+        s = ln.strip()
+        if _QUOTE_PREFIX.match(s):
+            lines.append(_QUOTE_PREFIX.sub("", s))
+    return "\n".join(lines)
+
+
+# `_SUBJ_DAY` requires a TRAILING dot after the month digits ("11.8."/"11.8.2026") — real
+# customer wording routinely omits it ("na 11.8 poprosím", verified live on the 2026-08-06
+# incident mail itself: neither "10.8" nor "11.8" carries a trailing dot anywhere in the
+# message). `_SUBJ_DAY` is deliberately left alone here — it is shared by `date_grounded`/
+# `date_conflict`/`_orders_a_day_still_ahead`, and loosening it there risks a genuine
+# decimal number ("3.5 kg") being misread as a date; that is a separate, wider-blast-radius
+# investigation (filed as a follow-up, #<TBD-on-file>). This detector only needs the
+# ANNOUNCING word Slovak orders already always use before a date ("na 11.8", "na
+# 11.8.2026" — every date example in this codebase's own prompts/tests uses "na …"), which
+# rules out a bare decimal without requiring the trailing dot.
+_QUOTED_DAY = re.compile(
+    r"\bna\s+(\d{1,2})\s*\.\s*(\d{1,2})(?:\s*\.\s*(\d{4}|\d{2}))?\b", re.IGNORECASE)
+
+
+def _quoted_days_in(text: str) -> set[tuple[int, int]]:
+    return {(int(d), int(m)) for d, m, _ in _QUOTED_DAY.findall(text or "")}
+
+
+def quoted_future_dates_uncovered(source: str, today: str,
+                                  covered: set[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Day.month dates written ONLY inside quoted ('>') lines, still ahead of `today`, that
+    are not already covered by an order the pipeline actually produced.
+
+    The model is told to ignore '>'-prefixed lines (correctly — #155 — so a stale quoted
+    thread is not read as today's order) but in a MIXED body (fresh content above, a
+    genuine SECOND order quoted below, e.g. a customer forwarding next week's order under
+    this week's) that means the second order is thrown away with no trace at all: not
+    shipped, not "ungrounded", not anywhere in the output. This never reads what the
+    quoted text IS for — it only proves a still-ahead day was named there and never turned
+    into an order, so a human can decide. `covered` is the set of (day, month) pairs the
+    orders that WERE produced already account for — a day named in BOTH the fresh and the
+    quoted portion is not a miss.
+    """
+    ref = _today_day_month(today)
+    quoted_days = _quoted_days_in(_quoted_body_only(source))
+    if not ref or not quoted_days:
+        return []
+    tday, tmonth = ref
+    still_ahead = {(d, m) for d, m in quoted_days
+                  if (m, d) >= (tmonth, tday) or m + 6 < tmonth}
+    return sorted(still_ahead - covered)
 
 
 # --- the delivery date itself must be grounded (#163) -----------------------
