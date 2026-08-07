@@ -1112,3 +1112,40 @@ intentional there for cards it was tuned against.
   after) — uniqueness stays continuously enforced. Check this ordering explicitly any time a
   migration widens a unique constraint on a table with an existing production writer, not
   just for `import_alert_incidents`.
+- **A THIRD engine reusing the shared `order_runs`/`order_items` tables cannot pass its OWN
+  snapshot table's id into `order_runs.snapshot_id` — that column has a real Postgres FK to
+  `order_snapshots(id)` specifically, not to whatever OTHER snapshot table the new engine
+  uses (#204, DL migration F5: `dl_snapshots` is a genuinely separate table, R20's own
+  catalog shape differs from the AI-orders one).** Adding a schema change (a nullable
+  second FK column, or a CHECK-constrained polymorphic id) is NOT needed — `snapshot_id`
+  is already nullable: pass `None` to `worker._start_run`/`_finish_run` and stash the
+  REAL snapshot id inside `result["dl_snapshot_id"]` (JSONB) instead, with
+  `result["kind"] = "dl"` as the one discriminator a later reader needs. Cheaper than F1's
+  own "reused with ZERO schema change" decision implied at the time it was written (#200
+  didn't hit the FK because nothing called `_start_run` yet) — any FUTURE 4th engine
+  sharing these tables hits the identical FK wall and should reach for the same fix.
+- **When TWO engines sharing `order_runs`/`order_items` happen to use the SAME rule NAME in
+  their own matching ladder (#204: DL's `dl_match.py` and AI-orders' `match.py` both have an
+  `"llm_sure"` rule), a shared stats/digest query MUST filter by the `result->>'kind'`
+  discriminator on BOTH the run-level query AND the item-level join — filtering only one
+  silently lets the other engine's items leak into the wrong bucket** (a DL document the
+  model confidently matched would count as an AI-ORDER the model decided, inflating
+  `reliability.provenance_stats_for_day`'s `llm` bucket with someone else's document).
+  Caught by design before shipping this time (`reliability.dl_provenance_stats_for_day`'s
+  own `kind='dl'` filter + the EXISTING `provenance_stats_for_day` gaining an explicit
+  `IS DISTINCT FROM 'dl'` exclusion on both queries) — check for this collision risk
+  EXPLICITLY (grep the other engine's rule vocabulary) before trusting a shared digest
+  query is scoped correctly, rather than assuming a `shadow=false` filter alone is enough.
+- **Testing anything that calls `dl_extract.run_extraction`/`extract_email` (or any future
+  module that reads `client.last_prompt_hash` after a `json_call`) needs that attribute on
+  a hand-rolled fake LLM client, or the failure is SILENT and misleading (#204).**
+  `dl_extract.extract_attachment` catches per-attachment exceptions internally and logs
+  them as an `ERROR` line rather than raising — so a fake client missing
+  `self.last_prompt_hash` doesn't crash the test with an obvious `AttributeError` at the
+  call site; it silently produces ZERO extracted documents, and every downstream assertion
+  then fails with a confusing, unrelated message (e.g. "no scripted answer left for
+  'dl_supplier'" instead of the real cause). When a new test double for `dl_extract`'s
+  `client` param starts failing every scripted-answer assertion at once, check the test's
+  OWN captured log output for `DL attachment ... failed to extract` before assuming the
+  worker logic itself is wrong — set `self.last_prompt_hash = ""` on the fake client and
+  update it in `json_call` the same way the real `llm.Client` does.
