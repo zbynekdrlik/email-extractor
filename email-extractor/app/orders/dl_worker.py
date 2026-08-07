@@ -341,6 +341,17 @@ def _num(value) -> float:
         return 0.0
 
 
+def _shipped_items(decisions: list[tuple[dict, dl_match.Decision]]) -> list[dict]:
+    """The gtin/quantity of every item that actually ends up ON THE EDI — same filter
+    `desadv_edi.build()` itself applies (real gtin, non-zero quantity). Exposed on
+    `_process_document`'s returned dict (#205, DL migration F6) so a caller — the eval
+    harness's own per-document scoring, or a future debugging/digest read — never has to
+    re-derive it from the aggregate `all_items` list, which carries no per-document tag
+    and cannot be split back apart for a multi-document message."""
+    return [{"gtin": d.gtin, "quantity": item.get("quantity")}
+           for item, d in decisions if d.gtin and _num(item.get("quantity")) != 0]
+
+
 # --- one document (R60-R97) -------------------------------------------------
 
 def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list[dict],
@@ -455,10 +466,12 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         is_dup = desadv.already_sent(conn, supplier_decision.ean_edi, built.doc_number)
         outcome = "duplicate" if is_dup else ("partial" if built.partial else "ok")
         return {"outcome": outcome, "doc_number": built.doc_number,
-               "supplier_name": supplier_decision.name, "filename": built.filename,
+               "supplier_name": supplier_decision.name,
+               "supplier_ean": supplier_decision.ean_edi, "filename": built.filename,
                "line_count": built.line_count,
                "items_skipped_no_match": built.items_skipped_no_match,
-               "price_substitutions": built.price_substitutions}
+               "price_substitutions": built.price_substitutions,
+               "items": _shipped_items(decisions)}
 
     if not desadv.claim_send(conn, supplier_decision.ean_edi, built.doc_number,
                              built.filename):
@@ -533,11 +546,13 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
           detail={"doc_number": built.doc_number, "edi_file": built.filename},
           rollup=False, workflow=dl_report.WORKFLOW)
     return {"outcome": outcome, "doc_number": built.doc_number,
-           "supplier_name": supplier_decision.name, "filename": built.filename,
+           "supplier_name": supplier_decision.name,
+           "supplier_ean": supplier_decision.ean_edi, "filename": built.filename,
            "line_count": built.line_count,
            "items_skipped_no_match": built.items_skipped_no_match,
            "items_skipped_zero_qty": built.items_skipped_zero_qty,
-           "price_substitutions": built.price_substitutions}
+           "price_substitutions": built.price_substitutions,
+           "items": _shipped_items(decisions)}
 
 
 # --- one message (R1-R17) ---------------------------------------------------
@@ -574,9 +589,16 @@ def _summary_outcome(result: dict) -> str:
 
 def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                      catalog: list[dict], suppliers: list[dict], shadow: bool,
-                     upload=None, post=None) -> dict:
-    if not message.get("has_attachments"):
-        attachments: list[dict] = []
+                     upload=None, post=None, attachments: list[dict] | None = None) -> dict:
+    # `attachments` injection (#205, DL migration F6 eval harness): mirrors the existing
+    # `upload=`/`post=` DI seam. `None` (every real call site, incl. `tick()` below) keeps
+    # reading `messages`/`attachments`/disk exactly as before; the eval harness passes a
+    # fixture list directly so a corpus case never needs a real Postgres row or a file on
+    # the add-on's data volume.
+    if attachments is not None:
+        pass
+    elif not message.get("has_attachments"):
+        attachments = []
     else:
         attachments = _read_attachments(cfg, message["message_id"], conn)
 
