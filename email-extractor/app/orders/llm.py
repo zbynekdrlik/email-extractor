@@ -104,14 +104,20 @@ def _http_transport_chat(payload: dict, api_key: str, timeout: int) -> tuple[lis
 def _chat_usage_as_responses(usage: dict | None) -> dict | None:
     """Normalize Chat Completions `usage` into the Responses-API shape `cost_usd`/`_tally`
     already read, so vision_call is priced through the exact same table as json_call —
-    never a second, untested pricing path."""
+    never a second, untested pricing path. Carries reasoning-token detail through too
+    (`completion_tokens_details.reasoning_tokens`), not just cached input and totals —
+    `_tally`'s `tokens_reasoning` diagnostic would otherwise silently under-report every
+    vision call, even though cost_usd itself is unaffected (reasoning tokens are already
+    folded into `output_tokens` for pricing)."""
     if not usage:
         return None
     details_in = usage.get("prompt_tokens_details") or {}
+    details_out = usage.get("completion_tokens_details") or {}
     return {
         "input_tokens": usage.get("prompt_tokens", 0),
         "output_tokens": usage.get("completion_tokens", 0),
         "input_tokens_details": {"cached_tokens": details_in.get("cached_tokens", 0)},
+        "output_tokens_details": {"reasoning_tokens": details_out.get("reasoning_tokens", 0)},
     }
 
 

@@ -24,9 +24,10 @@ JPEG_B = b"\xff\xd8\xff\xe0fake-page-two\xff\xd9"
 PDF_BYTES = b"%PDF-1.4 fake whole document bytes"
 
 
-def _chat_usage(prompt=1000, cached=0, completion=200):
+def _chat_usage(prompt=1000, cached=0, completion=200, reasoning=0):
     return {"prompt_tokens": prompt, "completion_tokens": completion,
-            "prompt_tokens_details": {"cached_tokens": cached}}
+            "prompt_tokens_details": {"cached_tokens": cached},
+            "completion_tokens_details": {"reasoning_tokens": reasoning}}
 
 
 def _client(tmp_path, texts, usage=None, calls=None):
@@ -171,6 +172,12 @@ def test_vision_usage_is_tallied_through_the_shared_pricing_table(tmp_path):
     assert spend["tokens_in"] == 1_000_000
     assert spend["tokens_out"] == 1_000_000
     assert spend["cost_usd"] == pytest.approx(2.50 + 15.00)
+
+
+def test_vision_reasoning_tokens_are_tallied_too(tmp_path):
+    c, _ = _client(tmp_path, ["a"], usage=_chat_usage(reasoning=350))
+    c.vision_call("transcribe", images=[JPEG_A], n=1)
+    assert c.spend()["tokens_reasoning"] == 350
 
 
 def test_a_cached_vision_hit_costs_nothing(tmp_path):
