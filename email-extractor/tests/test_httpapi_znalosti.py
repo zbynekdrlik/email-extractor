@@ -370,6 +370,24 @@ def test_edit_an_existing_dl_product_card(pg):
     assert items[0]["overridden"] is True
 
 
+def test_editing_a_dl_product_card_is_a_full_replace_not_a_partial_patch(pg):
+    """Review finding on PR #223: upsert_dl_catalog_card replaces ALL fields on every
+    call, same design as #127's upsert_catalog_card — a POST that sends only gtin+name
+    (no doplnok/mass/sklad/cena) blanks the others rather than keeping them. This is
+    INTENTIONAL (the /znalosti form always pre-fills the whole row before saving, same
+    as productsBox/clientsBox already do) — pinned explicitly so it stays a documented
+    contract, not an accidental gap."""
+    _dl_snap(pg)
+    c = _client()
+    _login(c)
+    c.post("/api/znalosti/dl-products", json={"gtin": "D1", "name": "Múka s detailmi",
+                                               "mass": "25", "sklad": "100", "cena": "12,5"})
+    c.post("/api/znalosti/dl-products", json={"gtin": "D1", "name": "Múka - iba názov"})
+    items = c.get("/api/znalosti/dl-products?q=múka").get_json()["items"]
+    assert items[0]["name"] == "Múka - iba názov"
+    assert items[0]["mass"] is None and items[0]["sklad"] == "" and items[0]["cena"] is None
+
+
 def test_retire_a_dl_product_card_removes_it_from_the_list(pg):
     _dl_snap(pg)
     c = _client()
@@ -466,3 +484,15 @@ def test_znalosti_dl_supplier_writes_reachable_via_the_warehouse_link(pg):
                           "orig_ean_edi": with_id["orig_ean_edi"],
                           "orig_city": with_id["orig_city"]}).status_code == 200
     assert c.get("/api/messages").status_code == 401
+
+
+def test_sklad_link_does_not_match_a_path_that_merely_starts_with_dl_products(pg):
+    """Review finding on PR #223: SKLAD_ZNALOSTI_API's new `dl-products(/[^/]+)?|
+    dl-suppliers` alternatives are anchored with ^/$ — pin that an unrelated path
+    sharing the prefix is NOT accidentally granted to the unauthenticated warehouse
+    link (a regex without `$` would match this)."""
+    _dl_snap(pg)
+    c = _client()
+    c.get("/sklad/" + sklad_key("test-secret"))
+    assert c.get("/api/znalosti/dl-productsX").status_code == 401
+    assert c.get("/api/znalosti/dl-suppliersX").status_code == 401
