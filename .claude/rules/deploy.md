@@ -118,3 +118,15 @@ warning; both alias the same command.)
   row/column that moved — if the bump is BEFORE the new container started, it was the
   old process's last legitimate tick; confirm the NEW code by checking the timestamp
   stays frozen from then on (re-query a minute or two later).
+- **The container for BOTH `docker logs` and `docker exec ... psql` is `app_e0ac7775_
+  email_extractor` — the old `addon_e0ac7775_email_extractor` name from before the
+  2026-07-30 rename NO LONGER EXISTS.** `sudo docker logs addon_...` / `sudo docker
+  exec addon_... sh -c ...` both fail with `Error: No such container:
+  addon_e0ac7775_email_extractor` — but a `grep`/pipeline built around that failing
+  command (`sudo docker logs addon_... 2>/dev/null | grep X`) silently swallows the
+  stderr and returns an EMPTY grep result (exit 1, "0 matches"), which reads exactly
+  like "the thing I searched for genuinely isn't in the logs" — a false negative, not
+  an error you'd notice. Always use `app_e0ac7775_email_extractor` (see "It is a real
+  supervisor add-on" above), and if a log/DB check ever comes back suspiciously empty,
+  re-run WITHOUT `2>/dev/null` first to rule out a silently-failed container name
+  before trusting the empty result.
