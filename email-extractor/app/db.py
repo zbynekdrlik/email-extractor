@@ -917,6 +917,17 @@ SCHEMA = [
         PRIMARY KEY (incident_id, desadv_sent_id)
     )
     """,
+    # --- #216: desadv_sent gains message_id, so a retry-after-partial-ship can tell
+    # "THIS SAME message already shipped this document earlier" apart from "a genuinely
+    # DIFFERENT message announced the same document" (W7's real-duplicate signal). No
+    # backfill: a legacy row predating this column simply has no known claimant, and
+    # `desadv.claimed_by()` treats that as "" — which can never equal a real
+    # message_id, so an existing row's reporting is completely unchanged by this
+    # migration. Plain `ADD COLUMN IF NOT EXISTS`, no advisory-lock DO block, matching
+    # the `import_alert_incidents.source` precedent just above: Postgres serializes
+    # concurrent `ADD COLUMN IF NOT EXISTS` calls via its own table lock, and there is
+    # no backfill step here to race. ---
+    "ALTER TABLE desadv_sent ADD COLUMN IF NOT EXISTS message_id TEXT",
 ]
 
 

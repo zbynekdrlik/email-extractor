@@ -57,6 +57,15 @@ deliberately covers ONLY the documented Lunys "IS KARAT" subject shape
 convention simply has nothing to compare against (a safe default: no false positives,
 never a false "you're missing a DL" alert for a subject shape nobody has verified yet).
 
+**A `desadv.claim_send()` refusal is NOT always a genuine W7 duplicate (#216).** R17's
+retry re-processes the WHOLE message on its next tick — including a document that
+already shipped successfully in an earlier, partially-failed attempt of THIS SAME
+message. `desadv_sent.message_id` (written by `claim_send`) records who currently
+holds the claim; `desadv.claimed_by()` reads it back so `_process_document` can tell
+"this message is retrying itself" (logged as `already_shipped_this_run`, excluded from
+the digest's `duplicates` count) apart from "a different message really duplicated
+this document" (`duplicate_skip`, counted).
+
 **Attachment selection is this worker's OWN scope decision** (`dl_extract.py`'s own
 docstring explicitly leaves worker/claim wiring to this phase): only attachments whose
 `mime`/filename look like a PDF or an image are read — a real delivery note is always one
@@ -478,12 +487,25 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                "items": _shipped_items(decisions)}
 
     if not desadv.claim_send(conn, supplier_decision.ean_edi, built.doc_number,
-                             built.filename):
-        # W7 fix: visible in the daily digest, never a silent skip (R32's "quiet by
-        # design" is exactly what lost the Lunys X1/X2 pair in the incident spec §4
-        # documents).
-        dl_report.log_duplicate(conn, message["message_id"], built.doc_number,
-                                supplier_decision.ean_edi)
+                             built.filename, message_id=message["message_id"]):
+        # #216: a claim_send() refusal has TWO different causes, and only one of them
+        # is a genuine W7 duplicate. R17's transient retry re-processes the WHOLE
+        # message on the next tick, including any document that already shipped
+        # earlier in a prior (partially-failed) attempt of THIS SAME message — that
+        # self-caused re-skip must not be counted the same as a real different message
+        # (e.g. a supplier's genuine re-announcement) having already sent this exact
+        # document. Compare the CURRENT claimant against the message being processed
+        # right now, not just "is there a row".
+        if desadv.claimed_by(conn, supplier_decision.ean_edi,
+                             built.doc_number) == message["message_id"]:
+            dl_report.log_already_shipped_this_run(
+                conn, message["message_id"], built.doc_number, supplier_decision.ean_edi)
+        else:
+            # W7 fix: visible in the daily digest, never a silent skip (R32's "quiet by
+            # design" is exactly what lost the Lunys X1/X2 pair in the incident spec §4
+            # documents).
+            dl_report.log_duplicate(conn, message["message_id"], built.doc_number,
+                                    supplier_decision.ean_edi)
         return {"outcome": "duplicate", "doc_number": built.doc_number,
                "supplier_name": supplier_decision.name}
 
