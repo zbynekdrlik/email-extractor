@@ -237,22 +237,13 @@ def tick(conn, cfg, pipeline=None) -> int:
 
 
 def refresh_due(conn, cfg) -> int | None:
-    """Import a fresh snapshot when the newest one is older than the refresh interval.
-
-    Returns the current snapshot id. Needs `catalog_sheet_id` + both tab ids; without
-    them the pipeline stays idle rather than matching against a stale or absent catalog.
+    """#129: the Google Sheet is never read anymore — Postgres (`catalog_overrides`/
+    `customer_overrides`, #127/#128) is the sole source of truth for the catalog and
+    customer list. This just reports whichever snapshot is currently frozen; there is
+    no fetch, no interval, and no config gate left to check. `cfg` stays in the
+    signature only so `run_forever`'s call site (and every caller) needs no change.
     """
-    if not (cfg.catalog_sheet_id and cfg.catalog_gid and cfg.customer_gid):
-        return snapshot.latest_snapshot_id(conn)
-    row = conn.execute(
-        "SELECT max(checked_at) FROM order_snapshots").fetchone()
-    minutes = max(1, int(getattr(cfg, "catalog_refresh_minutes", 60) or 60))
-    if row and row[0]:
-        age = conn.execute(
-            "SELECT (now() - %s) > make_interval(mins => %s)", (row[0], minutes)).fetchone()
-        if not age[0]:
-            return snapshot.latest_snapshot_id(conn)
-    return snapshot.refresh(conn, cfg.catalog_sheet_id, cfg.catalog_gid, cfg.customer_gid)
+    return snapshot.latest_snapshot_id(conn)
 
 
 def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pragma: no cover

@@ -1,13 +1,16 @@
 """Catalog + customer snapshots (#59).
 
-The pipeline must never read the Google Sheet directly: a live read makes every run
-unreproducible, which is why the n8n version cannot be regression-tested at all. The
-sheet is fetched here, frozen into Postgres under a content hash, and every order run
-records the snapshot id it used.
-
-Both tabs are fetched as CSV over the document's public export URL (verified
-2026-07-30: both tabs return 200 without credentials), so the add-on needs no Google
-credential. The document id lives in the add-on options, never in git.
+**#129: the Google Sheet is never read anymore — Postgres is the SOLE source of
+truth.** The pipeline used to fetch the sheet's two tabs as CSV over its public export
+URL every `catalog_refresh_minutes`; that network fetch (`fetch_csv`/`sheet_csv_url`/
+`refresh`) has been removed entirely (#127/#128's `catalog_overrides`/
+`customer_overrides` dashboard editing has been the maintained source since
+2026-08-02, several days before this change). What remains here is a pure, network-free
+CSV-text importer: `import_snapshot`/`import_files` freeze an already-obtained CSV
+(a golden-corpus fixture file, or a hand-built string in a test) into Postgres under a
+content hash, and every order run records the snapshot id it used. `worker.py`/
+`dl_worker.py` no longer call anything in this module that touches the network — see
+their own `refresh_due` docstrings.
 """
 from __future__ import annotations
 
@@ -16,28 +19,14 @@ import hashlib
 import io
 import logging
 import re
-import urllib.request
 
 log = logging.getLogger("orders.snapshot")
-
-EXPORT_URL = "https://docs.google.com/spreadsheets/d/{doc}/export?format=csv&gid={gid}"
-FETCH_TIMEOUT = 60
 
 _EMAIL_RE = re.compile(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}")
 
 
 class SnapshotRefused(Exception):
-    """The fetched sheet is unusable (empty), so it must not replace a good snapshot."""
-
-
-def sheet_csv_url(doc_id: str, gid: int | str) -> str:
-    return EXPORT_URL.format(doc=doc_id, gid=gid)
-
-
-def fetch_csv(doc_id: str, gid: int | str, timeout: int = FETCH_TIMEOUT) -> str:
-    url = sheet_csv_url(doc_id, gid)
-    with urllib.request.urlopen(url, timeout=timeout) as resp:   # noqa: S310 (fixed https host)
-        return resp.read().decode("utf-8", errors="replace")
+    """The imported CSV is unusable (empty), so it must not replace a good snapshot."""
 
 
 def _rows(text: str) -> list[dict]:
@@ -239,20 +228,6 @@ def import_files(conn, catalog_path: str, customers_path: str) -> int:
     return import_snapshot(conn,
                            Path(catalog_path).read_text(encoding="utf-8"),
                            Path(customers_path).read_text(encoding="utf-8"))
-
-
-def refresh(conn, doc_id: str, catalog_gid: int | str, customer_gid: int | str) -> int | None:
-    """Fetch both tabs and import. Returns the current snapshot id, or None when the
-    fetch failed — a failed refresh is logged and leaves the previous snapshot in place,
-    it never raises into the worker loop."""
-    try:
-        catalog_csv = fetch_csv(doc_id, catalog_gid)
-        customer_csv = fetch_csv(doc_id, customer_gid)
-        return import_snapshot(conn, catalog_csv, customer_csv)
-    except Exception as e:
-        log.error("snapshot refresh failed (%s) — keeping snapshot %s",
-                  e, latest_snapshot_id(conn))
-        return latest_snapshot_id(conn)
 
 
 # --- #127: direct curation of product cards -------------------------------
