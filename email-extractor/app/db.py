@@ -824,6 +824,22 @@ SCHEMA = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_dl_supplier_snapshot_snap ON dl_supplier_snapshot(snapshot_id)",
+    # --- dl_supplier_memory (#202, DL migration F3): the nástenka's "ktorý dodávateľ?"
+    # teaching — a taught sender-EMAIL -> supplier EAN mapping, so the SAME address never
+    # asks twice. Deliberately NOT a `customer_overrides`-style full override/rebuild system
+    # (design comment on #202): DL suppliers stay entirely sheet-driven
+    # (dl_supplier_snapshot above); this table only ever needs to answer "which EAN does
+    # this address belong to", one small standalone lookup, same spirit as
+    # `dl_item_memory` sitting next to it rather than trying to be `item_memory`. ---
+    """
+    CREATE TABLE IF NOT EXISTS dl_supplier_memory (
+        id           BIGSERIAL PRIMARY KEY,
+        sender_email TEXT NOT NULL UNIQUE,
+        ean_edi      TEXT NOT NULL,
+        name         TEXT,
+        created_at   TIMESTAMPTZ DEFAULT now()
+    )
+    """,
 ]
 
 
