@@ -242,6 +242,14 @@ def test_a_correctly_read_quantity_is_left_alone():
     assert "_qtyOcr" not in got
 
 
+def test_a_piece_quantity_at_exactly_the_tolerance_boundary_is_not_corrected():
+    # derived = round(46.75 / 0.38) = round(123.026...) = 123; |123 - 122.5| = 0.5 == tolerance
+    item = {"name": "Rožok", "quantity": 122.5, "unit": "ks", "unitPrice": 0.38, "totalPrice": 46.75}
+    got = dl_extract.self_correct_quantity(item)
+    assert got["quantity"] == 122.5
+    assert "_qtyOcr" not in got
+
+
 def test_a_kg_quantity_within_tolerance_is_not_corrected():
     item = {"name": "Múka", "quantity": 2.003, "unit": "kg", "unitPrice": 1.0, "totalPrice": 2.0}
     got = dl_extract.self_correct_quantity(item)
@@ -292,6 +300,16 @@ def test_money_gate_breaches_over_50_cents():
 def test_money_gate_tolerates_up_to_50_cents():
     doc = _doc(documentTotalWithoutVAT=46.00)   # diff exactly 0.40, within tolerance
     assert dl_extract.money_gate(doc) is None
+
+
+def test_money_gate_passes_at_exactly_the_50_cent_boundary():
+    doc = _doc(documentTotalWithoutVAT=45.60 + 0.50)   # diff exactly 0.50 -> not a breach
+    assert dl_extract.money_gate(doc) is None
+
+
+def test_money_gate_breaches_just_past_the_50_cent_boundary():
+    doc = _doc(documentTotalWithoutVAT=45.60 + 0.51)
+    assert dl_extract.money_gate(doc) is not None
 
 
 def test_money_gate_is_skipped_when_no_document_total_was_read():
