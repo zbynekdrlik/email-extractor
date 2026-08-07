@@ -1085,3 +1085,30 @@ intentional there for cards it was tuned against.
      but falls through to the wrong (item-shaped) branch on the admin dashboard, or vice
      versa. Grep both `q.kind===` branching conditions AND the `GENERIC_TITLE=`/`titles=`
      map literals — there are two of each, ~130 lines apart in the same file.
+- **Building a byte-parity fixture from a SAVED (not re-fetched) real n8n Code-node source
+  (#203, DL migration F4 — extends the earlier "run the real node under node" note).** When
+  the JS source was already extracted into the scratchpad by an earlier session (rather than
+  freshly pulled via the n8n MCP this session), the file is usually a bare script with NO
+  `module.exports` — `require('./that_file.js')` from a separate driver script does NOT leak
+  its top-level `function` declarations into the caller (Node wraps each required file in its
+  own module scope). Instead: `sed -n '1,<N>p' source.js > funcs.js` to cut everything BEFORE
+  the node-specific "MAIN"/`$input` section (which needs n8n globals this harness can't
+  provide), then `cat funcs.js > combined.js && cat >> combined.js <<'EOF' ... EOF` to append
+  a small driver (reads a JSON cases file, calls the target function per case, writes a
+  results JSON) directly into the SAME file/scope, and run `node combined.js cases.json
+  out.json`. Convert the driver's camelCase JS field names to the Python function's own
+  parameter names (e.g. `skladByGtin` -> `sklad_by_gtin`) when copying the recorded fixture
+  into `tests/fixtures/`, so `**case["input"]` unpacks straight into the Python call with no
+  renaming inside the test itself (mirrors `edi.py`'s own `edi_reference.json` convention).
+- **A schema migration that REPLACES a UNIQUE index on a table a LIVE writer already writes
+  to must CREATE the new (wider) index BEFORE dropping the old one, never DROP-then-CREATE
+  (#203, review-caught before merge).** `db.py`'s `SCHEMA` list runs each statement as its
+  own autocommitted `conn.execute()` (`init_schema()`, `for stmt in SCHEMA: conn.execute
+  (stmt)`) — between a `DROP INDEX ...; CREATE UNIQUE INDEX ...;` pair, ANY concurrent
+  `INSERT` on that table (e.g. `import_alert_incidents`, live-written by `confirm.py`'s own
+  already-running sweep) is completely unprotected against the exact duplicate this file's
+  own `#151`/`#179`/`#184` incident history says it cares about. The two indexes can coexist
+  harmlessly for the brief overlap when created in the SAFE order (new first, old dropped
+  after) — uniqueness stays continuously enforced. Check this ordering explicitly any time a
+  migration widens a unique constraint on a table with an existing production writer, not
+  just for `import_alert_incidents`.

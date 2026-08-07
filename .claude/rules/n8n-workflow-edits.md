@@ -108,3 +108,26 @@ Saturday/Sunday by default) — grouped per incident, never one message per file
    in this same session — re-insert those rows, or scope the delete by explicit ids.
 5. Close out with: file present for every order, `attempts=1` per message, claim count ==
    distinct filename count, and `uploaded_orion/ok` count == order count with 0 skip / 0 error.
+
+## `in_DL` (DESADV upload target) — live directory structure, resolves a doc conflict (#203)
+
+The Python migration design spec flagged a real conflict in its own sources: does `in_DL`
+have its own `archCodex`/`unconfirmed`, or does it share `in`'s? **Verified LIVE 2026-08-07
+via read-only SFTP** (the add-on's own `orion_host`/`orion_user`/`orion_pass` options, same
+credential the n8n "Granc server" SSH cred targets):
+
+- `C:\ORION\COMMUNICATOR\data\in_DL` is a **SIBLING** of `in`, not nested under it, and has
+  **NO `archCodex`/`unconfirmed` of its own** (`FileNotFoundError` on both when listed).
+- DESADV files land in `in_DL` on upload, already carrying the `Z-` prefix (R89 — the upload
+  ITSELF writes `Z-<filename>`, unlike ORDER_ files which upload unprefixed into `in`).
+- Once Communicator imports a DESADV file, it moves into the SAME **shared** `in\archCodex`
+  (confirmed live: 190 real `Z-DESADV_*` entries already sitting there, all Z-prefixed) —
+  never a separate `in_DL\archCodex`.
+
+So any future check of a DESADV upload's import status must: watch `in_DL` for "still
+queued", but `in`'s own `archCodex`/`unconfirmed` for "imported"/"failed" — exactly the split
+`app/orders/confirm.py`'s `_Ledger.queued_key` (`"in_DL"` for DESADV vs `"in"` for ORDER_)
+encodes, while `archCodex`/`unconfirmed` stay unconditionally read from `in`'s base
+(`upload.list_dirs()`). If a NEW ORION upload target is ever added, verify its real
+directory structure live the same way — don't trust a design doc's prose description of
+folder layout without an SFTP listing, the conflict here was real.
