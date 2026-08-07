@@ -840,6 +840,83 @@ SCHEMA = [
         created_at   TIMESTAMPTZ DEFAULT now()
     )
     """,
+    # ==========================================================================
+    # #203 F4: DESADV EDI builder + upload + import confirmation. desadv_sent (F1)
+    # already has the two-phase claim/confirm ledger (sent_at/uploaded_at); this phase
+    # extends it with the SAME import-confirmation columns edi_sent got in #151, so
+    # `orders/confirm.py`'s sweep can watch DESADV uploads through `in_DL` the same way
+    # it already watches ORDER_ uploads through `in`. Same advisory-lock DO-block shape
+    # and the same backfill reasoning as edi_sent's own #151 migration (db.py:553-568):
+    # any row already `uploaded_at IS NOT NULL` when this block first runs predates the
+    # feature and is treated as already resolved — in practice desadv_sent is EMPTY
+    # today (no worker writes it yet, #203 ships the builder+ledger primitives only;
+    # the worker wiring is a later phase), so this backfill is a no-op now and a safety
+    # net later, exactly like edi_sent's own migration was written to be. ---
+    """
+    DO $$
+    BEGIN
+        PERFORM pg_advisory_xact_lock(
+            hashtext('email-extractor:desadv_sent.import_status#203'));
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+             WHERE table_schema = 'public' AND table_name = 'desadv_sent'
+               AND column_name = 'import_status'
+        ) THEN
+            ALTER TABLE desadv_sent ADD COLUMN import_status TEXT;
+            ALTER TABLE desadv_sent ADD COLUMN import_confirmed_at TIMESTAMPTZ;
+            ALTER TABLE desadv_sent ADD COLUMN import_checked_at TIMESTAMPTZ;
+            UPDATE desadv_sent SET import_status = 'imported',
+                   import_confirmed_at = uploaded_at
+             WHERE uploaded_at IS NOT NULL AND import_status IS NULL;
+        END IF;
+    END $$
+    """,
+    # --- import_alert_incidents gains a `source` discriminator ('edi'/'desadv', #203)
+    # so a DESADV incident never gets grouped with an ORDER_ incident under the same
+    # (channel_id, kind) row — the alert TEXT differs per source (a delivery note is
+    # never an "objednávka"), and the two ledgers' rows live in separate members tables
+    # (see import_alert_incident_desadv_members below) that a single incident can't
+    # straddle without a polymorphic FK. Additive (DEFAULT 'edi' keeps every existing
+    # row — all of them genuinely edi_sent-sourced today — valid with zero backfill
+    # needed). CHECK mirrors the sibling `kind` column's own DB-enforced-invariant
+    # philosophy (see the #184 comment on that column) — a stray/mistyped source value
+    # must fail loudly, not silently fall back to EDI_LEDGER wherever confirm.py reads
+    # it back. The old (channel_id, kind) unique-open-incident index is replaced by a
+    # (channel_id, kind, source) one; the NEW index is created BEFORE the old one is
+    # dropped (never the other order) — `edi_sent`'s own import-confirmation sweep is
+    # an already-live production writer into this table (the #151/#179/#184 incident
+    # history this file documents), so a DROP-then-CREATE ordering would leave a real
+    # window with NO uniqueness enforced on (channel_id, kind) at all; creating the
+    # wider index first means uniqueness is continuously enforced throughout (both
+    # indexes briefly coexist, which is harmless). DROP+CREATE on an INDEX is a
+    # structural change, not a data-loss one (database-migrations.md). ---
+    "ALTER TABLE import_alert_incidents ADD COLUMN IF NOT EXISTS source TEXT "
+    "NOT NULL DEFAULT 'edi'",
+    "ALTER TABLE import_alert_incidents DROP CONSTRAINT IF EXISTS "
+    "import_alert_incidents_source_check",
+    "ALTER TABLE import_alert_incidents ADD CONSTRAINT "
+    "import_alert_incidents_source_check CHECK (source IN ('edi', 'desadv'))",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_import_alert_incidents_open_v2 "
+    "ON import_alert_incidents(channel_id, kind, source) WHERE closed_at IS NULL",
+    "DROP INDEX IF EXISTS idx_import_alert_incidents_open",
+    # --- import_alert_incident_desadv_members: the DESADV counterpart of
+    # import_alert_incident_members, same shape, own FK to desadv_sent. A SEPARATE
+    # table rather than widening the existing one with a second nullable FK column —
+    # that would force dropping the live table's PRIMARY KEY (a PK column cannot be
+    # NULL) for a still-zero-traffic ledger; a plain additive CREATE TABLE carries none
+    # of that risk (database-migrations.md: prefer incremental, never touch a live
+    # table's PK for a feature nothing writes to yet). Since #203's own design comment
+    # settles this in favour of the separate table over the polymorphic-FK alternative
+    # — see the rejected-alternative note there. ---
+    """
+    CREATE TABLE IF NOT EXISTS import_alert_incident_desadv_members (
+        incident_id    BIGINT NOT NULL REFERENCES import_alert_incidents(id)
+                           ON DELETE CASCADE,
+        desadv_sent_id BIGINT NOT NULL REFERENCES desadv_sent(id) ON DELETE CASCADE,
+        added_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (incident_id, desadv_sent_id)
+    )
+    """,
 ]
 
 

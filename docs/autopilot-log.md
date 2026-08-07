@@ -1344,3 +1344,60 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   date normalize, quantity self-correction, multi-document extraction+validation,
   vision_call's error guard). `delivery_notes_engine` confirmed still `"n8n"` — the
   live n8n dodacie listy pipeline is completely untouched by this phase.
+
+## Issue 202 (DL migration F3: matching ladder, knowledge DB, nástenka) — 2026-08-07
+
+- **#202** (DL migration Phase 3: supplier + item matching, `dl_item_memory.resolve()`,
+  two new nástenka question kinds). New `app/orders/dl_match.py` (pure, DB-free,
+  mirrors `match.py`/`customer.py`): `supplier_candidates()`/`decide_supplier()` (R60
+  deterministic pre-score + R61 model-answer interpretation, refuses a hallucinated
+  EAN not in the supplier whitelist) and `candidates()`/`decide_item()` (R62 OCR fix,
+  R63 normalization, R64 `w_eq` word-equality, R65 candidate scoring, R70-R76's full
+  post-match gate ladder — confidence bands, ALIAS RESCUE overriding even the weight
+  guard per R67, MEMORY RESCUE that never overrides a SURE model match, the
+  WEIGHT-CONFLICT guard with its `memWeightOverride` escape, and a final lexical
+  zero-overlap tripwire copying `match.py`'s own proven `#195` pattern). No prompt
+  files or LLM call wiring — deliberately deferred, mirroring F1/F2's own scope
+  boundary (see the design comment on #202).
+  `app/orders/dl_memory.py` gained `resolve()` — R66's weighted-majority history
+  read (`max(cnt)` per `(gtin, day)`, then summed across days, per the module's own
+  #200 docstring guidance), catalog-invalidation, and a human-taught-first rung.
+  New `app/orders/dl_supplier_memory.py` — a small standalone taught
+  `sender_email -> ean_edi` table (deliberately NOT a full `customer_overrides`-style
+  override/rebuild system — a documented, proportionate scope call).
+  `app/orders/teach.py` gained two `KINDS` entries, `dl_item`/`dl_supplier`, reusing
+  the #164 generalized funnel; wired into `app/httpapi.py`'s dispatch/undo and both
+  duplicated JS question-card blocks (`DASH_HTML` + `ASK_HTML`).
+- Design comment + still-valid comment posted before code (issue #202 thread). Deep
+  code review (dispatched `general-purpose` subagent against the real PR diff, per
+  `superpowers:requesting-code-review`) found 0 Critical, 2 Important, 4 Minor — all
+  fixed before merge in `0ed8746`: `dl_memory.resolve()`'s human-taught rung now
+  iterates every taught gtin group (newest first) instead of only the single most
+  recent one (an older still-valid teach was silently skipped when the newest teach's
+  gtin had since left the catalog); `ask_dl_item`/`ask_dl_supplier` now skip asking
+  when the (supplier, wording)/address is already taught, mirroring `ask()`'s own
+  `recalled.human` pre-check; plus documentation/test-quality Minor fixes (a
+  tautological test assertion, missing kind coverage in an existing test, a second
+  Playwright E2E for `dl_supplier`).
+- Tests: `tests/test_dl_match.py` (55 cases, 100% line coverage), `tests/
+  test_dl_memory.py` (+23 cases for `resolve()`, 100%), `tests/
+  test_dl_supplier_memory.py` (6 cases, 100%), `tests/test_orders_teach_kinds.py`
+  (+17 cases), `tests/test_api.py` (+1 HTTP dispatch), `tests/test_e2e.py` (+2
+  Playwright — `dl_item` and `dl_supplier` nástenka cards, real browser, zero console
+  errors). Full suite green (`pytest --cov=app --cov-fail-under=85`, 93.24% total,
+  `dl_match.py`/`dl_memory.py`/`dl_supplier_memory.py` all 100%), `ruff check .`
+  clean.
+- Shared PR: **212** — merge `58fd54630f974cfcaeb5a6ffef8ee570057a87b8`, main CI
+  green (test+e2e-orders+build, run `31191345105`). Deployed **v0.9.53** via
+  `ha addons update`: `/health`+`/version` 200 `0.9.53`, dashboard + `/otazky` DOM
+  both confirm `v0.9.53` (0 console errors on either page). Functional check run
+  LIVE inside the deployed container against the real Postgres (synthetic test data,
+  fully cleaned up afterward): every new pure function (`supplier_candidates`,
+  `decide_supplier`, `candidates`, `decide_item`) exercised against the actual
+  shipped code; `dl_memory.resolve()`/`dl_supplier_memory.resolve()` exercised
+  against the real live Postgres; a full browser click-through on the LIVE
+  `/otazky` page via the real `/sklad/<key>` link — seeded a real `dl_item`
+  question, it rendered with the new "Ktorá karta je táto DL položka?" title,
+  clicked the offered candidate, confirmed `dl_item_memory` was taught correctly.
+  `delivery_notes_engine` confirmed still `"n8n"` — this phase ships fully dark,
+  the live n8n DL pipeline is untouched.

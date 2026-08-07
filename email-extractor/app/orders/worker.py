@@ -274,15 +274,23 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pra
     while not (stop and stop.is_set()):
         try:
             refresh_due(conn, cfg)
-            if resolve_engine(getattr(cfg, "ai_orders_engine", "n8n")) == "python":
+            orders_python = resolve_engine(getattr(cfg, "ai_orders_engine", "n8n")) == "python"
+            # #203: delivery_notes_engine gets the SAME "n8n"/"python" contract as
+            # ai_orders_engine (F1's own design comment) — this is the one gate
+            # confirm.sweep needs to also cover desadv_sent once a later phase's DL
+            # worker starts writing it; nothing else in this loop is DL-aware yet.
+            dl_python = resolve_engine(getattr(cfg, "delivery_notes_engine", "n8n")) == "python"
+            if orders_python:
                 # #93: the deadline backstop — ship whatever is still held once its
                 # delivery date arrives. Shadow/n8n modes never hold an order, so there is
                 # never anything for this to release there.
                 from .hold import release_due
                 release_due(conn, cfg)
-                # #151: has Communicator actually taken what we uploaded? Shadow/n8n modes
-                # never upload through this engine, so edi_sent never gets a row for
-                # confirm.sweep to find there either — same gating as release_due above.
+            if orders_python or dl_python:
+                # #151/#203: has Communicator actually taken what we uploaded? Covers
+                # BOTH edi_sent (orders_python) and desadv_sent (dl_python) in one
+                # sweep — shadow/n8n modes never upload through either engine, so
+                # neither ledger ever gets a row for confirm.sweep to find there.
                 from . import confirm
                 confirm.sweep(conn, cfg)
             handled = tick(conn, cfg, pipeline=pipeline)

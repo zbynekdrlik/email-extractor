@@ -80,6 +80,20 @@ def _status(pg, rid):
         "SELECT import_status FROM edi_sent WHERE id = %s", (rid,)).fetchone()[0]
 
 
+def _insert_desadv_at(pg, supplier_ean, filename, uploaded_at: datetime,
+                      doc_number: str = "D1"):
+    row = pg.execute(
+        """INSERT INTO desadv_sent (supplier_ean, doc_number, filename, uploaded_at)
+           VALUES (%s, %s, %s, %s) RETURNING id""",
+        (supplier_ean, doc_number, filename, uploaded_at)).fetchone()
+    return row[0]
+
+
+def _desadv_status(pg, rid):
+    return pg.execute(
+        "SELECT import_status FROM desadv_sent WHERE id = %s", (rid,)).fetchone()[0]
+
+
 # --- imported: archCodex presence, WITH or WITHOUT the Z- prefix ---------------------
 
 def test_a_file_present_in_archcodex_is_confirmed_imported_with_no_alert(pg):
@@ -718,3 +732,132 @@ def test_pre_migration_rows_are_backfilled_as_already_imported_never_swept(pg):
     assert row[0] == "imported"
     assert row[1] is not None and row[1] == row[2]
     assert confirm.due_rows(pg, 5) == [], "a backfilled historical row must never be swept"
+
+
+# --- #203: desadv_sent gets its own sweep coverage through in_DL ----------------------
+
+def test_desadv_row_still_queued_in_in_dl_is_silent():
+    """Normal waiting — DESADV rows check `in_DL`, not `in`, for their still-queued
+    state (live-verified 2026-08-07: in_DL and in are siblings, not nested)."""
+    row = {"id": 1, "filename": "DESADV_x.txt", "uploaded_at": None}
+    dirs = {"in": set(), "in_DL": {"Z-DESADV_x.txt"}, "archCodex": set(),
+           "unconfirmed": set()}
+    assert confirm._decide(row, dirs, confirm.DESADV_LEDGER) is None
+
+
+def test_desadv_row_in_archcodex_with_its_wire_z_prefix_is_imported():
+    """R89: a DESADV upload's ON-WIRE name already carries Z- (unlike ORDER_ uploads,
+    which get no prefix at write time) — the ledger's own filename column stays the
+    human-facing base name."""
+    row = {"id": 1, "filename": "DESADV_x.txt", "uploaded_at": None}
+    dirs = {"in": set(), "in_DL": set(), "archCodex": {"Z-DESADV_x.txt"},
+           "unconfirmed": set()}
+    assert confirm._decide(row, dirs, confirm.DESADV_LEDGER) == "imported"
+
+
+def test_desadv_row_in_archcodex_with_a_double_z_prefix_is_still_imported():
+    """Defensive tolerance mirroring the ORDER_ side's own "with or without Z-" rule —
+    Communicator's separate, uncontrolled rename job could in principle add a SECOND
+    Z- on top of the one the upload itself already wrote."""
+    row = {"id": 1, "filename": "DESADV_x.txt", "uploaded_at": None}
+    dirs = {"in": set(), "in_DL": set(), "archCodex": {"Z-Z-DESADV_x.txt"},
+           "unconfirmed": set()}
+    assert confirm._decide(row, dirs, confirm.DESADV_LEDGER) == "imported"
+
+
+def test_desadv_row_in_unconfirmed_checks_the_wire_name_not_the_base_name():
+    row = {"id": 1, "filename": "DESADV_x.txt", "uploaded_at": None}
+    dirs_bare = {"in": set(), "in_DL": set(), "archCodex": set(),
+                "unconfirmed": {"DESADV_x.txt"}}
+    # The bare (non-wire) name in unconfirmed does NOT match — only the actual on-wire
+    # (Z-prefixed) name would ever legitimately land there.
+    assert confirm._decide(row, dirs_bare, confirm.DESADV_LEDGER) == "unknown"
+    dirs_wire = {"in": set(), "in_DL": set(), "archCodex": set(),
+                "unconfirmed": {"Z-DESADV_x.txt"}}
+    assert confirm._decide(row, dirs_wire, confirm.DESADV_LEDGER) == "failed"
+
+
+def test_desadv_sweep_confirms_import_and_writes_desadv_sent_not_edi_sent(pg):
+    rid = _insert_desadv_at(pg, "9", "DESADV_a.txt", uploaded_at=MON_MORNING)
+    posts = PostRecorder()
+    n = confirm.sweep(pg, _cfg(),
+                      listdir=lambda: {"in": set(), "in_DL": set(),
+                                       "archCodex": {"Z-DESADV_a.txt"},
+                                       "unconfirmed": set()},
+                      post=posts, now=MON_MORNING)
+    assert n == 1
+    assert posts.calls == []
+    assert _desadv_status(pg, rid) == "imported"
+
+
+def test_desadv_carryover_uses_dodaci_list_wording_not_objednavka(pg):
+    _insert_desadv_at(pg, "9", "DESADV_c.txt", uploaded_at=MON_EVENING)
+    posts = PostRecorder()
+    confirm.sweep(pg, _cfg(),
+                  listdir=lambda: {"in": set(), "in_DL": {"Z-DESADV_c.txt"},
+                                   "archCodex": set(), "unconfirmed": set()},
+                  post=posts, now=TUE_MORNING)
+    assert len(posts.calls) == 1
+    html = posts.calls[0][0]
+    assert "dodací list" in html
+    assert "objednávka" not in html and "objednávky" not in html
+
+
+def test_desadv_and_edi_incidents_on_the_same_channel_stay_independent(pg):
+    """A DESADV failure and an ORDER_ failure both routing to the SAME channel
+    (delivery_notes_channel_id unset -> falls back to orders_channel_id) must still open
+    TWO separate incidents (source-scoped), never merge into one grouped message."""
+    _insert_at(pg, "e1", "ORDER_e1.txt", uploaded_at=MON_MORNING)
+    _insert_desadv_at(pg, "d1", "DESADV_d1.txt", uploaded_at=MON_MORNING)
+    posts = PostRecorder()
+    confirm.sweep(
+        pg, _cfg(delivery_notes_channel_id=0),
+        listdir=lambda: {"in": set(), "in_DL": set(), "archCodex": set(),
+                         "unconfirmed": {"ORDER_e1.txt", "Z-DESADV_d1.txt"}},
+        post=posts, now=MON_MORNING)
+    assert len(posts.calls) == 2, "one grouped message per SOURCE, not merged"
+    edi_incident = confirm._open_incident(pg, 152, "failed", confirm.EDI_LEDGER)
+    desadv_incident = confirm._open_incident(pg, 152, "failed", confirm.DESADV_LEDGER)
+    assert edi_incident is not None and edi_incident["file_count"] == 1
+    assert desadv_incident is not None and desadv_incident["file_count"] == 1
+
+
+def test_one_listdir_call_serves_both_ledgers_in_one_sweep(pg):
+    _insert(pg, "e2", "ORDER_e2.txt", uploaded_minutes_ago=90)
+    _insert_desadv_at(pg, "d2", "DESADV_d2.txt", uploaded_at=MON_MORNING)
+    calls = []
+
+    def listdir():
+        calls.append(1)
+        return {"in": {"ORDER_e2.txt"}, "in_DL": {"Z-DESADV_d2.txt"},
+               "archCodex": set(), "unconfirmed": set()}
+
+    confirm.sweep(pg, _cfg(), listdir=listdir, post=PostRecorder(), now=MON_MORNING)
+    assert len(calls) == 1
+
+
+def test_plural_uses_delivery_note_nouns_for_desadv_source():
+    assert confirm._plural(1, "desadv") == "dodací list"
+    assert confirm._plural(2, "desadv") == "dodacie listy"
+    assert confirm._plural(5, "desadv") == "dodacích listov"
+    assert confirm._plural(1, "edi") == "objednávka"
+
+
+def test_desadv_pre_migration_rows_are_backfilled_as_already_imported(pg):
+    """Same backfill contract desadv_sent's own #203 migration carries — mirrors the
+    edi_sent test above."""
+    pg.execute("ALTER TABLE desadv_sent DROP COLUMN import_status, "
+              "DROP COLUMN import_confirmed_at, DROP COLUMN import_checked_at")
+    pg.execute(
+        """INSERT INTO desadv_sent (supplier_ean, doc_number, filename, sent_at,
+                                    uploaded_at)
+           VALUES ('12', 'HIST1', 'DESADV_historical.txt',
+                   now() - interval '30 days', now() - interval '30 days')""")
+    db.init_schema(pg)
+    row = pg.execute(
+        """SELECT import_status, import_confirmed_at, uploaded_at FROM desadv_sent
+            WHERE supplier_ean = '12'""").fetchone()
+    assert row[0] == "imported"
+    assert row[1] is not None and row[1] == row[2]
+    assert confirm.due_rows(pg, 5, confirm.DESADV_LEDGER) == [], \
+        "a backfilled historical DESADV row must never be swept"

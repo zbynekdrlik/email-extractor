@@ -1,4 +1,7 @@
 """Schema migration + rollup-trigger tests (real Postgres via the pg fixture)."""
+import psycopg
+import pytest
+
 from app import db
 
 
@@ -13,6 +16,85 @@ def test_schema_objects_exist(pg):
         assert col in cols
     assert pg.execute(
         "SELECT 1 FROM pg_trigger WHERE tgname='trg_email_events_rollup'").fetchone()
+
+
+# --- #203 F4: desadv_sent import-confirmation columns + incident source split ---
+
+def test_desadv_sent_has_import_confirmation_columns(pg):
+    cols = {r[0] for r in pg.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name='desadv_sent'").fetchall()}
+    for col in ("import_status", "import_confirmed_at", "import_checked_at"):
+        assert col in cols
+
+
+def test_desadv_sent_import_migration_backfills_pre_existing_confirmed_rows(pg):
+    """Same backfill contract as edi_sent's own #151 migration: any row already
+    `uploaded_at IS NOT NULL` when the migration first runs is treated as imported."""
+    pg.execute("ALTER TABLE desadv_sent DROP COLUMN IF EXISTS import_status")
+    pg.execute("ALTER TABLE desadv_sent DROP COLUMN IF EXISTS import_confirmed_at")
+    pg.execute("ALTER TABLE desadv_sent DROP COLUMN IF EXISTS import_checked_at")
+    pg.execute(
+        "INSERT INTO desadv_sent (supplier_ean, doc_number, filename, uploaded_at) "
+        "VALUES ('123', 'D1', 'DESADV_x.txt', now())")
+    db.init_schema(pg)
+    row = pg.execute(
+        "SELECT import_status FROM desadv_sent WHERE doc_number = 'D1'").fetchone()
+    assert row[0] == "imported"
+
+
+def test_import_alert_incidents_has_a_source_column_defaulting_to_edi(pg):
+    pg.execute(
+        "INSERT INTO import_alert_incidents (channel_id, kind) VALUES (1, 'failed')")
+    row = pg.execute(
+        "SELECT source FROM import_alert_incidents WHERE channel_id = 1").fetchone()
+    assert row[0] == "edi"
+
+
+def test_import_alert_incidents_source_is_check_constrained(pg):
+    """Same DB-enforced-invariant philosophy the sibling `kind` column already has
+    (#184) — a stray/mistyped source value must fail loudly, not silently resolve to
+    the wrong ledger wherever confirm.py reads it back (review finding on #203)."""
+    with pytest.raises(psycopg.errors.CheckViolation):
+        pg.execute(
+            "INSERT INTO import_alert_incidents (channel_id, kind, source) "
+            "VALUES (1, 'failed', 'bogus')")
+
+
+def test_at_most_one_open_incident_per_channel_kind_source(pg):
+    pg.execute(
+        "INSERT INTO import_alert_incidents (channel_id, kind, source) "
+        "VALUES (1, 'failed', 'edi')")
+    # Same (channel, kind) but a DIFFERENT source is allowed to open independently.
+    pg.execute(
+        "INSERT INTO import_alert_incidents (channel_id, kind, source) "
+        "VALUES (1, 'failed', 'desadv')")
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        pg.execute(
+            "INSERT INTO import_alert_incidents (channel_id, kind, source) "
+            "VALUES (1, 'failed', 'edi')")
+
+
+def test_import_alert_incident_desadv_members_references_desadv_sent(pg):
+    assert pg.execute(
+        "SELECT to_regclass('import_alert_incident_desadv_members')").fetchone()[0]
+    incident_id = pg.execute(
+        "INSERT INTO import_alert_incidents (channel_id, kind, source) "
+        "VALUES (2, 'unknown', 'desadv') RETURNING id").fetchone()[0]
+    row_id = pg.execute(
+        "INSERT INTO desadv_sent (supplier_ean, doc_number, filename) "
+        "VALUES ('456', 'D2', 'DESADV_y.txt') RETURNING id").fetchone()[0]
+    pg.execute(
+        "INSERT INTO import_alert_incident_desadv_members (incident_id, desadv_sent_id) "
+        "VALUES (%s, %s)", (incident_id, row_id))
+    # A repeat insert is a harmless no-op dedup via ON CONFLICT at the call-site level
+    # (mirrors import_alert_incident_members's own PK-as-dedup contract) — here we just
+    # confirm the PK actually rejects a genuine duplicate, proving the dedup mechanism
+    # exists to be relied on.
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        pg.execute(
+            "INSERT INTO import_alert_incident_desadv_members "
+            "(incident_id, desadv_sent_id) VALUES (%s, %s)", (incident_id, row_id))
 
 
 def test_rollup_updates_messages(pg):
