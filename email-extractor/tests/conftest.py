@@ -34,7 +34,8 @@ def pg(_schema):
         "item_memory, edi_sent, order_runs, order_spend_alerts, order_questions, "
         "global_item_memory, held_orders, catalog_overrides, customer_overrides, "
         "mail_rules, static_order_digest, import_alert_incidents, "
-        "import_alert_incident_members, match_incidents, order_digest_sent, "
+        "import_alert_incident_members, import_alert_incident_desadv_members, "
+        "match_incidents, order_digest_sent, "
         "desadv_sent, dl_item_memory, dl_snapshots, dl_supplier_memory "
         "RESTART IDENTITY CASCADE")
     return _schema
