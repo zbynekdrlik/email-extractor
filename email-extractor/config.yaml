@@ -59,6 +59,10 @@ options:
   import_alert_reminder_hours: 4
   static_digest_batch_size: 30
   static_digest_idle_minutes: 60
+  delivery_notes_engine: "n8n"
+  delivery_notes_shadow: false
+  delivery_notes_shadow_days: 3
+  dl_catalog_gid: ""
 schema:
   imap_host: str
   imap_port: int
@@ -105,3 +109,7 @@ schema:
   import_alert_reminder_hours: int?
   static_digest_batch_size: int?
   static_digest_idle_minutes: int?
+  delivery_notes_engine: list(n8n|python)?
+  delivery_notes_shadow: bool?
+  delivery_notes_shadow_days: int?
+  dl_catalog_gid: str?
