@@ -1,5 +1,12 @@
 """DL (dodacie listy) catalog + supplier snapshots (#200 F1).
 
+**#129: the sheet is never fetched anymore — `refresh()` (and `snapshot.fetch_csv`,
+which it used to call) has been removed.** The DL catalog/supplier snapshot frozen
+2026-08-07 (491 catalog rows, 959 suppliers) is now permanent; `dl_worker.refresh_due`
+just reports it (or a future one imported some other way — a dashboard editing UI is
+tracked as a follow-up, #221). `import_snapshot` itself (pure CSV-text importer, no
+network) is unchanged and still used by tests and `dl_eval_run.py`'s corpus import.
+
 Same content-addressed pattern as app/orders/snapshot.py (the AI-orders catalog),
 but a SEPARATE versioning line (`dl_snapshots`/`dl_catalog_snapshot`/
 `dl_supplier_snapshot`, not the orders tables): the DL catalog's shape
@@ -48,7 +55,7 @@ import logging
 import re
 
 from . import snapshot
-from .snapshot import SnapshotRefused, fetch_csv  # re-exported for callers
+from .snapshot import SnapshotRefused  # re-exported for callers
 
 log = logging.getLogger("orders.dl_snapshot")
 
@@ -201,7 +208,7 @@ def import_snapshot(conn, dl_catalog_csv: str, objednavky_catalog_csv: str,
     suppliers = parse_suppliers(supplier_csv)
     if not catalog or not suppliers:
         raise SnapshotRefused(
-            f"DL sheet fetch looks empty (catalog={len(catalog)}, suppliers={len(suppliers)}) "
+            f"DL import looks empty (catalog={len(catalog)}, suppliers={len(suppliers)}) "
             "— keeping the previous snapshot")
     return _freeze(conn, catalog, suppliers)
 
@@ -231,17 +238,3 @@ def load_suppliers(conn, snapshot_id: int) -> list[dict]:
            for r in rows]
 
 
-def refresh(conn, doc_id: str, dl_catalog_gid: int | str, objednavky_gid: int | str,
-           supplier_gid: int | str) -> int | None:
-    """Fetch all three tabs and import. Returns the current snapshot id, or None when
-    the fetch failed — a failed refresh is logged and leaves the previous snapshot in
-    place, mirroring snapshot.refresh's own contract exactly."""
-    try:
-        dl_csv = fetch_csv(doc_id, dl_catalog_gid)
-        objednavky_csv = fetch_csv(doc_id, objednavky_gid)
-        supplier_csv = fetch_csv(doc_id, supplier_gid)
-        return import_snapshot(conn, dl_csv, objednavky_csv, supplier_csv)
-    except Exception as e:
-        log.error("dl snapshot refresh failed (%s) — keeping snapshot %s",
-                  e, latest_snapshot_id(conn))
-        return latest_snapshot_id(conn)

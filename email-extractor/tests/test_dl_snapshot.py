@@ -189,3 +189,13 @@ def test_dl_and_orders_snapshots_are_independent_versioning_lines(pg):
     snapshot.import_snapshot(pg, OBJEDNAVKY_CATALOG_CSV, SUPPLIER_CSV)
     assert dl_snapshot.latest_snapshot_id(pg) == dl_sid
     assert snapshot.latest_snapshot_id(pg) == orders_sid
+
+
+# --- #129: the sheet is never read at all any more --------------------------------
+
+def test_dl_snapshot_module_never_reads_the_sheet_over_the_network():
+    """fetch_csv (re-exported from snapshot.py) and refresh() must both be gone —
+    import_snapshot (pure CSV-text importer, no network) stays, still used by tests
+    and by dl_eval_run.py's corpus import from frozen fixture files."""
+    assert not hasattr(dl_snapshot, "refresh")
+    assert not hasattr(dl_snapshot, "fetch_csv")

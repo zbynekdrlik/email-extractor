@@ -140,27 +140,34 @@ def test_without_a_snapshot_nothing_runs(pg):
     assert calls == []
 
 
-def test_refresh_is_skipped_while_the_snapshot_is_fresh(pg, monkeypatch):
-    """The loop calls refresh every tick; it must only hit Google when the newest
-    snapshot is older than the configured interval."""
-    _snapshot(pg)
-    calls = []
-    monkeypatch.setattr(worker.snapshot, "refresh",
-                        lambda *a, **k: calls.append(a) or 999)
+def test_refresh_due_never_touches_the_network_even_when_a_sheet_is_configured(pg, monkeypatch):
+    """#129: the Google Sheet is permanently disabled — catalog_overrides/
+    customer_overrides (#127/#128) are the sole source of truth. This must hold even
+    when the add-on's own (now-inert) catalog_sheet_id/gid options are still populated
+    (as they are on the live add-on today) and even when the frozen snapshot is old."""
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *a, **k: pytest.fail("must never fetch the sheet (#129)"))
+    sid = _snapshot(pg)
     cfg = _cfg(catalog_sheet_id="DOC", catalog_gid="1", customer_gid="2",
                catalog_refresh_minutes=60)
-    assert worker.refresh_due(pg, cfg) == worker.snapshot.latest_snapshot_id(pg)
-    assert calls == []
+    assert worker.refresh_due(pg, cfg) == sid
 
     pg.execute("UPDATE order_snapshots SET checked_at = now() - interval '2 hours'")
-    assert worker.refresh_due(pg, cfg) == 999
-    assert len(calls) == 1
+    assert worker.refresh_due(pg, cfg) == sid
 
 
-def test_refresh_without_a_configured_sheet_never_calls_out(pg, monkeypatch):
-    monkeypatch.setattr(worker.snapshot, "refresh",
-                        lambda *a, **k: pytest.fail("must not fetch without a sheet id"))
+def test_refresh_due_returns_none_when_no_snapshot_exists_yet(pg):
     assert worker.refresh_due(pg, _cfg()) is None
+
+
+def test_snapshot_module_has_no_network_fetch_code():
+    """#129: fetch_csv/refresh/sheet_csv_url must not exist at all — a passing test
+    that merely proves they're unused would not catch someone re-adding a call site
+    that reintroduces them."""
+    assert not hasattr(worker.snapshot, "fetch_csv")
+    assert not hasattr(worker.snapshot, "refresh")
+    assert not hasattr(worker.snapshot, "sheet_csv_url")
 
 
 def test_engine_option_only_accepts_known_values():

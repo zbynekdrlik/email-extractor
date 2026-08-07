@@ -149,25 +149,12 @@ def _check_retry(attempts: int, error: str) -> None:
 # --- catalog refresh (mirrors worker.refresh_due) ---------------------------
 
 def refresh_due(conn, cfg) -> int | None:
-    """R20/R21's DL catalog+supplier snapshot, refreshed on the SAME interval knob
-    (`catalog_refresh_minutes`) orders already use. Needs `catalog_sheet_id` (the shared
-    doc) + `dl_catalog_gid` (R20's DL-specific tab) + `catalog_gid` (the shared 'produkty
-    objednavky' tab, R20's union) + `customer_gid` (R21: same sheet, suppliers) — without
-    all four the worker stays idle rather than matching against a stale/absent catalog."""
-    sheet = getattr(cfg, "catalog_sheet_id", "")
-    dl_gid = getattr(cfg, "dl_catalog_gid", "")
-    obj_gid = getattr(cfg, "catalog_gid", "")
-    cust_gid = getattr(cfg, "customer_gid", "")
-    if not (sheet and dl_gid and obj_gid and cust_gid):
-        return dl_snapshot.latest_snapshot_id(conn)
-    row = conn.execute("SELECT max(checked_at) FROM dl_snapshots").fetchone()
-    minutes = max(1, int(getattr(cfg, "catalog_refresh_minutes", 60) or 60))
-    if row and row[0]:
-        age = conn.execute(
-            "SELECT (now() - %s) > make_interval(mins => %s)", (row[0], minutes)).fetchone()
-        if not age[0]:
-            return dl_snapshot.latest_snapshot_id(conn)
-    return dl_snapshot.refresh(conn, sheet, dl_gid, obj_gid, cust_gid)
+    """#129: the DL catalog/supplier sheet (R20/R21) is never read anymore either —
+    the snapshot frozen 2026-08-07 (491 catalog rows, 959 suppliers) is now permanent
+    and this just reports it. No fetch, no interval, no config gate left to check —
+    mirrors `worker.refresh_due`'s own #129 change exactly. `cfg` stays in the
+    signature only so `run_forever`'s call site needs no change."""
+    return dl_snapshot.latest_snapshot_id(conn)
 
 
 # --- message selection (R10/R11) --------------------------------------------
