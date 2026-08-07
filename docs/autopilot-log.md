@@ -1262,3 +1262,40 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   correct as of deploy day); today's live stats show `llm=24, review=0` — the new
   #195 guard is live and not falsely flagging genuine matches (0 `llm_sure_lexical_gap`
   rows in production yet, consistent with the guard being rare-case-only).
+
+## 2026-08-07 — #200 (PR #206)
+
+- **#200** (DL migration Phase 1: schema + config + spec, foundation only). Sanitized
+  binding spec `docs/superpowers/specs/2026-08-07-delivery-notes-python-design.md`
+  (n8n rules map R1-R97, weaknesses W1-W16). Config trio
+  `delivery_notes_engine`/`delivery_notes_shadow`/`delivery_notes_shadow_days`
+  (default `n8n` = fully inert) + `dl_catalog_gid` + `orion_dl_dir`. New tables:
+  `desadv_sent` (`app/orders/desadv.py`, two-phase claim/confirm, identity
+  `(supplier_ean, doc_number)` — fixes n8n's W2/W3/W4), `dl_item_memory`
+  (`app/orders/dl_memory.py`, `item_memory`'s sibling + a `cnt` column for R66),
+  `dl_snapshots`/`dl_catalog_snapshot`/`dl_supplier_snapshot`
+  (`app/orders/dl_snapshot.py`, content-addressed DL catalog union + supplier
+  loader, own versioning line). One-shot n8n import script `scripts/
+  import_dl_item_memory.py` (outside `app/`, never ships in the Docker image; real
+  run deferred to cutover). `order_runs` reused with zero schema change (documented
+  decision, spec §7). Feature work, no RED/GREEN split (greenfield foundation):
+  `4eb438e`/`37c6a76`/`896396a`/`c426830`/`87f1b04`/`8d1d930`.
+- Design comment + validated comment posted before code (issue comment thread).
+  Deep code review (dispatched `general-purpose` subagent) found 1 Critical + 3
+  Important + 7 Minor issues, all fixed in `cd77b68` — including a **live Google
+  Sheet doc id accidentally committed** to the spec (acts as a credential:
+  unauthenticated CSV export). Redacted going forward; the historical git-history
+  exposure itself is tracked as a separate, non-blocking decision for the user in
+  a follow-up ticket (issue 207).
+- Tests: `test_config.py` (+5), `test_desadv.py` (11), `test_dl_memory.py` (12),
+  `test_import_dl_item_memory.py` (4), `test_dl_snapshot.py` (18). Full suite green
+  (`pytest --cov=app --cov-fail-under=85`, 92.64% total), `ruff check .` clean.
+- Shared PR: **206** — merge `02b39fb81bb241a8a74c6ebbb1b72cab0b7a8fc0`, main CI
+  green (test+e2e-orders+build). Deployed **v0.9.51** via `ha addons update`
+  (supervisor add-on, not a raw container — see `.claude/rules/deploy.md`):
+  `/health` 200 `{"version":"0.9.51"}`, dashboard DOM confirms `v0.9.51`, worker
+  started clean (`engine=python shadow=False static_shadow=False` — unaffected,
+  `delivery_notes_engine` stays `n8n`), 5 new tables confirmed present in live
+  Postgres (`desadv_sent`, `dl_item_memory`, `dl_snapshots`, `dl_catalog_snapshot`,
+  `dl_supplier_snapshot`). Everything landed is inert by default — no pipeline code
+  reads/writes any of it yet.
