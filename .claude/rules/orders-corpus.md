@@ -1201,3 +1201,34 @@ intentional there for cards it was tuned against.
   matched by a non-unique key should default to this same best-fit shape, not a
   greedy index walk — a single passing test with items already in matching order will
   not catch the order-dependence; test the REORDERED case explicitly.
+- **"Claim a row, OR tell me who already holds it" — do BOTH in ONE atomic SQL round
+  trip via a data-modifying CTE with a `NOT EXISTS` fallback `SELECT`, never a
+  `claim_send()` call followed by a SEPARATE read (#216, review-caught before merge).**
+  `desadv.claim_send_or_identify()` needed to answer "did I just claim this document,
+  or does someone else already hold it — and if so, WHO" in one shot, so `dl_worker.py`
+  could tell "this SAME message is retrying itself after a partial ship" apart from "a
+  genuinely different message already shipped this document" (W7). Two separate
+  autocommit statements (`claim_send()` returning `False`, then a follow-up read) leave
+  a real, if narrow, TOCTOU gap — a different message could theoretically reclaim the
+  row in between and change who the read reports. The reusable shape:
+  ```sql
+  WITH ins AS (
+      INSERT INTO t (key, ..., holder) VALUES (...)
+      ON CONFLICT (key) DO UPDATE SET ..., holder = EXCLUDED.holder
+      WHERE <t is eligible to (re)claim>
+      RETURNING holder
+  )
+  SELECT true, NULL FROM ins
+  UNION ALL
+  SELECT false, d.holder FROM t d
+   WHERE d.key = %s AND NOT EXISTS (SELECT 1 FROM ins)
+  ```
+  The `INSERT` always runs (no `WHERE` of its own — only the `ON CONFLICT DO UPDATE`
+  branch has one); when the conflict path's `WHERE` refuses the write, the table row is
+  UNCHANGED by this statement, so the fallback `SELECT` reading it directly is exactly
+  the pre-existing claimant. Any FUTURE two-phase claim/ledger primitive in this
+  project that needs "who currently holds this" alongside the claim decision itself
+  should reach for this shape rather than two round trips — `edi.claim_send()` /
+  `static_worker.py`'s own duplicate-skip logging has the theoretically SAME gap today
+  (unfixed, not yet reported as an incident — low priority given it can only mis-tag a
+  digest stage, never double-ship).

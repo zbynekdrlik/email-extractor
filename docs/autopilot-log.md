@@ -1573,3 +1573,41 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   separate follow-up **#217** (mirrors the #132/#133 split for static orders: shadow-wiring
   ticket closes once shipped, cutover is its own ticket blocked on days of a clean shadow
   diff + the user's explicit decision).
+
+## 2026-08-07 — #216 (PR #219)
+
+- **#216** (DL worker: retry after a partial ship logs a false `duplicate_skip`, needs
+  `desadv_sent.message_id`): a #204/F5 deep-review residual finding. R17's transient retry
+  re-processes the WHOLE message on its next tick, including a document that already
+  shipped successfully in an earlier, partially-failed attempt of that SAME message —
+  `desadv.claim_send()` correctly refused the second claim, but `dl_worker.py` had no way
+  to tell that self-caused re-skip apart from a genuine cross-message W7 duplicate, so both
+  logged identical `stage='duplicate_skip'`, inflating `reliability.
+  dl_provenance_stats_for_day()`'s daily-digest `duplicates` count.
+- Additive, nullable `desadv_sent.message_id TEXT` column (no backfill — legacy rows stay
+  NULL, always treated as unknown/genuine duplicate). `desadv.claim_send()` gains an
+  optional `message_id` param; new read-only `desadv.claimed_by()`. Deep-review (dispatched
+  Explore subagent on the real PR diff) found 0 🔴/🟡, 2 🔵 — both fixed pre-merge: (1) a
+  microsecond-scale TOCTOU gap between `claim_send()` and a separate `claimed_by()` read,
+  closed by new atomic `desadv.claim_send_or_identify()` (one round trip, data-modifying
+  CTE + `NOT EXISTS` fallback `SELECT`) which `dl_worker.py` now calls instead of the
+  two-step pattern; (2) a weak test's docstring corrected + a stronger sibling test added
+  (known-but-different claimant, genuinely exercises the comparison logic).
+- Commits: `d7bb5a6` (version bump 0.9.56→0.9.57), `98ea1ce`
+  (`test_retry_after_partial_ship_logs_a_self_retry_not_a_false_duplicate` — RED,
+  `TypeError`/`AttributeError` pre-fix), `d89d356` (GREEN — schema + `claim_send`/
+  `claimed_by` + `dl_worker.py` wiring + `dl_report.log_already_shipped_this_run`),
+  `90831ad` (review-driven: `claim_send_or_identify` + strengthened test). Full suite
+  (1258 tests) green, `ruff check .` clean, all 5 shadow-mode tests re-verified green
+  (shadow never calls `claim_send`/`claim_send_or_identify`, only read-only
+  `already_sent()`).
+- Shared PR: **219** — merge `a6a131a5959e29e340c74d1764edc40d02fb3e23`, main CI green
+  (test+e2e-orders+e2e-dl+build, run `31220312666`). Deployed **v0.9.57** via
+  `ha addons update`: `/health` 200 `0.9.57`, dashboard DOM confirms `v0.9.57` (0 console
+  errors). Live process restarted clean on 0.9.57 with no schema-migration error
+  (`\d desadv_sent` confirms the new nullable `message_id` column). `delivery_notes_engine`
+  stays `n8n`/`delivery_notes_shadow=true` (unchanged, per the hard prohibition on flipping
+  it) — `desadv_sent` has 0 rows in production today (shadow never writes it), so the new
+  claim/identify decision logic is not yet live-exercised; its correctness is proven by the
+  local RED→GREEN suite, not a live trigger. 26 shadow DL runs in the prior 2h window, 0
+  errors, confirming the deployed process is healthy end-to-end.
