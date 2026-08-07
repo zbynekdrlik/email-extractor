@@ -1526,3 +1526,50 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   production `order_runs`/`email_events` tables. `delivery_notes_engine` confirmed
   still `"n8n"` — this phase ships fully dark; the dashboard's live feed showed real
   `dodacie_listy` mail still processed by the unmodified n8n workflow throughout.
+
+## #205 — DL migrácia F6: eval korpus (8 pomenovaných incident-tried) + shadow okno start
+
+- Version bump `936cec1` (0.9.55 → 0.9.56). New `app/orders/dl_evaluate.py` + `app/orders/
+  dl_eval_run.py` (mirrors `evaluate.py`/`eval_run.py`, DL-shaped: scores per DOCUMENT, not
+  per email/delivery-date, since one mail can carry several delivery notes — F2's own
+  W1a/W1b fix). `dl_worker._process_message` gained an optional `attachments=` override
+  (mirrors the existing `upload=`/`post=` DI seam) plus `supplier_ean`/`items` on its
+  ok/partial/duplicate return. New `e2e-dl` CI job in `.github/workflows/ci.yml` (mirrors
+  `e2e-orders`), runs on every change.
+- Real 8-case corpus built on dev2 (`~/eval-corpus/email-extractor/dl/`, outside git): 3
+  grounded in REAL production Postgres data (Lunys announced-vs-attached pair msg 6218/6222,
+  Jackulík 2-PDF-in-one-mail msg 5900, MPC P-prefix docNumber msg 6417 — all from 2026-08-07,
+  verified read-only against the live add-on's own Postgres); 5 clearly-labelled synthetic
+  fixtures (LESAFFRE Netto-kg-over-cartons R49b, thousands-separator quantity R49a,
+  Dalamanka/Dalmátska product-name precision, Forbak s.r.o./spol. wording variant R61,
+  EKVIA missing-catalog-card partial-EDI R81) exercising the exact named rule where no real
+  message could be found. `--live` recording: 8/8 passed on the first attempt; offline
+  replay confirmed both locally and in CI.
+- Deep review (`Explore` subagent against the real PR 218 diff) found 0 Critical, 2
+  Important, 4 Minor, all fixed before merge (`234770e`): `dl_worker._RetryLater` (a
+  genuine transient LLM failure) escaped `dl_evaluate.run_case`/`run_corpus` uncaught,
+  crashing the whole corpus run instead of failing one case — now caught; `score()`'s
+  duplicate-doc_number matching was order-dependent (a real W4 scenario) — replaced with
+  `_best_fit_group`'s injective-assignment search; `_shipped_items` re-derived the "on the
+  EDI" predicate a third time instead of the shared `desadv_edi._is_unmatched`; `_items_map`
+  could collapse two different no-gtin items onto a shared `"None"` key.
+- Tests: `tests/test_dl_eval.py` (new, ~40 cases: scoring, best-fit duplicate matching,
+  `_RetryLater` handling, the gate CLI). Full suite green (`pytest --cov=app
+  --cov-fail-under=85`, 93.23% total), `ruff check .` clean.
+- Shared PR: **218** — merge `731e4003e6ce5f13ea500bff988ac715a31453b5`, main CI green
+  (test+e2e-orders+e2e-dl+build, run `31215056422`). Deployed **v0.9.56** via `ha addons
+  update`: `/health` 200 `0.9.56`, dashboard DOM confirms `v0.9.56` (0 console errors).
+  Shadow window started LIVE (not just deployed dark): `dl_catalog_gid=1437442607` +
+  `delivery_notes_shadow=true` set via the supervisor options API + add-on restart. Log
+  confirmed `dl_shadow=True`, a real DL catalog snapshot froze (491 catalog rows, 959
+  suppliers), and the worker immediately shadow-processed a REAL live message (#6417, MPC,
+  docNumber P26042214 — the same message used as eval case 3) — `order_runs.id=363,
+  shadow=t, kind=dl, status=partial`. Zero observable side effect confirmed directly in
+  Postgres: `desadv_sent`/`dl_item_memory`/`email_events(workflow=delivery_notes)` all 0
+  rows for that message, `messages.processed`/`processing_at` untouched from the real n8n
+  run. `delivery_notes_engine` stays `n8n` — the live pipeline is unchanged, python only
+  compares in the background.
+- Cutover (`delivery_notes_engine: n8n -> python`) is explicitly OUT of scope — filed as a
+  separate follow-up **#217** (mirrors the #132/#133 split for static orders: shadow-wiring
+  ticket closes once shipped, cutover is its own ticket blocked on days of a clean shadow
+  diff + the user's explicit decision).
