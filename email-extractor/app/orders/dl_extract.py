@@ -54,7 +54,11 @@ QTY_TOLERANCE_PIECES = 0.5
 QTY_TOLERANCE_KG = 0.005
 PIECE_UNITS = {"ks", "ba", "kt", ""}
 
-_LT_PREFIX = re.compile(r"LT", re.IGNORECASE)
+# R47: only the documented '<digits>LT<digits>' shape (e.g. '2610LT9999999999') is a
+# genuine Lunys-style prefix — anchored to the WHOLE string, never a bare substring
+# search, or a doc number that merely CONTAINS "lt" ('SALT-2026-0001', 'MULTI2026') gets
+# silently corrupted (deep-review finding, #201).
+_LT_PREFIX = re.compile(r"^\d*LT(\d+)$", re.IGNORECASE)
 _DMY_DATE = re.compile(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$")
 _ISO_DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
@@ -154,8 +158,8 @@ def choose_source_text(scanned: bool, machine_text: str, vision_primary: str | N
 
 # --- 3) up-to-three-way cross-check (R43) -----------------------------------
 
-def _head(text: str, n: int = 80) -> str:
-    return re.sub(r"\s+", " ", (text or "").strip().lower())[:n]
+def _normalized(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
 
 
 def combine_transcripts(machine_text: str, primary: str, secondary: str | None) -> str:
@@ -165,16 +169,21 @@ def combine_transcripts(machine_text: str, primary: str, secondary: str | None) 
     `secondary` (the vision call's second independent sample) and `machine_text` (the
     extractor's own machine-OCR text) are each appended, clearly labelled, only when they
     actually differ from `primary` — an identical transcript would just double the token
-    cost for zero cross-check value.
+    cost for zero cross-check value. The comparison is over the FULL normalized text, not
+    a short prefix (deep-review finding, #201): a real delivery note's header — supplier,
+    city, doc number, date — fills roughly the first 80 characters on its own, so an
+    early version of this function that only compared a truncated head silently dropped
+    the whole secondary transcript whenever two samples agreed on the header but disagreed
+    on an ITEM further down — exactly the digit misread this cross-check exists to catch.
     """
     primary = primary or ""
     parts = [primary]
-    primary_head = _head(primary)
-    if secondary and _head(secondary) != primary_head:
+    primary_norm = _normalized(primary)
+    if secondary and _normalized(secondary) != primary_norm:
         parts.append(
             "--- DRUHY NEZAVISLY VISION PREPIS (na krížovú kontrolu, "
             "NIE nový dokument) ---\n" + secondary)
-    if machine_text and _head(machine_text) != primary_head:
+    if machine_text and _normalized(machine_text) != primary_norm:
         parts.append(
             "--- ALTERNATIVNY STROJOVY OCR PREPIS (na krížovú kontrolu, "
             "NIE nový dokument) ---\n" + machine_text)
@@ -204,11 +213,13 @@ def normalize_delivery_date(raw: str) -> str | None:
 
 def strip_lt_prefix(doc_number: str) -> str:
     """'2610LT9999999999' -> '9999999999': ORION parses the EDI's NCDLIST as a float, so a
-    letter prefix crashes the import — everything up to and including the FIRST 'LT' is
-    dropped, keeping only what follows it. A doc number with no 'LT' is unchanged."""
+    letter prefix crashes the import — the leading digits (if any) + 'LT' are dropped,
+    keeping only the digits after it. Anchored to the whole string (R47's documented
+    shape only), so a doc number that merely CONTAINS 'lt'/'LT' without being that exact
+    shape is left untouched."""
     s = str(doc_number or "")
-    m = _LT_PREFIX.search(s)
-    return s[m.end():] if m else s
+    m = _LT_PREFIX.match(s)
+    return m.group(1) if m else s
 
 
 # --- 6) validation (R50-R52) -------------------------------------------------
