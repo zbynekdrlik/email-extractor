@@ -71,3 +71,29 @@ warning; both alias the same command.)
   `sudo`: `sudo docker exec app_e0ac7775_email_extractor sh -c "PGPASSWORD=<pw> psql -h
   127.0.0.1 -U email -d email -c '<query>'"` (#153 post-deploy DB verification —
   confirming the edi_sent.uploaded_at backfill landed on the 48 live rows).
+- **A `psql -c '<query>'` containing JSONB operators (`->>`, `->`) or nested single-
+  quoted strings breaks through the ssh → `sudo docker exec` → `sh -c` → `psql -c`
+  quoting chain — don't fight it, write the SQL to a FILE and run `psql -f`** (#205,
+  post-deploy shadow-window verification). A query like `result->>'kind'='dl'` needs
+  its OWN single quotes preserved through THREE nested shells; every attempt at
+  escaping it inline (doubled quotes, backslash-escaping) either got eaten by one layer
+  or produced `column "kind" does not exist` (the `->>'kind'` silently parsed as a bare
+  identifier). The reliable path, same "base64 to the host, `docker cp` into the
+  container" technique the scp-workaround above already uses: write the SQL to a local
+  scratch file, `base64 -w0` it into the ssh session (`echo '<b64>' | base64 -d >
+  /tmp/x.sql`), `sudo docker cp /tmp/x.sql app_..._email_extractor:/tmp/x.sql`, then
+  `sudo docker exec app_..._email_extractor sh -c 'PGPASSWORD=<pw> psql -h 127.0.0.1 -U
+  email -d email -f /tmp/x.sql'` — zero quoting to get right, works first try. Also
+  note: `order_runs` has NO `created_at` column (only `started_at`/`finished_at`) —
+  check `\d order_runs` (same file-based technique) before guessing a column name.
+- **Updating a supervisor add-on's options with a LARGER merged JSON payload (not a
+  one-line change)** — the existing "fetch current options, merge, POST the whole
+  object" recipe above works, but for a payload of any real size, inline it as a FILE
+  the same way: base64 the merged `{"options": {...}}` JSON to the host, `docker cp` it
+  into `hassio_cli`, then `sudo docker exec hassio_cli sh -c 'curl -s -X POST -H
+  "Authorization: Bearer $SUPERVISOR_TOKEN" -H "Content-Type: application/json"
+  http://supervisor/addons/<slug>/options -d @/tmp/x.json'` — `-d @/tmp/x.json` reads
+  the body from the file inside the container, so nothing about the JSON's own quoting
+  or escaping has to survive the shell at all (#205, enabling `delivery_notes_shadow`
+  live). Delete the scratch file on BOTH the host and inside the container/`hassio_cli`
+  afterward — it's plaintext add-on config, not a secret, but still cleanup hygiene.

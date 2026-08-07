@@ -26,7 +26,10 @@ own immediate message — visibility for those is the DAILY digest
 (`reliability.dl_provenance_stats_for_day`, extended #204) via `email_events`, per the
 binding spec's explicit "hlásenie v dennom sumári, nie ticho" (report in the daily
 summary, never silently) for W7 specifically. `log_duplicate`/`log_announced_mismatch`
-below only write that event; they never call Odoo.
+below only write that event; they never call Odoo. `log_already_shipped_this_run`
+(#216) is a THIRD, deliberately different, non-Odoo, non-counted event: a retry after
+a partial ship re-skipping a document THIS SAME message already sent — never a real
+W7 cross-message duplicate, so it must not inflate that count.
 """
 from __future__ import annotations
 
@@ -145,6 +148,25 @@ def log_duplicate(conn, message_id: str, doc_number: str, supplier_ean: str) -> 
         conn, message_id, stage="duplicate_skip", status="ok",
         outcome=f"Dodací list {doc_number} od dodávateľa {supplier_ean} už bol odoslaný "
                 "skôr — preskočené (nahlásené v dennom súhrne)",
+        detail={"doc_number": doc_number, "supplier_ean": supplier_ean},
+        rollup=False, workflow=WORKFLOW)
+
+
+def log_already_shipped_this_run(conn, message_id: str, doc_number: str,
+                                 supplier_ean: str) -> None:
+    """#216: THIS SAME message already shipped this document in an earlier attempt —
+    R17's transient retry re-processes the WHOLE message, including documents that
+    already succeeded before a later document in the same mail hit a transient
+    failure. This is a self-caused re-skip, never a genuine W7 cross-message
+    duplicate, so it gets its OWN stage — deliberately NOT `duplicate_skip` — so
+    `reliability.dl_provenance_stats_for_day()`'s `duplicates` count (filtered on
+    `stage = 'duplicate_skip'`) stays a trustworthy signal of real supplier
+    re-announcements only."""
+    report.log_event(
+        conn, message_id, stage="already_shipped_this_run", status="ok",
+        outcome=f"Dodací list {doc_number} od dodávateľa {supplier_ean} bol v tomto "
+                "behu už odoslaný skôr (opakovaný pokus po čiastočnom odoslaní) — "
+                "preskočené",
         detail={"doc_number": doc_number, "supplier_ean": supplier_ean},
         rollup=False, workflow=WORKFLOW)
 

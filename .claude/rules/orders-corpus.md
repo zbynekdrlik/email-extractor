@@ -1149,3 +1149,55 @@ intentional there for cards it was tuned against.
   OWN captured log output for `DL attachment ... failed to extract` before assuming the
   worker logic itself is wrong — set `self.last_prompt_hash = ""` on the fake client and
   update it in `json_call` the same way the real `llm.Client` does.
+- **A DL eval-corpus case NEVER needs a real scanned image / vision call — supply
+  non-empty `machine_text` with NO `pdf_bytes` and `dl_extract.extract_attachment`
+  structurally cannot reach `vision_call`** (#205, DL migration F6). R42/W13's own
+  routing: `is_scanned(extract_embedded_jpegs(pdf_bytes))` is `False` on empty bytes
+  (no embedded JPEG to find), and the `elif not machine_text.strip():` vision-fallback
+  branch never fires when `machine_text` is non-empty — so the function falls straight
+  to `choose_source_text`/`run_extraction`, ONE `json_call`, zero `vision_call`s. This
+  is what let the whole 8-case `--live` recording (`app/orders/dl_evaluate.py`/
+  `dl_eval_run.py`) cost only extraction+match calls (~40 total, ~$1) instead of also
+  paying for `n=2` vision transcription on every case — build every FUTURE DL corpus
+  case the same way unless the case is SPECIFICALLY testing vision transcription
+  itself (which needs a real scanned image and is currently out of this corpus's scope
+  by design — see the #205 design comment for why).
+- **Searching `messages`/`attachments` by category + subject/from_addr `ILIKE` finds
+  REAL production examples for a corpus fast, but not every named incident class has
+  a matching row in the current retention window** (#205). Of the 8 DL incident
+  classes named in #205, 3 (Lunys announced-vs-attached, Jackulík 2-PDF-in-one-mail,
+  MPC P-prefix docNumber) turned up real matches within seconds of `category='
+  dodacie_listy' AND (subject ILIKE ... OR from_addr ILIKE ...)`; 5 others (LESAFFRE,
+  thousands-separator, Dalamanka/Dalmátska as a genuine near-miss PAIR, TLS/Forbak,
+  EKVIA) had zero hits even after widening the search to `combined_text ILIKE` with no
+  category filter. Don't burn excessive time chasing a real example for every named
+  class — a reasonable, TIME-BOUNDED search, then a clearly-labelled SYNTHETIC fixture
+  for the rest (documented as such in the case's own `why`/`source` fields, never
+  disguised as real) is the correct call, matching this file's own "assert only what
+  you can prove" principle — a synthetic case you fully control is MORE provable than
+  a real one you can't fully verify, not less.
+- **`dl_worker._process_message`'s per-call swallow-to-review behavior means an
+  `llm.CacheMiss` NEVER escapes as an exception, but a genuine TRANSIENT failure
+  (`dl_worker._RetryLater`, raised by `_check_retry` when the error text matches
+  `TRANSIENT_RE` AND `attempts < 3`) DOES** (#205, review-caught before merge). Every
+  LLM call inside `_process_document`/`dl_extract.extract_email` already runs behind
+  its own try/except that turns a failure into a `"review"` document outcome — this
+  swallows an offline cache-miss (its message text never matches the transient regex)
+  but NOT a real `--live` timeout/rate-limit, whose text DOES match. A harness/caller
+  built around `dl_worker._process_message` (or `tick()`) must catch `_RetryLater`
+  explicitly if it needs to survive a transient failure without crashing — don't
+  assume "the worker swallows everything" just because CacheMiss happens to.
+- **Scoring documents matched by a shared key (like DL's `doc_number`) by ENCOUNTER
+  ORDER is a real bug, not a simplification, the moment duplicates are a genuinely
+  supported case** (#205, review-caught: `app/orders/dl_evaluate.py`'s `score()`).
+  W4 (this project's own DL spec) explicitly allows two expected documents to share
+  one `doc_number` — a naive "first available actual with this key" match then pairs
+  wrongly whenever the actual engine emits them in a different order than the
+  expected list, producing spurious failures for an objectively correct result. Fix:
+  group both sides by the shared key, then search every INJECTIVE assignment within
+  each group (`itertools.combinations` × `itertools.permutations`, trivial at the
+  group sizes real duplicates ever reach) and keep the one with the fewest total
+  problems, rather than a single greedy pass. Any FUTURE eval harness scoring items
+  matched by a non-unique key should default to this same best-fit shape, not a
+  greedy index walk — a single passing test with items already in matching order will
+  not catch the order-dependence; test the REORDERED case explicitly.

@@ -143,3 +143,125 @@ def test_already_sent_never_writes_anything(pg):
 def test_already_sent_refuses_empty_identity(pg):
     assert desadv.already_sent(pg, "", "0100000203") is False
     assert desadv.already_sent(pg, "203", "") is False
+
+
+# --- message_id / claimed_by (#216): tell a self-retry apart from a real duplicate --
+
+def test_claim_send_records_which_message_made_the_claim(pg):
+    desadv.claim_send(pg, "210", "0100000210", "f1.txt", message_id="msg-a")
+    row = pg.execute(
+        "SELECT message_id FROM desadv_sent WHERE supplier_ean = '210'").fetchone()
+    assert row[0] == "msg-a"
+
+
+def test_claim_send_with_no_message_id_leaves_it_null(pg):
+    """Backward compatible: an existing caller that never passes message_id (or any
+    future one) behaves exactly as before this column existed."""
+    desadv.claim_send(pg, "211", "0100000211", "f1.txt")
+    row = pg.execute(
+        "SELECT message_id FROM desadv_sent WHERE supplier_ean = '211'").fetchone()
+    assert row[0] is None
+
+
+def test_claimed_by_returns_the_current_claimant(pg):
+    desadv.claim_send(pg, "212", "0100000212", "f1.txt", message_id="msg-b")
+    assert desadv.claimed_by(pg, "212", "0100000212") == "msg-b"
+
+
+def test_claimed_by_returns_empty_for_no_row_at_all(pg):
+    assert desadv.claimed_by(pg, "213", "0100000213") == ""
+
+
+def test_claimed_by_returns_empty_for_a_legacy_row_with_no_message_id(pg):
+    """A row that predates #216 (or was written by a caller that never passed
+    message_id) must read back as "" — never confused with a real message_id, so it
+    is always (safely) treated as an unknown/genuine duplicate, never a self-retry."""
+    desadv.claim_send(pg, "214", "0100000214", "f1.txt")
+    assert desadv.claimed_by(pg, "214", "0100000214") == ""
+
+
+def test_claimed_by_refuses_empty_identity(pg):
+    assert desadv.claimed_by(pg, "", "0100000215") == ""
+    assert desadv.claimed_by(pg, "215", "") == ""
+
+
+def test_reclaiming_a_stale_claim_updates_the_message_id_to_the_new_claimant(pg):
+    """A stale, never-confirmed claim can be genuinely reclaimed by a DIFFERENT
+    message — the recorded claimant must track whoever holds it NOW, not whoever
+    claimed it first."""
+    desadv.claim_send(pg, "216", "0100000216", "f1.txt", message_id="msg-old")
+    pg.execute("UPDATE desadv_sent SET sent_at = now() - interval '11 minutes' "
+              "WHERE supplier_ean = '216'")
+    assert desadv.claim_send(pg, "216", "0100000216", "f2.txt",
+                             message_id="msg-new") is True
+    assert desadv.claimed_by(pg, "216", "0100000216") == "msg-new"
+
+
+# --- claim_send_or_identify (#216, review finding: an atomic combination closes the
+# TOCTOU gap a separate claim_send()+claimed_by() pair would otherwise leave) --------
+
+def test_claim_send_or_identify_claims_a_fresh_document(pg):
+    claimed, holder = desadv.claim_send_or_identify(pg, "220", "0100000220", "f1.txt",
+                                                     message_id="msg-a")
+    assert claimed is True
+    assert holder == ""
+    row = pg.execute(
+        "SELECT message_id FROM desadv_sent WHERE supplier_ean = '220'").fetchone()
+    assert row[0] == "msg-a"
+
+
+def test_claim_send_or_identify_reports_the_same_message_as_the_current_holder(pg):
+    """The exact #216 scenario: THIS message already shipped the document earlier —
+    the refusal must come back tagged with the SAME message_id so the caller can
+    recognise its own prior claim."""
+    desadv.claim_send(pg, "221", "0100000221", "f1.txt", message_id="msg-b")
+    desadv.confirm_sent(pg, "221", "0100000221")
+    claimed, holder = desadv.claim_send_or_identify(pg, "221", "0100000221", "f2.txt",
+                                                     message_id="msg-b")
+    assert claimed is False
+    assert holder == "msg-b"
+
+
+def test_claim_send_or_identify_reports_a_different_message_as_the_current_holder(pg):
+    """A genuine cross-message duplicate: a DIFFERENT message already shipped it."""
+    desadv.claim_send(pg, "222", "0100000222", "f1.txt", message_id="msg-old")
+    desadv.confirm_sent(pg, "222", "0100000222")
+    claimed, holder = desadv.claim_send_or_identify(pg, "222", "0100000222", "f2.txt",
+                                                     message_id="msg-new")
+    assert claimed is False
+    assert holder == "msg-old"
+
+
+def test_claim_send_or_identify_reports_empty_holder_for_a_legacy_row(pg):
+    desadv.claim_send(pg, "223", "0100000223", "f1.txt")   # no message_id
+    desadv.confirm_sent(pg, "223", "0100000223")
+    claimed, holder = desadv.claim_send_or_identify(pg, "223", "0100000223", "f2.txt",
+                                                     message_id="msg-new")
+    assert claimed is False
+    assert holder == ""
+
+
+def test_claim_send_or_identify_refuses_empty_identity(pg):
+    claimed, holder = desadv.claim_send_or_identify(pg, "", "0100000224", "f1.txt")
+    assert (claimed, holder) == (False, "")
+    assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0
+
+
+def test_claim_send_or_identify_reclaims_a_stale_claim_and_updates_the_holder(pg):
+    desadv.claim_send(pg, "225", "0100000225", "f1.txt", message_id="msg-old")
+    pg.execute("UPDATE desadv_sent SET sent_at = now() - interval '11 minutes' "
+              "WHERE supplier_ean = '225'")
+    claimed, holder = desadv.claim_send_or_identify(pg, "225", "0100000225", "f2.txt",
+                                                     message_id="msg-new")
+    assert claimed is True
+    assert holder == ""
+    assert desadv.claimed_by(pg, "225", "0100000225") == "msg-new"
+
+
+def test_claim_send_or_identify_never_double_inserts(pg):
+    """Same invariant as claim_send's own dedup test — the atomic combined path must
+    not accidentally create two rows for the same identity."""
+    desadv.claim_send_or_identify(pg, "226", "0100000226", "f1.txt", message_id="a")
+    desadv.claim_send_or_identify(pg, "226", "0100000226", "f2.txt", message_id="b")
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE supplier_ean = '226'").fetchone()[0] == 1
