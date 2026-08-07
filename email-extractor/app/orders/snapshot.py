@@ -107,8 +107,8 @@ def _content_hash(catalog: list[dict], customers: list[dict]) -> str:
 
 def _freeze(conn, catalog: list[dict], customers: list[dict]) -> int:
     """Content-address and persist one (catalog, customers) pair. Identical content
-    reuses the existing snapshot, so a periodic re-freeze (hourly sheet refresh, or an
-    override edit's immediate `rebuild_from_overrides`) never churns ids while nothing
+    reuses the existing snapshot, so re-freezing (an override edit's immediate
+    `rebuild_from_overrides`, or a corpus re-import) never churns ids while nothing
     actually changed."""
     digest = _content_hash(catalog, customers)
     row = conn.execute(
@@ -150,7 +150,7 @@ def import_snapshot(conn, catalog_csv: str, customer_csv: str) -> int:
     # reject every order, so it is refused and the previous snapshot stays current.
     if not catalog or not customers:
         raise SnapshotRefused(
-            f"sheet fetch looks empty (catalog={len(catalog)}, customers={len(customers)}) "
+            f"import looks empty (catalog={len(catalog)}, customers={len(customers)}) "
             "— keeping the previous snapshot")
     catalog = _apply_catalog_overrides(conn, catalog)
     customers = _apply_customer_overrides(conn, customers)
@@ -160,10 +160,10 @@ def import_snapshot(conn, catalog_csv: str, customer_csv: str) -> int:
 def rebuild_from_overrides(conn) -> int | None:
     """Re-freeze a new snapshot from the current latest snapshot plus whatever catalog/
     customer overrides exist right now (#127/#128) — used right after a /znalosti edit
-    so the change is visible immediately, without waiting for the hourly sheet refresh
-    and without a network call. Idempotent: re-merging already-merged content just
-    re-applies the same overrides, which is a no-op when nothing changed. Returns None
-    when there is no snapshot yet to rebuild from."""
+    so the change is visible immediately, with no network call and nothing else to wait
+    for (#129: there is no periodic refresh anymore either). Idempotent: re-merging
+    already-merged content just re-applies the same overrides, which is a no-op when
+    nothing changed. Returns None when there is no snapshot yet to rebuild from."""
     sid = latest_snapshot_id(conn)
     if sid is None:
         return None

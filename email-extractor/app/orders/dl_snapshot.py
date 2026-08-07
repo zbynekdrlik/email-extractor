@@ -208,7 +208,7 @@ def import_snapshot(conn, dl_catalog_csv: str, objednavky_catalog_csv: str,
     suppliers = parse_suppliers(supplier_csv)
     if not catalog or not suppliers:
         raise SnapshotRefused(
-            f"DL sheet fetch looks empty (catalog={len(catalog)}, suppliers={len(suppliers)}) "
+            f"DL import looks empty (catalog={len(catalog)}, suppliers={len(suppliers)}) "
             "— keeping the previous snapshot")
     return _freeze(conn, catalog, suppliers)
 

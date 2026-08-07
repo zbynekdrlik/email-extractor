@@ -752,10 +752,11 @@ def create_app(cfg) -> Flask:
         return jsonify(ok=True) if ok else (jsonify(error="nenájdené"), 404)
 
     # ---- /znalosti (#127/#128): direct add/edit/retire of the product cards and
-    # customers themselves, layered as overrides ON TOP of the (still-live, until #129)
-    # sheet read — an override always wins, and is versioned exactly like the sheet
-    # already is (snapshot.rebuild_from_overrides freezes a new snapshot immediately, so
-    # the change is visible on this same page without waiting for the hourly refresh). ----
+    # customers themselves, layered as overrides ON TOP of the frozen base snapshot —
+    # an override always wins, and is versioned the same way
+    # (snapshot.rebuild_from_overrides freezes a new snapshot immediately, so the
+    # change is visible on this same page right away — no network call, no periodic
+    # refresh to wait for; the sheet itself is never read at all since #129). ----
 
     @app.get("/api/znalosti/products")
     def api_znalosti_products():
