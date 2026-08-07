@@ -236,6 +236,16 @@ def test_missing_prices_leave_the_quantity_untouched():
     assert "_qtyOcr" not in got
 
 
+def test_a_non_numeric_price_never_raises_it_just_skips_correction():
+    """Defensive: the JSON schema enforces number types on a real model answer, but a
+    hand-built/malformed document must never crash validation over one bad value."""
+    item = {"name": "X", "quantity": 5, "unit": "ks", "unitPrice": "not-a-number",
+            "totalPrice": 45.60}
+    got = dl_extract.self_correct_quantity(item)
+    assert got["quantity"] == 5
+    assert "_qtyOcr" not in got
+
+
 # --- 7) money gate (R51) ---------------------------------------------------
 
 def test_money_gate_passes_when_lines_sum_to_the_document_total():
