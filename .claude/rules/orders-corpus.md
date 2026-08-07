@@ -1042,3 +1042,46 @@ intentional there for cards it was tuned against.
   and this file's own existing warning with zero remaining ambiguity: **never dispatch
   `fork` for a passive wait/status-check, however narrowly scoped the prompt** — use a
   foreground bounded poll loop instead, every single time.
+- **Adding a NEW `teach.KINDS` entry that should be reachable through the GENERIC dispatch
+  (like `mail`/`date`/`line`/`dl_item`/`dl_supplier` — not item/customer's own bespoke
+  literal-body path) needs FOUR things, not just the registry entry itself (#202, DL
+  migration F3).** Missing any one of these leaves the kind "correct but dead" — present in
+  `teach.KINDS`, unit-testable directly, but broken or invisible through the real HTTP/JS
+  path:
+  1. **Store candidates in `{value, label}` shape, not the caller's natural shape.**
+     `app.httpapi.api_orders_questions()` returns `teach.open_questions()`'s RAW stored rows
+     straight to the browser — NO kind's own `.present()` is ever called in the live path
+     (verified by grepping `httpapi.py` for `.present(`: zero hits; `.present()` is a
+     correct-but-unused reference, same "not the live shape" caveat `_apply_item`'s own
+     docstring already states for item/customer). The shared `genericQuestionCard`/
+     `loadAsk()` JS reads `candidates[].value`/`.label` directly off that raw JSON. A new
+     `ask_<kind>()` function that stores its NATURAL candidate shape (e.g. `{"gtin":...,
+     "name":...}`) instead of translating it to `{value, label}` FIRST produces a card whose
+     buttons render but whose `answerGeneric(qid, opt.value)` click sends `undefined` —
+     Playwright's `page.click('button:has-text(...)')` then times out with no server-side
+     error at all, because the button text itself still came from `opt.label||opt.value`
+     (which silently falls back to the correct-looking name even when `.value` is missing).
+     Translate INSIDE `ask_<kind>()` so the caller keeps using the natural shape it already
+     has on hand (mirrors `dl_match.candidates()`'s own output) and never has to know the
+     storage contract.
+  2. **Add the kind name to `api_orders_answer()`'s dispatch tuple** (`httpapi.py`, the
+     `if q0.get("kind") in (...)` check) — this ONE tuple is a manual allow-list, unlike undo
+     (see #3 below). A kind left out of it silently falls through to the item-only bespoke
+     `gtin`/`card` body path, which expects fields the new kind's body never sends.
+  3. **`api_orders_undo()` is now GENERIC for every kind** (`kind = teach.KINDS.get(q0.get
+     ("kind", "item")); q = kind.undo(c, q0) if kind else teach.undo(c, qid)` — fixed in
+     #202's own review pass, previously only `mail` got its own registered undo and every
+     OTHER kind silently fell back to a bare `teach.undo()` that only touches
+     `item_memory`/`customer_overrides`, never a new kind's own table). A brand-new kind
+     with real teaching state (its own table, like `dl_item_memory`/`dl_supplier_memory`)
+     now gets correct undo behaviour automatically as long as its OWN `undo` function in the
+     registry does the real cleanup — nothing further to wire here, just don't forget step
+     2's dispatch tuple, which undo does NOT share (undo has no tuple to extend).
+  4. **BOTH duplicated JS question-card blocks need the SAME edit** — `DASH_HTML`'s
+     `loadAsk()` (the admin `/` dashboard's inline questions widget) and `ASK_HTML`'s
+     `genericQuestionCard`/`GENERIC_TITLE` (the no-login `/otazky` page reached via
+     `/sklad/<key>`) are two SEPARATE copies of the same rendering logic in `httpapi.py`,
+     not shared code — a kind added to one and not the other renders correctly on `/otazky`
+     but falls through to the wrong (item-shaped) branch on the admin dashboard, or vice
+     versa. Grep both `q.kind===` branching conditions AND the `GENERIC_TITLE=`/`titles=`
+     map literals — there are two of each, ~130 lines apart in the same file.
