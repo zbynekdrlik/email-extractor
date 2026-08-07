@@ -259,6 +259,8 @@ def self_correct_quantity(item: dict) -> dict:
     out = dict(item)
     out["_qtyOcr"] = read_qty
     out["quantity"] = derived
+    log.info("DL item %r: quantity self-corrected %s -> %s (unitPrice=%s totalPrice=%s)",
+              item.get("name", ""), read_qty, derived, unit_price, total_price)
     return out
 
 
@@ -279,22 +281,40 @@ def money_gate(document: dict) -> str | None:
 
 
 def validate_document(document: dict) -> dict:
-    """R50-R52 applied to one document: quantity self-correction on every item, then the
-    zero-items and money-gate review gates. Never raises — a breach is reported on the
-    document (`status`/`reviewReason`), never thrown away."""
+    """R50-R52 applied to one document: quantity self-correction on every item, then a
+    missing/unparseable delivery date, the zero-items gate, and the money gate — in that
+    order. Never raises — a breach is reported on the document (`status`/`reviewReason`),
+    never thrown away.
+
+    The missing-date check (deep-review finding, #201) exists because
+    `normalize_delivery_date` deliberately returns `None`/`""` for anything it cannot
+    parse rather than guessing — a document that reaches here with a blank date is
+    functionally the same downstream symptom W12 was fixed to prevent (a delivery note
+    with no usable date), just via a different root cause (an unreadable OCR date instead
+    of an ISO-format bug), so it gets the same review treatment as the other two gates.
+    """
     doc = dict(document)
+    doc_number = doc.get("docNumber") or "?"
     doc["items"] = [self_correct_quantity(i) for i in (document.get("items") or [])]
+    if not (doc.get("deliveryDate") or "").strip():
+        doc["status"] = "needsReview"
+        doc["reviewReason"] = "Dátum dodania sa nepodarilo rozpoznať alebo v dokumente chýba"
+        log.warning("DL document %s: missing/unparseable delivery date -> review", doc_number)
+        return doc
     if not doc["items"]:
         doc["status"] = "needsReview"
         doc["reviewReason"] = "Dokument neobsahuje žiadne položky"
+        log.warning("DL document %s: zero items -> review", doc_number)
         return doc
     reason = money_gate(doc)
     if reason:
         doc["status"] = "needsReview"
         doc["reviewReason"] = reason
+        log.warning("DL document %s: money gate breach -> review: %s", doc_number, reason)
         return doc
     doc["status"] = "valid"
     doc["reviewReason"] = ""
+    log.info("DL document %s: valid, %d item(s)", doc_number, len(doc["items"]))
     return doc
 
 
@@ -326,17 +346,21 @@ def extract_attachment(client, pdf_bytes: bytes, machine_text: str = "") -> dict
     jpegs = extract_embedded_jpegs(pdf_bytes)
     scanned = is_scanned(jpegs)
     machine_text = machine_text or ""
+    log.info("DL attachment: %d embedded JPEG(s), scanned=%s", len(jpegs), scanned)
 
     vision_used = False
     vision_primary: str | None = None
     vision_secondary: str | None = None
     if scanned:
+        log.info("DL attachment: scanned -> vision transcribing %d page(s)", len(jpegs))
         transcripts = client.vision_call(vision_prompt(), images=jpegs)
         vision_used = True
     elif not machine_text.strip():
+        log.info("DL attachment: digital PDF with no extracted text -> vision fallback")
         transcripts = client.vision_call(vision_prompt(), pdf_bytes=pdf_bytes)
         vision_used = True
     else:
+        log.info("DL attachment: digital PDF with real extracted text -> vision skipped (W13)")
         transcripts = []
     if transcripts:
         vision_primary = transcripts[0] if len(transcripts) > 0 else None
@@ -360,6 +384,12 @@ def extract_email(client, attachments: list[dict]) -> dict:
     which attachment it came from, so a later phase can still act per-attachment (one
     attachment's needsReview must not block another's upload).
 
+    A single attachment failing (a genuinely empty/corrupt file, or a transient vision/
+    extraction API failure) is caught HERE and recorded on that attachment's own entry
+    (`"error"`) rather than propagating — it must never abort the OTHER attachments of the
+    same mail (deep-review finding, #201). A caller that needs to know whether a specific
+    attachment failed reads `attachments[i]["error"]` (`None` on success).
+
     `attachments`: list of `{"idx", "filename", "pdf_bytes", "machine_text"}`.
     """
     documents: list[dict] = []
@@ -367,11 +397,19 @@ def extract_email(client, attachments: list[dict]) -> dict:
     for i, att in enumerate(attachments):
         idx = att.get("idx", i)
         filename = att.get("filename", "")
-        result = extract_attachment(client, att.get("pdf_bytes") or b"",
-                                    att.get("machine_text") or "")
+        try:
+            result = extract_attachment(client, att.get("pdf_bytes") or b"",
+                                        att.get("machine_text") or "")
+        except Exception as e:
+            log.exception("DL attachment idx=%s filename=%r failed to extract — "
+                          "continuing with the rest of this mail's attachments", idx, filename)
+            per_attachment.append({"idx": idx, "filename": filename, "scanned": None,
+                                   "vision_used": None, "error": str(e)})
+            continue
         for doc in result["documents"]:
             documents.append(dict(doc, source_attachment_idx=idx,
                                   source_attachment_filename=filename))
         per_attachment.append({"idx": idx, "filename": filename,
-                               "scanned": result["scanned"], "vision_used": result["vision_used"]})
+                               "scanned": result["scanned"], "vision_used": result["vision_used"],
+                               "error": None})
     return {"documents": documents, "attachments": per_attachment}
