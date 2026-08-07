@@ -301,13 +301,33 @@ def _match_item(client, item: dict, catalog: list[dict], recalled,
                                 partner_name=partner_name)
 
 
-# --- Odoo helpers (R97: a posting failure never blocks Mark Processed) -----
+# --- Odoo + event-log helpers -----------------------------------------------
+#
+# Deep-review findings on #204's own PR: (1) EVERY email_events write in this module
+# must be gated on `not shadow` — shadow's whole guarantee is that nothing observable
+# leaves the process, and `email_events` is observable even with `rollup=False` (it
+# still appears on the message's own admin timeline); the two `rollup=True` writes are
+# actively destructive (the DB trigger overwrites `messages.proc_status/proc_outcome`
+# — a shadow tick was reproduced silently corrupting the dashboard state of a message
+# n8n had ALREADY finished, mirroring `.claude/rules/n8n-workflow-edits.md` §3's own
+# "a skip/duplicate branch must never chain into the success logger" incident, just via
+# a different mechanism). (2) R97's "a posting failure never blocks Mark Processed"
+# must also cover a BUILDER exception (`dl_report.build_*`), not only the network post
+# — `_post` now takes a zero-arg callable so the HTML is built INSIDE the same
+# try/except, never evaluated as a bare argument before the guard runs.
 
-def _post(cfg, shadow: bool, html: str, post=None) -> None:
+def _event(conn, shadow: bool, message_id: str, **kwargs) -> None:
+    if shadow:
+        return
+    report.log_event(conn, message_id, **kwargs)
+
+
+def _post(cfg, shadow: bool, build, post=None) -> None:
     if shadow:
         return
     post = post or dl_report.post   # dl_report.post already never raises
     try:
+        html = build()
         post(cfg, html)
     except Exception:
         log.exception("posting a DL Odoo message failed")
@@ -334,12 +354,12 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
 
     if doc.get("status") == "needsReview":
         reason = doc.get("reviewReason") or "Dokument potrebuje kontrolu"
-        _post(cfg, shadow, dl_report.build_review(
+        _post(cfg, shadow, lambda: dl_report.build_review(
             reason, doc.get("supplierName", ""), doc_number, delivery_date, from_addr,
             subject), post=post)
-        report.log_event(conn, message["message_id"], stage="review", status="review",
-                         outcome=reason, detail={"doc_number": doc_number}, rollup=False,
-                         workflow=dl_report.WORKFLOW)
+        _event(conn, shadow, message["message_id"], stage="review", status="review",
+              outcome=reason, detail={"doc_number": doc_number}, rollup=False,
+              workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": doc_number,
                "supplier_name": doc.get("supplierName", ""), "reason": reason}
 
@@ -348,11 +368,11 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     except Exception as e:
         _check_retry(message.get("attempts", 0), str(e))
         reason = f"Zlyhalo párovanie dodávateľa: {e}"
-        _post(cfg, shadow, dl_report.build_review(reason, "", doc_number, delivery_date,
-                                                   from_addr, subject), post=post)
-        report.log_event(conn, message["message_id"], stage="review", status="error",
-                         outcome=reason, detail={"doc_number": doc_number}, rollup=False,
-                         workflow=dl_report.WORKFLOW)
+        _post(cfg, shadow, lambda: dl_report.build_review(
+            reason, "", doc_number, delivery_date, from_addr, subject), post=post)
+        _event(conn, shadow, message["message_id"], stage="review", status="error",
+              outcome=reason, detail={"doc_number": doc_number}, rollup=False,
+              workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": doc_number, "supplier_name": "",
                "reason": reason}
 
@@ -364,12 +384,12 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             teach.ask_dl_supplier(conn, message["message_id"],
                                   doc.get("supplierEmail") or from_addr, cands,
                                   delivery_date=delivery_date)
-        _post(cfg, shadow, dl_report.build_review(
+        _post(cfg, shadow, lambda: dl_report.build_review(
             supplier_decision.note, "", doc_number, delivery_date, from_addr, subject),
             post=post)
-        report.log_event(conn, message["message_id"], stage="review", status="review",
-                         outcome=supplier_decision.note, detail={"doc_number": doc_number},
-                         rollup=False, workflow=dl_report.WORKFLOW)
+        _event(conn, shadow, message["message_id"], stage="review", status="review",
+              outcome=supplier_decision.note, detail={"doc_number": doc_number},
+              rollup=False, workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": doc_number, "supplier_name": "",
                "reason": supplier_decision.note}
 
@@ -399,7 +419,16 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             "unit": item.get("unit"), "gtin": decision.gtin, "card": decision.card,
             "confidence": decision.confidence, "rule": decision.rule,
             "trace": decision.trace})
-        if decision.rule == "unmatched" and not shadow:
+        # Deep-review finding on #204's own PR: gate on `not decision.gtin` — the item
+        # is genuinely EXCLUDED from the EDI whenever `desadv_edi._is_unmatched(gtin)`
+        # would fire (i.e. `gtin` is falsy), which is EVERY rule that ends up here with
+        # no card (`unmatched`, the R75 lexical-gap tripwire `llm_sure_lexical_gap`,
+        # and this function's own `match_failed` fallback) — not only the literal
+        # string `"unmatched"`. Keying on the rule NAME instead of the actual EDI
+        # exclusion left those other two rules silently invisible: no nástenka
+        # question, no line in the Odoo message, nothing — exactly the loss class
+        # this migration exists to remove.
+        if not decision.gtin and not shadow:
             cands = dl_match.candidates(item.get("name", ""), catalog,
                                         memory_gtin=(recalled.gtin if recalled else ""))
             teach.ask_dl_item(conn, message["message_id"], supplier_decision.ean_edi,
@@ -413,13 +442,12 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     built = desadv_edi.build(header, extraction, matched_items, catalog)
 
     if not built.can_create:
-        _post(cfg, shadow, dl_report.build_review(
+        _post(cfg, shadow, lambda: dl_report.build_review(
             built.reject_reason, supplier_decision.name, built.doc_number, delivery_date,
             from_addr, subject), post=post)
-        report.log_event(conn, message["message_id"], stage="review", status="review",
-                         outcome=built.reject_reason,
-                         detail={"doc_number": built.doc_number}, rollup=False,
-                         workflow=dl_report.WORKFLOW)
+        _event(conn, shadow, message["message_id"], stage="review", status="review",
+              outcome=built.reject_reason, detail={"doc_number": built.doc_number},
+              rollup=False, workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": built.doc_number,
                "supplier_name": supplier_decision.name, "reason": built.reject_reason}
 
@@ -450,13 +478,19 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         log.exception("DL upload of %s failed", built.filename)
         note = ("Odoslanie dodacieho listu do ORIONu zlyhalo — skús znova alebo "
                "nahlás administrátorovi")
-        _post(cfg, shadow, dl_report.build_review(
-            f"{note} ({built.filename}): {e}", supplier_decision.name, built.doc_number,
-            delivery_date, from_addr, subject), post=post)
-        report.log_event(conn, message["message_id"], stage="review", status="error",
-                         outcome=note,
-                         detail={"error": repr(e), "filename": built.filename},
-                         rollup=False, workflow=dl_report.WORKFLOW)
+        # `e` is captured into a plain string BEFORE the lambda, never referenced
+        # inside it — `except ... as e` implicitly deletes `e` at the end of this
+        # block, which would otherwise make a closure over it fragile (it happens to
+        # run early enough today, but `_post`'s own try/except would silently
+        # swallow a future NameError here and degrade the alert to a bare generic
+        # message — the exact silent-loss failure mode fix #5 exists to prevent).
+        detail_text = f"{note} ({built.filename}): {e}"
+        _post(cfg, shadow, lambda: dl_report.build_review(
+            detail_text, supplier_decision.name, built.doc_number, delivery_date,
+            from_addr, subject), post=post)
+        _event(conn, shadow, message["message_id"], stage="review", status="error",
+              outcome=note, detail={"error": repr(e), "filename": built.filename},
+              rollup=False, workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": built.doc_number,
                "supplier_name": supplier_decision.name, "reason": note}
 
@@ -482,20 +516,22 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             elif decision.rule == "weight_override":
                 history_notes.append(f"{decision.item_name} -> {decision.card} "
                                      f"({decision.note})")
-        elif decision.rule == "unmatched":
+        elif not decision.gtin:
+            # Same fix as the nástenka gate above: any decision with no real gtin was
+            # excluded from the EDI, regardless of which rule produced it.
             unmatched_notes.append(f"{decision.item_name} ({decision.note})")
 
     outcome = "partial" if built.partial else "ok"
-    html = dl_report.build_success(
+    _post(cfg, shadow, lambda: dl_report.build_success(
         supplier_decision.name, built.doc_number, delivery_date, from_addr, subject,
         shipped, unmatched_items=unmatched_notes, borderline_notes=borderline_notes,
         history_notes=history_notes, price_substitutions=built.price_substitutions,
-        filename=built.filename, partial=built.partial, link=report.sklad_link(cfg))
-    _post(cfg, shadow, html, post=post)
-    report.log_event(conn, message["message_id"], stage="uploaded_orion", status="ok",
-                     outcome=f"EDI vytvorené: {built.filename}",
-                     detail={"doc_number": built.doc_number, "edi_file": built.filename},
-                     rollup=False, workflow=dl_report.WORKFLOW)
+        filename=built.filename, partial=built.partial, link=report.sklad_link(cfg)),
+        post=post)
+    _event(conn, shadow, message["message_id"], stage="uploaded_orion", status="ok",
+          outcome=f"EDI vytvorené: {built.filename}",
+          detail={"doc_number": built.doc_number, "edi_file": built.filename},
+          rollup=False, workflow=dl_report.WORKFLOW)
     return {"outcome": outcome, "doc_number": built.doc_number,
            "supplier_name": supplier_decision.name, "filename": built.filename,
            "line_count": built.line_count,
@@ -510,6 +546,12 @@ def _aggregate_status(documents_out: list[dict]) -> str:
     if not documents_out:
         return "review"
     outcomes = [d.get("outcome") for d in documents_out]
+    if all(o == "duplicate" for o in outcomes):
+        # Deep-review finding, #204: a message whose documents are ALL duplicates
+        # (typically THIS message being reclaimed/retried after already shipping —
+        # see the retry/idempotency note above) is not a clean "ok" — nothing was
+        # actually sent this run.
+        return "duplicate"
     if all(o in ("review", "duplicate") for o in outcomes) and "review" in outcomes:
         return "review"
     if any(o == "partial" for o in outcomes) or ("review" in outcomes and
@@ -541,11 +583,11 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     if not attachments:
         # R15: no attachment (or nothing PDF/image-shaped) is NOT an error.
         reason = "Email bez prílohy — pravdepodobne bežná správa"
-        _post(cfg, shadow, dl_report.build_review(
+        _post(cfg, shadow, lambda: dl_report.build_review(
             reason, from_addr=message.get("from_addr", ""),
             subject=message.get("subject", "")), post=post)
-        report.log_event(conn, message["message_id"], stage="review", status="review",
-                         outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
+        _event(conn, shadow, message["message_id"], stage="review", status="review",
+              outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
         return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
                "documents": [{"outcome": "review", "reason": reason}], "items": []}
 
@@ -560,12 +602,12 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
             _check_retry(message.get("attempts", 0), att["error"])
             reason = (f"Príloha {att.get('filename') or att.get('idx')} sa nepodarilo "
                       f"spracovať: {att['error']}")
-            _post(cfg, shadow, dl_report.build_review(
+            _post(cfg, shadow, lambda reason=reason: dl_report.build_review(
                 reason, from_addr=message.get("from_addr", ""),
                 subject=message.get("subject", "")), post=post)
-            report.log_event(conn, message["message_id"], stage="review", status="error",
-                             outcome=reason, detail={"idx": att.get("idx")}, rollup=False,
-                             workflow=dl_report.WORKFLOW)
+            _event(conn, shadow, message["message_id"], stage="review", status="error",
+                  outcome=reason, detail={"idx": att.get("idx")}, rollup=False,
+                  workflow=dl_report.WORKFLOW)
             documents_out.append({"outcome": "review", "reason": reason,
                                   "attachment_idx": att.get("idx")})
 
@@ -577,21 +619,23 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
 
     if not documents_out:
         reason = "Nepodarilo sa rozpoznať žiadny dodací list v prílohách"
-        _post(cfg, shadow, dl_report.build_review(
+        _post(cfg, shadow, lambda: dl_report.build_review(
             reason, from_addr=message.get("from_addr", ""),
             subject=message.get("subject", "")), post=post)
-        report.log_event(conn, message["message_id"], stage="review", status="review",
-                         outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
+        _event(conn, shadow, message["message_id"], stage="review", status="review",
+              outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
         documents_out.append({"outcome": "review", "reason": reason})
 
-    # spec §4: announced-vs-attached.
+    # spec §4: announced-vs-attached. Shadow guarantees nothing observable leaves the
+    # process, so neither the event log nor the Odoo post fire while shadowing (deep-
+    # review finding, #204 — the mismatch count must not be inflated by shadow runs).
     announced = _subject_doc_numbers(message.get("subject", ""))
     missing = [a for a in announced if a not in extracted_doc_numbers]
-    if missing:
+    if missing and not shadow:
         dl_report.log_announced_mismatch(conn, message["message_id"],
                                          message.get("subject", ""), missing,
                                          extracted_doc_numbers)
-        _post(cfg, shadow, dl_report.build_announced_mismatch(
+        _post(cfg, shadow, lambda: dl_report.build_announced_mismatch(
             message.get("subject", ""), message.get("from_addr", ""), missing,
             extracted_doc_numbers), post=post)
 
@@ -647,7 +691,14 @@ def tick(conn, cfg, client=None, upload=None, post=None) -> int:
             return 0
         except Exception as e:
             log.exception("DL pipeline failed for %s", message["message_id"])
-            worker._finish_run(conn, run_id, "error", None, error=repr(e))
+            # Deep-review finding, #204: `result=None` leaves `result->>'kind'` NULL,
+            # which `reliability.provenance_stats_for_day`'s own `IS DISTINCT FROM
+            # 'dl'` exclusion treats as an ORDERS run (NULL is distinct from 'dl') —
+            # exactly the rows the DL/orders split exists to keep apart end up
+            # miscounted on the busiest signal (a hard failure). Always tag `kind`.
+            worker._finish_run(conn, run_id, "error",
+                               {"kind": "dl", "dl_snapshot_id": snapshot_id},
+                               error=repr(e))
             conn.execute(
                 "UPDATE messages SET processing_at = NULL WHERE message_id = %s",
                 (message["message_id"],))
@@ -673,9 +724,21 @@ def tick(conn, cfg, client=None, upload=None, post=None) -> int:
     try:
         result = _process_message(conn, cfg, client, message, snapshot_id, catalog,
                                   suppliers, shadow=True, upload=upload, post=post)
+    except _RetryLater as e:
+        # Deep-review finding, #204: a shadow peek is not a claim — there is nothing
+        # to "retry", but a routine transient LLM hiccup is not an ERROR either; log
+        # it at info (not a full traceback) so it doesn't read as a genuine failure.
+        log.info("DL shadow pipeline hit a transient failure for %s (no observable "
+                 "effect — shadow claims/marks/writes nothing): %s",
+                 message["message_id"], e)
+        worker._finish_run(conn, run_id, "error",
+                           {"kind": "dl", "dl_snapshot_id": snapshot_id, "reason": str(e)},
+                           error=str(e))
+        return 0
     except Exception as e:
         log.exception("DL shadow pipeline failed for %s", message["message_id"])
-        worker._finish_run(conn, run_id, "error", None, error=repr(e))
+        worker._finish_run(conn, run_id, "error",
+                           {"kind": "dl", "dl_snapshot_id": snapshot_id}, error=repr(e))
         return 0
     worker._finish_run(conn, run_id, result.get("status", "ok"), result)
     return 1

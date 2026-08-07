@@ -441,3 +441,105 @@ def test_refresh_due_returns_the_existing_snapshot_when_configured_but_fresh(pg)
     cfg = _cfg(catalog_sheet_id="doc", dl_catalog_gid="1", catalog_gid="2",
               customer_gid="3")
     assert dl_worker.refresh_due(pg, cfg) == sid
+
+
+# --- deep-review regression tests (#204's own PR review) ---------------------
+
+def test_shadow_never_writes_email_events_not_even_non_rollup_ones(pg, tmp_path):
+    """Deep-review finding: shadow's 'marks/writes nothing' guarantee must cover
+    EVERY email_events write in this module, not only the two `rollup=True` ones."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", has_attachments=False)  # R15 path — cheapest event-log write
+    cfg = _cfg(delivery_notes_engine="n8n", delivery_notes_shadow=True,
+              data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=FakeClient({}))
+    assert n == 1
+    assert pg.execute(
+        "SELECT count(*) FROM email_events WHERE message_id='dl1'").fetchone()[0] == 0
+
+
+def test_shadow_never_corrupts_an_already_delivered_messages_dashboard_state(pg, tmp_path):
+    """The EXACT deep-review reproduction: a shadow peek picking a message n8n had
+    ALREADY finished must never overwrite its proc_status/proc_outcome (the
+    email_events rollup=True trigger) — a shadow tick was reproduced silently turning
+    an 'uploaded_orion/ok' message back into 'review' before this fix."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", has_attachments=False)
+    from app.orders import report as report_mod
+    report_mod.log_event(pg, "dl1", stage="uploaded_orion", status="ok",
+                         outcome="EDI vytvorené: Z-DESADV_x.txt", rollup=True,
+                         workflow="delivery_notes")
+    before = pg.execute(
+        "SELECT proc_status, proc_outcome FROM messages WHERE message_id='dl1'"
+        ).fetchone()
+    assert before == ("ok", "EDI vytvorené: Z-DESADV_x.txt")
+
+    cfg = _cfg(delivery_notes_engine="n8n", delivery_notes_shadow=True,
+              data_dir=str(tmp_path))
+    dl_worker.tick(pg, cfg, client=FakeClient({}))
+
+    after = pg.execute(
+        "SELECT proc_status, proc_outcome FROM messages WHERE message_id='dl1'"
+        ).fetchone()
+    assert after == before, \
+        "shadow must never overwrite an already-delivered message's dashboard state"
+
+
+def test_lexical_gap_item_is_visible_in_the_message_and_raises_a_question(pg, tmp_path):
+    """Deep-review finding: an item excluded from the EDI by the R75 lexical-gap
+    tripwire (`llm_sure_lexical_gap`) — or this worker's own `match_failed` fallback —
+    was previously invisible: the gate only checked `rule == 'unmatched'`, so neither
+    the Odoo message nor a nástenka question ever mentioned it."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    doc = _doc(total=8.0, items=[
+        {"name": "Rožok 50g", "quantity": 10, "unit": "ks", "unitPrice": 0.5,
+         "totalPrice": 5.0},
+        {"name": "Úplne iný produkt", "quantity": 3, "unit": "ks", "unitPrice": 1.0,
+         "totalPrice": 3.0}])
+    client = FakeClient({
+        "dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+        "dl_item": [ITEM_MATCHED,
+                   {"gtin": ITEM_GTIN, "matchedCatalogName": "Rožok 50g",
+                    "matchConfidence": 0.97, "matchReason": "istý, no odlišné slová"}]})
+    uploaded, posted = [], []
+    n = dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client,
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+        post=lambda c, h: posted.append(h))
+    assert n == 1
+    assert len(uploaded) == 1, "the first item still ships (partial EDI, R81)"
+    success = [h for h in posted if "Dodací list spracovaný" in h][0]
+    assert "ČIASTOČNE" in success
+    assert "Nespárované" in success and "Úplne iný produkt" in success
+    q = pg.execute(
+        "SELECT kind FROM order_questions WHERE kind='dl_item'").fetchone()
+    assert q is not None
+
+    items = pg.execute("SELECT gtin, rule FROM order_items ORDER BY id").fetchall()
+    assert ("8588000000001", "llm_sure") in items
+    assert (None, "llm_sure_lexical_gap") in items
+
+
+def test_a_hard_pipeline_failure_stays_tagged_as_a_dl_run_not_an_orders_run(
+        pg, tmp_path, monkeypatch):
+    """Deep-review finding: the generic exception handler in tick() used to pass
+    `result=None` to `worker._finish_run`, leaving `result->>'kind'` NULL — which
+    `reliability.provenance_stats_for_day`'s own `IS DISTINCT FROM 'dl'` exclusion
+    treats as an ORDERS run, miscounting a hard DL failure into the wrong digest."""
+    from app.orders import dl_extract
+
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+
+    def _boom(client, attachments):
+        raise RuntimeError("kaboom — unexpected, not caught anywhere upstream")
+
+    monkeypatch.setattr(dl_extract, "extract_email", _boom)
+    n = dl_worker.tick(pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)),
+                       client=FakeClient({}))
+    assert n == 0
+    row = pg.execute("SELECT status, result->>'kind' FROM order_runs").fetchone()
+    assert row == ("error", "dl")

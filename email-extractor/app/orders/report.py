@@ -243,7 +243,8 @@ def build_daily_digest(stats: dict, days_since_incident: int | None, link: str =
     dl_mismatch = int(dl.get("announced_mismatch") or 0)
     if dl_runs or dl_dups or dl_mismatch:
         dl_items = int(dl.get("items") or 0)
-        parts.append(f"<p><b>Dodacie listy &mdash; {day}</b></p>")
+        dl_day = escape(str(dl.get("day") or stats.get("day", "")))
+        parts.append(f"<p><b>Dodacie listy &mdash; {dl_day}</b></p>")
         head = f"{dl_runs} " + _plural(dl_runs, "spracovaná správa", "spracované správy",
                                        "spracovaných správ")
         if dl_items:
