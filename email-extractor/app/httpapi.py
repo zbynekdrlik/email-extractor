@@ -593,7 +593,7 @@ def create_app(cfg) -> Flask:
             return jsonify(error="otázka neexistuje"), 404
         if q0.get("kind") == "customer":
             return _api_orders_answer_customer(qid, q0, body)
-        if q0.get("kind") in ("mail", "date", "line"):
+        if q0.get("kind") in ("mail", "date", "line", "dl_item", "dl_supplier"):
             return _api_orders_answer_generic(qid, q0, body)
 
         gtin, card = str(body.get("gtin") or ""), str(body.get("card") or "")
@@ -635,11 +635,15 @@ def create_app(cfg) -> Flask:
     def api_orders_undo(qid: int):
         """Take a mistaken teaching back — it would otherwise decide that line forever.
 
-        #164: `mail` is the ONE new kind that actually teaches something durable outside
-        `order_questions` itself (a `mail_rules` row) — routed through its own registered
-        `undo` so that row is retracted too. `date`/`line` teach nothing (`learns` says
-        so), so plain `teach.undo` (which only ever touches `item_memory`/customer data,
-        a harmless no-op for them) already does the right thing — reopen, nothing else.
+        Routed through the SAME `teach.KINDS[kind].undo` every OTHER dispatch in this file
+        already uses (#202 review pass — the previous `mail`-only special case silently left
+        `dl_item`/`dl_supplier` on the bare `teach.undo` fallback, which never touches
+        `dl_item_memory`/`dl_supplier_memory` at all: an undone DL teaching would reopen the
+        question but keep the wrong mapping live). Behavior-preserving for every existing kind
+        — `item`/`customer`/`date`/`line`'s own registered `undo` already delegates to the
+        exact same `teach.undo(conn, qid)` call this replaces; `mail` is the one kind whose
+        registered `undo` does more (retracts its own `mail_rules` row), and it already went
+        through the registry before this change too.
         """
         from .orders import teach
         try:
@@ -647,8 +651,8 @@ def create_app(cfg) -> Flask:
                 q0 = teach.get(c, qid)
                 if not q0:
                     return jsonify(error="otázka neexistuje"), 404
-                q = (teach.KINDS["mail"].undo(c, q0) if q0.get("kind") == "mail"
-                    else teach.undo(c, qid))
+                kind = teach.KINDS.get(q0.get("kind", "item"))
+                q = kind.undo(c, q0) if kind else teach.undo(c, qid)
         except teach.NotACandidate as e:
             return jsonify(error=str(e)), 404
         return jsonify(ok=True, question=q)
@@ -1208,12 +1212,14 @@ async function loadAsk(){const L=document.getElementById('list');
       ub.onclick=()=>answerCustomerIt(q.id,'','',true);acts.appendChild(ub);
       head.appendChild(who);head.appendChild(why);head.appendChild(acts);
       el.appendChild(head);L.appendChild(el);continue}
-    // #164: ONE generic renderer for every OTHER new kind (mail/date/line) — the
-    // candidates carry their own {value,label}; a universal "Neviem" escape posts
-    // {"choice":"unknown"} through the same dispatch endpoint (stays open, never silent).
-    if(q.kind==='mail'||q.kind==='date'||q.kind==='line'){
+    // #164/#202: ONE generic renderer for every OTHER new kind (mail/date/line, and DL's
+    // own dl_item/dl_supplier) — the candidates carry their own {value,label}; a universal
+    // "Neviem" escape posts {"choice":"unknown"} through the same dispatch endpoint (stays
+    // open, never silent).
+    if(q.kind==='mail'||q.kind==='date'||q.kind==='line'||q.kind==='dl_item'||q.kind==='dl_supplier'){
       const titles={mail:'Je to vôbec objednávka?',date:'Ktorý deň dodávky platí?',
-        line:'Platí ešte táto položka?'};
+        line:'Platí ešte táto položka?',dl_item:'Ktorá karta je táto DL položka?',
+        dl_supplier:'Ktorý dodávateľ?'};
       b.textContent=titles[q.kind]||q.kind;head.appendChild(b);
       const who=document.createElement('div');who.className='sub';who.textContent=q.wording||'';
       const why=document.createElement('div');why.className='sub';why.textContent=q.reason||'';
@@ -1376,11 +1382,13 @@ function searchBox(q){
   if(inp.value.trim().length>=2)run(inp.value.trim());
   return wrap;
 }
-// #164: ONE generic card for every kind BEYOND item/customer (mail/date/line) — each
-// candidate button posts {"choice": <value>} through the SAME dispatch endpoint, plus a
-// universal "Neviem" escape that posts {"choice":"unknown"} (stays open, never silent).
+// #164/#202: ONE generic card for every kind BEYOND item/customer (mail/date/line, and
+// DL's own dl_item/dl_supplier) — each candidate button posts {"choice": <value>} through
+// the SAME dispatch endpoint, plus a universal "Neviem" escape that posts
+// {"choice":"unknown"} (stays open, never silent).
 const GENERIC_TITLE={mail:'Je to vôbec objednávka?',date:'Ktorý deň dodávky platí?',
-  line:'Platí ešte táto položka?'};
+  line:'Platí ešte táto položka?',dl_item:'Ktorá karta je táto DL položka?',
+  dl_supplier:'Ktorý dodávateľ?'};
 function genericQuestionCard(q){
   const c=el('div','q');
   c.appendChild(el('div','who',GENERIC_TITLE[q.kind]||q.kind));
@@ -1426,7 +1434,7 @@ async function load(){const mine=++render;let d,t;
   if(!d.items.length)W.appendChild(el('div','empty','Nič nečaká. Ďakujem!'));
   for(const q of d.items){
     if(q.kind==='customer'){W.appendChild(customerQuestionCard(q));continue}
-    if(q.kind==='mail'||q.kind==='date'||q.kind==='line'){
+    if(q.kind==='mail'||q.kind==='date'||q.kind==='line'||q.kind==='dl_item'||q.kind==='dl_supplier'){
       W.appendChild(genericQuestionCard(q));continue}
     const c=el('div','q');
     c.appendChild(el('div','who',(q.customer_name||q.customer_ean)+(q.delivery_date?' · na '+q.delivery_date:'')));
