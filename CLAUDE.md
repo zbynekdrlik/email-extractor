@@ -36,6 +36,14 @@ Skip decorative/banner/tiny images. See `docs/superpowers/specs/`.
   add-on image to GHCR. All gates green before merge; auto-merge on green (default).
 - No real email data in git (`_spike_*`, `pipeline.py` are gitignored). Synthetic
   fixtures only in tests.
+- **The git repo root is THIS directory** (`email_extract/`, containing this
+  `CLAUDE.md`, `docs/`, `.claude/`) — ONE LEVEL ABOVE the `email-extractor/`
+  subdirectory that `.github/workflows/ci.yml` treats as its `working-directory`
+  (`app/`, `tests/`, `config.yaml`, `requirements*.txt` all live inside
+  `email-extractor/`). `docs/autopilot-log.md` and every `.claude/rules/*.md` live at
+  THIS root, not inside `email-extractor/docs/` — a session whose cwd is already
+  `email-extractor/` (e.g. because it's mid-ticket there) must `cd ..` or use the
+  absolute repo-root path to find/update them.
 
 ## Playbook router
 
