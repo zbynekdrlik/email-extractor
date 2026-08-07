@@ -101,10 +101,14 @@ def test_an_empty_sheet_is_refused_so_a_failed_fetch_cannot_wipe_the_catalog(pg)
     assert snapshot.latest_snapshot_id(pg) == good
 
 
-def test_sheet_csv_url_targets_the_configured_document_and_tab():
-    url = snapshot.sheet_csv_url("DOC123", 957145124)
-    assert url == ("https://docs.google.com/spreadsheets/d/DOC123/export"
-                   "?format=csv&gid=957145124")
+def test_snapshot_module_never_reads_the_sheet_over_the_network():
+    """#129: fetch_csv/refresh/sheet_csv_url are gone entirely — Postgres
+    (catalog_overrides/customer_overrides, #127/#128) is the sole source of truth.
+    import_snapshot/import_files (pure CSV-text/frozen-file importers, no network) and
+    every #127/#128 override function stay — only the network fetch path is removed."""
+    assert not hasattr(snapshot, "fetch_csv")
+    assert not hasattr(snapshot, "refresh")
+    assert not hasattr(snapshot, "sheet_csv_url")
 
 
 # --- the frozen snapshot the CI gate replays against ----------------------

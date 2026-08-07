@@ -534,14 +534,25 @@ def test_attempts_3_or_more_goes_to_review_even_for_a_transient_reason(pg, tmp_p
 
 # --- refresh_due (mirrors worker.refresh_due) --------------------------------
 
-def test_refresh_due_stays_idle_without_all_four_gids(pg):
+def test_refresh_due_returns_none_when_no_snapshot_exists_yet(pg):
     assert dl_worker.refresh_due(pg, _cfg()) is None
 
 
-def test_refresh_due_returns_the_existing_snapshot_when_configured_but_fresh(pg):
+def test_refresh_due_never_touches_the_network_even_when_configured(pg, monkeypatch):
+    """#129: the DL catalog/supplier sheet is permanently disabled too — it must never
+    be fetched again, even when catalog_sheet_id/gids are still populated (as they are
+    on the live add-on today, dl_catalog_gid included) and the frozen dl_snapshot is
+    old. dl_worker.py must not break the LIVE delivery_notes_shadow window (#205) — it
+    now just reports whatever dl_snapshot is currently frozen."""
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *a, **k: pytest.fail("must never fetch the DL sheet (#129)"))
     sid = _snapshot(pg)
     cfg = _cfg(catalog_sheet_id="doc", dl_catalog_gid="1", catalog_gid="2",
               customer_gid="3")
+    assert dl_worker.refresh_due(pg, cfg) == sid
+
+    pg.execute("UPDATE dl_snapshots SET checked_at = now() - interval '2 hours'")
     assert dl_worker.refresh_due(pg, cfg) == sid
 
 
