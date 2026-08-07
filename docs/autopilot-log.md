@@ -1299,3 +1299,48 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   Postgres (`desadv_sent`, `dl_item_memory`, `dl_snapshots`, `dl_catalog_snapshot`,
   `dl_supplier_snapshot`). Everything landed is inert by default — no pipeline code
   reads/writes any of it yet.
+
+## Issue 201 (DL migration F2: Vision + multi-document extraction) — 2026-08-07
+
+- New `app/orders/dl_extract.py` (pure functions, no DB/worker wiring — deliberately
+  out of scope, worker integration is a later phase): scan detection via raw JPEG
+  SOI/EOI byte-marker scanning (R40, every embedded page transcribed — fixes W1c),
+  R42 text-source priority (a digital PDF with real extracted text never pays for a
+  vision call — fixes W13), R43 up-to-three-way transcript cross-check, a
+  MULTI-document JSON extraction schema (`{"documents": [...]}` — fixes W1b), R50-R52
+  validation (quantity self-correction via the totalPrice/unitPrice line equation, a
+  0.50€ money gate, zero-items AND missing/unparseable-date review gates), and
+  `extract_email()` processing EVERY attachment of the message (fixes W1a) with
+  per-attachment failure isolation. `llm.Client` gains `vision_call()`: a raw Chat
+  Completions POST (distinct from the existing Responses-API `json_call`) with `n`
+  independent samples + image/file content parts, content-addressed cached,
+  offline-safe, priced through the same `PRICES` table (incl. reasoning-token
+  detail). Fresh Slovak prompts `prompts/dl_extract.md`/`prompts/dl_vision.md`
+  written from the sanitized spec, never copied from the (real-data) scratchpad.
+  RED/GREEN commits: `89b676f`/`18ba518` (vision_call), `d503722`/`6ccb1af`
+  (dl_extract module), `70c0df7` (extra coverage), `d5aa7f8` (reasoning-token fix).
+- Design comment + still-valid comment posted before code (issue #201 thread).
+  Deep code review (dispatched `general-purpose` subagent against the real PR diff)
+  found **1 Critical + 4 Important** issues — ALL fixed with their own RED/GREEN
+  regression tests before merge: `combine_transcripts()` truncated its
+  same-vs-different comparison to an 80-char head, so two transcripts sharing a
+  realistic delivery-note header silently dropped a genuine item-level disagreement
+  (`defb322`/`45a422f`); `strip_lt_prefix()` was an unanchored substring search for
+  "LT" anywhere in the string, corrupting any doc number merely containing those two
+  letters (same commits, anchored to the documented `<digits>LT<digits>` shape); a
+  missing/unparseable delivery date silently validated instead of forcing review, and
+  one bad/corrupt attachment aborted the WHOLE mail's remaining attachments instead of
+  being isolated (`0891dbe`/`a5cffa4`, which also added logging at every decision
+  branch per the project's comprehensive-logging policy). Boundary-value tests for
+  the 0.50€ money gate and the quantity-correction tolerance added in `4949961`.
+- Tests: `test_orders_llm.py` (17, vision_call), `test_orders_dl_extract.py` (69).
+  Full suite green (`pytest --cov=app --cov-fail-under=85`, 92.70% total,
+  `dl_extract.py` 100%), `ruff check .` clean.
+- Shared PR: **209** — merge `115db989c729b8c1e30aa6140e573421031d5b04`, main CI
+  green (test+e2e-orders+build). Deployed **v0.9.52** via `ha addons update`:
+  `/health`+`/version` 200 `0.9.52`, dashboard DOM confirms `v0.9.52` (0 console
+  errors/warnings), functional check run LIVE inside the deployed container (every
+  new function exercised against the actual shipped code — scan detection, LT-strip,
+  date normalize, quantity self-correction, multi-document extraction+validation,
+  vision_call's error guard). `delivery_notes_engine` confirmed still `"n8n"` — the
+  live n8n dodacie listy pipeline is completely untouched by this phase.
