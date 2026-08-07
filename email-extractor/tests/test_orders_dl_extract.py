@@ -157,6 +157,22 @@ def test_empty_machine_text_is_never_appended():
     assert "ALTERNATIVNY" not in got
 
 
+def test_a_differing_item_line_past_a_shared_80_char_header_is_still_caught():
+    """Deep-review finding (Critical): the old head-comparison truncated to 80 chars,
+    so two real transcripts sharing a header (supplier/city/email/docNumber/date —
+    exactly what fills the first ~80 chars of a real delivery note) silently dropped
+    the SECOND transcript even when it disagreed on a quantity later in the document —
+    precisely the digit misread R43 exists to catch."""
+    header = ("Pekáreň Test s.r.o., Martin, sklad@test.sk, DL 9999999999, "
+              "dátum 07.08.2026 dodania tovaru zákazníkovi na sklad")
+    primary = header + "\n1 | Rožok štandart 50g | 120 ks | 0.38 | 45.60 | 5%"
+    secondary = header + "\n1 | Rožok štandart 50g | 12 ks | 0.38 | 45.60 | 5%"
+    assert len(header) > 80   # the exact condition that defeated the old truncation
+    got = dl_extract.combine_transcripts("", primary, secondary)
+    assert "12 ks" in got
+    assert "DRUHY NEZAVISLY VISION PREPIS" in got
+
+
 # --- 4) date normalization (fixes W12) ------------------------------------
 
 def test_dmy_date_passes_through_zero_padded():
@@ -195,6 +211,19 @@ def test_a_doc_number_without_lt_is_unchanged():
 
 def test_an_empty_doc_number_stays_empty():
     assert dl_extract.strip_lt_prefix("") == ""
+
+
+def test_lt_appearing_mid_word_in_a_non_matching_doc_number_is_left_alone():
+    """Deep-review finding (Important): the old implementation was an UNANCHORED
+    substring search for 'LT' anywhere in the string — it corrupted any doc number
+    that merely contains those two letters without being the documented
+    <digits>LT<digits> shape (R47's own example: '2610LT9999999999')."""
+    assert dl_extract.strip_lt_prefix("SALT-2026-0001") == "SALT-2026-0001"
+    assert dl_extract.strip_lt_prefix("MULTI2026") == "MULTI2026"
+
+
+def test_lt_prefix_with_no_leading_digits_is_still_stripped():
+    assert dl_extract.strip_lt_prefix("LT9999999999") == "9999999999"
 
 
 # --- 6) quantity self-correction (R50) ------------------------------------
