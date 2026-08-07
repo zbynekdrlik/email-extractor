@@ -9,7 +9,7 @@ import pytest
 
 from app import store
 from app.config import Config
-from app.orders import desadv, dl_snapshot, dl_worker
+from app.orders import desadv, dl_snapshot, dl_worker, reliability
 
 DL_CATALOG_CSV = ("GTIN,Názov,doplnok,hmotnost,Sklad,Cena\n"
                   "8588000000001,Rožok 50g,,0.05,1,0.50\n")
@@ -232,6 +232,69 @@ def test_duplicate_document_is_skipped_visibly_not_silently(pg, tmp_path):
     assert ev == ("duplicate_skip", False)
     row = pg.execute("SELECT processed FROM messages WHERE message_id='dl1'").fetchone()
     assert row[0] is True
+
+
+# --- #216: retry after a partial ship must not log a FALSE duplicate_skip ----
+
+def test_retry_after_partial_ship_logs_a_self_retry_not_a_false_duplicate(pg, tmp_path):
+    """A message with 2+ documents: document A already shipped (claimed + confirmed by
+    THIS SAME message_id, e.g. from an earlier attempt that then hit R17's transient
+    retry on a later document and got re-claimed for a fresh pass). Re-processing
+    document A on the retry must be reported as a SELF-retry, never counted the same
+    way as a genuine W7 cross-message duplicate — the whole point of desadv_sent
+    gaining a message_id column (#216)."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    desadv.claim_send(pg, SUPPLIER_EAN, "0100000001", "already.txt", message_id="dl1")
+    desadv.confirm_sent(pg, SUPPLIER_EAN, "0100000001")
+
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    uploaded, posted = [], []
+    n = dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client,
+        upload=lambda *a, **k: uploaded.append(a), post=lambda c, h: posted.append(h))
+
+    assert n == 1
+    assert uploaded == [], "a self-retry must never re-upload"
+    ev = pg.execute(
+        "SELECT stage, rollup FROM email_events WHERE message_id='dl1' "
+        "AND stage='already_shipped_this_run'").fetchone()
+    assert ev == ("already_shipped_this_run", False)
+    dup_count = pg.execute(
+        "SELECT count(*) FROM email_events WHERE message_id='dl1' "
+        "AND stage='duplicate_skip'").fetchone()[0]
+    assert dup_count == 0, \
+        "a self-retry must NOT ALSO be logged as a genuine cross-message duplicate"
+
+    stats = reliability.dl_provenance_stats_for_day(pg)
+    assert stats["duplicates"] == 0, \
+        "the daily digest's duplicates bucket must not count a message retrying itself"
+
+
+def test_a_genuine_cross_message_duplicate_still_counts_when_claimant_is_unknown(pg,
+                                                                                 tmp_path):
+    """A legacy claim with NO recorded message_id (predates #216, or was claimed by a
+    process that never passed one) must still be reported — and COUNTED — as a real
+    duplicate: `desadv.claimed_by()` returns "" for it, which can never equal a real
+    message_id, so the safe default stays 'genuine duplicate', never silently
+    downgraded to a self-retry it cannot actually prove."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    desadv.claim_send(pg, SUPPLIER_EAN, "0100000001", "already.txt")   # no message_id
+    desadv.confirm_sent(pg, SUPPLIER_EAN, "0100000001")
+
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    n = dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client,
+        upload=lambda *a, **k: None, post=lambda c, h: None)
+
+    assert n == 1
+    stats = reliability.dl_provenance_stats_for_day(pg)
+    assert stats["duplicates"] == 1
 
 
 # --- supplier / item not matched: nástenka questions, never silent ----------
