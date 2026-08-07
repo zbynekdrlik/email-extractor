@@ -51,6 +51,24 @@ def test_a_zero_or_none_cnt_is_coerced_to_one(pg):
     assert [r[0] for r in rows] == [1, 1]
 
 
+def test_a_negative_cnt_is_clamped_to_one_not_stored_as_negative(pg):
+    """A negative weight would poison R66's future weighted-majority math (review
+    finding on #200's PR) — the original int(cnt or 1) coercion let -3 through as-is."""
+    _ship(pg, "889", "maslo", "G8", "Maslo čerstvé", "2026-07-01", cnt=-3)
+    row = pg.execute(
+        "SELECT cnt FROM dl_item_memory WHERE supplier_ean = '889'").fetchone()
+    assert row[0] == 1
+
+
+def test_a_non_numeric_cnt_defaults_to_one_instead_of_raising(pg):
+    """A garbled cnt value must never crash the caller (review finding on #200's PR) —
+    the whole point is that a single bad row in a batch import never aborts the rest."""
+    assert _ship(pg, "890", "maslo", "G8", "Maslo čerstvé", "2026-07-01", cnt="not-a-number") is True
+    row = pg.execute(
+        "SELECT cnt FROM dl_item_memory WHERE supplier_ean = '890'").fetchone()
+    assert row[0] == 1
+
+
 def test_duplicate_rows_dedupe_by_gtin_day_cnt_identity(pg):
     """R66's own stated n8n dedup rule: two rows are the SAME underlying record when
     (gtin, day, cnt) match — this is what the UNIQUE constraint enforces directly."""
@@ -92,6 +110,24 @@ def test_import_n8n_rows_skips_a_row_with_no_timestamp(pg):
     rows = [{"cust": "555", "item": "syr", "gtin": "G5", "card": "Syr", "src": "ship"}]
     assert dl_memory.import_n8n_rows(pg, rows) == 0
     assert pg.execute("SELECT count(*) FROM dl_item_memory").fetchone()[0] == 0
+
+
+def test_import_n8n_rows_a_garbled_cnt_does_not_abort_the_rest_of_the_batch(pg):
+    """Review finding on #200's PR: the original int(r.get('cnt') or 1) raised
+    ValueError straight out of the loop for a non-numeric cnt, losing every row after
+    the bad one silently (the caller sees a partial import with no indication why)."""
+    rows = [
+        {"cust": "556", "item": "syr eidam", "gtin": "G56", "card": "Syr eidam",
+         "at": "2026-05-02T00:00:00Z", "src": "ship", "cnt": "corrupted"},
+        {"cust": "556", "item": "syr eidam", "gtin": "G56", "card": "Syr eidam",
+         "at": "2026-05-03T00:00:00Z", "src": "ship", "cnt": 4},
+    ]
+    stored = dl_memory.import_n8n_rows(pg, rows)
+    assert stored == 2, "both rows must land — the bad cnt defaults to 1, never aborts the batch"
+    rows_out = pg.execute(
+        "SELECT delivered_on, cnt FROM dl_item_memory WHERE supplier_ean = '556' "
+        "ORDER BY delivered_on").fetchall()
+    assert [r[1] for r in rows_out] == [1, 4]
 
 
 def test_import_n8n_rows_defaults_cnt_to_one_when_absent(pg):

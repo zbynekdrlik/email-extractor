@@ -18,6 +18,14 @@ unique key either — R66 documents its own dedup rule for that: duplicate rows 
 same underlying record when (gtin, day, cnt) match. This table's UNIQUE constraint
 enforces that identity directly, so no JS-style re-dedup is ever needed on read.
 
+CAVEAT (review finding on #200's PR): because `cnt` is part of that identity, TWO rows
+can legitimately coexist for the same (supplier, wording, gtin, day) with DIFFERENT
+`cnt` values — faithful to R66's own dedup rule, and harmless today since n8n only
+ever writes `cnt=1` per real delivery (R91). It only bites if the SAME source row is
+re-imported after its own `cnt` was edited upstream. Whichever later phase builds
+`resolve()`'s weighted-majority read should take `max(cnt)` per (gtin, day), never
+`sum(cnt)`, or a re-import could double-count a single delivery.
+
 Resolution (R66's actual matching ladder — unanimous/majority/silent) is NOT
 implemented here. This is the foundation phase (#200); only storage and the one-shot
 n8n import exist yet. A later phase adds the `resolve()` counterpart, mirroring
@@ -36,10 +44,20 @@ def remember(conn, supplier_ean: str, item: str, gtin: str, card: str,
              delivered_on, cnt: int = 1, source: str = "ship") -> bool:
     """Record one delivery (or one imported n8n history row). Returns False when this
     exact (supplier, wording, gtin, day, cnt) is already known.
+
+    `cnt` is coerced defensively (review finding on #200's PR): a falsy value (0,
+    None, "") OR a genuinely negative/non-numeric one (an export glitch, an upstream
+    typo) all collapse to 1 rather than either poisoning R66's future weighted-majority
+    math with a negative weight, or raising and aborting a whole batch import over one
+    bad row.
     """
     key = item_key(item)
     if not (supplier_ean and key and gtin):
         return False
+    try:
+        cnt_val = max(1, int(cnt))
+    except (TypeError, ValueError):
+        cnt_val = 1
     row = conn.execute(
         """INSERT INTO dl_item_memory
                (supplier_ean, item_key, item_raw, gtin, card, delivered_on, cnt, source)
@@ -47,7 +65,7 @@ def remember(conn, supplier_ean: str, item: str, gtin: str, card: str,
            ON CONFLICT (supplier_ean, item_key, gtin, delivered_on, cnt) DO NOTHING
            RETURNING id""",
         (str(supplier_ean), key, str(item), str(gtin), card or "", delivered_on,
-         int(cnt or 1), source),
+         cnt_val, source),
     ).fetchone()
     return row is not None
 
@@ -61,6 +79,11 @@ def import_n8n_rows(conn, rows: list[dict]) -> int:
 
     The source table's `at` is a full timestamp; several rows of one shipment differ
     only by time and collapse into one delivery day here, same as `memory.py`'s import.
+
+    A row's `cnt` is passed through RAW (not pre-cast) — `remember()` coerces it
+    defensively, so one row with a garbled `cnt` (a non-numeric export glitch) is
+    stored as `cnt=1` instead of raising and aborting the rest of the batch (review
+    finding on #200's PR).
     """
     stored = 0
     for r in rows:
@@ -69,7 +92,7 @@ def import_n8n_rows(conn, rows: list[dict]) -> int:
             continue
         if remember(conn, str(r.get("cust") or ""), str(r.get("item") or ""),
                     str(r.get("gtin") or ""), str(r.get("card") or ""),
-                    delivered_on=day, cnt=int(r.get("cnt") or 1),
+                    delivered_on=day, cnt=r.get("cnt"),
                     source=str(r.get("src") or "n8n")):
             stored += 1
     log.info("dl item memory: imported %d of %d n8n rows", stored, len(rows))

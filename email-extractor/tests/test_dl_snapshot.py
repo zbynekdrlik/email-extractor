@@ -59,27 +59,64 @@ def test_a_missing_mass_or_price_is_none_not_zero():
     assert row["cena"] is None
 
 
-# --- R20: the union of two tabs, straight append (mirrors n8n Merge(append)) ------
+# --- _num: real Sheets export noise (review finding on #200's PR) ----------------
 
-def test_merge_catalog_is_a_straight_union_of_both_tabs():
+def test_num_strips_nbsp_thousands_separator_from_a_formatted_export():
+    assert dl_snapshot._num("1\xa0133,00") == 1133.0
+
+
+def test_num_strips_a_trailing_currency_symbol():
+    assert dl_snapshot._num("12,50 €") == 12.5
+
+
+def test_num_handles_dot_thousands_plus_comma_decimal():
+    assert dl_snapshot._num("1.234,50") == 1234.5
+
+
+def test_num_returns_none_for_garbage():
+    assert dl_snapshot._num("not a number") is None
+
+
+# --- R20: the union of two tabs — GTIN-deduped, DL tab wins on overlap -----------
+# (a deliberate deviation from n8n's literal Merge(append), which keeps both rows —
+# see dl_snapshot.merge_catalog's own docstring; review finding on #200's PR)
+
+def test_merge_catalog_unions_both_tabs():
     merged = dl_snapshot.merge_catalog(DL_CATALOG_CSV, OBJEDNAVKY_CATALOG_CSV)
     gtins = [r["gtin"] for r in merged]
     assert "8588001900001" in gtins and "8588001900002" in gtins
     assert "8588001805889" in gtins and "8588001800013" in gtins
-    assert len(gtins) == 4, "no dedup — straight append, matching n8n's Merge(append)"
+    assert len(gtins) == len(set(gtins)) == 4, "no duplicate gtins in the merged result"
 
 
-def test_merged_rows_from_the_objednavky_tab_carry_dl_fields_as_none():
+def test_merged_rows_from_the_objednavky_tab_still_carry_sklad():
+    """The original version routed this tab through the orders-only parser, which
+    silently dropped Sklad — a real R84 kg-tracking signal (review finding on #200's
+    PR, the exact W14 class of bug this module claims to have eliminated). Only
+    fields truly absent from that tab's header (mass, cena) stay None."""
     merged = dl_snapshot.merge_catalog(DL_CATALOG_CSV, OBJEDNAVKY_CATALOG_CSV)
     row = next(r for r in merged if r["gtin"] == "8588001805889")
+    assert row["sklad"] == "1"
     assert row["mass"] is None and row["cena"] is None
-    assert row["doplnok"] == "", "the objednavky tab's own alias column maps to doplnok"
 
 
 def test_objednavky_alias_maps_into_doplnok():
     merged = dl_snapshot.merge_catalog(DL_CATALOG_CSV, OBJEDNAVKY_CATALOG_CSV)
     row = next(r for r in merged if r["gtin"] == "8588001800013")
     assert row["doplnok"] == "rozok standard"
+
+
+def test_a_gtin_shared_by_both_tabs_dedupes_with_the_dl_tab_winning():
+    """Review finding on #200's PR: without this, the DB's own primary key
+    (snapshot_id, gtin) would silently swallow the second row anyway, but the
+    content hash would still be computed over BOTH — churning a new snapshot id
+    for content that was never actually going to be stored."""
+    dl_csv = DL_CATALOG_CSV + "8588001805889,Bábovka DL-strana,alias-dl,0.2,1,\"3,50\"\n"
+    merged = dl_snapshot.merge_catalog(dl_csv, OBJEDNAVKY_CATALOG_CSV)
+    rows = [r for r in merged if r["gtin"] == "8588001805889"]
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Bábovka DL-strana", "the DL-specific tab must win"
+    assert rows[0]["mass"] == 0.2
 
 
 # --- R21: suppliers reuse the orders customer parser verbatim ---------------------
@@ -113,12 +150,15 @@ def test_reimporting_identical_content_does_not_create_a_new_snapshot(pg):
 
 def test_a_changed_dl_sheet_creates_a_new_snapshot_and_the_old_one_survives(pg):
     old = dl_snapshot.import_snapshot(pg, DL_CATALOG_CSV, OBJEDNAVKY_CATALOG_CSV, SUPPLIER_CSV)
-    changed = DL_CATALOG_CSV + "8588001900099,Vianočka 400g,,0.4,1,4,20\n"
+    changed = DL_CATALOG_CSV + "8588001900099,Vianočka 400g,,0.4,1,\"4,20\"\n"
     new = dl_snapshot.import_snapshot(pg, changed, OBJEDNAVKY_CATALOG_CSV, SUPPLIER_CSV)
     assert new != old
     assert dl_snapshot.latest_snapshot_id(pg) == new
     assert len(dl_snapshot.load_catalog(pg, old)) == 4, "the old snapshot must not change"
-    assert len(dl_snapshot.load_catalog(pg, new)) == 5
+    new_rows = {r["gtin"]: r for r in dl_snapshot.load_catalog(pg, new)}
+    assert len(new_rows) == 5
+    assert new_rows["8588001900099"]["cena"] == 4.20, \
+        "the price must parse correctly now that it's properly quoted (review finding)"
 
 
 def test_an_empty_dl_catalog_is_refused_so_a_failed_fetch_cannot_wipe_it(pg):

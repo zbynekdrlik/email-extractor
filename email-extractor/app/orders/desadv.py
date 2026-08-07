@@ -46,12 +46,24 @@ CLAIM_STALE_MINUTES = 10
 def claim_send(conn, supplier_ean: str, doc_number: str, filename: str) -> bool:
     """Claim the right to upload this document, or reclaim an orphaned one.
 
-    False = a CONFIRMED upload already exists for this (supplier, doc_number), or
+    False = a CONFIRMED upload already exists for this (supplier, doc_number),
     another claim is still fresh (< CLAIM_STALE_MINUTES) and may be mid-upload right
-    now. The reclaim is atomic the same way edi.claim_send's is: `DO UPDATE ... WHERE`
-    is evaluated by Postgres per-row as part of conflict resolution, so two workers
-    racing this call can never both win.
+    now, or supplier_ean/doc_number is empty. The reclaim is atomic the same way
+    edi.claim_send's is: `DO UPDATE ... WHERE` is evaluated by Postgres per-row as
+    part of conflict resolution, so two workers racing this call can never both win.
+
+    An empty identity is refused outright (review finding on #200's PR): this
+    ledger has no content hash, so — unlike edi_sent — an empty doc_number would
+    collapse EVERY numberless document from one supplier onto a single ledger row,
+    silently losing every one after the first. R83 always generates a fallback
+    docNumber when extraction found none; a caller reaching this with a genuinely
+    empty one has a bug upstream, not a legitimate claim.
     """
+    ean, doc = str(supplier_ean or ""), str(doc_number or "")
+    if not ean or not doc:
+        log.warning("desadv.claim_send refused — missing supplier_ean/doc_number "
+                    "(supplier_ean=%r doc_number=%r)", ean, doc)
+        return False
     row = conn.execute(
         """INSERT INTO desadv_sent (supplier_ean, doc_number, filename)
            VALUES (%s, %s, %s)
@@ -60,7 +72,7 @@ def claim_send(conn, supplier_ean: str, doc_number: str, filename: str) -> bool:
            WHERE desadv_sent.uploaded_at IS NULL
              AND desadv_sent.sent_at < now() - make_interval(mins => %s)
            RETURNING id""",
-        (str(supplier_ean or ""), str(doc_number or ""), filename, CLAIM_STALE_MINUTES),
+        (ean, doc, filename, CLAIM_STALE_MINUTES),
     ).fetchone()
     if row is None:
         log.warning("DESADV already sent (or claimed within %sm) for supplier=%s doc=%s "
@@ -87,7 +99,16 @@ def confirm_sent(conn, supplier_ean: str, doc_number: str, pg_dsn: str = "") -> 
     attempts = 4
     for attempt in range(1, attempts + 1):
         try:
-            conn.execute(stmt, (ean, doc))
+            cur = conn.execute(stmt, (ean, doc))
+            if getattr(cur, "rowcount", None) == 0:
+                # Same exposure edi.confirm_sent already has (review finding on #200's
+                # PR, parity not regression): the claim row is gone underneath (released
+                # or reclaimed elsewhere) — the confirmation silently landed on nothing,
+                # and a later re-announcement could re-upload. Loud, not raised: the
+                # document IS already physically in ORION either way.
+                log.warning("confirm_sent found no matching claim for supplier=%s doc=%s "
+                           "— was it released or reclaimed already?", supplier_ean,
+                           doc_number)
             log.info("DESADV confirmed sent for supplier=%s doc=%s", supplier_ean, doc_number)
             return
         except Exception:

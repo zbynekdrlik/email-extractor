@@ -10,10 +10,22 @@ is untouched.
 
 **R20 — the catalog is a UNION of two tabs, never a replacement of one by the
 other:** `produkty dodacie listy` (has mass/doplnok/sklad/cena — the DL-specific
-fields) PLUS `produkty objednavky` (the existing AI-orders catalog tab — gtin/name/
-alias only, so its rows carry mass=None/sklad=None/cena=None here). This mirrors the
-n8n parent workflow's own `Merge(append)` step exactly: straight concatenation, no
-GTIN dedup — that is the production behaviour being ported, not a simplification.
+fields) PLUS `produkty objednavky` (the existing AI-orders catalog tab). BOTH tabs
+are parsed with the SAME `parse_dl_catalog` (not routed through the orders-only
+`snapshot.parse_catalog`, which would silently drop `Sklad` — a real R84
+kg-tracking signal the orders tab genuinely carries; review finding on #200's PR).
+A field truly absent from a tab (that tab has no `hmotnost`/`Cena` header at all)
+still comes back `None`, distinct from a present-but-empty cell.
+
+**GTIN de-duplication — a deliberate DEVIATION from n8n's literal `Merge(append)`
+(review finding on #200's PR).** n8n's node keeps both rows verbatim; here, the
+DL-specific tab wins when the SAME gtin appears in both (`dl_catalog_snapshot`'s
+own primary key is `(snapshot_id, gtin)`, matching `catalog_snapshot`'s shape — a
+second row for the same gtin cannot coexist there either way, and letting the DB
+silently swallow it via `ON CONFLICT DO NOTHING` would leave the CONTENT HASH
+computed over rows that never actually get stored, exactly the churn
+`snapshot.py`'s own `_content_hash` docstring exists to prevent). `merge_catalog`
+now dedups explicitly, BEFORE hashing/counting, so what's hashed is what's stored.
 
 **W14 — no static keep-only column allowlist that can silently drop a new column.**
 The n8n `Edit Fields` node's fixed field list already did this once for real (the
@@ -33,11 +45,14 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 
 from . import snapshot
 from .snapshot import SnapshotRefused, fetch_csv  # re-exported for callers
 
 log = logging.getLogger("orders.dl_snapshot")
+
+_CURRENCY_RE = re.compile(r"[€$]")
 
 
 def _cell(row: dict, *names: str) -> str:
@@ -48,11 +63,22 @@ def _cell(row: dict, *names: str) -> str:
 
 
 def _num(value: str) -> float | None:
-    """Slovak sheets use a comma decimal separator ('0,150'). Empty/unparsable → None,
-    never 0 — a missing mass/price must stay distinguishable from a genuinely zero one."""
-    v = str(value or "").strip().replace(",", ".").replace(" ", "")
+    """Slovak Sheets exports commonly carry: a comma decimal separator ('9,90'), a
+    NBSP/narrow-NBSP thousands separator from a formatted-number export ('1\xa0133,00'),
+    a trailing currency symbol ('12,50 €'), or a dot thousands + comma decimal
+    ('1.234,50'). Empty/unparsable → None, never 0 — a missing mass/price must stay
+    distinguishable from a genuinely zero one (review finding on #200's PR: the
+    original version only handled the plain comma case)."""
+    v = str(value or "").strip()
     if not v:
         return None
+    v = v.replace("\xa0", "").replace(" ", "").replace(" ", "")
+    v = _CURRENCY_RE.sub("", v)
+    if "," in v and "." in v:
+        # '.' is a THOUSANDS separator here, not a decimal point — drop it before the
+        # comma→dot swap below, or '1.234,50' would corrupt to '1.234.50'.
+        v = v.replace(".", "")
+    v = v.replace(",", ".")
     try:
         return float(v)
     except ValueError:
@@ -81,21 +107,37 @@ def parse_dl_catalog(text: str) -> list[dict]:
 
 
 def merge_catalog(dl_catalog_csv: str, objednavky_catalog_csv: str) -> list[dict]:
-    """The union R20 describes — straight append, mirroring the n8n `Merge(append)`
-    step exactly. Rows from the orders tab (no mass/sklad/cena in that sheet) carry
-    those fields as None, and their `alias` column becomes `doplnok` here — same
-    field, different tab header."""
-    out = list(parse_dl_catalog(dl_catalog_csv))
-    for row in snapshot.parse_catalog(objednavky_catalog_csv):
-        out.append({"gtin": row["gtin"], "name": row["name"], "doplnok": row["alias"],
-                    "mass": None, "sklad": "", "cena": None})
-    return out
+    """The union R20 describes. Both tabs go through `parse_dl_catalog` — NOT
+    `snapshot.parse_catalog` for the orders tab, which only returns gtin/name/alias
+    and would silently drop that tab's `Sklad` column (a real R84 kg-tracking signal
+    the orders sheet genuinely carries — review finding on #200's PR, the exact W14
+    class of bug this module's docstring warns about).
+
+    GTIN-deduped: when the SAME gtin appears in both tabs, the DL-specific tab's row
+    wins (first-inserted-wins, matching `_freeze`'s own `ON CONFLICT DO NOTHING` on
+    `dl_catalog_snapshot`'s `(snapshot_id, gtin)` primary key) — see the module
+    docstring for why this deliberately deviates from n8n's literal `Merge(append)`.
+    """
+    seen: dict[str, dict] = {}
+    for row in parse_dl_catalog(dl_catalog_csv):
+        seen[row["gtin"]] = row
+    for row in parse_dl_catalog(objednavky_catalog_csv):
+        seen.setdefault(row["gtin"], row)
+    return list(seen.values())
 
 
 def parse_suppliers(text: str) -> list[dict]:
     """R21: suppliers = the SAME `customers` tab AI orders reads, same columns
     (Názov organizácie / EAN kód EDI / E-mail / Obec) — reused verbatim rather than
-    re-implemented, since it is literally the same physical sheet tab."""
+    re-implemented, since it is literally the same physical sheet tab.
+
+    NOTE: the returned dicts also carry `street`/`zip` (inherited from
+    `snapshot.parse_customers` — R21/R60 don't use them for DL). `load_suppliers`
+    below does NOT persist those two fields (`dl_supplier_snapshot` has no such
+    columns) — a later phase reading suppliers straight from THIS function (not from
+    a frozen snapshot) sees a different shape than one reading `load_suppliers`'
+    output. Review finding on #200's PR; not a bug today (nothing reads either yet).
+    """
     return snapshot.parse_customers(text)
 
 

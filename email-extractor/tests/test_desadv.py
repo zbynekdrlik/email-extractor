@@ -14,6 +14,30 @@ def test_the_same_document_is_only_ever_sent_once(pg):
     assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 1
 
 
+def test_claim_send_refuses_an_empty_doc_number(pg):
+    """Review finding on #200's PR: this ledger has no content hash, so an empty
+    doc_number would collapse EVERY numberless document from one supplier onto one
+    ledger row — the second one silently lost, exactly the W4 failure the ledger
+    exists to fix."""
+    assert desadv.claim_send(pg, "8586013743063", "", "f1.txt") is False
+    assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0
+
+
+def test_claim_send_refuses_an_empty_supplier_ean(pg):
+    assert desadv.claim_send(pg, "", "0100000001", "f1.txt") is False
+    assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0
+
+
+def test_confirm_sent_does_not_raise_when_the_claim_is_already_gone(pg):
+    """The claim can legitimately vanish underneath (released, or reclaimed by
+    another worker) — confirm_sent must warn, not crash, since the document IS
+    already physically uploaded either way (review finding on #200's PR)."""
+    desadv.claim_send(pg, "157", "0100000157", "f1.txt")
+    desadv.release_send(pg, "157", "0100000157")
+    desadv.confirm_sent(pg, "157", "0100000157")   # must not raise
+    assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0
+
+
 def test_the_ledger_remembers_which_file_carried_which_claim(pg):
     desadv.claim_send(pg, "8586013743063", "0100000001", "DESADV_x.txt")
     row = pg.execute("SELECT filename FROM desadv_sent").fetchone()

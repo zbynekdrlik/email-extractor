@@ -6,9 +6,7 @@
 
 
 Mapped 2026-08-07 from the LIVE n8n workflows (read-only). Sources: workflow dumps + 10 real
-executions + prod Postgres ground truth. Raw dumps + full prompt texts live next to this file
-(`wf_*.json`, `p_*/`, `prompt_*.txt`, `exec_*.json`, `sub3_edi_code.js`).
-NOTE: contains supplier names + real DL numbers — do NOT commit verbatim into the public repo.
+executions + prod Postgres ground truth.
 
 Workflows:
 
@@ -26,8 +24,19 @@ External state:
 - Postgres (email-extractor add-on): `messages`, `attachments`, `email_events`.
 - n8n Data Table **"dodacie listy"** `sn0R7JbZVrHjE4yG` — sent-DL registry, single column `docNumber`.
 - n8n Data Table **"dodacie_pamat_poloziek"** `MBCwHVhzsKjbQkVl` — item-match history (cust, item, gtin, card, at, src, cnt).
-- Google Sheet **"Slovnormal"** `1m12ognEGs93t8WxtLw576XoEhCS2FE37tovFtVPSO00`: tabs `produkty dodacie listy` (gid 1437442607), `produkty objednavky` (gid 957145124), `customers` (gid 501932372).
-- Google Sheet forecast log `14UYxEMwOZnas2CWweBDevRoznPYSmzPx7ty4PeVoHTE` (tab gid 0) — one row per shipped item.
+- Google Sheet **"Slovnormal"** `<doc id — the existing add-on option catalog_sheet_id, never committed; same
+  document the AI-orders pipeline already reads (app/orders/snapshot.py)>`: tabs
+  `produkty dodacie listy` (gid 1437442607), `produkty objednavky` (gid 957145124),
+  `customers` (gid 501932372). **The doc id itself is effectively a credential** — the
+  sheet is fetched via its public, unauthenticated CSV export URL (same as
+  `app/orders/snapshot.py`'s existing `fetch_csv`), so anyone who has the id can read
+  supplier names/EANs/emails and catalog prices with no login. Never put the real id
+  in this file or any other committed text; it lives only in the add-on's own options
+  (`dl_catalog_gid` config option for the tab, the doc id itself under
+  `catalog_sheet_id`).
+- Google Sheet forecast log `<doc id — separate sheet, access-controlled (verified: its
+  own CSV export URL returns 401 without credentials), still not committed as a matter
+  of the same policy>` (tab gid 0) — one row per shipped item.
 - Odoo Discuss channel **243** (`https://erp.slovnormal.sk/json/2/discuss.channel/message_post`, header `X-Odoo-Database: odoo`, Bearer auth).
 - ORION target: SSH cred "Granc server", upload dir `C:\ORION\COMMUNICATOR\data\in_DL`.
 
