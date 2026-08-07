@@ -878,14 +878,27 @@ SCHEMA = [
     # (see import_alert_incident_desadv_members below) that a single incident can't
     # straddle without a polymorphic FK. Additive (DEFAULT 'edi' keeps every existing
     # row — all of them genuinely edi_sent-sourced today — valid with zero backfill
-    # needed). The old (channel_id, kind) unique-open-incident index is replaced by a
-    # (channel_id, kind, source) one; DROP+CREATE on an INDEX is a structural change,
-    # not a data-loss one (database-migrations.md). ---
+    # needed). CHECK mirrors the sibling `kind` column's own DB-enforced-invariant
+    # philosophy (see the #184 comment on that column) — a stray/mistyped source value
+    # must fail loudly, not silently fall back to EDI_LEDGER wherever confirm.py reads
+    # it back. The old (channel_id, kind) unique-open-incident index is replaced by a
+    # (channel_id, kind, source) one; the NEW index is created BEFORE the old one is
+    # dropped (never the other order) — `edi_sent`'s own import-confirmation sweep is
+    # an already-live production writer into this table (the #151/#179/#184 incident
+    # history this file documents), so a DROP-then-CREATE ordering would leave a real
+    # window with NO uniqueness enforced on (channel_id, kind) at all; creating the
+    # wider index first means uniqueness is continuously enforced throughout (both
+    # indexes briefly coexist, which is harmless). DROP+CREATE on an INDEX is a
+    # structural change, not a data-loss one (database-migrations.md). ---
     "ALTER TABLE import_alert_incidents ADD COLUMN IF NOT EXISTS source TEXT "
     "NOT NULL DEFAULT 'edi'",
-    "DROP INDEX IF EXISTS idx_import_alert_incidents_open",
+    "ALTER TABLE import_alert_incidents DROP CONSTRAINT IF EXISTS "
+    "import_alert_incidents_source_check",
+    "ALTER TABLE import_alert_incidents ADD CONSTRAINT "
+    "import_alert_incidents_source_check CHECK (source IN ('edi', 'desadv'))",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_import_alert_incidents_open_v2 "
     "ON import_alert_incidents(channel_id, kind, source) WHERE closed_at IS NULL",
+    "DROP INDEX IF EXISTS idx_import_alert_incidents_open",
     # --- import_alert_incident_desadv_members: the DESADV counterpart of
     # import_alert_incident_members, same shape, own FK to desadv_sent. A SEPARATE
     # table rather than widening the existing one with a second nullable FK column —

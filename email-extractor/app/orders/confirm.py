@@ -102,6 +102,14 @@ DESADV_LEDGER = _Ledger(
     members_table="import_alert_incident_desadv_members",
     members_fk_col="desadv_sent_id")
 
+# Every `ledger`-taking function below defaults to EDI_LEDGER solely so the pre-#203
+# test suite (which predates DESADV entirely) keeps working unmodified — `sweep()` and
+# `_check_incidents_for_clear()`, the only PRODUCTION call sites, always pass `ledger`
+# explicitly (verified: grep for every call site below). A future DESADV-context call
+# site that forgets the argument fails SILENTLY (queries edi_sent instead of
+# desadv_sent) rather than erroring — review finding on #203. Always pass `ledger`
+# explicitly for any new call site; never rely on this default outside a test.
+
 
 def _channel_for(filename: str, cfg) -> int:
     """`ORDER_*` is this add-on's own upload (`edi.filename`, #67); `DESADV_*` is the

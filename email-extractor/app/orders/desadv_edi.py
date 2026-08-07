@@ -62,7 +62,6 @@ LIN_MIN_WIDTH = 209
 LIN_MAX_WIDTH = 221
 # R89: the buyer-EAN tail + the doc-number alnum cap the filename uses.
 MAX_DOC_NUMBER_IN_FILENAME = 10
-DL_DIR_DEFAULT = "C:\\ORION\\COMMUNICATOR\\data\\in_DL"
 
 # toWin1250, byte-exact port of the JS map — deliberately includes Czech 'ě'/'Ě' (the
 # orders-side edi.py's own table lacks it; real DL supplier/product names do carry
@@ -132,6 +131,14 @@ def _num(value) -> float:
         return 0.0
 
 
+def _is_unmatched(gtin) -> bool:
+    """No real GTIN — empty/None or the model's literal 'NO_MATCH' sentinel. A single
+    shared predicate (review finding on #203: this was written twice, once in
+    `generate()` and once in `build()`, with no shared helper — a future new
+    "unmatched" sentinel could silently diverge between the two)."""
+    return not gtin or str(gtin) == "NO_MATCH"
+
+
 def _detect_liquid_multipack(name) -> tuple[float, str] | None:
     """R84.1: `N x <size> (ml|l)` on the ORIGINAL supplier wording (never the matched
     catalog name — the token is usually stripped from the card). Liquid only — does
@@ -159,7 +166,13 @@ def _extract_mass(name) -> float:
     return 0.0
 
 
-def _format_mass(value) -> str:
+def _format_price(value) -> str:
+    """9-wide, 3-decimal — despite the production node calling its equivalent
+    `formatMass()`, its ONLY call site is `formatMass(unitPrice)` (grep-confirmed
+    against the real source): the LIN layout has no separate mass field at all — mass
+    is input-only, consumed by the R84 conversion math, never written to the document.
+    Named for what it actually formats (review finding on #203), not the misleading
+    inherited JS name."""
     return _pad_left(f"{_num(value):.3f}", 9)
 
 
@@ -239,7 +252,7 @@ def generate(data: dict, sklad_by_gtin: dict, cena_by_gtin: dict) -> Desadv:
     line_no = 0
     for item in data.get("items") or []:
         gtin = item.get("gtin")
-        if not gtin or str(gtin) == "NO_MATCH":
+        if _is_unmatched(gtin):
             skipped.append(item.get("name") or "(unknown)")
             log.info("desadv line skipped (no GTIN): %r", item.get("name"))
             continue
@@ -307,7 +320,7 @@ def generate(data: dict, sklad_by_gtin: dict, cena_by_gtin: dict) -> Desadv:
         lin += _pad("", 23)
         lin += "Z"
         lin += _pad("", 22)
-        lin += _format_mass(unit_price)
+        lin += _format_price(unit_price)
         lin += _pad_left("5", 5)
         lin += _format_qty(out_qty)
         lin += _pad(str(final_unit)[:3], 3)
@@ -367,12 +380,13 @@ def upload_name(name: str) -> str:
     """R89: uploaded onto ORION as `Z-<filename>` (verified live 2026-08-07: `in_DL`
     and `in\\archCodex` both hold the file under its Z-prefixed name — the LEDGER keeps
     the base name per R83's "human-facing name in the registry", this is only the
-    on-wire transform applied at upload time)."""
+    on-wire transform applied at upload time). The target directory itself is NOT
+    duplicated here — `upload.DL_DIR`/`cfg.orion_dl_dir` (config.py) are the two
+    existing sources of truth for that path (mirroring the orders side's own
+    `edi.ORION_DIR`/`cfg.orion_dir` split); a third copy here was removed (review
+    finding on #203) rather than adding a fourth place a path change would need to
+    touch."""
     return f"Z-{name}"
-
-
-def orion_dl_path(name: str, base: str = DL_DIR_DEFAULT) -> str:
-    return f"{base}\\{name}"
 
 
 # --- orchestration (R80-R83, R89) -------------------------------------------
@@ -418,10 +432,8 @@ def build(header: dict, extraction: dict, matched_items: list[dict],
     all_items = matched_items or []
     zero_qty = [i for i in all_items if _num(i.get("quantity")) == 0]
     items = [i for i in all_items if _num(i.get("quantity")) != 0]
-    no_match = [i for i in items
-               if not i.get("gtin") or str(i.get("gtin")) == "NO_MATCH"]
-    real_matched = [i for i in items
-                    if i.get("gtin") and str(i.get("gtin")) != "NO_MATCH"]
+    no_match = [i for i in items if _is_unmatched(i.get("gtin"))]
+    real_matched = [i for i in items if not _is_unmatched(i.get("gtin"))]
     can_create = supplier_matched and bool(real_matched)
 
     zero_qty_names = [i.get("name") or "(unknown)" for i in zero_qty]
@@ -455,6 +467,20 @@ def build(header: dict, extraction: dict, matched_items: list[dict],
     # digits-only (ORION/EDITEL parses the HDR field as a number — a letter prefix
     # crashes the import); the human-facing doc_number (Odoo, registry, filename) keeps
     # whatever extraction/auto-generation produced.
+    #
+    # `or doc_number` is a FAITHFUL port of the production node's own fallback
+    # (`String(docNumber).replace(/[^0-9]/g, '') || String(docNumber)`), not a Python
+    # addition — verified against the real sub3_edi_code.js source (review finding on
+    # #203). It is a genuine INHERITED weak point, same class as W12: a docNumber with
+    # ZERO digit characters anywhere (e.g. extraction misreads a purely-alphabetic
+    # value) falls back to the un-stripped original, which can still crash ORION's
+    # import exactly the way R83 exists to prevent. `_generate_doc_number()`'s own
+    # fallback always contains digits (MMDD/HHMM), so this only bites when EXTRACTION
+    # itself hands back an all-non-digit docNumber — never observed in practice, but
+    # deliberately NOT "fixed" here (dropping the fallback would diverge from the byte
+    # parity this module exists to guarantee); pinned by
+    # `test_doc_number_with_zero_digits_falls_back_to_the_raw_value_matching_production`
+    # so the behavior is visible and provably intentional, not silently unverified.
     doc_number = extraction_doc_number or _generate_doc_number(customer_name)
     auto_generated = not extraction_doc_number
     edi_doc_number = re.sub(r"[^0-9]", "", doc_number) or doc_number

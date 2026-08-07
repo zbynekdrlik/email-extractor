@@ -59,6 +59,18 @@ def test_diacritics_and_czech_e_caron_never_reach_the_file():
     assert "Pekaren Novakova a spol." in got.content
 
 
+def test_czech_e_caron_folds_via_the_win1250_table():
+    """The fixture case above (named for Czech ě) actually only exercises Slovak
+    diacritics — review finding on #203: the one thing the module's own docstring
+    calls out as new coverage versus edi.py's table was untested. Direct test of the
+    literal map entry (byte-exact port of the real JS `toWin1250`'s 'ě':'e'/'Ě':'E' —
+    no fresh node fixture needed, the map itself IS the ground truth already sourced
+    from the real JS)."""
+    assert desadv_edi._to_win1250("měsíc") == "mesic"   # ě and í both fold
+    assert desadv_edi._to_win1250("ě") == "e"
+    assert desadv_edi._to_win1250("Ě") == "E"
+
+
 # --- R84: quantity/unit conversion ladder ------------------------------------
 
 def test_kg_tracked_sklad_100_converts_pieces_to_kg():
@@ -116,6 +128,15 @@ def test_unit_column_keeps_original_text_except_when_multipack_forces_l():
     got = desadv_edi.generate(**non_multipack["input"])
     lin = got.content.split("\r\n")[1]
     assert lin[108:111] == "ks "        # original unit text preserved, not "kg"
+
+
+def test_multipack_count_above_the_1000_sanity_cap_is_rejected():
+    """Ported faithfully from the real JS guard (`count > 1000 -> return null`, review
+    finding on #203) — an implausible count is treated as noise, not a real multipack,
+    falling through to the unconverted piece branch rather than silently producing a
+    huge quantity."""
+    assert desadv_edi._detect_liquid_multipack("Voda / 1001x1l") is None
+    assert desadv_edi._detect_liquid_multipack("Voda / 1000x1l") is not None
 
 
 # --- R85: price fallback -----------------------------------------------------
@@ -362,6 +383,22 @@ def test_build_strips_doc_number_to_digits_only_in_edi_content_but_keeps_it_huma
     hdr = result.content.split("\r\n")[0]
     doc_number_field = hdr[3:18]
     assert doc_number_field.strip() == "26036931"    # EDI content is digits-only
+
+
+def test_doc_number_with_zero_digits_falls_back_to_the_raw_value_matching_production():
+    """A genuine INHERITED weak point (review finding on #203, verified against the
+    real sub3_edi_code.js source): the production node's own digits-only strip is
+    `.replace(/[^0-9]/g, '') || String(docNumber)` — when NOTHING in docNumber is a
+    digit, it falls back to the un-stripped original, not an empty string. This test
+    PINS that this Python port matches production byte-for-byte here too, deliberately
+    NOT "fixed" to diverge from it (that would break the byte-parity guarantee this
+    module exists for)."""
+    result = desadv_edi.build(_header(), _extraction(doc_number="ABC"), [_item()], [])
+    assert result.can_create is True
+    assert result.doc_number == "ABC"
+    hdr = result.content.split("\r\n")[0]
+    doc_number_field = hdr[3:18]
+    assert doc_number_field.strip() == "ABC"          # NOT stripped — matches production
 
 
 def test_build_uses_catalog_price_fallback_and_sklad_conversion_end_to_end():

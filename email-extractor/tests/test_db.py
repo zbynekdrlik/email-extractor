@@ -51,6 +51,16 @@ def test_import_alert_incidents_has_a_source_column_defaulting_to_edi(pg):
     assert row[0] == "edi"
 
 
+def test_import_alert_incidents_source_is_check_constrained(pg):
+    """Same DB-enforced-invariant philosophy the sibling `kind` column already has
+    (#184) — a stray/mistyped source value must fail loudly, not silently resolve to
+    the wrong ledger wherever confirm.py reads it back (review finding on #203)."""
+    with pytest.raises(psycopg.errors.CheckViolation):
+        pg.execute(
+            "INSERT INTO import_alert_incidents (channel_id, kind, source) "
+            "VALUES (1, 'failed', 'bogus')")
+
+
 def test_at_most_one_open_incident_per_channel_kind_source(pg):
     pg.execute(
         "INSERT INTO import_alert_incidents (channel_id, kind, source) "
