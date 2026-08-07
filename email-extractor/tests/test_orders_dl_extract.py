@@ -301,6 +301,24 @@ def test_money_gate_is_skipped_when_no_document_total_was_read():
 
 # --- 8) per-document validation (R50-R52) ---------------------------------
 
+def test_a_missing_delivery_date_forces_review():
+    """Deep-review finding (Important): a delivery date that never parsed is
+    functionally the same downstream symptom W12 was fixed to prevent (a document
+    reaching EDI/ORION with no usable date) — it must not silently pass as valid."""
+    doc = _doc(deliveryDate="")
+    got = dl_extract.validate_document(doc)
+    assert got["status"] == "needsReview"
+    assert got["reviewReason"]
+
+
+def test_run_extraction_routes_an_unparseable_date_to_review():
+    client = FakeClient(json_answers=[{"documents": [
+        _doc(deliveryDate="not a real date")]}])
+    got = dl_extract.run_extraction(client, "source text")
+    assert got["documents"][0]["deliveryDate"] == ""
+    assert got["documents"][0]["status"] == "needsReview"
+
+
 def test_zero_items_forces_review():
     doc = _doc(items=[])
     got = dl_extract.validate_document(doc)
@@ -452,6 +470,38 @@ def test_no_attachments_means_no_documents():
     client = FakeClient()
     result = dl_extract.extract_email(client, [])
     assert result == {"documents": [], "attachments": []}
+
+
+class _RaisingClient(FakeClient):
+    """Fails on the FIRST attachment it is asked to extract from, then behaves
+    normally for the rest — simulates one truly-broken/empty attachment or a
+    transient API failure on ONE document out of several."""
+
+    def json_call(self, system, user, schema, name="result"):
+        if "boom" in user:
+            raise RuntimeError("simulated failure on this one attachment")
+        return super().json_call(system, user, schema, name)
+
+
+def test_one_bad_attachment_does_not_lose_the_others_documents():
+    """Deep-review finding (Important): a truly empty attachment, or any transport/
+    API failure, must not abort every remaining attachment of the same mail."""
+    client = _RaisingClient(json_answers=[
+        {"documents": [_doc(docNumber="1111111111")]},
+        {"documents": [_doc(docNumber="3333333333")]},
+    ])
+    attachments = [
+        {"idx": 0, "filename": "good1.pdf", "pdf_bytes": b"%PDF good", "machine_text": "text one"},
+        {"idx": 1, "filename": "bad.pdf", "pdf_bytes": b"%PDF boom", "machine_text": "boom"},
+        {"idx": 2, "filename": "good2.pdf", "pdf_bytes": b"%PDF good", "machine_text": "text three"},
+    ]
+    result = dl_extract.extract_email(client, attachments)
+    assert [d["docNumber"] for d in result["documents"]] == ["1111111111", "3333333333"]
+    assert len(result["attachments"]) == 3
+    failed = [a for a in result["attachments"] if a["idx"] == 1][0]
+    assert failed["error"]
+    ok = [a for a in result["attachments"] if a["idx"] in (0, 2)]
+    assert all(a["error"] is None for a in ok)
 
 
 # --- 12) prompts exist and are non-empty ------------------------------------
