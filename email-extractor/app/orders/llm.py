@@ -14,6 +14,7 @@ Model and effort come from the config; the standing decision is the top tier
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
@@ -24,6 +25,10 @@ from pathlib import Path
 log = logging.getLogger("orders.llm")
 
 API_URL = "https://api.openai.com/v1/responses"
+# The DL vision transcription (#201) needs `n` independent samples of ONE document in a
+# single call (R41/R43's dual-transcript cross-check) — the Responses API has no
+# equivalent of Chat Completions' `n`, so vision_call() is a genuinely separate transport.
+CHAT_API_URL = "https://api.openai.com/v1/chat/completions"
 DEFAULT_MODEL = "gpt-5.4"
 DEFAULT_EFFORT = "high"
 TIMEOUT = 300
@@ -75,6 +80,41 @@ def _http_transport(payload: dict, api_key: str, timeout: int) -> tuple[dict, di
     return _parse_response(body), body.get("usage")
 
 
+def _http_transport_chat(payload: dict, api_key: str, timeout: int) -> tuple[list[str], dict | None]:
+    req = urllib.request.Request(
+        CHAT_API_URL, method="POST",
+        data=json.dumps(payload).encode(),
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (fixed host)
+            body = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        raise LlmError(f"{e.code}: {e.read().decode()[:400]}") from e
+    except Exception as e:
+        raise LlmError(repr(e)) from e
+    if body.get("error"):
+        raise LlmError(str(body["error"])[:400])
+    choices = body.get("choices") or []
+    texts = [str((c.get("message") or {}).get("content") or "") for c in choices]
+    if not texts:
+        raise LlmError(f"no choices in vision response: {json.dumps(body)[:300]}")
+    return texts, body.get("usage")
+
+
+def _chat_usage_as_responses(usage: dict | None) -> dict | None:
+    """Normalize Chat Completions `usage` into the Responses-API shape `cost_usd`/`_tally`
+    already read, so vision_call is priced through the exact same table as json_call —
+    never a second, untested pricing path."""
+    if not usage:
+        return None
+    details_in = usage.get("prompt_tokens_details") or {}
+    return {
+        "input_tokens": usage.get("prompt_tokens", 0),
+        "output_tokens": usage.get("completion_tokens", 0),
+        "input_tokens_details": {"cached_tokens": details_in.get("cached_tokens", 0)},
+    }
+
+
 def _parse_response(body: dict) -> dict:
     """Pull the JSON payload out of a Responses API answer."""
     if body.get("error"):
@@ -96,7 +136,7 @@ def _parse_response(body: dict) -> dict:
 class Client:
     def __init__(self, api_key: str = "", cache_dir: str = "", model: str = DEFAULT_MODEL,
                  reasoning_effort: str = DEFAULT_EFFORT, offline: bool = False,
-                 transport=None, timeout: int = TIMEOUT):
+                 transport=None, timeout: int = TIMEOUT, vision_transport=None):
         self.api_key = api_key
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.model = model or DEFAULT_MODEL
@@ -104,6 +144,7 @@ class Client:
         self.offline = offline
         self.timeout = timeout
         self._transport = transport or _http_transport
+        self._vision_transport = vision_transport or _http_transport_chat
         self.last_prompt_hash = ""
         self.last_cached = False
         # The running bill for this client, so a run can persist what it cost (#89).
@@ -178,6 +219,70 @@ class Client:
             path.write_text(json.dumps(result, ensure_ascii=False, indent=1),
                             encoding="utf-8")
         return result
+
+    # --- vision (multimodal, #201) ----------------------------------------
+
+    def _vision_key(self, prompt: str, images: list[bytes] | None,
+                     pdf_bytes: bytes | None, n: int) -> str:
+        h = hashlib.sha256()
+        for part in (self.model, self.reasoning_effort, prompt, str(n)):
+            h.update(part.encode())
+            h.update(b"\x00")
+        for img in images or []:
+            h.update(hashlib.sha256(img).digest())
+        if pdf_bytes:
+            h.update(b"pdf:")
+            h.update(hashlib.sha256(pdf_bytes).digest())
+        return h.hexdigest()
+
+    def vision_call(self, prompt: str, images: list[bytes] | None = None,
+                     pdf_bytes: bytes | None = None, n: int = 2) -> list[str]:
+        """`n` independent transcripts of ONE document — either its scanned page
+        images (R40/R43) or the whole PDF as a file part (the digital-PDF vision
+        fallback, R42). A raw Chat Completions call, content-addressed-cached and
+        offline-safe exactly like `json_call`, priced through the same table.
+        """
+        if not images and not pdf_bytes:
+            raise LlmError("vision_call needs images or pdf_bytes")
+        key = self._vision_key(prompt, images, pdf_bytes, n)
+        path = self._cache_path(key)
+        if path and path.exists():
+            self.last_cached = True
+            self._tally(None, cached=True)
+            return json.loads(path.read_text(encoding="utf-8"))
+        if self.offline:
+            raise CacheMiss(
+                f"offline: no cached vision answer for {key[:12]}. "
+                "Record it with the live tier before relying on it in CI.")
+        if not self.api_key:
+            raise LlmError("no OpenAI API key configured (option openai_api_key)")
+
+        content: list[dict] = [{"type": "text", "text": prompt}]
+        for img in images or []:
+            b64 = base64.b64encode(img).decode()
+            content.append({"type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{b64}",
+                                         "detail": "high"}})
+        if pdf_bytes:
+            b64 = base64.b64encode(pdf_bytes).decode()
+            content.append({"type": "file",
+                            "file": {"filename": "document.pdf",
+                                    "file_data": f"data:application/pdf;base64,{b64}"}})
+        payload = {
+            "model": self.model,
+            "reasoning_effort": self.reasoning_effort,
+            "n": n,
+            "messages": [{"role": "user", "content": content}],
+        }
+        answer = self._vision_transport(payload, self.api_key, self.timeout)
+        texts, usage = answer if isinstance(answer, tuple) else (answer, None)
+        self.last_cached = False
+        self._tally(_chat_usage_as_responses(usage), cached=False)
+        if path:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(texts, ensure_ascii=False, indent=1),
+                            encoding="utf-8")
+        return texts
 
 
 def from_config(cfg, offline: bool = False) -> Client:
