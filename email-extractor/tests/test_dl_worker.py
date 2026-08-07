@@ -277,9 +277,15 @@ def test_a_genuine_cross_message_duplicate_still_counts_when_claimant_is_unknown
                                                                                  tmp_path):
     """A legacy claim with NO recorded message_id (predates #216, or was claimed by a
     process that never passed one) must still be reported — and COUNTED — as a real
-    duplicate: `desadv.claimed_by()` returns "" for it, which can never equal a real
-    message_id, so the safe default stays 'genuine duplicate', never silently
-    downgraded to a self-retry it cannot actually prove."""
+    duplicate: the atomic claim/identify read reports "" for it, which can never equal
+    a real message_id, so the safe default stays 'genuine duplicate', never silently
+    downgraded to a self-retry it cannot actually prove. NOTE: this specific setup
+    (no message_id passed to the pre-seeded claim) is a valid call under BOTH the old
+    and new `desadv.claim_send()` signature, so on its own it does not discriminate
+    pre-#216 from post-#216 behaviour — see the sibling test right below, which pins
+    a KNOWN but DIFFERENT claimant, for a case that actually exercises the comparison
+    itself. `test_retry_after_partial_ship_logs_a_self_retry_not_a_false_duplicate`
+    above is the one that is genuinely RED pre-fix (fails on TypeError)."""
     _snapshot(pg)
     _msg(pg, mid="dl1")
     _attach(pg, tmp_path, "dl1")
@@ -293,6 +299,39 @@ def test_a_genuine_cross_message_duplicate_still_counts_when_claimant_is_unknown
         upload=lambda *a, **k: None, post=lambda c, h: None)
 
     assert n == 1
+    stats = reliability.dl_provenance_stats_for_day(pg)
+    assert stats["duplicates"] == 1
+
+
+def test_a_genuine_cross_message_duplicate_still_counts_with_a_known_different_claimant(
+        pg, tmp_path):
+    """The comparison itself, not just the "unknown claimant" fallback: a DIFFERENT,
+    KNOWN message_id ("dl0") already holds the claim while THIS message ("dl1") is
+    being processed. A wrong/inverted equality check (e.g. always True, or comparing
+    the wrong fields) would fail this test even on the fixed code — unlike the
+    unknown-claimant sibling above, this one genuinely discriminates the comparison
+    logic in `dl_worker.py`'s `if holder == message["message_id"]:` check."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    desadv.claim_send(pg, SUPPLIER_EAN, "0100000001", "already.txt", message_id="dl0")
+    desadv.confirm_sent(pg, SUPPLIER_EAN, "0100000001")
+
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    n = dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client,
+        upload=lambda *a, **k: None, post=lambda c, h: None)
+
+    assert n == 1
+    ev = pg.execute(
+        "SELECT stage FROM email_events WHERE message_id='dl1' "
+        "AND stage='duplicate_skip'").fetchone()
+    assert ev == ("duplicate_skip",)
+    none = pg.execute(
+        "SELECT count(*) FROM email_events WHERE message_id='dl1' "
+        "AND stage='already_shipped_this_run'").fetchone()[0]
+    assert none == 0
     stats = reliability.dl_provenance_stats_for_day(pg)
     assert stats["duplicates"] == 1
 

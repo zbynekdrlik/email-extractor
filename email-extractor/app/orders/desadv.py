@@ -92,6 +92,72 @@ def claim_send(conn, supplier_ean: str, doc_number: str, filename: str,
     return row is not None
 
 
+def claim_send_or_identify(conn, supplier_ean: str, doc_number: str, filename: str,
+                           message_id: str = "") -> tuple[bool, str]:
+    """`claim_send()` + `claimed_by()`, ATOMICALLY, in ONE round trip — closes a
+    review-caught TOCTOU window on #216's own PR: `claim_send()` returning False and a
+    SEPARATE follow-up `claimed_by()` read are two plain autocommit statements with no
+    shared transaction, leaving a gap in which a genuinely different message could
+    theoretically reclaim this same row and change its `message_id` before the read
+    runs. In practice this could only ever mis-tag WHICH stage gets logged (never
+    double-ship — the actual claim/reclaim decision below is exactly `claim_send()`'s
+    own atomic `ON CONFLICT ... WHERE`), but a single statement removes the gap
+    entirely rather than merely shrinking it.
+
+    Returns `(claimed, current_message_id)`:
+    - `claimed=True` — the claim was taken (a fresh insert or a stale reclaim);
+      `current_message_id` is always `""` (nothing else to identify, the caller may
+      proceed to upload).
+    - `claimed=False` — refused (a CONFIRMED upload already exists, or another claim
+      is still fresh); `current_message_id` is whoever holds it now, same value
+      `claimed_by()` would return ("" for a legacy row with no `message_id`).
+
+    The data-modifying CTE (`ins`) always runs the INSERT; the fallback `SELECT` only
+    contributes a row via `NOT EXISTS (SELECT 1 FROM ins)` when the conflict path's
+    own `WHERE` refused to update — at that point the table row is UNCHANGED by this
+    statement, so reading it back directly is exactly the pre-existing claimant.
+    `claim_send()`/`claimed_by()` stay as their own tested primitives (other callers,
+    and directness for tests) — this is the race-free combination `dl_worker.py`
+    actually uses in production."""
+    ean, doc = str(supplier_ean or ""), str(doc_number or "")
+    mid = str(message_id or "") or None
+    if not ean or not doc:
+        log.warning("desadv.claim_send_or_identify refused — missing "
+                    "supplier_ean/doc_number (supplier_ean=%r doc_number=%r)", ean, doc)
+        return False, ""
+    row = conn.execute(
+        """WITH ins AS (
+               INSERT INTO desadv_sent (supplier_ean, doc_number, filename, message_id)
+               VALUES (%s, %s, %s, %s)
+               ON CONFLICT (supplier_ean, doc_number)
+               DO UPDATE SET sent_at = now(), filename = EXCLUDED.filename,
+                             message_id = EXCLUDED.message_id
+               WHERE desadv_sent.uploaded_at IS NULL
+                 AND desadv_sent.sent_at < now() - make_interval(mins => %s)
+               RETURNING message_id
+           )
+           SELECT true, NULL FROM ins
+           UNION ALL
+           SELECT false, d.message_id FROM desadv_sent d
+            WHERE d.supplier_ean = %s AND d.doc_number = %s
+              AND NOT EXISTS (SELECT 1 FROM ins)""",
+        (ean, doc, filename, mid, CLAIM_STALE_MINUTES, ean, doc),
+    ).fetchone()
+    if row is None:
+        # Cannot happen given ean/doc are non-empty (the INSERT itself has no WHERE of
+        # its own — only the ON CONFLICT DO UPDATE branch does), but never unpack a
+        # None into the caller.
+        log.error("desadv.claim_send_or_identify: no row returned for supplier=%s "
+                  "doc=%s — treating as refused", supplier_ean, doc_number)
+        return False, ""
+    claimed, holder = bool(row[0]), (row[1] or "")
+    if not claimed:
+        log.warning("DESADV already sent (or claimed within %sm) for supplier=%s doc=%s "
+                    "— refusing a duplicate upload", CLAIM_STALE_MINUTES, supplier_ean,
+                    doc_number)
+    return claimed, holder
+
+
 def confirm_sent(conn, supplier_ean: str, doc_number: str, pg_dsn: str = "") -> None:
     """Stamp the claim as a genuinely CONFIRMED upload — call this ONLY after the
     upload actually succeeded. Until this runs, the claim stays reclaimable by
