@@ -1,0 +1,394 @@
+[
+  {
+    "name": "two_pieces_no_conversion",
+    "input": {
+      "data": {
+        "customerEanEdi": "2000000000099",
+        "customerName": "Testovaci Dodavatel s.r.o.",
+        "orderNumber": "12345678",
+        "docNumber": "12345678",
+        "deliveryDate": "04.08.2026",
+        "items": [
+          {
+            "gtin": "8588001800013",
+            "name": "Rozok stand",
+            "supplierName": "rozok",
+            "quantity": 120,
+            "mass": 0,
+            "unit": "ks",
+            "totalPrice": 24,
+            "unitPrice": 0.2
+          },
+          {
+            "gtin": "8588001800020",
+            "name": "Vianocka 400g",
+            "supplierName": "vianocka",
+            "quantity": 7,
+            "mass": 0,
+            "unit": "ks",
+            "totalPrice": 14,
+            "unitPrice": 2
+          }
+        ]
+      },
+      "sklad_by_gtin": {},
+      "cena_by_gtin": {}
+    },
+    "expected": {
+      "content": "HDR12345678       2026080420260804                                 12345678                                              2000000000099    2000000000099    2000000000099    8586013743063                         Testovaci Dodavatel s.r.o.                                                                                                                                                                                                                              SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                              Druzstevna 170                        Grance - Petrovce          053 05                                                                                                                                                                                                                                                                                                                                                                    \r\nLIN     18588001800013             0                       Z                          0.200    5     120.000ks                                    12345678                                                                   \r\nLIN     28588001800020             0                       Z                          2.000    5       7.000ks                                    12345678                                                                   ",
+      "lineCount": 2,
+      "skipped": [],
+      "substituted": []
+    }
+  },
+  {
+    "name": "kg_tracked_piece_unit_converts",
+    "input": {
+      "data": {
+        "customerEanEdi": "2000000000099",
+        "customerName": "Testovaci Dodavatel s.r.o.",
+        "orderNumber": "77",
+        "docNumber": "77",
+        "deliveryDate": "05.08.2026",
+        "items": [
+          {
+            "gtin": "8500000000001",
+            "name": "Syr eidam",
+            "supplierName": "syr eidam",
+            "quantity": 3,
+            "mass": 2.5,
+            "unit": "ks",
+            "totalPrice": 30,
+            "unitPrice": 10
+          }
+        ]
+      },
+      "sklad_by_gtin": {
+        "8500000000001": "100"
+      },
+      "cena_by_gtin": {}
+    },
+    "expected": {
+      "content": "HDR77             2026080520260805                                 77                                                    2000000000099    2000000000099    2000000000099    8586013743063                         Testovaci Dodavatel s.r.o.                                                                                                                                                                                                                              SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                              Druzstevna 170                        Grance - Petrovce          053 05                                                                                                                                                                                                                                                                                                                                                                    \r\nLIN     18500000000001             0                       Z                          4.000    5       7.500ks                                    77                                                                         ",
+      "lineCount": 1,
+      "skipped": [],
+      "substituted": []
+    }
+  },
+  {
+    "name": "kg_tracked_already_kg_unit_unchanged",
+    "input": {
+      "data": {
+        "customerEanEdi": "2000000000099",
+        "customerName": "Testovaci Dodavatel s.r.o.",
+        "orderNumber": "78",
+        "docNumber": "78",
+        "deliveryDate": "05.08.2026",
+        "items": [
+          {
+            "gtin": "8500000000002",
+            "name": "Syr eidam vaha",
+            "supplierName": "syr eidam vaha",
+            "quantity": 7.5,
+            "mass": 2.5,
+            "unit": "kg",
+            "totalPrice": 60,
+            "unitPrice": 8
+          }
+        ]
+      },
+      "sklad_by_gtin": {
+        "8500000000002": "100"
+      },
+      "cena_by_gtin": {}
+    },
+    "expected": {
+      "content": "HDR78             2026080520260805                                 78                                                    2000000000099    2000000000099    2000000000099    8586013743063                         Testovaci Dodavatel s.r.o.                                                                                                                                                                                                                              SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                              Druzstevna 170                        Grance - Petrovce          053 05                                                                                                                                                                                                                                                                                                                                                                    \r\nLIN     18500000000002             0                       Z                          8.000    5       7.500kg                                    78                                                                         ",
+      "lineCount": 1,
+      "skipped": [],
+      "substituted": []
+    }
+  },
+  {
+    "name": "kg_tracked_eggs_exempt_stays_pieces",
+    "input": {
+      "data": {
+        "customerEanEdi": "2000000000099",
+        "customerName": "Testovaci Dodavatel s.r.o.",
+        "orderNumber": "79",
+        "docNumber": "79",
+        "deliveryDate": "05.08.2026",
+        "items": [
+          {
+            "gtin": "8500000000003",
+            "name": "Vajcia M 10ks",
+            "supplierName": "vajcia M",
+            "quantity": 30,
+            "mass": 0.06,
+            "unit": "ks",
+            "totalPrice": 9,
+            "unitPrice": 0.3
+          }
+        ]
+      },
+      "sklad_by_gtin": {
+        "8500000000003": "100"
+      },
+      "cena_by_gtin": {}
+    },
+    "expected": {
+      "content": "HDR79             2026080520260805                                 79                                                    2000000000099    2000000000099    2000000000099    8586013743063                         Testovaci Dodavatel s.r.o.                                                                                                                                                                                                                              SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                              Druzstevna 170                        Grance - Petrovce          053 05                                                                                                                                                                                                                                                                                                                                                                    \r\nLIN     18500000000003             0                       Z                          0.300    5      30.000ks                                    79                                                                         ",
+      "lineCount": 1,
+      "skipped": [],
+      "substituted": []
+    }
+  },
+  {
+    "name": "liquid_multipack_takes_precedence",
+    "input": {
+      "data": {
+        "customerEanEdi": "2000000000099",
+        "customerName": "Testovaci Dodavatel s.r.o.",
+        "orderNumber": "80",
+        "docNumber": "80",
+        "deliveryDate": "05.08.2026",
+        "items": [
+          {
+            "gtin": "8500000000004",
+            "name": "Ocot 8%",
+            "supplierName": "Ocot 8% / 6x1l",
+            "quantity": 2,
+            "mass": 0,
+            "unit": "ks",
+            "totalPrice": 24,
+            "unitPrice": 12
+          }
+        ]
+      },
+      "sklad_by_gtin": {
+        "8500000000004": "100"
+      },
+      "cena_by_gtin": {}
+    },
+    "expected": {
+      "content": "HDR80             2026080520260805                                 80                                                    2000000000099    2000000000099    2000000000099    8586013743063                         Testovaci Dodavatel s.r.o.                                                                                                                                                                                                                              SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                              Druzstevna 170                        Grance - Petrovce          053 05                                                                                                                                                                                                                                                                                                                                                                    \r\nLIN     18500000000004             0                       Z                          2.000    5      12.000L                                     80                                                                         ",
+      "lineCount": 1,
+      "skipped": [],
+      "substituted": []
+    }
+  },
+  {
+    "name": "price_fallback_missing_price",
+    "input": {
+      "data": {
+        "customerEanEdi": "2000000000099",
+        "customerName": "Testovaci Dodavatel s.r.o.",
+        "orderNumber": "81",
+        "docNumber": "81",
+        "deliveryDate": "05.08.2026",
+        "items": [
+          {
+            "gtin": "8500000000005",
+            "name": "Chlieb konzum",
+            "supplierName": "chlieb konzum",
+            "quantity": 10,
+            "mass": 0,
+            "unit": "ks",
+            "totalPrice": 0,
+            "unitPrice": 0
+          }
+        ]
+      },
+      "sklad_by_gtin": {},
+      "cena_by_gtin": {
+        "8500000000005": 1.5
+      }
+    },
+    "expected": {
+      "content": "HDR81             2026080520260805                                 81                                                    2000000000099    2000000000099    2000000000099    8586013743063                         Testovaci Dodavatel s.r.o.                                                                                                                                                                                                                              SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                              Druzstevna 170                        Grance - Petrovce          053 05                                                                                                                                                                                                                                                                                                                                                                    \r\nLIN     18500000000005             0                       Z                          1.500    5      10.000ks                                    81                                                                         ",
+      "lineCount": 1,
+      "skipped": [],
+      "substituted": [
+        "Chlieb konzum: bez ceny → 1.500 €/ks"
+      ]
+    }
+  },
+  {
+    "name": "price_fallback_5x_too_high",
+    "input": {
+      "data": {
+        "customerEanEdi": "2000000000099",
+        "customerName": "Testovaci Dodavatel s.r.o.",
+        "orderNumber": "82",
+        "docNumber": "82",
+        "deliveryDate": "05.08.2026",
+        "items": [
+          {
+            "gtin": "8500000000006",
+            "name": "Rohlik",
+            "supplierName": "rohlik",
+            "quantity": 5,
+            "mass": 0,
+            "unit": "ks",
+            "totalPrice": 48.5,
+            "unitPrice": 9.7
+          }
+        ]
+      },
+      "sklad_by_gtin": {},
+      "cena_by_gtin": {
+        "8500000000006": 0.974
+      }
+    },
+    "expected": {
+      "content": "HDR82             2026080520260805                                 82                                                    2000000000099    2000000000099    2000000000099    8586013743063                         Testovaci Dodavatel s.r.o.                                                                                                                                                                                                                              SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                              Druzstevna 170                        Grance - Petrovce          053 05                                                                                                                                                                                                                                                                                                                                                                    \r\nLIN     18500000000006             0                       Z                          0.974    5       5.000ks                                    82                                                                         ",
+      "lineCount": 1,
+      "skipped": [],
+      "substituted": [
+        "Rohlik: 9.700 → 0.974 €/ks"
+      ]
+    }
+  },
+  {
+    "name": "price_normal_movement_not_substituted",
+    "input": {
+      "data": {
+        "customerEanEdi": "2000000000099",
+        "customerName": "Testovaci Dodavatel s.r.o.",
+        "orderNumber": "83",
+        "docNumber": "83",
+        "deliveryDate": "05.08.2026",
+        "items": [
+          {
+            "gtin": "8500000000007",
+            "name": "Bageta",
+            "supplierName": "bageta",
+            "quantity": 5,
+            "mass": 0,
+            "unit": "ks",
+            "totalPrice": 6,
+            "unitPrice": 1.2
+          }
+        ]
+      },
+      "sklad_by_gtin": {},
+      "cena_by_gtin": {
+        "8500000000007": 1
+      }
+    },
+    "expected": {
+      "content": "HDR83             2026080520260805                                 83                                                    2000000000099    2000000000099    2000000000099    8586013743063                         Testovaci Dodavatel s.r.o.                                                                                                                                                                                                                              SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                              Druzstevna 170                        Grance - Petrovce          053 05                                                                                                                                                                                                                                                                                                                                                                    \r\nLIN     18500000000007             0                       Z                          1.200    5       5.000ks                                    83                                                                         ",
+      "lineCount": 1,
+      "skipped": [],
+      "substituted": []
+    }
+  },
+  {
+    "name": "no_match_item_skipped_and_renumbered",
+    "input": {
+      "data": {
+        "customerEanEdi": "2000000000099",
+        "customerName": "Testovaci Dodavatel s.r.o.",
+        "orderNumber": "84",
+        "docNumber": "84",
+        "deliveryDate": "05.08.2026",
+        "items": [
+          {
+            "gtin": "NO_MATCH",
+            "name": "Neznamy vyrobok",
+            "supplierName": "neznamy vyrobok",
+            "quantity": 4,
+            "mass": 0,
+            "unit": "ks",
+            "totalPrice": 8,
+            "unitPrice": 2
+          },
+          {
+            "gtin": "8500000000008",
+            "name": "Kaiserka",
+            "supplierName": "kaiserka",
+            "quantity": 20,
+            "mass": 0,
+            "unit": "ks",
+            "totalPrice": 4,
+            "unitPrice": 0.2
+          }
+        ]
+      },
+      "sklad_by_gtin": {},
+      "cena_by_gtin": {}
+    },
+    "expected": {
+      "content": "HDR84             2026080520260805                                 84                                                    2000000000099    2000000000099    2000000000099    8586013743063                         Testovaci Dodavatel s.r.o.                                                                                                                                                                                                                              SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                              Druzstevna 170                        Grance - Petrovce          053 05                                                                                                                                                                                                                                                                                                                                                                    \r\nLIN     18500000000008             0                       Z                          0.200    5      20.000ks                                    84                                                                         ",
+      "lineCount": 1,
+      "skipped": [
+        "Neznamy vyrobok"
+      ],
+      "substituted": []
+    }
+  },
+  {
+    "name": "diacritics_and_czech_e_caron",
+    "input": {
+      "data": {
+        "customerEanEdi": "2000000000099",
+        "customerName": "Pekáreň Nováková a spol.",
+        "orderNumber": "85",
+        "docNumber": "85",
+        "deliveryDate": "05.08.2026",
+        "items": [
+          {
+            "gtin": "8500000000009",
+            "name": "Chlebíček s vajíčkom",
+            "supplierName": "chlebicek",
+            "quantity": 3,
+            "mass": 0,
+            "unit": "ks",
+            "totalPrice": 9,
+            "unitPrice": 3
+          }
+        ]
+      },
+      "sklad_by_gtin": {},
+      "cena_by_gtin": {}
+    },
+    "expected": {
+      "content": "HDR85             2026080520260805                                 85                                                    2000000000099    2000000000099    2000000000099    8586013743063                         Pekaren Novakova a spol.                                                                                                                                                                                                                                SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                              Druzstevna 170                        Grance - Petrovce          053 05                                                                                                                                                                                                                                                                                                                                                                    \r\nLIN     18500000000009             0                       Z                          3.000    5       3.000ks                                    85                                                                         ",
+      "lineCount": 1,
+      "skipped": [],
+      "substituted": []
+    }
+  },
+  {
+    "name": "missing_delivery_date_blanks_hdr_dates",
+    "input": {
+      "data": {
+        "customerEanEdi": "2000000000099",
+        "customerName": "Testovaci Dodavatel s.r.o.",
+        "orderNumber": "86",
+        "docNumber": "86",
+        "deliveryDate": "",
+        "items": [
+          {
+            "gtin": "8500000000010",
+            "name": "Slad chlieb",
+            "supplierName": "slad chlieb",
+            "quantity": 2,
+            "mass": 0,
+            "unit": "ks",
+            "totalPrice": 3,
+            "unitPrice": 1.5
+          }
+        ]
+      },
+      "sklad_by_gtin": {},
+      "cena_by_gtin": {}
+    },
+    "expected": {
+      "content": "HDR86                                                              86                                                    2000000000099    2000000000099    2000000000099    8586013743063                         Testovaci Dodavatel s.r.o.                                                                                                                                                                                                                              SLOVNORMAL, s.r.o.                                                                                                                                                                                                                                                              Druzstevna 170                        Grance - Petrovce          053 05                                                                                                                                                                                                                                                                                                                                                                    \r\nLIN     18500000000010             0                       Z                          1.500    5       2.000ks                                    86                                                                         ",
+      "lineCount": 1,
+      "skipped": [],
+      "substituted": []
+    }
+  }
+]
