@@ -374,3 +374,28 @@ def test_dl_suppliers_for_management_marks_override_identity_for_editing(pg):
         ean_edi="8586010000001", name="Signatus v2", emails=[], city="Košice")
     rows2 = {r["name"]: r for r in dl_snapshot.dl_suppliers_for_management(pg)}
     assert rows2["Signatus v2"]["override_id"] == rid
+
+
+def test_editing_an_already_overridden_dl_supplier_by_its_override_id(pg):
+    """The second edit through /znalosti sends the REAL override_id it got back from the
+    first edit — a different code path than the still-snapshot-only orig-identity one."""
+    _dl_snap(pg)
+    rows = {r["name"]: r for r in dl_snapshot.dl_suppliers_for_management(pg)}
+    row = rows["Signatus s.r.o."]
+    first_rid = dl_snapshot.upsert_dl_supplier(
+        pg, override_id=None, orig_ean_edi=row["orig_ean_edi"], orig_city=row["orig_city"],
+        ean_edi="8586010000001", name="Prvá verzia", emails=[], city="Košice")
+    second_rid = dl_snapshot.upsert_dl_supplier(
+        pg, override_id=first_rid, orig_ean_edi=None, orig_city=None,
+        ean_edi="8586010000001", name="Druhá verzia", emails=["nove@x.sk"], city="Košice")
+    assert second_rid == first_rid
+    rows2 = dl_snapshot.dl_suppliers_for_management(pg)
+    names = [r["name"] for r in rows2 if r["orig_ean_edi"] == row["orig_ean_edi"]]
+    assert names == ["Druhá verzia"]
+
+
+def test_upsert_dl_supplier_by_override_id_refuses_a_nonexistent_id(pg):
+    with pytest.raises(KeyError):
+        dl_snapshot.upsert_dl_supplier(
+            pg, override_id=999999, orig_ean_edi=None, orig_city=None,
+            ean_edi="1", name="x", emails=[], city="")

@@ -32,7 +32,7 @@ from werkzeug.exceptions import HTTPException
 
 from . import __version__, db, linkutil
 from .db import MAX_UID_ATTEMPTS
-from .orders import memory, snapshot
+from .orders import dl_snapshot, memory, snapshot
 from .store import message_dir
 
 CATEGORIES = ["ai_orders", "invoices", "reklamacie", "dodacie_listy",
@@ -84,7 +84,7 @@ SKLAD_ACTION = re.compile(r"^/api/orders/question/\d+/(answer|undo)$")
 SKLAD_ZNALOSTI_PAGE = re.compile(r"^/znalosti(/[^/]+)?$")
 SKLAD_ZNALOSTI_API = re.compile(
     r"^/api/znalosti/(global(/\d+)?|catalog|customers|customer/[^/]+(/\d+)?"
-    r"|products(/[^/]+)?|clients)$")
+    r"|products(/[^/]+)?|clients|dl-products(/[^/]+)?|dl-suppliers)$")
 
 
 def create_app(cfg) -> Flask:
@@ -830,6 +830,81 @@ def create_app(cfg) -> Flask:
                 orig_ean_edi=body.get("orig_ean_edi"), orig_street=body.get("orig_street"))
             if ok:
                 snapshot.rebuild_from_overrides(c)
+        return jsonify(ok=True) if ok else (jsonify(error="nenájdené"), 404)
+
+    # ---- /znalosti (#221): direct add/edit/retire of the DL catalog cards + suppliers,
+    # mirroring the #127/#128 products/clients routes above 1:1 but on DL's own separate
+    # dl_snapshots versioning line (see dl_snapshot.py's module docstring for why). ----
+
+    @app.get("/api/znalosti/dl-products")
+    def api_znalosti_dl_products():
+        q = _fold((request.args.get("q") or "").strip())
+        with _db() as c:
+            rows = dl_snapshot.dl_catalog_for_management(c)
+        if q:
+            rows = [r for r in rows if q in _fold(r["name"]) or q in _fold(r["gtin"])]
+        rows.sort(key=lambda r: _fold(r["name"]))
+        return jsonify(items=rows[:50])
+
+    @app.post("/api/znalosti/dl-products")
+    def api_znalosti_dl_products_upsert():
+        body = request.get_json(silent=True) or {}
+        gtin = str(body.get("gtin") or "").strip()
+        name = str(body.get("name") or "").strip()
+        if not (gtin and name):
+            return jsonify(error="chýba GTIN alebo názov"), 400
+        with _db() as c:
+            dl_snapshot.upsert_dl_catalog_card(
+                c, gtin, name, doplnok=str(body.get("doplnok") or "").strip(),
+                mass=dl_snapshot.parse_number(body.get("mass")),
+                sklad=str(body.get("sklad") or "").strip(),
+                cena=dl_snapshot.parse_number(body.get("cena")))
+            dl_snapshot.dl_rebuild_from_overrides(c)
+        return jsonify(ok=True)
+
+    @app.delete("/api/znalosti/dl-products/<gtin>")
+    def api_znalosti_dl_products_retire(gtin: str):
+        with _db() as c:
+            ok = dl_snapshot.retire_dl_catalog_card(c, gtin)
+            if ok:
+                dl_snapshot.dl_rebuild_from_overrides(c)
+        return jsonify(ok=True) if ok else (jsonify(error="nenájdené"), 404)
+
+    @app.get("/api/znalosti/dl-suppliers")
+    def api_znalosti_dl_suppliers():
+        q = _fold((request.args.get("q") or "").strip())
+        with _db() as c:
+            rows = dl_snapshot.dl_suppliers_for_management(c)
+        if q:
+            rows = [r for r in rows if q in _fold(r["name"]) or q in _fold(r["ean_edi"])]
+        rows.sort(key=lambda r: _fold(r["name"]))
+        return jsonify(items=rows[:50])
+
+    @app.post("/api/znalosti/dl-suppliers")
+    def api_znalosti_dl_suppliers_upsert():
+        body = request.get_json(silent=True) or {}
+        name = str(body.get("name") or "").strip()
+        if not name:
+            return jsonify(error="chýba názov"), 400
+        with _db() as c:
+            rid = dl_snapshot.upsert_dl_supplier(
+                c, override_id=body.get("override_id"),
+                orig_ean_edi=body.get("orig_ean_edi"), orig_city=body.get("orig_city"),
+                ean_edi=str(body.get("ean_edi") or "").strip(), name=name,
+                emails=_parse_emails_field(body.get("emails")),
+                city=str(body.get("city") or "").strip())
+            dl_snapshot.dl_rebuild_from_overrides(c)
+        return jsonify(ok=True, id=rid)
+
+    @app.delete("/api/znalosti/dl-suppliers")
+    def api_znalosti_dl_suppliers_retire():
+        body = request.get_json(silent=True) or {}
+        with _db() as c:
+            ok = dl_snapshot.retire_dl_supplier(
+                c, override_id=body.get("override_id"),
+                orig_ean_edi=body.get("orig_ean_edi"), orig_city=body.get("orig_city"))
+            if ok:
+                dl_snapshot.dl_rebuild_from_overrides(c)
         return jsonify(ok=True) if ok else (jsonify(error="nenájdené"), 404)
 
     @app.get("/api/orders/spend")
@@ -1667,6 +1742,121 @@ function clientsBox(){
   return box;
 }
 
+// #221: direct add/edit/retire of DL catalog cards (mirror of #127's productsBox, with the
+// DL-specific fields doplnok/mass/sklad/cena added — see dl_snapshot.py).
+function dlProductsBox(){
+  const box=el('div','box');
+  box.appendChild(el('h2',null,'DL katalóg (dodacie listy)'));
+  const gtin=el('input');gtin.placeholder='GTIN';
+  const name=el('input');name.placeholder='názov karty';
+  const doplnok=el('input');doplnok.placeholder='doplnok';
+  const mass=el('input');mass.placeholder='hmotnosť (kg)';
+  const sklad=el('input');sklad.placeholder='sklad';
+  const cena=el('input');cena.placeholder='cena';
+  for(const i of [gtin,name,doplnok,mass,sklad,cena])box.appendChild(i);
+  const status=el('div','picked','');box.appendChild(status);
+  const list=el('div');
+  async function refresh(q){
+    list.textContent='';
+    const d=await api('/api/znalosti/dl-products'+(q?('?q='+encodeURIComponent(q)):''));
+    if(!d.items.length){list.appendChild(el('div','empty','Zatiaľ nič.'));return}
+    for(const it of d.items){
+      const r=el('div','row');
+      r.appendChild(el('div',null,it.name+'  ('+it.gtin+')'+(it.overridden?' · upravené':'')));
+      const b=el('button',null,'upraviť');
+      b.onclick=()=>{gtin.value=it.gtin;name.value=it.name;doplnok.value=it.doplnok||'';
+        mass.value=it.mass==null?'':it.mass;sklad.value=it.sklad||'';
+        cena.value=it.cena==null?'':it.cena;status.textContent=''};
+      r.appendChild(b);list.appendChild(r)
+    }
+  }
+  const save=el('button','add','Uložiť (nový GTIN = pridá, existujúci = upraví)');
+  save.onclick=async()=>{
+    if(!gtin.value.trim()||!name.value.trim()){alert('vyplň GTIN aj názov');return}
+    try{await api('/api/znalosti/dl-products',{method:'POST',
+      body:JSON.stringify({gtin:gtin.value.trim(),name:name.value.trim(),
+        doplnok:doplnok.value.trim(),mass:mass.value.trim(),sklad:sklad.value.trim(),
+        cena:cena.value.trim()})});
+      status.textContent='uložené';await refresh(search.value.trim())}
+    catch(e){alert(e.message||'chyba')}
+  };
+  box.appendChild(save);
+  const retire=el('button',null,'Vyradiť kartu s GTIN vyššie');
+  retire.onclick=async()=>{
+    const g=gtin.value.trim();if(!g)return;
+    if(!confirm('Vyradiť kartu '+g+'?'))return;
+    try{await api('/api/znalosti/dl-products/'+encodeURIComponent(g),{method:'DELETE'});
+      gtin.value='';name.value='';doplnok.value='';mass.value='';sklad.value='';cena.value='';
+      status.textContent='vyradené';await refresh(search.value.trim())}
+    catch(e){alert(e.message||'chyba')}
+  };
+  box.appendChild(retire);
+  var search=el('input');search.placeholder='hľadaj kartu (názov alebo GTIN)…';
+  box.appendChild(search);box.appendChild(list);
+  let t=null;search.oninput=()=>{clearTimeout(t);t=setTimeout(()=>refresh(search.value.trim()),200)};
+  refresh('');
+  return box;
+}
+
+// #221: direct add/edit/retire of DL suppliers (mirror of #128's clientsBox). Identity is
+// city-only (no street/zip) — dl_supplier_snapshot never persists those, see dl_snapshot.py.
+function dlSuppliersBox(){
+  const box=el('div','box');
+  box.appendChild(el('h2',null,'Dodávatelia (dodacie listy)'));
+  const ean=el('input');ean.placeholder='EAN kód EDI';
+  const name=el('input');name.placeholder='názov firmy';
+  const emails=el('input');emails.placeholder='e-maily (čiarkou oddelené)';
+  const city=el('input');city.placeholder='obec';
+  for(const i of [ean,name,emails,city])box.appendChild(i);
+  const status=el('div','picked','');box.appendChild(status);
+  let editing=null;
+  function clearForm(){ean.value=name.value=emails.value=city.value='';editing=null}
+  const list=el('div');
+  async function refresh(q){
+    list.textContent='';
+    const d=await api('/api/znalosti/dl-suppliers'+(q?('?q='+encodeURIComponent(q)):''));
+    if(!d.items.length){list.appendChild(el('div','empty','Zatiaľ nič.'));return}
+    for(const it of d.items){
+      const r=el('div','row');
+      r.appendChild(el('div',null,it.name+'  ('+(it.ean_edi||'bez EAN')+')'+
+        (it.city?(' · '+it.city):'')));
+      const b=el('button',null,'upraviť');
+      b.onclick=()=>{
+        ean.value=it.ean_edi||'';name.value=it.name||'';emails.value=(it.emails||[]).join(', ');
+        city.value=it.city||'';
+        editing={override_id:it.override_id,orig_ean_edi:it.orig_ean_edi,orig_city:it.orig_city};
+        status.textContent=''
+      };
+      r.appendChild(b);list.appendChild(r)
+    }
+  }
+  const save=el('button','add','Uložiť');
+  save.onclick=async()=>{
+    if(!name.value.trim()){alert('vyplň názov');return}
+    const body={ean_edi:ean.value.trim(),name:name.value.trim(),emails:emails.value.trim(),
+      city:city.value.trim()};
+    if(editing)Object.assign(body,editing);
+    try{await api('/api/znalosti/dl-suppliers',{method:'POST',body:JSON.stringify(body)});
+      status.textContent='uložené';await refresh(search.value.trim())}
+    catch(e){alert(e.message||'chyba')}
+  };
+  box.appendChild(save);
+  const retire=el('button',null,'Vyradiť tohto dodávateľa');
+  retire.onclick=async()=>{
+    if(!editing){alert('najprv vyber existujúceho dodávateľa zo zoznamu');return}
+    if(!confirm('Vyradiť '+(name.value||'tohto dodávateľa')+'?'))return;
+    try{await api('/api/znalosti/dl-suppliers',{method:'DELETE',body:JSON.stringify(editing)});
+      clearForm();status.textContent='vyradené';await refresh(search.value.trim())}
+    catch(e){alert(e.message||'chyba')}
+  };
+  box.appendChild(retire);
+  var search=el('input');search.placeholder='hľadaj dodávateľa (názov alebo EAN)…';
+  box.appendChild(search);box.appendChild(list);
+  let t=null;search.oninput=()=>{clearTimeout(t);t=setTimeout(()=>refresh(search.value.trim()),200)};
+  refresh('');
+  return box;
+}
+
 // #128: on the /znalosti/<ean> page, edit THIS customer directly (no search needed —
 // the page already fixes which one). `record` is null only if the ean matches nobody.
 function customerEditBox(record, fallbackName){
@@ -1727,6 +1917,8 @@ async function load(){
     W.appendChild(box);
     W.appendChild(productsBox());
     W.appendChild(clientsBox());
+    W.appendChild(dlProductsBox());
+    W.appendChild(dlSuppliersBox());
   }
   W.appendChild(el('h2',null,'Globálne priradenia (platia pre každého zákazníka)'));
   W.appendChild(addForm((wording,gtin,card)=>
