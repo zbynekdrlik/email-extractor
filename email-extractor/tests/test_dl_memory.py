@@ -146,3 +146,99 @@ def test_import_n8n_rows_is_idempotent_on_a_second_run(pg):
     assert dl_memory.import_n8n_rows(pg, rows) == 0, "re-running the import must store nothing new"
     assert pg.execute(
         "SELECT count(*) FROM dl_item_memory WHERE supplier_ean = '777'").fetchone()[0] == 1
+
+
+# --- resolve() (#202, R66's weighted-majority read) ---------------------------------------
+
+def test_resolve_unanimous_single_gtin(pg):
+    _ship(pg, "S1", "múka hladká 25kg", "G1", "Múka hladká 25kg", "2026-07-01")
+    _ship(pg, "S1", "múka hladká 25kg", "G1", "Múka hladká 25kg", "2026-07-08")
+    r = dl_memory.resolve(pg, "S1", "múka hladká 25kg")
+    assert r is not None and r.gtin == "G1" and r.unanimous is True and r.strength == 2
+
+
+def test_resolve_none_when_no_history_at_all(pg):
+    assert dl_memory.resolve(pg, "S9", "nič") is None
+
+
+def test_resolve_mixed_history_newest_card_wins_at_or_above_60_percent(pg):
+    # G1: 2 deliveries (weight 2), G2: 3 deliveries (weight 3), newest is G2 -> 3/5 = 60%.
+    _ship(pg, "S2", "cukor", "G1", "Cukor A", "2026-06-01")
+    _ship(pg, "S2", "cukor", "G1", "Cukor A", "2026-06-02")
+    _ship(pg, "S2", "cukor", "G2", "Cukor B", "2026-06-10")
+    _ship(pg, "S2", "cukor", "G2", "Cukor B", "2026-06-11")
+    _ship(pg, "S2", "cukor", "G2", "Cukor B", "2026-06-12")
+    r = dl_memory.resolve(pg, "S2", "cukor")
+    assert r is not None and r.gtin == "G2" and r.unanimous is False and r.strength == 3
+
+
+def test_resolve_silent_when_newest_card_is_below_60_percent(pg):
+    # G1: 2 deliveries, G2: 2 deliveries -> newest (G2) is only 2/4 = 50%, below MAJORITY.
+    _ship(pg, "S3", "olej", "G1", "Olej A", "2026-06-01")
+    _ship(pg, "S3", "olej", "G1", "Olej A", "2026-06-02")
+    _ship(pg, "S3", "olej", "G2", "Olej B", "2026-06-10")
+    _ship(pg, "S3", "olej", "G2", "Olej B", "2026-06-11")
+    assert dl_memory.resolve(pg, "S3", "olej") is None
+
+
+def test_resolve_duplicate_rows_for_the_same_day_take_max_cnt_not_sum(pg):
+    """R66's own stated dedup rule + this module's own #200 review-finding guidance: two
+    rows for the SAME (gtin, day) with different cnt are the same underlying record —
+    max(cnt), never sum(cnt), or a re-import would double-count one delivery."""
+    _ship(pg, "S4", "vajcia", "G1", "Vajcia M", "2026-06-01", cnt=3)
+    _ship(pg, "S4", "vajcia", "G1", "Vajcia M", "2026-06-01", cnt=5)   # same day, re-seeded
+    r = dl_memory.resolve(pg, "S4", "vajcia")
+    assert r is not None and r.strength == 5, "must be max(3,5)=5, never 3+5=8"
+
+
+def test_resolve_weight_override_needs_unanimous_and_at_least_3(pg):
+    _ship(pg, "S5", "chlieb", "G1", "Chlieb 1kg", "2026-06-01", cnt=1)
+    _ship(pg, "S5", "chlieb", "G1", "Chlieb 1kg", "2026-06-02", cnt=1)
+    r = dl_memory.resolve(pg, "S5", "chlieb")
+    assert r.unanimous and r.strength == 2 and r.weight_override is False
+    _ship(pg, "S5", "chlieb", "G1", "Chlieb 1kg", "2026-06-03", cnt=1)
+    r = dl_memory.resolve(pg, "S5", "chlieb")
+    assert r.strength == 3 and r.weight_override is True
+
+
+def test_resolve_weight_override_false_when_history_is_mixed_even_at_3_plus(pg):
+    # G1: weight 1 (older), G2: weight 3 (newer) -> newest share 3/4 = 75%, clears MAJORITY,
+    # and its own strength (3) alone would clear WEIGHT_OVERRIDE_MIN — but the history is
+    # NOT unanimous (a genuinely different card was also shipped), so override must stay off.
+    _ship(pg, "S6", "syr", "G1", "Syr A", "2026-06-01", cnt=1)
+    _ship(pg, "S6", "syr", "G2", "Syr B", "2026-06-10", cnt=3)
+    r = dl_memory.resolve(pg, "S6", "syr")
+    assert r is not None and r.gtin == "G2" and r.unanimous is False
+    assert r.weight_override is False, "R66: weightOverride only when unanimous"
+
+
+def test_resolve_human_taught_row_wins_unconditionally(pg):
+    _ship(pg, "S7", "roztok", "G1", "Roztok A", "2026-06-01", cnt=9)  # heavy ship history
+    _ship(pg, "S7", "roztok", "G2", "Roztok B", "2026-07-01", src="human")
+    r = dl_memory.resolve(pg, "S7", "roztok")
+    assert r.gtin == "G2" and r.human is True and r.weight_override is True
+
+
+def test_resolve_catalog_invalidation_drops_a_retired_gtin(pg):
+    """R66: 'catalog-card disappearance invalidates the memory.'"""
+    _ship(pg, "S8", "maslo", "G1", "Maslo A", "2026-06-01")
+    _ship(pg, "S8", "maslo", "G1", "Maslo A", "2026-06-02")
+    assert dl_memory.resolve(pg, "S8", "maslo", catalog_gtins={"G1"}) is not None
+    assert dl_memory.resolve(pg, "S8", "maslo", catalog_gtins={"G9"}) is None
+
+
+def test_resolve_catalog_invalidation_also_applies_to_a_human_taught_row(pg):
+    _ship(pg, "S8b", "maslo extra", "G1", "Maslo A", "2026-06-01", src="human")
+    assert dl_memory.resolve(pg, "S8b", "maslo extra", catalog_gtins={"G9"}) is None
+
+
+def test_resolve_as_of_excludes_deliveries_on_or_after_the_given_day(pg):
+    _ship(pg, "S9x", "kvasnice", "G1", "Kvasnice", "2026-06-01")
+    _ship(pg, "S9x", "kvasnice", "G1", "Kvasnice", "2026-06-15")
+    r = dl_memory.resolve(pg, "S9x", "kvasnice", as_of="2026-06-10")
+    assert r is not None and r.strength == 1, "only the 06-01 delivery is before as_of"
+
+
+def test_resolve_missing_supplier_or_item_returns_none(pg):
+    assert dl_memory.resolve(pg, "", "co") is None
+    assert dl_memory.resolve(pg, "S1", "") is None
