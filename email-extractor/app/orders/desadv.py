@@ -125,6 +125,24 @@ def confirm_sent(conn, supplier_ean: str, doc_number: str, pg_dsn: str = "") -> 
             time.sleep(1)
 
 
+def already_sent(conn, supplier_ean: str, doc_number: str) -> bool:
+    """READ-ONLY: was this (supplier, doc_number) already CONFIRMED uploaded? Never
+    claims, never inserts, never touches a row — the shadow-mode counterpart of
+    `claim_send()` (#204, DL migration F5). Shadow's whole guarantee is that nothing
+    observable leaves the process; `claim_send()` always performs an INSERT/UPDATE (an
+    orphaned reclaim is a genuine, intentional side effect for the LIVE engine), so
+    shadow must never call it. A bare (unconfirmed, still-fresh) claim does NOT count
+    here — only a genuinely confirmed upload is "already sent"; an in-flight live claim
+    racing a shadow peek must not make shadow report a false duplicate."""
+    ean, doc = str(supplier_ean or ""), str(doc_number or "")
+    if not ean or not doc:
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM desadv_sent WHERE supplier_ean = %s AND doc_number = %s "
+        "AND uploaded_at IS NOT NULL", (ean, doc)).fetchone()
+    return row is not None
+
+
 def release_send(conn, supplier_ean: str, doc_number: str) -> None:
     """Give the claim back after a failed upload, so the document can be retried."""
     conn.execute(

@@ -27,6 +27,23 @@ on #196 for why both alternatives were rejected):
   from `worker.tick()` on every tick, but only ever actually posts on the FIRST tick of
   a new day, summarizing the day that JUST finished (never "today", which is still
   incomplete while the day is in progress).
+
+**#204 (DL migration F5) extends this file with a DL-scoped counterpart, never mixes the
+two.** F1 (#200)'s design decision reuses `order_runs`/`order_items` UNMODIFIED for DL
+runs (`result->>'kind' = 'dl'` is the only discriminator, no new column) — so
+`provenance_stats_for_day` now explicitly EXCLUDES `kind='dl'` rows (`IS DISTINCT FROM`,
+which also matches every pre-#204 row that has no `kind` key at all — backward
+compatible), or a DL run would silently inflate the AI-orders "runs"/"objednávky" counts,
+and DL's OWN rule vocabulary (`llm_sure`/`unmatched`/`llm_borderline`/
+`llm_sure_lexical_gap`, `dl_match.py`) would leak into orders' `llm`/`review` buckets —
+`llm_sure` is a real match rule name BOTH engines happen to share, so without the filter a
+DL document decided by the model would silently count as an ORDER decided by the model.
+`dl_provenance_stats_for_day` is the DL-scoped mirror (its own review-rule set, `email_events`
+counts for W7's duplicate-skip visibility and the spec §4 announced-vs-attached mismatch —
+neither of those two has an `order_items` row at all, they are message/document-level
+findings, not item decisions). `maybe_post_daily_digest` computes BOTH blocks and posts
+ONE combined message (still one claim on `order_digest_sent`, never a second table) — "DL
+run[s go] into the daily reliability digest", per the design comment on #204.
 """
 from __future__ import annotations
 
@@ -39,13 +56,17 @@ log = logging.getLogger("orders.reliability")
 
 
 def provenance_stats_for_day(conn, day: str = "") -> dict:
-    """Per-day match provenance. `day` is `YYYY-MM-DD`; empty means today."""
+    """Per-day match provenance. `day` is `YYYY-MM-DD`; empty means today.
+
+    Orders-only (#204): every query below excludes `result->>'kind' = 'dl'` rows — see
+    the module docstring's #204 section for why a DL run must never be counted here.
+    """
     row = conn.execute(
         """SELECT count(*),
                   count(*) FILTER (WHERE i.rule = 'llm_sure'),
                   count(*) FILTER (WHERE i.rule = ANY(%s))
              FROM order_items i JOIN order_runs r ON r.id = i.run_id
-            WHERE r.shadow = false
+            WHERE r.shadow = false AND (r.result->>'kind') IS DISTINCT FROM 'dl'
               AND to_char(coalesce(r.finished_at, r.started_at), 'YYYY-MM-DD')
                   = coalesce(nullif(%s, ''), to_char(now(), 'YYYY-MM-DD'))""",
         (list(ASK_THE_WAREHOUSE), day)).fetchone()
@@ -60,7 +81,7 @@ def provenance_stats_for_day(conn, day: str = "") -> dict:
         """SELECT count(*), count(*) FILTER (WHERE status = 'error'),
                   coalesce(sum((result->>'orders')::int), 0)
              FROM order_runs
-            WHERE shadow = false
+            WHERE shadow = false AND (result->>'kind') IS DISTINCT FROM 'dl'
               AND to_char(coalesce(finished_at, started_at), 'YYYY-MM-DD')
                   = coalesce(nullif(%s, ''), to_char(now(), 'YYYY-MM-DD'))""",
         (day,)).fetchone()
@@ -69,6 +90,55 @@ def provenance_stats_for_day(conn, day: str = "") -> dict:
     return {"day": day or _today(conn), "runs": runs_n, "orders": orders_n,
            "errors": errors_n, "items": items_n, "deterministic": det_n,
            "llm": llm_n, "review": review_n}
+
+
+# --- #204: the DL-scoped counterpart ----------------------------------------
+
+# dl_match.py's own review-worthy rule names (mirrors pipeline.ASK_THE_WAREHOUSE, but a
+# DIFFERENT rule vocabulary — DL's `llm_sure` would otherwise collide with orders' own
+# rule of the same name, see the module docstring's #204 section).
+DL_ASK_THE_WAREHOUSE = ("unmatched", "llm_borderline", "llm_sure_lexical_gap")
+
+
+def dl_provenance_stats_for_day(conn, day: str = "") -> dict:
+    """The DL mirror of `provenance_stats_for_day` — `kind='dl'` runs/items ONLY, plus
+    two message/document-level `email_events` counts `order_items` has no row for at
+    all: W7's duplicate-skip visibility and the spec §4 announced-vs-attached mismatch
+    (both `dl_report.log_duplicate`/`log_announced_mismatch`, #204)."""
+    row = conn.execute(
+        """SELECT count(*),
+                  count(*) FILTER (WHERE i.rule = 'llm_sure'),
+                  count(*) FILTER (WHERE i.rule = ANY(%s))
+             FROM order_items i JOIN order_runs r ON r.id = i.run_id
+            WHERE r.shadow = false AND r.result->>'kind' = 'dl'
+              AND to_char(coalesce(r.finished_at, r.started_at), 'YYYY-MM-DD')
+                  = coalesce(nullif(%s, ''), to_char(now(), 'YYYY-MM-DD'))""",
+        (list(DL_ASK_THE_WAREHOUSE), day)).fetchone()
+    items_n, llm_n, review_n = (int(x or 0) for x in row)
+    det_n = max(0, items_n - llm_n - review_n)
+
+    run_row = conn.execute(
+        """SELECT count(*), count(*) FILTER (WHERE status = 'error')
+             FROM order_runs
+            WHERE shadow = false AND result->>'kind' = 'dl'
+              AND to_char(coalesce(finished_at, started_at), 'YYYY-MM-DD')
+                  = coalesce(nullif(%s, ''), to_char(now(), 'YYYY-MM-DD'))""",
+        (day,)).fetchone()
+    runs_n, errors_n = (int(x or 0) for x in run_row)
+
+    events_row = conn.execute(
+        """SELECT count(*) FILTER (WHERE stage = 'duplicate_skip'),
+                  count(*) FILTER (WHERE stage = 'announced_mismatch')
+             FROM email_events
+            WHERE workflow = 'delivery_notes'
+              AND to_char(ts, 'YYYY-MM-DD')
+                  = coalesce(nullif(%s, ''), to_char(now(), 'YYYY-MM-DD'))""",
+        (day,)).fetchone()
+    dup_n, mismatch_n = (int(x or 0) for x in events_row)
+
+    return {"day": day or _today(conn), "runs": runs_n, "errors": errors_n,
+           "items": items_n, "deterministic": det_n, "llm": llm_n, "review": review_n,
+           "duplicates": dup_n, "announced_mismatch": mismatch_n}
 
 
 def days_since_incident(conn) -> int | None:
@@ -97,8 +167,9 @@ def maybe_post_daily_digest(conn, cfg, post=None, shadow: bool = False) -> bool:
     if not claimed:
         return False
     stats = provenance_stats_for_day(conn, yesterday)
+    dl_stats = dl_provenance_stats_for_day(conn, yesterday)
     html = report.build_daily_digest(stats, days_since_incident(conn),
-                                     link=report.sklad_link(cfg))
+                                     link=report.sklad_link(cfg), dl_stats=dl_stats)
     try:
         post(cfg, html)
     except Exception:

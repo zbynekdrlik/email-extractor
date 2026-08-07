@@ -10,13 +10,16 @@ from psycopg.types.json import Json
 from app.orders import reliability, report
 
 
-def _run(pg, day, rules=(), shadow=False, status="ok", orders=1):
+def _run(pg, day, rules=(), shadow=False, status="ok", orders=1, kind=None):
+    result = {"orders": orders}
+    if kind:
+        result["kind"] = kind
     rid = int(pg.execute(
         "INSERT INTO order_runs (message_id, shadow, status, started_at, finished_at, "
         "result) VALUES ('m', %s, %s, %s::timestamptz, %s::timestamptz, %s) "
         "RETURNING id",
         (shadow, status, f"{day} 10:00:00+00", f"{day} 10:00:05+00",
-         Json({"orders": orders}))).fetchone()[0])
+         Json(result))).fetchone()[0])
     for rule in rules:
         pg.execute("INSERT INTO order_items (run_id, name, rule) VALUES (%s, 'x', %s)",
                    (rid, rule))
@@ -68,6 +71,69 @@ def test_a_day_with_nothing_processed_reports_honest_zeros(pg):
     stats = reliability.provenance_stats_for_day(pg, "2026-08-05")
     assert stats == {"day": "2026-08-05", "runs": 0, "orders": 0, "errors": 0,
                      "items": 0, "deterministic": 0, "llm": 0, "review": 0}
+
+
+# --- #204 (DL migration F5): DL runs never leak into the orders digest, and vice versa --
+
+def test_a_dl_run_is_excluded_from_the_orders_digest(pg):
+    """F1's design decision reuses order_runs/order_items UNMODIFIED for DL
+    (`result->>'kind'='dl'`) — without the exclusion filter a DL run would silently
+    inflate the AI-orders 'runs'/'objednávky' counts, and DL's OWN `llm_sure` rule name
+    (dl_match.py) would leak into orders' 'decided by the model' bucket."""
+    _run(pg, "2026-08-05", rules=("catalog_name",))
+    _run(pg, "2026-08-05", rules=("llm_sure", "unmatched"), kind="dl")
+    stats = reliability.provenance_stats_for_day(pg, "2026-08-05")
+    assert stats["items"] == 1
+    assert stats["deterministic"] == 1
+    assert stats["llm"] == 0
+    assert stats["runs"] == 1
+
+
+def test_dl_provenance_stats_counts_only_dl_kind_runs(pg):
+    _run(pg, "2026-08-05", rules=("catalog_name",))
+    _run(pg, "2026-08-05", rules=("llm_sure", "unmatched", "llm_borderline"), kind="dl")
+    stats = reliability.dl_provenance_stats_for_day(pg, "2026-08-05")
+    assert stats["items"] == 3
+    assert stats["llm"] == 1
+    assert stats["review"] == 2          # unmatched + llm_borderline
+    assert stats["deterministic"] == 0
+    assert stats["runs"] == 1
+
+
+def test_dl_lexical_gap_counts_as_review_too(pg):
+    _run(pg, "2026-08-05", rules=("llm_sure_lexical_gap",), kind="dl")
+    stats = reliability.dl_provenance_stats_for_day(pg, "2026-08-05")
+    assert stats["review"] == 1 and stats["llm"] == 0
+
+
+def test_dl_errors_are_counted_at_the_run_level(pg):
+    _run(pg, "2026-08-05", status="error", kind="dl")
+    _run(pg, "2026-08-05", status="ok", kind="dl")
+    stats = reliability.dl_provenance_stats_for_day(pg, "2026-08-05")
+    assert stats["runs"] == 2 and stats["errors"] == 1
+
+
+def test_dl_shadow_run_is_never_counted(pg):
+    _run(pg, "2026-08-05", rules=("llm_sure",), kind="dl", shadow=True)
+    stats = reliability.dl_provenance_stats_for_day(pg, "2026-08-05")
+    assert stats["items"] == 0 and stats["runs"] == 0
+
+
+def test_dl_duplicate_and_mismatch_events_are_counted(pg):
+    from app.orders import dl_report
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('dlm1', "
+              "'dodacie_listy')")
+    dl_report.log_duplicate(pg, "dlm1", "0100000001", "111")
+    dl_report.log_announced_mismatch(pg, "dlm1", "subj", ["0100000002"], ["0100000001"])
+    stats = reliability.dl_provenance_stats_for_day(pg)   # today, default
+    assert stats["duplicates"] == 1
+    assert stats["announced_mismatch"] == 1
+
+
+def test_a_dl_only_day_reports_honest_zeros_for_orders(pg):
+    _run(pg, "2026-08-05", rules=("llm_sure",), kind="dl")
+    stats = reliability.provenance_stats_for_day(pg, "2026-08-05")
+    assert stats["items"] == 0 and stats["runs"] == 0
 
 
 # --- days since the last confirmed incident --------------------------------
@@ -124,6 +190,24 @@ def test_a_posting_failure_never_raises(pg):
         raise RuntimeError("odoo is down")
 
     assert reliability.maybe_post_daily_digest(pg, _Cfg(), post=_boom) is True
+
+
+def test_the_digest_folds_dl_activity_into_the_same_single_post(pg):
+    """#204: 'DL run[s go] into the daily reliability digest' — one claim, one message,
+    not a second post."""
+    from app.orders import dl_report
+
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('dlm2', "
+              "'dodacie_listy')")
+    dl_report.log_duplicate(pg, "dlm2", "0100000009", "999")
+    # the digest reports the day that JUST finished — backdate this event to yesterday
+    # so it lands in that window (the helper itself always logs "now").
+    pg.execute("UPDATE email_events SET ts = now() - interval '1 day' "
+              "WHERE message_id = 'dlm2'")
+    posted = []
+    reliability.maybe_post_daily_digest(pg, _Cfg(), post=lambda c, h: posted.append(h))
+    assert len(posted) == 1
+    assert "Dodacie listy" in posted[0]
 
 
 # --- wired into worker.tick(), same pattern as _check_spend_cap ------------

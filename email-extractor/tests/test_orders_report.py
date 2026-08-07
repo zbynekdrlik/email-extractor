@@ -392,3 +392,44 @@ def test_the_link_is_only_rendered_when_given():
     with_link = report.build_daily_digest(_stats(), days_since_incident=3,
                                           link="http://x/sklad/k")
     assert 'href="http://x/sklad/k"' in with_link
+
+
+# --- #204 (DL migration F5): the optional DL section ------------------------
+
+def _dl_stats(**over):
+    base = {"day": "2026-08-05", "runs": 0, "errors": 0, "items": 0, "deterministic": 0,
+           "llm": 0, "review": 0, "duplicates": 0, "announced_mismatch": 0}
+    base.update(over)
+    return base
+
+
+def test_omitted_dl_stats_leaves_the_digest_byte_identical_to_before_204():
+    """Every pre-#204 caller/test must be unaffected."""
+    without = report.build_daily_digest(_stats(), days_since_incident=3)
+    with_none = report.build_daily_digest(_stats(), days_since_incident=3, dl_stats=None)
+    assert without == with_none
+    assert "Dodacie listy" not in without
+
+
+def test_a_quiet_dl_day_renders_no_extra_section():
+    html = report.build_daily_digest(_stats(), days_since_incident=3, dl_stats=_dl_stats())
+    assert "Dodacie listy" not in html
+
+
+def test_dl_activity_renders_its_own_section():
+    html = report.build_daily_digest(
+        _stats(), days_since_incident=3,
+        dl_stats=_dl_stats(runs=5, items=8, errors=1, duplicates=2, announced_mismatch=1))
+    assert "Dodacie listy" in html
+    assert "5" in html and "8" in html
+    assert "duplicitn" in html.lower()
+    assert "ohlásil dodací list" in html
+
+
+def test_dl_duplicates_alone_still_render_the_section():
+    """Runs can be 0 (nothing new the DL worker touched) while a duplicate/mismatch
+    was still found — the section must appear either way, never gated on `runs` alone."""
+    html = report.build_daily_digest(_stats(), days_since_incident=3,
+                                     dl_stats=_dl_stats(duplicates=1))
+    assert "Dodacie listy" in html
+    assert "1" in html
