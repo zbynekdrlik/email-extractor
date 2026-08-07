@@ -1,0 +1,22 @@
+{
+ "note": "Synthetic corpus for CI's own unit tests of the DL harness itself. The real 8-case corpus (the named incident classes from #205) lives on dev2 (~/eval-corpus/email-extractor/dl/), outside git, so no customer email/PDF is ever committed. Every case here uses invented suppliers/products, digital-text-only (no pdf_bytes), so it never needs a vision call.",
+ "cases": [
+  {
+   "id": "syn-single-document-ok",
+   "type": "single_document_ok",
+   "email": {"message_id": "syn-dl-1", "subject": "Dodaci list", "from_addr": "sklad@dodavatel.test",
+             "has_attachments": true, "today": "2026-08-07"},
+   "attachments": [
+    {"idx": 0, "filename": "dl1.pdf",
+     "machine_text": "Dodaci list c. SYN0001\nDatum dodania: 07.08.2026\nDodavatel: Testovacia pekaren s.r.o.\n1 rozok 50g 10 ks 0.10 1.00\n"}
+   ],
+   "expected": {
+    "status": "ok",
+    "documents": [
+      {"doc_number": "SYN0001", "outcome": "ok", "supplier_name_contains": "Testovacia",
+       "item_count": 1, "items": [{"gtin": "SYNG1", "quantity": 10}]}
+    ]
+   }
+  }
+ ]
+}

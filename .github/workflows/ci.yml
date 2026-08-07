@@ -112,8 +112,64 @@ jobs:
         run: |
           .venv/bin/python -m app.orders.static_edi_corpus_check --corpus-dir "$CORPUS/static-edi"
 
+  # The DL (dodacie listy) eval corpus (#205, DL migration F6) — same "runs on every
+  # change, a change that does not pass it does not get applied" rule as e2e-orders
+  # above, and the same reason: an extraction/matching-rule tweak in app/orders/dl_*.py
+  # must not silently regress a supplier it wasn't written for.
+  #
+  # Same self-hosted runner and CORPUS base dir as e2e-orders — the DL cases live in
+  # $CORPUS/dl/ (real production mail is allowed there, never in git) and SHARE the same
+  # $CORPUS/llm-cache/ (content-addressed by model+prompt+input, so no key collision with
+  # the AI-orders cache). Every DL corpus case supplies machine_text with no scanned
+  # image, so replay never needs a vision call (R42/W13) — offline replay costs nothing
+  # and needs no API key, same as e2e-orders.
+  e2e-dl:
+    needs: [test]
+    runs-on: [self-hosted, email-extractor-eval]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 55435:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CORPUS: /home/newlevel/eval-corpus/email-extractor
+      PG_DSN: postgresql://postgres:postgres@localhost:55435/postgres
+    defaults:
+      run:
+        working-directory: email-extractor
+    steps:
+      - uses: actions/checkout@v4
+      - name: The DL corpus must be present (a missing corpus fails, never skips)
+        run: |
+          for f in dl/manifest.json dl/dl_catalog.csv dl/objednavky_catalog.csv \
+                   dl/customers.csv dl/history.json dl/baseline.json llm-cache; do
+            test -e "$CORPUS/$f" || { echo "corpus incomplete: $CORPUS/$f missing"; exit 1; }
+          done
+          python3 -c "import json,sys;n=len(json.load(open('$CORPUS/dl/manifest.json'))['cases']);print(f'{n} DL cases');sys.exit(0 if n>=8 else 1)"
+      - name: Install Python deps
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip -q install -r requirements.txt
+      - name: Run the DL corpus (offline, recorded answers)
+        env:
+          LLM_CACHE_DIR: ${{ env.CORPUS }}/llm-cache
+        run: |
+          .venv/bin/python -m app.orders.dl_eval_run \
+            --manifest "$CORPUS/dl/manifest.json" \
+            --dl-catalog "$CORPUS/dl/dl_catalog.csv" \
+            --objednavky-catalog "$CORPUS/dl/objednavky_catalog.csv" \
+            --customers "$CORPUS/dl/customers.csv" \
+            --history "$CORPUS/dl/history.json" \
+            --baseline "$CORPUS/dl/baseline.json" \
+            --require-all
+
   build:
-    needs: [test, e2e-orders]
+    needs: [test, e2e-orders, e2e-dl]
     runs-on: ubuntu-latest
     permissions:
       contents: read

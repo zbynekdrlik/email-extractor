@@ -1474,3 +1474,55 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   `delivery_notes_engine` confirmed still `"n8n"` — this phase ships fully dark, the
   live n8n DL pipeline is untouched (the dashboard's own live feed showed real
   `dodacie_listy` mail being processed by the unmodified n8n workflow throughout).
+
+## #204 — DL migrácia F5: worker + shadow + Odoo hlásenia + kontrola ohlásený-vs-priložený DL
+
+- Version bump `10525c6` (0.9.54 → 0.9.55). New `app/orders/dl_worker.py` (the worker
+  loop wiring F2 extraction + F3 matching/memory/nástenka + F4 EDI builder/upload
+  ledger into one three-mode engine — same n8n-inert/n8n+shadow/python shape
+  `static_worker.py` uses) + `app/orders/dl_report.py` (new — per-DOCUMENT Odoo
+  messages, R95/R96, deliberately separate from `report.build_summary`'s per-e-mail
+  policy) + two new LLM prompts (`prompts/dl_match_supplier.md`/`dl_match_item.md`).
+  `app/orders/desadv.py` gained `already_sent()` (read-only duplicate check for
+  shadow). `app/orders/reliability.py`/`report.py` gained a DL-scoped digest
+  counterpart, explicitly excluded from the AI-orders provenance stats via a
+  `result->>'kind'` filter. `app/orders/worker.py` wired `dl_worker.refresh_due`/
+  `tick` into `run_forever`. Spec §4's announced-vs-attached check (the Lunys "IS
+  KARAT" incident — a subject can announce 2 DL numbers while only 1 PDF arrives) +
+  W7's duplicate-document visibility both surface via the daily digest, never a
+  silent skip or an immediate ping.
+- Design decision: `order_runs.snapshot_id` has a real FK to `order_snapshots(id)`,
+  not `dl_snapshots(id)` — resolved by passing `snapshot_id=None` (nullable) to
+  `worker._start_run`/`_finish_run` and stashing the real DL snapshot id inside
+  `result["dl_snapshot_id"]`, with `result["kind"]="dl"` as the sole discriminator.
+- Deep review (`/requesting-code-review`) found 2 Critical + 3 Important issues
+  before merge, all fixed in the same PR: shadow mode's `report.log_event` calls
+  (incl. two `rollup=true` ones) ran unconditionally — reproduced silently
+  corrupting an already-delivered message's dashboard state; an item excluded from
+  the EDI by the R75 lexical-gap tripwire or the `match_failed` fallback was
+  invisible (nástenka question + Odoo message both keyed on the literal string
+  `"unmatched"` instead of `not decision.gtin`); a hard pipeline failure passed
+  `result=None`, leaving `kind` NULL and miscounting the failure into the AI-orders
+  digest; `_post` evaluated the Odoo HTML builder outside its own try/except. One
+  finding (retry-after-partial-ship logs a false `duplicate_skip` for the SAME
+  message's own already-shipped document) needs a schema change to fix cleanly —
+  filed as follow-up **#216**; the core no-double-shipment safety property already
+  holds either way.
+- Tests: `tests/test_dl_worker.py` (24 cases — claim/shadow/retry semantics, R15,
+  duplicate visibility, nástenka questions, announced-vs-attached, both deep-review
+  regression scenarios), `tests/test_desadv.py` (+4 for `already_sent()`), extended
+  `tests/test_orders_reliability.py`/`test_orders_report.py`. Full suite green
+  (`pytest --cov=app --cov-fail-under=85`, 93.05% total), `ruff check .` clean.
+- Playbook: `.claude/rules/orders-corpus.md` gained 3 entries (the `snapshot_id` FK
+  gotcha for a third shared-table engine, the shared-rule-name digest-collision
+  risk, and the `last_prompt_hash` fake-client requirement for `dl_extract` tests).
+- Shared PR: **215** — merge `3cf2b61e9bfe18be8d44de50260b0829eaa07416`, main CI
+  green (test+e2e-orders+build, run `31207052575`). Deployed **v0.9.55** via
+  `ha addons update`: `/health` 200 `0.9.55`, dashboard DOM confirms `v0.9.55`.
+  Functional check run LIVE inside the deployed container against the real
+  Postgres, read-only/no-op: `dl_worker.tick()` → `0` (correctly inert),
+  `dl_worker.refresh_due()` → `None` (no DL catalog gid configured yet),
+  `reliability.dl_provenance_stats_for_day()` → clean honest zeros against the real
+  production `order_runs`/`email_events` tables. `delivery_notes_engine` confirmed
+  still `"n8n"` — this phase ships fully dark; the dashboard's live feed showed real
+  `dodacie_listy` mail still processed by the unmodified n8n workflow throughout.
