@@ -205,7 +205,9 @@ def test_llm_borderline_is_flagged_for_review():
 def test_below_gate_min_is_unmatched():
     d = dl_match.decide_item("Múka hladká 25kg", {"gtin": "G1", "confidence": 0.5}, CATALOG)
     assert d.rule == "unmatched" and d.gtin is None
-    assert "G1" not in (d.note or "") or "kandidát" in d.note  # candidate name kept in note
+    # R71: the rejected candidate's name is kept in the note, so the warehouse still sees
+    # what the model guessed even though the answer was not trusted.
+    assert "Múka hladká T512 25kg" in d.note
 
 
 def test_model_no_match_string_is_unmatched():

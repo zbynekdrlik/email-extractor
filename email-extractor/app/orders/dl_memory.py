@@ -148,20 +148,27 @@ def resolve(conn, supplier_ean: str, item: str, catalog_gtins=None,
     outranks everything below unconditionally — mirrors `memory.resolve()`'s own taught-first
     rung exactly, including the weight-guard override (a human decision is not something the
     guard exists to second-guess).
+
+    A supplier can legitimately have been taught MORE THAN ONE (gtin, wording) mapping over
+    time — a correction, or teaching the same wording again after the first card was retired.
+    All candidate gtins (newest group first) are checked against `catalog_gtins` in turn, so a
+    still-valid OLDER human teach is not silently skipped in favour of falling through to
+    machine-inferred ship history just because the MOST RECENT teach happens to name a gtin
+    that has since left the catalog (review finding on this issue's PR).
     """
     key = item_key(item)
     if not (supplier_ean and key):
         return None
-    taught = conn.execute(
-        """SELECT gtin, max(card), max(delivered_on)
+    taught_rows = conn.execute(
+        """SELECT gtin, max(card) AS card, max(delivered_on) AS last_day, max(created_at) AS at
              FROM dl_item_memory
             WHERE supplier_ean = %s AND item_key = %s AND source = 'human'
-            GROUP BY gtin ORDER BY max(created_at) DESC LIMIT 1""",
-        (str(supplier_ean), key)).fetchone()
-    if taught and (catalog_gtins is None or str(taught[0]) in catalog_gtins):
-        return Recalled(gtin=str(taught[0]), card=taught[1] or "", strength=1,
-                        unanimous=True, last_day=str(taught[2]), weight_override=True,
-                        human=True)
+            GROUP BY gtin ORDER BY at DESC""",
+        (str(supplier_ean), key)).fetchall()
+    for gtin, card, last_day, _at in taught_rows:
+        if catalog_gtins is None or str(gtin) in catalog_gtins:
+            return Recalled(gtin=str(gtin), card=card or "", strength=1, unanimous=True,
+                            last_day=str(last_day), weight_override=True, human=True)
 
     rows = conn.execute(
         """SELECT gtin, delivered_on, max(cnt) AS c, max(card) AS card

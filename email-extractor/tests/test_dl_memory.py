@@ -232,6 +232,16 @@ def test_resolve_catalog_invalidation_also_applies_to_a_human_taught_row(pg):
     assert dl_memory.resolve(pg, "S8b", "maslo extra", catalog_gtins={"G9"}) is None
 
 
+def test_resolve_human_taught_falls_back_to_an_older_still_valid_teach(pg):
+    """Review finding (#202 PR): the MOST RECENT human teach can point at a gtin that has
+    since left the catalog — an OLDER still-valid teach must still win, rather than silently
+    falling through to machine-inferred ship history."""
+    _ship(pg, "S8c", "maslo", "G_OLD", "Maslo starý", "2026-06-01", src="human")
+    _ship(pg, "S8c", "maslo", "G_NEW_RETIRED", "Maslo nový", "2026-07-01", src="human")
+    r = dl_memory.resolve(pg, "S8c", "maslo", catalog_gtins={"G_OLD"})
+    assert r is not None and r.gtin == "G_OLD" and r.human is True
+
+
 def test_resolve_as_of_excludes_deliveries_on_or_after_the_given_day(pg):
     _ship(pg, "S9x", "kvasnice", "G1", "Kvasnice", "2026-06-01")
     _ship(pg, "S9x", "kvasnice", "G1", "Kvasnice", "2026-06-15")

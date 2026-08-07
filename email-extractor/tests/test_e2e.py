@@ -273,6 +273,36 @@ def test_the_warehouse_answers_a_dl_item_question_from_the_link(live_server, pg,
     assert console == [], f"browser console not clean: {console}"
 
 
+def test_the_warehouse_answers_a_dl_supplier_question_from_the_link(live_server, pg, page):
+    """#202: the "ktorý dodávateľ?" half of the DL nástenka — a genuinely different question
+    flow from dl_item (picking a SUPPLIER, not an item card), through the real browser."""
+    from app.httpapi import sklad_key
+    from app.orders import dl_supplier_memory as dsm
+    from app.orders import teach
+
+    qid = teach.ask_dl_supplier(
+        pg, message_id="e-dl2", sender_email="obchod@mlynvrbovce.sk",
+        candidates=[{"ean_edi": "S1", "name": "Mlyn Vrbovce s.r.o."}],
+        delivery_date="08.08.2026")
+    assert qid
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/otazky")
+
+    page.wait_for_selector("text=Ktorý dodávateľ?")
+    page.wait_for_selector("text=obchod@mlynvrbovce.sk")
+    page.click('button:has-text("Mlyn Vrbovce s.r.o.")')
+
+    page.wait_for_selector("text=Naposledy naučené")
+    q = teach.get(pg, qid)
+    assert q["status"] == "answered"
+    assert dsm.resolve(pg, "obchod@mlynvrbovce.sk") == {"ean_edi": "S1",
+                                                         "name": "Mlyn Vrbovce s.r.o."}
+
+    assert console == [], f"browser console not clean: {console}"
+
+
 def test_the_warehouse_answers_from_the_link_with_no_login(live_server, pg, page):
     """The user's ask: the warehouse must not type a password (2026-07-31).
 

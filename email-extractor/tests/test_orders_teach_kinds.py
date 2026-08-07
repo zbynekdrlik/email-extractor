@@ -44,7 +44,7 @@ def test_only_item_is_deadline_shippable():
     matched at the deadline. Every NEW kind (customer/mail/date/line) must NOT — shipping
     an unconfirmed customer/date/line is exactly what this ticket exists to prevent."""
     assert teach.KINDS["item"].deadline_shippable is True
-    for name in ("customer", "mail", "date", "line"):
+    for name in ("customer", "mail", "date", "line", "dl_item", "dl_supplier"):
         assert teach.KINDS[name].deadline_shippable is False, name
 
 
@@ -274,6 +274,30 @@ def test_ask_dl_supplier_refuses_with_no_message_id_or_sender(pg):
     assert teach.ask_dl_supplier(pg, message_id="", sender_email="a@b.sk",
                                  candidates=[]) is None
     assert teach.ask_dl_supplier(pg, message_id="x", sender_email="", candidates=[]) is None
+
+
+def test_ask_dl_item_skips_when_the_wording_is_already_human_taught(pg):
+    """Review finding (#202 PR): mirrors ask()'s own `recalled.human` pre-check — a future
+    caller must not raise a needless duplicate question for a wording dl_memory.resolve()
+    would already answer for free."""
+    from app.orders import dl_memory
+    dl_memory.remember(pg, "S1", "Múka hladká", "G1", "Múka hladká 25kg", "2026-08-01",
+                       source="human")
+    assert teach.ask_dl_item(pg, message_id="dlk9", supplier_ean="S1", supplier_name="X",
+                             wording="Múka hladká", quantity=1, unit="kg",
+                             candidates=[{"gtin": "G1", "name": "Múka hladká 25kg"}]) is None
+    assert pg.execute("SELECT count(*) FROM order_questions WHERE kind='dl_item'"
+                     ).fetchone()[0] == 0
+
+
+def test_ask_dl_supplier_skips_when_the_address_is_already_taught(pg):
+    from app.orders import dl_supplier_memory as dsm
+    dsm.remember(pg, "obchod@mlynvrbovce.sk", "S1", "Mlyn Vrbovce s.r.o.")
+    assert teach.ask_dl_supplier(
+        pg, message_id="dlk10", sender_email="obchod@mlynvrbovce.sk",
+        candidates=[{"ean_edi": "S1", "name": "Mlyn Vrbovce s.r.o."}]) is None
+    assert pg.execute("SELECT count(*) FROM order_questions WHERE kind='dl_supplier'"
+                     ).fetchone()[0] == 0
 
 
 def test_dl_item_kind_dedupes_per_supplier_and_wording(pg):

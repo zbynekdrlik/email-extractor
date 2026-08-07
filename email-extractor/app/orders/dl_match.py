@@ -383,7 +383,10 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
 
     # R72 — ALIAS RESCUE. Unlike orders' equivalent rung, R67 explicitly says the alias
     # confirmation overrides even the SIZE/weight rule ("unless alias confirms"), so this runs
-    # BEFORE the weight-conflict guard, unconditionally.
+    # BEFORE the weight-conflict guard, unconditionally. `conf > 0` is a defensive floor (R72's
+    # own text states no minimum) mirroring match.py's alias_customer rung: it only excludes
+    # the degenerate case of a `gtin` the model returned alongside a literal 0 confidence,
+    # never a realistic proposal.
     if llm_gtin and conf > 0 and alias_names_partner:
         log.info("dl alias rescue: %r -> %s (partner %r, raw conf %.2f)",
                  item_name, llm_gtin, partner_name, conf)

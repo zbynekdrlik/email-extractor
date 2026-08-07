@@ -648,9 +648,17 @@ def ask_dl_item(conn, message_id: str, supplier_ean: str, supplier_name: str, wo
 
     `candidates` takes the natural catalog shape (`{"gtin": ..., "name": ...}`, same as
     `dl_match.candidates()` returns) — translated to `{value, label}` before storage, see
-    the section header comment above for why."""
+    the section header comment above for why.
+
+    Skips (returns `None`, asks nothing) when this exact (supplier, wording) is ALREADY
+    human-taught — mirrors `ask()`'s own `recalled.human` pre-check (review finding on this
+    issue's PR: without it, a future caller could raise a needless duplicate question for a
+    wording `dl_memory.resolve()` would already answer for free)."""
     key = memory.item_key(wording)
     if not (message_id and supplier_ean and key):
+        return None
+    recalled = dl_memory.resolve(conn, supplier_ean, wording)
+    if recalled is not None and recalled.human:
         return None
     options = [{"value": str(c.get("gtin")), "label": c.get("name") or str(c.get("gtin"))}
               for c in (candidates or [])]
@@ -706,9 +714,15 @@ def ask_dl_supplier(conn, message_id: str, sender_email: str, candidates: list[d
 
     `candidates` takes the natural supplier shape (`{"ean_edi": ..., "name": ...}`, same as
     `dl_match.supplier_candidates()` returns) — translated to `{value, label}` before
-    storage, same reasoning as `ask_dl_item` above."""
+    storage, same reasoning as `ask_dl_item` above.
+
+    Skips (returns `None`, asks nothing) when this exact address is ALREADY taught — same
+    `ask_dl_item` reasoning above, using `dl_supplier_memory.resolve()` instead of
+    `dl_memory.resolve()`."""
     key = str(sender_email or "").strip().lower()
     if not (message_id and key):
+        return None
+    if dl_supplier_memory.resolve(conn, sender_email) is not None:
         return None
     options = [{"value": str(c.get("ean_edi")), "label": c.get("name") or str(c.get("ean_edi"))}
               for c in (candidates or [])]
