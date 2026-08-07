@@ -88,6 +88,16 @@ def test_item_order_and_number_formatting_are_not_differences():
     assert s.passed is True
 
 
+def test_items_with_no_gtin_do_not_silently_merge_onto_a_shared_key():
+    """Review finding, #205: `_items_map` must SKIP a falsy gtin explicitly rather than
+    stringify it into a shared "None" bucket, where two DIFFERENT no-gtin items would
+    otherwise be indistinguishable from one another."""
+    assert dl_evaluate._items_map(
+        [{"gtin": None, "quantity": 1}, {"gtin": "", "quantity": 2}]) == {}
+    assert dl_evaluate._items_map(
+        [{"gtin": "G1", "quantity": 1}, {"gtin": None, "quantity": 99}]) == {"G1": 1.0}
+
+
 def test_the_same_card_twice_is_counted_once_as_the_total():
     expected = {"documents": [{"doc_number": "D1",
                                "items": [{"gtin": "G1", "quantity": 3}]}]}
@@ -185,6 +195,33 @@ def test_two_documents_sharing_one_doc_number_are_matched_one_to_one():
     assert dl_evaluate.score(expected, actual).passed is True
 
 
+def test_duplicate_doc_number_group_matches_by_content_not_encounter_order():
+    """Review finding, #205: a naive first-available-index match is ORDER-DEPENDENT — the
+    SAME two actual documents, listed in the opposite order, must still score as a clean
+    pass (best-fit by content), not report spurious problems just because 'ok' now comes
+    second and 'duplicate' comes first."""
+    expected = {"documents": [{"doc_number": "D", "outcome": "ok",
+                              "items": [{"gtin": "G1", "quantity": 1}]},
+                             {"doc_number": "D", "outcome": "duplicate"}]}
+    reordered_actual = {"documents": [{"doc_number": "D", "outcome": "duplicate"},
+                                      {"doc_number": "D", "outcome": "ok",
+                                       "items": [{"gtin": "G1", "quantity": 1}]}]}
+    s = dl_evaluate.score(expected, reordered_actual)
+    assert s.passed is True, s.problems
+
+
+def test_duplicate_doc_number_group_still_catches_a_real_mismatch():
+    """The best-fit search must not become so permissive that a GENUINE mismatch inside a
+    duplicate-doc_number group stops being reported."""
+    expected = {"documents": [{"doc_number": "D", "outcome": "ok"},
+                              {"doc_number": "D", "outcome": "duplicate"}]}
+    actual = {"documents": [{"doc_number": "D", "outcome": "review"},
+                            {"doc_number": "D", "outcome": "review"}]}
+    s = dl_evaluate.score(expected, actual)
+    assert s.passed is False
+    assert sum("review" in p for p in s.problems) == 2
+
+
 # --- announced-vs-attached (spec §4) ---------------------------------------
 
 def test_announced_mismatch_is_asserted():
@@ -274,6 +311,7 @@ CASE = {
     "attachments": [{"idx": 0, "filename": "dl.pdf", "machine_text": "dodaci list text"}],
     "expected": {"status": "ok", "documents": [
         {"doc_number": "0100000001", "outcome": "ok", "supplier_name_contains": "Lunys",
+         "supplier_ean": SUPPLIER_EAN,
          "items": [{"gtin": "8588000000001", "quantity": 10}]}]},
 }
 
@@ -294,6 +332,9 @@ def test_run_case_never_uploads_or_posts(pg):
                                      "mass": 0.05}]})
     result = dl_evaluate.run_case(pg, _cfg(), CASE, sid, client=client)
     assert result.score.passed is True, result.score.problems
+    # review finding, #205: the new `supplier_ean` key must be proven against the REAL
+    # pipeline's own return value, not only a hand-built `_actual()` fixture dict.
+    assert result.actual["documents"][0]["supplier_ean"] == SUPPLIER_EAN
     assert result.actual["status"] == "ok"
     # shadow guarantee: nothing observable landed anywhere
     assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0
@@ -307,6 +348,32 @@ def test_run_case_refuses_to_call_vision():
     than silently costing a live call during --live recording."""
     client = FakeClient({})
     assert hasattr(client, "vision_call")
+
+
+class TransientlyFailingClient:
+    """Extraction fails with a TRANSIENT error on every call — mirrors dl_worker's own
+    `RaisingClient` test double (tests/test_dl_worker.py), used here to prove `run_case`
+    catches `dl_worker._RetryLater` instead of letting it crash the whole corpus run."""
+
+    def __init__(self):
+        self.last_prompt_hash = ""
+
+    def json_call(self, system, user, schema, name="result"):
+        self.last_prompt_hash = name
+        raise Exception("timed out")
+
+    def vision_call(self, *a, **kw):
+        raise AssertionError
+
+
+def test_run_case_catches_a_transient_retry_failure_as_a_failed_case_not_a_crash(pg):
+    """Review finding, #205: `_check_retry` re-raises a TRANSIENT failure as
+    `dl_worker._RetryLater` (attempts=0 is always within the retry window) — this must
+    show up as one failed `Result`, never an exception escaping `run_case`/`run_corpus`."""
+    sid = _snapshot(pg)
+    result = dl_evaluate.run_case(pg, _cfg(), CASE, sid, client=TransientlyFailingClient())
+    assert result.score.passed is False
+    assert any("prechodná" in p for p in result.score.problems)
 
 
 def test_offline_run_refuses_a_cache_miss(tmp_path):

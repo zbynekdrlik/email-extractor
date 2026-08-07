@@ -343,13 +343,17 @@ def _num(value) -> float:
 
 def _shipped_items(decisions: list[tuple[dict, dl_match.Decision]]) -> list[dict]:
     """The gtin/quantity of every item that actually ends up ON THE EDI — same filter
-    `desadv_edi.build()` itself applies (real gtin, non-zero quantity). Exposed on
-    `_process_document`'s returned dict (#205, DL migration F6) so a caller — the eval
-    harness's own per-document scoring, or a future debugging/digest read — never has to
-    re-derive it from the aggregate `all_items` list, which carries no per-document tag
-    and cannot be split back apart for a multi-document message."""
+    `desadv_edi.build()` itself applies (real gtin via `desadv_edi._is_unmatched`,
+    non-zero quantity — review finding, #205: routed through the SAME shared predicate
+    `generate()`/`build()` already share per #203, rather than a third ad-hoc `gtin`
+    truthy check that could silently diverge from it). Exposed on `_process_document`'s
+    returned dict (#205, DL migration F6) so a caller — the eval harness's own
+    per-document scoring, or a future debugging/digest read — never has to re-derive it
+    from the aggregate `all_items` list, which carries no per-document tag and cannot be
+    split back apart for a multi-document message."""
     return [{"gtin": d.gtin, "quantity": item.get("quantity")}
-           for item, d in decisions if d.gtin and _num(item.get("quantity")) != 0]
+           for item, d in decisions
+           if not desadv_edi._is_unmatched(d.gtin) and _num(item.get("quantity")) != 0]
 
 
 # --- one document (R60-R97) -------------------------------------------------
@@ -512,14 +516,14 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
 
     today = message.get("today") or datetime.now(UTC).date().isoformat()
     for _item, decision in decisions:
-        if decision.gtin:
+        if not desadv_edi._is_unmatched(decision.gtin):
             # R91: item-history write, ONLY for what actually shipped.
             dl_memory.remember(conn, supplier_decision.ean_edi, decision.item_name,
                               decision.gtin, decision.card, today, source="ship")
 
     shipped, unmatched_notes, borderline_notes, history_notes = [], [], [], []
     for item, decision in decisions:
-        if decision.gtin and _num(item.get("quantity")) != 0:
+        if not desadv_edi._is_unmatched(decision.gtin) and _num(item.get("quantity")) != 0:
             shipped.append({"name": decision.card or decision.item_name,
                            "quantity": item.get("quantity"), "unit": item.get("unit")})
             if decision.rule == "llm_borderline":
@@ -595,12 +599,9 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     # reading `messages`/`attachments`/disk exactly as before; the eval harness passes a
     # fixture list directly so a corpus case never needs a real Postgres row or a file on
     # the add-on's data volume.
-    if attachments is not None:
-        pass
-    elif not message.get("has_attachments"):
-        attachments = []
-    else:
-        attachments = _read_attachments(cfg, message["message_id"], conn)
+    if attachments is None:
+        attachments = ([] if not message.get("has_attachments")
+                       else _read_attachments(cfg, message["message_id"], conn))
 
     if not attachments:
         # R15: no attachment (or nothing PDF/image-shaped) is NOT an error.
