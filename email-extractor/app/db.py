@@ -721,6 +721,109 @@ SCHEMA = [
         sent_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
+
+    # ==========================================================================
+    # #200 F1: delivery-notes (dodacie listy, "DL") migration — foundation only.
+    # See docs/superpowers/specs/2026-08-07-delivery-notes-python-design.md for
+    # the full rules map (R1-R97) and known n8n weaknesses (W1-W16) these tables
+    # are built to fix. No pipeline code reads/writes these yet — they exist so
+    # later phases have a schema to build on, and so the worst structural bugs
+    # (W2/W3/W4) are fixed at the schema level from day one, not bolted on later.
+    # ==========================================================================
+    #
+    # --- desadv_sent: two-phase claim/confirm upload ledger, mirroring
+    # edi_sent's #153 design (app/orders/edi.py:213-297) but with a DIFFERENT
+    # identity: (supplier_ean, doc_number), no content hash. DL identity is the
+    # DOCUMENT (one delivery note has one number from its own supplier), not its
+    # bytes — the n8n registry never hashed content either (R90). Scoping by
+    # supplier_ean (not just doc_number) fixes W4: a bare short doc number
+    # (e.g. "68944") can legitimately repeat across two different suppliers
+    # without colliding. Two-phase from inception fixes W2/W3: a claim is
+    # reserved BEFORE the upload, confirmed only after it genuinely succeeds —
+    # unlike the n8n registry, which reads/writes only AFTER the upload,
+    # leaving the exact race window that lost/duplicated real DL uploads. ---
+    """
+    CREATE TABLE IF NOT EXISTS desadv_sent (
+        id            BIGSERIAL PRIMARY KEY,
+        supplier_ean  TEXT NOT NULL,
+        doc_number    TEXT NOT NULL,
+        filename      TEXT,
+        sent_at       TIMESTAMPTZ DEFAULT now(),
+        uploaded_at   TIMESTAMPTZ,
+        UNIQUE (supplier_ean, doc_number)
+    )
+    """,
+    # --- dl_item_memory: item_memory's sibling (db.py:397-410) for DL product
+    # matching, keyed by SUPPLIER instead of customer, with one structural
+    # difference — the `cnt` column. R66's weighted-majority rule (a mixed
+    # history takes the newest card's GTIN only when it carries >= 60% of ALL
+    # deliveries, weighted by cnt) needs the n8n table's own per-row delivery
+    # COUNT preserved verbatim; item_memory.resolve() instead counts DISTINCT
+    # DAYS (a deliberate, different fix for a different n8n bug — see its own
+    # docstring). Conflating the two semantics in one table would risk
+    # reintroducing the exact bug item_memory was built to fix, so this is a
+    # separate table, not a nullable column bolted onto item_memory. ---
+    """
+    CREATE TABLE IF NOT EXISTS dl_item_memory (
+        id           BIGSERIAL PRIMARY KEY,
+        supplier_ean TEXT NOT NULL,
+        item_key     TEXT NOT NULL,
+        item_raw     TEXT,
+        gtin         TEXT NOT NULL,
+        card         TEXT,
+        delivered_on DATE NOT NULL,
+        cnt          INTEGER NOT NULL DEFAULT 1,
+        source       TEXT,
+        created_at   TIMESTAMPTZ DEFAULT now(),
+        UNIQUE (supplier_ean, item_key, gtin, delivered_on, cnt)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dl_item_memory_lookup "
+    "ON dl_item_memory(supplier_ean, item_key)",
+    # --- DL catalog + supplier snapshots (app/orders/dl_snapshot.py) — content-
+    # addressed, same pattern as order_snapshots/catalog_snapshot/customer_snapshot
+    # (snapshot.py), but a SEPARATE versioning line: the DL catalog's shape
+    # (name/gtin/mass/doplnok/sklad/cena, R20) is different from the orders
+    # catalog's (gtin/name/alias only), so freezing them together would force
+    # one snapshot id to change whenever EITHER pipeline's source sheet changes,
+    # even when the other pipeline's own data is untouched. ---
+    """
+    CREATE TABLE IF NOT EXISTS dl_snapshots (
+        id             BIGSERIAL PRIMARY KEY,
+        content_sha256 TEXT NOT NULL,
+        catalog_rows   INT  NOT NULL,
+        supplier_rows  INT  NOT NULL,
+        imported_at    TIMESTAMPTZ DEFAULT now(),
+        checked_at     TIMESTAMPTZ DEFAULT now()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dl_snapshots_hash ON dl_snapshots(content_sha256)",
+    """
+    CREATE TABLE IF NOT EXISTS dl_catalog_snapshot (
+        snapshot_id BIGINT NOT NULL REFERENCES dl_snapshots(id) ON DELETE CASCADE,
+        gtin        TEXT   NOT NULL,
+        name        TEXT   NOT NULL,
+        doplnok     TEXT,
+        mass        NUMERIC,
+        sklad       TEXT,
+        cena        NUMERIC,
+        PRIMARY KEY (snapshot_id, gtin)
+    )
+    """,
+    # No unique key on ean_edi — same reasoning as customer_snapshot: a supplier
+    # row can legitimately have a blank EAN, and (unlikely but not impossible)
+    # two branches of the same supplier could share one.
+    """
+    CREATE TABLE IF NOT EXISTS dl_supplier_snapshot (
+        id          BIGSERIAL PRIMARY KEY,
+        snapshot_id BIGINT NOT NULL REFERENCES dl_snapshots(id) ON DELETE CASCADE,
+        ean_edi     TEXT,
+        name        TEXT NOT NULL,
+        emails      TEXT[],
+        city        TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dl_supplier_snapshot_snap ON dl_supplier_snapshot(snapshot_id)",
 ]
 
 
