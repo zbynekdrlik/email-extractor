@@ -28,7 +28,8 @@ def _cfg(**kw):
 # --- the register itself --------------------------------------------------------------
 
 def test_every_kind_declares_a_non_empty_learns_and_an_escape_option():
-    assert set(teach.KINDS) == {"item", "customer", "mail", "date", "line"}
+    assert set(teach.KINDS) == {"item", "customer", "mail", "date", "line",
+                                "dl_item", "dl_supplier"}
     for name, kind in teach.KINDS.items():
         assert kind.name == name
         assert kind.learns and kind.learns.strip(), f"{name} must state what it learns"
@@ -240,3 +241,103 @@ def test_mail_and_date_kind_present_shapes():
     for q, kind_name in ((mail_q, "mail"), (date_q, "date"), (line_q, "line")):
         p = teach.KINDS[kind_name].present(q)
         assert p["qid"] == q["id"] and p["kind"] == kind_name and p["unknown_label"]
+
+
+# --- dl_item / dl_supplier (#202, DL migration F3) --------------------------------------
+
+def test_dl_item_kind_present_apply_undo(pg):
+    from app.orders import dl_memory
+    qid = teach.ask_dl_item(
+        pg, message_id="dlk1", supplier_ean="S1", supplier_name="Mlyn Vrbovce s.r.o.",
+        wording="Múka hladká", quantity=25, unit="kg",
+        candidates=[{"gtin": "G1", "name": "Múka hladká T512 25kg"}])
+    q = teach.get(pg, qid)
+    kind = teach.KINDS["dl_item"]
+    presented = kind.present(q)
+    assert presented["kind"] == "dl_item" and presented["options"][0]["value"] == "G1"
+    extra = kind.apply(pg, _cfg(), q, "G1", "sklad")
+    assert extra == {}
+    assert dl_memory.resolve(pg, "S1", "Múka hladká").gtin == "G1"
+    kind.undo(pg, teach.get(pg, qid))
+    assert dl_memory.resolve(pg, "S1", "Múka hladká") is None
+    assert teach.get(pg, qid)["status"] == "open"
+
+
+def test_ask_dl_item_refuses_with_no_supplier_ean_or_wording(pg):
+    assert teach.ask_dl_item(pg, message_id="x", supplier_ean="", supplier_name="",
+                             wording="čosi", quantity=1, unit="ks", candidates=[]) is None
+    assert teach.ask_dl_item(pg, message_id="x", supplier_ean="S1", supplier_name="",
+                             wording="", quantity=1, unit="ks", candidates=[]) is None
+
+
+def test_ask_dl_supplier_refuses_with_no_message_id_or_sender(pg):
+    assert teach.ask_dl_supplier(pg, message_id="", sender_email="a@b.sk",
+                                 candidates=[]) is None
+    assert teach.ask_dl_supplier(pg, message_id="x", sender_email="", candidates=[]) is None
+
+
+def test_dl_item_kind_dedupes_per_supplier_and_wording(pg):
+    qid1 = teach.ask_dl_item(pg, message_id="dlk2a", supplier_ean="S2",
+                             supplier_name="Cukrovar", wording="Cukor", quantity=1, unit="ks",
+                             candidates=[{"gtin": "G3", "name": "Cukor kryštálový 25kg"}])
+    qid2 = teach.ask_dl_item(pg, message_id="dlk2b", supplier_ean="S2",
+                             supplier_name="Cukrovar", wording="Cukor", quantity=1, unit="ks",
+                             candidates=[{"gtin": "G3", "name": "Cukor kryštálový 25kg"}])
+    assert qid1 == qid2
+
+
+def test_dl_item_kind_validate_rejects_an_unoffered_gtin(pg):
+    qid = teach.ask_dl_item(pg, message_id="dlk3", supplier_ean="S3", supplier_name="X",
+                            wording="čosi", quantity=1, unit="ks",
+                            candidates=[{"gtin": "G1", "name": "Karta"}])
+    q = teach.get(pg, qid)
+    with pytest.raises(teach.NotACandidate):
+        teach.KINDS["dl_item"].validate(q, "NOT-OFFERED", "sklad")
+    teach.KINDS["dl_item"].validate(q, "G1", "sklad")   # the real offered one is fine
+    teach.KINDS["dl_item"].validate(q, "", "sklad")     # blank ("neviem") is always fine
+
+
+def test_dl_supplier_kind_present_apply_undo(pg):
+    from app.orders import dl_supplier_memory as dsm
+    qid = teach.ask_dl_supplier(
+        pg, message_id="dlk4", sender_email="obchod@mlynvrbovce.sk",
+        candidates=[{"ean_edi": "S1", "name": "Mlyn Vrbovce s.r.o."}])
+    q = teach.get(pg, qid)
+    kind = teach.KINDS["dl_supplier"]
+    presented = kind.present(q)
+    assert presented["kind"] == "dl_supplier"
+    assert presented["options"][0]["value"] == "S1"
+    extra = kind.apply(pg, _cfg(), q, "S1", "sklad")
+    assert extra == {}
+    assert dsm.resolve(pg, "obchod@mlynvrbovce.sk") == {"ean_edi": "S1",
+                                                         "name": "Mlyn Vrbovce s.r.o."}
+    kind.undo(pg, teach.get(pg, qid))
+    assert dsm.resolve(pg, "obchod@mlynvrbovce.sk") is None
+    assert teach.get(pg, qid)["status"] == "open"
+
+
+def test_dl_supplier_kind_apply_with_blank_choice_teaches_nothing(pg):
+    from app.orders import dl_supplier_memory as dsm
+    qid = teach.ask_dl_supplier(
+        pg, message_id="dlk5", sender_email="neznamy@nikde.sk",
+        candidates=[{"ean_edi": "S1", "name": "Mlyn Vrbovce s.r.o."}])
+    q = teach.get(pg, qid)
+    extra = teach.KINDS["dl_supplier"].apply(pg, _cfg(), q, "", "sklad")
+    assert extra == {}
+    assert dsm.resolve(pg, "neznamy@nikde.sk") is None
+
+
+def test_dl_supplier_kind_dedupes_per_sender_address(pg):
+    qid1 = teach.ask_dl_supplier(pg, message_id="dlk6a", sender_email="a@b.sk",
+                                 candidates=[{"ean_edi": "S1", "name": "X"}])
+    qid2 = teach.ask_dl_supplier(pg, message_id="dlk6b", sender_email="A@B.SK  ",
+                                 candidates=[{"ean_edi": "S1", "name": "X"}])
+    assert qid1 == qid2
+
+
+def test_dl_supplier_kind_validate_rejects_an_unoffered_ean():
+    q = {"id": 1, "candidates": [{"value": "S1", "label": "X"}]}
+    with pytest.raises(teach.NotACandidate):
+        teach.KINDS["dl_supplier"].validate(q, "S9", "sklad")
+    teach.KINDS["dl_supplier"].validate(q, "S1", "sklad")
+    teach.KINDS["dl_supplier"].validate(q, "", "sklad")

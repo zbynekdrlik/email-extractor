@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 from psycopg.types.json import Json
 
-from . import memory, snapshot
+from . import dl_memory, dl_supplier_memory, memory, snapshot
 
 log = logging.getLogger("orders.teach")
 
@@ -609,6 +609,149 @@ def _undo_line(conn, q: dict) -> dict:
     return get(conn, q["id"]) or {}
 
 
+# --- dl_item / dl_supplier (#202, DL migration F3): the nástenka half of the matching
+# ladder in app/orders/dl_match.py. Reuse `ask_generic`/the SAME dashboard machinery
+# mail/date/line already use (#164's "never a bespoke table per new kind" — see that
+# section's own header comment) — `customer_ean` stays '' and the real scoping identity
+# (supplier EAN / sender address) lives in the synthetic `item_key` + `payload`, exactly
+# like `ask_mail`/`ask_customer` already do for THEIR own non-customer-EAN identities.
+#
+# Unlike mail/date/line, these two DO write durable state a future document can read back
+# (`dl_item_memory(source='human')` / `dl_supplier_memory`) — closer in spirit to item/
+# customer. They are wired into httpapi's GENERIC dispatch (not item/customer's bespoke
+# literal-body path), so — unlike item/customer's `_validate_*` no-ops, which defer to
+# `answer()`'s own DB-backed check — `_validate_dl_item`/`_validate_dl_supplier` do REAL
+# checking here, against the OFFERED candidate set (no DB access in `validate`'s own
+# signature, same constraint `_validate_mail`/`_validate_line` already work within).
+#
+# `api_orders_questions()` returns `open_questions()`'s RAW rows straight to the browser —
+# no kind ever routes through its own `.present()` in the live path (verified: nothing in
+# httpapi.py calls it; `.present()` is exercised only by direct unit tests, same "correct
+# reference, not the live shape" caveat `_apply_item`'s own docstring already states for
+# item/customer). The shared `genericQuestionCard` JS (mail/date/line, ASK_HTML + DASH_HTML)
+# reads `candidates[].value`/`.label` straight off that RAW stored JSON — so `ask_dl_item`/
+# `ask_dl_supplier` must store candidates in `{value, label}` shape themselves, exactly like
+# `ask_mail`/`ask_date`/`ask_line` already do, not the richer gtin/name shape a caller
+# naturally has on hand (that shape is accepted as the FUNCTION's own input and translated
+# here — the caller never has to know the storage contract).
+
+def _offered_values(q: dict) -> set[str]:
+    return {str(c.get("value")) for c in (q.get("candidates") or [])}
+
+
+def ask_dl_item(conn, message_id: str, supplier_ean: str, supplier_name: str, wording: str,
+                quantity, unit: str, candidates: list[dict], delivery_date: str = "",
+                reason: str = "", on_new=None) -> int | None:
+    """Raise ONE 'ktorá karta je táto DL položka?' question, scoped per (supplier, wording) —
+    a second DL from the same supplier with the same still-unresolved wording reuses the SAME
+    open question, exactly like `ask()`'s own per-(customer, wording) dedupe.
+
+    `candidates` takes the natural catalog shape (`{"gtin": ..., "name": ...}`, same as
+    `dl_match.candidates()` returns) — translated to `{value, label}` before storage, see
+    the section header comment above for why."""
+    key = memory.item_key(wording)
+    if not (message_id and supplier_ean and key):
+        return None
+    options = [{"value": str(c.get("gtin")), "label": c.get("name") or str(c.get("gtin"))}
+              for c in (candidates or [])]
+    return ask_generic(
+        conn, "dl_item", message_id, f"dlitem:{supplier_ean}:{key}", wording,
+        options, reason or "Neznáme znenie položky na dodacom liste",
+        {"supplier_ean": supplier_ean, "supplier_name": supplier_name or "",
+         "quantity": quantity, "unit": unit or "ks"},
+        delivery_date=delivery_date, on_new=on_new)
+
+
+def _present_dl_item(q: dict) -> dict:
+    payload = q.get("payload") or {}
+    who = payload.get("supplier_name") or payload.get("supplier_ean") or ""
+    body = f"{who} · dodanie {q.get('delivery_date') or '?'}\n{q.get('reason') or ''}"
+    return _present(q, q.get("wording", ""), body, list(q.get("candidates") or []))
+
+
+def _validate_dl_item(q: dict, choice: str, by: str) -> None:
+    if choice and choice not in _offered_values(q):
+        raise NotACandidate(f"{choice!r} nebolo ponúknuté pre otázku {q['id']}")
+
+
+def _apply_dl_item(conn, cfg, q: dict, choice: str, by: str) -> dict:
+    payload = q.get("payload") or {}
+    supplier_ean = payload.get("supplier_ean", "")
+    card = next((c.get("label", "") for c in (q.get("candidates") or [])
+                if str(c.get("value")) == str(choice)), "")
+    dl_memory.remember(conn, supplier_ean, q.get("wording", ""), str(choice), card,
+                       _today(conn), source="human")
+    return {}
+
+
+def _undo_dl_item(conn, q: dict) -> dict:
+    """Only what a HUMAN taught is removed — same rule `undo()` already applies to
+    `item_memory`; a genuine `source='ship'` delivery record is evidence and stays."""
+    payload = q.get("payload") or {}
+    conn.execute(
+        "DELETE FROM dl_item_memory WHERE supplier_ean = %s AND item_key = %s "
+        "AND source = 'human'", (payload.get("supplier_ean", ""), memory.item_key(
+            q.get("wording", ""))))
+    conn.execute(
+        """UPDATE order_questions
+              SET status = 'open', answer = NULL, answered_by = NULL, answered_at = NULL
+            WHERE id = %s""", (q["id"],))
+    return get(conn, q["id"]) or {}
+
+
+def ask_dl_supplier(conn, message_id: str, sender_email: str, candidates: list[dict],
+                    delivery_date: str = "", on_new=None) -> int | None:
+    """Raise ONE 'ktorý dodávateľ?' question — one per sender address, mirrors
+    `ask_customer`'s own address-keyed dedupe exactly (R61's own supplier-whitelist miss).
+
+    `candidates` takes the natural supplier shape (`{"ean_edi": ..., "name": ...}`, same as
+    `dl_match.supplier_candidates()` returns) — translated to `{value, label}` before
+    storage, same reasoning as `ask_dl_item` above."""
+    key = str(sender_email or "").strip().lower()
+    if not (message_id and key):
+        return None
+    options = [{"value": str(c.get("ean_edi")), "label": c.get("name") or str(c.get("ean_edi"))}
+              for c in (candidates or [])]
+    return ask_generic(
+        conn, "dl_supplier", message_id, f"dlsupplier:{key}", sender_email,
+        options, "Dodávateľ nebol nájdený v databáze dodávateľov",
+        {"sender_email": sender_email or ""}, delivery_date=delivery_date, on_new=on_new)
+
+
+def _present_dl_supplier(q: dict) -> dict:
+    payload = q.get("payload") or {}
+    body = f"dodanie {q.get('delivery_date') or '?'}\n{q.get('reason') or ''}"
+    return _present(q, payload.get("sender_email") or q.get("wording", ""), body,
+                    list(q.get("candidates") or []))
+
+
+def _validate_dl_supplier(q: dict, choice: str, by: str) -> None:
+    if choice and choice not in _offered_values(q):
+        raise NotACandidate(f"{choice!r} nebolo ponúknuté pre otázku {q['id']}")
+
+
+def _apply_dl_supplier(conn, cfg, q: dict, choice: str, by: str) -> dict:
+    """A blank choice ('neviem, ktorý dodávateľ to je') teaches nothing — same honesty as
+    `_apply_customer`'s own 'neviem' path; the document stays for manual review."""
+    if not choice:
+        return {}
+    payload = q.get("payload") or {}
+    name = next((c.get("label", "") for c in (q.get("candidates") or [])
+                if str(c.get("value")) == str(choice)), "")
+    dl_supplier_memory.remember(conn, payload.get("sender_email", ""), str(choice), name)
+    return {}
+
+
+def _undo_dl_supplier(conn, q: dict) -> dict:
+    payload = q.get("payload") or {}
+    dl_supplier_memory.forget(conn, payload.get("sender_email", ""))
+    conn.execute(
+        """UPDATE order_questions
+              SET status = 'open', answer = NULL, answered_by = NULL, answered_at = NULL
+            WHERE id = %s""", (q["id"],))
+    return get(conn, q["id"]) or {}
+
+
 KINDS: dict[str, QuestionKind] = {
     "item": QuestionKind(
         name="item", present=_present_item, validate=_validate_item, apply=_apply_item,
@@ -633,6 +776,15 @@ KINDS: dict[str, QuestionKind] = {
         name="line", present=_present_line, validate=_validate_line, apply=_apply_line,
         undo=_undo_line,
         learns="nothing: hodnota je, že sa nepošle vymyslený riadok bez potvrdenia",
+        deadline_shippable=False),
+    "dl_item": QuestionKind(
+        name="dl_item", present=_present_dl_item, validate=_validate_dl_item,
+        apply=_apply_dl_item, undo=_undo_dl_item, learns="dl_item_memory(source='human')",
+        deadline_shippable=False),
+    "dl_supplier": QuestionKind(
+        name="dl_supplier", present=_present_dl_supplier, validate=_validate_dl_supplier,
+        apply=_apply_dl_supplier, undo=_undo_dl_supplier,
+        learns="dl_supplier_memory (real pick); nothing: znovu sa spýtať je čestné (\"neviem\")",
         deadline_shippable=False),
 }
 for _k, _v in KINDS.items():

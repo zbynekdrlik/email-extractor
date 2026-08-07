@@ -698,3 +698,38 @@ def test_legacy_rows_and_the_sklad_boundary_survive_the_new_kind_register(pg, mo
     assert pg.execute("SELECT action FROM mail_rules WHERE question_id=%s",
                       (mail_qid,)).fetchone() == ("ignore",)
     assert sc.get("/api/messages").status_code == 401, "the link still reaches nothing else"
+
+
+def test_dl_item_and_dl_supplier_kinds_answer_and_undo_over_http(pg, monkeypatch):
+    """#202: the SAME generic dispatch endpoint mail/date/line already went through — proves
+    the two new kinds are actually LIVE through `/api/orders/question/<qid>/answer|undo`, not
+    just correct when called directly against the registry."""
+    from app.orders import dl_memory, dl_supplier_memory, teach
+
+    dl_item_qid = teach.ask_dl_item(
+        pg, message_id="m202a", supplier_ean="S1", supplier_name="Mlyn Vrbovce s.r.o.",
+        wording="Múka hladká", quantity=25, unit="kg",
+        candidates=[{"gtin": "G1", "name": "Múka hladká T512 25kg"}])
+    dl_supplier_qid = teach.ask_dl_supplier(
+        pg, message_id="m202b", sender_email="obchod@mlynvrbovce.sk",
+        candidates=[{"ean_edi": "S1", "name": "Mlyn Vrbovce s.r.o."}])
+
+    c = _client()
+    _login(c)
+
+    r = c.post(f"/api/orders/question/{dl_item_qid}/answer", json={"choice": "G1"})
+    assert r.status_code == 200
+    assert dl_memory.resolve(pg, "S1", "Múka hladká").gtin == "G1"
+    assert c.post(f"/api/orders/question/{dl_item_qid}/undo").status_code == 200
+    assert dl_memory.resolve(pg, "S1", "Múka hladká") is None
+
+    r = c.post(f"/api/orders/question/{dl_supplier_qid}/answer", json={"choice": "S1"})
+    assert r.status_code == 200
+    assert dl_supplier_memory.resolve(pg, "obchod@mlynvrbovce.sk") == {
+        "ean_edi": "S1", "name": "Mlyn Vrbovce s.r.o."}
+    assert c.post(f"/api/orders/question/{dl_supplier_qid}/undo").status_code == 200
+    assert dl_supplier_memory.resolve(pg, "obchod@mlynvrbovce.sk") is None
+
+    # a choice never offered is a 400, exactly like mail/date/line's own closed option sets
+    r = c.post(f"/api/orders/question/{dl_item_qid}/answer", json={"choice": "NOT-OFFERED"})
+    assert r.status_code == 400

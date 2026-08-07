@@ -242,6 +242,37 @@ def test_the_warehouse_can_say_it_does_not_know_the_customer(live_server, pg, pa
     assert console == [], f"browser console not clean: {console}"
 
 
+def test_the_warehouse_answers_a_dl_item_question_from_the_link(live_server, pg, page):
+    """#202 (DL migration F3): the DL matching ladder's own nástenka kind, rendered on the
+    exact same /otazky page as the AI-orders questions (#164's generic card renderer), through
+    the real browser, no login — proving the teach.py KINDS + httpapi dispatch + JS wiring is
+    actually LIVE end-to-end, not just correct when called directly."""
+    from app.httpapi import sklad_key
+    from app.orders import dl_memory, teach
+
+    qid = teach.ask_dl_item(
+        pg, message_id="e-dl1", supplier_ean="S1", supplier_name="Mlyn Vrbovce s.r.o.",
+        wording="Múka hladká T512", quantity=25, unit="kg",
+        candidates=[{"gtin": "G1", "name": "Múka hladká T512 25kg"}],
+        delivery_date="08.08.2026", reason="neznáme znenie na DL")
+    assert qid
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/otazky")
+
+    page.wait_for_selector("text=Ktorá karta je táto DL položka?")
+    page.wait_for_selector("text=Múka hladká T512")
+    page.click('button:has-text("Múka hladká T512 25kg")')
+
+    page.wait_for_selector("text=Naposledy naučené")
+    q = teach.get(pg, qid)
+    assert q["status"] == "answered"
+    assert dl_memory.resolve(pg, "S1", "Múka hladká T512").gtin == "G1"
+
+    assert console == [], f"browser console not clean: {console}"
+
+
 def test_the_warehouse_answers_from_the_link_with_no_login(live_server, pg, page):
     """The user's ask: the warehouse must not type a password (2026-07-31).
 
