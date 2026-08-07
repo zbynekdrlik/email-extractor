@@ -71,3 +71,45 @@ def test_dashboard_base_url_is_kept_when_configured(monkeypatch):
     monkeypatch.setenv("DASHBOARD_BASE_URL", "http://46.224.130.35:8099")
     monkeypatch.setattr(config, "OPTIONS_PATH", config.Path("/nonexistent/options.json"))
     assert config.Config.load().dashboard_base_url == "http://46.224.130.35:8099"
+
+
+# --- #200 F1: delivery-notes (DL) engine trio — same shape as ai_orders_engine/
+# static_orders_engine, defaults must keep the live n8n DL workflow completely
+# untouched until a later phase deliberately flips this. ---
+
+def test_delivery_notes_engine_defaults_to_n8n_inert(tmp_path, monkeypatch):
+    cfg = _load_with_options(tmp_path, monkeypatch, {})
+    assert cfg.delivery_notes_engine == "n8n"
+    assert cfg.delivery_notes_shadow is False
+    assert cfg.delivery_notes_shadow_days == 3
+
+
+def test_delivery_notes_engine_reads_from_options(tmp_path, monkeypatch):
+    cfg = _load_with_options(tmp_path, monkeypatch, {
+        "delivery_notes_engine": "python",
+        "delivery_notes_shadow": True,
+        "delivery_notes_shadow_days": 7,
+    })
+    assert cfg.delivery_notes_engine == "python"
+    assert cfg.delivery_notes_shadow is True
+    assert cfg.delivery_notes_shadow_days == 7
+
+
+def test_dl_catalog_gid_defaults_empty_and_reads_from_options(tmp_path, monkeypatch):
+    assert _load_with_options(tmp_path, monkeypatch, {}).dl_catalog_gid == ""
+    cfg = _load_with_options(tmp_path, monkeypatch, {"dl_catalog_gid": "1437442607"})
+    assert cfg.dl_catalog_gid == "1437442607"
+
+
+def test_orion_dl_dir_defaults_to_a_different_folder_than_orders(tmp_path, monkeypatch):
+    """#200: DL uploads must never land in the orders folder — the two pipelines'
+    uploads must be trivially distinguishable in ORION even before either engine
+    is flipped to python."""
+    cfg = _load_with_options(tmp_path, monkeypatch, {})
+    assert cfg.orion_dl_dir == "C:\\ORION\\COMMUNICATOR\\data\\in_DL"
+    assert cfg.orion_dl_dir != cfg.orion_dir
+
+
+def test_orion_dl_dir_reads_from_options(tmp_path, monkeypatch):
+    cfg = _load_with_options(tmp_path, monkeypatch, {"orion_dl_dir": "C:\\custom\\in_DL"})
+    assert cfg.orion_dl_dir == "C:\\custom\\in_DL"

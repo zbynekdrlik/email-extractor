@@ -84,6 +84,23 @@ class Config:
     orion_user: str = ""
     orion_pass: str = ""
     orion_dir: str = "C:\\ORION\\COMMUNICATOR\\data\\in"
+    # #200 F1: the delivery-notes (dodacie listy) engine trio — SAME naming/default
+    # pattern as ai_orders_engine/orders_shadow and static_orders_engine/
+    # static_orders_shadow above. "n8n" (default) is completely inert for THIS engine;
+    # the live n8n "Dodacie Listy EDI" workflow keeps running unchanged until a later
+    # phase deliberately flips this. "shadow" runs the Python pipeline for comparison
+    # only once it exists (#200 itself only lands schema/config — no pipeline yet).
+    delivery_notes_engine: str = "n8n"
+    delivery_notes_shadow: bool = False
+    delivery_notes_shadow_days: int = 3
+    # #200: the "produkty dodacie listy" tab (gid 1437442607 in the live sheet) — the
+    # DL catalog is the UNION of this tab with the existing catalog_gid tab ("produkty
+    # objednavky"), never a replacement of it. See app/orders/dl_snapshot.py.
+    dl_catalog_gid: str = ""
+    # #200: DL uploads land in a DIFFERENT ORION folder than orders (in_DL, not in) —
+    # same "not exposed as an add-on option" precedent as orion_dir above (an internal
+    # convention path, not something an operator tunes).
+    orion_dl_dir: str = "C:\\ORION\\COMMUNICATOR\\data\\in_DL"
     # #151: import-confirmation sweep (orders/confirm.py). 5 minutes keeps the SFTP
     # `listdir` load on the ORION box low while a file is still legitimately waiting.
     # (2026-08-05 #133 correction: the old `import_confirm_timeout_minutes` — a
@@ -179,6 +196,16 @@ class Config:
             orion_pass=_get(o, "orion_pass", "ORION_PASS", "") or "",
             orion_dir=_get(o, "orion_dir", "ORION_DIR",
                            "C:\\ORION\\COMMUNICATOR\\data\\in"),
+            delivery_notes_engine=str(
+                _get(o, "delivery_notes_engine", "DELIVERY_NOTES_ENGINE", "n8n") or "n8n"),
+            delivery_notes_shadow=str(
+                _get(o, "delivery_notes_shadow", "DELIVERY_NOTES_SHADOW", "false")).lower() in (
+                    "1", "true", "yes", "on"),
+            delivery_notes_shadow_days=int(
+                _get(o, "delivery_notes_shadow_days", "DELIVERY_NOTES_SHADOW_DAYS", 3) or 3),
+            dl_catalog_gid=str(_get(o, "dl_catalog_gid", "DL_CATALOG_GID", "") or ""),
+            orion_dl_dir=_get(o, "orion_dl_dir", "ORION_DL_DIR",
+                              "C:\\ORION\\COMMUNICATOR\\data\\in_DL"),
             import_confirm_interval_minutes=int(
                 _get(o, "import_confirm_interval_minutes",
                      "IMPORT_CONFIRM_INTERVAL_MINUTES", 5) or 5),
