@@ -179,7 +179,8 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
     return "".join(parts)
 
 
-def build_daily_digest(stats: dict, days_since_incident: int | None, link: str = "") -> str:
+def build_daily_digest(stats: dict, days_since_incident: int | None, link: str = "",
+                       dl_stats: dict | None = None) -> str:
     """The ONE daily match-provenance digest (#196) — the warehouse's measurable basis
     for trust, posted through the same Odoo channel as the other order notifications.
 
@@ -188,6 +189,13 @@ def build_daily_digest(stats: dict, days_since_incident: int | None, link: str =
     (deterministic / the AI rung `llm_sure` / held for review) plus outright errors.
     `days_since_incident` is `None` (rendered honestly, never a fake "0 days") when no
     incident has ever been recorded yet.
+
+    `dl_stats` (#204, DL migration F5) is `reliability.dl_provenance_stats_for_day`'s
+    return shape (same fields, plus `duplicates`/`announced_mismatch`) — an OPTIONAL
+    second section, rendered only when there was any DL activity that day (runs,
+    duplicates, or an announced-vs-attached mismatch). Omitted/empty keeps this
+    function's output byte-identical to before #204, so every pre-existing caller and
+    test is unaffected.
     """
     day = escape(str(stats.get("day", "")))
     runs = int(stats.get("runs") or 0)
@@ -225,6 +233,37 @@ def build_daily_digest(stats: dict, days_since_incident: int | None, link: str =
         parts.append(f"<p>&#128197; {days_since_incident} " +
                      _plural(days_since_incident, "deň", "dni", "dní") +
                      " od posledného potvrdeného incidentu.</p>")
+
+    # #204 (DL migration F5): a second, optional section — only when there was any DL
+    # activity that day (a genuinely quiet DL day renders nothing extra, same "errors
+    # are only mentioned when there are any" discipline the orders section above uses).
+    dl = dl_stats or {}
+    dl_runs = int(dl.get("runs") or 0)
+    dl_dups = int(dl.get("duplicates") or 0)
+    dl_mismatch = int(dl.get("announced_mismatch") or 0)
+    if dl_runs or dl_dups or dl_mismatch:
+        dl_items = int(dl.get("items") or 0)
+        parts.append(f"<p><b>Dodacie listy &mdash; {day}</b></p>")
+        head = f"{dl_runs} " + _plural(dl_runs, "spracovaná správa", "spracované správy",
+                                       "spracovaných správ")
+        if dl_items:
+            head += f", {dl_items} " + _plural(dl_items, "položka", "položky", "položiek")
+        parts.append(f"<p>{head}</p>")
+        dl_errors = int(dl.get("errors") or 0)
+        if dl_errors:
+            parts.append(f"<p>&#128721; {dl_errors} " +
+                         _plural(dl_errors, "zlyhanie", "zlyhania", "zlyhaní") + "</p>")
+        if dl_dups:
+            parts.append(f"<p>&#128257; {dl_dups} " +
+                         _plural(dl_dups, "duplicitný dodací list preskočený",
+                                 "duplicitné dodacie listy preskočené",
+                                 "duplicitných dodacích listov preskočených") + "</p>")
+        if dl_mismatch:
+            parts.append(f"<p>&#9888;&#65039; {dl_mismatch} " +
+                         _plural(dl_mismatch, "e-mail ohlásil dodací list, ktorý neprišiel",
+                                 "e-maily ohlásili dodací list, ktorý neprišiel",
+                                 "e-mailov ohlásilo dodací list, ktorý neprišiel") + "</p>")
+
     if link:
         parts.append(f'<p>&#128203; Nástenka: '
                      f'<a href="{escape(link)}">{escape(link)}</a></p>')

@@ -116,3 +116,30 @@ def test_confirm_sent_stamps_the_upload_so_it_is_never_reclaimed(pg):
     row = pg.execute(
         "SELECT uploaded_at FROM desadv_sent WHERE supplier_ean = '156'").fetchone()
     assert row[0] is not None
+
+
+# --- already_sent (#204, DL migration F5): the READ-ONLY shadow-mode counterpart --
+
+def test_already_sent_is_false_for_an_unknown_document(pg):
+    assert desadv.already_sent(pg, "200", "0100000200") is False
+
+
+def test_already_sent_is_true_only_after_confirm(pg):
+    desadv.claim_send(pg, "201", "0100000201", "f1.txt")
+    assert desadv.already_sent(pg, "201", "0100000201") is False, \
+        "a bare claim is not yet a genuine upload — a live claim racing a shadow peek " \
+        "must not report a false duplicate"
+    desadv.confirm_sent(pg, "201", "0100000201")
+    assert desadv.already_sent(pg, "201", "0100000201") is True
+
+
+def test_already_sent_never_writes_anything(pg):
+    """The whole point: shadow must never INSERT/UPDATE the ledger."""
+    desadv.already_sent(pg, "202", "0100000202")
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE supplier_ean = '202'").fetchone()[0] == 0
+
+
+def test_already_sent_refuses_empty_identity(pg):
+    assert desadv.already_sent(pg, "", "0100000203") is False
+    assert desadv.already_sent(pg, "203", "") is False

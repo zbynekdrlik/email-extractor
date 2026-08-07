@@ -266,19 +266,20 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pra
     """
     import time as _time
 
-    from . import static_worker
+    from . import dl_worker, static_worker
     sleep = sleep or _time.sleep
-    log.info("order worker started (engine=%s shadow=%s static_shadow=%s)",
+    log.info("order worker started (engine=%s shadow=%s static_shadow=%s dl_shadow=%s)",
              getattr(cfg, "ai_orders_engine", "n8n"), getattr(cfg, "orders_shadow", False),
-             getattr(cfg, "static_orders_shadow", False))
+             getattr(cfg, "static_orders_shadow", False),
+             getattr(cfg, "delivery_notes_shadow", False))
     while not (stop and stop.is_set()):
         try:
             refresh_due(conn, cfg)
+            dl_worker.refresh_due(conn, cfg)
             orders_python = resolve_engine(getattr(cfg, "ai_orders_engine", "n8n")) == "python"
-            # #203: delivery_notes_engine gets the SAME "n8n"/"python" contract as
-            # ai_orders_engine (F1's own design comment) — this is the one gate
-            # confirm.sweep needs to also cover desadv_sent once a later phase's DL
-            # worker starts writing it; nothing else in this loop is DL-aware yet.
+            # #204: delivery_notes_engine gets the SAME "n8n"/"python" contract as
+            # ai_orders_engine (F1's own design comment) — this is the gate both
+            # confirm.sweep (desadv_sent, #203) and dl_worker.tick (#204) key on.
             dl_python = resolve_engine(getattr(cfg, "delivery_notes_engine", "n8n")) == "python"
             if orders_python:
                 # #93: the deadline backstop — ship whatever is still held once its
@@ -295,6 +296,10 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pra
                 confirm.sweep(conn, cfg)
             handled = tick(conn, cfg, pipeline=pipeline)
             handled = static_worker.tick(conn, cfg) or handled
+            # #204: shadow ALSO needs a tick (it never claims, but it does need to be
+            # driven) — dl_worker.tick's own engine/shadow gate is the SAME "inert by
+            # default" contract every other engine here already has.
+            handled = dl_worker.tick(conn, cfg) or handled
             if handled:
                 continue          # more may be waiting; do not sleep between messages
         except Exception:
