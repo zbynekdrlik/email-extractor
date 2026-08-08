@@ -1738,4 +1738,32 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
 - Both issues validated STILL REAL against live production data before implementation
   (`gh issue comment` on each, per `verify-issue-still-valid`) — 5 real `order_runs` rows
   for #224, 7 for #225, all shadow (never uploaded to ORION, never marked processed).
-- Shared PR: pending (bundled #224 + #225, one `dev` branch, one CI cycle).
+- Deep review (Explore subagent, adversarial pass on the real PR diff) found 2 more 🟡
+  inside #224's own diff — `_decodable_large_jpegs()` trusted local extraction on just
+  ONE valid+large candidate (a mixed-encoding multi-page scan could silently drop real
+  pages), and `render_pdf_pages()`'s own "never raises" only wrapped
+  `convert_from_bytes`, not the per-page JPEG-encode loop. Both fixed in `d2bdb78`
+  (all-or-nothing decodability + whole-function try/except), plus 3 🔵 (misleading
+  DPI-parity comment, missing page-cap truncation log, imprecise fallback log message).
+  One 🟡 pointed OUTSIDE the diff (`app/orders/prompts/match_product.md`, the LIVE
+  AI-orders engine's own sibling prompt, has the same missing weight-tolerance number)
+  — filed as **#227** (needs-user-decision: different live engine, needs its own
+  30-case corpus `--live` re-record).
+- Shared PR: **226** — merged `37b4f2ffe6eb7447fa1279e5c4d3493148ac80e0`, main CI green
+  (test+e2e-orders+e2e-dl+build, build pushed the GHCR image on this `main` push).
+  Deployed **v0.9.60** via `ha addons update`: `/health` 200 `0.9.60`, dashboard DOM
+  confirms `v0.9.60`, 0 console errors, worker log confirms `dl_shadow=True` still
+  armed. Functional verification: deleted the 12 affected messages' stale shadow
+  `order_runs` rows (all `shadow=true`, zero non-shadow runs for the same
+  message_ids, confirmed before deleting) so the worker naturally re-picked and
+  re-processed all 12 live (one message — created outside the 3-day shadow window —
+  needed a temporary `delivery_notes_shadow_days` bump to 5, reverted to 3 + add-on
+  restarted immediately after). Result: **11/12 fully `ok`, zero
+  `items_skipped_no_match`, zero `invalid_image_format`** — including all 5 of #224's
+  originally Vision-failing messages and all 7 of #225's originally partial ones. The
+  1 remaining `partial` (id 395, Jackulík) is a genuinely NEW, unrelated item
+  ("Šatôčka maková (plundra) 80g" on a second document that arrived in the same
+  attachment, doc 68944) with no matching catalog card at all (confirmed via direct
+  catalog query) — a legitimate missing-catalog-card case, not in #225's original
+  5-wording scope, not a regression, left for the user to add via the #221 dashboard
+  per the ticket's own "NIE ručné dopĺňanie kariet" instruction.
