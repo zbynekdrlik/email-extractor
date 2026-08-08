@@ -1696,3 +1696,46 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   `dl_catalog_overrides`/`dl_supplier_overrides` both back to 0 rows. Worker log
   confirms `dl_shadow=True` still armed, 0 ERROR/Traceback lines in a 10-minute
   post-deploy window.
+
+## 2026-08-08 — #224 + #225 (DL shadow window bugs found during eval)
+
+- **#224** (DL shadow: Vision 400 `invalid_image_format` on 5 shadow runs, n8n processed
+  them `ok`): root cause verified live — real supplier scans (from at least 2 suppliers)
+  use `/Filter [/FlateDecode /DCTDecode]`, so `extract_embedded_jpegs()`'s raw SOI/EOI
+  byte scan finds only coincidental marker matches inside the Flate-compressed stream,
+  never a decodable image. `extract_attachment()` now filters candidates through
+  `_is_real_image()` (PIL decode) before treating them as the vision payload; when none
+  qualify (`_decodable_large_jpegs()`), `render_pdf_pages()` rasterizes the real PDF
+  pages via `pdf2image`/poppler (same mechanism `app/extract.py`'s OCR fallback already
+  uses) — a robust fallback that sidesteps whatever filter chain the source PDF used.
+  `extract_embedded_jpegs()`/`is_scanned()` themselves are untouched (still mirror n8n's
+  own heuristic). Commits: `13f29df` (RED), `21629d6` (GREEN, 100% coverage on
+  `dl_extract.py`).
+- **#225** (DL shadow: `items_skipped_no_match` on 7 shadow runs, n8n matched the same
+  items): two distinct root causes found by comparing real n8n-shipped EDI (SFTP-read
+  from ORION `archCodex`, read-only) against the python match trace:
+  1. **4 of 5 wordings** ("ZÁVIN s nápl.makovou350g" and 2 siblings, "Buchta tvarohová
+     nebalená 56g") — `_score_item()`'s word-overlap ratio counted 1-2 char Slovak
+     filler words (the preposition "s") as real tokens; `w_eq()`'s cheap substring check
+     then spuriously "matched" them against unrelated candidates' longer words,
+     inflating wrong cards and diluting the real match enough to push it out of the
+     top-15 shown to the model (rank #18-#32 in the real 491-row catalog). Fixed by
+     `_MIN_SCORABLE_WORD_LEN = 3` filtering both word lists before `w_eq`. Verified live
+     against the real catalog: all 4 now rank first or within the top 15 (was outside
+     it). Commits: `c94b844` (RED), `a6c9178` (GREEN).
+  2. **1 of 5** ("Žemľa špeciál 110g/špec.") — the correct card WAS already in the
+     top-15 (rank #2), but the model returned `NO_MATCH` at confidence 0.38: the ordered
+     weight (110g) is exactly `WEIGHT_TOLERANCE` (10%) off the card's own (100g), and
+     `dl_match_item.md`'s prompt only said "significantly different weight = different
+     product" with no number, so the model had no way to know the code's own gate would
+     already accept this gap. Added the explicit 10% tolerance to the prompt. Commits:
+     `d77a5f2` (RED), `2d01e9f` (GREEN).
+  - **Corpus re-record**: both the candidate-scoring change and the prompt edit
+    invalidate the DL eval corpus's cached matching-call answers (candidate list text /
+    prompt text both feed the content-addressed cache key). Re-recorded the full 8-case
+    corpus via `--live` on dev2 (`~/eval-corpus/email-extractor/dl/`, ~$1.20):
+    8/8 passed, zero regressions, offline replay confirmed against the fresh cache.
+- Both issues validated STILL REAL against live production data before implementation
+  (`gh issue comment` on each, per `verify-issue-still-valid`) — 5 real `order_runs` rows
+  for #224, 7 for #225, all shadow (never uploaded to ORION, never marked processed).
+- Shared PR: pending (bundled #224 + #225, one `dev` branch, one CI cycle).
