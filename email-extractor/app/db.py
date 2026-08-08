@@ -928,6 +928,49 @@ SCHEMA = [
     # concurrent `ADD COLUMN IF NOT EXISTS` calls via its own table lock, and there is
     # no backfill step here to race. ---
     "ALTER TABLE desadv_sent ADD COLUMN IF NOT EXISTS message_id TEXT",
+    # --- #221: direct web curation of DL catalog cards + suppliers, mirroring #127/#128's
+    # catalog_overrides/customer_overrides — layered ON TOP of the frozen dl_catalog_snapshot/
+    # dl_supplier_snapshot (the sheet itself is never read anymore, #129), merged in at
+    # freeze time by dl_snapshot.py's own dl_rebuild_from_overrides. Deliberately a SEPARATE
+    # pair of tables from catalog_overrides/customer_overrides, not a shared/widened one — a
+    # GTIN can legitimately exist in BOTH the AI-orders catalog and the DL catalog
+    # (dl_snapshot.py's own merge_catalog union), and editing a DL-only field on it must
+    # never also rewrite what the AI-orders engine sees for the same product; same reasoning
+    # dl_snapshots already used to stay independent of order_snapshots (R20 design comment
+    # on dl_snapshot.py). ---
+    """
+    CREATE TABLE IF NOT EXISTS dl_catalog_overrides (
+        gtin       TEXT PRIMARY KEY,
+        name       TEXT NOT NULL,
+        doplnok    TEXT,
+        mass       NUMERIC,
+        sklad      TEXT,
+        cena       NUMERIC,
+        retired    BOOLEAN NOT NULL DEFAULT false,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    # Surrogate id, not ean_edi — same reasoning as customer_overrides: a supplier row can
+    # legitimately have a blank EAN, and (like customer branches) two rows could share one.
+    # orig_ean_edi/orig_city pin the ORIGINAL snapshot row an override replaces (NULL
+    # orig_ean_edi = a brand-new supplier, not an edit) — city, not street, because
+    # dl_supplier_snapshot/dl_snapshot.load_suppliers never persists street/zip at all (see
+    # that module's own R21 docstring), so city is the only disambiguator actually available.
+    """
+    CREATE TABLE IF NOT EXISTS dl_supplier_overrides (
+        id           BIGSERIAL PRIMARY KEY,
+        orig_ean_edi TEXT,
+        orig_city    TEXT,
+        ean_edi      TEXT,
+        name         TEXT NOT NULL,
+        emails       TEXT[],
+        city         TEXT,
+        retired      BOOLEAN NOT NULL DEFAULT false,
+        updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_dl_supplier_overrides_orig "
+    "ON dl_supplier_overrides(orig_ean_edi, orig_city) WHERE orig_ean_edi IS NOT NULL",
 ]
 
 

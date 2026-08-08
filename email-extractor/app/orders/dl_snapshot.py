@@ -69,6 +69,13 @@ def _cell(row: dict, *names: str) -> str:
     return ""
 
 
+def parse_number(value: str | None) -> float | None:
+    """Public wrapper of `_num` (#221) — the /znalosti dashboard's mass/cena text fields
+    need the exact same tolerant parsing a sheet cell already gets (comma decimal, NBSP
+    thousands, trailing currency symbol); reused rather than re-implemented."""
+    return _num(value)
+
+
 def _num(value: str) -> float | None:
     """Slovak Sheets exports commonly carry: a comma decimal separator ('9,90'), a
     NBSP/narrow-NBSP thousands separator from a formatted-number export ('1\xa0133,00'),
@@ -197,7 +204,10 @@ def _freeze(conn, catalog: list[dict], suppliers: list[dict]) -> int:
 
 def import_snapshot(conn, dl_catalog_csv: str, objednavky_catalog_csv: str,
                     supplier_csv: str) -> int:
-    """Freeze one (catalog union, suppliers) pair. Returns the snapshot id.
+    """Freeze one (catalog union, suppliers) pair, with any manual #221 catalog/supplier
+    overrides applied on top — an override always wins over whatever the imported CSV
+    still says for the same identity, same as snapshot.import_snapshot already does for
+    the AI-orders side. Returns the snapshot id.
 
     A header-only / empty result for EITHER side is refused — same rule
     snapshot.import_snapshot applies, and the same reason: accepting it would freeze
@@ -210,6 +220,8 @@ def import_snapshot(conn, dl_catalog_csv: str, objednavky_catalog_csv: str,
         raise SnapshotRefused(
             f"DL import looks empty (catalog={len(catalog)}, suppliers={len(suppliers)}) "
             "— keeping the previous snapshot")
+    catalog = _apply_dl_catalog_overrides(conn, catalog)
+    suppliers = _apply_dl_supplier_overrides(conn, suppliers)
     return _freeze(conn, catalog, suppliers)
 
 
@@ -236,5 +248,210 @@ def load_suppliers(conn, snapshot_id: int) -> list[dict]:
         (snapshot_id,)).fetchall()
     return [{"ean_edi": r[0], "name": r[1], "emails": list(r[2] or []), "city": r[3] or ""}
            for r in rows]
+
+
+# --- #221: direct curation of DL catalog cards, mirroring #127's catalog_overrides on the
+# AI-orders side — see this module's own docstring + db.py's dl_catalog_overrides comment
+# for why this is a SEPARATE table rather than a shared/widened one. Keyed by gtin, exactly
+# like catalog_overrides, so an edit or a retirement always targets exactly one row.
+
+def _load_dl_catalog_overrides(conn) -> dict[str, dict]:
+    rows = conn.execute(
+        "SELECT gtin, name, doplnok, mass, sklad, cena, retired FROM dl_catalog_overrides"
+    ).fetchall()
+    return {r[0]: {"name": r[1], "doplnok": r[2] or "",
+                   "mass": float(r[3]) if r[3] is not None else None, "sklad": r[4] or "",
+                   "cena": float(r[5]) if r[5] is not None else None, "retired": r[6]}
+            for r in rows}
+
+
+def _merge_dl_catalog(catalog: list[dict], overrides: dict[str, dict]) -> list[dict]:
+    out, seen = [], set()
+    for row in catalog:
+        ov = overrides.get(row["gtin"])
+        if ov:
+            seen.add(row["gtin"])
+            if ov["retired"]:
+                continue
+            out.append({"gtin": row["gtin"], "name": ov["name"], "doplnok": ov["doplnok"],
+                        "mass": ov["mass"], "sklad": ov["sklad"], "cena": ov["cena"]})
+        else:
+            out.append(row)
+    for gtin, ov in overrides.items():
+        if gtin in seen or ov["retired"]:
+            continue
+        out.append({"gtin": gtin, "name": ov["name"], "doplnok": ov["doplnok"],
+                    "mass": ov["mass"], "sklad": ov["sklad"], "cena": ov["cena"]})
+    return out
+
+
+def _apply_dl_catalog_overrides(conn, catalog: list[dict]) -> list[dict]:
+    return _merge_dl_catalog(catalog, _load_dl_catalog_overrides(conn))
+
+
+def dl_catalog_for_management(conn) -> list[dict]:
+    """The current effective DL catalog (frozen snapshot + overrides merged), each row
+    flagged with whether it carries a manual override — what /znalosti's DL products box
+    lists. Mirrors snapshot.catalog_for_management exactly."""
+    sid = latest_snapshot_id(conn)
+    base = load_catalog(conn, sid) if sid else []
+    overrides = _load_dl_catalog_overrides(conn)
+    merged = _merge_dl_catalog(base, overrides)
+    return [dict(r, overridden=r["gtin"] in overrides) for r in merged]
+
+
+def upsert_dl_catalog_card(conn, gtin: str, name: str, *, doplnok: str = "",
+                           mass: float | None = None, sklad: str = "",
+                           cena: float | None = None) -> None:
+    """Add a brand-new DL card, or edit an existing one (snapshot-derived or already
+    overridden) — same call either way, keyed by gtin."""
+    conn.execute(
+        """INSERT INTO dl_catalog_overrides (gtin, name, doplnok, mass, sklad, cena,
+                                              retired, updated_at)
+           VALUES (%s, %s, %s, %s, %s, %s, false, now())
+           ON CONFLICT (gtin) DO UPDATE
+              SET name = EXCLUDED.name, doplnok = EXCLUDED.doplnok, mass = EXCLUDED.mass,
+                  sklad = EXCLUDED.sklad, cena = EXCLUDED.cena, retired = false,
+                  updated_at = now()""",
+        (gtin, name, doplnok, mass, sklad, cena))
+
+
+def retire_dl_catalog_card(conn, gtin: str) -> bool:
+    """True iff `gtin` was a real card in the CURRENT effective DL catalog (snapshot or
+    override) — retiring a gtin that never existed is refused rather than silently
+    creating a phantom override row."""
+    current = {r["gtin"] for r in dl_catalog_for_management(conn)}
+    if gtin not in current:
+        return False
+    conn.execute(
+        """INSERT INTO dl_catalog_overrides (gtin, name, retired, updated_at)
+           VALUES (%s, '', true, now())
+           ON CONFLICT (gtin) DO UPDATE SET retired = true, updated_at = now()""",
+        (gtin,))
+    return True
+
+
+# --- #221: direct curation of DL suppliers, mirroring #128's customer_overrides. Surrogate
+# id, not ean_edi — a supplier row can legitimately have a blank EAN or share one across
+# branches, same reasoning customer_overrides already documents. orig_ean_edi/orig_city pin
+# the ORIGINAL snapshot row an override replaces (NULL orig_ean_edi = a brand-new supplier);
+# city instead of street, because dl_supplier_snapshot/load_suppliers never persists
+# street/zip at all (see this module's own R21 docstring above).
+
+def _load_dl_supplier_overrides(conn) -> list[dict]:
+    rows = conn.execute(
+        """SELECT id, orig_ean_edi, orig_city, ean_edi, name, emails, city, retired
+           FROM dl_supplier_overrides ORDER BY id""").fetchall()
+    return [{"id": r[0], "orig_ean_edi": r[1], "orig_city": r[2], "ean_edi": r[3] or "",
+             "name": r[4], "emails": list(r[5] or []), "city": r[6] or "", "retired": r[7]}
+            for r in rows]
+
+
+def _merge_dl_suppliers(base: list[dict], overrides: list[dict]) -> list[dict]:
+    """Same shape as snapshot.py's `_merge_customers` — see that function's own docstring
+    for why BOTH the override's original AND current identity must be excluded from `base`
+    (idempotent re-merging, and a brand-new override with no prior "current" state uses its
+    own original identity rather than a blank placeholder — see the #128 review finding
+    mirrored in this module's own retire_dl_supplier below)."""
+    excluded = set()
+    for o in overrides:
+        if o["orig_ean_edi"] is not None:
+            excluded.add((o["orig_ean_edi"], o["orig_city"]))
+        excluded.add((o["ean_edi"], o["city"]))
+    out = []
+    for row in base:
+        key = (row.get("ean_edi") or "", row.get("city") or "")
+        if key in excluded:
+            continue
+        out.append({**row, "override_id": None, "orig_ean_edi": key[0], "orig_city": key[1]})
+    for o in overrides:
+        if o["retired"]:
+            continue
+        out.append({"ean_edi": o["ean_edi"], "name": o["name"], "emails": o["emails"],
+                    "city": o["city"], "override_id": o["id"],
+                    "orig_ean_edi": o["orig_ean_edi"], "orig_city": o["orig_city"]})
+    return out
+
+
+def _apply_dl_supplier_overrides(conn, suppliers: list[dict]) -> list[dict]:
+    merged = _merge_dl_suppliers(suppliers, _load_dl_supplier_overrides(conn))
+    return [{"ean_edi": r["ean_edi"], "name": r["name"], "emails": r["emails"],
+             "city": r["city"]} for r in merged]
+
+
+def dl_suppliers_for_management(conn) -> list[dict]:
+    """The current effective DL supplier list (snapshot + overrides merged), each row
+    carrying the override identity fields /znalosti needs to edit/retire it."""
+    sid = latest_snapshot_id(conn)
+    base = load_suppliers(conn, sid) if sid else []
+    return _merge_dl_suppliers(base, _load_dl_supplier_overrides(conn))
+
+
+def upsert_dl_supplier(conn, *, override_id: int | None, orig_ean_edi: str | None,
+                       orig_city: str | None, ean_edi: str, name: str,
+                       emails: list[str], city: str) -> int:
+    """Add a brand-new DL supplier (override_id=None, orig_ean_edi=None), or edit one —
+    either an already-overridden row (pass its override_id) or a still-snapshot-only row
+    (pass its CURRENT orig_ean_edi/orig_city, from `dl_suppliers_for_management`; the
+    partial unique index makes a repeat call idempotent, no duplicate rows)."""
+    if override_id is not None:
+        row = conn.execute(
+            """UPDATE dl_supplier_overrides
+                  SET ean_edi=%s, name=%s, emails=%s, city=%s, retired=false, updated_at=now()
+                WHERE id=%s RETURNING id""",
+            (ean_edi, name, emails, city, override_id)).fetchone()
+        if not row:
+            raise KeyError(f"no such override id {override_id}")
+        return int(row[0])
+    row = conn.execute(
+        """INSERT INTO dl_supplier_overrides
+               (orig_ean_edi, orig_city, ean_edi, name, emails, city, retired, updated_at)
+           VALUES (%s,%s,%s,%s,%s,%s,false,now())
+           ON CONFLICT (orig_ean_edi, orig_city) WHERE orig_ean_edi IS NOT NULL
+           DO UPDATE SET ean_edi=EXCLUDED.ean_edi, name=EXCLUDED.name, emails=EXCLUDED.emails,
+                          city=EXCLUDED.city, retired=false, updated_at=now()
+           RETURNING id""",
+        (orig_ean_edi, orig_city, ean_edi, name, emails, city)).fetchone()
+    return int(row[0])
+
+
+def retire_dl_supplier(conn, *, override_id: int | None, orig_ean_edi: str | None,
+                       orig_city: str | None) -> bool:
+    """Retire an already-overridden row by id, or a still-snapshot-only row by its current
+    (orig_ean_edi, orig_city) identity. False when neither identity is given, or the named
+    override id does not exist."""
+    if override_id is not None:
+        row = conn.execute(
+            "UPDATE dl_supplier_overrides SET retired=true, updated_at=now() "
+            "WHERE id=%s RETURNING id", (override_id,)).fetchone()
+        return row is not None
+    if orig_ean_edi is None:
+        return False
+    # A fresh retirement marker's "current identity" must be its ORIGINAL one, never a blank
+    # placeholder — same #127/#128 review finding this module's docstring already cites:
+    # a blank ("", "") current identity would make _merge_dl_suppliers exclude EVERY
+    # supplier that legitimately has both ean_edi and city blank, not just the one retired.
+    conn.execute(
+        """INSERT INTO dl_supplier_overrides
+               (orig_ean_edi, orig_city, ean_edi, name, emails, city, retired, updated_at)
+           VALUES (%s,%s,%s,%s,%s,%s,true,now())
+           ON CONFLICT (orig_ean_edi, orig_city) WHERE orig_ean_edi IS NOT NULL
+           DO UPDATE SET retired=true, updated_at=now()""",
+        (orig_ean_edi, orig_city, orig_ean_edi, "", [], orig_city or ""))
+    return True
+
+
+def dl_rebuild_from_overrides(conn) -> int | None:
+    """Re-freeze a new DL snapshot from the current latest one plus whatever catalog/
+    supplier overrides exist right now (#221) — used right after a /znalosti DL edit so the
+    change is visible immediately, with no network call and nothing else to wait for (#129:
+    there is no periodic refresh anymore either). Mirrors snapshot.rebuild_from_overrides.
+    Returns None when there is no DL snapshot yet to rebuild from."""
+    sid = latest_snapshot_id(conn)
+    if sid is None:
+        return None
+    catalog = _apply_dl_catalog_overrides(conn, load_catalog(conn, sid))
+    suppliers = _apply_dl_supplier_overrides(conn, load_suppliers(conn, sid))
+    return _freeze(conn, catalog, suppliers)
 
 

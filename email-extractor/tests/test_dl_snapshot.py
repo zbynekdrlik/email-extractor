@@ -199,3 +199,203 @@ def test_dl_snapshot_module_never_reads_the_sheet_over_the_network():
     and by dl_eval_run.py's corpus import from frozen fixture files."""
     assert not hasattr(dl_snapshot, "refresh")
     assert not hasattr(dl_snapshot, "fetch_csv")
+
+
+def test_parse_number_is_the_public_wrapper_the_dashboard_form_uses():
+    """#221: the /znalosti dashboard's mass/cena text fields need the SAME tolerant
+    parsing a sheet cell already got (comma decimal, currency symbol) — reuse _num
+    via a public name instead of duplicating a parser."""
+    assert dl_snapshot.parse_number("12,50 €") == 12.50
+    assert dl_snapshot.parse_number("") is None
+    assert dl_snapshot.parse_number(None) is None
+
+
+# --- #221: direct curation overrides (mirror of #127/#128, DL's own dl_snapshots line) ---
+
+def _dl_snap(pg):
+    return dl_snapshot.import_snapshot(pg, DL_CATALOG_CSV, OBJEDNAVKY_CATALOG_CSV, SUPPLIER_CSV)
+
+
+def test_dl_catalog_override_wins_over_the_snapshot_row_with_the_same_gtin(pg):
+    dl_snapshot.upsert_dl_catalog_card(pg, "8588001900001", "Múka hladká T512 25kg OPRAVENÉ",
+                                       doplnok="", mass=25.0, sklad="100", cena=13.0)
+    sid = _dl_snap(pg)
+    catalog = {r["gtin"]: r for r in dl_snapshot.load_catalog(pg, sid)}
+    assert catalog["8588001900001"]["name"] == "Múka hladká T512 25kg OPRAVENÉ"
+    assert catalog["8588001900001"]["cena"] == 13.0
+
+
+def test_dl_catalog_override_can_add_a_brand_new_card_not_in_the_sheet(pg):
+    dl_snapshot.upsert_dl_catalog_card(pg, "NEW1", "Nová DL karta", doplnok="nový",
+                                       mass=1.5, sklad="50", cena=2.5)
+    sid = _dl_snap(pg)
+    catalog = {r["gtin"]: r for r in dl_snapshot.load_catalog(pg, sid)}
+    assert catalog["NEW1"]["name"] == "Nová DL karta"
+    assert catalog["NEW1"]["mass"] == 1.5
+
+
+def test_dl_catalog_override_defaults_are_blank_not_required(pg):
+    """mass/cena/doplnok/sklad are all optional — an override can add a card with just
+    gtin+name, same as the sheet parser itself allows."""
+    dl_snapshot.upsert_dl_catalog_card(pg, "NEW2", "Karta bez detailov")
+    sid = _dl_snap(pg)
+    catalog = {r["gtin"]: r for r in dl_snapshot.load_catalog(pg, sid)}
+    assert catalog["NEW2"]["mass"] is None
+    assert catalog["NEW2"]["cena"] is None
+    assert catalog["NEW2"]["doplnok"] == ""
+
+
+def test_retiring_a_dl_catalog_card_excludes_it_even_though_the_snapshot_still_has_it(pg):
+    _dl_snap(pg)   # the card must exist first
+    ok = dl_snapshot.retire_dl_catalog_card(pg, "8588001900001")
+    assert ok is True
+    sid = _dl_snap(pg)
+    catalog = {r["gtin"] for r in dl_snapshot.load_catalog(pg, sid)}
+    assert "8588001900001" not in catalog
+    assert "8588001900002" in catalog, "an unrelated card must survive untouched"
+
+
+def test_retire_dl_catalog_card_refuses_a_gtin_that_never_existed(pg):
+    _dl_snap(pg)
+    assert dl_snapshot.retire_dl_catalog_card(pg, "NOPE-NEVER-EXISTED") is False
+
+
+def test_dl_catalog_for_management_marks_overridden_cards(pg):
+    _dl_snap(pg)
+    rows = {r["gtin"]: r for r in dl_snapshot.dl_catalog_for_management(pg)}
+    assert rows["8588001900001"]["overridden"] is False
+    dl_snapshot.upsert_dl_catalog_card(pg, "8588001900001", "Múka - nový popis")
+    rows2 = {r["gtin"]: r for r in dl_snapshot.dl_catalog_for_management(pg)}
+    assert rows2["8588001900001"]["overridden"] is True
+    assert rows2["8588001900001"]["name"] == "Múka - nový popis"
+
+
+def test_dl_rebuild_from_overrides_reflects_a_new_override_without_reimporting(pg):
+    sid = _dl_snap(pg)
+    dl_snapshot.upsert_dl_catalog_card(pg, "8588001900002", "Olej - nový názov")
+    new_sid = dl_snapshot.dl_rebuild_from_overrides(pg)
+    assert new_sid != sid
+    catalog = {r["gtin"]: r for r in dl_snapshot.load_catalog(pg, new_sid)}
+    assert catalog["8588001900002"]["name"] == "Olej - nový názov"
+    old_catalog = {r["gtin"]: r for r in dl_snapshot.load_catalog(pg, sid)}
+    assert old_catalog["8588001900002"]["name"] == "Olej repkový 10l", \
+        "the OLD snapshot must not change"
+
+
+def test_dl_rebuild_from_overrides_is_a_noop_before_any_snapshot_exists(pg):
+    assert dl_snapshot.dl_rebuild_from_overrides(pg) is None
+
+
+def test_dl_supplier_override_replaces_the_snapshot_row_it_names(pg):
+    _dl_snap(pg)
+    rows = {r["name"]: r for r in dl_snapshot.dl_suppliers_for_management(pg)}
+    row = rows["Signatus s.r.o."]
+    dl_snapshot.upsert_dl_supplier(
+        pg, override_id=None, orig_ean_edi=row["orig_ean_edi"], orig_city=row["orig_city"],
+        ean_edi="8586010000001", name="Signatus s.r.o. OPRAVENÉ", emails=["nove@signatus.sk"],
+        city="Košice")
+    sid = dl_snapshot.dl_rebuild_from_overrides(pg)
+    suppliers = {r["name"]: r for r in dl_snapshot.load_suppliers(pg, sid)}
+    assert "Signatus s.r.o." not in suppliers
+    assert suppliers["Signatus s.r.o. OPRAVENÉ"]["ean_edi"] == "8586010000001"
+
+
+def test_dl_supplier_override_can_add_a_brand_new_supplier(pg):
+    dl_snapshot.upsert_dl_supplier(
+        pg, override_id=None, orig_ean_edi=None, orig_city=None,
+        ean_edi="9999999999999", name="Nový dodávateľ", emails=["novy@x.sk"], city="Žilina")
+    sid = _dl_snap(pg)
+    suppliers = {r["name"]: r for r in dl_snapshot.load_suppliers(pg, sid)}
+    assert suppliers["Nový dodávateľ"]["ean_edi"] == "9999999999999"
+
+
+def test_retiring_a_dl_supplier_override_excludes_it(pg):
+    _dl_snap(pg)
+    rows = {r["name"]: r for r in dl_snapshot.dl_suppliers_for_management(pg)}
+    row = rows["Jackulík"]
+    ok = dl_snapshot.retire_dl_supplier(pg, override_id=None,
+                                        orig_ean_edi=row["orig_ean_edi"], orig_city=row["orig_city"])
+    assert ok is True
+    sid = dl_snapshot.dl_rebuild_from_overrides(pg)
+    names = {r["name"] for r in dl_snapshot.load_suppliers(pg, sid)}
+    assert "Jackulík" not in names
+    assert "Signatus s.r.o." in names, "an unrelated supplier must survive untouched"
+
+
+def test_retire_dl_supplier_needs_some_identity(pg):
+    assert dl_snapshot.retire_dl_supplier(pg, override_id=None,
+                                          orig_ean_edi=None, orig_city=None) is False
+
+
+def test_retiring_one_dl_supplier_does_not_drop_an_unrelated_blank_identity_supplier(pg):
+    """Same #127/#128 review finding mirrored for DL: an override's own current identity
+    must never default to a blank placeholder, or it would exclude EVERY blank-identity
+    supplier from every future merge, not just the one being retired."""
+    dl_catalog_csv = "GTIN,Názov,doplnok,hmotnost,Sklad,Cena\nG1,Múka,,,,\n"
+    supplier_csv = (
+        "Názov organizácie,EAN kód EDI,Obec,E-mail\n"
+        "Dodávateľ na vyradenie,8586010000009,Košice,prvy@x.sk\n"
+        "Nevinný okolostojaci bez EAN a obce,,,druhy@x.sk\n")
+    dl_snapshot.import_snapshot(pg, dl_catalog_csv, "GTIN,Sklad,Názov,doplnok\n", supplier_csv)
+    ok = dl_snapshot.retire_dl_supplier(pg, override_id=None,
+                                        orig_ean_edi="8586010000009", orig_city="Košice")
+    assert ok is True
+    sid = dl_snapshot.dl_rebuild_from_overrides(pg)
+    names = {r["name"] for r in dl_snapshot.load_suppliers(pg, sid)}
+    assert "Dodávateľ na vyradenie" not in names
+    assert "Nevinný okolostojaci bez EAN a obce" in names, \
+        "an unrelated blank-identity supplier must survive"
+
+
+def test_upsert_dl_supplier_by_orig_identity_is_idempotent_not_duplicated(pg):
+    _dl_snap(pg)
+    rows = {r["name"]: r for r in dl_snapshot.dl_suppliers_for_management(pg)}
+    row = rows["Signatus s.r.o."]
+    dl_snapshot.upsert_dl_supplier(
+        pg, override_id=None, orig_ean_edi=row["orig_ean_edi"], orig_city=row["orig_city"],
+        ean_edi="8586010000001", name="Prvá oprava", emails=[], city="Košice")
+    dl_snapshot.upsert_dl_supplier(
+        pg, override_id=None, orig_ean_edi=row["orig_ean_edi"], orig_city=row["orig_city"],
+        ean_edi="8586010000001", name="Druhá oprava", emails=[], city="Košice")
+    assert pg.execute("SELECT count(*) FROM dl_supplier_overrides").fetchone()[0] == 1
+    rows2 = dl_snapshot.dl_suppliers_for_management(pg)
+    names = [r["name"] for r in rows2 if r["orig_ean_edi"] == row["orig_ean_edi"]]
+    assert names == ["Druhá oprava"]
+
+
+def test_dl_suppliers_for_management_marks_override_identity_for_editing(pg):
+    _dl_snap(pg)
+    rows = {r["name"]: r for r in dl_snapshot.dl_suppliers_for_management(pg)}
+    assert rows["Signatus s.r.o."]["override_id"] is None
+    assert rows["Signatus s.r.o."]["orig_ean_edi"] == "8586010000001"
+
+    rid = dl_snapshot.upsert_dl_supplier(
+        pg, override_id=None, orig_ean_edi="8586010000001", orig_city="Košice",
+        ean_edi="8586010000001", name="Signatus v2", emails=[], city="Košice")
+    rows2 = {r["name"]: r for r in dl_snapshot.dl_suppliers_for_management(pg)}
+    assert rows2["Signatus v2"]["override_id"] == rid
+
+
+def test_editing_an_already_overridden_dl_supplier_by_its_override_id(pg):
+    """The second edit through /znalosti sends the REAL override_id it got back from the
+    first edit — a different code path than the still-snapshot-only orig-identity one."""
+    _dl_snap(pg)
+    rows = {r["name"]: r for r in dl_snapshot.dl_suppliers_for_management(pg)}
+    row = rows["Signatus s.r.o."]
+    first_rid = dl_snapshot.upsert_dl_supplier(
+        pg, override_id=None, orig_ean_edi=row["orig_ean_edi"], orig_city=row["orig_city"],
+        ean_edi="8586010000001", name="Prvá verzia", emails=[], city="Košice")
+    second_rid = dl_snapshot.upsert_dl_supplier(
+        pg, override_id=first_rid, orig_ean_edi=None, orig_city=None,
+        ean_edi="8586010000001", name="Druhá verzia", emails=["nove@x.sk"], city="Košice")
+    assert second_rid == first_rid
+    rows2 = dl_snapshot.dl_suppliers_for_management(pg)
+    names = [r["name"] for r in rows2 if r["orig_ean_edi"] == row["orig_ean_edi"]]
+    assert names == ["Druhá verzia"]
+
+
+def test_upsert_dl_supplier_by_override_id_refuses_a_nonexistent_id(pg):
+    with pytest.raises(KeyError):
+        dl_snapshot.upsert_dl_supplier(
+            pg, override_id=999999, orig_ean_edi=None, orig_city=None,
+            ean_edi="1", name="x", emails=[], city="")

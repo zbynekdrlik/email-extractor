@@ -5,7 +5,7 @@ import os
 
 from app.config import Config
 from app.httpapi import create_app, sklad_key
-from app.orders import memory, snapshot
+from app.orders import dl_snapshot, memory, snapshot
 
 PG_DSN = os.environ.get("PG_TEST_DSN")
 
@@ -313,3 +313,186 @@ def test_znalosti_client_writes_reachable_via_the_warehouse_link(pg):
                           "orig_ean_edi": with_id["orig_ean_edi"],
                           "orig_street": with_id["orig_street"]}).status_code == 200
     assert c.get("/api/messages").status_code == 401
+
+
+# ---- #221: DL catalog + supplier curation (mirror of #127/#128 above, DL's own line) -----
+
+DL_CATALOG_CSV = ("GTIN,Názov,doplnok,hmotnost,Sklad,Cena\n"
+                  "D1,Múka hladká T512 25kg,,25,100,\"12,50\"\n"
+                  "D2,Olej repkový 10l,olej repka,10,200,\"9,90\"\n")
+DL_OBJEDNAVKY_CSV = "GTIN,Sklad,Názov,doplnok\n"
+DL_SUPPLIER_CSV = ("Názov organizácie,EAN kód EDI,Obec,E-mail\n"
+                   "Signatus s.r.o.,8586010000001,Košice,objednavky@signatus.sk\n")
+
+
+def _dl_snap(pg):
+    return dl_snapshot.import_snapshot(pg, DL_CATALOG_CSV, DL_OBJEDNAVKY_CSV, DL_SUPPLIER_CSV)
+
+
+def test_dl_products_list_and_search(pg):
+    _dl_snap(pg)
+    c = _client()
+    _login(c)
+    items = c.get("/api/znalosti/dl-products").get_json()["items"]
+    assert {i["gtin"] for i in items} == {"D1", "D2"}
+    found = c.get("/api/znalosti/dl-products?q=olej").get_json()["items"]
+    assert [i["gtin"] for i in found] == ["D2"]
+
+
+def test_add_a_new_dl_product_card_is_visible_immediately(pg):
+    _dl_snap(pg)
+    c = _client()
+    _login(c)
+    r = c.post("/api/znalosti/dl-products", json={"gtin": "NEW1", "name": "Chlieb domáci 1kg",
+                                                   "mass": "1,2", "sklad": "50", "cena": "2,5"})
+    assert r.status_code == 200 and r.get_json()["ok"] is True
+    items = c.get("/api/znalosti/dl-products?q=domáci").get_json()["items"]
+    assert [i["gtin"] for i in items] == ["NEW1"]
+    assert items[0]["mass"] == 1.2
+    assert items[0]["cena"] == 2.5
+
+
+def test_add_dl_product_needs_gtin_and_name(pg):
+    _dl_snap(pg)
+    c = _client()
+    _login(c)
+    assert c.post("/api/znalosti/dl-products", json={"gtin": "X"}).status_code == 400
+    assert c.post("/api/znalosti/dl-products", json={"name": "bez GTIN"}).status_code == 400
+
+
+def test_edit_an_existing_dl_product_card(pg):
+    _dl_snap(pg)
+    c = _client()
+    _login(c)
+    c.post("/api/znalosti/dl-products", json={"gtin": "D1", "name": "Múka — nový popis"})
+    items = c.get("/api/znalosti/dl-products?q=múka").get_json()["items"]
+    assert items[0]["name"] == "Múka — nový popis"
+    assert items[0]["overridden"] is True
+
+
+def test_editing_a_dl_product_card_is_a_full_replace_not_a_partial_patch(pg):
+    """Review finding on PR #223: upsert_dl_catalog_card replaces ALL fields on every
+    call, same design as #127's upsert_catalog_card — a POST that sends only gtin+name
+    (no doplnok/mass/sklad/cena) blanks the others rather than keeping them. This is
+    INTENTIONAL (the /znalosti form always pre-fills the whole row before saving, same
+    as productsBox/clientsBox already do) — pinned explicitly so it stays a documented
+    contract, not an accidental gap."""
+    _dl_snap(pg)
+    c = _client()
+    _login(c)
+    c.post("/api/znalosti/dl-products", json={"gtin": "D1", "name": "Múka s detailmi",
+                                               "mass": "25", "sklad": "100", "cena": "12,5"})
+    c.post("/api/znalosti/dl-products", json={"gtin": "D1", "name": "Múka - iba názov"})
+    items = c.get("/api/znalosti/dl-products?q=múka").get_json()["items"]
+    assert items[0]["name"] == "Múka - iba názov"
+    assert items[0]["mass"] is None and items[0]["sklad"] == "" and items[0]["cena"] is None
+
+
+def test_retire_a_dl_product_card_removes_it_from_the_list(pg):
+    _dl_snap(pg)
+    c = _client()
+    _login(c)
+    assert c.delete("/api/znalosti/dl-products/D1").status_code == 200
+    gtins = {i["gtin"] for i in c.get("/api/znalosti/dl-products").get_json()["items"]}
+    assert "D1" not in gtins and "D2" in gtins
+    assert c.delete("/api/znalosti/dl-products/NOPE").status_code == 404
+
+
+def test_znalosti_dl_product_writes_reachable_via_the_warehouse_link(pg):
+    _dl_snap(pg)
+    c = _client()
+    c.get("/sklad/" + sklad_key("test-secret"))
+    assert c.get("/api/znalosti/dl-products").status_code == 200
+    r = c.post("/api/znalosti/dl-products", json={"gtin": "SK1", "name": "od skladu"})
+    assert r.status_code == 200
+    assert c.delete("/api/znalosti/dl-products/SK1").status_code == 200
+    assert c.get("/api/messages").status_code == 401
+
+
+def test_dl_suppliers_list_marks_override_identity(pg):
+    _dl_snap(pg)
+    c = _client()
+    _login(c)
+    items = c.get("/api/znalosti/dl-suppliers").get_json()["items"]
+    row = next(i for i in items if i["ean_edi"] == "8586010000001")
+    assert row["override_id"] is None
+    assert row["orig_ean_edi"] == "8586010000001"
+
+
+def test_add_a_new_dl_supplier_is_visible_immediately(pg):
+    _dl_snap(pg)
+    c = _client()
+    _login(c)
+    r = c.post("/api/znalosti/dl-suppliers", json={
+        "ean_edi": "999", "name": "Nový dodávateľ", "emails": "novy@x.sk", "city": "Košice"})
+    assert r.status_code == 200 and r.get_json()["ok"] is True
+    items = c.get("/api/znalosti/dl-suppliers?q=nový").get_json()["items"]
+    assert [i["ean_edi"] for i in items] == ["999"]
+
+
+def test_add_dl_supplier_needs_a_name(pg):
+    _dl_snap(pg)
+    c = _client()
+    _login(c)
+    assert c.post("/api/znalosti/dl-suppliers", json={"ean_edi": "1"}).status_code == 400
+
+
+def test_edit_an_existing_dl_supplier_by_its_original_identity(pg):
+    _dl_snap(pg)
+    c = _client()
+    _login(c)
+    items = c.get("/api/znalosti/dl-suppliers").get_json()["items"]
+    row = next(i for i in items if i["ean_edi"] == "8586010000001")
+    r = c.post("/api/znalosti/dl-suppliers", json={
+        "override_id": row["override_id"], "orig_ean_edi": row["orig_ean_edi"],
+        "orig_city": row["orig_city"], "ean_edi": "8586010000001",
+        "name": "Signatus OPRAVA", "emails": "objednavky@signatus.sk", "city": "Košice"})
+    assert r.status_code == 200
+    items2 = c.get("/api/znalosti/dl-suppliers").get_json()["items"]
+    assert any(i["name"] == "Signatus OPRAVA" for i in items2)
+    assert not any(i["name"] == "Signatus s.r.o." for i in items2)
+
+
+def test_retire_a_dl_supplier_removes_it_from_the_list(pg):
+    _dl_snap(pg)
+    c = _client()
+    _login(c)
+    items = c.get("/api/znalosti/dl-suppliers").get_json()["items"]
+    row = next(i for i in items if i["ean_edi"] == "8586010000001")
+    r = c.delete("/api/znalosti/dl-suppliers", json={
+        "override_id": row["override_id"], "orig_ean_edi": row["orig_ean_edi"],
+        "orig_city": row["orig_city"]})
+    assert r.status_code == 200
+    eans = {i["ean_edi"] for i in c.get("/api/znalosti/dl-suppliers").get_json()["items"]}
+    assert "8586010000001" not in eans
+
+
+def test_znalosti_dl_supplier_writes_reachable_via_the_warehouse_link(pg):
+    _dl_snap(pg)
+    c = _client()
+    c.get("/sklad/" + sklad_key("test-secret"))
+    assert c.get("/api/znalosti/dl-suppliers").status_code == 200
+    r = c.post("/api/znalosti/dl-suppliers", json={"ean_edi": "SK1", "name": "od skladu"})
+    assert r.status_code == 200
+    assert c.delete("/api/znalosti/dl-suppliers",
+                    json={"override_id": None, "orig_ean_edi": None,
+                          "orig_city": None}).status_code == 404
+    c.post("/api/znalosti/dl-suppliers", json={"ean_edi": "SK2", "name": "na vyradenie"})
+    with_id = c.get("/api/znalosti/dl-suppliers?q=vyradenie").get_json()["items"][0]
+    assert c.delete("/api/znalosti/dl-suppliers",
+                    json={"override_id": with_id["override_id"],
+                          "orig_ean_edi": with_id["orig_ean_edi"],
+                          "orig_city": with_id["orig_city"]}).status_code == 200
+    assert c.get("/api/messages").status_code == 401
+
+
+def test_sklad_link_does_not_match_a_path_that_merely_starts_with_dl_products(pg):
+    """Review finding on PR #223: SKLAD_ZNALOSTI_API's new `dl-products(/[^/]+)?|
+    dl-suppliers` alternatives are anchored with ^/$ — pin that an unrelated path
+    sharing the prefix is NOT accidentally granted to the unauthenticated warehouse
+    link (a regex without `$` would match this)."""
+    _dl_snap(pg)
+    c = _client()
+    c.get("/sklad/" + sklad_key("test-secret"))
+    assert c.get("/api/znalosti/dl-productsX").status_code == 401
+    assert c.get("/api/znalosti/dl-suppliersX").status_code == 401

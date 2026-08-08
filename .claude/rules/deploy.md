@@ -97,3 +97,36 @@ warning; both alias the same command.)
   or escaping has to survive the shell at all (#205, enabling `delivery_notes_shadow`
   live). Delete the scratch file on BOTH the host and inside the container/`hassio_cli`
   afterward — it's plaintext add-on config, not a secret, but still cleanup hygiene.
+- **Retiring a feature that reads a `config.yaml` option (#129, disabling the Google
+  Sheet fetch) — do NOT remove the option from `options:`/`schema:`.** The live add-on
+  already has the key set in its own `/data/options.json`; removing it from the
+  store-published `config.yaml` risks the Supervisor rejecting/warning on the next
+  options validation. Leave the schema key declared (`str?`/etc, unchanged) and just
+  stop the CODE from reading it — an unread-but-still-declared option is harmless, and
+  it's the only way to guarantee no live-add-on validation risk. Same for the `Config`
+  dataclass field that parses it: leave it too, rather than making that a second,
+  separate refactor.
+- **A `checked_at`/similar "last refreshed" timestamp can legitimately bump ONE more
+  time right after a deploy that just REMOVED the periodic refresh that used to touch
+  it — don't mistake it for the new code still running the old behavior (#129).** `ha
+  addons update` doesn't swap the container instantly: the OLD version keeps running
+  (on its own interval-based loop) right up until the new image is pulled and the
+  container is recreated. If the old code's refresh interval happens to come due in
+  that window, it fires ONE last time under the OLD code — perfectly normal, not a
+  bug. Verify which code actually did it: `sudo docker inspect <container> --format
+  '{{.State.StartedAt}}'` (new container's start time) vs the timestamp on the
+  row/column that moved — if the bump is BEFORE the new container started, it was the
+  old process's last legitimate tick; confirm the NEW code by checking the timestamp
+  stays frozen from then on (re-query a minute or two later).
+- **The container for BOTH `docker logs` and `docker exec ... psql` is `app_e0ac7775_
+  email_extractor` — the old `addon_e0ac7775_email_extractor` name from before the
+  2026-07-30 rename NO LONGER EXISTS.** `sudo docker logs addon_...` / `sudo docker
+  exec addon_... sh -c ...` both fail with `Error: No such container:
+  addon_e0ac7775_email_extractor` — but a `grep`/pipeline built around that failing
+  command (`sudo docker logs addon_... 2>/dev/null | grep X`) silently swallows the
+  stderr and returns an EMPTY grep result (exit 1, "0 matches"), which reads exactly
+  like "the thing I searched for genuinely isn't in the logs" — a false negative, not
+  an error you'd notice. Always use `app_e0ac7775_email_extractor` (see "It is a real
+  supervisor add-on" above), and if a log/DB check ever comes back suspiciously empty,
+  re-run WITHOUT `2>/dev/null` first to rule out a silently-failed container name
+  before trusting the empty result.

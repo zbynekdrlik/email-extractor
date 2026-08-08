@@ -1611,3 +1611,42 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   claim/identify decision logic is not yet live-exercised; its correctness is proven by the
   local RED→GREEN suite, not a live trigger. 26 shadow DL runs in the prior 2h window, 0
   errors, confirming the deployed process is healthy end-to-end.
+
+## #129 — Databáza znalostí: vypnúť čítanie Google Sheetu, DB je jediný zdroj pravdy (2026-08-08)
+
+- Removed ALL Google Sheet network reads from the add-on: `snapshot.fetch_csv`/
+  `sheet_csv_url`/`refresh()` and `dl_snapshot.refresh()` (the DL catalog's own copy)
+  deleted entirely — the only network-touching code in either module.
+  `worker.refresh_due`/`dl_worker.refresh_due` simplified to a single-line
+  `return <module>.latest_snapshot_id(conn)` — no fetch, no interval check, no config
+  gate. `import_snapshot`/`import_files`/`parse_catalog`/`parse_customers`/
+  `parse_dl_catalog`/`merge_catalog` and every #127/#128 override function (dashboard
+  editing) are untouched — pure, network-free CSV/DB functions.
+- `config.yaml` schema/options and `Config` dataclass fields (`catalog_sheet_id`,
+  `catalog_gid`, `customer_gid`, `dl_catalog_gid`, `catalog_refresh_minutes`) left
+  as-is deliberately — removing a live add-on's schema key risks failing options
+  validation on start; the code simply never reads them for fetching any more.
+- The AI-orders catalog+customers keep their #127/#128 dashboard-editable path (live
+  since 2026-08-02). The DL catalog (491 rows) + suppliers (959 rows) froze on their
+  2026-08-07 state — safe because `delivery_notes_engine` is still `n8n` (DL Python
+  engine is shadow-only; real cutover tracked separately, already-open ticket #217).
+  Dashboard editing for the DL-specific fields filed as its own follow-up, **#221**.
+- Commits: `4dd0cea` (version bump 0.9.57→0.9.58), `4fd4160` (RED — 5 new/changed
+  tests proving the sheet was still read: network-call + `hasattr` structural
+  assertions, all failing pre-fix), `3330cb4` (GREEN — the removal itself; full suite
+  1260 tests green, 93% coverage, ruff clean), `0f8576f` (review-driven cleanup: 3
+  stale "sheet fetch"/"hourly refresh" docstring/message leftovers in
+  `snapshot.py`/`dl_snapshot.py`/`httpapi.py`).
+- Deep review (Explore subagent, adversarial pass on the real diff): 0 🔴 0 🟡 3 🔵,
+  all fixed pre-merge. Confirmed no other caller of the removed functions anywhere in
+  the repo.
+- Shared PR: **222** — merged `6f6e42f7cf96a2e42bab9fee11e3391d70d12f52`, main CI green
+  (test+e2e-orders+e2e-dl+build, run `31224834022`). Deployed **v0.9.58** via
+  `ha addons update`: `/health` 200 `0.9.58`, dashboard + `/znalosti` DOM confirm
+  `v0.9.58` (0 console errors on both). Live verification: 8+ minutes of post-restart
+  logs show ZERO `docs.google.com`/sheet/urlopen activity (the actual proof of the
+  fix) and zero errors/exceptions; `order_snapshots`/`dl_snapshots` row counts and
+  `checked_at` unchanged since before the deploy (127 catalog cards / 491 DL cards +
+  959 suppliers, all still served correctly — `/znalosti` catalog search for "Rožok"
+  returned 6 real cards from the frozen DB snapshot); worker startup log confirms
+  `dl_shadow=True` (DL shadow engine still armed, unaffected).
