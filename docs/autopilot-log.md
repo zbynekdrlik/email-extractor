@@ -1783,3 +1783,10 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   (`~/eval-corpus/email-extractor`), `--require-all` PASSED with zero new regressions
   (the only 5 failures are the pre-existing `#120` known-defect cases already excluded
   from the hard gate).
+- PR #228 merged (`ccd2c96b93e3cbd7d0da498027eee6972f64695e`), main CI green (test,
+  e2e-orders, e2e-dl, build all success). Deployed **v0.9.61** to the live HA add-on
+  (`e0ac7775_email_extractor`) via `ha addons update`. Post-deploy: `/health` confirms
+  `{"ok":true,"version":"0.9.61"}`; DOM read on both `/` and `/otazky` shows `v0.9.61`;
+  `/otazky` renders live "Naposledy naučené" item-match entries (the exact AI-orders
+  matching feature this prompt drives), 0 console errors on either page. Discord
+  run-card delivered.
