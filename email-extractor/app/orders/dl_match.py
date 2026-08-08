@@ -43,6 +43,14 @@ GATE_SURE = 0.85
 WEIGHT_TOLERANCE = 0.1
 # R65: top N item candidates shown to the model.
 ITEM_CANDIDATES = 15
+# #225: a word shorter than this never participates in the _score_item() word-overlap
+# ratio (either side) — a bare 1-2 char Slovak preposition/conjunction ("s", "a", "v", "z",
+# "o"...) is near-guaranteed to appear as a SUBSTRING of some unrelated candidate's longer
+# word via w_eq()'s cheap "a in b or b in a" check, which both inflates unrelated candidates
+# and dilutes the real match's own hit ratio (verified live: this pushed the correct card
+# out of the top-15 shown to the model for 4 of 5 broken production wordings). 3 keeps
+# genuinely meaningful short Slovak words (e.g. "syr" = cheese) scorable.
+_MIN_SCORABLE_WORD_LEN = 3
 # R60: top N supplier candidates shown to the model.
 SUPPLIER_CANDIDATES = 10
 # R60/R72: company-suffix tokens that discriminate nothing between two real companies —
@@ -165,9 +173,11 @@ def _score_item(item_name_norm: str, card: dict, memory_gtin: str = "") -> float
             score = 70.0
         if item and item in name:
             score = max(score, 65.0)
-        iw = [w for w in item.split() if w]
+        # #225: short filler words (1-2 chars) never enter the word-overlap ratio —
+        # see _MIN_SCORABLE_WORD_LEN's own docstring.
+        iw = [w for w in item.split() if len(w) >= _MIN_SCORABLE_WORD_LEN]
         for other, weight in ((name, 60.0), (alias, 70.0)):
-            ow = [w for w in other.split() if w]
+            ow = [w for w in other.split() if len(w) >= _MIN_SCORABLE_WORD_LEN]
             if iw and ow:
                 hits = sum(1 for w in iw if any(w_eq(w, o) for o in ow))
                 score = max(score, hits / len(iw) * weight)
