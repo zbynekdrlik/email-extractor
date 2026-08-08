@@ -1650,3 +1650,49 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   959 suppliers, all still served correctly — `/znalosti` catalog search for "Rožok"
   returned 6 real cards from the frozen DB snapshot); worker startup log confirms
   `dl_shadow=True` (DL shadow engine still armed, unaffected).
+
+## #221 — DL katalóg + dodávatelia: dashboard editovanie (mirror #127/#128) (2026-08-08)
+
+- Mirrors #127/#128's product-card/customer curation for the DL-specific line
+  (`dl_catalog_snapshot`/`dl_supplier_snapshot`, frozen since #129), on its OWN
+  `dl_snapshots` versioning line — deliberately NOT the shared `catalog_overrides`/
+  `customer_overrides` tables (a shared GTIN between the AI-orders and DL catalogs
+  must never let a DL-only edit rewrite the AI-orders side; same reasoning
+  `dl_snapshots` itself already used to stay independent of `order_snapshots`).
+- `db.py`: 2 new tables, purely additive — `dl_catalog_overrides` (PK `gtin`) and
+  `dl_supplier_overrides` (surrogate id + `orig_ean_edi`/`orig_city` partial-unique
+  index — city, not street, since `dl_supplier_snapshot` never persists street/zip).
+- `app/orders/dl_snapshot.py`: `parse_number` (public `_num` wrapper) +
+  `dl_catalog_for_management`/`upsert_dl_catalog_card`/`retire_dl_catalog_card`/
+  `dl_suppliers_for_management`/`upsert_dl_supplier`/`retire_dl_supplier`/
+  `dl_rebuild_from_overrides`. `import_snapshot` now ALSO applies these overrides at
+  freeze time (mirroring `snapshot.import_snapshot` exactly) — the TDD RED tests,
+  mirrored 1:1 from the AI-orders override tests, proved this is what "mirror
+  #127/#128" actually requires; the design comment's "import_snapshot stays
+  untouched" undersold this by one detail.
+- `app/httpapi.py`: `/api/znalosti/dl-products` + `/api/znalosti/dl-suppliers`
+  (GET/POST/DELETE), same shape as `/products`/`/clients`; `SKLAD_ZNALOSTI_API`
+  widened so the warehouse link reaches them; 2 new `/znalosti` JS boxes
+  (`dlProductsBox`/`dlSuppliersBox`).
+- `tests/conftest.py`: the `pg` fixture's TRUNCATE list gained the 2 new tables —
+  found via a real cross-test leakage failure while turning RED to GREEN (gotcha now
+  captured in `.claude/rules/local-testing.md`).
+- Commits: `f5295d3` (version bump 0.9.58→0.9.59), `98cc9dc` (RED — 28 new tests),
+  `18f1111` (GREEN — full implementation, 94% coverage, ruff clean), `70a6f68`
+  (docs: deploy.md container-name gotcha), `5a27657` (2 more tests pinning the deep
+  review's 2 🔵 findings — both were inherited-design notes, not bugs).
+- Deep review (Explore subagent, adversarial 9-angle pass on the real PR diff): 0 🔴
+  0 🟡 2 🔵, both addressed (full-replace-upsert + SKLAD_ZNALOSTI_API anchoring, both
+  pinned as explicit tests rather than left implicit).
+- Shared PR: **223** — merged `a64c06bfcbbe69bd346ca59b04ff9b5df18bc2d8`, main CI
+  green (test+e2e-orders+e2e-dl+build). Deployed **v0.9.59** via `ha addons update`:
+  `/health` 200 `0.9.59`, dashboard + `/znalosti` DOM confirm `v0.9.59` (0 console
+  errors on the `/znalosti` page itself). Live functional verification via
+  Playwright driving the REAL dashboard: created a synthetic DL catalog card
+  (`TESTQA221001`) and a synthetic DL supplier (`9999999221001`) through the UI,
+  confirmed each write in Postgres, edited both through the UI, confirmed the edits
+  in Postgres, retired both through the UI (confirm dialog handled), then HARD-
+  DELETEd both rows via psql so production carries zero synthetic test data —
+  `dl_catalog_overrides`/`dl_supplier_overrides` both back to 0 rows. Worker log
+  confirms `dl_shadow=True` still armed, 0 ERROR/Traceback lines in a 10-minute
+  post-deploy window.
