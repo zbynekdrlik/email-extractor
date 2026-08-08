@@ -10,7 +10,9 @@ Pravidlá:
   menuje PARTNERA (dodávateľa tohto dokumentu), táto karta je záväzná (istota ≥ 0.95).
 - Základný typ produktu musí byť rovnaký — radšej `NO_MATCH` než najbližší INÝ produkt.
 - Výrazne odlišná uvedená gramáž/objem oproti karte = INÝ produkt (istota < 0.85 alebo
-  `NO_MATCH`), okrem prípadu keď to potvrdzuje alias.
+  `NO_MATCH`), okrem prípadu keď to potvrdzuje alias. Rozdiel do 10 % (napr. 110 g
+  objednané vs. karta 100 g) NIE JE dôvod na zamietnutie — bežná tlačová/zaokrúhľovacia
+  odchýlka, nie iný produkt; až výraznejší rozdiel signalizuje inú kartu.
 - Slová ako odtučnený/tučný/hrudkový sú súčasť identity produktu, nie voliteľný variant.
 - Kalibrácia istoty: 0.95+ = rovnaký produkt bez pochýb; 0.85-0.95 = drobné pochybnosti;
   < 0.85 = neisté — nikdy nenafukuj istotu.
