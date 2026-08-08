@@ -8,7 +8,9 @@ Abbreviated names are normal: "moravsky koláč tvaroh" is "Moravský koláč tv
 - **WEIGHT IS IDENTITY.** When the ordered name states a weight ("Rožok 70g"), the card
   with the SAME weight wins — never a different one. A card with a different stated weight
   is a different product: score it below 0.85. (2026-07-24: "Rožok 70g" shipped as
-  štandart 50g.)
+  štandart 50g.) A gap up to 10% (e.g. "110g" ordered vs. a card stated "100g") is NOT a
+  reason to reject — it's a common printed/rounding difference, not a different product;
+  only a bigger gap signals a genuinely different card.
 - **The Alias column is the warehouse's own mapping** and outranks your doubts. An alias
   often NAMES the customers a card belongs to; when it names the customer who ordered,
   that IS their card — 0.95 or higher, even if the ordered name states no weight and
