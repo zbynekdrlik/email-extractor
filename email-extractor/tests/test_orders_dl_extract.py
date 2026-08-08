@@ -28,10 +28,6 @@ LARGE_JPEG = b"\xff\xd8\xff\xe0" + b"x" * 25_000 + b"\xff\xd9"
 LARGE_JPEG_2 = b"\xff\xd8\xff\xe0" + b"y" * 22_000 + b"\xff\xd9"
 
 
-def _has_poppler():
-    return bool(shutil.which("pdftoppm"))
-
-
 def _real_jpeg(seed: int, min_size: int = 25_000) -> bytes:
     """A genuinely decodable JPEG (#224) — noise so it doesn't compress away below the
     20 kB scan threshold, unlike a flat-color image."""
@@ -500,8 +496,11 @@ def test_a_small_valid_logo_alone_is_not_enough_evidence_of_real_page_content():
     assert dl_extract._decodable_large_jpegs([small_real, LARGE_JPEG]) == []
 
 
-@pytest.mark.skipif(not _has_poppler(), reason="poppler (pdftoppm) not installed")
 def test_render_pdf_pages_returns_valid_jpeg_bytes_for_a_real_pdf():
+    # poppler (pdftoppm) is a hard requirement of this test — the Dockerfile and CI's
+    # `test` job both install it unconditionally, same as app/extract.py's own OCR path
+    # already relies on.
+    assert shutil.which("pdftoppm"), "poppler (pdftoppm) is required, not optional"
     pdf = _real_pdf_with_page()
     pages = dl_extract.render_pdf_pages(pdf)
     assert len(pages) == 1
