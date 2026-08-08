@@ -28,6 +28,7 @@ offline with a scripted fake client, no network.
 """
 from __future__ import annotations
 
+import io
 import logging
 import re
 from pathlib import Path
@@ -43,6 +44,13 @@ SCAN_JPEG_THRESHOLD_BYTES = 20_000
 
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
+
+# #224: when NO extracted candidate is both decodable and this size, we render the real
+# PDF pages instead of trusting the (garbage) marker-scanned bytes. Mirrors app/extract.py's
+# own OCR-fallback DPI (poppler render quality) and page cap, at a lighter DPI — a DL is
+# realistically 1-3 pages, not a multi-page invoice.
+VISION_RENDER_DPI = 200
+VISION_RENDER_MAX_PAGES = 15
 
 # R51: the EDI is built from line items, so a misread SUMMARY digit must not block — but a
 # missing/extra/mistranscribed LINE must.
@@ -140,6 +148,73 @@ def is_scanned(jpegs: list[bytes]) -> bool:
     `extract_embedded_jpegs` already returning all of them.
     """
     return bool(jpegs) and max(len(j) for j in jpegs) > SCAN_JPEG_THRESHOLD_BYTES
+
+
+# --- 1b) real-image validation + page rendering (#224 — invalid_image_format fix) -----
+
+def _is_real_image(data: bytes) -> bool:
+    """True only when `data` is a genuinely decodable JPEG — never raises.
+
+    A byte span `extract_embedded_jpegs` found by matching SOI/EOI markers is NOT
+    necessarily a real image: a PDF that Flate-compresses its embedded JPEG on top of
+    the DCTDecode filter (`/Filter [/FlateDecode /DCTDecode]`, confirmed on 5 real
+    production shadow runs, #224) hides the true image bytes behind zlib deflate — any
+    SOI/EOI match the raw scan finds inside that compressed stream is a coincidental
+    byte pattern, not decodable pixels, and OpenAI Vision correctly rejects it with 400
+    invalid_image_format.
+    """
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(data))
+        img.load()
+        return img.format == "JPEG"
+    except Exception:
+        return False
+
+
+def _decodable_large_jpegs(jpegs: list[bytes]) -> list[bytes]:
+    """The extracted candidates that are BOTH genuinely decodable AND include at least
+    one over the scan-size threshold (#224) — a small valid image alone (e.g. a
+    supplier's letterhead logo the byte scan also happened to catch) is not evidence
+    the real page content was correctly extracted; when that is all we have, the
+    caller falls back to rendering the actual PDF pages instead of transcribing an
+    unrelated logo as if it were the delivery note."""
+    valid = [j for j in jpegs if _is_real_image(j)]
+    if not any(len(j) > SCAN_JPEG_THRESHOLD_BYTES for j in valid):
+        return []
+    return valid
+
+
+def render_pdf_pages(pdf_bytes: bytes) -> list[bytes]:
+    """Rasterize every page of `pdf_bytes` into a real, valid JPEG via poppler
+    (`pdf2image.convert_from_bytes` — the SAME renderer `app/extract.py`'s own OCR
+    fallback already uses in this codebase, already installed in the Dockerfile/CI,
+    #224).
+
+    `extract_embedded_jpegs`'s raw SOI/EOI byte scan assumes an embedded image sits as
+    plain, unwrapped DCTDecode bytes at the top level of the file — real supplier
+    scans routinely wrap it in an extra FlateDecode layer instead (see
+    `_is_real_image`'s docstring), so the true bytes never appear verbatim. Rendering
+    the actual page pixels sidesteps whatever internal filter chain the source PDF
+    used — poppler decodes it correctly either way, regardless of how the image is
+    encoded internally.
+
+    Never raises: a genuinely corrupt/unrenderable PDF returns an empty list, and the
+    caller falls back to sending the whole PDF as a file part instead.
+    """
+    try:
+        from pdf2image import convert_from_bytes
+        pages = convert_from_bytes(pdf_bytes, dpi=VISION_RENDER_DPI, first_page=1,
+                                   last_page=VISION_RENDER_MAX_PAGES)
+    except Exception:
+        log.exception("DL attachment: pdf2image page rendering failed (#224)")
+        return []
+    out = []
+    for page in pages:
+        buf = io.BytesIO()
+        page.convert("RGB").save(buf, format="JPEG", quality=85)
+        out.append(buf.getvalue())
+    return out
 
 
 # --- 2) text-source priority (R42, fixes W13) -------------------------------
@@ -352,8 +427,26 @@ def extract_attachment(client, pdf_bytes: bytes, machine_text: str = "") -> dict
     vision_primary: str | None = None
     vision_secondary: str | None = None
     if scanned:
-        log.info("DL attachment: scanned -> vision transcribing %d page(s)", len(jpegs))
-        transcripts = client.vision_call(vision_prompt(), images=jpegs)
+        # #224: never trust the raw marker-scanned bytes blindly — only send genuinely
+        # decodable, page-sized images. When extraction found nothing usable (the real
+        # bug: a Flate-wrapped DCTDecode stream produces only garbage marker spans),
+        # render the actual PDF pages instead; if even that fails, fall back to the
+        # whole-PDF file part (the same path the digital/no-text branch below uses).
+        usable = _decodable_large_jpegs(jpegs)
+        if usable:
+            log.info("DL attachment: scanned -> vision transcribing %d page(s)", len(usable))
+            transcripts = client.vision_call(vision_prompt(), images=usable)
+        else:
+            log.warning("DL attachment: scan detected but no extracted JPEG candidate "
+                        "was decodable (likely a Flate-wrapped DCTDecode stream, #224) "
+                        "-> rendering the PDF pages instead")
+            rendered = render_pdf_pages(pdf_bytes)
+            if rendered:
+                transcripts = client.vision_call(vision_prompt(), images=rendered)
+            else:
+                log.warning("DL attachment: page rendering also produced nothing -> "
+                            "whole-PDF vision fallback")
+                transcripts = client.vision_call(vision_prompt(), pdf_bytes=pdf_bytes)
         vision_used = True
     elif not machine_text.strip():
         log.info("DL attachment: digital PDF with no extracted text -> vision fallback")
