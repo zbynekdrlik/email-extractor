@@ -130,3 +130,40 @@ warning; both alias the same command.)
   supervisor add-on" above), and if a log/DB check ever comes back suspiciously empty,
   re-run WITHOUT `2>/dev/null` first to rule out a silently-failed container name
   before trusting the empty result.
+
+- **`cat file | ssh host "cmd" 2>&1 </dev/null` silently drops the piped content —
+  `</dev/null` on the SAME command line overrides the pipe as stdin for the whole
+  compound command, so `ssh` gets an empty stdin instead of `file`'s content (#224/#225,
+  2026-08-08).** `cat scratch.py | sshpass -p "$PW" ssh host "cat > /tmp/x.py" 2>&1
+  </dev/null` creates a 0-byte `/tmp/x.py` with NO error — the trailing `< /dev/null`
+  (added out of habit to avoid an interactive ssh prompt) wins over the `cat |` pipe for
+  stdin, and `cat >` on an empty stdin just makes an empty file and exits 0. If you need
+  BOTH "ssh never blocks on a prompt" AND "pipe real content through", do NOT redirect
+  stdin at all when you're piping content in — the pipe itself already provides
+  non-interactive stdin; only add `</dev/null` on ssh calls that send NO piped input.
+- **Forcing a "shadow re-run" of specific already-processed messages, to verify a
+  matching/extraction fix against real production data (#224/#225).** `dl_worker.
+  _peek_for_shadow`'s `NOT EXISTS (SELECT 1 FROM order_runs r WHERE r.message_id =
+  m.message_id AND r.shadow)` means a message with ANY existing shadow `order_runs` row
+  (success OR failure) is excluded from ever being re-picked. To force a fresh shadow
+  run: `DELETE FROM order_runs WHERE id IN (<the specific failing run ids>) AND
+  shadow=true` (verify EVERY id is `shadow=true` and the message has ZERO non-shadow
+  runs first, read-only, before deleting) — the worker's own loop
+  (`worker.run_forever`, `sleep(15)` only when nothing was handled) then naturally
+  re-picks and re-processes each freed-up message within its normal tick cycle, ONE per
+  tick, no restart needed. **Caveat:** `_peek_for_shadow` ALSO filters on `m.created_at
+  > now() - make_interval(days => delivery_notes_shadow_days)` (default 3) — a message
+  older than that window stays invisible even after its shadow row is deleted. Fix:
+  temporarily widen `delivery_notes_shadow_days` via the documented options-POST
+  technique above, `ha addons restart`, wait for it to be picked up, then revert the
+  option and restart AGAIN immediately — a config-only, fully reversible bump, not a
+  destructive action.
+- **A multi-document attachment's SECOND (and later) document is invisible to a query
+  that reads `result->'documents'->0->>...` — that `->0` only ever sees document INDEX
+  ZERO (#224/#225 post-deploy verification, 2026-08-08).** One real message legitimately
+  produced TWO documents from one attachment (doc 612006 `ok` + doc 68944 `partial`,
+  same `order_runs` row) — a first-pass check of `result->'documents'->0->>'reason'`
+  reported "clean" while document[1]'s own `items_skipped_no_match` still had a real
+  (unrelated, out-of-scope) miss. Always read `jsonb_array_elements(result->
+  'documents')` (or `jsonb_pretty(result->'documents')` for a full manual read) when
+  auditing DL run outcomes — never assume a message produced only one document.

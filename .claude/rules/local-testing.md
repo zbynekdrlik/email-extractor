@@ -61,3 +61,20 @@ hang, a truncated capture, or a reason to re-run: verify success from **exit cod
 `F`/`E`/`s`/`x` characters** in the dot-progress output (`python3 -c "print(collections.
 Counter(ch for ch in open('out.log').read() if ch not in '.\n[] %0123456789'))"` — an empty
 Counter means every test passed) rather than grepping for `"passed in"`.
+
+## `pytest.mark.skipif` in a NEW test line blocks the push, even though `.skip(` is what's actually banned (#224, 2026-08-08)
+
+`hooks/block-test-skips.sh`'s content scanner matches the raw substring `pytest\.mark\.skip`
+against every ADDED line in a test file — this also matches `pytest.mark.skipif(...)`, even
+though a CONDITIONAL, environment-based skip (not a blanket "this test doesn't run" skip) is
+a different thing and is NOT what `test-strictness.md` is banning. The hook fails with
+`No stderr output` (a generic wrapper message, not the real reason) rather than a clear
+rejection — don't waste time guessing at a crash; check the diff for a fresh
+`pytest.mark.skipif`/`pytest.mark.skip` line first. `tests/test_extract.py` already has an
+existing (pre-hook, grandfathered) `@pytest.mark.skipif(not _has_ocr(), ...)` for the
+tesseract/poppler-dependent OCR tests — do NOT copy that pattern into a NEW test. Since
+poppler is an UNCONDITIONAL Dockerfile + CI dependency in this project (same as tesseract),
+a new test needing it should assert `shutil.which("pdftoppm")` truthy and let the test FAIL
+loudly if it's somehow missing, rather than skip — matches `test-strictness.md`'s own "a
+missing dependency must fail loudly, never skip" principle anyway, and sidesteps the hook
+entirely (no bypass tag needed for a scoped, well-justified assertion instead of a skip).
