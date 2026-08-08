@@ -866,3 +866,19 @@ def test_merge_same_card_keeps_a_materially_different_wording_as_its_own_bucket(
     assert len(out) == 2
     by_qty = sorted(d.quantity for d in out)
     assert by_qty == [1, 5]
+
+
+def test_match_product_prompt_states_the_same_weight_tolerance_the_code_applies_fixes_227():
+    """#227: the same gap #225 fixed for the DL engine's `dl_match_item.md`, but in the
+    LIVE, non-shadow AI-orders engine's own prompt. `match.py`'s WEIGHT_TOLERANCE (10 %)
+    is applied deterministically by `_weights_disagree()` at multiple points in
+    `match.decide()`, but `match_product.md` only says "a card with a different stated
+    weight is a different product: score it below 0.85" — no percentage anywhere. The
+    model has no way to know a small (<=10 %) printed-weight gap is already tolerated by
+    the deterministic gate, so it may return unnecessarily low confidence on a match the
+    code would accept anyway."""
+    from app.orders import pipeline
+
+    prompt = pipeline._prompt("match_product.md")
+    tolerance_pct = round(match.WEIGHT_TOLERANCE * 100)
+    assert f"{tolerance_pct} %" in prompt or f"{tolerance_pct}%" in prompt
