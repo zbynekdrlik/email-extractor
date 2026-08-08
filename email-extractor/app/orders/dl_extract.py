@@ -173,13 +173,24 @@ def _is_real_image(data: bytes) -> bool:
 
 
 def _decodable_large_jpegs(jpegs: list[bytes]) -> list[bytes]:
-    """The extracted candidates that are BOTH genuinely decodable AND include at least
-    one over the scan-size threshold (#224) — a small valid image alone (e.g. a
-    supplier's letterhead logo the byte scan also happened to catch) is not evidence
-    the real page content was correctly extracted; when that is all we have, the
-    caller falls back to rendering the actual PDF pages instead of transcribing an
-    unrelated logo as if it were the delivery note."""
+    """The extracted candidates, ALL-OR-NOTHING: only returned when EVERY candidate is
+    genuinely decodable AND at least one is over the scan-size threshold (#224).
+
+    Deep-review finding on this ticket's own PR: trusting local extraction whenever
+    just ONE candidate happens to be valid+large is unsafe for a mixed-encoding
+    multi-page scan — a real document where page 1's bytes happen to decode (plain
+    DCTDecode) but pages 2-3 don't (the Flate-wrapped garbage this bug is about) would
+    silently ship page 1 alone and skip the rest, a regression against W1c ("every
+    embedded page image", not just some). A single undecodable candidate anywhere in
+    the set means we can't trust that the byte-scan correctly found EVERY real page,
+    so the whole set is discarded and the caller renders the actual PDF pages instead
+    — a small valid image alone (e.g. a supplier's letterhead logo the byte scan also
+    happened to catch, with nothing else decodable) hits the same "discard" path for
+    the same reason: it is not evidence the real page content was correctly
+    extracted."""
     valid = [j for j in jpegs if _is_real_image(j)]
+    if len(valid) != len(jpegs):
+        return []
     if not any(len(j) > SCAN_JPEG_THRESHOLD_BYTES for j in valid):
         return []
     return valid
@@ -188,8 +199,10 @@ def _decodable_large_jpegs(jpegs: list[bytes]) -> list[bytes]:
 def render_pdf_pages(pdf_bytes: bytes) -> list[bytes]:
     """Rasterize every page of `pdf_bytes` into a real, valid JPEG via poppler
     (`pdf2image.convert_from_bytes` — the SAME renderer `app/extract.py`'s own OCR
-    fallback already uses in this codebase, already installed in the Dockerfile/CI,
-    #224).
+    fallback already uses to get real pixels out of a PDF, already installed in the
+    Dockerfile/CI, #224 — though that OCR path never re-encodes to JPEG or sends
+    anything to a vision LLM; only the underlying renderer + page cap are shared, not
+    the DPI or the purpose).
 
     `extract_embedded_jpegs`'s raw SOI/EOI byte scan assumes an embedded image sits as
     plain, unwrapped DCTDecode bytes at the top level of the file — real supplier
@@ -199,22 +212,30 @@ def render_pdf_pages(pdf_bytes: bytes) -> list[bytes]:
     used — poppler decodes it correctly either way, regardless of how the image is
     encoded internally.
 
-    Never raises: a genuinely corrupt/unrenderable PDF returns an empty list, and the
-    caller falls back to sending the whole PDF as a file part instead.
+    Never raises: a genuinely corrupt/unrenderable PDF, OR a page that renders but
+    fails to JPEG-encode (deep-review finding on this ticket's own PR — the original
+    cut only wrapped the `convert_from_bytes` call, leaving a per-page encode failure
+    to propagate uncaught out of this "never raises" function), returns an empty
+    list either way, and the caller falls back to sending the whole PDF as a file
+    part instead.
     """
     try:
         from pdf2image import convert_from_bytes
         pages = convert_from_bytes(pdf_bytes, dpi=VISION_RENDER_DPI, first_page=1,
                                    last_page=VISION_RENDER_MAX_PAGES)
+        if len(pages) == VISION_RENDER_MAX_PAGES:
+            log.warning("DL attachment: PDF has >= %d pages — rendering may be "
+                       "truncated (vision cap VISION_RENDER_MAX_PAGES, #224)",
+                       VISION_RENDER_MAX_PAGES)
+        out = []
+        for page in pages:
+            buf = io.BytesIO()
+            page.convert("RGB").save(buf, format="JPEG", quality=85)
+            out.append(buf.getvalue())
+        return out
     except Exception:
         log.exception("DL attachment: pdf2image page rendering failed (#224)")
         return []
-    out = []
-    for page in pages:
-        buf = io.BytesIO()
-        page.convert("RGB").save(buf, format="JPEG", quality=85)
-        out.append(buf.getvalue())
-    return out
 
 
 # --- 2) text-source priority (R42, fixes W13) -------------------------------
@@ -437,9 +458,12 @@ def extract_attachment(client, pdf_bytes: bytes, machine_text: str = "") -> dict
             log.info("DL attachment: scanned -> vision transcribing %d page(s)", len(usable))
             transcripts = client.vision_call(vision_prompt(), images=usable)
         else:
-            log.warning("DL attachment: scan detected but no extracted JPEG candidate "
-                        "was decodable (likely a Flate-wrapped DCTDecode stream, #224) "
-                        "-> rendering the PDF pages instead")
+            log.warning("DL attachment: scan detected but local extraction found no "
+                        "usable page image — either NO candidate was decodable at all "
+                        "(likely a Flate-wrapped DCTDecode stream, #224), or a small "
+                        "decodable one was found (e.g. a letterhead logo) with nothing "
+                        "large enough to be the real page -> rendering the PDF pages "
+                        "instead")
             rendered = render_pdf_pages(pdf_bytes)
             if rendered:
                 transcripts = client.vision_call(vision_prompt(), images=rendered)

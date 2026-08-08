@@ -496,6 +496,16 @@ def test_a_small_valid_logo_alone_is_not_enough_evidence_of_real_page_content():
     assert dl_extract._decodable_large_jpegs([small_real, LARGE_JPEG]) == []
 
 
+def test_a_mixed_scan_where_only_some_pages_decode_is_never_trusted_deep_review():
+    """Deep-review finding on this ticket's own PR: trusting local extraction whenever
+    just ONE candidate is valid+large would silently ship a real page 1 (that happened
+    to decode) while DROPPING real pages 2-3 (Flate-wrapped garbage) instead of
+    rendering all of them — a regression against W1c. One undecodable candidate
+    anywhere in the set must discard the WHOLE set, all-or-nothing."""
+    one_real_large_page = _real_jpeg(5)
+    assert dl_extract._decodable_large_jpegs([one_real_large_page, LARGE_JPEG]) == []
+
+
 def test_render_pdf_pages_returns_valid_jpeg_bytes_for_a_real_pdf():
     # poppler (pdftoppm) is a hard requirement of this test — the Dockerfile and CI's
     # `test` job both install it unconditionally, same as app/extract.py's own OCR path
