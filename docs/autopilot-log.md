@@ -1767,3 +1767,19 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   catalog query) — a legitimate missing-catalog-card case, not in #225's original
   5-wording scope, not a regression, left for the user to add via the #221 dashboard
   per the ticket's own "NIE ručné dopĺňanie kariet" instruction.
+
+## 2026-08-08 — #227 (AI-orders match_product.md prompt had no weight-tolerance number)
+
+- Same gap #225 fixed for the DL engine's `dl_match_item.md`, this time in the LIVE,
+  non-shadow AI-orders engine's own `app/orders/prompts/match_product.md` — the code's
+  `match.WEIGHT_TOLERANCE = 0.1` (10 %) is applied deterministically by
+  `_weights_disagree()` at multiple `match.decide()` ladder rungs, but the prompt only
+  said "a card with a different stated weight is a different product" with no number.
+  Version bumped 0.9.60 → 0.9.61 (`7208318`). RED: `238b687`
+  (`tests/test_orders_match.py::test_match_product_prompt_states_the_same_weight_tolerance_the_code_applies_fixes_227`).
+  GREEN: `1d1ab3a` (one sentence added to `match_product.md`, mirroring #225's fix).
+  Per `.claude/rules/orders-corpus.md`, the prompt edit invalidated the AI-orders
+  35-case eval corpus's cached matching-call answers — re-recorded `--live` on dev2
+  (`~/eval-corpus/email-extractor`), `--require-all` PASSED with zero new regressions
+  (the only 5 failures are the pre-existing `#120` known-defect cases already excluded
+  from the hard gate).

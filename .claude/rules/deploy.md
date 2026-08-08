@@ -167,3 +167,8 @@ warning; both alias the same command.)
   (unrelated, out-of-scope) miss. Always read `jsonb_array_elements(result->
   'documents')` (or `jsonb_pretty(result->'documents')` for a full manual read) when
   auditing DL run outcomes — never assume a message produced only one document.
+- **Restarting the add-on kills any in-flight worker tick mid-processing and leaves an
+  orphaned `order_runs` row with `status='running'`** (observed 2026-08-08: run 401).
+  After any restart, check `SELECT id,message_id FROM order_runs WHERE status='running'
+  AND started_at < now() - interval '10 minutes';` and delete stale shadow rows
+  (`shadow=true`) — a live-engine stale row needs investigation, not blind deletion.
