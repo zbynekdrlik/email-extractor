@@ -1232,3 +1232,31 @@ intentional there for cards it was tuned against.
   `static_worker.py`'s own duplicate-skip logging has the theoretically SAME gap today
   (unfixed, not yet reported as an incident — low priority given it can only mis-tag a
   digest stage, never double-ship).
+- **`dl_match.py`'s candidate scoring (`_score_item`/`w_eq`) is a SEPARATE, hand-ported
+  sibling of `match.py`'s own scoring, NOT a shared function — check `match.py` for an
+  equivalent fix BEFORE assuming a scoring bug in one is genuinely new (#225,
+  2026-08-08).** `w_eq()`'s cheap `a in b or b in a` substring check lets a 1-2 char
+  Slovak filler word (a preposition like "s") register a spurious "match" against ANY
+  candidate word that happens to contain that one letter — this pushed a correct DL
+  catalog card out of the top-15 shown to the model for 4 of 5 real broken production
+  wordings (verified against the real 491-row catalog, rank #18-#32 instead of top-15).
+  Fixed with `dl_match._MIN_SCORABLE_WORD_LEN = 3` filtering both word lists before the
+  `w_eq` loop. Deep review then found `match.py` (the ai_orders engine) does NOT have
+  this exact bug — it already filters `len(w) > 2` at `match.py:152,154` — meaning this
+  was a genuine DL-only gap, not a cross-cutting one, but the CHECK (does the sibling
+  engine already handle this?) is the reusable lesson: before fixing a `dl_match.py`
+  scoring/matching bug, grep the equivalent function in `match.py` first — sometimes the
+  fix already exists there and DL just needs the same guard ported over; other times (as
+  here) DL genuinely lacks something `match.py` already has, which is itself useful
+  confirmation the bug is real and not a misunderstanding of intended behavior.
+- **A prompt file change (`dl_match_item.md`, `match_product.md`, etc.) invalidates
+  the CANDIDATE-LIST-DEPENDENT cache too, not just the literal prompt text (#225,
+  2026-08-08).** The `llm.Client` cache key hashes `(model, effort, system_prompt,
+  user_message, schema)` — `user_message` is built from `_item_input(item, cands,
+  partner_name)`, which embeds the CANDIDATE LIST TEXT. So a scoring/ranking change
+  (like the `_MIN_SCORABLE_WORD_LEN` fix above) ALSO invalidates cached matching-call
+  answers for any case whose candidate ORDER changed — even with the prompt text itself
+  byte-identical. Before assuming "I only changed scoring code, the cache should still
+  be valid," check whether the change could alter what `candidates()`/`_item_input`
+  produces; if so, budget for the SAME `--live` re-record + `--require-all` verify the
+  prompt-edit case already requires.
