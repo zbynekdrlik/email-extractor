@@ -28,6 +28,7 @@ offline with a scripted fake client, no network.
 """
 from __future__ import annotations
 
+import io
 import logging
 import re
 from pathlib import Path
@@ -43,6 +44,13 @@ SCAN_JPEG_THRESHOLD_BYTES = 20_000
 
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
+
+# #224: when NO extracted candidate is both decodable and this size, we render the real
+# PDF pages instead of trusting the (garbage) marker-scanned bytes. Mirrors app/extract.py's
+# own OCR-fallback DPI (poppler render quality) and page cap, at a lighter DPI — a DL is
+# realistically 1-3 pages, not a multi-page invoice.
+VISION_RENDER_DPI = 200
+VISION_RENDER_MAX_PAGES = 15
 
 # R51: the EDI is built from line items, so a misread SUMMARY digit must not block — but a
 # missing/extra/mistranscribed LINE must.
@@ -140,6 +148,94 @@ def is_scanned(jpegs: list[bytes]) -> bool:
     `extract_embedded_jpegs` already returning all of them.
     """
     return bool(jpegs) and max(len(j) for j in jpegs) > SCAN_JPEG_THRESHOLD_BYTES
+
+
+# --- 1b) real-image validation + page rendering (#224 — invalid_image_format fix) -----
+
+def _is_real_image(data: bytes) -> bool:
+    """True only when `data` is a genuinely decodable JPEG — never raises.
+
+    A byte span `extract_embedded_jpegs` found by matching SOI/EOI markers is NOT
+    necessarily a real image: a PDF that Flate-compresses its embedded JPEG on top of
+    the DCTDecode filter (`/Filter [/FlateDecode /DCTDecode]`, confirmed on 5 real
+    production shadow runs, #224) hides the true image bytes behind zlib deflate — any
+    SOI/EOI match the raw scan finds inside that compressed stream is a coincidental
+    byte pattern, not decodable pixels, and OpenAI Vision correctly rejects it with 400
+    invalid_image_format.
+    """
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(data))
+        img.load()
+        return img.format == "JPEG"
+    except Exception:
+        return False
+
+
+def _decodable_large_jpegs(jpegs: list[bytes]) -> list[bytes]:
+    """The extracted candidates, ALL-OR-NOTHING: only returned when EVERY candidate is
+    genuinely decodable AND at least one is over the scan-size threshold (#224).
+
+    Deep-review finding on this ticket's own PR: trusting local extraction whenever
+    just ONE candidate happens to be valid+large is unsafe for a mixed-encoding
+    multi-page scan — a real document where page 1's bytes happen to decode (plain
+    DCTDecode) but pages 2-3 don't (the Flate-wrapped garbage this bug is about) would
+    silently ship page 1 alone and skip the rest, a regression against W1c ("every
+    embedded page image", not just some). A single undecodable candidate anywhere in
+    the set means we can't trust that the byte-scan correctly found EVERY real page,
+    so the whole set is discarded and the caller renders the actual PDF pages instead
+    — a small valid image alone (e.g. a supplier's letterhead logo the byte scan also
+    happened to catch, with nothing else decodable) hits the same "discard" path for
+    the same reason: it is not evidence the real page content was correctly
+    extracted."""
+    valid = [j for j in jpegs if _is_real_image(j)]
+    if len(valid) != len(jpegs):
+        return []
+    if not any(len(j) > SCAN_JPEG_THRESHOLD_BYTES for j in valid):
+        return []
+    return valid
+
+
+def render_pdf_pages(pdf_bytes: bytes) -> list[bytes]:
+    """Rasterize every page of `pdf_bytes` into a real, valid JPEG via poppler
+    (`pdf2image.convert_from_bytes` — the SAME renderer `app/extract.py`'s own OCR
+    fallback already uses to get real pixels out of a PDF, already installed in the
+    Dockerfile/CI, #224 — though that OCR path never re-encodes to JPEG or sends
+    anything to a vision LLM; only the underlying renderer + page cap are shared, not
+    the DPI or the purpose).
+
+    `extract_embedded_jpegs`'s raw SOI/EOI byte scan assumes an embedded image sits as
+    plain, unwrapped DCTDecode bytes at the top level of the file — real supplier
+    scans routinely wrap it in an extra FlateDecode layer instead (see
+    `_is_real_image`'s docstring), so the true bytes never appear verbatim. Rendering
+    the actual page pixels sidesteps whatever internal filter chain the source PDF
+    used — poppler decodes it correctly either way, regardless of how the image is
+    encoded internally.
+
+    Never raises: a genuinely corrupt/unrenderable PDF, OR a page that renders but
+    fails to JPEG-encode (deep-review finding on this ticket's own PR — the original
+    cut only wrapped the `convert_from_bytes` call, leaving a per-page encode failure
+    to propagate uncaught out of this "never raises" function), returns an empty
+    list either way, and the caller falls back to sending the whole PDF as a file
+    part instead.
+    """
+    try:
+        from pdf2image import convert_from_bytes
+        pages = convert_from_bytes(pdf_bytes, dpi=VISION_RENDER_DPI, first_page=1,
+                                   last_page=VISION_RENDER_MAX_PAGES)
+        if len(pages) == VISION_RENDER_MAX_PAGES:
+            log.warning("DL attachment: PDF has >= %d pages — rendering may be "
+                       "truncated (vision cap VISION_RENDER_MAX_PAGES, #224)",
+                       VISION_RENDER_MAX_PAGES)
+        out = []
+        for page in pages:
+            buf = io.BytesIO()
+            page.convert("RGB").save(buf, format="JPEG", quality=85)
+            out.append(buf.getvalue())
+        return out
+    except Exception:
+        log.exception("DL attachment: pdf2image page rendering failed (#224)")
+        return []
 
 
 # --- 2) text-source priority (R42, fixes W13) -------------------------------
@@ -352,8 +448,29 @@ def extract_attachment(client, pdf_bytes: bytes, machine_text: str = "") -> dict
     vision_primary: str | None = None
     vision_secondary: str | None = None
     if scanned:
-        log.info("DL attachment: scanned -> vision transcribing %d page(s)", len(jpegs))
-        transcripts = client.vision_call(vision_prompt(), images=jpegs)
+        # #224: never trust the raw marker-scanned bytes blindly — only send genuinely
+        # decodable, page-sized images. When extraction found nothing usable (the real
+        # bug: a Flate-wrapped DCTDecode stream produces only garbage marker spans),
+        # render the actual PDF pages instead; if even that fails, fall back to the
+        # whole-PDF file part (the same path the digital/no-text branch below uses).
+        usable = _decodable_large_jpegs(jpegs)
+        if usable:
+            log.info("DL attachment: scanned -> vision transcribing %d page(s)", len(usable))
+            transcripts = client.vision_call(vision_prompt(), images=usable)
+        else:
+            log.warning("DL attachment: scan detected but local extraction found no "
+                        "usable page image — either NO candidate was decodable at all "
+                        "(likely a Flate-wrapped DCTDecode stream, #224), or a small "
+                        "decodable one was found (e.g. a letterhead logo) with nothing "
+                        "large enough to be the real page -> rendering the PDF pages "
+                        "instead")
+            rendered = render_pdf_pages(pdf_bytes)
+            if rendered:
+                transcripts = client.vision_call(vision_prompt(), images=rendered)
+            else:
+                log.warning("DL attachment: page rendering also produced nothing -> "
+                            "whole-PDF vision fallback")
+                transcripts = client.vision_call(vision_prompt(), pdf_bytes=pdf_bytes)
         vision_used = True
     elif not machine_text.strip():
         log.info("DL attachment: digital PDF with no extracted text -> vision fallback")

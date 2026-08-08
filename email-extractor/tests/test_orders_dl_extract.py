@@ -13,7 +13,11 @@ against the binding spec (docs/superpowers/specs/2026-08-07-delivery-notes-pytho
 No DB, no worker/claim wiring — deliberately (the worker integration is #204). Everything
 here is pure functions plus a scripted fake LLM client (no network in tests).
 """
+import io
+import shutil
+
 import pytest
+from PIL import Image
 
 from app.orders import dl_extract
 
@@ -22,6 +26,38 @@ from app.orders import dl_extract
 SMALL_JPEG = b"\xff\xd8\xff\xe0" + b"x" * 100 + b"\xff\xd9"
 LARGE_JPEG = b"\xff\xd8\xff\xe0" + b"x" * 25_000 + b"\xff\xd9"
 LARGE_JPEG_2 = b"\xff\xd8\xff\xe0" + b"y" * 22_000 + b"\xff\xd9"
+
+
+def _real_jpeg(seed: int, min_size: int = 25_000) -> bytes:
+    """A genuinely decodable JPEG (#224) — noise so it doesn't compress away below the
+    20 kB scan threshold, unlike a flat-color image."""
+    img = Image.effect_noise((300, 300), 30 + seed).convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=95)
+    data = buf.getvalue()
+    assert len(data) > min_size, f"fixture too small ({len(data)}), raise noise/quality"
+    return data
+
+
+def _real_small_jpeg(seed: int = 0) -> bytes:
+    """A genuinely decodable but TINY JPEG (#224) — well under the 20 kB scan
+    threshold, standing in for a supplier's letterhead logo caught by the byte scan
+    alongside real garbage."""
+    img = Image.effect_noise((12, 12), 30 + seed).convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=70)
+    data = buf.getvalue()
+    assert len(data) < dl_extract.SCAN_JPEG_THRESHOLD_BYTES, f"fixture too large ({len(data)})"
+    return data
+
+
+def _real_pdf_with_page(seed: int = 0) -> bytes:
+    """A real, poppler-renderable single-page PDF (#224) — mirrors test_extract.py's own
+    `img.convert("RGB").save(buf, format="PDF")` pattern."""
+    img = Image.effect_noise((400, 300), 40 + seed).convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="PDF")
+    return buf.getvalue()
 
 
 class FakeClient:
@@ -396,7 +432,10 @@ def test_run_extraction_with_zero_documents_returns_an_empty_list():
 # --- 10) one attachment end-to-end (vision routing) -----------------------
 
 def test_a_scanned_attachment_calls_vision_with_every_page():
-    pdf = LARGE_JPEG + LARGE_JPEG_2
+    # Real, genuinely decodable JPEGs (#224) — the two pages must both reach vision
+    # unchanged when local extraction actually found valid images (W1c preserved).
+    page1, page2 = _real_jpeg(1), _real_jpeg(2)
+    pdf = page1 + page2
     client = FakeClient(
         vision_answers=[["primary transcript", "secondary transcript"]],
         json_answers=[{"documents": [_doc()]}])
@@ -404,9 +443,85 @@ def test_a_scanned_attachment_calls_vision_with_every_page():
     assert result["scanned"] is True
     assert result["vision_used"] is True
     assert len(client.vision_calls) == 1
-    assert client.vision_calls[0]["images"] == [LARGE_JPEG, LARGE_JPEG_2]
+    assert client.vision_calls[0]["images"] == [page1, page2]
     assert client.vision_calls[0]["pdf_bytes"] is None
     assert len(result["documents"]) == 1
+
+
+# --- #224: a marker-only "JPEG" that isn't decodable must never reach vision ------
+
+def test_marker_only_candidates_are_not_decodable_real_images():
+    """Documents the actual production bug (#224): a byte span that satisfies the
+    SOI/EOI marker scan is NOT necessarily a real image — real supplier scans wrap the
+    JPEG in an extra FlateDecode layer (`/Filter [/FlateDecode /DCTDecode]`), so the
+    raw bytes `extract_embedded_jpegs` finds are garbage, not decodable pixels."""
+    assert dl_extract._is_real_image(LARGE_JPEG) is False
+    assert dl_extract._is_real_image(_real_jpeg(9)) is True
+
+
+def test_undecodable_scan_candidates_fall_back_to_rendering_real_pages_fixes_224(monkeypatch):
+    pdf = LARGE_JPEG + LARGE_JPEG_2   # marker-only garbage, mirrors the real bug
+    rendered_page = _real_jpeg(3)
+    monkeypatch.setattr(dl_extract, "render_pdf_pages", lambda pdf_bytes: [rendered_page])
+    client = FakeClient(
+        vision_answers=[["primary transcript", "secondary transcript"]],
+        json_answers=[{"documents": [_doc()]}])
+    result = dl_extract.extract_attachment(client, pdf, machine_text="")
+    assert result["scanned"] is True
+    assert result["vision_used"] is True
+    assert client.vision_calls[0]["images"] == [rendered_page]
+    assert client.vision_calls[0]["images"] != [LARGE_JPEG, LARGE_JPEG_2]
+    assert client.vision_calls[0]["pdf_bytes"] is None
+
+
+def test_undecodable_scan_with_failed_rendering_falls_back_to_whole_pdf_fixes_224(monkeypatch):
+    pdf = LARGE_JPEG   # marker-only garbage, and rendering ALSO fails (corrupt PDF)
+    monkeypatch.setattr(dl_extract, "render_pdf_pages", lambda pdf_bytes: [])
+    client = FakeClient(
+        vision_answers=[["fallback transcript"]],
+        json_answers=[{"documents": [_doc()]}])
+    result = dl_extract.extract_attachment(client, pdf, machine_text="")
+    assert result["scanned"] is True
+    assert result["vision_used"] is True
+    assert client.vision_calls[0]["images"] is None
+    assert client.vision_calls[0]["pdf_bytes"] == pdf
+
+
+def test_a_small_valid_logo_alone_is_not_enough_evidence_of_real_page_content():
+    """A genuinely decodable but SMALL image (e.g. a supplier's letterhead logo caught
+    by the byte scan alongside garbage) must not be mistaken for the real scanned page
+    — only a candidate that is BOTH decodable AND over the scan-size threshold counts."""
+    small_real = _real_small_jpeg(4)
+    assert len(small_real) < dl_extract.SCAN_JPEG_THRESHOLD_BYTES
+    assert dl_extract._decodable_large_jpegs([small_real, LARGE_JPEG]) == []
+
+
+def test_a_mixed_scan_where_only_some_pages_decode_is_never_trusted_deep_review():
+    """Deep-review finding on this ticket's own PR: trusting local extraction whenever
+    just ONE candidate is valid+large would silently ship a real page 1 (that happened
+    to decode) while DROPPING real pages 2-3 (Flate-wrapped garbage) instead of
+    rendering all of them — a regression against W1c. One undecodable candidate
+    anywhere in the set must discard the WHOLE set, all-or-nothing."""
+    one_real_large_page = _real_jpeg(5)
+    assert dl_extract._decodable_large_jpegs([one_real_large_page, LARGE_JPEG]) == []
+
+
+def test_render_pdf_pages_returns_valid_jpeg_bytes_for_a_real_pdf():
+    # poppler (pdftoppm) is a hard requirement of this test — the Dockerfile and CI's
+    # `test` job both install it unconditionally, same as app/extract.py's own OCR path
+    # already relies on.
+    assert shutil.which("pdftoppm"), "poppler (pdftoppm) is required, not optional"
+    pdf = _real_pdf_with_page()
+    pages = dl_extract.render_pdf_pages(pdf)
+    assert len(pages) == 1
+    img = Image.open(io.BytesIO(pages[0]))
+    img.load()
+    assert img.format == "JPEG"
+
+
+def test_render_pdf_pages_never_raises_on_unrenderable_bytes():
+    assert dl_extract.render_pdf_pages(b"not a pdf at all") == []
+    assert dl_extract.render_pdf_pages(b"") == []
 
 
 def test_a_digital_attachment_with_real_text_never_calls_vision_fixes_w13():

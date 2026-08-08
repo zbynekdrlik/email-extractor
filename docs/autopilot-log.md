@@ -1650,3 +1650,92 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   959 suppliers, all still served correctly — `/znalosti` catalog search for "Rožok"
   returned 6 real cards from the frozen DB snapshot); worker startup log confirms
   `dl_shadow=True` (DL shadow engine still armed, unaffected).
+
+## #221 — DL katalóg + dodávatelia: dashboard editovanie (mirror #127/#128) (2026-08-08)
+
+- Mirrors #127/#128's product-card/customer curation for the DL-specific line
+  (`dl_catalog_snapshot`/`dl_supplier_snapshot`, frozen since #129), on its OWN
+  `dl_snapshots` versioning line — deliberately NOT the shared `catalog_overrides`/
+  `customer_overrides` tables (a shared GTIN between the AI-orders and DL catalogs
+  must never let a DL-only edit rewrite the AI-orders side; same reasoning
+  `dl_snapshots` itself already used to stay independent of `order_snapshots`).
+- `db.py`: 2 new tables, purely additive — `dl_catalog_overrides` (PK `gtin`) and
+  `dl_supplier_overrides` (surrogate id + `orig_ean_edi`/`orig_city` partial-unique
+  index — city, not street, since `dl_supplier_snapshot` never persists street/zip).
+- `app/orders/dl_snapshot.py`: `parse_number` (public `_num` wrapper) +
+  `dl_catalog_for_management`/`upsert_dl_catalog_card`/`retire_dl_catalog_card`/
+  `dl_suppliers_for_management`/`upsert_dl_supplier`/`retire_dl_supplier`/
+  `dl_rebuild_from_overrides`. `import_snapshot` now ALSO applies these overrides at
+  freeze time (mirroring `snapshot.import_snapshot` exactly) — the TDD RED tests,
+  mirrored 1:1 from the AI-orders override tests, proved this is what "mirror
+  #127/#128" actually requires; the design comment's "import_snapshot stays
+  untouched" undersold this by one detail.
+- `app/httpapi.py`: `/api/znalosti/dl-products` + `/api/znalosti/dl-suppliers`
+  (GET/POST/DELETE), same shape as `/products`/`/clients`; `SKLAD_ZNALOSTI_API`
+  widened so the warehouse link reaches them; 2 new `/znalosti` JS boxes
+  (`dlProductsBox`/`dlSuppliersBox`).
+- `tests/conftest.py`: the `pg` fixture's TRUNCATE list gained the 2 new tables —
+  found via a real cross-test leakage failure while turning RED to GREEN (gotcha now
+  captured in `.claude/rules/local-testing.md`).
+- Commits: `f5295d3` (version bump 0.9.58→0.9.59), `98cc9dc` (RED — 28 new tests),
+  `18f1111` (GREEN — full implementation, 94% coverage, ruff clean), `70a6f68`
+  (docs: deploy.md container-name gotcha), `5a27657` (2 more tests pinning the deep
+  review's 2 🔵 findings — both were inherited-design notes, not bugs).
+- Deep review (Explore subagent, adversarial 9-angle pass on the real PR diff): 0 🔴
+  0 🟡 2 🔵, both addressed (full-replace-upsert + SKLAD_ZNALOSTI_API anchoring, both
+  pinned as explicit tests rather than left implicit).
+- Shared PR: **223** — merged `a64c06bfcbbe69bd346ca59b04ff9b5df18bc2d8`, main CI
+  green (test+e2e-orders+e2e-dl+build). Deployed **v0.9.59** via `ha addons update`:
+  `/health` 200 `0.9.59`, dashboard + `/znalosti` DOM confirm `v0.9.59` (0 console
+  errors on the `/znalosti` page itself). Live functional verification via
+  Playwright driving the REAL dashboard: created a synthetic DL catalog card
+  (`TESTQA221001`) and a synthetic DL supplier (`9999999221001`) through the UI,
+  confirmed each write in Postgres, edited both through the UI, confirmed the edits
+  in Postgres, retired both through the UI (confirm dialog handled), then HARD-
+  DELETEd both rows via psql so production carries zero synthetic test data —
+  `dl_catalog_overrides`/`dl_supplier_overrides` both back to 0 rows. Worker log
+  confirms `dl_shadow=True` still armed, 0 ERROR/Traceback lines in a 10-minute
+  post-deploy window.
+
+## 2026-08-08 — #224 + #225 (DL shadow window bugs found during eval)
+
+- **#224** (DL shadow: Vision 400 `invalid_image_format` on 5 shadow runs, n8n processed
+  them `ok`): root cause verified live — real supplier scans (from at least 2 suppliers)
+  use `/Filter [/FlateDecode /DCTDecode]`, so `extract_embedded_jpegs()`'s raw SOI/EOI
+  byte scan finds only coincidental marker matches inside the Flate-compressed stream,
+  never a decodable image. `extract_attachment()` now filters candidates through
+  `_is_real_image()` (PIL decode) before treating them as the vision payload; when none
+  qualify (`_decodable_large_jpegs()`), `render_pdf_pages()` rasterizes the real PDF
+  pages via `pdf2image`/poppler (same mechanism `app/extract.py`'s OCR fallback already
+  uses) — a robust fallback that sidesteps whatever filter chain the source PDF used.
+  `extract_embedded_jpegs()`/`is_scanned()` themselves are untouched (still mirror n8n's
+  own heuristic). Commits: `13f29df` (RED), `21629d6` (GREEN, 100% coverage on
+  `dl_extract.py`).
+- **#225** (DL shadow: `items_skipped_no_match` on 7 shadow runs, n8n matched the same
+  items): two distinct root causes found by comparing real n8n-shipped EDI (SFTP-read
+  from ORION `archCodex`, read-only) against the python match trace:
+  1. **4 of 5 wordings** ("ZÁVIN s nápl.makovou350g" and 2 siblings, "Buchta tvarohová
+     nebalená 56g") — `_score_item()`'s word-overlap ratio counted 1-2 char Slovak
+     filler words (the preposition "s") as real tokens; `w_eq()`'s cheap substring check
+     then spuriously "matched" them against unrelated candidates' longer words,
+     inflating wrong cards and diluting the real match enough to push it out of the
+     top-15 shown to the model (rank #18-#32 in the real 491-row catalog). Fixed by
+     `_MIN_SCORABLE_WORD_LEN = 3` filtering both word lists before `w_eq`. Verified live
+     against the real catalog: all 4 now rank first or within the top 15 (was outside
+     it). Commits: `c94b844` (RED), `a6c9178` (GREEN).
+  2. **1 of 5** ("Žemľa špeciál 110g/špec.") — the correct card WAS already in the
+     top-15 (rank #2), but the model returned `NO_MATCH` at confidence 0.38: the ordered
+     weight (110g) is exactly `WEIGHT_TOLERANCE` (10%) off the card's own (100g), and
+     `dl_match_item.md`'s prompt only said "significantly different weight = different
+     product" with no number, so the model had no way to know the code's own gate would
+     already accept this gap. Added the explicit 10% tolerance to the prompt. Commits:
+     `d77a5f2` (RED), `2d01e9f` (GREEN).
+  - **Corpus re-record**: both the candidate-scoring change and the prompt edit
+    invalidate the DL eval corpus's cached matching-call answers (candidate list text /
+    prompt text both feed the content-addressed cache key). Re-recorded the full 8-case
+    corpus via `--live` on dev2 (`~/eval-corpus/email-extractor/dl/`, ~$1.20):
+    8/8 passed, zero regressions, offline replay confirmed against the fresh cache.
+- Both issues validated STILL REAL against live production data before implementation
+  (`gh issue comment` on each, per `verify-issue-still-valid`) — 5 real `order_runs` rows
+  for #224, 7 for #225, all shadow (never uploaded to ORION, never marked processed).
+- Shared PR: pending (bundled #224 + #225, one `dev` branch, one CI cycle).

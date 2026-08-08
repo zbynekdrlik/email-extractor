@@ -36,6 +36,22 @@ If you ever DO get a hang: find the blocking backend with the query above and
 `SELECT pg_terminate_backend(<pid>)` for the one that's `idle in transaction` — it's safe,
 it's always a stray test connection on a throwaway local DB, never anything live.
 
+## A NEW table your feature writes to must be added to the `pg` fixture's own TRUNCATE
+## list, or its rows silently leak across tests (#221)
+
+The `pg` fixture in `conftest.py` does NOT `TRUNCATE *` — it names every table
+explicitly. Adding a new table in `db.py`'s `SCHEMA` (e.g. a new `_overrides` table
+mirroring `catalog_overrides`/`customer_overrides`) is invisible to that list until you
+edit it too — nothing errors, the tests just start failing in a way that looks like a
+LOGIC bug: an EARLIER test's row (a different name, a different override) shows up in a
+LATER test's assertion, because the row was never wiped between tests. The tell:
+`KeyError`/`assert X in Y` failures naming data from an unrelated, alphabetically-earlier
+test in the same file, or a "must survive untouched" assertion failing on a name you
+never wrote in THIS test. Fix: add the new table's name to the `TRUNCATE ... RESTART
+IDENTITY CASCADE` list in `conftest.py`'s `pg` fixture in the SAME commit that adds the
+table — this is a required companion edit, not an optional cleanup, for any new table a
+test is going to write rows into.
+
 ## The final "N passed in Xs" summary line can be MISSING from captured output (#160)
 
 `.venv/bin/python -m pytest tests/ -q > out.log 2>&1` on this box has, at least once, ended

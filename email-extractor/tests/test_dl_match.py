@@ -124,6 +124,38 @@ def test_wording_substring_of_card_name_scores_65():
     assert row[0]["score"] == 65.0
 
 
+# --- #225: short filler words must never drive/dilute the word-overlap score -----------
+#
+# Root cause verified live against the real 491-row DL catalog (issue #225 comment): a
+# Slovak preposition like "s" ("with") is its own token after _norm(); w_eq()'s cheap
+# `a in b or b in a` substring check then treats a bare 1-2 char token as a "match" against
+# ANY candidate word that happens to contain that single letter — inflating unrelated
+# candidates and, via the shared hit-ratio denominator, diluting the real match's own
+# score enough that it fell out of the top-15 shown to the model.
+
+def test_short_filler_word_never_scores_a_spurious_substring_hit_fixes_225():
+    catalog = [{"gtin": "NOISE", "name": "Syrova bageta", "doplnok": ""}]
+    # the lone "s" token must not "match" "syrova" just because 's' is its first letter
+    row = dl_match.candidates("Zavin s naplnou makovou", catalog)
+    assert row[0]["score"] == 0.0
+
+
+def test_short_filler_words_are_excluded_from_the_match_ratio_denominator_fixes_225():
+    catalog = [{"gtin": "TARGET", "name": "Zavin makovy", "doplnok": ""}]
+    row = dl_match.candidates("Zavin s naplnou makovou", catalog)
+    # 2 real hits (zavin, makovou via stem) out of the 3 SCORABLE words ("s" excluded,
+    # "naplnou" itself doesn't match) = 40.0 — not diluted to 30.0 by counting "s" too.
+    assert row[0]["score"] == 40.0
+
+
+def test_a_three_letter_word_still_counts_towards_a_match():
+    # the filter must not be so aggressive it throws away genuinely meaningful short
+    # Slovak words (e.g. "syr" = cheese, 3 letters) — only 1-2 char filler is excluded.
+    catalog = [{"gtin": "GX", "name": "Bageta syr", "doplnok": ""}]
+    row = dl_match.candidates("Bageta so syrom", catalog)
+    assert row[0]["score"] > 0.0
+
+
 # --- supplier scoring (R60) --------------------------------------------------------------
 
 def test_supplier_exact_name_scores_100():

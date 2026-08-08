@@ -443,6 +443,19 @@ def test_subject_doc_numbers_empty_for_an_unrelated_subject():
     assert dl_worker._subject_doc_numbers("Faktúra 123/2026") == []
 
 
+def test_item_match_prompt_states_the_same_weight_tolerance_the_code_applies_fixes_225():
+    """#225: a real production wording ("110g") was 10 % off its correct card's own
+    stated weight ("100g") — exactly WEIGHT_TOLERANCE, so the deterministic
+    _weights_disagree() gate would have accepted it, but the model (told only a vague
+    "significantly different weight = different product", no number) returned
+    NO_MATCH at confidence 0.38. The prompt must state the actual tolerance so the
+    model's own judgement doesn't reject something the code would accept anyway."""
+    from app.orders import dl_match
+    prompt = dl_worker._item_prompt()
+    tolerance_pct = round(dl_match.WEIGHT_TOLERANCE * 100)
+    assert f"{tolerance_pct} %" in prompt or f"{tolerance_pct}%" in prompt
+
+
 def test_announced_but_not_attached_dl_is_flagged_not_silently_lost(pg, tmp_path):
     """The exact incident spec §4 documents: the subject names TWO DL numbers, only
     ONE PDF (and therefore one extracted docNumber) ever arrives."""
