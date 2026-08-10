@@ -202,6 +202,60 @@ def test_a_login_is_remembered_so_nobody_retypes_the_password():
     assert c.get("/api/messages").status_code != 401   # the session carries (DB error is fine)
 
 
+# --- #231: a SECOND, independent unauthenticated link for the DL-only nástenka ----------
+
+def test_the_signed_dl_warehouse_link_opens_the_dl_questions_page_with_no_password():
+    from app import httpapi
+    _, c = _sklad_client()
+    assert c.get("/sklad-dl/" + httpapi.dl_key("t")).status_code == 302
+    r = c.get("/otazky-dl")
+    assert r.status_code == 200
+    assert b'data-testid="version"' in r.data
+    assert b"/api/orders/questions" in r.data
+
+
+def test_a_wrong_dl_warehouse_link_is_refused():
+    _, c = _sklad_client()
+    assert c.get("/sklad-dl/" + "0" * 32).status_code == 403
+    assert c.get("/otazky-dl").status_code == 302        # and nothing was granted
+
+
+def test_the_orders_link_does_not_open_the_dl_key_and_vice_versa():
+    """The two links are genuinely independent secrets (#231) — the orders sklad_key must
+    not open the DL route, and dl_key must not open the orders route."""
+    from app import httpapi
+    _, c = _sklad_client()
+    assert c.get("/sklad-dl/" + httpapi.sklad_key("t")).status_code == 403
+    assert c.get("/sklad/" + httpapi.dl_key("t")).status_code == 403
+
+
+def test_the_dl_warehouse_link_opens_ONLY_the_dl_questions_surface():
+    """Same unauthenticated-link boundary discipline as the orders link — must never
+    reach the mail archive, and must never redirect to the ORDERS board (#231's point)."""
+    from app import httpapi
+    _, c = _sklad_client()
+    c.get("/sklad-dl/" + httpapi.dl_key("t"))
+    assert c.get("/api/messages").status_code == 401
+    assert c.get("/api/orders/spend").status_code == 401
+    assert c.get("/api/orders/digest").status_code == 401
+    assert c.get("/api/orders/held").status_code == 401, \
+        "held orders are an AI-orders concept — outside the DL role's own path allowlist"
+    assert c.get("/eml/e1").status_code == 403
+    r = c.get("/")
+    assert r.status_code == 302 and "/otazky-dl" in r.headers["Location"]
+
+
+def test_the_dl_role_can_reach_dl_stats_but_the_orders_role_cannot():
+    from app import httpapi
+    _, dl_c = _sklad_client()
+    dl_c.get("/sklad-dl/" + httpapi.dl_key("t"))
+    assert dl_c.get("/api/orders/dl/stats").status_code != 401
+
+    _, orders_c = _sklad_client()
+    orders_c.get("/sklad/" + httpapi.sklad_key("t"))
+    assert orders_c.get("/api/orders/dl/stats").status_code == 401
+
+
 def test_the_dashboard_shows_the_warehouse_link_to_copy():
     """Built from the address the OPERATOR is actually on — never from public_base_url.
 
@@ -216,3 +270,6 @@ def test_the_dashboard_shows_the_warehouse_link_to_copy():
     body = c.get("/", base_url=host).data.decode()
     assert "http://46.224.130.35:8099/sklad/" + httpapi.sklad_key("t") in body
     assert "e0ac7775-email-extractor:8099/sklad/" not in body
+    # #231: the DL-only nástenka link is shown alongside it, same operator-host rule
+    assert "http://46.224.130.35:8099/sklad-dl/" + httpapi.dl_key("t") in body
+    assert "e0ac7775-email-extractor:8099/sklad-dl/" not in body

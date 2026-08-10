@@ -64,3 +64,40 @@ def test_httpapi_sklad_key_is_the_same_function_as_linkutil():
     """A regression guard against the two derivations drifting apart again (#139's whole
     point) — httpapi.py must not keep its own copy."""
     assert httpapi.sklad_key is linkutil.sklad_key
+
+
+# --- #231: a SECOND, independent link for the delivery-notes-only nástenka ---------------
+
+def test_dl_key_is_stable_for_the_same_secret():
+    assert linkutil.dl_key("s3cret") == linkutil.dl_key("s3cret")
+
+
+def test_dl_key_differs_per_secret():
+    assert linkutil.dl_key("a") != linkutil.dl_key("b")
+
+
+def test_dl_key_differs_from_the_orders_sklad_key_for_the_same_secret():
+    """The whole point of a SEPARATE HMAC context string (#231) — leaking one link must
+    never leak the other."""
+    assert linkutil.dl_key("s3cret") != linkutil.sklad_key("s3cret")
+
+
+def test_dl_url_is_empty_without_dashboard_base_url(tmp_path):
+    class Cfg:
+        dashboard_base_url = ""
+        secret_key = "s"
+        data_dir = str(tmp_path)
+    assert linkutil.dl_url(Cfg()) == ""
+
+
+def test_dl_url_strips_trailing_slash_and_signs_the_key(tmp_path):
+    class Cfg:
+        dashboard_base_url = "http://46.224.130.35:8099/"
+        secret_key = "s3cret"
+        data_dir = str(tmp_path)
+    url = linkutil.dl_url(Cfg())
+    assert url == f"http://46.224.130.35:8099/sklad-dl/{linkutil.dl_key('s3cret')}"
+
+
+def test_httpapi_dl_key_is_the_same_function_as_linkutil():
+    assert httpapi.dl_key is linkutil.dl_key

@@ -96,23 +96,42 @@ def get(conn, qid: int) -> dict | None:
     return _row(row) if row else None
 
 
-def open_questions(conn, limit: int = 100) -> list[dict]:
-    rows = conn.execute(
-        f"""SELECT {_COLS} FROM order_questions WHERE status = 'open'
-            ORDER BY created_at LIMIT %s""", (limit,)).fetchall()
+def open_questions(conn, limit: int = 100, kinds: tuple[str, ...] | None = None) -> list[dict]:
+    """`kinds` (#231, the DL-only nástenka) restricts the result to those `kind` values
+    only — `None` (the default, every existing caller) keeps returning every kind, exactly
+    as before. The filter is applied HERE, in SQL, not by the caller filtering the
+    returned list — a role-scoped board must never even see a row of a kind it isn't
+    allowed to, not just skip rendering it."""
+    if kinds is not None:
+        rows = conn.execute(
+            f"""SELECT {_COLS} FROM order_questions WHERE status = 'open'
+                AND kind = ANY(%s) ORDER BY created_at LIMIT %s""",
+            (list(kinds), limit)).fetchall()
+    else:
+        rows = conn.execute(
+            f"""SELECT {_COLS} FROM order_questions WHERE status = 'open'
+                ORDER BY created_at LIMIT %s""", (limit,)).fetchall()
     return [_row(r) for r in rows]
 
 
-def recently_taught(conn, limit: int = 20) -> list[dict]:
+def recently_taught(conn, limit: int = 20, kinds: tuple[str, ...] | None = None) -> list[dict]:
     """The mappings a human settled, newest first — this is what makes `undo` reachable.
 
     An answered question leaves the open list, so without this the warehouse had nowhere to
     correct a mis-click, and an undo nobody can reach is not an undo (found while verifying
     0.9.5 on the live box).
+
+    `kinds` (#231): same optional kind-restriction as `open_questions` above.
     """
-    rows = conn.execute(
-        f"""SELECT {_COLS} FROM order_questions WHERE status = 'answered'
-            ORDER BY answered_at DESC LIMIT %s""", (limit,)).fetchall()
+    if kinds is not None:
+        rows = conn.execute(
+            f"""SELECT {_COLS} FROM order_questions WHERE status = 'answered'
+                AND kind = ANY(%s) ORDER BY answered_at DESC LIMIT %s""",
+            (list(kinds), limit)).fetchall()
+    else:
+        rows = conn.execute(
+            f"""SELECT {_COLS} FROM order_questions WHERE status = 'answered'
+                ORDER BY answered_at DESC LIMIT %s""", (limit,)).fetchall()
     return [_row(r) for r in rows]
 
 

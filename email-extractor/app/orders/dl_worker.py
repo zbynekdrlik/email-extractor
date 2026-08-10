@@ -367,7 +367,8 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # #229 follow-up 2: computed once, reused by every build_review/build_success call
     # below — each function decides for ITSELF whether this specific message actually
     # needs the link (review always does; success only when it raised a real question).
-    link = report.sklad_link(cfg)
+    # #231: the DL-only nástenka link, never the mixed AI-orders `sklad_link`.
+    link = report.dl_sklad_link(cfg)
 
     if doc.get("status") == "needsReview":
         reason = doc.get("reviewReason") or "Dokument potrebuje kontrolu"
@@ -632,7 +633,8 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                        else _read_attachments(cfg, message["message_id"], conn))
     # #229 follow-up 2: computed once, reused by every build_review/build_announced_
     # mismatch call in this function (mirrors the same pattern in _process_document).
-    link = report.sklad_link(cfg)
+    # #231: the DL-only nástenka link, never the mixed AI-orders `sklad_link`.
+    link = report.dl_sklad_link(cfg)
 
     if not attachments:
         # R15: no attachment (or nothing PDF/image-shaped) is NOT an error.

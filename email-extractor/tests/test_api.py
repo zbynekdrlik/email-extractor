@@ -733,3 +733,115 @@ def test_dl_item_and_dl_supplier_kinds_answer_and_undo_over_http(pg, monkeypatch
     # a choice never offered is a 400, exactly like mail/date/line's own closed option sets
     r = c.post(f"/api/orders/question/{dl_item_qid}/answer", json={"choice": "NOT-OFFERED"})
     assert r.status_code == 400
+
+
+# --- #231: the DL-only and orders-only nástenka links are a REAL security boundary,
+# not just a display filter — a role can neither SEE nor ANSWER/UNDO the other's kinds,
+# even by guessing a question id. ---------------------------------------------------
+
+def test_the_dl_role_sees_only_dl_questions_and_the_orders_role_sees_only_orders_ones(pg):
+    from app.httpapi import dl_key, sklad_key
+    from app.orders import teach
+
+    item_qid = teach.ask(
+        pg, message_id="m231a", customer_ean="2000000000001", customer_name="Zákazník A",
+        wording="Šiška", quantity=30, unit="ks",
+        candidates=[{"gtin": "SLI50", "name": "Šiška džemová 50g"}])
+    dl_qid = teach.ask_dl_item(
+        pg, message_id="m231b", supplier_ean="S1", supplier_name="Mlyn Vrbovce s.r.o.",
+        wording="Múka hladká", quantity=25, unit="kg",
+        candidates=[{"gtin": "G1", "name": "Múka hladká T512 25kg"}])
+
+    orders_c = _client()
+    orders_c.get("/sklad/" + sklad_key("test-secret"))
+    rendered = {q["id"] for q in orders_c.get("/api/orders/questions").get_json()["items"]}
+    assert rendered == {item_qid}, "the orders board must never see a DL question"
+
+    dl_c = _client()
+    dl_c.get("/sklad-dl/" + dl_key("test-secret"))
+    rendered = {q["id"] for q in dl_c.get("/api/orders/questions").get_json()["items"]}
+    assert rendered == {dl_qid}, "the DL board must never see an orders question"
+
+
+def test_the_dl_role_cannot_answer_or_undo_an_orders_question_and_vice_versa(pg):
+    from app.httpapi import dl_key, sklad_key
+    from app.orders import teach
+
+    item_qid = teach.ask(
+        pg, message_id="m231c", customer_ean="2000000000001", customer_name="Zákazník A",
+        wording="Rožok", quantity=10, unit="ks",
+        candidates=[{"gtin": "ROZ", "name": "Rožok štandart 50g"}])
+    dl_qid = teach.ask_dl_item(
+        pg, message_id="m231d", supplier_ean="S1", supplier_name="Mlyn Vrbovce s.r.o.",
+        wording="Múka polohrubá", quantity=25, unit="kg",
+        candidates=[{"gtin": "G2", "name": "Múka polohrubá 25kg"}])
+
+    dl_c = _client()
+    dl_c.get("/sklad-dl/" + dl_key("test-secret"))
+    r = dl_c.post(f"/api/orders/question/{item_qid}/answer",
+                  json={"gtin": "ROZ", "card": "Rožok štandart 50g"})
+    assert r.status_code == 403
+    assert dl_c.post(f"/api/orders/question/{item_qid}/undo").status_code == 403
+
+    orders_c = _client()
+    orders_c.get("/sklad/" + sklad_key("test-secret"))
+    r = orders_c.post(f"/api/orders/question/{dl_qid}/answer", json={"choice": "G2"})
+    assert r.status_code == 403
+    assert orders_c.post(f"/api/orders/question/{dl_qid}/undo").status_code == 403
+
+    # sanity: a full admin login is unrestricted, unchanged from before this ticket
+    admin_c = _client()
+    _login(admin_c)
+    r = admin_c.post(f"/api/orders/question/{dl_qid}/answer", json={"choice": "G2"})
+    assert r.status_code == 200
+
+
+def test_dl_stats_endpoint_reports_todays_counts(pg):
+    from app.httpapi import dl_key
+
+    c = _client()
+    c.get("/sklad-dl/" + dl_key("test-secret"))
+    r = c.get("/api/orders/dl/stats")
+    assert r.status_code == 200
+    d = r.get_json()
+    assert "today" in d and "yesterday" in d
+    assert d["today"]["runs"] == 0   # no DL order_runs rows inserted in this test
+
+
+def test_a_stale_role_cookie_never_restricts_a_real_admin_login(pg):
+    """Deep-review finding on the #231 PR: `session["auth"]` and `session["role"]` are
+    independent session keys sharing the SAME cookie jar — the admin dashboard's own link
+    panel (`showSkladLink()`) renders BOTH nástenka links as clickable `target="_blank"`
+    tags specifically so the operator can preview them, and opening either one (a
+    completely natural thing to do) sets `role` WITHOUT ever clearing `auth`. A real
+    dash_password login must stay fully unrestricted afterward, exactly like `_gate()`
+    itself already treats `auth` as the overriding signal — this is what would otherwise
+    silently degrade the admin's OWN dashboard (filtered question list, 403s on
+    answer/undo) with no error anywhere."""
+    from app.httpapi import dl_key, sklad_key
+    from app.orders import teach
+
+    item_qid = teach.ask(
+        pg, message_id="m231e", customer_ean="2000000000001", customer_name="Zákazník A",
+        wording="Vianočka", quantity=5, unit="ks",
+        candidates=[{"gtin": "VIA", "name": "Vianočka 500g"}])
+    dl_qid = teach.ask_dl_item(
+        pg, message_id="m231f", supplier_ean="S1", supplier_name="Mlyn Vrbovce s.r.o.",
+        wording="Múka celozrnná", quantity=25, unit="kg",
+        candidates=[{"gtin": "G4", "name": "Múka celozrnná 25kg"}])
+
+    c = _client()
+    _login(c)
+    # the admin previews BOTH nástenka links, same browser/cookie jar, staying logged in
+    c.get("/sklad/" + sklad_key("test-secret"))
+    c.get("/sklad-dl/" + dl_key("test-secret"))
+
+    rendered = {q["id"] for q in c.get("/api/orders/questions").get_json()["items"]}
+    assert rendered == {item_qid, dl_qid}, \
+        "a real admin login must still see EVERY kind after visiting either link"
+
+    r = c.post(f"/api/orders/question/{item_qid}/answer",
+              json={"gtin": "VIA", "card": "Vianočka 500g"})
+    assert r.status_code == 200
+    r = c.post(f"/api/orders/question/{dl_qid}/answer", json={"choice": "G4"})
+    assert r.status_code == 200

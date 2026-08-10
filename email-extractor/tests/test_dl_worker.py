@@ -393,6 +393,28 @@ def test_an_unmatched_supplier_review_run_carries_the_dashboard_link(pg, tmp_pat
         "a review outcome always needs somewhere to go resolve it"
 
 
+def test_the_dashboard_link_is_the_dl_only_nastenka_never_the_orders_one(pg, tmp_path):
+    """#231: DL Odoo review messages must point at `/sklad-dl/<key>` (the DELIVERY-NOTES-
+    only board) — never `/sklad/<key>` (the AI-orders board, `report.sklad_link`), which
+    is exactly what a DL message linked to before this ticket."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({
+        "dl_documents": [_doc()],
+        "dl_supplier": [{"matched": False, "matchReason": "nie je v zozname"}]})
+    posted = []
+    dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path),
+                dashboard_base_url="http://x.example"), client=client,
+        post=lambda c, h: posted.append(h))
+    assert len(posted) == 1
+    assert "/sklad-dl/" in posted[0], posted[0]
+    # the path segment is exact — "/sklad-dl/" must not be reachable by a stray substring
+    # match against "/sklad/" (e.g. "sklad/dl-..."), so also pin the OLD orders link is gone
+    assert "http://x.example/sklad/" not in posted[0], posted[0]
+
+
 def test_unmatched_item_ships_a_partial_edi_and_raises_a_nastenka_question(pg, tmp_path):
     _snapshot(pg)
     _msg(pg, mid="dl1")
