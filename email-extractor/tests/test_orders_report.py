@@ -237,6 +237,29 @@ def test_sklad_link_builds_from_dashboard_base_url_not_public_base_url():
     assert "e0ac7775" not in link
 
 
+# --- #231: the DL-only nástenka link is a genuinely separate one ------------
+
+def test_dl_sklad_link_is_empty_when_dashboard_base_url_is_unset():
+    class Cfg:
+        dashboard_base_url = ""
+        secret_key = "s"
+        data_dir = "/tmp"
+    assert report.dl_sklad_link(Cfg()) == ""
+
+
+def test_dl_sklad_link_points_at_sklad_dl_not_sklad():
+    class Cfg:
+        dashboard_base_url = "http://46.224.130.35:8099"
+        public_base_url = "http://e0ac7775-email-extractor:8099"
+        secret_key = "s"
+        data_dir = "/tmp"
+    link = report.dl_sklad_link(Cfg())
+    assert link.startswith("http://46.224.130.35:8099/sklad-dl/")
+    assert "e0ac7775" not in link
+    # a genuinely different key from the orders link for the SAME secret (#231)
+    assert link != report.sklad_link(Cfg())
+
+
 # --- delivery ------------------------------------------------------------
 
 def test_posting_uses_message_post_with_html_enabled():

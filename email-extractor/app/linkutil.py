@@ -60,3 +60,24 @@ def sklad_url(cfg) -> str:
     if not base:
         return ""
     return f"{base}/sklad/{sklad_key(resolve_secret(cfg))}"
+
+
+def dl_key(secret) -> str:
+    """The delivery-notes warehouse link's key (#231) — a DIFFERENT HMAC context string
+    than `sklad_key`'s, so the two links are independent secrets derived from the same
+    install secret: leaking one (e.g. shared with the wrong person) never leaks the
+    other. Same derivation shape as `sklad_key` otherwise (stable across restarts,
+    different per install)."""
+    if isinstance(secret, str):
+        secret = secret.encode()
+    return hmac.new(secret, b"sklad-dl-link-v1", hashlib.sha256).hexdigest()[:32]
+
+
+def dl_url(cfg) -> str:
+    """The full, human-clickable `/sklad-dl/<key>` link (#231) — the delivery-notes-only
+    warehouse board, mirrors `sklad_url` exactly except for the key/path. `""` under the
+    same condition (`dashboard_base_url` unset)."""
+    base = (getattr(cfg, "dashboard_base_url", "") or "").rstrip("/")
+    if not base:
+        return ""
+    return f"{base}/sklad-dl/{dl_key(resolve_secret(cfg))}"

@@ -243,11 +243,14 @@ def test_the_warehouse_can_say_it_does_not_know_the_customer(live_server, pg, pa
 
 
 def test_the_warehouse_answers_a_dl_item_question_from_the_link(live_server, pg, page):
-    """#202 (DL migration F3): the DL matching ladder's own nástenka kind, rendered on the
-    exact same /otazky page as the AI-orders questions (#164's generic card renderer), through
-    the real browser, no login — proving the teach.py KINDS + httpapi dispatch + JS wiring is
-    actually LIVE end-to-end, not just correct when called directly."""
-    from app.httpapi import sklad_key
+    """#202 (DL migration F3), updated for #231: the DL matching ladder's own nástenka
+    kind now renders on the SEPARATE `/otazky-dl` page (reached via its own `/sklad-dl/
+    <key>` link, never the AI-orders `/sklad/<key>` one — the two boards are now a real
+    server-side security boundary, not just a display choice, see `test_api.py`'s
+    role/kind tests), through the real browser, proving the teach.py KINDS + httpapi
+    dispatch + JS wiring is actually LIVE end-to-end, not just correct when called
+    directly."""
+    from app.httpapi import dl_key
     from app.orders import dl_memory, teach
 
     qid = teach.ask_dl_item(
@@ -258,8 +261,8 @@ def test_the_warehouse_answers_a_dl_item_question_from_the_link(live_server, pg,
     assert qid
 
     console = _collect_console(page)
-    page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/otazky")
+    page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/otazky-dl")
 
     page.wait_for_selector("text=Ktorá karta je táto DL položka?")
     page.wait_for_selector("text=Múka hladká T512")
@@ -274,9 +277,10 @@ def test_the_warehouse_answers_a_dl_item_question_from_the_link(live_server, pg,
 
 
 def test_the_warehouse_answers_a_dl_supplier_question_from_the_link(live_server, pg, page):
-    """#202: the "ktorý dodávateľ?" half of the DL nástenka — a genuinely different question
-    flow from dl_item (picking a SUPPLIER, not an item card), through the real browser."""
-    from app.httpapi import sklad_key
+    """#202, updated for #231: the "ktorý dodávateľ?" half of the DL nástenka — a
+    genuinely different question flow from dl_item (picking a SUPPLIER, not an item
+    card), through the real browser, on the SAME separate `/otazky-dl` page."""
+    from app.httpapi import dl_key
     from app.orders import dl_supplier_memory as dsm
     from app.orders import teach
 
@@ -287,8 +291,8 @@ def test_the_warehouse_answers_a_dl_supplier_question_from_the_link(live_server,
     assert qid
 
     console = _collect_console(page)
-    page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/otazky")
+    page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/otazky-dl")
 
     page.wait_for_selector("text=Ktorý dodávateľ?")
     page.wait_for_selector("text=obchod@mlynvrbovce.sk")
@@ -299,6 +303,32 @@ def test_the_warehouse_answers_a_dl_supplier_question_from_the_link(live_server,
     assert q["status"] == "answered"
     assert dsm.resolve(pg, "obchod@mlynvrbovce.sk") == {"ean_edi": "S1",
                                                          "name": "Mlyn Vrbovce s.r.o."}
+
+    assert console == [], f"browser console not clean: {console}"
+
+
+def test_the_dl_link_never_shows_an_orders_question(live_server, pg, page):
+    """#231: the DL nástenka must never render an AI-orders item/customer question, even
+    if one happens to be open at the same time — the split is real, not cosmetic."""
+    from app.httpapi import dl_key
+    from app.orders import teach
+
+    teach.ask(pg, message_id="e-mix1", customer_ean="2000000000001",
+              customer_name="Zákazník A", wording="Šiška", quantity=30, unit="ks",
+              candidates=[{"gtin": "SLI50", "name": "Šiška džemová 50g"}])
+    dl_qid = teach.ask_dl_item(
+        pg, message_id="e-mix2", supplier_ean="S1", supplier_name="Mlyn Vrbovce s.r.o.",
+        wording="Múka hrubá", quantity=25, unit="kg",
+        candidates=[{"gtin": "G3", "name": "Múka hrubá 25kg"}])
+    assert dl_qid
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/otazky-dl")
+
+    page.wait_for_selector("text=Múka hrubá")
+    assert page.locator("text=Šiška").count() == 0, \
+        "an AI-orders item question must never render on the DL nástenka"
 
     assert console == [], f"browser console not clean: {console}"
 

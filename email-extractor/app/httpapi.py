@@ -68,6 +68,7 @@ def _fold(s: str) -> str:
 # so the derivation must not be duplicated here.
 _persistent_secret = linkutil.persistent_secret
 sklad_key = linkutil.sklad_key
+dl_key = linkutil.dl_key
 
 SKLAD_ROLE = "sklad"
 # What the warehouse link may reach — the questions surface, nothing else. It is an
@@ -86,6 +87,29 @@ SKLAD_ZNALOSTI_API = re.compile(
     r"^/api/znalosti/(global(/\d+)?|catalog|customers|customer/[^/]+(/\d+)?"
     r"|products(/[^/]+)?|clients|dl-products(/[^/]+)?|dl-suppliers)$")
 
+# #231: a SECOND, independent unauthenticated link — the delivery-notes-only nástenka.
+# `order_questions.kind` is the ONE discriminator between the two agendas
+# (`teach.KINDS`): ORDERS_KINDS are every kind the AI-orders pipeline raises, DL_KINDS are
+# the two DL ones (#202). `/api/orders/questions`/`/api/orders/taught` are DELIBERATELY
+# the SAME shared endpoints both roles use (and the full-admin dashboard, unrestricted) —
+# `_role_kinds()` below decides what each role is actually allowed to see/touch, so the
+# security boundary never depends on which URL a client happens to call.
+ORDERS_KINDS = ("item", "customer", "mail", "date", "line")
+DL_KINDS = ("dl_item", "dl_supplier")
+SKLAD_DL_ROLE = "sklad_dl"
+SKLAD_DL_PATHS = ("/otazky-dl", "/api/orders/questions", "/api/orders/taught",
+                  "/api/orders/dl/stats")
+
+
+def _role_kinds(role: str | None) -> tuple[str, ...] | None:
+    """The `kind` values a session's role may see/answer/undo. `None` = unrestricted (a
+    real dash_password login) — every existing admin-dashboard behavior is unchanged."""
+    if role == SKLAD_DL_ROLE:
+        return DL_KINDS
+    if role == SKLAD_ROLE:
+        return ORDERS_KINDS
+    return None
+
 
 def create_app(cfg) -> Flask:
     app = Flask(__name__)
@@ -95,6 +119,7 @@ def create_app(cfg) -> Flask:
     # operator — Flask's default is a browser-session cookie that dies with the tab.
     app.permanent_session_lifetime = timedelta(days=365)
     key = sklad_key(app.secret_key)
+    dl_link_key = dl_key(app.secret_key)
     if not cfg.dash_password:
         log.warning("dash_password is unset — the dashboard is CLOSED; "
                     "set dash_password to enable it")
@@ -160,6 +185,7 @@ def create_app(cfg) -> Flask:
         if (p in ("/health", "/version", "/login", "/logout", "/favicon.ico")
                 or p.startswith("/static")
                 or p.startswith("/sklad/")          # the route verifies its own signature
+                or p.startswith("/sklad-dl/")       # ditto, the DL nástenka link (#231)
                 or p.startswith("/files") or p.startswith("/eml")):
             return None
         # Dashboard surface ("/", "/api/*"): session only — login requires a
@@ -173,6 +199,13 @@ def create_app(cfg) -> Flask:
             # Not an error: send the warehouse back to the one page it owns.
             if not p.startswith("/api/"):
                 return redirect("/otazky")
+        if session.get("role") == SKLAD_DL_ROLE:
+            if p in SKLAD_DL_PATHS or SKLAD_ACTION.match(p):
+                return None
+            # Not an error: send the warehouse back to the ONE page IT owns — never
+            # /otazky, which is the orders-only board (#231's whole point).
+            if not p.startswith("/api/"):
+                return redirect("/otazky-dl")
         if p.startswith("/api/"):
             return jsonify(error="auth required"), 401
         return redirect("/login")
@@ -212,6 +245,24 @@ def create_app(cfg) -> Flask:
     @app.get("/otazky")
     def questions_page():
         return ASK_HTML.replace("__VERSION__", __version__)
+
+    @app.get("/sklad-dl/<k>")
+    def dl_sklad_link_route(k: str):
+        """The DELIVERY-NOTES warehouse's own way in (#231) — a SEPARATE signed link
+        from `/sklad/<k>` above, on its own key, so it cannot be reached by guessing or
+        reusing the orders link. Grants ONLY the DL questions surface (SKLAD_DL_PATHS +
+        `_role_kinds` on the shared endpoints) — never the AI-orders board.
+        """
+        if not hmac.compare_digest(str(k), dl_link_key):
+            log.warning("bad DL warehouse link from %s", request.remote_addr)
+            abort(403)
+        session["role"] = SKLAD_DL_ROLE
+        session.permanent = True
+        return redirect("/otazky-dl")
+
+    @app.get("/otazky-dl")
+    def dl_questions_page():
+        return ASK_DL_HTML.replace("__VERSION__", __version__)
 
     @app.get("/logout")
     def logout():
@@ -485,10 +536,15 @@ def create_app(cfg) -> Flask:
 
     @app.get("/api/orders/questions")
     def api_orders_questions():
-        """The wordings waiting for the warehouse (#88) — one per (customer, wording)."""
+        """The wordings waiting for the warehouse (#88) — one per (customer, wording).
+
+        #231: a SKLAD_ROLE/SKLAD_DL_ROLE session (the unauthenticated nástenka links)
+        only ever sees ITS OWN kinds (`_role_kinds`) — a full dash_password login is
+        unrestricted, unchanged from before this ticket.
+        """
         from .orders import teach
         with _db() as c:
-            return jsonify(items=teach.open_questions(c))
+            return jsonify(items=teach.open_questions(c, kinds=_role_kinds(session.get("role"))))
 
     def _api_orders_answer_customer(qid: int, q: dict, body: dict):
         """#159: the customer-half of the same click — "this order belongs to THIS
@@ -591,6 +647,12 @@ def create_app(cfg) -> Flask:
             q0 = teach.get(c0, qid)
         if not q0:
             return jsonify(error="otázka neexistuje"), 404
+        # #231: a SKLAD_ROLE/SKLAD_DL_ROLE session may answer only ITS OWN kinds — the
+        # id-based endpoint is otherwise shared, so this is the real boundary that keeps
+        # the two nástenka links from reaching each other's agenda by guessing an id.
+        allowed = _role_kinds(session.get("role"))
+        if allowed is not None and q0.get("kind", "item") not in allowed:
+            abort(403)
         if q0.get("kind") == "customer":
             return _api_orders_answer_customer(qid, q0, body)
         if q0.get("kind") in ("mail", "date", "line", "dl_item", "dl_supplier"):
@@ -626,10 +688,13 @@ def create_app(cfg) -> Flask:
 
     @app.get("/api/orders/taught")
     def api_orders_taught():
-        """What the warehouse has already taught — so a mis-click can be corrected."""
+        """What the warehouse has already taught — so a mis-click can be corrected.
+
+        #231: role-scoped exactly like `/api/orders/questions` above.
+        """
         from .orders import teach
         with _db() as c:
-            return jsonify(items=teach.recently_taught(c))
+            return jsonify(items=teach.recently_taught(c, kinds=_role_kinds(session.get("role"))))
 
     @app.post("/api/orders/question/<int:qid>/undo")
     def api_orders_undo(qid: int):
@@ -651,6 +716,10 @@ def create_app(cfg) -> Flask:
                 q0 = teach.get(c, qid)
                 if not q0:
                     return jsonify(error="otázka neexistuje"), 404
+                # #231: same role/kind boundary as the answer endpoint above.
+                allowed = _role_kinds(session.get("role"))
+                if allowed is not None and q0.get("kind", "item") not in allowed:
+                    abort(403)
                 kind = teach.KINDS.get(q0.get("kind", "item"))
                 q = kind.undo(c, q0) if kind else teach.undo(c, qid)
         except teach.NotACandidate as e:
@@ -943,6 +1012,22 @@ def create_app(cfg) -> Flask:
             since = reliability.days_since_incident(c)
         return jsonify(today=today, yesterday=yesterday, days_since_incident=since)
 
+    @app.get("/api/orders/dl/stats")
+    def api_orders_dl_stats():
+        """#231: the "stavy" the DL nástenka asks for — today/yesterday's DL run counts
+        (`reliability.dl_provenance_stats_for_day`, built for #204's daily digest — same
+        aggregate-only shape: run/document counts, no mail body, no attachment). Reachable
+        by BOTH the full admin login and the DL-only `sklad_dl` role (it is in
+        `SKLAD_DL_PATHS`); the orders-only `sklad` role has no matching path and gets a
+        plain 401, same as any other endpoint outside its own board."""
+        from .orders import reliability
+        with _db() as c:
+            today = reliability.dl_provenance_stats_for_day(c)
+            yesterday = reliability.dl_provenance_stats_for_day(
+                c, c.execute(
+                    "SELECT to_char(now() - interval '1 day', 'YYYY-MM-DD')").fetchone()[0])
+        return jsonify(today=today, yesterday=yesterday)
+
     @app.get("/api/imap-failures")
     def api_imap_failures():
         """Emails that could not be ingested at all (#20) — they have no messages row,
@@ -1018,7 +1103,8 @@ def create_app(cfg) -> Flask:
         # base (n8n fetches /files over the docker network) and is unopenable in a browser.
         base = request.host_url.rstrip("/")
         return (DASH_HTML.replace("__VERSION__", __version__)
-                .replace("__SKLADLINK__", f"{base}/sklad/{key}"))
+                .replace("__SKLADLINK__", f"{base}/sklad/{key}")
+                .replace("__DLSKLADLINK__", f"{base}/sklad-dl/{dl_link_key}"))
 
     return app
 
@@ -1253,13 +1339,19 @@ function tick(){if(live&&document.getElementById('ov').style.display!=='flex'){
   if(view==='mails')loadList();else if(view==='imap')loadImap();
   else if(view==='ask')loadAsk();else loadFix()}}
 const SKLAD_LINK="__SKLADLINK__";
-function showSkladLink(){const D=document.getElementById('detail');D.textContent='';
-  const w=document.createElement('div');w.className='row';
-  const h=document.createElement('div');h.className='sub';
-  h.textContent='Odkaz pre sklad — otvorí sa bez hesla, dá sa dať do Odoo aj do záložiek:';
-  const a=document.createElement('a');a.href=SKLAD_LINK;a.textContent=SKLAD_LINK;
+const DL_SKLAD_LINK="__DLSKLADLINK__";
+function skladLinkRow(label,url){const w=document.createElement('div');w.className='row';
+  const h=document.createElement('div');h.className='sub';h.textContent=label;
+  const a=document.createElement('a');a.href=url;a.textContent=url;
   a.target='_blank';a.rel='noopener';a.style.wordBreak='break-all';
-  w.appendChild(h);w.appendChild(a);D.appendChild(w)}
+  w.appendChild(h);w.appendChild(a);return w}
+function showSkladLink(){const D=document.getElementById('detail');D.textContent='';
+  D.appendChild(skladLinkRow(
+    'Odkaz pre predaj (objednávky) — otvorí sa bez hesla, dá sa dať do Odoo aj do záložiek:',
+    SKLAD_LINK));
+  D.appendChild(skladLinkRow(
+    'Odkaz pre sklad (dodacie listy) — samostatná nástenka, len dodacie listy:',
+    DL_SKLAD_LINK))}
 let askRender=0;
 async function loadAsk(){const L=document.getElementById('list');
   // Every render gets a number. A fetch that comes back after a newer render started must not
@@ -1386,9 +1478,18 @@ loadList();imapBadgeRefresh();spendBadgeRefresh();askBadgeRefresh();reliabilityB
 # The warehouse's own page: reachable from the signed /sklad/<key> link with NO password,
 # so it fetches ONLY the two question endpoints — nothing here may reach a mail, a file or
 # the spend. Phone-sized buttons: it is answered from the floor, not from a desk.
-ASK_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
+# #231: ONE shared template for BOTH unauthenticated question boards (the orders-only
+# `/otazky` and the NEW delivery-notes-only `/otazky-dl`) — they need the same rendering
+# for every generic-kind card (`genericQuestionCard`, `dl_item`/`dl_supplier` included
+# since #202) and the same "naposledy naučené" history, and the server already sends
+# each role only its OWN kinds (`_role_kinds` in httpapi.py) — so the two pages differ
+# only in title/heading and an optional "stavy" (states) strip the DL board asks for
+# (ticket #231: "review fronta, história, stavy"). Building both from ONE literal string
+# via `.replace()` keeps them from silently drifting apart the way two hand-maintained
+# ~150-line copies inevitably would.
+_ASK_HTML_TEMPLATE = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Otázky skladu</title>
+<title>__TITLE__</title>
 <style>
  *{box-sizing:border-box}
  body{font:15px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;
@@ -1421,7 +1522,7 @@ ASK_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
  .sres.none{cursor:default;color:#57606a;background:transparent;border-style:dashed}
  .sres.none:hover{background:transparent}
 </style></head><body>
-<header><h1>&#128230; Otázky skladu</h1><span class="ver" data-testid="version">v__VERSION__</span></header>
+<header><h1>__HEADING__</h1><span class="ver" data-testid="version">v__VERSION__</span>__STATS_HEADER__</header>
 <main id="wrap"><div class="empty">Nahrávam&hellip;</div></main>
 <script>
 async function api(u,o){const r=await fetch(u,Object.assign({headers:{'Content-Type':'application/json'}},o||{}));
@@ -1533,8 +1634,33 @@ async function teach(qid,gtin,card){try{await api('/api/orders/question/'+qid+'/
   catch(e){alert(e.message||'chyba')}}
 async function undo(qid){try{await api('/api/orders/question/'+qid+'/undo',{method:'POST'});
   await load()}catch(e){alert(e.message||'chyba')}}
+__STATS_SCRIPT__
 load();setInterval(load,5000);
 </script></body></html>"""
+
+ASK_HTML = (_ASK_HTML_TEMPLATE
+           .replace("__TITLE__", "Otázky skladu")
+           .replace("__HEADING__", "&#128230; Otázky skladu")
+           .replace("__STATS_HEADER__", "")
+           .replace("__STATS_SCRIPT__", ""))
+
+# #231: the DL nástenka additionally shows today/yesterday's DL run "stavy" (states) —
+# a small text strip in the header, fed by `/api/orders/dl/stats` (role-scoped, see
+# httpapi.py's `api_orders_dl_stats`). The orders board has no equivalent (out of scope
+# for this ticket) — the placeholders above are replaced with "" for it, so nothing is
+# fetched or rendered there.
+ASK_DL_HTML = (_ASK_HTML_TEMPLATE
+              .replace("__TITLE__", "Dodacie listy — sklad")
+              .replace("__HEADING__", "&#128666; Dodacie listy")
+              .replace("__STATS_HEADER__", '<span class="ver" id="dlStats"></span>')
+              .replace("__STATS_SCRIPT__", r"""
+async function loadStats(){try{const d=await api('/api/orders/dl/stats');
+  const t=d.today||{},y=d.yesterday||{};
+  document.getElementById('dlStats').textContent=
+    'dnes: '+(t.runs||0)+' spracovaných, '+(t.duplicates||0)+' duplicít, '+
+    (t.announced_mismatch||0)+' nezhôd · včera: '+(y.runs||0)+' spracovaných'}
+  catch(e){}}
+loadStats();setInterval(loadStats,30000);"""))
 
 
 # #104: direct curation of wording->card knowledge (no order_questions row required).

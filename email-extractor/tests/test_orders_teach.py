@@ -754,6 +754,44 @@ def test_an_undone_mapping_leaves_the_taught_list(pg):
     assert teach.recently_taught(pg) == []
 
 
+# --- #231: the DL-only nástenka needs to see ONLY its own kinds --------------------------
+
+def test_open_questions_kinds_filter_restricts_to_the_given_kinds(pg):
+    item_qid = _ask(pg)
+    dl_qid = teach.ask_dl_item(
+        pg, message_id="dlm1", supplier_ean="S1", supplier_name="Mlyn Vrbovce s.r.o.",
+        wording="Múka hladká", quantity=25, unit="kg",
+        candidates=[{"gtin": "G1", "name": "Múka hladká T512 25kg"}])
+    # no filter (None, the default) — unchanged behaviour, both kinds returned
+    assert {q["id"] for q in teach.open_questions(pg)} == {item_qid, dl_qid}
+    # DL-only filter sees only the DL question
+    dl_only = teach.open_questions(pg, kinds=("dl_item", "dl_supplier"))
+    assert [q["id"] for q in dl_only] == [dl_qid]
+    # orders-only filter sees only the item question
+    orders_only = teach.open_questions(pg, kinds=("item", "customer", "mail", "date", "line"))
+    assert [q["id"] for q in orders_only] == [item_qid]
+    # a kinds filter that matches nothing returns an empty list, not an error
+    assert teach.open_questions(pg, kinds=("mail",)) == []
+
+
+def test_recently_taught_kinds_filter_restricts_to_the_given_kinds(pg):
+    item_qid = _ask(pg)
+    teach.answer(pg, item_qid, gtin="SLI90", card="Šiška džemová 90g", by="sklad")
+    dl_qid = teach.ask_dl_item(
+        pg, message_id="dlm2", supplier_ean="S1", supplier_name="Mlyn Vrbovce s.r.o.",
+        wording="Múka hladká", quantity=25, unit="kg",
+        candidates=[{"gtin": "G1", "name": "Múka hladká T512 25kg"}])
+    c = _dash(pg)
+    r = c.post(f"/api/orders/question/{dl_qid}/answer", json={"choice": "G1"})
+    assert r.status_code == 200, r.get_json()
+
+    assert {t["id"] for t in teach.recently_taught(pg)} == {item_qid, dl_qid}
+    dl_only = teach.recently_taught(pg, kinds=("dl_item", "dl_supplier"))
+    assert [t["id"] for t in dl_only] == [dl_qid]
+    orders_only = teach.recently_taught(pg, kinds=("item", "customer", "mail", "date", "line"))
+    assert [t["id"] for t in orders_only] == [item_qid]
+
+
 def test_the_dashboard_serves_the_taught_list(pg):
     qid = _ask(pg)
     c = _dash(pg)

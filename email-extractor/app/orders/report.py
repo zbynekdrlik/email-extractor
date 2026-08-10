@@ -44,6 +44,14 @@ def sklad_link(cfg) -> str:
     return linkutil.sklad_url(cfg)
 
 
+def dl_sklad_link(cfg) -> str:
+    """The DELIVERY-NOTES-ONLY nástenka link (#231) — `/sklad-dl/<key>`, a genuinely
+    separate signed link/page from `sklad_link` above, so a DL Odoo review message never
+    sends the warehouse to a page mixed with unrelated AI-orders questions. Same "no HTTP
+    request" reasoning and the same "" fallback as `sklad_link`."""
+    return linkutil.dl_url(cfg)
+
+
 def link_line(link: str) -> str:
     """The ONE shared "go resolve this on the nástenka" line — the exact markup/wording
     both this module's own `build_summary` (orders) and `dl_report.py` (DL, #229
