@@ -364,12 +364,16 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     delivery_date = doc.get("deliveryDate", "")
     upload = upload or (lambda c, name, content, dir_override=None:
                         upload_mod.put(c, name, content, dir_override=dir_override))
+    # #229 follow-up 2: computed once, reused by every build_review/build_success call
+    # below — each function decides for ITSELF whether this specific message actually
+    # needs the link (review always does; success only when it raised a real question).
+    link = report.sklad_link(cfg)
 
     if doc.get("status") == "needsReview":
         reason = doc.get("reviewReason") or "Dokument potrebuje kontrolu"
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, doc.get("supplierName", ""), doc_number, delivery_date, from_addr,
-            subject), post=post)
+            subject, link=link), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, detail={"doc_number": doc_number}, rollup=False,
               workflow=dl_report.WORKFLOW)
@@ -382,7 +386,8 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         _check_retry(message.get("attempts", 0), str(e))
         reason = f"Zlyhalo párovanie dodávateľa: {e}"
         _post(cfg, shadow, lambda: dl_report.build_review(
-            reason, "", doc_number, delivery_date, from_addr, subject), post=post)
+            reason, "", doc_number, delivery_date, from_addr, subject, link=link),
+            post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="error",
               outcome=reason, detail={"doc_number": doc_number}, rollup=False,
               workflow=dl_report.WORKFLOW)
@@ -398,8 +403,8 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                                   doc.get("supplierEmail") or from_addr, cands,
                                   delivery_date=delivery_date)
         _post(cfg, shadow, lambda: dl_report.build_review(
-            supplier_decision.note, "", doc_number, delivery_date, from_addr, subject),
-            post=post)
+            supplier_decision.note, "", doc_number, delivery_date, from_addr, subject,
+            link=link), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=supplier_decision.note, detail={"doc_number": doc_number},
               rollup=False, workflow=dl_report.WORKFLOW)
@@ -457,7 +462,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     if not built.can_create:
         _post(cfg, shadow, lambda: dl_report.build_review(
             built.reject_reason, supplier_decision.name, built.doc_number, delivery_date,
-            from_addr, subject), post=post)
+            from_addr, subject, link=link), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=built.reject_reason, detail={"doc_number": built.doc_number},
               rollup=False, workflow=dl_report.WORKFLOW)
@@ -517,7 +522,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         detail_text = f"{note} ({built.filename}): {e}"
         _post(cfg, shadow, lambda: dl_report.build_review(
             detail_text, supplier_decision.name, built.doc_number, delivery_date,
-            from_addr, subject), post=post)
+            from_addr, subject, link=link), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="error",
               outcome=note, detail={"error": repr(e), "filename": built.filename},
               rollup=False, workflow=dl_report.WORKFLOW)
@@ -556,7 +561,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         supplier_decision.name, built.doc_number, delivery_date, from_addr, subject,
         shipped, unmatched_items=unmatched_notes, borderline_notes=borderline_notes,
         history_notes=history_notes, price_substitutions=built.price_substitutions,
-        filename=built.filename, partial=built.partial, link=report.sklad_link(cfg)),
+        filename=built.filename, partial=built.partial, link=link),
         post=post)
     _event(conn, shadow, message["message_id"], stage="uploaded_orion", status="ok",
           outcome=f"EDI vytvorené: {built.filename}",
@@ -569,6 +574,16 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
            "items_skipped_no_match": built.items_skipped_no_match,
            "items_skipped_zero_qty": built.items_skipped_zero_qty,
            "price_substitutions": built.price_substitutions,
+           # #229 follow-up 2, review finding: `outcome`/`built.partial` alone is NOT a
+           # precise "did this raise a real dl_item board question" signal --
+           # desadv_edi.build() excludes a zero-quantity item from its own no_match/
+           # partial computation even when unmatched, but dl_worker's own teach.ask_
+           # dl_item call above fires for ANY unmatched item regardless of quantity.
+           # `unmatched_notes` is that exact, precise signal (same list build_success's
+           # own link condition already reads) -- carry it through so
+           # dl_report._outcome_needs_link can check it directly instead of
+           # re-deriving an imprecise proxy from `outcome`.
+           "unmatched_items": unmatched_notes,
            "items": _shipped_items(decisions)}
 
 
@@ -615,13 +630,16 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     if attachments is None:
         attachments = ([] if not message.get("has_attachments")
                        else _read_attachments(cfg, message["message_id"], conn))
+    # #229 follow-up 2: computed once, reused by every build_review/build_announced_
+    # mismatch call in this function (mirrors the same pattern in _process_document).
+    link = report.sklad_link(cfg)
 
     if not attachments:
         # R15: no attachment (or nothing PDF/image-shaped) is NOT an error.
         reason = "Email bez prílohy — pravdepodobne bežná správa"
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, from_addr=message.get("from_addr", ""),
-            subject=message.get("subject", "")), post=post)
+            subject=message.get("subject", ""), link=link), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
         return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
@@ -640,7 +658,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                       f"spracovať: {att['error']}")
             _post(cfg, shadow, lambda reason=reason: dl_report.build_review(
                 reason, from_addr=message.get("from_addr", ""),
-                subject=message.get("subject", "")), post=post)
+                subject=message.get("subject", ""), link=link), post=post)
             _event(conn, shadow, message["message_id"], stage="review", status="error",
                   outcome=reason, detail={"idx": att.get("idx")}, rollup=False,
                   workflow=dl_report.WORKFLOW)
@@ -657,7 +675,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
         reason = "Nepodarilo sa rozpoznať žiadny dodací list v prílohách"
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, from_addr=message.get("from_addr", ""),
-            subject=message.get("subject", "")), post=post)
+            subject=message.get("subject", ""), link=link), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
         documents_out.append({"outcome": "review", "reason": reason})
@@ -673,7 +691,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                                          extracted_doc_numbers)
         _post(cfg, shadow, lambda: dl_report.build_announced_mismatch(
             message.get("subject", ""), message.get("from_addr", ""), missing,
-            extracted_doc_numbers), post=post)
+            extracted_doc_numbers, documents=documents_out, link=link), post=post)
 
     return {"kind": "dl", "dl_snapshot_id": snapshot_id,
            "status": _aggregate_status(documents_out), "documents": documents_out,

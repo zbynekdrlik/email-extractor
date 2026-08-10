@@ -44,6 +44,17 @@ def sklad_link(cfg) -> str:
     return linkutil.sklad_url(cfg)
 
 
+def link_line(link: str) -> str:
+    """The ONE shared "go resolve this on the nástenka" line — the exact markup/wording
+    both this module's own `build_summary` (orders) and `dl_report.py` (DL, #229
+    follow-up) use, so the two notify paths can never drift on how a "you have
+    something to resolve" hint is phrased. The CALLER decides whether this message
+    actually needs it (empty link -> no line); this function only owns the rendering."""
+    if not link:
+        return ""
+    return f'<p>&#128203; Rieš na nástenke: <a href="{escape(link)}">{escape(link)}</a></p>'
+
+
 def _plural(n: int, one: str, few: str, many: str) -> str:
     """Slovak has three plural forms for a small count: 1 / 2-4 / 0,5+."""
     if n == 1:
@@ -171,8 +182,7 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
     has_other_action = bool(counts.get("review") or counts.get("error") or unverified_count)
     if has_board_item or has_other_action:
         if has_board_item and link:
-            parts.append(f'<p>&#128203; Rieš na nástenke: '
-                         f'<a href="{escape(link)}">{escape(link)}</a></p>')
+            parts.append(link_line(link))
         else:
             parts.append("<p>&#128203; Treba doriešiť — otvor dashboard extraktora.</p>")
 

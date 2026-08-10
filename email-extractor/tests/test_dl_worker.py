@@ -184,7 +184,7 @@ def test_live_engine_matches_uploads_and_marks_processed(pg, tmp_path):
     assert uploaded[0][0].startswith("Z-DESADV_")
     assert uploaded[0][2] == cfg.orion_dl_dir
     assert len(posted) == 1
-    assert "Dodací list spracovaný" in posted[0]
+    assert "spracovaný a nahratý do ORIONu" in posted[0]
     assert "Rožok 50g" in posted[0]
 
     row = pg.execute(
@@ -224,7 +224,7 @@ def test_duplicate_document_is_skipped_visibly_not_silently(pg, tmp_path):
 
     assert n == 1
     assert uploaded == [], "a duplicate must never re-upload"
-    assert not any("Dodací list spracovaný" in h for h in posted), \
+    assert not any("spracovaný a nahratý do ORIONu" in h for h in posted), \
         "R32: a duplicate is quiet — no immediate success message either"
     ev = pg.execute(
         "SELECT stage, rollup FROM email_events WHERE message_id='dl1' "
@@ -358,6 +358,41 @@ def test_unmatched_supplier_raises_a_nastenka_question_and_reviews(pg, tmp_path)
     assert row[0] is True
 
 
+# --- dashboard link only when there is real board action (#229 follow-up 2) --
+
+def test_a_clean_ok_run_carries_no_dashboard_link(pg, tmp_path):
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    posted = []
+    dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path),
+                dashboard_base_url="http://x.example"), client=client,
+        upload=lambda *a, **k: None, post=lambda c, h: posted.append(h))
+    assert len(posted) == 1
+    assert "<a href" not in posted[0], \
+        "a clean, fully-resolved DL must not carry a dashboard link"
+
+
+def test_an_unmatched_supplier_review_run_carries_the_dashboard_link(pg, tmp_path):
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({
+        "dl_documents": [_doc()],
+        "dl_supplier": [{"matched": False, "matchReason": "nie je v zozname"}]})
+    posted = []
+    dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path),
+                dashboard_base_url="http://x.example"), client=client,
+        post=lambda c, h: posted.append(h))
+    assert len(posted) == 1
+    assert "<a href" in posted[0], \
+        "a review outcome always needs somewhere to go resolve it"
+
+
 def test_unmatched_item_ships_a_partial_edi_and_raises_a_nastenka_question(pg, tmp_path):
     _snapshot(pg)
     _msg(pg, mid="dl1")
@@ -379,7 +414,7 @@ def test_unmatched_item_ships_a_partial_edi_and_raises_a_nastenka_question(pg, t
         post=lambda c, h: posted.append(h))
     assert n == 1
     assert len(uploaded) == 1, "R81: partial EDI still ships"
-    success = [h for h in posted if "Dodací list spracovaný" in h][0]
+    success = [h for h in posted if "spracovaný ČIASTOČNE" in h][0]
     assert "ČIASTOČNE" in success
     assert "Nespárované" in success and "Neznámy chlebík" in success
     q = pg.execute(
@@ -471,9 +506,16 @@ def test_announced_but_not_attached_dl_is_flagged_not_silently_lost(pg, tmp_path
         pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client,
         upload=lambda *a, **k: None, post=lambda c, h: posted.append(h))
 
-    mismatch = [h for h in posted if "ohlásil viac dodacích listov" in h]
+    mismatch = [h for h in posted if "ohlásený aj doklad" in h]
     assert mismatch, "the announced-but-unattached DL number must be flagged"
     assert "0100000002" in mismatch[0]
+    # #229 follow-up: the message must ALSO state the outcome of the doc that WAS
+    # attached, and state it FIRST — a reader must never be left guessing whether
+    # 0100000001 (the one PDF that did arrive) was actually processed.
+    assert "Dodací list 0100000001" in mismatch[0]
+    assert "spracovaný a nahratý do ORIONu" in mismatch[0]
+    assert (mismatch[0].index("Dodací list 0100000001") <
+           mismatch[0].index("ohlásený aj doklad"))
     ev = pg.execute(
         "SELECT detail FROM email_events WHERE message_id='dl1' "
         "AND stage='announced_mismatch'").fetchone()
@@ -636,7 +678,7 @@ def test_lexical_gap_item_is_visible_in_the_message_and_raises_a_question(pg, tm
         post=lambda c, h: posted.append(h))
     assert n == 1
     assert len(uploaded) == 1, "the first item still ships (partial EDI, R81)"
-    success = [h for h in posted if "Dodací list spracovaný" in h][0]
+    success = [h for h in posted if "spracovaný ČIASTOČNE" in h][0]
     assert "ČIASTOČNE" in success
     assert "Nespárované" in success and "Úplne iný produkt" in success
     q = pg.execute(
