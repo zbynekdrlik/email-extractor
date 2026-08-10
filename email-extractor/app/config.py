@@ -192,6 +192,11 @@ class Config:
             odoo_api_key=_get(o, "odoo_api_key", "ODOO_API_KEY", "") or "",
             odoo_db=_get(o, "odoo_db", "ODOO_DB", "odoo") or "odoo",
             orders_channel_id=int(_get(o, "orders_channel_id", "ORDERS_CHANNEL_ID", 0) or 0),
+            # #229: the trailing `or 243` (same idiom every other int option here uses)
+            # means an options.json that still carries the OLD explicit `0` (not just a
+            # genuinely absent key) also resolves to 243 -- deliberate, since 0 was never
+            # a real Odoo channel id, only ever the "unset, fall back" sentinel this whole
+            # ticket exists to stop relying on.
             delivery_notes_channel_id=int(
                 _get(o, "delivery_notes_channel_id", "DELIVERY_NOTES_CHANNEL_ID", 243)
                 or 243),
