@@ -1790,3 +1790,37 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   `/otazky` renders live "Naposledy naučené" item-match entries (the exact AI-orders
   matching feature this prompt drives), 0 console errors on either page. Discord
   run-card delivered.
+- #229 (DL Odoo messages routing to the wrong channel + unprocessed-DL sweep). Root
+  cause: `delivery_notes_channel_id` defaulted to `0` in the `Config` dataclass,
+  `Config.load()`'s `_get()` fallback, and `config.yaml`'s options block — `0` is
+  treated as "unset" by both `dl_report._channel()` and `confirm.py::_channel_for()`,
+  which fall back to `orders_channel_id` (152, sales desk) rather than silently drop an
+  alert. The live add-on's `delivery_notes_channel_id` was never explicitly set after
+  the DL Python-engine cutover (#217), so every DL review/success/announced-mismatch
+  message landed in 152 instead of 243 ("AI dodacie listy", the warehouse) — confirmed
+  live via the Odoo API (message ids 31140124/31140125/32595437, all `res_id=152`).
+  Version bumped 0.9.61 → 0.9.62 (`a8743db`). RED: `6635484`
+  (`tests/test_orders_dl_report.py`, 3 cases: DL routes to 243 by default, orders
+  routing to `orders_channel_id` unaffected, explicit override still works). GREEN:
+  `27a4ebc` (default 0 → 243 in all three places) + `04a3cc4` (clarifying comment from
+  self-review: the `x or 243` idiom also upgrades an already-persisted explicit `0`,
+  not just a genuinely absent key — same idiom every other int option in `Config.load()`
+  already uses). `superpowers:requesting-code-review` subagent: 0 🔴 0 🟡, 1 🔵 cosmetic
+  (stale docstring wording, not worth a diff line). PR #230 merged (`4b683e0`), main CI
+  green (test, e2e-orders, e2e-dl, build). Deployed **v0.9.62**
+  (`e0ac7775_email_extractor`), `/health` confirms `{"ok":true,"version":"0.9.62"}`, DOM
+  on `/` and `/otazky` shows `v0.9.62`, 0 console errors on either page. Live options.json
+  also explicitly set to `delivery_notes_channel_id=243` (defense in depth — the code fix
+  alone already resolved the old explicit `0` to 243 via the `or 243` idiom, confirmed by
+  reading `Config.load()`'s output inside the container before this step). Functional
+  post-deploy verification: called the REAL `dl_report.post(cfg, html)` with the REAL
+  live `Config.load()` (no channel override) — landed in `discuss.channel` `res_id=243`
+  (Odoo message id 33218595), confirmed via the Odoo API. Part 2 (unprocessed DL):
+  `SELECT count(*) FROM messages WHERE category='dodacie_listy' AND processed=false` = 0,
+  now and across the whole history — the only 2 DL messages since the #217 cutover both
+  reached a correct terminal state (one shipped to ORION, confirmed via `desadv_sent` +
+  read-only SFTP `archCodex`; one correctly detected as a duplicate re-announcement and
+  skipped, no second upload) — nothing needed reprocessing. Posted informational copies
+  of both misrouted announced-mismatch messages (runs 406/407, LUNYS DL 0100239749) into
+  243 (Odoo ids 33218596/33218597), clearly marked as a copy, no message re-run. Discord
+  run-card delivered.
