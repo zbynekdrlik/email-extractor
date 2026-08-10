@@ -2,6 +2,8 @@
 paths:
   - "email-extractor/app/orders/**"
   - "email-extractor/app/httpapi.py"
+  - "email-extractor/app/config.py"
+  - "email-extractor/config.yaml"
   - "email-extractor/tests/test_e2e.py"
   - ".github/workflows/ci.yml"
 ---
@@ -1260,3 +1262,39 @@ intentional there for cards it was tuned against.
   be valid," check whether the change could alter what `candidates()`/`_item_input`
   produces; if so, budget for the SAME `--live` re-record + `--require-all` verify the
   prompt-edit case already requires.
+- **`Config.load()`'s `int(_get(o, key, env, N) or N)` idiom retroactively "fixes" an
+  already-persisted EXPLICIT `0` in a live `options.json`, not just a genuinely-absent
+  key (#229).** `_get()` returns `opts[key]` verbatim whenever the key is present and
+  not `None`/`""` — including a literal `0` — so the trailing `or N` only looks like a
+  fallback for "missing"; in practice, because `0` is falsy in Python, it ALSO overrides
+  any already-configured `0`. This is the SAME idiom every int-typed option in
+  `Config.load()` already uses (`orders_shadow_days`, `catalog_refresh_minutes`, …), so
+  it's not a new pattern — but it means bumping a field's DEFAULT from `0` to a real
+  value (as `delivery_notes_channel_id` did, `0`→`243`) fixes a LIVE add-on's behavior
+  the moment the new CODE deploys, even before anyone POSTs a new value to
+  `/data/options.json` — verified live: the add-on's own `options.json` still had the
+  OLD literal `0` right after the v0.9.62→v0.9.63 deploy, yet `Config.load()` already
+  resolved to `243`. Don't assume a schema-default change needs a matching live
+  options-POST to take effect — check whether the field uses this `or N` idiom first
+  (an option's own DEFAULT-only fields, like `catalog_sheet_id: str = ""` with no
+  trailing `or`, do NOT get this retroactive effect). The options-POST is still good
+  practice afterward (keeps `options.json` itself from looking stale/wrong to a future
+  reader), just not the thing that fixes behavior.
+- **`desadv_edi.build()`'s own `partial`/`no_match` classification EXCLUDES a
+  zero-quantity item even when it is genuinely unmatched (#229) — do not treat
+  `built.partial`/a document's `outcome` string as a precise "did this raise a real
+  `dl_item` board question" signal.** `build()` filters `zero_qty = [... quantity==0]`
+  OUT of `items` BEFORE computing `no_match`/`partial` — but `dl_worker.py`'s own
+  matching loop (`_process_document`) calls `teach.ask_dl_item(...)` for ANY item with
+  `not decision.gtin`, regardless of quantity. So a document whose ONLY unmatched item
+  also has quantity 0 gets `outcome="ok"` (a "clean" classification) even though a real,
+  open warehouse question exists for it. `unmatched_notes`/`unmatched_items` (built in
+  `_process_document`'s own second loop, same `not decision.gtin` condition, no quantity
+  filter) is the PRECISE signal — `documents_out`'s dicts now carry it explicitly
+  (`"unmatched_items"` key, live success path only) specifically so a caller like
+  `dl_report._outcome_needs_link()` doesn't have to re-derive "does this need a
+  dashboard link" from the imprecise `outcome` string. Any FUTURE consumer of
+  `documents_out`/`built.partial` that needs to know "is there something to actually
+  resolve" should read `unmatched_items`/`items_skipped_no_match`+quantity directly,
+  never `outcome`/`partial` alone — this is the same class of "the aggregate label lies
+  about a narrow edge case" gotcha as this file's own `#204` note on `_aggregate_status`.
