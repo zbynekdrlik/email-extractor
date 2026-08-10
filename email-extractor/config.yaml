@@ -47,7 +47,7 @@ options:
   odoo_api_key: ""
   odoo_db: "odoo"
   orders_channel_id: 0
-  delivery_notes_channel_id: 0
+  delivery_notes_channel_id: 243
   orion_host: ""
   orion_port: 22
   orion_user: ""

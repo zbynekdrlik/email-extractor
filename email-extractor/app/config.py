@@ -78,7 +78,11 @@ class Config:
     orders_channel_id: int = 0
     # #151: the delivery-note (DESADV_*) counterpart of orders_channel_id — see
     # orders/confirm.py's _channel_for. Falls back to orders_channel_id when unset.
-    delivery_notes_channel_id: int = 0
+    # #229: defaults to 243 ("AI dodacie listy", the warehouse) — a genuinely UNSET (0)
+    # value used to silently fall back to orders_channel_id (152, "objednávky", the sales
+    # desk), routing every DL review/success/announced-mismatch message to the wrong
+    # audience. Still fully overridable per-install; this only fixes the DEFAULT.
+    delivery_notes_channel_id: int = 243
     orion_host: str = ""
     orion_port: int = 22
     orion_user: str = ""
@@ -189,7 +193,8 @@ class Config:
             odoo_db=_get(o, "odoo_db", "ODOO_DB", "odoo") or "odoo",
             orders_channel_id=int(_get(o, "orders_channel_id", "ORDERS_CHANNEL_ID", 0) or 0),
             delivery_notes_channel_id=int(
-                _get(o, "delivery_notes_channel_id", "DELIVERY_NOTES_CHANNEL_ID", 0) or 0),
+                _get(o, "delivery_notes_channel_id", "DELIVERY_NOTES_CHANNEL_ID", 243)
+                or 243),
             orion_host=_get(o, "orion_host", "ORION_HOST", "") or "",
             orion_port=int(_get(o, "orion_port", "ORION_PORT", 22) or 22),
             orion_user=_get(o, "orion_user", "ORION_USER", "") or "",
