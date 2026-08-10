@@ -1824,3 +1824,33 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   of both misrouted announced-mismatch messages (runs 406/407, LUNYS DL 0100239749) into
   243 (Odoo ids 33218596/33218597), clearly marked as a copy, no message re-run. Discord
   run-card delivered.
+- #229 follow-up (reopened after the merge above, 2 more user-reported gaps, same
+  branch/ticket): (1) `build_announced_mismatch` never stated whether the attached DL
+  was actually processed — live complaint on run 406 ("preco nenapisalo do odoo ze
+  dodaci list bol spracovany"). (2) `build_success` unconditionally carried the `/sklad`
+  link even for a clean run; `build_review` had none at all even though review always
+  needs one — backwards. Version bumped 0.9.62 → 0.9.63 (`3d2c0e0`). RED: `95487a5`
+  (`tests/test_orders_dl_report_messages.py`, 12 cases). GREEN: `3625681` — every DL
+  message now opens with a short per-document outcome line (new `_outcome_line`/
+  `_OUTCOME_ICON`) before any warning; `build_success`'s headline states doc number +
+  item count; the missing-doc warning reworded per the user's exact wording; new shared
+  `report.link_line()` (orders' `build_summary` link markup extracted, byte-identical
+  output) used by `build_review` (always when given), `build_success` (only when
+  `unmatched_items` non-empty), `build_announced_mismatch` (only when a document's
+  outcome needs it). `superpowers:requesting-code-review` subagent: 0 🔴, 2 🟡, 3 🔵.
+  Both 🟡 fixed in `d136ba5` (same branch — a follow-up ticket for either would itself
+  be a follow-up-of-a-follow-up, correctly refused by the filing gate): (a) wired
+  `build_success`'s headline to actually read the `_OUTCOME_ICON` dict instead of
+  hardcoded literals its own comment falsely claimed were shared; (b) `desadv_edi.
+  build()`'s own `partial`/`no_match` computation excludes a zero-quantity item even
+  when unmatched, so `outcome` alone under-reports "needs a link" — `dl_worker.py` now
+  carries the exact `unmatched_items` list through on every live outcome dict and
+  `_outcome_needs_link` reads that directly. PR #232 merged (`0e2d755`), main CI green.
+  Deployed **v0.9.63**, `/health` confirms `{"ok":true,"version":"0.9.63"}`, DOM shows
+  `v0.9.63`, 0 console errors. Functional post-deploy verification: called the REAL
+  `dl_report.build_success`/`build_review` + `dl_report.post` with the REAL live
+  `Config.load()` — success message (id 33218660) landed in channel 243 with headline
+  "Dodací list TEST-0001 spracovaný a nahratý do ORIONu (1 položiek)" and NO link
+  (unmatched_items empty, even though a link was passed in); review message (id
+  33218661) landed with the link present — both confirmed via the Odoo API reading the
+  actual delivered `body`. Discord run-card delivered.
