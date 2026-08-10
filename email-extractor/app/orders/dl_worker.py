@@ -574,6 +574,16 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
            "items_skipped_no_match": built.items_skipped_no_match,
            "items_skipped_zero_qty": built.items_skipped_zero_qty,
            "price_substitutions": built.price_substitutions,
+           # #229 follow-up 2, review finding: `outcome`/`built.partial` alone is NOT a
+           # precise "did this raise a real dl_item board question" signal --
+           # desadv_edi.build() excludes a zero-quantity item from its own no_match/
+           # partial computation even when unmatched, but dl_worker's own teach.ask_
+           # dl_item call above fires for ANY unmatched item regardless of quantity.
+           # `unmatched_notes` is that exact, precise signal (same list build_success's
+           # own link condition already reads) -- carry it through so
+           # dl_report._outcome_needs_link can check it directly instead of
+           # re-deriving an imprecise proxy from `outcome`.
+           "unmatched_items": unmatched_notes,
            "items": _shipped_items(decisions)}
 
 

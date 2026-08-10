@@ -98,20 +98,27 @@ def build_success(supplier_name: str, doc_number: str, delivery_date: str,
     #229 follow-up: the headline now states the doc number and item count explicitly
     ("Dodací list <číslo> spracovaný a nahratý do ORIONu (<N> položiek)") — a reader must
     never have to guess from a bare "spracovaný" whether THIS document went through.
-    `link` is rendered ONLY when `unmatched_items` is non-empty — the exact condition
-    under which `dl_worker._process_document` actually raised a real `dl_item` board
-    question (`partial == bool(unmatched_items)` by construction, see `desadv_edi.build`)
-    — a purely informational note (borderline confidence, a weight-history override, a
-    price backfilled from the catalog) never gets a link, since there is nothing to
-    action on the board for it."""
+    `link` is rendered ONLY when `unmatched_items` is non-empty — the SAME list
+    `dl_worker._process_document` builds `dl_item` board questions from (both driven by
+    `not decision.gtin`), so this is exact, not derived from `partial` — a purely
+    informational note (borderline confidence, a weight-history override, a price
+    backfilled from the catalog) never gets a link, since there is nothing to action on
+    the board for it. Deliberately NOT derived from `partial` itself
+    (`bool(desadv_edi.build(...).items_skipped_no_match)`): that computation excludes a
+    zero-quantity item even when unmatched, so a document whose ONLY unmatched item also
+    has quantity 0 can have `partial=False` while a real `dl_item` question was still
+    raised — `unmatched_items` has no such gap (`dl_worker`'s own teach.ask_dl_item call
+    fires for ANY unmatched item regardless of quantity). `_outcome_needs_link` below
+    mirrors this exact precision via `documents_out`'s own `unmatched_items` key, not the
+    less precise `outcome` string alone (review finding, PR #232)."""
     n_items = len(shipped_items or [])
     if partial:
-        headline = (f"&#9888;&#65039; Dodací list {escape(doc_number or '?')} "
+        headline = (f"{_OUTCOME_ICON['partial']} Dodací list {escape(doc_number or '?')} "
                    f"spracovaný ČIASTOČNE &mdash; nahratý do ORIONu, chýbajú niektoré "
                    f"položky ({n_items} položiek)")
     else:
-        headline = (f"&#9989; Dodací list {escape(doc_number or '?')} spracovaný a "
-                   f"nahratý do ORIONu ({n_items} položiek)")
+        headline = (f"{_OUTCOME_ICON['ok']} Dodací list {escape(doc_number or '?')} "
+                   f"spracovaný a nahratý do ORIONu ({n_items} položiek)")
     parts = [f"<p><b>{headline}</b></p>"]
     parts.append(_meta_lines(**{"Od": from_addr, "Predmet": subject,
                                 "Dodávateľ": supplier_name,
@@ -189,10 +196,14 @@ def _outcome_line(doc: dict) -> str:
 
 
 def _outcome_needs_link(doc: dict) -> bool:
-    """Mirrors `build_success`'s own link condition (review always; partial only when it
-    actually carries unmatched items, which every `partial` outcome does by
-    construction) — see the module docstring's "dashboard link" paragraph."""
-    return doc.get("outcome") in ("review", "partial")
+    """Mirrors `build_success`'s own link condition EXACTLY: `review` always; otherwise
+    only when `doc["unmatched_items"]` is non-empty (the SAME list `_process_document`
+    now carries on every live outcome dict, review finding PR #232 — reading the
+    `outcome` string alone ("partial") would miss a document whose only unmatched item
+    also has zero quantity, see `build_success`'s own docstring for why)."""
+    if doc.get("outcome") == "review":
+        return True
+    return bool(doc.get("unmatched_items"))
 
 
 # --- spec §4: announced-vs-attached mismatch --------------------------------

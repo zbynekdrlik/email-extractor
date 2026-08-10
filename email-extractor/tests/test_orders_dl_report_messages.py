@@ -131,6 +131,39 @@ def test_mismatch_with_a_review_document_carries_the_link():
     assert "<a href" in html
 
 
+def test_mismatch_with_a_duplicate_document_states_it_and_carries_no_link():
+    html = dl_report.build_announced_mismatch(
+        "subj", "dodavatel@lunys.sk", ["0100239776"], ["0100239749"],
+        documents=[_doc(outcome="duplicate", doc_number="0100239749")],
+        link="http://example.com/sklad/xyz")
+    assert "Dodací list 0100239749" in html
+    assert "bol už spracovaný skôr" in html
+    assert "<a href" not in html
+
+
+def test_mismatch_with_an_outcome_ok_but_real_unmatched_items_still_carries_the_link():
+    """Review finding (PR #232): `desadv_edi.build()`'s own `partial`/no_match
+    computation excludes a zero-quantity item even when it is genuinely unmatched, so a
+    document can have `outcome="ok"` while STILL carrying a real, non-empty
+    `unmatched_items` list (a genuine `dl_item` board question was raised for it) --
+    `_outcome_needs_link` must key on `unmatched_items`, never the `outcome` string
+    alone, or this exact case would wrongly omit the link."""
+    html = dl_report.build_announced_mismatch(
+        "subj", "dodavatel@lunys.sk", ["0100239776"], ["0100239749"],
+        documents=[_doc(outcome="ok", doc_number="0100239749", items=[{"name": "x"}],
+                        )],
+        link="http://example.com/sklad/xyz")
+    assert "<a href" not in html, "sanity: a genuinely clean ok carries no link"
+
+    doc_with_real_gap = _doc(outcome="ok", doc_number="0100239749",
+                             items=[{"name": "x"}])
+    doc_with_real_gap["unmatched_items"] = ["Neznámy chlebík (nulové množstvo, žiadna zhoda)"]
+    html2 = dl_report.build_announced_mismatch(
+        "subj", "dodavatel@lunys.sk", ["0100239776"], ["0100239749"],
+        documents=[doc_with_real_gap], link="http://example.com/sklad/xyz")
+    assert "<a href" in html2
+
+
 # --- shared helper reused by both notify paths (#229 follow-up 2) -----------
 
 def test_link_line_is_the_single_shared_markup_used_by_orders_too():
