@@ -40,10 +40,23 @@ warning; both alias the same command.)
 ## Post-deploy verification
 
 - Liveness: `curl http://<ha-host>:8099/health` → `{"ok":true,"version":"<x.y.z>"}`.
-- Version-on-DOM: any page (`/otazky`, the main dashboard) shows `v<x.y.z>` in the header —
-  read it with Playwright, not curl.
-- Functional: `/otazky` lists live open warehouse questions — a real, current cross-check
-  for whatever the ticket changed in the matching ladder (`app/orders/match.py`).
+- Version-on-DOM: any page (`/otazky`, `/otazky-dl`, the main dashboard) shows `v<x.y.z>`
+  in the header — read it with Playwright, not curl.
+- Functional: `/otazky`/`/otazky-dl` list live open warehouse questions — a real, current
+  cross-check for whatever the ticket changed in the matching ladder (`app/orders/match.py`)
+  or the `/sklad`/`/sklad-dl` role boundary (`app/httpapi.py`'s `_role_kinds`, #231).
+
+**Verifying an unauthenticated-link/session boundary with the Playwright MCP browser —
+clear cookies FIRST, every time.** The MCP browser profile (`.playwright-mcp/`) is
+PERSISTENT across separate Claude sessions against this SAME live host — a cookie from an
+earlier admin `dash_password` login can still be sitting in the jar. Since a real admin
+login (`session["auth"]`) is DELIBERATELY unrestricted regardless of whatever `/sklad`/
+`/sklad-dl` role a session also picks up (#231's own fix — `_role_kinds()` checks `auth`
+first), navigating straight to `/sklad-dl/<key>` with a stale admin cookie still present
+will show the FULL unfiltered board and look like the split isn't working — a false
+negative on the boundary, not a real bug. `await page.context().clearCookies()` (via
+`browser_run_code_unsafe`) before EVERY fresh unauthenticated-link check, then verify `/`
+actually redirects to `/login` first as proof the session is genuinely clean.
 
 ## Known gotchas
 

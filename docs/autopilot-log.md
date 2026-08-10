@@ -1854,3 +1854,55 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   (unmatched_items empty, even though a link was passed in); review message (id
   33218661) landed with the link present — both confirmed via the Odoo API reading the
   actual delivered `body`. Discord run-card delivered.
+
+## 2026-08-10 — #231 (separate DL-only nástenka, split from AI-orders)
+
+- User's ask: skladníčka (vlákno "AI dodacie listy", ch.243) has to see LEN dodacie
+  listy, predajkyňa LEN objednávky — previously BOTH kinds (`item`/`customer`/`mail`/
+  `date`/`line` + `dl_item`/`dl_supplier`) rendered mixed on ONE unauthenticated page
+  (`/otazky`, reached via the ONE `/sklad/<key>` link), and `dl_worker.py`'s DL Odoo
+  review messages linked to that same mixed board. Design comment posted BEFORE code
+  (root cause + chosen server-side-role-scoping approach + rejected query-param
+  alternative, `gh issue comment 231`). Version bumped 0.9.63 → 0.9.64 (`e505e34`).
+  New independent link `/sklad-dl/<key>` (`linkutil.dl_key`/`dl_url`, own HMAC context
+  string `"sklad-dl-link-v1"`) → `/otazky-dl`. `teach.open_questions`/`recently_taught`
+  gained an optional `kinds` filter (default `None` = unchanged); `httpapi.py`'s
+  `/api/orders/questions`/`/api/orders/taught` + the answer/undo dispatch endpoints
+  apply a NEW `_role_kinds(session.get("role"))` — a real server-side boundary (a role
+  can neither see nor answer/undo the other agenda's kind, even by guessing a question
+  id), not a display filter. `dl_worker.py`'s two `link=` sites (in `_process_document`/
+  `_process_message`) now call `report.dl_sklad_link(cfg)` instead of the orders-only
+  `report.sklad_link(cfg)` — #229's "link only when actionable" rule unchanged, only
+  the target moved. New `/api/orders/dl/stats` endpoint (aggregate DL run/duplicate/
+  mismatch counts, `reliability.dl_provenance_stats_for_day`) feeds a "stavy" strip on
+  the DL board. `_ASK_HTML_TEMPLATE` refactor: `ASK_HTML`/`ASK_DL_HTML` both built from
+  ONE literal via `.replace()`, avoiding two hand-maintained ~150-line JS copies. Admin
+  dashboard shows both links now. Commit `dc831fd`.
+  `superpowers:requesting-code-review` subagent caught a real Critical bug before
+  merge: `_role_kinds()` checked only `session["role"]`, never `session["auth"]` — a
+  real admin login who merely clicked either nástenka link shown on their OWN
+  dashboard (both rendered as clickable `target="_blank"` tags) would silently start
+  seeing a role-filtered view (`session["auth"]`/`session["role"]` are independent
+  session keys sharing one cookie jar). Fixed by checking `auth` first, exactly like
+  `_gate()` already does; regression test `test_a_stale_role_cookie_never_restricts_a_
+  real_admin_login`. Also added a module-level assertion that `ORDERS_KINDS ∪
+  DL_KINDS == teach.KINDS`, so a forgotten future kind fails loudly at import instead
+  of silently locking both links out of it. Commit `d9a4863`. PR #233 merged
+  (`b6de59b`), main CI green (test, e2e-orders, e2e-dl, build). Deployed **v0.9.64**
+  to the live add-on (`e0ac7775_email_extractor`); `/health` confirms
+  `{"ok":true,"version":"0.9.64"}`. Functional post-deploy verification with Playwright
+  against a CLEAN (cookie-cleared) unauthenticated session for each link: `/sklad-dl/
+  <key>` → `/otazky-dl` shows ONLY the one real live open `dl_supplier` question
+  ("Ktorý dodávateľ? — objednavky@feast.sk"), the "stavy" strip ("dnes: 4 spracovaných,
+  2 duplicít, 1 nezhôd · včera: 1 spracovaných"), and `v0.9.64` — zero `mail`/`item`
+  questions leak through; `/sklad/<key>` → `/otazky` shows the 3 real open `mail`
+  questions + 12 taught mappings, zero `dl_supplier` leak, `v0.9.64`. Admin dashboard's
+  "Otázky skladu" tab shows both links side by side with the correct URLs. Zero
+  browser console errors on either page's clean load. (First verification pass, with a
+  browser context that still carried a STALE admin `auth` cookie from an earlier
+  session, correctly showed the DL board unrestricted — that's the just-fixed `auth`-
+  precedence behavior working as designed, not a live bug; re-verified clean after
+  clearing cookies.) Deliberately did NOT click an answer on the live `dl_supplier`
+  question (id 26, real production data, real supplier assignment) — the
+  click-to-answer wiring is already proven by local Playwright e2e tests against a
+  fixture DB. Discord run-card delivered.
