@@ -806,3 +806,42 @@ def test_dl_stats_endpoint_reports_todays_counts(pg):
     d = r.get_json()
     assert "today" in d and "yesterday" in d
     assert d["today"]["runs"] == 0   # no DL order_runs rows inserted in this test
+
+
+def test_a_stale_role_cookie_never_restricts_a_real_admin_login(pg):
+    """Deep-review finding on the #231 PR: `session["auth"]` and `session["role"]` are
+    independent session keys sharing the SAME cookie jar — the admin dashboard's own link
+    panel (`showSkladLink()`) renders BOTH nástenka links as clickable `target="_blank"`
+    tags specifically so the operator can preview them, and opening either one (a
+    completely natural thing to do) sets `role` WITHOUT ever clearing `auth`. A real
+    dash_password login must stay fully unrestricted afterward, exactly like `_gate()`
+    itself already treats `auth` as the overriding signal — this is what would otherwise
+    silently degrade the admin's OWN dashboard (filtered question list, 403s on
+    answer/undo) with no error anywhere."""
+    from app.httpapi import dl_key, sklad_key
+    from app.orders import teach
+
+    item_qid = teach.ask(
+        pg, message_id="m231e", customer_ean="2000000000001", customer_name="Zákazník A",
+        wording="Vianočka", quantity=5, unit="ks",
+        candidates=[{"gtin": "VIA", "name": "Vianočka 500g"}])
+    dl_qid = teach.ask_dl_item(
+        pg, message_id="m231f", supplier_ean="S1", supplier_name="Mlyn Vrbovce s.r.o.",
+        wording="Múka celozrnná", quantity=25, unit="kg",
+        candidates=[{"gtin": "G4", "name": "Múka celozrnná 25kg"}])
+
+    c = _client()
+    _login(c)
+    # the admin previews BOTH nástenka links, same browser/cookie jar, staying logged in
+    c.get("/sklad/" + sklad_key("test-secret"))
+    c.get("/sklad-dl/" + dl_key("test-secret"))
+
+    rendered = {q["id"] for q in c.get("/api/orders/questions").get_json()["items"]}
+    assert rendered == {item_qid, dl_qid}, \
+        "a real admin login must still see EVERY kind after visiting either link"
+
+    r = c.post(f"/api/orders/question/{item_qid}/answer",
+              json={"gtin": "VIA", "card": "Vianočka 500g"})
+    assert r.status_code == 200
+    r = c.post(f"/api/orders/question/{dl_qid}/answer", json={"choice": "G4"})
+    assert r.status_code == 200

@@ -33,6 +33,7 @@ from werkzeug.exceptions import HTTPException
 from . import __version__, db, linkutil
 from .db import MAX_UID_ATTEMPTS
 from .orders import dl_snapshot, memory, snapshot
+from .orders import teach as _teach
 from .store import message_dir
 
 CATEGORIES = ["ai_orders", "invoices", "reklamacie", "dodacie_listy",
@@ -99,11 +100,32 @@ DL_KINDS = ("dl_item", "dl_supplier")
 SKLAD_DL_ROLE = "sklad_dl"
 SKLAD_DL_PATHS = ("/otazky-dl", "/api/orders/questions", "/api/orders/taught",
                   "/api/orders/dl/stats")
+# Review finding on the #231 PR: nothing enforced that these two tuples actually
+# partition EVERY registered `teach.KINDS` entry. A future kind added to that registry
+# but forgotten here would silently NEVER reach either unauthenticated nástenka link
+# (fail-safe direction — full admin login still sees it — but nobody would notice why
+# the warehouse never gets asked). Fail loudly at import time instead, mirroring
+# `teach.py`'s own `KINDS` completeness assertion right after its dict definition.
+assert set(ORDERS_KINDS) | set(DL_KINDS) == set(_teach.KINDS), (
+    "every teach.KINDS entry must be routed to exactly one of ORDERS_KINDS/DL_KINDS")
 
 
 def _role_kinds(role: str | None) -> tuple[str, ...] | None:
-    """The `kind` values a session's role may see/answer/undo. `None` = unrestricted (a
-    real dash_password login) — every existing admin-dashboard behavior is unchanged."""
+    """The `kind` values a session's role may see/answer/undo. `None` = unrestricted.
+
+    A real dash_password login (`session["auth"]`) is ALWAYS unrestricted, regardless of
+    whatever `role` the SAME session might also carry — `auth` and `role` are independent
+    session keys, and a real browser can end up with BOTH set: the admin dashboard's own
+    link panel (`showSkladLink()`) renders both nástenka links as clickable
+    `target="_blank"` `<a>` tags specifically so the operator can preview/copy them, and
+    opening either one in the same cookie jar sets `role` WITHOUT ever clearing `auth`.
+    `_gate()` already treats `auth` as the overriding signal (checked first, before
+    `role`, in the SAME `before_request` handler) — this function must use the identical
+    precedence, or a logged-in admin who merely clicked their own dashboard's link would
+    silently start seeing a role-filtered question list and getting 403s on answer/undo
+    (review finding on the #231 PR — caught before merge, no live incident)."""
+    if session.get("auth"):
+        return None
     if role == SKLAD_DL_ROLE:
         return DL_KINDS
     if role == SKLAD_ROLE:
