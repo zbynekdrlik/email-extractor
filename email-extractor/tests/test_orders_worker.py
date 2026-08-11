@@ -143,14 +143,14 @@ def test_without_a_snapshot_nothing_runs(pg):
 def test_refresh_due_never_touches_the_network_even_when_a_sheet_is_configured(pg, monkeypatch):
     """#129: the Google Sheet is permanently disabled — catalog_overrides/
     customer_overrides (#127/#128) are the sole source of truth. This must hold even
-    when the add-on's own (now-inert) catalog_sheet_id/gid options are still populated
-    (as they are on the live add-on today) and even when the frozen snapshot is old."""
+    when the frozen snapshot is old. (The add-on's own catalog_sheet_id/gid options that
+    used to configure the fetch stay declared on Config/config.yaml per #129's own
+    precedent — see test_config.py's own coverage — but nothing reads them any more.)"""
     import urllib.request
     monkeypatch.setattr(urllib.request, "urlopen",
                         lambda *a, **k: pytest.fail("must never fetch the sheet (#129)"))
     sid = _snapshot(pg)
-    cfg = _cfg(catalog_sheet_id="DOC", catalog_gid="1", customer_gid="2",
-               catalog_refresh_minutes=60)
+    cfg = _cfg()
     assert worker.refresh_due(pg, cfg) == sid
 
     pg.execute("UPDATE order_snapshots SET checked_at = now() - interval '2 hours'")

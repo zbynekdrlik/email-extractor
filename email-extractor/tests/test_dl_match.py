@@ -257,6 +257,48 @@ def test_unknown_gtin_never_crashes_and_falls_through_as_no_match():
     assert d.rule == "unmatched" and d.gtin is None
 
 
+# --- #245: a catalog GTIN that overflows the DESADV LIN field (13 chars) must never ship --
+
+def test_gtin_longer_than_the_edi_field_is_unmatched_not_silently_truncated():
+    """Live incident: catalog GTIN 18585037201518 ("Margarín stolný - Favorit", a valid
+    GTIN-14 wholesale/bulk code) reached desadv_edi.generate()'s `_pad(str(gtin), 13)`,
+    which silently truncated it to 1858503720151 — ORION then rejected the WHOLE document
+    ("no stock card with EAN 1858503720151") because that truncated value matches no real
+    card at all, and the document sat stuck in `in_DL`, unimportable, for days. A confident
+    model match on such a card must never ship — it becomes a real `unmatched` Decision
+    (same as any other unresolved item), which raises a visible warehouse question instead
+    of corrupting the file."""
+    catalog = [{"gtin": "18585037201518", "name": "Margarin stolny - Favorit", "doplnok": "",
+               "mass": None, "sklad": "100", "cena": 1.824}]
+    d = dl_match.decide_item("Margarin stolny - Favorit",
+                             {"gtin": "18585037201518", "confidence": 0.95}, catalog)
+    assert d.gtin is None
+    assert d.rule == "unmatched"
+    assert "13" in d.note
+
+
+def test_gtin_exactly_at_the_edi_field_width_still_ships():
+    """The guard must not be off-by-one — a genuine 13-char GTIN is the overwhelming normal
+    case and must keep shipping exactly as before."""
+    catalog = [{"gtin": "8436036682545", "name": "Cokolada tmava", "doplnok": "", "mass": None}]
+    d = dl_match.decide_item("Cokolada tmava", {"gtin": "8436036682545", "confidence": 0.95},
+                             catalog)
+    assert d.rule == "llm_sure" and d.gtin == "8436036682545"
+
+
+def test_memory_rescue_never_resurrects_an_edi_overflowing_gtin():
+    """R73 must apply the SAME field-width guard — a stale/human `dl_item_memory` recall
+    pointing at an overflowing catalog gtin must not resurrect it either."""
+    catalog = [{"gtin": "18585037201518", "name": "Margarin stolny - Favorit", "doplnok": "",
+               "mass": None}]
+    recalled = _recall(gtin="18585037201518", card="Margarin stolny - Favorit", strength=3,
+                       unanimous=True, last_day="2026-08-01")
+    d = dl_match.decide_item("Margarin", {"gtin": "NO_MATCH", "confidence": 0.1}, catalog,
+                             recalled=recalled)
+    assert d.gtin is None
+    assert d.rule == "unmatched"
+
+
 # --- R72 ALIAS RESCUE ----------------------------------------------------------------------
 
 def test_alias_rescue_overrides_low_confidence_when_alias_names_partner():

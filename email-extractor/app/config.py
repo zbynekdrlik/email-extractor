@@ -48,8 +48,20 @@ class Config:
     # uses over the docker network (see `linkutil.sklad_url`'s docstring — 0.9.10 fixed
     # exactly this confusion once already, never repeat it).
     dashboard_base_url: str = ""
-    # --- order pipeline (#59): the catalog/customer sheet is fetched as CSV and frozen
-    # into Postgres. The document id is an option, never committed. ---
+    # #129/#235: catalog_sheet_id/catalog_gid/customer_gid/catalog_refresh_minutes (the
+    # AI-orders sheet) and dl_catalog_gid (the DL sheet, below) are UNREAD — #129
+    # (2026-08-07) permanently stopped reading either Sheet; Postgres overrides are now
+    # the sole source of truth for both catalogs (snapshot.py/dl_snapshot.py). #235's
+    # own first draft REMOVED these fields entirely — deep review reverted that: per
+    # .claude/rules/deploy.md's own recorded #129 incident, the live add-on's
+    # /data/options.json still has these 5 keys set with real-looking values, and
+    # dropping them from the store-published schema risks the Supervisor rejecting/
+    # warning on the next options validation — a risk nothing in THIS repo (a
+    # Python-only test) can prove is safe, since it can't simulate the real HA
+    # Supervisor's own schema validation. Kept declared + parsed here (matching
+    # config.yaml's schema, see test_config.py's own parity test), just never consumed
+    # by any downstream code — that's what "unread" means; do not "clean this up" again
+    # without first verifying live against the real Supervisor.
     catalog_sheet_id: str = ""
     catalog_gid: str = ""
     customer_gid: str = ""
@@ -97,9 +109,8 @@ class Config:
     delivery_notes_engine: str = "n8n"
     delivery_notes_shadow: bool = False
     delivery_notes_shadow_days: int = 3
-    # #200: the "produkty dodacie listy" tab (gid 1437442607 in the live sheet) — the
-    # DL catalog is the UNION of this tab with the existing catalog_gid tab ("produkty
-    # objednavky"), never a replacement of it. See app/orders/dl_snapshot.py.
+    # #129/#235: the DL-sheet counterpart of catalog_sheet_id above — same "unread,
+    # never removed" precedent, see that field's own comment.
     dl_catalog_gid: str = ""
     # #200: DL uploads land in a DIFFERENT ORION folder than orders (in_DL, not in) —
     # same "not exposed as an add-on option" precedent as orion_dir above (an internal
@@ -162,11 +173,13 @@ class Config:
             secret_key=_get(o, "secret_key", "SECRET_KEY", ""),
             public_base_url=base,
             dashboard_base_url=dashboard_base,
+            # #129/#235: parsed (matching config.yaml's still-declared schema) but
+            # deliberately UNREAD by any downstream code — see the field comment above.
             catalog_sheet_id=_get(o, "catalog_sheet_id", "CATALOG_SHEET_ID", "") or "",
             catalog_gid=str(_get(o, "catalog_gid", "CATALOG_GID", "") or ""),
             customer_gid=str(_get(o, "customer_gid", "CUSTOMER_GID", "") or ""),
             catalog_refresh_minutes=int(
-                _get(o, "catalog_refresh_minutes", "CATALOG_REFRESH_MINUTES", 60)),
+                _get(o, "catalog_refresh_minutes", "CATALOG_REFRESH_MINUTES", 60) or 60),
             ai_orders_engine=str(_get(o, "ai_orders_engine", "AI_ORDERS_ENGINE", "n8n")
                                  or "n8n"),
             orders_shadow=str(

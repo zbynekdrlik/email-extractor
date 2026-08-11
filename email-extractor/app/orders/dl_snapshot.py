@@ -393,7 +393,13 @@ def upsert_dl_supplier(conn, *, override_id: int | None, orig_ean_edi: str | Non
     """Add a brand-new DL supplier (override_id=None, orig_ean_edi=None), or edit one —
     either an already-overridden row (pass its override_id) or a still-snapshot-only row
     (pass its CURRENT orig_ean_edi/orig_city, from `dl_suppliers_for_management`; the
-    partial unique index makes a repeat call idempotent, no duplicate rows)."""
+    partial unique index makes a repeat call idempotent, no duplicate rows).
+
+    #235: `ean_edi` is validated + normalized UNCONDITIONALLY (`snapshot.normalize_ean`,
+    reused with `entity="dodávateľ"` rather than a second copy — mirrors #234's
+    `upsert_customer`'s own "every write path funnels through here" guarantee for the
+    EAN-EDI a DL delivery cannot be built without)."""
+    ean_edi = snapshot.normalize_ean(ean_edi, entity="dodávateľ")
     if override_id is not None:
         row = conn.execute(
             """UPDATE dl_supplier_overrides
@@ -403,6 +409,39 @@ def upsert_dl_supplier(conn, *, override_id: int | None, orig_ean_edi: str | Non
         if not row:
             raise KeyError(f"no such override id {override_id}")
         return int(row[0])
+    if orig_ean_edi is None:
+        # #235: mirrors #234's own post-review fix for `upsert_customer` (see that
+        # function's docstring for the full reasoning) — the unique index below only
+        # covers `orig_ean_edi IS NOT NULL` (editing a still-snapshot-only row); a
+        # genuinely BRAND-NEW supplier has no ON CONFLICT target at all, so answering
+        # the SAME dl_supplier question twice (a double-click, or two independent
+        # documents both raising "new supplier" for the same real sender) could insert
+        # two rows sharing one EAN. An advisory transaction lock keyed on the EAN
+        # serializes the reclaim-or-insert decision across connections (the server runs
+        # `threaded=True`), zero schema change — same technique as `edi_sent`'s
+        # two-phase claim.
+        with conn.transaction():
+            conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (ean_edi,))
+            existing = conn.execute(
+                """SELECT id FROM dl_supplier_overrides
+                    WHERE orig_ean_edi IS NULL AND ean_edi = %s AND city = %s
+                      AND NOT retired""",
+                (ean_edi, city)).fetchone()
+            if existing:
+                row = conn.execute(
+                    """UPDATE dl_supplier_overrides
+                          SET name=%s, emails=%s, city=%s, retired=false, updated_at=now()
+                        WHERE id=%s RETURNING id""",
+                    (name, emails, city, existing[0])).fetchone()
+                return int(row[0])
+            row = conn.execute(
+                """INSERT INTO dl_supplier_overrides
+                       (orig_ean_edi, orig_city, ean_edi, name, emails, city, retired,
+                        updated_at)
+                   VALUES (NULL,%s,%s,%s,%s,%s,false,now())
+                   RETURNING id""",
+                (orig_city, ean_edi, name, emails, city)).fetchone()
+            return int(row[0])
     row = conn.execute(
         """INSERT INTO dl_supplier_overrides
                (orig_ean_edi, orig_city, ean_edi, name, emails, city, retired, updated_at)

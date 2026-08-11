@@ -1950,3 +1950,38 @@ via SSH+psql on the HA box + read-only DuckDB queries against Codex ERP on dev2.
 - Safety: every reprocess checked `desadv_sent` (empty for all 4 doc numbers before
   reprocessing) AND read-only SFTP on ORION (`in`/`in_DL`/`archCodex`/`unconfirmed`,
   with and without `Z-`) before touching anything — confirmed nothing had shipped.
+
+## #245 — urgent: EKVIA DL stuck in ORION, CODEX import rejects it (2026-08-11)
+
+RED `723bdb0` / GREEN `fd99c8c` on `dev` (bundled behind PR #244, blocked on #235's own
+unfixed critical review finding — not touched, not mine to fix). Root cause: catalog GTIN
+`18585037201518` ("Margarín stolný - Favorit") is a valid GTIN-14 (verified via the GS1
+check-digit algorithm) that overflows `desadv_edi.py`'s fixed 13-char DESADV LIN GTIN field
+— `_pad()` silently truncated it to `1858503720151`, which matches no real ORION stock card,
+so CODEX rejected the whole document ("no stock card with EAN 1858503720151") and it sat
+stuck in `in_DL` 4 days. Fixed at the matching layer: `dl_match.decide_item()`'s new
+`_gtin_edi_overflow()` guard (both the fresh-LLM-match and R73 memory-rescue paths) treats
+an overflowing card the same as "no card" — the item becomes a real `unmatched` Decision,
+raising the existing warehouse question instead of silently corrupting the file.
+`desadv_edi.generate()` itself is untouched (byte-parity fixture still passes; only the `13`
+literal became a named `GTIN_FIELD_WIDTH` constant both modules share). Tests:
+`test_gtin_longer_than_the_edi_field_is_unmatched_not_silently_truncated`,
+`test_memory_rescue_never_resurrects_an_edi_overflowing_gtin`,
+`test_gtin_exactly_at_the_edi_field_width_still_ships` (sanity, off-by-one).
+
+Immediate unblock (independent of the code deploy, done via read-only-normally SFTP,
+owner-authorized for this ONE file): verified `Z-DESADV_000264_3412606458_20260807_072424371.txt`
+was present in `in_DL`, absent from `in\archCodex`/`in\unconfirmed` (never imported) —
+saved its bytes to scratchpad, deleted it, surgically edited its own bytes (dropped the
+margarine LIN, renumbered the remaining 3, byte-verified the SFTP round-trip) and
+re-uploaded under the same filename. Reconciled `desadv_sent` (empty for this doc — the
+ledger only started writing 2026-08-09, predates this document) with a fresh row so
+`confirm.py`'s sweep picks up the real import status tomorrow morning. Margarín 30kg was
+deliberately excluded (cannot be represented in a 13-char field at all) — told the warehouse
+in Odoo ch.243 to enter it manually in CODEX for this one delivery. 10 other catalog cards
+share the same 14-digit shape, none yet delivered — filed #246 (`needs-user-decision`,
+CODEX-side question: does an alternate 13-char code exist for these?).
+
+Playbook: `.claude/rules/orders-corpus.md` gained 3 entries (GTIN-14 overflow + guard
+placement, `desadv_sent`'s 2026-08-09 start date, the surgical fixed-width-file-edit
+technique for manual ORION corrections with no recoverable `matched_items` input).

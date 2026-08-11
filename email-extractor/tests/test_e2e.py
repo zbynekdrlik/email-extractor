@@ -347,6 +347,134 @@ def test_the_warehouse_answers_a_dl_supplier_question_from_the_link(live_server,
     assert console == [], f"browser console not clean: {console}"
 
 
+def test_the_warehouse_adds_a_brand_new_dl_supplier_from_the_card(live_server, pg, page):
+    """#235: the dead end this ticket exists to close — HK LOAN (#236) is the concrete
+    case. A DL supplier absent from `dl_supplier_snapshot` entirely can now be added
+    right on the dl_supplier question card, through the real browser, on her own
+    `/otazky-dl` board — mirrors #234's own customer test above."""
+    from app.httpapi import dl_key
+    from app.orders import dl_supplier_memory as dsm
+    from app.orders import teach
+
+    qid = teach.ask_dl_supplier(
+        pg, message_id="e-dl3", sender_email="gnip@hkloan.eu", candidates=[],
+        delivery_date="11.08.2026")
+    assert qid
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/otazky-dl")
+
+    page.wait_for_selector("text=gnip@hkloan.eu")
+    page.click('button:has-text("Nový dodávateľ")')
+    page.wait_for_selector('input[placeholder="EAN kód EDI *"]')
+    page.fill('input[placeholder="EAN kód EDI *"]', "2000000000900")
+    page.fill('input[placeholder="názov firmy *"]', "HK LOAN s.r.o.")
+    page.click('button:has-text("Uložiť nového dodávateľa")')
+
+    page.wait_for_selector("text=Naposledy naučené")
+    q = teach.get(pg, qid)
+    assert q["status"] == "answered"
+    assert dsm.resolve(pg, "gnip@hkloan.eu") == {
+        "ean_edi": "2000000000900", "name": "HK LOAN s.r.o."}
+    row = pg.execute(
+        "SELECT name FROM dl_supplier_overrides WHERE ean_edi='2000000000900'").fetchone()
+    assert row == ("HK LOAN s.r.o.",)
+
+    assert console == [], f"browser console not clean: {console}"
+
+
+def test_the_warehouse_reclaims_an_existing_dl_supplier_after_a_collision(
+        live_server, pg, page):
+    """Deep-review finding (independent review, same PR as #235's own fixes): the
+    server-side EAN-collision check (httpapi.py's `_api_orders_answer_new_dl_supplier`)
+    already refuses a duplicate EAN with 409 + the existing supplier's details — this
+    proves the FRONTEND actually uses that payload, mirroring `newCustomerForm`'s own
+    one-click reclaim button (#234), through the real browser, not just the API
+    response shape."""
+    from app.httpapi import dl_key
+    from app.orders import dl_snapshot, teach
+    from app.orders import dl_supplier_memory as dsm
+
+    dl_snapshot.upsert_dl_supplier(
+        pg, override_id=None, orig_ean_edi=None, orig_city=None,
+        ean_edi="2000000000955", name="Už existujúci s.r.o.", emails=[], city="Trnava")
+    qid = teach.ask_dl_supplier(
+        pg, message_id="e-dl9", sender_email="iny@x.sk", candidates=[],
+        delivery_date="11.08.2026")
+    assert qid
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/otazky-dl")
+
+    page.wait_for_selector("text=iny@x.sk")
+    page.click('button:has-text("Nový dodávateľ")')
+    page.wait_for_selector('input[placeholder="EAN kód EDI *"]')
+    page.fill('input[placeholder="EAN kód EDI *"]', "2000000000955")
+    page.fill('input[placeholder="názov firmy *"]', "Iný názov s.r.o.")
+    page.click('button:has-text("Uložiť nového dodávateľa")')
+
+    page.wait_for_selector("text=Už existujúci s.r.o.")
+    page.click('button:has-text("Použiť existujúceho Už existujúci s.r.o.")')
+
+    page.wait_for_selector("text=Naposledy naučené")
+    q = teach.get(pg, qid)
+    assert q["status"] == "answered"
+    assert dsm.resolve(pg, "iny@x.sk") == {
+        "ean_edi": "2000000000955", "name": "Už existujúci s.r.o."}
+    assert pg.execute(
+        "SELECT count(*) FROM dl_supplier_overrides WHERE ean_edi='2000000000955'"
+    ).fetchone()[0] == 1
+
+    # This is the one test in the file that deliberately triggers a real 409 through a
+    # real fetch() (proving the httpapi.py collision check above and the frontend's own
+    # use of its `existing` payload). Chromium logs an unavoidable, application-code-free
+    # "Failed to load resource: ... 409" console entry for ANY non-2xx fetch() response —
+    # that is a browser-native network log, not a JS console.error() call, and every
+    # OTHER assertion in this file (real console.error/pageerror calls) still applies in
+    # full. Filter ONLY that one expected, intentionally-provoked entry.
+    real_errors = [m for m in console if "Failed to load resource" not in m]
+    assert real_errors == [], f"browser console not clean: {real_errors}"
+
+
+def test_the_warehouse_adds_a_brand_new_dl_product_from_the_card(live_server, pg, page):
+    """#235: the dl_item half of the same fix (the #236 "Soľ jedlá..." case — a genuinely
+    new catalog card with no GTIN in Codex yet)."""
+    from app.httpapi import dl_key
+    from app.orders import dl_memory, teach
+
+    qid = teach.ask_dl_item(
+        pg, message_id="e-dl4", supplier_ean="S1", supplier_name="Mlyn s.r.o.",
+        wording="Soľ jedlá kamenná jódovaná 0,7-0,16 mm", quantity=1000, unit="kg",
+        candidates=[], delivery_date="11.08.2026")
+    assert qid
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/otazky-dl")
+
+    page.wait_for_selector("text=Soľ jedlá kamenná jódovaná")
+    page.click('button:has-text("Nový produkt")')
+    page.wait_for_selector('input[placeholder="GTIN (EAN kód) *"]')
+    # prefilled straight from the DL wording itself
+    assert page.locator('input[placeholder="názov produktu *"]').input_value() \
+        == "Soľ jedlá kamenná jódovaná 0,7-0,16 mm"
+    page.fill('input[placeholder="GTIN (EAN kód) *"]', "4003885181808")
+    page.click('button:has-text("Uložiť nový produkt")')
+
+    page.wait_for_selector("text=Naposledy naučené")
+    q = teach.get(pg, qid)
+    assert q["status"] == "answered"
+    assert dl_memory.resolve(
+        pg, "S1", "Soľ jedlá kamenná jódovaná 0,7-0,16 mm").gtin == "4003885181808"
+    row = pg.execute(
+        "SELECT name FROM dl_catalog_overrides WHERE gtin='4003885181808'").fetchone()
+    assert row == ("Soľ jedlá kamenná jódovaná 0,7-0,16 mm",)
+
+    assert console == [], f"browser console not clean: {console}"
+
+
 def test_the_dl_link_never_shows_an_orders_question(live_server, pg, page):
     """#231: the DL nástenka must never render an AI-orders item/customer question, even
     if one happens to be open at the same time — the split is real, not cosmetic."""

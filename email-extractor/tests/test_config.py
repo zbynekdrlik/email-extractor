@@ -1,9 +1,13 @@
 """Config resolution — bundled-Postgres DSN fallback (add-on mode)."""
 
 import json
+import re
+from pathlib import Path
 
 from app import config as config_mod
 from app.config import Config
+
+CONFIG_YAML = Path(__file__).resolve().parents[1] / "config.yaml"
 
 
 def _load_with_options(tmp_path, monkeypatch, options: dict) -> Config:
@@ -95,10 +99,60 @@ def test_delivery_notes_engine_reads_from_options(tmp_path, monkeypatch):
     assert cfg.delivery_notes_shadow_days == 7
 
 
-def test_dl_catalog_gid_defaults_empty_and_reads_from_options(tmp_path, monkeypatch):
-    assert _load_with_options(tmp_path, monkeypatch, {}).dl_catalog_gid == ""
-    cfg = _load_with_options(tmp_path, monkeypatch, {"dl_catalog_gid": "1437442607"})
+_DEAD_SHEET_OPTIONS = ("catalog_sheet_id", "catalog_gid", "customer_gid",
+                      "catalog_refresh_minutes", "dl_catalog_gid")
+
+
+def test_dead_sheet_options_stay_declared_but_are_unread(tmp_path, monkeypatch):
+    """Deep-review finding on #235's own first draft, which REMOVED these fields
+    entirely: #129 already permanently disabled the Sheet reads catalog_sheet_id/
+    catalog_gid/customer_gid/catalog_refresh_minutes/dl_catalog_gid used to configure —
+    but the live add-on's own /data/options.json still has all five keys SET with
+    real-looking values. `.claude/rules/deploy.md` records exactly this precedent from
+    #129 itself: removing a still-configured option from config.yaml's schema risks the
+    REAL HA Supervisor rejecting/warning on the next options validation — a risk this
+    Python-only test cannot rule out either way, which is why the fields stay. So:
+    still declared on `Config`, still parsed from options.json (a value present there
+    is accepted, not just silently tolerated), but consumed by NOTHING downstream — see
+    the field's own comment in app/config.py."""
+    cfg = _load_with_options(tmp_path, monkeypatch, {
+        "catalog_sheet_id": "DOC", "catalog_gid": "1", "customer_gid": "2",
+        "catalog_refresh_minutes": 90, "dl_catalog_gid": "1437442607"})
+    assert cfg.catalog_sheet_id == "DOC"
+    assert cfg.catalog_gid == "1"
+    assert cfg.customer_gid == "2"
+    assert cfg.catalog_refresh_minutes == 90
     assert cfg.dl_catalog_gid == "1437442607"
+    for dead in _DEAD_SHEET_OPTIONS:
+        assert dead in Config.__dataclass_fields__, f"{dead} must stay declared on Config"
+    assert cfg.delivery_notes_engine == "n8n"  # the rest of Config still loads fine
+
+
+def test_dead_sheet_options_default_harmlessly_when_absent(tmp_path, monkeypatch):
+    """The live add-on always has these set today, but a fresh/test install with none
+    of the 5 keys present must still load cleanly (same `_get()` fallback every other
+    option here already relies on)."""
+    cfg = _load_with_options(tmp_path, monkeypatch, {})
+    assert cfg.catalog_sheet_id == ""
+    assert cfg.catalog_gid == ""
+    assert cfg.customer_gid == ""
+    assert cfg.catalog_refresh_minutes == 60
+    assert cfg.dl_catalog_gid == ""
+
+
+def test_config_yaml_schema_still_declares_the_dead_sheet_options():
+    """A future cleanup pass must not silently re-break the #129 precedent above — pin
+    config.yaml's own `options:`/`schema:` blocks textually (this project has no PyYAML
+    dependency, same reason `test_version.py` regexes config.yaml instead of parsing
+    it), not just the `Config` dataclass fields the test above already pins."""
+    text = CONFIG_YAML.read_text()
+    options_block, sep, schema_block = text.partition("\nschema:\n")
+    assert sep, "config.yaml has no schema: block"
+    for dead in _DEAD_SHEET_OPTIONS:
+        assert re.search(rf"^\s+{dead}:", options_block, re.M), \
+            f"{dead} missing from config.yaml options: block"
+        assert re.search(rf"^\s+{dead}:", schema_block, re.M), \
+            f"{dead} missing from config.yaml schema: block"
 
 
 def test_orion_dl_dir_defaults_to_a_different_folder_than_orders(tmp_path, monkeypatch):

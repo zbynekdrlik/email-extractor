@@ -1,5 +1,5 @@
 name: Email OCR Extractor
-version: "0.9.65"
+version: "0.9.67"
 slug: email_extractor
 description: Reads an IMAP mailbox, OCR-extracts the body + all attachments, and writes Postgres for n8n. Bundles its own Postgres on /data (leave pg_dsn empty, set pg_password).
 url: https://github.com/zbynekdrlik/email-extractor
@@ -79,6 +79,15 @@ schema:
   secret_key: password?
   http_port: int
   data_dir: str
+  # #129/#235: catalog_sheet_id/catalog_gid/customer_gid/catalog_refresh_minutes (the
+  # AI-orders sheet) and dl_catalog_gid (the DL sheet, below) are UNREAD — #129
+  # permanently stopped reading either Sheet. Kept declared here (never removed) per
+  # .claude/rules/deploy.md's own recorded #129 incident: the live add-on's
+  # /data/options.json still has these keys set with real values, and removing them
+  # from the store-published schema risks the Supervisor rejecting/warning on the next
+  # options validation — a risk a Python-only test can prove nothing about (nothing in
+  # this repo can simulate the real HA Supervisor's own schema validation). Leave
+  # declared, keep the CODE from reading them (see Config, app/config.py).
   catalog_sheet_id: str?
   catalog_gid: str?
   customer_gid: str?

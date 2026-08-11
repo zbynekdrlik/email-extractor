@@ -1347,3 +1347,42 @@ intentional there for cards it was tuned against.
   `python3 -c "import duckdb; duckdb.connect('/var/lib/codex-bridge/codex.duckdb',
   read_only=True)..."` over `ssh dev2`) worked every time and is the reliable path,
   not just a backup.
+- **A DL catalog GTIN can legitimately be a valid GTIN-14 (verify with the GS1 mod-10
+  weighted checksum, alternating ×3/×1 from the rightmost digit before the check
+  digit — a live incident's `18585037201518` checked out valid), but `desadv_edi.py`'s
+  DESADV LIN record has a FIXED 13-char GTIN field (external CODEX/WINCODEX spec) —
+  `_pad()` TRUNCATES anything longer instead of erroring, silently corrupting the code
+  into a value matching no real stock card (#245: this shipped `18585037201518` as the
+  truncated `1858503720151` and ORION rejected the WHOLE document, stuck 4 days).**
+  Fixed at the MATCHING layer (`dl_match.decide_item()`'s new `_gtin_edi_overflow()`
+  guard, applied to both a fresh LLM match and an R73 memory-rescue recall), never by
+  touching `generate()` itself — `generate()` is byte-pinned against a production
+  fixture, so widening its field or trying to encode the overflow differently there
+  risks the byte-parity contract; keeping the guard upstream means `generate()` simply
+  never receives an overflowing GTIN in the first place. A card this wide genuinely
+  CANNOT ship through this channel at all (there is no "right" 13-char encoding of a
+  GTIN-14 — dropping the last digit AND dropping the leading indicator digit were both
+  checked and are both invalid EAN-13s) — the real fix needs a CODEX-side decision
+  (does an alternate 13-char code exist for that stock card?), filed separately as a
+  `needs-user-decision` follow-up (#246) rather than blocking the safety fix on it. At
+  incident time, 10 OTHER untested catalog cards shared the same 14-digit shape
+  (Kombucha/limonáda/Mystery Cola/Korenie line — grep `length(gtin) > 13` on
+  `dl_catalog_snapshot` to re-check after any catalog refresh).
+- **`desadv_sent` (the two-phase claim/confirm upload ledger) only started being
+  WRITTEN from 2026-08-09 — any DESADV document processed before that date has NO row
+  at all, which is expected, not a sign of data loss.** Don't treat an empty
+  `desadv_sent` lookup for an older `doc_number` as a bug; it just predates the
+  ledger's wiring into `dl_worker.py`'s live upload path.
+- **Manually correcting a stuck fixed-width DESADV/EDI file in ORION when the original
+  `matched_items` input is NOT recoverable (predates `order_runs` DL logging, or the
+  run simply never got logged) — edit the file's OWN bytes surgically instead of
+  reconstructing input for `desadv_edi.generate()` from scratch.** Read the raw file,
+  split on `\r\n` (HDR is `desadv_edi.HEADER_WIDTH`=1157 chars, each LIN is
+  `LIN_MIN_WIDTH`..`LIN_MAX_WIDTH`=209..221 chars — `LIN` + linenum(6, right, chars
+  3:9) + gtin(`GTIN_FIELD_WIDTH`=13, chars 9:22) + the rest unchanged), drop/renumber
+  only the LIN(s) that need to change (renumbering is a fixed 6-char right-justified
+  field, same length in and out — `assert len(new_line) == len(old_line)` after every
+  edit), re-join with `\r\n`. Verified end-to-end on the #245 incident (EKVIA
+  DESADV_000264_3412606458): removed the one unshippable LIN, renumbered the remaining
+  3, byte-round-tripped the SFTP write to confirm. Faster and safer than guessing at
+  `unitPrice`/`mass`/`quantity` inputs to regenerate the whole document from scratch.
