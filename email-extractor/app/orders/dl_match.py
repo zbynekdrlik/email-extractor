@@ -388,6 +388,10 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
     # treated the same as "no card" — never silently truncated downstream. Capture the
     # card's name BEFORE resetting so the final unmatched note can still tell the warehouse
     # what the model actually proposed (mirrors R71's own "kept the rejected name" pattern).
+    # `llm_card is None` already implies `llm_gtin` is falsy (set together two lines above),
+    # so `_gtin_edi_overflow(llm_gtin)` alone would short-circuit False the same way — the
+    # explicit `is not None` is kept only so `llm_card["name"]` below can never be reached
+    # on a None card, even if that invariant ever changes upstream (review finding, #245).
     gtin_overflow_card = None
     if llm_card is not None and _gtin_edi_overflow(llm_gtin):
         gtin_overflow_card = llm_card["name"]
@@ -439,8 +443,10 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
         # #245: a remembered gtin that overflows the DESADV field is exactly as unshippable
         # as a fresh model answer that does — never resurrect it either.
         if rec_card and _gtin_edi_overflow(recalled.gtin):
-            log.warning("dl memory rescue skipped: %r -> %s (%d chars > %d) — cannot ship",
-                       item_name, recalled.gtin, len(str(recalled.gtin)), GTIN_FIELD_WIDTH)
+            log.warning("dl memory rescue skipped: %r card %r gtin %s is %d chars, DESADV "
+                       "LIN field is %d — cannot ship, routing to review", item_name,
+                       rec_card["name"], recalled.gtin, len(str(recalled.gtin)),
+                       GTIN_FIELD_WIDTH)
             rec_card = None
         if rec_card:
             log.info("dl memory rescue: %r -> %s (%s)", item_name, recalled.gtin, recalled.note)
