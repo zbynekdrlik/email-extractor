@@ -2171,3 +2171,46 @@ explained in their own commit messages, this log entry, and the review comment o
 Playbook: `.claude/rules/orders-corpus.md` already documents the corpus-update
 obligation for a production-incident fix; no new reusable procedure emerged beyond
 what commit messages / this entry / the #238 issue comments already capture in full.
+
+## #251 — dotiahnutie 4 stratených dodacích listov z auditu #238 (2026-08-12)
+
+LIVE OPS ticket, no code commits (same shape as #236). Re-verified live (SFTP) that all
+4 documents were still absent from ORION before touching anything, then shipped them
+ONE AT A TIME via `dl_worker._process_document()` called directly (never `_process_message`/
+`_claim` — see the new `.claude/rules/n8n-workflow-edits.md` section this ticket added,
+"Re-shipping ONE missing document out of a multi-document DL message via the Python
+engine"), shadow preview first, live commit second, ORION-verify after every commit:
+
+- **P26034244** (MPC, msg 823) → `Z-DESADV_000276_P26034244_20260627_000429615.txt` in
+  `in_DL`. Sibling P26034036 (already in `archCodex`) untouched.
+- **P26036049** + **P26035800** (MPC, msg 2191, same mail carried BOTH) → shipped
+  sequentially, each its own shadow+live+verify cycle. P26035800's first shadow preview
+  came back `partial` (1 item unmatched — LLM non-determinism); a second preview and the
+  eventual live run both matched all 7 items cleanly (`llm_sure`, conf 0.96, unanimous
+  recent history). Sibling P26036281 untouched.
+- **611741** (Pekáreň Jackulík, msg 5900) → 14/14 items matched, `Z-DESADV_000825_611741_
+  20260805_001823982.txt` in `in_DL`. Clarified vs the ticket's own hypothesis: msg 5900's
+  FIRST attachment (611494) was a GENUINE duplicate (already shipped a day earlier by msg
+  5557) — old n8n correctly flagged it, but its LIMIT-1 bug then never even read the
+  second attachment (611741). Not a NEW W4 registry-collision class; the current engine's
+  `desadv_sent` already scopes by `(supplier_ean, doc_number)` since #200, so this class
+  is structurally excluded today. No code change needed or made.
+- Final checklist: 4/4 files confirmed in ORION `in_DL`, 3/3 siblings confirmed untouched
+  in `archCodex`, `desadv_sent` has exactly 4 new confirmed rows (correct supplier_ean/
+  message_id each), `messages.processed/attempts/proc_status` for all 3 source messages
+  completely unchanged (deliberate — this was a per-document backfill, not a message
+  reprocess).
+- **Side finding, filed as #253** (own ticket, not this one's scope): `erp.slovnormal.sk`
+  Odoo's API is entirely down (every `POST /json/2/*` → 405 via nginx, every `GET` → 503)
+  — confirmed independently of the add-on via direct `curl`, confirmed it's instance-wide
+  not endpoint-specific. Blocks BOTH this app's own best-effort Odoo posts (R97 already
+  swallows the failure, so processing itself is unaffected) AND this ticket's own
+  warehouse-notification requirement — retried periodically through the rest of this
+  session, still down at close; will deliver the warehouse summary the moment Odoo
+  recovers.
+
+Playbook: added a new `.claude/rules/n8n-workflow-edits.md` section — the safe
+shadow-preview + direct-`_process_document` technique for re-shipping ONE missing
+document out of an old, multi-document, pre-ledger DL message without risking a
+duplicate upload of its already-shipped sibling(s), plus the LLM-matching-is-
+non-deterministic caveat (re-preview once before trusting a surprising `partial`).

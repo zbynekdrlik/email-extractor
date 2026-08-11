@@ -109,6 +109,69 @@ Saturday/Sunday by default) — grouped per incident, never one message per file
 5. Close out with: file present for every order, `attempts=1` per message, claim count ==
    distinct filename count, and `uploaded_orion/ok` count == order count with 0 skip / 0 error.
 
+## Re-shipping ONE missing document out of a multi-document DL message via the Python engine (#251)
+
+The section above ("Re-sending orders after an incident") is for the OLD n8n `edi_sent`
+ledger and a full whole-message reprocess. The **current Python DL engine** (`dl_worker.py`)
+needs a DIFFERENT, narrower technique when the loss is an old n8n-era message that had
+2+ delivery notes in one mail and only SOME of them ever reached ORION (the classic
+`LIMIT 1` attachment bug, #204/#238) — because `desadv_sent` (the DL engine's own
+two-phase claim ledger, started **2026-08-09**) has **no row at all** for any document
+uploaded before that date. Resetting `messages.processed=false` and letting the live
+worker reprocess the WHOLE message via `_claim`/`_process_message` would make the engine
+treat the ALREADY-shipped sibling document(s) in that same mail as brand new and
+genuinely try to re-upload them — a real duplicate delivery, and (for a message with 2+
+missing documents, e.g. one mail with 3 attachments) it would also ship every missing
+document of that message in ONE synchronous pass, violating a strict one-document-at-a-
+time safety requirement.
+
+The safe shape (used for #251's 3 messages / 4 documents, zero duplicates, zero code
+changes): drive `dl_worker._process_document()` — the SAME function the live engine calls
+per document — **directly**, one target `docNumber` at a time, never `_process_message`/
+`_claim`:
+
+1. Build the `message` dict from the real `messages` row (`dl_worker._as_message`), read
+   its attachments (`dl_worker._read_attachments` — works fine even if the original PDF
+   bytes were purged from `/data/store`, since `machine_text`/OCR text is stored
+   separately and is what the extractor actually needs).
+2. `dl_extract.extract_email(client, attachments)` ONCE — read-only, finds every document
+   in the mail including the already-shipped sibling(s). Select only the ONE `docNumber`
+   you intend to ship; never call `_process_document` for the sibling(s) at all (don't
+   even pre-seed the ledger for them — simplest and just as safe, since they're just
+   never touched).
+3. **Shadow-preview first**: `_process_document(..., shadow=True)` — zero writes (uses
+   `desadv.already_sent()` read-only), shows the built EDI's `outcome`/`line_count`/
+   `items_skipped_no_match`. Pass a mutable `all_items=[]` list to the call and print it
+   afterward — it gets the FULL per-item `Decision` (rule/confidence/trace), which the
+   top-level `result` dict does NOT expose, and is what you need to actually understand
+   an `outcome: partial`.
+4. Only after reviewing the shadow output, re-run with `shadow=False` to actually claim +
+   upload + confirm + post to Odoo (best-effort, see the Odoo-outage note below).
+5. Verify in ORION (`upload.list_dirs(cfg)`, read-only) after EVERY live call before
+   moving to the next document — never batch multiple live calls without verifying
+   between them.
+
+**LLM item-matching is genuinely non-deterministic across calls — don't panic on a single
+`outcome: partial`.** One #251 shadow preview reported an item unmatched
+(`items_skipped_no_match`); a second preview of the exact same document, seconds later,
+matched it cleanly at 0.96 confidence with unanimous recent history support. This is
+expected model variance, not a bug — the system is safe either way (an unmatched item
+never ships silently, it always raises a `dl_item` board question instead). Re-run the
+shadow preview once or twice if a result looks surprising before trusting it; if it stays
+unmatched, that's real ambiguity, let the board question fire.
+
+**This does NOT touch `messages.processed`/`processing_at`/`attempts`/`proc_status` at
+all** — deliberately. It's a targeted per-document backfill, not a message-level
+reprocess; the message's own historical lifecycle (already completed under the old n8n
+workflow) is left alone. The audit trail lives in `desadv_sent` (the new confirmed claim)
+and `email_events` (written by `_process_document` itself, `rollup=False`) plus whatever
+you write to the originating ticket.
+
+**A message whose Odoo post fails is NOT a sign the remediation failed** — `_process_document`
+already treats posting as best-effort (R97: a posting failure never blocks the real
+claim/upload/confirm, which happen BEFORE the post call) — check the `RESULT:`/ledger/
+ORION evidence, not whether an Odoo traceback was printed.
+
 ## `in_DL` (DESADV upload target) — live directory structure, resolves a doc conflict (#203)
 
 The Python migration design spec flagged a real conflict in its own sources: does `in_DL`
