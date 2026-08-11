@@ -64,6 +64,11 @@ def test_state_reviewed_and_fix_counts(pg):
     pg.execute("INSERT INTO messages (message_id, category, proc_status, processed) "
                "VALUES ('d','ai_orders','ok', true)")
     pg.execute("INSERT INTO messages (message_id, category, proc_status) VALUES ('r','ai_orders','review')")
+    # #238 review: a DL run honestly reported "partial" needs the same "needs review"
+    # visibility as "review" — it must not be invisible just because the status string
+    # differs (the dashboard-visibility gap the deep review found).
+    pg.execute("INSERT INTO messages (message_id, category, proc_status) "
+               "VALUES ('pa','dodacie_listy','partial')")
     pg.execute("INSERT INTO messages (message_id, category, proc_status) VALUES ('e','ai_orders','error')")
     pg.execute("INSERT INTO messages (message_id, category, processing_at) VALUES ('p','ai_orders', now())")
     pg.execute("INSERT INTO messages (message_id, category, review_status) VALUES ('v','ai_orders','corrected')")
@@ -75,14 +80,14 @@ def test_state_reviewed_and_fix_counts(pg):
         return c.get("/api/messages?" + qs).get_json()["total"]
 
     assert total("state=done") == 1
-    assert total("state=review") == 1
+    assert total("state=review") == 2, "review AND partial must both count as needs-review"
     assert total("state=error") == 1
     assert total("state=processing") == 1
     assert total("state=onfix") == 1
     assert total("reviewed=corrected") == 1
     counts = c.get("/api/messages").get_json()["counts"]
     assert counts["on_fix"] == 1
-    assert counts["review"] == 1
+    assert counts["review"] == 2
     assert counts["error"] == 1
 
 
