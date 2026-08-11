@@ -352,6 +352,36 @@ def test_an_unknown_customer_question_ranks_candidates_by_address_signal(pg, env
     assert qs[0]["candidates"][0]["ean_edi"] == "2000000000861"
 
 
+# --- #234: a MATCHED customer with no EAN must never reach ORION -------------------
+
+BLANK_EAN_CUSTOMER_CSV = (
+    "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,E-mail\n"
+    "Pekáreň Bez EAN,,Martin,Košútka 1,,,sklad@pekaren.sk\n"
+)
+
+
+def test_a_matched_customer_without_an_ean_is_never_uploaded(pg):
+    """#234's second, independent defect: nothing enforced a non-blank customer EAN
+    anywhere — a legacy blank-EAN snapshot row is resolved just fine by
+    `customer.resolve`'s exact_email rung (the sender address IS this customer's own),
+    but `edi.build` would silently coerce the blank EAN into four blank 17-char buyer
+    fields — a structurally valid but malformed ORION file. The EDI backstop in
+    `pipeline._ship_one` must catch this BEFORE `edi.build` ever runs, never upload, and
+    say clearly that the EAN is what's missing."""
+    sid = snapshot.import_snapshot(pg, CATALOG_CSV, BLANK_EAN_CUSTOMER_CSV)
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('m1', 'ai_orders')")
+    rec = Recorder()
+    answers = _answers(items=(("rožok 50g", "G50", 0.95),))
+    result = pipeline.run(pg, _cfg(), MAIL, sid, client=ScriptedClient(answers),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "review"
+    assert rec.uploads == []
+    assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 0
+    reject = result["order_results"][0]["reject_reason"]
+    assert "EAN" in reject
+    assert "Pekáreň Bez EAN" in reject
+
+
 def test_the_same_order_is_never_uploaded_twice(pg, env):
     rec = Recorder()
     for _ in range(2):
