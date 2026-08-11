@@ -2054,3 +2054,57 @@ Playbook: none new this round — the 3 fix findings and the search-legitimizati
 narrow to `httpapi.py`/`config.py`, already fully explained in their own commit messages
 and this log entry; no new reusable *procedure* emerged beyond what `orders-corpus.md`
 already documents for this file's shared patterns.
+
+## 2026-08-11 — #240 (PR #249) — resumed after a session-limit interruption
+
+- **#240** (answering a DL board `dl_item`/`dl_supplier` question must finish its
+  document, not leave it hanging forever): first round already committed by an earlier
+  worker before this session (`0bdfa30` bump, `9af8c51` RED, `39bec3e` GREEN, `154bbe4`
+  docs) — `dl_worker.release_for_question` re-runs the message via `_run_and_finish`
+  once every sibling `dl_item`/`dl_supplier` question is answered; `_apply_dl_item`/
+  `_apply_dl_supplier` now call it.
+- **Second round, this session:** applied an independent deep-review pass (fresh-context
+  `general-purpose` subagent) of the first round's own diff PLUS a prior worker's
+  uncommitted follow-up fixes (advisory lock, `catalog_gtins` filter, blank-choice
+  guard). Review found 2 🟡 + 2 🔵, all fixed:
+  - `_run_and_finish`'s hard-failure (`except Exception`) branch had the SAME
+    `processed` strand-forever bug the `_RetryLater` branch was fixed for, but the fix
+    wasn't extended — mirrored it. RED verified manually (temporarily reverted the
+    fix, confirmed `test_release_for_question_hard_failure_re_arms_processed_for_
+    reclaim` fails) before committing GREEN.
+  - `_apply_dl_item`'s blank-choice guard had zero direct test coverage (unlike its
+    `_apply_dl_supplier` twin) — added `test_dl_item_kind_apply_with_blank_choice_
+    teaches_nothing`.
+  - The new `pg_advisory_xact_lock` had no test proving it genuinely SERIALIZES two
+    concurrent callers (only sequential-call tests existed) — added
+    `test_release_for_question_advisory_lock_serializes_two_genuinely_concurrent_racers`
+    (two real threads, each its own Postgres connection, deterministic via recorded
+    call-span timestamps rather than a sleep-based race).
+  - The lock's own docstring claimed the second racer "correctly no-ops" — false; it
+    still runs a full second reprocess (fresh LLM call, new `order_runs` row), the
+    lock only serializes the two attempts and `desadv.claim_send_or_identify` is the
+    real duplicate-upload guard. Docstring corrected.
+  - Commits: `3ee3c8d` [red] (all 4 findings' tests — verified failing against
+    `154bbe4` with the app-side changes reverted), `fbcb4b0` [green] (the fixes).
+    Review verdict posted as its own `gh issue comment` on #240 before merge.
+- CI green on both `dev` (run `31524009119`/`31524005933`) and `main` (run
+  `31524561573`, incl. `build` pushing the GHCR image) — 4 jobs each (`test`,
+  `e2e-orders`, `e2e-dl`, `build`). PR #249 auto-merged (`94bd5a2`), #240 auto-closed.
+  Deployed to the live add-on (`ha addons update`, v0.9.67→v0.9.68), verified: `/health`
+  200, DOM shows `v0.9.68` on both the admin dashboard and `/otazky-dl`, and the RUNNING
+  container's own source greped to confirm the advisory lock / `catalog_gtins` / blank-
+  choice / hard-failure-re-arm code is actually the code that's live (a version bump
+  alone is not proof).
+- **Deliberately left UNVERIFIED, by design:** did not answer either of the two real
+  live open board questions (id 30 `dl_item` "Soas W 17 ExtraFlex S1 25kg C2TES1" for
+  Stavebniny KLEŠČ, id 35 `dl_supplier` `gnip@hkloan.eu`) to watch a real production
+  document finish — per the hard safety rule against acting on the warehouse's behalf
+  and the risk of an unintended real ORION upload. The mechanism is proven instead by
+  the full local test suite (1402 tests green, including the exact `release_for_
+  question`→`_run_and_finish` code path with fake-but-realistic upload/post) plus the
+  live container-source grep above.
+
+Playbook: none new — this round's findings (a mirrored re-arm fix, two missing unit
+tests, a corrected docstring) are narrow to `dl_worker.py`/`teach.py` and already fully
+explained in their own commit messages, this log entry, and the review comment on
+#240; no new reusable cross-file *procedure* emerged.
