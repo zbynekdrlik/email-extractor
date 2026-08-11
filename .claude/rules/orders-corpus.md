@@ -1386,3 +1386,52 @@ intentional there for cards it was tuned against.
   DESADV_000264_3412606458): removed the one unshippable LIN, renumbered the remaining
   3, byte-round-tripped the SFTP write to confirm. Faster and safer than guessing at
   `unitPrice`/`mass`/`quantity` inputs to regenerate the whole document from scratch.
+- **A `teach.KINDS` entry with a "live search over everything" JS box (the pattern the
+  #202 F3 entry above describes for `dl_supplier`/`dl_item`, mirrored from customer's
+  own search box) needs the picked value LEGITIMIZED server-side, or the search box is
+  silently non-functional for its entire purpose (#235's own deep-review, discovered
+  2026-08-11 while implementing an UNRELATED optional finding).** `_validate_dl_supplier`/
+  `_validate_dl_item` only ever accept a `choice` already present in the question's
+  FROZEN `candidates` — for the exact case these kinds exist to solve (a genuinely
+  unknown supplier/card, `candidates=[]`), that set starts and often stays EMPTY, so
+  every single click on a `dlSupplierSearchBox`/`dlItemSearchBox` result (which searches
+  the FULL current `dl_suppliers_for_management`/`dl_catalog_for_management`, not the
+  frozen candidates) was rejected 400 "nebolo ponúknuté" — verified by hand against the
+  real running app, not just read from the code. `_api_orders_answer_customer` already
+  solved this for its OWN search box (legitimise via `teach.add_candidate` before
+  validating, see httpapi.py ~line 691) — `_api_orders_answer_generic` did NOT, because
+  it is the SHARED dispatch for mail/date/line too, which have no search box and must
+  keep the strict offered-only check. Fix (httpapi.py, `_api_orders_answer_generic`):
+  before `kind.validate`, when `q.get("kind") in ("dl_supplier", "dl_item")` and
+  `choice` is not already offered, look it up in the real current list and
+  `teach.add_candidate` it in if found — a genuinely nonexistent value still fails
+  honestly. **Any FUTURE `teach.KINDS` entry that adds its own "search the full
+  database" box must get this same legitimization, or ship it non-functional the same
+  way** — the registry's generic dispatch has no way to know a kind wants this without
+  being told explicitly (grep `q.get("kind") in ("dl_supplier", "dl_item")` in
+  `_api_orders_answer_generic` before assuming a new search-box kind "just works" the
+  way the existing candidate-button flow does).
+- **The Playwright MCP's `browser_click` + a SEPARATE `browser_find`/`browser_snapshot`
+  round-trip can race `/otazky`/`/otazky-dl`'s own 5-second auto-refresh poll** (the
+  same `setInterval` re-render this file's `#149` `searchState` comment already
+  documents from the pytest-fixture side) — a click that opens a collapsed "➕ Nový…"
+  form can appear to silently un-toggle by the time the NEXT MCP tool call inspects the
+  page, because the auto-refresh rebuilt the DOM from scratch in between the two
+  separate round trips (each MCP call is its own real wall-clock delay). Live-verifying
+  #235's DL forms this way looked like a broken toggle until switching to ONE atomic
+  `browser_run_code_unsafe` script that clicks AND asserts within the SAME script
+  invocation (no MCP round-trip in between) — reliable every time. Any future live
+  Playwright-MCP verification of these two pages should default to one atomic script
+  for click-then-assert, not click-then-separate-snapshot.
+- **A Playwright test that DELIBERATELY provokes a non-2xx `fetch()` response (e.g.
+  testing a 409 collision path end-to-end) will always see an unavoidable, application-
+  code-free "Failed to load resource: the server responded with a status of ###"
+  Chromium console entry — this is NOT a `console.error()` call and NOT a real bug, but
+  `page.on('console', ...)` captures it exactly like one (#235, the first test in
+  `test_e2e.py` to intentionally trigger an HTTP error).** Don't weaken the file's
+  overall `assert console == []` convention for every other test — filter ONLY the
+  known "Failed to load resource" substring in the ONE test that deliberately exercises
+  an error path (see `test_the_warehouse_reclaims_an_existing_dl_supplier_after_a_
+  collision`'s own `real_errors = [m for m in console if "Failed to load resource" not
+  in m]`), with a comment explaining why, so a real `console.error()` in that same test
+  is still caught.
