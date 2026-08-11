@@ -256,7 +256,12 @@ def test_dl_item_kind_present_apply_undo(pg):
     presented = kind.present(q)
     assert presented["kind"] == "dl_item" and presented["options"][0]["value"] == "G1"
     extra = kind.apply(pg, _cfg(), q, "G1", "sklad")
-    assert extra == {}
+    # #240: apply() now also tries to release the document that raised this question —
+    # "dlk1" was never inserted into `messages` (this test only exercises teach.py's own
+    # dedup/present/undo machinery), so release_for_question finds nothing to reprocess
+    # and reports an empty release, same shape item/customer/date's own apply() already
+    # returns.
+    assert extra == {"released": []}
     assert dl_memory.resolve(pg, "S1", "Múka hladká").gtin == "G1"
     kind.undo(pg, teach.get(pg, qid))
     assert dl_memory.resolve(pg, "S1", "Múka hladká") is None
@@ -332,7 +337,9 @@ def test_dl_supplier_kind_present_apply_undo(pg):
     assert presented["kind"] == "dl_supplier"
     assert presented["options"][0]["value"] == "S1"
     extra = kind.apply(pg, _cfg(), q, "S1", "sklad")
-    assert extra == {}
+    # #240: same reasoning as test_dl_item_kind_present_apply_undo above — "dlk4" has no
+    # `messages` row, so release_for_question finds nothing to reprocess.
+    assert extra == {"released": []}
     assert dsm.resolve(pg, "obchod@mlynvrbovce.sk") == {"ean_edi": "S1",
                                                          "name": "Mlyn Vrbovce s.r.o."}
     kind.undo(pg, teach.get(pg, qid))
