@@ -100,6 +100,33 @@ def test_a_new_dl_suppliers_own_sender_address_is_remembered_even_when_left_blan
     assert row and "gnip@hkloan.eu" in row[0]
 
 
+def test_a_new_dl_supplier_ean_already_belonging_to_another_supplier_is_refused(pg):
+    """Deep-review finding on #235: `upsert_dl_supplier`'s advisory-lock reclaim only
+    matches an EXACT (ean_edi, city) pair against an un-overridden row — it checks
+    neither the frozen base snapshot nor an already-overridden supplier under a
+    DIFFERENT (or, as here, BLANK — city is optional in this quick form) city. Without
+    this check, typing in an EAN that already belongs to a real supplier would silently
+    create a SECOND row sharing that ean_edi; both then land in
+    dl_suppliers_for_management and dl_match.py would pick whichever comes first,
+    possibly a stale name. Mirrors #234's own new_customer collision test."""
+    dl_snapshot.upsert_dl_supplier(pg, override_id=None, orig_ean_edi=None, orig_city=None,
+                                   ean_edi="2000000000950", name="Existujúci s.r.o.",
+                                   emails=[], city="Bratislava")
+    qid = teach.ask_dl_supplier(pg, message_id="m235z", sender_email="iny@x.sk",
+                                candidates=[])
+    c = _dl_client()
+    r = c.post(f"/api/orders/question/{qid}/answer", json={"new_supplier": {
+        "ean_edi": "2000000000950", "name": "Iný názov s.r.o."}})
+    assert r.status_code == 409
+    body = r.get_json()
+    assert "Existujúci s.r.o." in body["error"]
+    assert body["existing"]["ean_edi"] == "2000000000950"
+    assert pg.execute(
+        "SELECT count(*) FROM dl_supplier_overrides WHERE ean_edi='2000000000950'"
+    ).fetchone()[0] == 1
+    assert teach.get(pg, qid)["status"] == "open"
+
+
 def test_adding_a_new_dl_product_from_the_card_teaches_it_and_answers(pg):
     qid = teach.ask_dl_item(
         pg, message_id="m235d", supplier_ean="S1", supplier_name="Mlyn s.r.o.",
@@ -161,6 +188,46 @@ def test_a_new_dl_product_with_a_non_numeric_gtin_is_refused(pg):
               json={"new_item": {"gtin": "ABC", "name": "Neznáme"}})
     assert r.status_code == 400
     assert pg.execute("SELECT count(*) FROM dl_catalog_overrides").fetchone()[0] == 0
+
+
+def test_two_concurrent_answers_to_the_same_dl_question_leave_exactly_one_winner(pg):
+    """Deep-review finding on #235: `_api_orders_answer_generic`'s UPDATE had no
+    `WHERE status='open'` guard — the `q.get('status') != 'open'` check above it is a
+    Python-level read from the EARLIER select this route already did (`q0` in
+    `api_orders_answer`), not a write-time guard on the UPDATE itself. Two genuinely
+    racing answers to the SAME open question could both pass that check and the second
+    write would silently overwrite the first's `answered_by`/`answered_at` — the
+    new_supplier/new_item branches route through this same generic path (#235), so the
+    race is reachable from the warehouse's own board, not just the pre-existing
+    mail/date/line kinds. Proven with real threads + real HTTP requests through the
+    Flask test client (fresh psycopg connection per request, `_db_tx()` in httpapi.py) —
+    same shape as `test_two_concurrent_answers_to_the_same_customer_question_leave_
+    exactly_one_winner` in test_orders_teach.py, one layer up at the HTTP boundary."""
+    import threading
+
+    qid = teach.ask_dl_supplier(
+        pg, message_id="m235race", sender_email="race@x.sk",
+        candidates=[{"ean_edi": "2000000000961", "name": "Pretekár s.r.o."}])
+    c1, c2 = _dl_client(), _dl_client()
+    barrier = threading.Barrier(2)
+    results: dict[str, int] = {}
+
+    def answer(key, client):
+        barrier.wait(timeout=5)
+        r = client.post(f"/api/orders/question/{qid}/answer",
+                        json={"choice": "2000000000961", "by": "sklad"})
+        results[key] = r.status_code
+
+    t1 = threading.Thread(target=answer, args=("a", c1))
+    t2 = threading.Thread(target=answer, args=("b", c2))
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+
+    codes = sorted([results.get("a"), results.get("b")])
+    assert codes == [200, 409], f"exactly one racing answer may win, got {results}"
+    assert teach.get(pg, qid)["status"] == "answered"
 
 
 # --- role boundary: neither side widens beyond its own agenda ------------------------

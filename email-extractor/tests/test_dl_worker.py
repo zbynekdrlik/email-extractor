@@ -620,7 +620,8 @@ def test_refresh_due_never_touches_the_network_even_when_configured(pg, monkeypa
     be fetched again, even when the frozen dl_snapshot is old. dl_worker.py must not
     break the LIVE delivery_notes_shadow window (#205) — it now just reports whatever
     dl_snapshot is currently frozen. (The catalog_sheet_id/gid options that used to
-    configure the fetch are gone entirely as of #235.)"""
+    configure the fetch stay declared on Config/config.yaml per #129's own precedent —
+    see test_config.py — but nothing here, or anywhere else, reads them any more.)"""
     import urllib.request
     monkeypatch.setattr(urllib.request, "urlopen",
                         lambda *a, **k: pytest.fail("must never fetch the DL sheet (#129)"))
