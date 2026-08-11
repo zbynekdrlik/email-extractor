@@ -711,10 +711,36 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
         documents_out.append({"outcome": "review", "reason": reason})
+    elif extraction["documents"]:
+        # #238: a UNIVERSAL, supplier-format-independent completeness check —
+        # replaces relying on the Lunys-only subject check alone. A successfully-read
+        # attachment (`error is None`) that contributed ZERO documents to
+        # `extraction["documents"]` is the CURRENT engine's own analogue of the old
+        # n8n W1a loss: an LLM/vision extraction call can omit a genuine document with
+        # no exception at all, so nothing upstream ever learns it was missed. Only
+        # runs when the mail found at least one document overall — a wholly empty
+        # mail already took the branch above, with its own more general message.
+        found_idxs = {d.get("source_attachment_idx") for d in extraction["documents"]}
+        for att in extraction["attachments"]:
+            if att.get("error") or att.get("idx") in found_idxs:
+                continue
+            reason = (f"Príloha {att.get('filename') or att.get('idx')} bola "
+                      f"spracovaná, ale nenašiel sa v nej žiadny dodací list — over "
+                      f"ručne, či naozaj neobsahuje ďalší doklad")
+            _post(cfg, shadow, lambda reason=reason: dl_report.build_review(
+                reason, from_addr=message.get("from_addr", ""),
+                subject=message.get("subject", ""), link=link), post=post)
+            _event(conn, shadow, message["message_id"], stage="review", status="review",
+                  outcome=reason, detail={"idx": att.get("idx")}, rollup=False,
+                  workflow=dl_report.WORKFLOW)
+            documents_out.append({"outcome": "review", "reason": reason,
+                                  "attachment_idx": att.get("idx")})
 
-    # spec §4: announced-vs-attached. Shadow guarantees nothing observable leaves the
-    # process, so neither the event log nor the Odoo post fire while shadowing (deep-
-    # review finding, #204 — the mismatch count must not be inflated by shadow runs).
+    # spec §4: announced-vs-attached (Lunys subject shape only — a real, still-useful
+    # signal for that supplier, kept as-is). Shadow guarantees nothing observable
+    # leaves the process, so neither the event log nor the Odoo post fire while
+    # shadowing (deep-review finding, #204 — the mismatch count must not be inflated
+    # by shadow runs).
     announced = _subject_doc_numbers(message.get("subject", ""))
     missing = [a for a in announced if a not in extracted_doc_numbers]
     if missing and not shadow:
@@ -724,6 +750,17 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
         _post(cfg, shadow, lambda: dl_report.build_announced_mismatch(
             message.get("subject", ""), message.get("from_addr", ""), missing,
             extracted_doc_numbers, documents=documents_out, link=link), post=post)
+    if missing:
+        # #238 requirement #2: fed into the AGGREGATE (`_aggregate_status` below) —
+        # AFTER the Odoo post/event above so `build_announced_mismatch`'s own
+        # per-document rendering never doubles up with these synthetic entries — so
+        # `messages.proc_status` itself is never "ok" while a document the mail's own
+        # subject announces is genuinely missing, not just alerted separately.
+        for num in missing:
+            documents_out.append({
+                "outcome": "review", "doc_number": num,
+                "reason": f"Predmet emailu ohlasuje dodací list {num}, ale nebol "
+                         f"nájdený v žiadnej prílohe"})
 
     return {"kind": "dl", "dl_snapshot_id": snapshot_id,
            "status": _aggregate_status(documents_out), "documents": documents_out,
