@@ -251,6 +251,12 @@ def test_dl_item_kind_present_apply_undo(pg):
         pg, message_id="dlk1", supplier_ean="S1", supplier_name="Mlyn Vrbovce s.r.o.",
         wording="Múka hladká", quantity=25, unit="kg",
         candidates=[{"gtin": "G1", "name": "Múka hladká T512 25kg"}])
+    # The real HTTP dispatch (`_api_orders_answer_generic`) always marks the question
+    # 'answered' BEFORE calling apply() — do the same here, or release_for_question's own
+    # "every sibling answered?" gate finds THIS question still open and returns early for
+    # that reason alone (review finding, #240: an earlier version of this test skipped
+    # this step and its own comment below was accordingly wrong).
+    pg.execute("UPDATE order_questions SET status='answered' WHERE id=%s", (qid,))
     q = teach.get(pg, qid)
     kind = teach.KINDS["dl_item"]
     presented = kind.present(q)
@@ -258,13 +264,34 @@ def test_dl_item_kind_present_apply_undo(pg):
     extra = kind.apply(pg, _cfg(), q, "G1", "sklad")
     # #240: apply() now also tries to release the document that raised this question —
     # "dlk1" was never inserted into `messages` (this test only exercises teach.py's own
-    # dedup/present/undo machinery), so release_for_question finds nothing to reprocess
-    # and reports an empty release, same shape item/customer/date's own apply() already
-    # returns.
+    # dedup/present/undo machinery), so release_for_question's sibling gate passes (no
+    # OTHER open dl_item/dl_supplier question on this message) but then finds no
+    # `messages` row to reprocess and reports an empty release, same shape item/customer/
+    # date's own apply() already returns.
     assert extra == {"released": []}
     assert dl_memory.resolve(pg, "S1", "Múka hladká").gtin == "G1"
     kind.undo(pg, teach.get(pg, qid))
     assert dl_memory.resolve(pg, "S1", "Múka hladká") is None
+    assert teach.get(pg, qid)["status"] == "open"
+
+
+def test_dl_item_kind_apply_with_blank_choice_teaches_nothing(pg):
+    """Review finding (#240, this ticket's own second round): `_apply_dl_item`'s new
+    blank-choice short-circuit (mirrors `_apply_dl_supplier`'s existing "neviem" guard)
+    had zero direct coverage — `_api_orders_answer_generic` already keeps this branch
+    dead on the real HTTP path (a blank `choice` short-circuits before `kind.apply` is
+    ever called, httpapi.py's own `if not choice: return jsonify(...)`), so only a
+    direct `KINDS["dl_item"].apply(..., "", ...)` call like this one actually exercises
+    it — mirrors `test_dl_supplier_kind_apply_with_blank_choice_teaches_nothing` above."""
+    from app.orders import dl_memory
+    qid = teach.ask_dl_item(
+        pg, message_id="dlk7", supplier_ean="S1", supplier_name="Mlyn Vrbovce s.r.o.",
+        wording="Neznáma múka", quantity=25, unit="kg",
+        candidates=[{"gtin": "G1", "name": "Múka hladká T512 25kg"}])
+    q = teach.get(pg, qid)
+    extra = teach.KINDS["dl_item"].apply(pg, _cfg(), q, "", "sklad")
+    assert extra == {}
+    assert dl_memory.resolve(pg, "S1", "Neznáma múka") is None
     assert teach.get(pg, qid)["status"] == "open"
 
 
@@ -331,6 +358,10 @@ def test_dl_supplier_kind_present_apply_undo(pg):
     qid = teach.ask_dl_supplier(
         pg, message_id="dlk4", sender_email="obchod@mlynvrbovce.sk",
         candidates=[{"ean_edi": "S1", "name": "Mlyn Vrbovce s.r.o."}])
+    # Same reasoning as test_dl_item_kind_present_apply_undo above — mark it answered
+    # first, mirroring the real HTTP dispatch, so release_for_question's sibling gate
+    # genuinely passes instead of finding this very question still open.
+    pg.execute("UPDATE order_questions SET status='answered' WHERE id=%s", (qid,))
     q = teach.get(pg, qid)
     kind = teach.KINDS["dl_supplier"]
     presented = kind.present(q)
@@ -338,7 +369,8 @@ def test_dl_supplier_kind_present_apply_undo(pg):
     assert presented["options"][0]["value"] == "S1"
     extra = kind.apply(pg, _cfg(), q, "S1", "sklad")
     # #240: same reasoning as test_dl_item_kind_present_apply_undo above — "dlk4" has no
-    # `messages` row, so release_for_question finds nothing to reprocess.
+    # `messages` row, so the sibling gate passes but release_for_question finds nothing
+    # to reprocess.
     assert extra == {"released": []}
     assert dsm.resolve(pg, "obchod@mlynvrbovce.sk") == {"ean_edi": "S1",
                                                          "name": "Mlyn Vrbovce s.r.o."}
