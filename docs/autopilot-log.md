@@ -2108,3 +2108,66 @@ Playbook: none new — this round's findings (a mirrored re-arm fix, two missing
 tests, a corrected docstring) are narrow to `dl_worker.py`/`teach.py` and already fully
 explained in their own commit messages, this log entry, and the review comment on
 #240; no new reusable cross-file *procedure* emerged.
+
+## 2026-08-11 — #238 (PR #252) — silent multi-DL loss + audit of all "ok" DLs
+
+- Root cause: the OLD (retired, pre-Python-migration) n8n "Dodacie Listy EDI" workflow
+  fetched only the FIRST attachment (`LIMIT 1`) and used a single-document extraction
+  schema — a mail with 2+ delivery notes silently dropped everything past the first,
+  while still logging its own "ok" rollup event. Confirmed on live production message
+  6202 (2026-08-06): its only `order_runs` row is a SHADOW run from 2026-08-08 (two
+  days after the message was actually processed by the old workflow), which correctly
+  found and processed BOTH of its documents and reported "partial" — proving the
+  Python engine (`dl_extract.extract_email`/`DL_SCHEMA`, #204/#205) already fixes the
+  STRUCTURAL loss for future mails.
+- Two residual gaps closed in `app/orders/dl_worker.py`'s `_process_message`, both
+  additive/detection-only (zero change to claim/upload/retry/dedup logic):
+  1. A universal, supplier-format-independent completeness check — a successfully-read
+     attachment that contributed zero documents (a plain LLM/vision omission, no
+     exception) now gets its own `review` entry, marked `synthetic` so it demotes
+     `proc_status` without being double-counted as a real processed document. Skips
+     `extract.py`'s own `method='skipped'` decorative attachments (logos/signatures) to
+     avoid false alarms (mirrors the #133/#151 false-alarm class).
+  2. The existing Lunys-only announced-vs-attached mismatch now ALSO feeds
+     `_aggregate_status` (kept, still supplier-specific but real) — `proc_status` was
+     previously staying "ok" even when the mismatch alert fired.
+- Deep-review round (fresh-context Opus subagent) caught a CRITICAL regression before
+  merge: the DL corpus's `lunys_announced_not_attached` case expected `status: "ok"`,
+  which the fix correctly changes to `"partial"` — updated on dev2
+  (`~/eval-corpus/email-extractor/dl/manifest.json`, deliberately outside git),
+  re-verified `--require-all` 8/8 exit 0, `baseline.json` unchanged (pass/fail state
+  didn't move). Also fixed: `_summary_outcome`/rollup-detail/`dl_evaluate.score()` all
+  now exclude `synthetic` entries from document counts; deduped `missing`; a Slovak
+  gender-agreement bug; and `httpapi.py`'s dashboard `state=review`
+  filter/count/badge now also matches `proc_status='partial'` (previously fell through
+  to a neutral grey badge and never appeared in the "⚠ review" filtered view — would
+  have quietly reintroduced the exact "no one notices" failure this ticket exists to
+  fix).
+- Audit (read-only, production Postgres + read-only ORION SFTP) of all 115 `ok` DL
+  messages: 5 had ≥2 real attachments (structurally suspect). 3 documents confirmed
+  genuinely lost (never in ORION at all — `P26034244`, `P26036049`, `P26035800`, all
+  MPC); a 4th (`611741`, Jackulík) found via a bonus discovery on a `proc_status='skip'`
+  message (5900, a false "duplicate" skip — spec's own documented W4 registry-collision
+  class, pre-existing n8n-era only). 2 other apparently-missing documents (610461,
+  68944×2) turned out to have been delivered successfully via unrelated LATER messages —
+  reassuring but confirms the old pipeline relied on luck (a supplier resend), not
+  correct first-pass handling. 110 single-attachment `ok` messages got an automated
+  text-heuristic pass (63/110 covered by 2 known suppliers' wording, 0 multi-doc
+  markers found; 47/110 honestly left unhand-verified — different doc formats, out of
+  session scope). Filed as #251 (remediation of the 4 confirmed losses, same safe
+  procedure as #236/#241 — never re-run a message that already uploaded).
+- Live post-deploy verification (v0.9.69) caught a REAL production Lunys mail (#6784,
+  23:07) mid-verification: subject announced 2 DL numbers, only 1 attached — the
+  dashboard correctly showed `1 dokument(y): 1x partial` (not the pre-fix `1x ok`), the
+  `announced_mismatch` timeline event correctly named the missing doc `0100242689`, and
+  the "⚠ review" filter correctly included it with a `b-review`-styled badge reading
+  "partial" — full end-to-end confirmation on a genuine live document, not just a test.
+- CI: dev PR #252 all 4 jobs green (`test`/`e2e-orders`/`e2e-dl`/`build`) on both the PR
+  run and the push run; main run `31536299463` all 4 green. Merged `05256c4`. Deployed
+  v0.9.68→v0.9.69, verified `/health`, DOM `v0.9.69`, and a grep of the RUNNING
+  container's own source for `synthetic`/`_flag_attachment`/the httpapi `proc_status IN`
+  clause to confirm the new code is actually live, not just the version string.
+
+Playbook: `.claude/rules/orders-corpus.md` already documents the corpus-update
+obligation for a production-incident fix; no new reusable procedure emerged beyond
+what commit messages / this entry / the #238 issue comments already capture in full.
