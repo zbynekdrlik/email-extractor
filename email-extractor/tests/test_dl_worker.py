@@ -664,6 +664,185 @@ def test_attempts_3_or_more_goes_to_review_even_for_a_transient_reason(pg, tmp_p
     assert row == (True, 3)
 
 
+# --- #239 class 2: upload-failure retry + durable alert (never fire-and-forget) -----
+
+def test_transient_upload_failure_retries_without_alerting(pg, tmp_path):
+    """A network-shaped upload failure gets the SAME automatic retry R17 already gives
+    a transient LLM failure — no alert yet, it is not terminal."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+
+    def _raise_upload(c, name, content, dir_override=None):
+        raise OSError("connection timed out")
+
+    n = dl_worker.tick(pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)),
+                       client=client, upload=_raise_upload)
+    assert n == 0
+    row = pg.execute(
+        "SELECT processed, processing_at, attempts FROM messages "
+        "WHERE message_id='dl1'").fetchone()
+    assert row[0] is False
+    assert row[1] is not None, "the claim stays set — the 30-min stale window reclaims it"
+    assert row[2] == 1
+    assert pg.execute("SELECT count(*) FROM pending_alerts").fetchone()[0] == 0
+    # the claim was released so a retry can safely re-upload without a duplicate
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE uploaded_at IS NOT NULL"
+    ).fetchone()[0] == 0
+
+
+def test_non_transient_upload_failure_enqueues_a_durable_alert_not_a_direct_post(pg, tmp_path):
+    """Requirement 3 of #239: the upload-failure alert must be DURABLE (retried until
+    Odoo confirms delivery), never a fire-and-forget `post()` call that silently loses
+    the alert if Odoo happens to be down at that exact moment."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+
+    def _raise_upload(c, name, content, dir_override=None):
+        raise OSError("disk quota exceeded on remote host")
+
+    posted = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, upload=_raise_upload,
+                       post=lambda c, h: posted.append(h))
+    assert n == 1
+    assert posted == [], "must NOT go through the immediate best-effort post at all"
+    row = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='dl1'").fetchone()
+    assert row[0] is True
+
+    alert = pg.execute(
+        "SELECT channel_id, kind, message_id, delivered_at, body_html "
+        "FROM pending_alerts").fetchone()
+    assert alert[0] == cfg.delivery_notes_channel_id
+    assert alert[1] == "dl_upload_failed"
+    assert alert[2] == "dl1"
+    assert alert[3] is None, "not yet delivered — flush_pending delivers it later"
+    assert "Odoslanie dodacieho listu do ORIONu zlyhalo" in alert[4]
+
+    # the claim was released — a later successful reprocess must not be blocked
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE uploaded_at IS NOT NULL"
+    ).fetchone()[0] == 0
+
+
+def test_upload_failure_alert_actually_delivers_once_flushed(pg, tmp_path):
+    """End-to-end proof: the enqueued alert survives to a real (grouped) Odoo post via
+    the SAME flush sweep worker.run_forever wires in."""
+    from app.orders import dl_alerts
+
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+
+    def _raise_upload(c, name, content, dir_override=None):
+        raise OSError("disk quota exceeded on remote host")
+
+    dl_worker.tick(pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)),
+                   client=client, upload=_raise_upload)
+
+    posted = []
+
+    def _fake_post(c, h, **kw):
+        posted.append((h, kw.get("channel_id")))
+        return {"id": 1}
+
+    n = dl_alerts.flush_pending(pg, cfg=None, post=_fake_post)
+    assert n == 1
+    assert len(posted) == 1 and posted[0][1] == 243
+
+
+def test_upload_failure_at_attempts_3_or_more_enqueues_immediately(pg, tmp_path):
+    """W9-mirrored: attempts is already incremented by the claim, so retries happen on
+    attempts 1-2 and a transient-looking reason at attempts>=3 still alerts."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    pg.execute("UPDATE messages SET attempts = 2 WHERE message_id = 'dl1'")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+
+    def _raise_upload(c, name, content, dir_override=None):
+        raise OSError("connection timed out")
+
+    n = dl_worker.tick(pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)),
+                       client=client, upload=_raise_upload)
+    assert n == 1
+    row = pg.execute(
+        "SELECT processed, attempts FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True, 3)
+    assert pg.execute("SELECT count(*) FROM pending_alerts").fetchone()[0] == 1
+
+
+# --- #239 class 3: classified as DL but never even attempted -----------------
+
+def test_stuck_classified_sweep_alerts_a_message_with_no_order_runs_row(pg):
+    _msg(pg, mid="dl1")
+    pg.execute(
+        "UPDATE messages SET created_at = now() - interval '31 minutes' "
+        "WHERE message_id = 'dl1'")
+    n = dl_worker.stuck_classified_sweep(pg, _cfg())
+    assert n == 1
+    alert = pg.execute(
+        "SELECT channel_id, kind, message_id, delivered_at FROM pending_alerts"
+    ).fetchone()
+    assert alert == (_cfg().delivery_notes_channel_id, "dl_stuck_classified", "dl1", None)
+
+
+def test_stuck_classified_sweep_ignores_a_message_within_the_threshold(pg):
+    _msg(pg, mid="dl1")  # created_at = now(), well within 30 minutes
+    n = dl_worker.stuck_classified_sweep(pg, _cfg())
+    assert n == 0
+    assert pg.execute("SELECT count(*) FROM pending_alerts").fetchone()[0] == 0
+
+
+def test_stuck_classified_sweep_ignores_a_message_with_any_order_runs_row(pg):
+    """A shadow peek run (or a real one) proves the message WAS attempted at least
+    once — never the class this sweep exists to catch."""
+    _msg(pg, mid="dl1")
+    pg.execute(
+        "UPDATE messages SET created_at = now() - interval '1 hour' "
+        "WHERE message_id = 'dl1'")
+    pg.execute(
+        "INSERT INTO order_runs (message_id, shadow, status) VALUES (%s, true, 'review')",
+        ("dl1",))
+    n = dl_worker.stuck_classified_sweep(pg, _cfg())
+    assert n == 0
+
+
+def test_stuck_classified_sweep_deduplicates_across_repeated_sweeps(pg):
+    """A persistently-stuck message must be alerted exactly ONCE, not every ~15s tick
+    (never `messages.alerted_stuck` — that flag belongs to the n8n watchdog's own
+    dedup, see the design comment on #239)."""
+    _msg(pg, mid="dl1")
+    pg.execute(
+        "UPDATE messages SET created_at = now() - interval '1 hour' "
+        "WHERE message_id = 'dl1'")
+    n1 = dl_worker.stuck_classified_sweep(pg, _cfg())
+    n2 = dl_worker.stuck_classified_sweep(pg, _cfg())
+    assert (n1, n2) == (1, 0)
+    assert pg.execute("SELECT count(*) FROM pending_alerts").fetchone()[0] == 1
+    row = pg.execute("SELECT alerted_stuck FROM messages WHERE message_id='dl1'").fetchone()
+    assert row[0] is False, "alerted_stuck belongs to the n8n watchdog, never set here"
+
+
+def test_stuck_classified_sweep_ignores_an_already_processed_message(pg):
+    _msg(pg, mid="dl1")
+    pg.execute(
+        "UPDATE messages SET created_at = now() - interval '1 hour', processed = true "
+        "WHERE message_id = 'dl1'")
+    n = dl_worker.stuck_classified_sweep(pg, _cfg())
+    assert n == 0
+
+
 # --- refresh_due (mirrors worker.refresh_due) --------------------------------
 
 def test_refresh_due_returns_none_when_no_snapshot_exists_yet(pg):
