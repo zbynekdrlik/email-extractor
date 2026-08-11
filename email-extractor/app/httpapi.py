@@ -754,6 +754,26 @@ def create_app(cfg) -> Flask:
         city = str(ns.get("city") or "").strip()
         try:
             with _db_tx() as c:
+                # Deep-review finding on #235 (mirrors #234's own new_customer collision
+                # check above): `upsert_dl_supplier`'s advisory-lock reclaim only fires on
+                # an EXACT (ean_edi, city) match against an un-overridden row — it checks
+                # neither the frozen base snapshot nor an already-overridden supplier under
+                # a DIFFERENT (or blank — city is optional in this quick form) city. Without
+                # this check, entering an EAN that already belongs to a real supplier under
+                # another city silently inserts a SECOND row sharing that ean_edi; both then
+                # land in dl_suppliers_for_management and dl_match.py picks whichever comes
+                # first, possibly a stale name. So: refuse up front, same shape as the
+                # customer path, ignoring city on purpose (the collision is on the EAN).
+                existing = [r for r in dl_snapshot.dl_suppliers_for_management(c)
+                           if str(r.get("ean_edi") or "") == ean]
+                if existing:
+                    hit = existing[0]
+                    return jsonify(
+                        error=f"EAN {ean} už má dodávateľ {hit.get('name', '')}.",
+                        existing={"ean_edi": hit.get("ean_edi", ""),
+                                 "name": hit.get("name", ""),
+                                 "city": hit.get("city", ""),
+                                 "override_id": hit.get("override_id")}), 409
                 dl_snapshot.upsert_dl_supplier(
                     c, override_id=None, orig_ean_edi=None, orig_city=None,
                     ean_edi=ean, name=name, emails=emails, city=city)
@@ -821,12 +841,24 @@ def create_app(cfg) -> Flask:
         # for `date` releases a held order — a REAL external upload) runs afterward on an
         # autocommit connection, so a later, unrelated failure can never roll back an
         # already-physically-uploaded document.
+        #
+        # Deep-review finding on #235: the `q.get("status") != "open"` check above is a
+        # Python-level read from an EARLIER select (the `q` this function was called
+        # with), not a WHERE-clause guard on this write — same class of race
+        # `answer_customer` (teach.py) was already hardened against on #234's own review.
+        # The new_supplier/new_item branches now route through here too, so two
+        # concurrent answers to the same question could both pass the check above and
+        # the second write would silently overwrite the first's `answered_by`/
+        # `answered_at`. Guard the write itself and re-check on 0 rows affected.
         with _db_tx() as c:
-            c.execute(
+            row = c.execute(
                 """UPDATE order_questions
                       SET status = 'answered', answer = %s, answered_by = %s,
                           answered_at = now()
-                    WHERE id = %s""", (Json({"choice": choice}), by, qid))
+                    WHERE id = %s AND status = 'open'
+                    RETURNING id""", (Json({"choice": choice}), by, qid)).fetchone()
+        if not row:
+            return jsonify(error=f"otázka {qid} je už zodpovedaná"), 409
         with _db() as c2:
             extra = kind.apply(c2, cfg, q, choice, by) or {}
         with _db() as c3:
