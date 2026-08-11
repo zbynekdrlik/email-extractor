@@ -230,6 +230,58 @@ def test_two_concurrent_answers_to_the_same_dl_question_leave_exactly_one_winner
     assert teach.get(pg, qid)["status"] == "answered"
 
 
+def test_picking_a_dl_supplier_found_via_live_search_is_accepted(pg):
+    """Deep-review finding (independent review, same PR): `dlSupplierSearchBox` (#235's
+    own design comment: "živé vyhľadávanie" over the FULL current DL supplier list, not
+    just the question's frozen candidates) posts a plain `{"choice": ean_edi}` through
+    `answerGeneric` — but `_validate_dl_supplier` only ever accepted a value already in
+    `q['candidates']`, so clicking ANY search result not among the original (often
+    empty, see test_adding_a_new_dl_supplier_from_the_card_teaches_it_and_answers)
+    candidates was silently refused with 400 "nebolo ponúknuté" — the search box could
+    never actually work. This is also the exact mechanism the new "Použiť existujúceho"
+    collision-reclaim button (newDlSupplierForm) depends on."""
+    dl_snapshot.upsert_dl_supplier(pg, override_id=None, orig_ean_edi=None, orig_city=None,
+                                   ean_edi="2000000000970", name="Nájdený cez hľadanie s.r.o.",
+                                   emails=[], city="Košice")
+    qid = teach.ask_dl_supplier(pg, message_id="m235search", sender_email="hladam@x.sk",
+                                candidates=[])
+    c = _dl_client()
+    r = c.post(f"/api/orders/question/{qid}/answer",
+              json={"choice": "2000000000970", "by": "sklad"})
+    assert r.status_code == 200, r.get_json()
+    assert teach.get(pg, qid)["status"] == "answered"
+    from app.orders import dl_supplier_memory
+    assert dl_supplier_memory.resolve(pg, "hladam@x.sk") == {
+        "ean_edi": "2000000000970", "name": "Nájdený cez hľadanie s.r.o."}
+
+
+def test_picking_a_dl_item_found_via_live_search_is_accepted(pg):
+    """Same fix, dl_item half — `dlItemSearchBox` over `dl_catalog_for_management`."""
+    dl_snapshot.upsert_dl_catalog_card(pg, "4003885181900", "Nájdená cez hľadanie karta")
+    qid = teach.ask_dl_item(pg, message_id="m235searchi", supplier_ean="S1",
+                            supplier_name="Mlyn s.r.o.", wording="Neznáme znenie",
+                            quantity=1, unit="ks", candidates=[])
+    c = _dl_client()
+    r = c.post(f"/api/orders/question/{qid}/answer",
+              json={"choice": "4003885181900", "by": "sklad"})
+    assert r.status_code == 200, r.get_json()
+    assert teach.get(pg, qid)["status"] == "answered"
+    from app.orders import dl_memory
+    assert dl_memory.resolve(pg, "S1", "Neznáme znenie").gtin == "4003885181900"
+
+
+def test_picking_a_genuinely_nonexistent_dl_supplier_is_still_refused(pg):
+    """The legitimization is looked up against the real current supplier list — it must
+    NOT become an escape hatch that accepts an arbitrary EAN with no corresponding row."""
+    qid = teach.ask_dl_supplier(pg, message_id="m235searchbad", sender_email="x@y.sk",
+                                candidates=[])
+    c = _dl_client()
+    r = c.post(f"/api/orders/question/{qid}/answer",
+              json={"choice": "9999999999999", "by": "sklad"})
+    assert r.status_code == 400
+    assert teach.get(pg, qid)["status"] == "open"
+
+
 # --- role boundary: neither side widens beyond its own agenda ------------------------
 
 def test_the_dl_role_can_now_reach_the_dl_znalosti_api(pg):
