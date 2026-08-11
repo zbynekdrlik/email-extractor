@@ -320,6 +320,22 @@ def test_answering_a_customer_question_outside_the_offered_candidates_is_refused
         teach.answer_customer(pg, qid, ean_edi="9999999999999", name="Vymyslený", by="sklad")
 
 
+def test_add_candidate_makes_a_newly_created_customer_answerable(pg):
+    """#234: a brand-new customer (or one found via live search) was never in the frozen
+    candidate set a question was asked with — `add_candidate` extends it so `answer_
+    customer`'s own "must have been offered" invariant still holds, with the pick now
+    visible in the question's own stored candidates (the audit trail)."""
+    qid = _ask_customer(pg, sender_email="novy@nikde.sk")
+    teach.add_candidate(pg, qid, {"ean_edi": "7000000000009", "name": "Nový zákazník",
+                                  "city": "", "street": "", "address_match": False,
+                                  "source": "new"})
+    q = teach.answer_customer(pg, qid, ean_edi="7000000000009", name="Nový zákazník",
+                              by="sklad")
+    assert q["status"] == "answered"
+    assert q["answer_gtin"] == "7000000000009"
+    assert any(c["ean_edi"] == "7000000000009" for c in q.get("candidates") or [])
+
+
 def test_answering_a_customer_question_twice_is_refused(pg):
     qid = _ask_customer(pg)
     teach.answer_customer(pg, qid, ean_edi="2000000000861", name="Žilina", by="sklad")

@@ -1854,3 +1854,99 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   (unmatched_items empty, even though a link was passed in); review message (id
   33218661) landed with the link present — both confirmed via the Odoo API reading the
   actual delivered `body`. Discord run-card delivered.
+
+## 2026-08-10 — #231 (separate DL-only nástenka, split from AI-orders)
+
+- User's ask: skladníčka (vlákno "AI dodacie listy", ch.243) has to see LEN dodacie
+  listy, predajkyňa LEN objednávky — previously BOTH kinds (`item`/`customer`/`mail`/
+  `date`/`line` + `dl_item`/`dl_supplier`) rendered mixed on ONE unauthenticated page
+  (`/otazky`, reached via the ONE `/sklad/<key>` link), and `dl_worker.py`'s DL Odoo
+  review messages linked to that same mixed board. Design comment posted BEFORE code
+  (root cause + chosen server-side-role-scoping approach + rejected query-param
+  alternative, `gh issue comment 231`). Version bumped 0.9.63 → 0.9.64 (`e505e34`).
+  New independent link `/sklad-dl/<key>` (`linkutil.dl_key`/`dl_url`, own HMAC context
+  string `"sklad-dl-link-v1"`) → `/otazky-dl`. `teach.open_questions`/`recently_taught`
+  gained an optional `kinds` filter (default `None` = unchanged); `httpapi.py`'s
+  `/api/orders/questions`/`/api/orders/taught` + the answer/undo dispatch endpoints
+  apply a NEW `_role_kinds(session.get("role"))` — a real server-side boundary (a role
+  can neither see nor answer/undo the other agenda's kind, even by guessing a question
+  id), not a display filter. `dl_worker.py`'s two `link=` sites (in `_process_document`/
+  `_process_message`) now call `report.dl_sklad_link(cfg)` instead of the orders-only
+  `report.sklad_link(cfg)` — #229's "link only when actionable" rule unchanged, only
+  the target moved. New `/api/orders/dl/stats` endpoint (aggregate DL run/duplicate/
+  mismatch counts, `reliability.dl_provenance_stats_for_day`) feeds a "stavy" strip on
+  the DL board. `_ASK_HTML_TEMPLATE` refactor: `ASK_HTML`/`ASK_DL_HTML` both built from
+  ONE literal via `.replace()`, avoiding two hand-maintained ~150-line JS copies. Admin
+  dashboard shows both links now. Commit `dc831fd`.
+  `superpowers:requesting-code-review` subagent caught a real Critical bug before
+  merge: `_role_kinds()` checked only `session["role"]`, never `session["auth"]` — a
+  real admin login who merely clicked either nástenka link shown on their OWN
+  dashboard (both rendered as clickable `target="_blank"` tags) would silently start
+  seeing a role-filtered view (`session["auth"]`/`session["role"]` are independent
+  session keys sharing one cookie jar). Fixed by checking `auth` first, exactly like
+  `_gate()` already does; regression test `test_a_stale_role_cookie_never_restricts_a_
+  real_admin_login`. Also added a module-level assertion that `ORDERS_KINDS ∪
+  DL_KINDS == teach.KINDS`, so a forgotten future kind fails loudly at import instead
+  of silently locking both links out of it. Commit `d9a4863`. PR #233 merged
+  (`b6de59b`), main CI green (test, e2e-orders, e2e-dl, build). Deployed **v0.9.64**
+  to the live add-on (`e0ac7775_email_extractor`); `/health` confirms
+  `{"ok":true,"version":"0.9.64"}`. Functional post-deploy verification with Playwright
+  against a CLEAN (cookie-cleared) unauthenticated session for each link: `/sklad-dl/
+  <key>` → `/otazky-dl` shows ONLY the one real live open `dl_supplier` question
+  ("Ktorý dodávateľ? — objednavky@feast.sk"), the "stavy" strip ("dnes: 4 spracovaných,
+  2 duplicít, 1 nezhôd · včera: 1 spracovaných"), and `v0.9.64` — zero `mail`/`item`
+  questions leak through; `/sklad/<key>` → `/otazky` shows the 3 real open `mail`
+  questions + 12 taught mappings, zero `dl_supplier` leak, `v0.9.64`. Admin dashboard's
+  "Otázky skladu" tab shows both links side by side with the correct URLs. Zero
+  browser console errors on either page's clean load. (First verification pass, with a
+  browser context that still carried a STALE admin `auth` cookie from an earlier
+  session, correctly showed the DL board unrestricted — that's the just-fixed `auth`-
+  precedence behavior working as designed, not a live bug; re-verified clean after
+  clearing cookies.) Deliberately did NOT click an answer on the live `dl_supplier`
+  question (id 26, real production data, real supplier assignment) — the
+  click-to-answer wiring is already proven by local Playwright e2e tests against a
+  fixture DB. Discord run-card delivered.
+
+## #236 — Zaseknuté dodacie listy: FEAST, HK LOAN, TLS Great 15/20 kg (2026-08-11)
+
+LIVE OPS ticket, no code commits. All data changes via the live dashboard's own
+`/api/znalosti/dl-suppliers` / `/api/znalosti/dl-products` (session auth), verified
+via SSH+psql on the HA box + read-only DuckDB queries against Codex ERP on dev2.
+
+- **FEAST s.r.o.** — added as `dl_supplier` (`ean_edi=2000000000866`, cross-verified
+  against `raw.firma.AEDIEAN` in Codex, independent of the warehouse's own screenshot;
+  `emails=[objednavky@feast.sk, obejdnavky@feast.sk]`, `city=Nitra`). Its item
+  ("Soľ jedlá kamenná jódovaná 0,7-0,16 mm") separately failed `dl_match.py`'s R75
+  lexical tripwire even AFTER the warehouse (sklad) answered the board question live
+  mid-session — the memory-rescue rung (R73) only fires below `GATE_SURE`, so a
+  human-taught mapping never overrides an already-"sure"-but-lexically-orphaned model
+  guess. Fixed with a DATA-only alias (`doplnok="Soľ jedlá kamenná jódovaná"` on the
+  matched card, gtin `4003885181808`) — `card_words` in the lexical guard includes
+  `doplnok`, so this closes the gap without touching `dl_match.py`. DL 20263245 now
+  ships (`DESADV_000866_20263245_...txt`, confirmed on ORION `in_DL`).
+- **TLS Logistics / Forbak s.r.o.** — the ticket's premise was slightly off: "TLS
+  Logistics" isn't an unonboarded supplier, it's the 3PL warehouse operator that
+  prints Forbak s.r.o.'s (`ean_edi=2000000000549`) pick slips — Forbak was ALREADY a
+  supplier, just under a name with zero word-overlap with "TLS Logistics, s.r.o." (the
+  document's own header). Renamed the supplier record to `"Forbak s. r. o. (TLS
+  Logistics, s.r.o.)"` (supplier has no separate alias field — folded into `name`) so
+  R60's word-overlap scoring finds it. Separately, "Great 15 kg" vs the existing card
+  "Great 20 kg" (Codex `NEANKOD 3605`, ONE card for both bag sizes) tripped
+  `dl_match.py`'s weight-conflict guard (±10% tolerance, 20/15=1.33× over). Renamed the
+  card to weight-neutral `"Great"` (kept `doplnok="Great-náhrada fresca"`, left `mass`
+  blank so per-line kg conversion falls back to each delivery's own stated weight via
+  `_extract_mass`, verified correct for both 15kg and 20kg runs). 3 stuck docs
+  reprocessed: 07-21 (Great 20kg) → shipped, 08-05 (Great 15kg) → shipped, 08-06 (exact
+  duplicate of 08-05, same `doc_number`) → correctly caught as `duplicate`, NOT
+  double-uploaded (`desadv_sent` ledger + ORION `in_DL` both confirm 2 files, not 3).
+- **HK LOAN** — genuinely unresolvable EAN-EDI without the user: checked Codex
+  `raw.firma`, `dl_supplier_snapshot`/`overrides`, `order_questions` — zero record
+  anywhere. Asked the user (`❓`), ticket stays open + `needs-answer` labelled.
+- Two stray `order_questions` (id 26 FEAST-supplier, id 32 TLS/tlaciaren-supplier)
+  left `open` by the direct data fixes (resolved outside the normal answer flow) were
+  closed via a narrow, scoped `UPDATE order_questions SET status='answered', ...`
+  (same class of repair as #147's playbook precedent) — no teaching-table side effect,
+  just stops them showing as stale pending items on the dashboard.
+- Safety: every reprocess checked `desadv_sent` (empty for all 4 doc numbers before
+  reprocessing) AND read-only SFTP on ORION (`in`/`in_DL`/`archCodex`/`unconfirmed`,
+  with and without `Z-`) before touching anything — confirmed nothing had shipped.

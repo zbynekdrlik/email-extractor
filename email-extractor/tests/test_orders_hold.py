@@ -447,6 +447,61 @@ def test_the_deadline_sweep_never_ships_a_still_unresolved_customer(pg, env):
     assert teach.get(pg, qid)["status"] == "open"
 
 
+# --- #234: a customer added on /znalosti (instead of on the question card) must also
+# unstick any order still waiting for it ------------------------------------------------
+
+def test_a_customer_added_in_znalosti_releases_the_held_order(pg, env):
+    qid, hid = _hold_unmatched_customer(pg, env)
+    snapshot.upsert_customer(
+        pg, override_id=None, orig_ean_edi=None, orig_street=None,
+        ean_edi="7000000000200", name="Farméria Žilina", emails=["zilina@farmeria.sk"],
+        city="Žilina", street="", zip_="")
+    snapshot.rebuild_from_overrides(pg)
+    rec = Recorder()
+    released = hold.retry_unknown_customer_questions(pg, _cfg(), upload=rec.upload,
+                                                      post=rec.post)
+    assert len(released) == 1 and released[0]["status"] == "ok"
+    assert len(rec.uploads) == 1
+    assert teach.get(pg, qid)["status"] == "answered"
+    assert pg.execute("SELECT status, customer_ean FROM held_orders WHERE id=%s",
+                      (hid,)).fetchone() == ("released", "7000000000200")
+
+
+def test_the_auto_retry_never_guesses_when_the_address_belongs_to_two_customers(pg, env):
+    """`customer.resolve`'s addr rung refuses to pick when the SAME address belongs to
+    more than one customer and there is no store header to disambiguate (never reached
+    here) — the auto-retry must never guess either; the question stays open."""
+    qid, hid = _hold_unmatched_customer(pg, env)
+    for i, name in enumerate(("Farméria A", "Farméria B")):
+        snapshot.upsert_customer(
+            pg, override_id=None, orig_ean_edi=None, orig_street=None,
+            ean_edi=f"700000000030{i}", name=name, emails=["zilina@farmeria.sk"],
+            city="Žilina", street="", zip_="")
+    snapshot.rebuild_from_overrides(pg)
+    released = hold.retry_unknown_customer_questions(pg, _cfg())
+    assert released == []
+    assert teach.get(pg, qid)["status"] == "open"
+    assert pg.execute(
+        "SELECT status FROM held_orders WHERE id=%s", (hid,)).fetchone() == ("held",)
+
+
+def test_the_auto_retry_ignores_a_customer_without_an_ean(pg, env):
+    """A legacy blank-EAN snapshot row (sheet-derived, never possible through
+    `upsert_customer` since #234 — but still possible from the sheet import path) must
+    never be auto-picked: `matched.ean_edi` must be truthy before the retry acts."""
+    qid, hid = _hold_unmatched_customer(pg, env)
+    blank_ean_csv = (
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,E-mail\n"
+        "Farméria Bez EAN,,Žilina,,zilina@farmeria.sk\n"
+    )
+    snapshot.import_snapshot(pg, CATALOG_CSV, blank_ean_csv)
+    released = hold.retry_unknown_customer_questions(pg, _cfg())
+    assert released == []
+    assert teach.get(pg, qid)["status"] == "open"
+    assert pg.execute(
+        "SELECT status FROM held_orders WHERE id=%s", (hid,)).fetchone() == ("held",)
+
+
 # --- #162: a genuinely ambiguous ITEM in a customer-unknown order must be re-asked,
 # never silently shipped partial, once the customer is resolved --------------------
 

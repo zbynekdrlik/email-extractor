@@ -286,6 +286,21 @@ def ask_customer(conn, message_id: str, sender_email: str, candidates: list[dict
     return int(existing[0]) if existing else None
 
 
+def add_candidate(conn, qid: int, cand: dict) -> None:
+    """Extend an OPEN question's stored candidate list with one more entry (#234) — used
+    when the warehouse answers a customer question with a pick that was never in the
+    frozen candidate set (a brand-new customer just created, or an existing one found via
+    the live search box). Keeps `answer_customer`'s "a pick must have been offered"
+    invariant intact while leaving a durable audit trail: the answered EAN is present in
+    the question's own recorded candidates.
+
+    `candidates` is `JSONB NOT NULL DEFAULT '[]'::jsonb` (`db.py`), so a jsonb `||` array
+    concat is correct. A no-op (silently) once the question is no longer open."""
+    conn.execute(
+        "UPDATE order_questions SET candidates = candidates || %s::jsonb WHERE id = %s"
+        " AND status = 'open'", (Json([cand]), qid))
+
+
 def answer_customer(conn, qid: int, ean_edi: str, name: str, by: str = "") -> dict:
     """Settle a 'who is this customer?' question. `ean_edi=""` means the warehouse said
     "neviem, kto to je / nie je to ani jeden z nich" — the question is still marked

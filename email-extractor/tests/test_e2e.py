@@ -242,6 +242,46 @@ def test_the_warehouse_can_say_it_does_not_know_the_customer(live_server, pg, pa
     assert console == [], f"browser console not clean: {console}"
 
 
+def test_the_warehouse_adds_a_brand_new_customer_from_the_card(live_server, pg, page):
+    """#234: the dead end this ticket exists to close — a sender absent from
+    `customer_snapshot` entirely can now be added right on the question card, prefilled
+    from the mail, through the real browser."""
+    from app.httpapi import sklad_key
+    from app.orders import teach
+
+    qid = teach.ask_customer(
+        pg, message_id="e-cust3", sender_email="uplnenovy@nikde.sk",
+        candidates=[{"ean_edi": "2000000000001", "name": "Iný zákazník", "city": "",
+                    "street": "", "address_match": False}],
+        delivery_date="08.08.2026",
+        context={"sender_email": "uplnenovy@nikde.sk", "sender_name": "Sklad",
+                "company_name": "Celkom Nová Pekáreň s.r.o.",
+                "delivery_address_guess": ""})
+    assert qid
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/otazky")
+
+    page.wait_for_selector("text=uplnenovy@nikde.sk")
+    page.click('button:has-text("Nový zákazník")')
+    page.wait_for_selector('input[placeholder="EAN kód EDI *"]')
+    # prefilled straight from the mail's own company name
+    assert page.locator('input[placeholder="názov firmy *"]').input_value() \
+        == "Celkom Nová Pekáreň s.r.o."
+    page.fill('input[placeholder="EAN kód EDI *"]', "7000000000321")
+    page.click('button:has-text("Uložiť nového zákazníka")')
+
+    page.wait_for_selector("text=Naposledy naučené")
+    q = teach.get(pg, qid)
+    assert q["status"] == "answered" and q["answer_gtin"] == "7000000000321"
+    row = pg.execute(
+        "SELECT name FROM customer_overrides WHERE ean_edi='7000000000321'").fetchone()
+    assert row == ("Celkom Nová Pekáreň s.r.o.",)
+
+    assert console == [], f"browser console not clean: {console}"
+
+
 def test_the_warehouse_answers_a_dl_item_question_from_the_link(live_server, pg, page):
     """#202 (DL migration F3), updated for #231: the DL matching ladder's own nástenka
     kind now renders on the SEPARATE `/otazky-dl` page (reached via its own `/sklad-dl/
@@ -508,7 +548,8 @@ def test_znalosti_lets_the_warehouse_curate_products_and_customers_directly(
 
     # --- customer: add a brand-new one, verify it actually matches by e-mail --------
     clients_box = page.locator('#wrap .box:has-text("Odberatelia")')
-    clients_box.locator('input[placeholder="EAN kód EDI"]').fill("9998887776")
+    # #234: the clientsBox() EAN field is now marked required in its own placeholder
+    clients_box.locator('input[placeholder="EAN kód EDI *"]').fill("9998887776")
     clients_box.locator('input[placeholder="názov firmy"]').fill("Nový odberateľ s.r.o.")
     clients_box.locator('input[placeholder="e-maily (čiarkou oddelené)"]').fill("novy@odber.sk")
     clients_box.locator('button:has-text("Uložiť")').click()

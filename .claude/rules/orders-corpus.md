@@ -1298,3 +1298,52 @@ intentional there for cards it was tuned against.
   resolve" should read `unmatched_items`/`items_skipped_no_match`+quantity directly,
   never `outcome`/`partial` alone — this is the same class of "the aggregate label lies
   about a narrow edge case" gotcha as this file's own `#204` note on `_aggregate_status`.
+- **`dl_match.py`'s R73 MEMORY-RESCUE rung only fires when the model is NOT already
+  "sure" (`conf < GATE_SURE or not llm_gtin`) — a fresh HUMAN answer (`dl_item_memory`,
+  `source='human'`) does NOT override an already-≥GATE_SURE model guess that then trips
+  the R75 lexical tripwire (#236, live incident).** The warehouse answered a board
+  `dl_item` question live; reprocessing the SAME document immediately after STILL
+  bounced to review with the identical `llm_sure_lexical_gap` — the model re-proposed
+  the SAME (now human-confirmed) GTIN at 0.89 confidence, `recalled` was populated in
+  the trace, but the `if recalled and (conf < GATE_SURE or not llm_gtin):` guard never
+  even evaluates it once the model is confident. This can strand a document even AFTER
+  the human "fixes" it, silently — she has no way to tell the fix didn't take. The
+  WORKING fix needs no code change: add the ordered wording (or its distinctive words)
+  as the matched card's `doplnok` (alias) via `/api/znalosti/dl-products` —
+  `_lexical_overlap`'s `card_words = _distinctive_words(name) | _distinctive_words(alias)`
+  already includes the alias, so a card whose NAME shares no stem with a real customer
+  wording can still pass the tripwire once its alias does. Reprocess (reset
+  `processed=false, processing_at=NULL, attempts=0` on `messages`) to re-verify. If this
+  recurs on a case an alias genuinely can't cover, the real fix is letting R73 also
+  rescue a `source='human'` recall regardless of model confidence (mirrors AI-orders'
+  `human_taught` rung, which sits ABOVE confidence banding) — out of scope for a
+  live-ops ticket, flag it if seen again.
+- **`dl_supplier` has NO separate alias field (unlike products' `doplnok`) — when a
+  document's OWN header names a different company than the registered supplier (a 3PL/
+  warehouse operator issuing the pick slip on the real supplier's behalf), fold the
+  extra identity into the supplier's `name` itself** (#236: "TLS Logistics, s.r.o."
+  prints Forbak s.r.o.'s delivery notes; renamed the record to `"Forbak s. r. o. (TLS
+  Logistics, s.r.o.)"` via `/api/znalosti/dl-suppliers`, upserting with the row's own
+  `orig_ean_edi`/`orig_city` from the management GET so it edits in place rather than
+  duplicating). `_score_supplier`'s word-overlap tier (R60) then matches on either name.
+- **A kg-tracked (`sklad=100`) DL catalog card covering MULTIPLE physical bag/package
+  sizes for the SAME single Codex `NEANKOD` needs a WEIGHT-NEUTRAL `name` and a BLANK
+  `mass`, never a specific size baked into the card's name** (#236: Codex has exactly
+  ONE card for "Great-náhrada fresca" — `NEANKOD 3605` — used for both 15kg and 20kg
+  bags; the DL catalog had it named "Great 20 kg", so `_weights_disagree` (±10%
+  tolerance) hard-rejected every "Great 15 kg" delivery, alias or not — the
+  weight-conflict guard reads `mass_grams(card.name)` directly, doplnok is NOT
+  consulted there). Renaming to plain `"Great"` (keeping `doplnok` for scoring) makes
+  `mass_grams(card.name)` return `None` → the guard is structurally skipped for that
+  card; leaving `mass` blank is CORRECT (not a gap to fill) because `dl_match._mass_kg`
+  and `desadv_edi.py`'s own `_extract_mass` fallback both then read the WEIGHT PER LINE
+  straight off each delivery's own wording, which is what actually varies.
+- **Cross-checking a warehouse-provided value against Codex directly (`raw.firma.
+  AEDIEAN`) is stronger evidence than trusting the value alone, and cheap** (#236: a
+  new DL supplier's EAN-EDI code, given as a screenshot, was independently confirmed
+  present verbatim in `raw.firma` before being written to `dl_supplier_overrides`).
+  `claude.ai codex bridge` MCP was flaky this session (repeatedly connects then
+  disconnects) — the documented fallback (`local-testing.md`/deploy memory: direct
+  `python3 -c "import duckdb; duckdb.connect('/var/lib/codex-bridge/codex.duckdb',
+  read_only=True)..."` over `ssh dev2`) worked every time and is the reliable path,
+  not just a backup.

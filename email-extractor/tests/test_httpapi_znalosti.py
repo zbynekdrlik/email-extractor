@@ -265,6 +265,21 @@ def test_add_customer_needs_a_name(pg):
     assert c.post("/api/znalosti/clients", json={"ean_edi": "1"}).status_code == 400
 
 
+def test_znalosti_clients_post_refuses_a_blank_ean(pg):
+    """#234: the EAN kód EDI can never be forgotten, whichever screen a customer is added
+    from."""
+    _snap(pg)
+    c = _client()
+    _login(c)
+    r = c.post("/api/znalosti/clients", json={"name": "Bez EAN s.r.o."})
+    assert r.status_code == 400
+    assert c.get("/api/znalosti/clients").get_json()["items"]
+    assert not any(i["name"] == "Bez EAN s.r.o."
+                  for i in c.get("/api/znalosti/clients").get_json()["items"])
+    r2 = c.post("/api/znalosti/clients", json={"ean_edi": "SK-123", "name": "Zlý EAN s.r.o."})
+    assert r2.status_code == 400
+
+
 def test_edit_an_existing_customer_by_its_original_sheet_identity(pg):
     _snap(pg)
     c = _client()
@@ -300,13 +315,14 @@ def test_znalosti_client_writes_reachable_via_the_warehouse_link(pg):
     c = _client()
     c.get("/sklad/" + sklad_key("test-secret"))
     assert c.get("/api/znalosti/clients").status_code == 200
-    r = c.post("/api/znalosti/clients", json={"ean_edi": "SK1", "name": "od skladu"})
+    # #234: ean_edi must be numeric — a plain code like "SK1" is refused everywhere now
+    r = c.post("/api/znalosti/clients", json={"ean_edi": "7000000000501", "name": "od skladu"})
     assert r.status_code == 200
     # retire (DELETE) is method-agnostic in SKLAD_ZNALOSTI_API too, not just GET/POST —
     # review finding: this was untested (mirrors the #93/PR#116 SKLAD_PATHS gap)
     assert c.delete("/api/znalosti/clients", json={"override_id": None, "orig_ean_edi": None,
                                                     "orig_street": None}).status_code == 404
-    c.post("/api/znalosti/clients", json={"ean_edi": "SK2", "name": "na vyradenie"})
+    c.post("/api/znalosti/clients", json={"ean_edi": "7000000000502", "name": "na vyradenie"})
     with_id = c.get("/api/znalosti/clients?q=vyradenie").get_json()["items"][0]
     assert c.delete("/api/znalosti/clients",
                     json={"override_id": with_id["override_id"],
