@@ -686,7 +686,7 @@ def _offered_values(q: dict) -> set[str]:
 
 def ask_dl_item(conn, message_id: str, supplier_ean: str, supplier_name: str, wording: str,
                 quantity, unit: str, candidates: list[dict], delivery_date: str = "",
-                reason: str = "", on_new=None) -> int | None:
+                reason: str = "", catalog_gtins=None, on_new=None) -> int | None:
     """Raise ONE 'ktorá karta je táto DL položka?' question, scoped per (supplier, wording) —
     a second DL from the same supplier with the same still-unresolved wording reuses the SAME
     open question, exactly like `ask()`'s own per-(customer, wording) dedupe.
@@ -698,11 +698,24 @@ def ask_dl_item(conn, message_id: str, supplier_ean: str, supplier_name: str, wo
     Skips (returns `None`, asks nothing) when this exact (supplier, wording) is ALREADY
     human-taught — mirrors `ask()`'s own `recalled.human` pre-check (review finding on this
     issue's PR: without it, a future caller could raise a needless duplicate question for a
-    wording `dl_memory.resolve()` would already answer for free)."""
+    wording `dl_memory.resolve()` would already answer for free).
+
+    `catalog_gtins` (review finding, #240): MUST be passed by any live caller that has a
+    current catalog snapshot on hand (`dl_worker._process_document` does) — without it,
+    a wording taught with a GTIN that has since been RETIRED from the catalog is still
+    reported as "already human-taught" here (this pre-check's OWN `dl_memory.resolve()`
+    call, unlike the real matching decision in `dl_match.decide_item`, would otherwise
+    apply NO catalog filter at all) and this function silently refuses to ask again —
+    even though that stale mapping can never actually resolve the item (`decide_item`'s
+    own, correctly-filtered lookup rejects it too). That combination is a genuine,
+    permanent silent hang: the exact failure class this whole ticket exists to close,
+    just for a taught-then-retired card instead of a never-taught one. `None` (the
+    default) preserves the OLD, unfiltered behaviour for any caller with no catalog
+    handy (e.g. a direct test)."""
     key = memory.item_key(wording)
     if not (message_id and supplier_ean and key):
         return None
-    recalled = dl_memory.resolve(conn, supplier_ean, wording)
+    recalled = dl_memory.resolve(conn, supplier_ean, wording, catalog_gtins=catalog_gtins)
     if recalled is not None and recalled.human:
         return None
     options = [{"value": str(c.get("gtin")), "label": c.get("name") or str(c.get("gtin"))}
@@ -728,12 +741,19 @@ def _validate_dl_item(q: dict, choice: str, by: str) -> None:
 
 
 def _apply_dl_item(conn, cfg, q: dict, choice: str, by: str) -> dict:
-    """#240: teaches the wording (unchanged), then gives the DOCUMENT that raised this
-    question its own second chance to finish — `dl_worker.release_for_question` re-runs
-    the message once every dl_item/dl_supplier question it still has open is answered.
-    Lazy import: `dl_worker` imports `teach` at its own top, so a module-level import
-    here would deadlock the same way `hold.py`'s own docstring already explains for its
-    `pipeline` import."""
+    """A blank choice ('neviem, ktorá karta to je') teaches nothing — same honesty as
+    `_apply_dl_supplier`'s own 'neviem' path (review finding, #240: added here for
+    symmetry/defensiveness; `_api_orders_answer_generic`'s own blank-choice short-circuit
+    already keeps this branch dead on the real HTTP path, but a future/direct caller
+    should not be able to trigger a pointless reprocess attempt off an empty pick).
+
+    #240: a REAL pick also gives the DOCUMENT that raised this question its own second
+    chance to finish — `dl_worker.release_for_question` re-runs the message once every
+    dl_item/dl_supplier question it still has open is answered. Lazy import: `dl_worker`
+    imports `teach` at its own top, so a module-level import here would deadlock the same
+    way `hold.py`'s own docstring already explains for its `pipeline` import."""
+    if not choice:
+        return {}
     payload = q.get("payload") or {}
     supplier_ean = payload.get("supplier_ean", "")
     card = next((c.get("label", "") for c in (q.get("candidates") or [])

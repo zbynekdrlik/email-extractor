@@ -82,6 +82,8 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
+import psycopg
+
 from .. import store
 from . import (
     desadv,
@@ -480,7 +482,8 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             teach.ask_dl_item(conn, message["message_id"], supplier_decision.ean_edi,
                               supplier_decision.name, item.get("name", ""),
                               item.get("quantity"), item.get("unit", ""), cands,
-                              delivery_date=delivery_date, reason=decision.note)
+                              delivery_date=delivery_date, reason=decision.note,
+                              catalog_gtins=catalog_gtins)
 
     header = {"customerName": supplier_decision.name,
              "customerEanEdi": supplier_decision.ean_edi}
@@ -754,6 +757,23 @@ def _run_and_finish(conn, cfg, client, message: dict, snapshot_id: int | None,
         worker._finish_run(conn, run_id, "retry",
                            {"kind": "dl", "dl_snapshot_id": snapshot_id, "reason": str(e)},
                            error=str(e))
+        # Deep-review finding on this ticket's own PR (#240): `tick()`'s claim branch
+        # relies on `_claim()` having already set `processing_at = now()` and `processed
+        # = false` — leaving both UNTOUCHED here is what lets R10's 30-minute stale
+        # window reclaim the message later. `release_for_question`'s reprocess call
+        # never went through `_claim()` at all: the message arrives here with `processed
+        # = true` (its earlier, successful pass already set that) and `processing_at =
+        # NULL` — leaving BOTH untouched would permanently strand the message outside
+        # `_claim()`'s own `WHERE processed = false` filter, with no path back into the
+        # normal retry cycle at all (a human's answer recorded, but the document never
+        # gets the "second chance" this whole ticket exists to give it). Explicitly
+        # re-arming both columns here makes the message reclaimable by the SAME stale
+        # window either way — a genuine no-op for the tick()-claim path (both columns
+        # already held these values moments earlier) and the actual fix for the
+        # release_for_question-reprocess path.
+        conn.execute(
+            """UPDATE messages SET processed = false, processing_at = now()
+                WHERE message_id = %s""", (message["message_id"],))
         report.log_event(conn, message["message_id"], stage="retry", status="retry",
                          outcome=str(e)[:500], rollup=False, workflow=dl_report.WORKFLOW)
         return None
@@ -766,9 +786,20 @@ def _run_and_finish(conn, cfg, client, message: dict, snapshot_id: int | None,
         # (a hard failure). Always tag `kind`.
         worker._finish_run(conn, run_id, "error",
                            {"kind": "dl", "dl_snapshot_id": snapshot_id}, error=repr(e))
+        # Deep-review finding on this ticket's own PR (#240), same reasoning as the
+        # `_RetryLater` branch above: a hard failure during a `release_for_question`
+        # reprocess also arrives here with `processed = true` (its earlier, successful
+        # pass already set that) — `processing_at = NULL` alone would leave `processed`
+        # untouched and permanently strand the message outside `_claim()`'s own `WHERE
+        # processed = false` filter, exactly like the retry case, just with no 30-minute
+        # stale window at all (a hard failure has always been immediately reclaimable —
+        # `processing_at = NULL` puts it straight back in `_claim()`'s pool, matching the
+        # existing tick()-claim behaviour this line already had). Re-arming `processed`
+        # too is a genuine no-op for the tick()-claim path (already `false`) and the
+        # actual fix for the reprocess path.
         conn.execute(
-            "UPDATE messages SET processing_at = NULL WHERE message_id = %s",
-            (message["message_id"],))
+            "UPDATE messages SET processed = false, processing_at = NULL "
+            "WHERE message_id = %s", (message["message_id"],))
         return None
     worker._finish_run(conn, run_id, result.get("status", "ok"), result)
     conn.execute(
@@ -818,38 +849,70 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
     Returns the reprocessed message's own `documents` list (mirrors AI-orders'
     `hold.release_for_question`'s `released` list) — `[]` when nothing happened yet (a
     sibling question is still open), or when there is genuinely nothing to reprocess
-    (the message row is gone, or no catalog snapshot is loaded)."""
-    still_open = conn.execute(
-        """SELECT 1 FROM order_questions
-            WHERE message_id = (SELECT message_id FROM order_questions WHERE id = %s)
-              AND kind IN ('dl_item', 'dl_supplier') AND status = 'open' LIMIT 1""",
-        (qid,)).fetchone()
-    if still_open:
-        return []
+    (the message row is gone, or no catalog snapshot is loaded).
+
+    Deep-review finding on this ticket's own PR (#240): the "every sibling answered?"
+    check below has no lock of its own — two near-simultaneous answers to SIBLING
+    questions of the SAME message could each independently observe "every question
+    answered" under READ COMMITTED and both dispatch a reprocess (the exact race
+    `hold._release_locked`'s own docstring already documents and fixes for AI-orders,
+    #118). Bounded to WASTED work, never corruption (`desadv.claim_send_or_identify` is
+    still the real, atomic backstop against a double-upload) — but a doubled LLM call, a
+    duplicate `order_runs` row and duplicate digest noise per collision is real, avoidable
+    waste. `pg_advisory_xact_lock(hashtext(message_id))`, taken on a SEPARATE connection
+    and held for the WHOLE check-through-reprocess decision (mirrors the `db.py`
+    migration-lock idiom this codebase already uses, and `hold._release_locked`'s own
+    "separate connection, held for the whole decision" shape — DL has no natural row to
+    `FOR UPDATE` the way `held_orders` gives AI-orders, so a plain advisory lock keyed on
+    the message id is the closest honest equivalent).
+
+    Correction (review of THIS lock's own first draft, same PR): the SECOND of two racing
+    answers does NOT "no-op" once it acquires the lock — the sibling questions it re-reads
+    are the SAME `status='answered'` rows the first racer already saw (answering a
+    question doesn't reopen it), so the second racer still runs its own full
+    `_run_and_finish` pass (a second LLM call, a second `order_runs` row) — the lock only
+    SERIALIZES the two attempts instead of letting them run truly concurrently; it does
+    not skip the second one. What actually stops the waste from becoming a real
+    duplicate DELIVERY is the same `desadv.claim_send_or_identify` claim two paragraphs
+    up — the second pass's own upload attempt sees the first pass's already-confirmed
+    claim and refuses to re-ship. The lock's whole value is narrower than "no-op": it
+    guarantees the two attempts never touch `desadv.claim_send_or_identify` at the same
+    instant (no TOCTOU on the claim check itself), and it keeps the SQL cheap
+    (no genuinely parallel Postgres work on the same message) — it does not, by itself,
+    prevent the wasted second LLM call and `order_runs` row this docstring already
+    called out above as the acceptable cost."""
     qrow = conn.execute(
         "SELECT message_id FROM order_questions WHERE id = %s", (qid,)).fetchone()
     if not qrow:
         return []
     message_id = qrow[0]
-    msg_row = conn.execute(
-        """SELECT message_id, subject, from_addr, from_name, combined_text, body_text,
-                  has_attachments FROM messages WHERE message_id = %s""",
-        (message_id,)).fetchone()
-    if not msg_row:
-        return []
-    message = _as_message(msg_row)
-    snapshot_id = dl_snapshot.latest_snapshot_id(conn)
-    if not snapshot_id:
-        log.warning("release_for_question(%s): no DL catalog snapshot yet — cannot "
-                    "reprocess %s", qid, message_id)
-        return []
-    catalog = dl_snapshot.load_catalog(conn, snapshot_id)
-    suppliers = dl_snapshot.load_suppliers(conn, snapshot_id)
-    if client is None:
-        client = llm.from_config(cfg)
-    result = _run_and_finish(conn, cfg, client, message, snapshot_id, catalog, suppliers,
-                             upload=upload, post=post)
-    return (result or {}).get("documents", [])
+    with psycopg.connect(cfg.pg_dsn) as lock_tx:
+        lock_tx.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (message_id,))
+        still_open = conn.execute(
+            """SELECT 1 FROM order_questions
+                WHERE message_id = %s AND kind IN ('dl_item', 'dl_supplier')
+                  AND status = 'open' LIMIT 1""", (message_id,)).fetchone()
+        if still_open:
+            return []
+        msg_row = conn.execute(
+            """SELECT message_id, subject, from_addr, from_name, combined_text,
+                      body_text, has_attachments FROM messages
+                WHERE message_id = %s""", (message_id,)).fetchone()
+        if not msg_row:
+            return []
+        message = _as_message(msg_row)
+        snapshot_id = dl_snapshot.latest_snapshot_id(conn)
+        if not snapshot_id:
+            log.warning("release_for_question(%s): no DL catalog snapshot yet — cannot "
+                        "reprocess %s", qid, message_id)
+            return []
+        catalog = dl_snapshot.load_catalog(conn, snapshot_id)
+        suppliers = dl_snapshot.load_suppliers(conn, snapshot_id)
+        if client is None:
+            client = llm.from_config(cfg)
+        result = _run_and_finish(conn, cfg, client, message, snapshot_id, catalog,
+                                 suppliers, upload=upload, post=post)
+        return (result or {}).get("documents", [])
 
 
 # --- one tick ----------------------------------------------------------------
