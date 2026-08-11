@@ -29,10 +29,6 @@ options:
   secret_key: ""
   http_port: 8099
   data_dir: "/data/store"
-  catalog_sheet_id: ""
-  catalog_gid: ""
-  customer_gid: ""
-  catalog_refresh_minutes: 60
   ai_orders_engine: "n8n"
   orders_shadow: false
   orders_shadow_days: 3
@@ -62,7 +58,6 @@ options:
   delivery_notes_engine: "n8n"
   delivery_notes_shadow: false
   delivery_notes_shadow_days: 3
-  dl_catalog_gid: ""
 schema:
   imap_host: str
   imap_port: int
@@ -79,10 +74,6 @@ schema:
   secret_key: password?
   http_port: int
   data_dir: str
-  catalog_sheet_id: str?
-  catalog_gid: str?
-  customer_gid: str?
-  catalog_refresh_minutes: int?
   ai_orders_engine: list(n8n|python)?
   orders_shadow: bool?
   orders_shadow_days: int?
@@ -112,4 +103,3 @@ schema:
   delivery_notes_engine: list(n8n|python)?
   delivery_notes_shadow: bool?
   delivery_notes_shadow_days: int?
-  dl_catalog_gid: str?

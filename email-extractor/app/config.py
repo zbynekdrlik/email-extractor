@@ -48,12 +48,13 @@ class Config:
     # uses over the docker network (see `linkutil.sklad_url`'s docstring — 0.9.10 fixed
     # exactly this confusion once already, never repeat it).
     dashboard_base_url: str = ""
-    # --- order pipeline (#59): the catalog/customer sheet is fetched as CSV and frozen
-    # into Postgres. The document id is an option, never committed. ---
-    catalog_sheet_id: str = ""
-    catalog_gid: str = ""
-    customer_gid: str = ""
-    catalog_refresh_minutes: int = 60
+    # #235: catalog_sheet_id/catalog_gid/customer_gid/catalog_refresh_minutes (the
+    # AI-orders sheet) and dl_catalog_gid (the DL sheet, below) REMOVED — #129
+    # (2026-08-07) permanently stopped reading either Sheet, but these options stayed
+    # declared here (and in config.yaml/the live add-on's options.json) with real-
+    # looking values, misleading the warehouse into thinking the Sheet still worked
+    # (see #235's own root cause). Postgres overrides are now the sole source of truth
+    # for both catalogs — see snapshot.py/dl_snapshot.py.
     # n8n owns the live pipeline until this is flipped to "python"; "shadow" runs the
     # Python pipeline for comparison only (claims nothing, uploads nothing).
     ai_orders_engine: str = "n8n"
@@ -97,10 +98,6 @@ class Config:
     delivery_notes_engine: str = "n8n"
     delivery_notes_shadow: bool = False
     delivery_notes_shadow_days: int = 3
-    # #200: the "produkty dodacie listy" tab (gid 1437442607 in the live sheet) — the
-    # DL catalog is the UNION of this tab with the existing catalog_gid tab ("produkty
-    # objednavky"), never a replacement of it. See app/orders/dl_snapshot.py.
-    dl_catalog_gid: str = ""
     # #200: DL uploads land in a DIFFERENT ORION folder than orders (in_DL, not in) —
     # same "not exposed as an add-on option" precedent as orion_dir above (an internal
     # convention path, not something an operator tunes).
@@ -162,11 +159,6 @@ class Config:
             secret_key=_get(o, "secret_key", "SECRET_KEY", ""),
             public_base_url=base,
             dashboard_base_url=dashboard_base,
-            catalog_sheet_id=_get(o, "catalog_sheet_id", "CATALOG_SHEET_ID", "") or "",
-            catalog_gid=str(_get(o, "catalog_gid", "CATALOG_GID", "") or ""),
-            customer_gid=str(_get(o, "customer_gid", "CUSTOMER_GID", "") or ""),
-            catalog_refresh_minutes=int(
-                _get(o, "catalog_refresh_minutes", "CATALOG_REFRESH_MINUTES", 60)),
             ai_orders_engine=str(_get(o, "ai_orders_engine", "AI_ORDERS_ENGINE", "n8n")
                                  or "n8n"),
             orders_shadow=str(
@@ -213,7 +205,6 @@ class Config:
                     "1", "true", "yes", "on"),
             delivery_notes_shadow_days=int(
                 _get(o, "delivery_notes_shadow_days", "DELIVERY_NOTES_SHADOW_DAYS", 3) or 3),
-            dl_catalog_gid=str(_get(o, "dl_catalog_gid", "DL_CATALOG_GID", "") or ""),
             orion_dl_dir=_get(o, "orion_dl_dir", "ORION_DL_DIR",
                               "C:\\ORION\\COMMUNICATOR\\data\\in_DL"),
             import_confirm_interval_minutes=int(

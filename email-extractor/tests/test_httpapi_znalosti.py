@@ -414,14 +414,18 @@ def test_retire_a_dl_product_card_removes_it_from_the_list(pg):
     assert c.delete("/api/znalosti/dl-products/NOPE").status_code == 404
 
 
-def test_znalosti_dl_product_writes_reachable_via_the_warehouse_link(pg):
+def test_the_orders_warehouse_link_can_no_longer_reach_dl_product_writes(pg):
+    """#235: SKLAD_ZNALOSTI_API used to include dl-products/dl-suppliers too (since
+    #223's dashboard-editing rollout) — a pre-existing gap that let the orders-only
+    warehouse link write DL catalog data, which #235's own boundary requirement ("the
+    orders role must equally not gain DL write access") closes. DL knowledge now has
+    its own separate role/endpoint (SKLAD_DL_ROLE, see test_httpapi_new_dl.py)."""
     _dl_snap(pg)
     c = _client()
     c.get("/sklad/" + sklad_key("test-secret"))
-    assert c.get("/api/znalosti/dl-products").status_code == 200
-    r = c.post("/api/znalosti/dl-products", json={"gtin": "SK1", "name": "od skladu"})
-    assert r.status_code == 200
-    assert c.delete("/api/znalosti/dl-products/SK1").status_code == 200
+    assert c.get("/api/znalosti/dl-products").status_code == 401
+    assert c.post("/api/znalosti/dl-products",
+                  json={"gtin": "SK1", "name": "od skladu"}).status_code == 401
     assert c.get("/api/messages").status_code == 401
 
 
@@ -483,30 +487,23 @@ def test_retire_a_dl_supplier_removes_it_from_the_list(pg):
     assert "8586010000001" not in eans
 
 
-def test_znalosti_dl_supplier_writes_reachable_via_the_warehouse_link(pg):
+def test_the_orders_warehouse_link_can_no_longer_reach_dl_supplier_writes(pg):
+    """Same #235 boundary fix as the products test above, pinned for suppliers."""
     _dl_snap(pg)
     c = _client()
     c.get("/sklad/" + sklad_key("test-secret"))
-    assert c.get("/api/znalosti/dl-suppliers").status_code == 200
-    r = c.post("/api/znalosti/dl-suppliers", json={"ean_edi": "SK1", "name": "od skladu"})
-    assert r.status_code == 200
-    assert c.delete("/api/znalosti/dl-suppliers",
-                    json={"override_id": None, "orig_ean_edi": None,
-                          "orig_city": None}).status_code == 404
-    c.post("/api/znalosti/dl-suppliers", json={"ean_edi": "SK2", "name": "na vyradenie"})
-    with_id = c.get("/api/znalosti/dl-suppliers?q=vyradenie").get_json()["items"][0]
-    assert c.delete("/api/znalosti/dl-suppliers",
-                    json={"override_id": with_id["override_id"],
-                          "orig_ean_edi": with_id["orig_ean_edi"],
-                          "orig_city": with_id["orig_city"]}).status_code == 200
+    assert c.get("/api/znalosti/dl-suppliers").status_code == 401
+    assert c.post("/api/znalosti/dl-suppliers",
+                  json={"ean_edi": "2000000000900", "name": "od skladu"}).status_code == 401
     assert c.get("/api/messages").status_code == 401
 
 
 def test_sklad_link_does_not_match_a_path_that_merely_starts_with_dl_products(pg):
-    """Review finding on PR #223: SKLAD_ZNALOSTI_API's new `dl-products(/[^/]+)?|
-    dl-suppliers` alternatives are anchored with ^/$ — pin that an unrelated path
-    sharing the prefix is NOT accidentally granted to the unauthenticated warehouse
-    link (a regex without `$` would match this)."""
+    """Review finding on PR #223, still true after #235's narrowing: neither znalosti
+    regex should match an unrelated path sharing the dl-products/dl-suppliers prefix
+    (a regex without `$` would match this) — orders role gets 401 regardless now that
+    dl-* is out of its allowlist entirely (#235); the DL role's OWN anchoring is pinned
+    separately in test_httpapi_new_dl.py."""
     _dl_snap(pg)
     c = _client()
     c.get("/sklad/" + sklad_key("test-secret"))

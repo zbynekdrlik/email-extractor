@@ -38,16 +38,21 @@ class InvalidCustomer(Exception):
 _EAN_STRIP_RE = re.compile(r"[\s\-]")
 
 
-def normalize_ean(value) -> str:
+def normalize_ean(value, *, entity: str = "zákazník", field: str = "EAN kód EDI") -> str:
     """Strip spaces/dashes and validate. `upsert_customer` calls this UNCONDITIONALLY —
     #234's whole point is that the EAN can never again be silently forgotten, so every
-    write path funnels through here, not just the ones that remembered to check."""
-    ean = _EAN_STRIP_RE.sub("", str(value or ""))
-    if not ean:
-        raise InvalidCustomer("Bez EAN kódu EDI sa zákazník nedá uložiť.")
-    if not ean.isdigit():
-        raise InvalidCustomer("EAN kód EDI musí byť len číslice.")
-    return ean
+    write path funnels through here, not just the ones that remembered to check.
+
+    #235: `entity`/`field` let a DIFFERENT write path (a DL supplier's EAN kód EDI, a DL
+    catalog card's GTIN) reuse this exact helper — not a second copy of the regex/digit
+    check — with its own precise Slovak wording. The defaults reproduce #234's original
+    messages byte-for-byte, so every existing customer caller/test is unaffected."""
+    code = _EAN_STRIP_RE.sub("", str(value or ""))
+    if not code:
+        raise InvalidCustomer(f"Bez {field} sa {entity} nedá uložiť.")
+    if not code.isdigit():
+        raise InvalidCustomer(f"{field} musí byť len číslice.")
+    return code
 
 
 def _rows(text: str) -> list[dict]:

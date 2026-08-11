@@ -95,10 +95,23 @@ def test_delivery_notes_engine_reads_from_options(tmp_path, monkeypatch):
     assert cfg.delivery_notes_shadow_days == 7
 
 
-def test_dl_catalog_gid_defaults_empty_and_reads_from_options(tmp_path, monkeypatch):
-    assert _load_with_options(tmp_path, monkeypatch, {}).dl_catalog_gid == ""
-    cfg = _load_with_options(tmp_path, monkeypatch, {"dl_catalog_gid": "1437442607"})
-    assert cfg.dl_catalog_gid == "1437442607"
+def test_dead_sheet_options_are_gone_and_a_stale_live_value_is_harmlessly_ignored(
+        tmp_path, monkeypatch):
+    """#235: catalog_sheet_id/catalog_gid/customer_gid/catalog_refresh_minutes/
+    dl_catalog_gid removed entirely (#129 already permanently disabled the Sheet reads
+    they configured; leaving them declared misled the warehouse into thinking the Sheet
+    still worked — see #235's own root cause). `Config` no longer HAS these fields at
+    all, and `_get()`'s plain dict lookup means a live add-on's options.json that still
+    carries the old keys for a while (until the options-POST cleanup) is a harmless
+    no-op — nothing reads them, nothing errors."""
+    from app.config import Config
+    cfg = _load_with_options(tmp_path, monkeypatch, {
+        "catalog_sheet_id": "DOC", "catalog_gid": "1", "customer_gid": "2",
+        "catalog_refresh_minutes": 60, "dl_catalog_gid": "1437442607"})
+    for dead in ("catalog_sheet_id", "catalog_gid", "customer_gid",
+                "catalog_refresh_minutes", "dl_catalog_gid"):
+        assert dead not in Config.__dataclass_fields__, f"{dead} must be removed from Config"
+    assert cfg.delivery_notes_engine == "n8n"  # the rest of Config still loads fine
 
 
 def test_orion_dl_dir_defaults_to_a_different_folder_than_orders(tmp_path, monkeypatch):

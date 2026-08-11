@@ -90,9 +90,21 @@ SKLAD_ACTION = re.compile(r"^/api/orders/question/\d+/(answer|undo)$")
 # #104: the same warehouse link also reaches the knowledge-base page. Same boundary rule as
 # SKLAD_PATHS above — wording/gtin/card metadata only, never a mail body or an attachment.
 SKLAD_ZNALOSTI_PAGE = re.compile(r"^/znalosti(/[^/]+)?$")
+# #235: narrowed to the ORDERS-only knowledge (global/catalog/customers/products/clients) —
+# `dl-products`/`dl-suppliers` used to be alternatives here too (since #223's dashboard-
+# editing rollout), which meant the orders SKLAD_ROLE already had a real, unintended write
+# path into the DL supplier/catalog data — a pre-existing gap #235's own boundary
+# requirement ("the orders role must equally not gain DL write access") closes. DL
+# knowledge now has its own, separate allowlist below (SKLAD_DL_ZNALOSTI_API).
 SKLAD_ZNALOSTI_API = re.compile(
     r"^/api/znalosti/(global(/\d+)?|catalog|customers|customer/[^/]+(/\d+)?"
-    r"|products(/[^/]+)?|clients|dl-products(/[^/]+)?|dl-suppliers)$")
+    r"|products(/[^/]+)?|clients)$")
+# #235: the DL nástenka's own API-only reach — deliberately NOT the `/znalosti` PAGE (that
+# template also renders orders-domain boxes: catalog/customers/clients search+edit — giving
+# SKLAD_DL_ROLE the page would either expose that dead-end UI or, if the API were widened to
+# match, be a real widening of her role into the orders agenda). Only the two DL-specific
+# endpoints her question card's new-entry form actually calls.
+SKLAD_DL_ZNALOSTI_API = re.compile(r"^/api/znalosti/(dl-products(/[^/]+)?|dl-suppliers)$")
 
 # #231: a SECOND, independent unauthenticated link — the delivery-notes-only nástenka.
 # `order_questions.kind` is the ONE discriminator between the two agendas
@@ -228,7 +240,8 @@ def create_app(cfg) -> Flask:
             if not p.startswith("/api/"):
                 return redirect("/otazky")
         if session.get("role") == SKLAD_DL_ROLE:
-            if p in SKLAD_DL_PATHS or SKLAD_ACTION.match(p):
+            if (p in SKLAD_DL_PATHS or SKLAD_ACTION.match(p)
+                    or SKLAD_DL_ZNALOSTI_API.match(p)):
                 return None
             # Not an error: send the warehouse back to the ONE page IT owns — never
             # /otazky, which is the orders-only board (#231's whole point).
@@ -711,12 +724,83 @@ def create_app(cfg) -> Flask:
             released = hold.release_for_question(c2, cfg, qid)
         return jsonify(ok=True, question=answered, released=released)
 
+    def _api_orders_answer_new_dl_supplier(qid: int, q: dict, ns: dict):
+        """#235: the DL-supplier half of the same "genuinely new, not just unoffered"
+        card action #234 gave customers — HK LOAN (#236) is the concrete case. Validate
+        the EAN-EDI (never forgettable — same helper #234 established, reused with
+        `entity="dodávateľ"`), write the supplier, extend the question's OWN offered
+        candidate set (`teach.add_candidate` — never bypass `_validate_dl_supplier`'s
+        own check), then fall through to the SAME generic answer path every other
+        dl_supplier pick already uses."""
+        from .orders import teach
+        ean = _EAN_STRIP_RE.sub("", str(ns.get("ean_edi") or ""))
+        if not ean:
+            return jsonify(error="Bez EAN kódu EDI sa dodávateľ nedá uložiť — nájdeš ho "
+                                 "v CODEXe pri dodávateľovi."), 400
+        if not ean.isdigit():
+            return jsonify(error="EAN kód EDI musí byť len číslice."), 400
+        name = str(ns.get("name") or "").strip()
+        if not name:
+            return jsonify(error="chýba názov"), 400
+        emails = _parse_emails_field(ns.get("emails"))
+        # `ask_dl_supplier`/`ask_generic` store the sender address in `payload`, not
+        # `context` (that column is `customer`-kind-only, see `ask_customer`) — the
+        # bug this fixes: reading `context` here always returns {} for a dl_supplier
+        # question, so the sender's own address was silently never appended.
+        ctx = q.get("payload") or {}
+        ctx_email = str(ctx.get("sender_email") or "").strip().lower()
+        if ctx_email and ctx_email not in [e.lower() for e in emails]:
+            emails.append(ctx_email)
+        city = str(ns.get("city") or "").strip()
+        try:
+            with _db_tx() as c:
+                dl_snapshot.upsert_dl_supplier(
+                    c, override_id=None, orig_ean_edi=None, orig_city=None,
+                    ean_edi=ean, name=name, emails=emails, city=city)
+                dl_snapshot.dl_rebuild_from_overrides(c)
+                teach.add_candidate(c, qid, {"value": ean, "label": name})
+        except snapshot.InvalidCustomer as e:
+            return jsonify(error=str(e)), 400
+        with _db() as c2:
+            q2 = teach.get(c2, qid)
+        return _api_orders_answer_generic(qid, q2, {"choice": ean, "by": "sklad"})
+
+    def _api_orders_answer_new_dl_item(qid: int, q: dict, ni: dict):
+        """#235: the DL-item half — a genuinely new catalog card with no GTIN in Codex
+        yet (the #236 "Soľ jedlá..." case). Same shape as the supplier branch above."""
+        from .orders import teach
+        gtin = _EAN_STRIP_RE.sub("", str(ni.get("gtin") or ""))
+        if not gtin:
+            return jsonify(error="Bez GTIN sa karta nedá uložiť — nájdeš ho v CODEXe "
+                                 "pri produkte."), 400
+        if not gtin.isdigit():
+            return jsonify(error="GTIN musí byť len číslice."), 400
+        name = str(ni.get("name") or "").strip()
+        if not name:
+            return jsonify(error="chýba názov"), 400
+        with _db_tx() as c:
+            dl_snapshot.upsert_dl_catalog_card(c, gtin, name)
+            dl_snapshot.dl_rebuild_from_overrides(c)
+            teach.add_candidate(c, qid, {"value": gtin, "label": name})
+        with _db() as c2:
+            q2 = teach.get(c2, qid)
+        return _api_orders_answer_generic(qid, q2, {"choice": gtin, "by": "sklad"})
+
     def _api_orders_answer_generic(qid: int, q: dict, body: dict):
         """#164: the SAME dispatch endpoint, generalized for kinds beyond item/customer
-        (mail/date/line) — a UNIFIED `{"choice": ..., "by": ...}` body, routed through
-        `teach.KINDS[q['kind']]`. `choice` blank/`"unknown"` is the universal escape
-        hatch (constraint 5 of #164): the question stays OPEN and visible instead of
-        being silently marked answered with nothing."""
+        (mail/date/line, and #235's dl_item/dl_supplier) — a UNIFIED `{"choice": ...,
+        "by": ...}` body, routed through `teach.KINDS[q['kind']]`. `choice` blank/
+        `"unknown"` is the universal escape hatch (constraint 5 of #164): the question
+        stays OPEN and visible instead of being silently marked answered with nothing.
+
+        #235: a `new_supplier`/`new_item` body (mirrors `customer`'s own `new_customer`
+        branch) means the pick genuinely does not exist yet — dispatched BEFORE the
+        open/kind checks below, same as `_api_orders_answer_customer` does for
+        `new_customer`."""
+        if q.get("kind") == "dl_supplier" and isinstance(body.get("new_supplier"), dict):
+            return _api_orders_answer_new_dl_supplier(qid, q, body["new_supplier"])
+        if q.get("kind") == "dl_item" and isinstance(body.get("new_item"), dict):
+            return _api_orders_answer_new_dl_item(qid, q, body["new_item"])
         from .orders import teach
         kind = teach.KINDS.get(q.get("kind", ""))
         if not kind:
@@ -861,7 +945,17 @@ def create_app(cfg) -> Flask:
     @app.get("/znalosti")
     @app.get("/znalosti/<ean>")
     def znalosti_page(ean: str = ""):
-        return ZNALOSTI_HTML.replace("__VERSION__", __version__)
+        # #235: the DL product/supplier boxes call `/api/znalosti/dl-products`/
+        # `dl-suppliers` — SKLAD_ROLE (the orders-only warehouse link) no longer has API
+        # access to those (SKLAD_ZNALOSTI_API narrowed, see this ticket's own boundary
+        # requirement). Rendering the boxes anyway would fire two 401s the instant the
+        # page loads for that role (a real, dirty browser-console failure, caught by the
+        # existing Playwright coverage) — so a non-admin session gets the page WITHOUT
+        # them; a real dash_password login (`session["auth"]`) is unaffected.
+        dl_boxes = ("    W.appendChild(dlProductsBox());\n"
+                   "    W.appendChild(dlSuppliersBox());\n") if session.get("auth") else ""
+        return (ZNALOSTI_HTML.replace("__VERSION__", __version__)
+               .replace("__DL_BOXES__", dl_boxes))
 
     def _current_catalog(c):
         sid = snapshot.latest_snapshot_id(c)
@@ -1096,11 +1190,21 @@ def create_app(cfg) -> Flask:
         name = str(body.get("name") or "").strip()
         if not name:
             return jsonify(error="chýba názov"), 400
+        # #235: the same EAN-cannot-be-forgotten guarantee #234 gave customers, reusing
+        # the SAME `_EAN_STRIP_RE` constant (not a second copy) — an early, precise 400
+        # before ever reaching the DB layer. `dl_snapshot.upsert_dl_supplier` ALSO
+        # enforces this unconditionally (defense in depth, any future caller).
+        ean = _EAN_STRIP_RE.sub("", str(body.get("ean_edi") or ""))
+        if not ean:
+            return jsonify(error="Bez EAN kódu EDI sa dodávateľ nedá uložiť — nájdeš ho "
+                                 "v CODEXe pri dodávateľovi."), 400
+        if not ean.isdigit():
+            return jsonify(error="EAN kód EDI musí byť len číslice."), 400
         with _db() as c:
             rid = dl_snapshot.upsert_dl_supplier(
                 c, override_id=body.get("override_id"),
                 orig_ean_edi=body.get("orig_ean_edi"), orig_city=body.get("orig_city"),
-                ean_edi=str(body.get("ean_edi") or "").strip(), name=name,
+                ean_edi=ean, name=name,
                 emails=_parse_emails_field(body.get("emails")),
                 city=str(body.get("city") or "").strip())
             dl_snapshot.dl_rebuild_from_overrides(c)
@@ -1724,6 +1828,139 @@ function genericQuestionCard(q){
 async function answerGeneric(qid,choice){try{await api('/api/orders/question/'+qid+'/answer',
   {method:'POST',body:JSON.stringify({choice:choice})});await load()}
   catch(e){alert(e.message||'chyba')}}
+// #235: dl_supplier/dl_item get their OWN card (mirrors #234's customerQuestionCard
+// below) — a live search over the CURRENT DL suppliers/catalog (not just the frozen
+// candidates the question was asked with), plus a collapsed "this is genuinely new"
+// form. mail/date/line stay on the plain genericQuestionCard above, unchanged.
+function dlSupplierSearchBox(q){
+  const wrap=el('div');
+  const inp=el('input','search');inp.placeholder='hľadaj dodávateľa (názov alebo EAN)…';
+  const res=el('div','sres-wrap');
+  wrap.appendChild(inp);wrap.appendChild(res);
+  let seq=0;
+  async function run(v){
+    const mine=++seq;
+    if(v.length<2){res.textContent='';return}
+    let d;try{d=await api('/api/znalosti/dl-suppliers?q='+encodeURIComponent(v))}catch(e){return}
+    if(mine!==seq)return;
+    res.textContent='';
+    const hits=d.items.filter(it=>it.ean_edi);
+    if(!hits.length){res.appendChild(el('div','sres none','žiadna zhoda'));return}
+    for(const it of hits){
+      const b=el('div','sres',it.name+(it.city?'  ('+it.city+')':'')+'  ('+it.ean_edi+')');
+      b.onclick=()=>answerGeneric(q.id,it.ean_edi);res.appendChild(b)}
+  }
+  let t=null;
+  inp.oninput=()=>{clearTimeout(t);t=setTimeout(()=>run(inp.value.trim()),200)};
+  return wrap}
+function dlItemSearchBox(q){
+  const wrap=el('div');
+  const inp=el('input','search');inp.placeholder='hľadaj v DL katalógu (názov karty)…';
+  const res=el('div','sres-wrap');
+  wrap.appendChild(inp);wrap.appendChild(res);
+  let seq=0;
+  async function run(v){
+    const mine=++seq;
+    if(v.length<2){res.textContent='';return}
+    let d;try{d=await api('/api/znalosti/dl-products?q='+encodeURIComponent(v))}catch(e){return}
+    if(mine!==seq)return;
+    res.textContent='';
+    if(!d.items.length){res.appendChild(el('div','sres none','žiadna zhoda'));return}
+    for(const it of d.items){
+      const b=el('div','sres',it.name+'  ('+it.gtin+')');
+      b.onclick=()=>answerGeneric(q.id,it.gtin);res.appendChild(b)}
+  }
+  let t=null;
+  inp.oninput=()=>{clearTimeout(t);t=setTimeout(()=>run(inp.value.trim()),200)};
+  return wrap}
+function newDlSupplierForm(q){
+  const ctx=q.payload||q.context||{};
+  const box=el('div');box.style.marginTop='12px';
+  const toggle=el('button',null,'➕ Nový dodávateľ (najprv EAN kód na karte v Codexe)');
+  toggle.style.borderColor='#d0d7de';toggle.style.background='#f6f8fa';toggle.style.color='#57606a';
+  const form=el('div');form.style.display='none';
+  const ean=el('input');ean.placeholder='EAN kód EDI *';
+  const name=el('input');name.placeholder='názov firmy *';
+  const emails=el('input');emails.placeholder='e-maily';emails.value=ctx.sender_email||'';
+  const city=el('input');city.placeholder='obec';
+  for(const i of [ean,name,emails,city])form.appendChild(i);
+  const status=el('div','slabel','');form.appendChild(status);
+  const save=el('button',null,'Uložiť nového dodávateľa');
+  save.style.borderColor='#1f6feb';save.style.background='#ddf4ff';save.style.color='#0969da';
+  save.onclick=async()=>{
+    const e=ean.value.replace(/[\s-]/g,'');
+    if(!e){alert('Bez EAN kódu EDI sa dodávateľ nedá uložiť — nájdeš ho v CODEXe pri dodávateľovi.');return}
+    if(!/^\d+$/.test(e)){alert('EAN kód EDI musí byť len číslice.');return}
+    if(!name.value.trim()){alert('vyplň názov firmy');return}
+    status.textContent='';save.disabled=true;
+    try{
+      await api('/api/orders/question/'+q.id+'/answer',{method:'POST',body:JSON.stringify({
+        new_supplier:{ean_edi:e,name:name.value.trim(),emails:emails.value.trim(),
+          city:city.value.trim()}})});
+      await load()
+    }catch(err){save.disabled=false;status.textContent=err.message||'chyba'}
+  };
+  form.appendChild(save);
+  toggle.onclick=()=>{form.style.display=form.style.display==='none'?'block':'none'};
+  box.appendChild(toggle);box.appendChild(form);
+  return box}
+function newDlProductForm(q){
+  const box=el('div');box.style.marginTop='12px';
+  const toggle=el('button',null,'➕ Nový produkt (najprv EAN kód na karte v Codexe)');
+  toggle.style.borderColor='#d0d7de';toggle.style.background='#f6f8fa';toggle.style.color='#57606a';
+  const form=el('div');form.style.display='none';
+  const gtin=el('input');gtin.placeholder='GTIN (EAN kód) *';
+  const name=el('input');name.placeholder='názov produktu *';name.value=q.wording||'';
+  for(const i of [gtin,name])form.appendChild(i);
+  const status=el('div','slabel','');form.appendChild(status);
+  const save=el('button',null,'Uložiť nový produkt');
+  save.style.borderColor='#1f6feb';save.style.background='#ddf4ff';save.style.color='#0969da';
+  save.onclick=async()=>{
+    const g=gtin.value.replace(/[\s-]/g,'');
+    if(!g){alert('Bez GTIN sa karta nedá uložiť — nájdeš ho v CODEXe pri produkte.');return}
+    if(!/^\d+$/.test(g)){alert('GTIN musí byť len číslice.');return}
+    if(!name.value.trim()){alert('vyplň názov produktu');return}
+    status.textContent='';save.disabled=true;
+    try{
+      await api('/api/orders/question/'+q.id+'/answer',{method:'POST',body:JSON.stringify({
+        new_item:{gtin:g,name:name.value.trim()}})});
+      await load()
+    }catch(err){save.disabled=false;status.textContent=err.message||'chyba'}
+  };
+  form.appendChild(save);
+  toggle.onclick=()=>{form.style.display=form.style.display==='none'?'block':'none'};
+  box.appendChild(toggle);box.appendChild(form);
+  return box}
+function dlSupplierQuestionCard(q){
+  const c=el('div','q');
+  c.appendChild(el('div','who',GENERIC_TITLE.dl_supplier));
+  c.appendChild(el('div','w',q.wording||''));
+  c.appendChild(el('div','why',q.reason||''));
+  for(const opt of (q.candidates||[])){
+    const b=el('button',null,opt.label||opt.value);
+    b.onclick=()=>answerGeneric(q.id,opt.value);c.appendChild(b)}
+  c.appendChild(el('div','slabel','alebo nájdi v celej databáze dodávateľov:'));
+  c.appendChild(dlSupplierSearchBox(q));
+  c.appendChild(newDlSupplierForm(q));
+  const nb=el('button',null,'Neviem');
+  nb.style.borderColor='#d0d7de';nb.style.background='#f6f8fa';nb.style.color='#57606a';
+  nb.onclick=()=>answerGeneric(q.id,'unknown');c.appendChild(nb);
+  return c}
+function dlItemQuestionCard(q){
+  const c=el('div','q');
+  c.appendChild(el('div','who',GENERIC_TITLE.dl_item));
+  c.appendChild(el('div','w',q.wording||''));
+  c.appendChild(el('div','why',q.reason||''));
+  for(const opt of (q.candidates||[])){
+    const b=el('button',null,opt.label||opt.value);
+    b.onclick=()=>answerGeneric(q.id,opt.value);c.appendChild(b)}
+  c.appendChild(el('div','slabel','alebo nájdi v celom DL katalógu:'));
+  c.appendChild(dlItemSearchBox(q));
+  c.appendChild(newDlProductForm(q));
+  const nb=el('button',null,'Neviem');
+  nb.style.borderColor='#d0d7de';nb.style.background='#f6f8fa';nb.style.color='#57606a';
+  nb.onclick=()=>answerGeneric(q.id,'unknown');c.appendChild(nb);
+  return c}
 // #234: a live search over ALL current customers — not just the frozen candidates the
 // question was asked with. Mirrors searchBox() above, one input, debounced.
 function customerSearchBox(q){
@@ -1837,7 +2074,9 @@ async function load(){const mine=++render;let d,t;
   if(!d.items.length)W.appendChild(el('div','empty','Nič nečaká. Ďakujem!'));
   for(const q of d.items){
     if(q.kind==='customer'){W.appendChild(customerQuestionCard(q));continue}
-    if(q.kind==='mail'||q.kind==='date'||q.kind==='line'||q.kind==='dl_item'||q.kind==='dl_supplier'){
+    if(q.kind==='dl_supplier'){W.appendChild(dlSupplierQuestionCard(q));continue}
+    if(q.kind==='dl_item'){W.appendChild(dlItemQuestionCard(q));continue}
+    if(q.kind==='mail'||q.kind==='date'||q.kind==='line'){
       W.appendChild(genericQuestionCard(q));continue}
     const c=el('div','q');
     c.appendChild(el('div','who',(q.customer_name||q.customer_ean)+(q.delivery_date?' · na '+q.delivery_date:'')));
@@ -2273,9 +2512,7 @@ async function load(){
     W.appendChild(box);
     W.appendChild(productsBox());
     W.appendChild(clientsBox());
-    W.appendChild(dlProductsBox());
-    W.appendChild(dlSuppliersBox());
-  }
+__DL_BOXES__  }
   W.appendChild(el('h2',null,'Globálne priradenia (platia pre každého zákazníka)'));
   W.appendChild(addForm((wording,gtin,card)=>
     api('/api/znalosti/global',{method:'POST',body:JSON.stringify({wording:wording,gtin:gtin,card:card})})));

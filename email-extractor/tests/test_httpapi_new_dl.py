@@ -51,53 +51,20 @@ def _login(c):
     c.post("/login", data={"password": "secret"})
 
 
-# --- the RED case: today's dead end -----------------------------------------------------
-
-def test_a_new_dl_supplier_cannot_be_added_from_the_question_card_today(pg):
-    """Proves the bug this ticket exists to fix: HK LOAN (#236) — a genuinely new DL
-    supplier, EAN typed in from CODEX — must be addable right on the card. Today the
-    unrecognized `new_supplier` body is silently treated as the generic-kind "unknown"
-    escape (falls through to `choice=""`), so the POST reports success but does NOTHING:
-    no supplier row, the question stays open, the data she typed just vanishes."""
-    qid = teach.ask_dl_supplier(pg, message_id="m235a", sender_email="gnip@hkloan.eu",
-                                candidates=[])
-    c = _dl_client()
-    r = c.post(f"/api/orders/question/{qid}/answer", json={"new_supplier": {
-        "ean_edi": "2000000000900", "name": "HK LOAN s.r.o.", "emails": "gnip@hkloan.eu"}})
-    assert r.status_code == 200
-    assert teach.get(pg, qid)["status"] == "open"
-    assert pg.execute(
-        "SELECT count(*) FROM dl_supplier_overrides WHERE ean_edi='2000000000900'"
-    ).fetchone()[0] == 0
-
-
-def test_a_new_dl_product_cannot_be_added_from_the_question_card_today(pg):
-    """Same dead end for a brand-new DL catalog card (the #236 "Soľ jedlá..." case: a
-    genuinely new product with no GTIN in Codex yet cannot be entered from her card)."""
-    qid = teach.ask_dl_item(
-        pg, message_id="m235b", supplier_ean="S1", supplier_name="Mlyn s.r.o.",
-        wording="Soľ jedlá kamenná jódovaná 0,7-0,16 mm", quantity=1000, unit="kg",
-        candidates=[])
-    c = _dl_client()
-    r = c.post(f"/api/orders/question/{qid}/answer", json={"new_item": {
-        "gtin": "4003885181808", "name": "Soľ jedlá kamenná jódovaná 0,7-0,16 mm"}})
-    assert r.status_code == 200
-    assert teach.get(pg, qid)["status"] == "open"
-    assert pg.execute(
-        "SELECT count(*) FROM dl_catalog_overrides WHERE gtin='4003885181808'"
-    ).fetchone()[0] == 0
-
-
-def test_the_dl_role_cannot_reach_the_dl_znalosti_api_today(pg):
-    """Root cause half 2: her role's whole path allowlist has no /znalosti reach at all."""
-    c = _dl_client()
-    assert c.get("/api/znalosti/dl-suppliers").status_code == 401
-    assert c.get("/api/znalosti/dl-products").status_code == 401
-
-
-# --- GREEN: the new_supplier/new_item answer path -----------------------------------
+# --- the fix: new_supplier/new_item answer path, and the DL role's widened reach -------
+#
+# (An earlier draft of this file pinned the pre-fix dead end directly — asserting the
+# question STAYS open and NOTHING gets written when posting new_supplier/new_item, and
+# that the DL role gets 401 on /api/znalosti/dl-*. Those assertions describe the OLD
+# buggy behavior, so they PASSED before this fix and would FAIL after it — the inverse
+# of a real regression test. Removed once verified: the tests below assert the CORRECT,
+# desired behavior instead, exactly mirroring #234's own `test_a_held_order_from_an_
+# unknown_customer_cannot_be_completed_today` pattern — they fail without the fix
+# (confirmed on the [red] commit) and pass with it, which is what stays committed.)
 
 def test_adding_a_new_dl_supplier_from_the_card_teaches_it_and_answers(pg):
+    """Proves the fix for the bug #235 exists to close: HK LOAN (#236) — a genuinely new
+    DL supplier, EAN typed in from CODEX — completes right on the card, one click."""
     qid = teach.ask_dl_supplier(pg, message_id="m235c", sender_email="gnip@hkloan.eu",
                                 candidates=[])
     c = _dl_client()
@@ -113,6 +80,24 @@ def test_adding_a_new_dl_supplier_from_the_card_teaches_it_and_answers(pg):
     from app.orders import dl_supplier_memory
     assert dl_supplier_memory.resolve(pg, "gnip@hkloan.eu") == {
         "ean_edi": "2000000000900", "name": "HK LOAN s.r.o."}
+
+
+def test_a_new_dl_suppliers_own_sender_address_is_remembered_even_when_left_blank(pg):
+    """Regression: `ask_dl_supplier`/`ask_generic` store the sender address in the
+    question's `payload` column, not `context` (that column is customer-kind-only) — an
+    early draft of `_api_orders_answer_new_dl_supplier` read `context` and always got {}
+    for a dl_supplier question, so the sender's own address never got auto-appended when
+    she left the "e-maily" field blank in the form."""
+    qid = teach.ask_dl_supplier(pg, message_id="m235k", sender_email="gnip@hkloan.eu",
+                                candidates=[])
+    c = _dl_client()
+    r = c.post(f"/api/orders/question/{qid}/answer", json={"new_supplier": {
+        "ean_edi": "2000000000900", "name": "HK LOAN s.r.o."}})
+    assert r.status_code == 200
+    row = pg.execute(
+        "SELECT emails FROM dl_supplier_overrides WHERE ean_edi='2000000000900'"
+    ).fetchone()
+    assert row and "gnip@hkloan.eu" in row[0]
 
 
 def test_adding_a_new_dl_product_from_the_card_teaches_it_and_answers(pg):
@@ -187,6 +172,14 @@ def test_the_dl_role_can_now_reach_the_dl_znalosti_api(pg):
     c = _dl_client()
     assert c.get("/api/znalosti/dl-suppliers").status_code == 200
     assert c.get("/api/znalosti/dl-products").status_code == 200
+
+
+def test_the_dl_role_znalosti_api_regex_does_not_match_a_mere_prefix(pg):
+    """SKLAD_DL_ZNALOSTI_API's alternatives are anchored with ^/$ — an unrelated path
+    sharing the dl-products/dl-suppliers prefix must not be accidentally granted."""
+    c = _dl_client()
+    assert c.get("/api/znalosti/dl-productsX").status_code == 401
+    assert c.get("/api/znalosti/dl-suppliersX").status_code == 401
 
 
 def test_the_orders_role_cannot_reach_the_dl_znalosti_api(pg):
