@@ -813,7 +813,7 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
     before any upload; reprocessing this message again, the ledger reports the confirmed
     claim exactly like a genuine R17 self-retry and refuses the upload (see
     `_process_document`'s own `already_shipped_this_run` handling) — see
-    `test_reprocessing_after_an_answer_never_reuploads_an_already_shipped_document`.
+    `test_release_for_question_never_reuploads_an_already_partially_shipped_document`.
 
     Returns the reprocessed message's own `documents` list (mirrors AI-orders'
     `hold.release_for_question`'s `released` list) — `[]` when nothing happened yet (a
