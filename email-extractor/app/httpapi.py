@@ -57,6 +57,12 @@ def _escape_like(s: str) -> str:
     return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+# #234: the exact same EAN normalization/validation `snapshot.normalize_ean` uses,
+# duplicated here (not imported) so both HTTP entry points can return their own precise
+# 400 body BEFORE ever calling into the DB layer.
+_EAN_STRIP_RE = re.compile(r"[\s\-]")
+
+
 def _fold(s: str) -> str:
     """Diacritics- and case-insensitive substring match for the /znalosti card/customer
     search — a warehouse worker types "rozok" and must still find "Rožok"."""
@@ -568,18 +574,93 @@ def create_app(cfg) -> Flask:
         with _db() as c:
             return jsonify(items=teach.open_questions(c, kinds=_role_kinds(session.get("role"))))
 
+    def _api_orders_answer_new_customer(qid: int, q: dict, nc: dict):
+        """#234: the customer genuinely does not exist anywhere yet — the warehouse
+        creates it in CODEX first (source of truth), then types the same few fields in
+        here, prefilled from the mail. Same two-connection discipline as the branch below:
+        the customer write, the `teach.add_candidate` audit trail, and `teach.
+        answer_customer` commit together in ONE transaction; the release (a REAL external
+        upload) runs afterward on its own autocommit connection, never inside the same
+        rollback-able transaction — see `_api_orders_answer_customer`'s own docstring for
+        why.
+        """
+        from .orders import hold, report, teach
+
+        ean = _EAN_STRIP_RE.sub("", str(nc.get("ean_edi") or ""))
+        if not ean:
+            return jsonify(error="Bez EAN kódu EDI sa zákazník nedá uložiť — nájdeš ho v "
+                                 "CODEXe pri odberateľovi."), 400
+        if not ean.isdigit():
+            return jsonify(error="EAN kód EDI musí byť len číslice."), 400
+        name = str(nc.get("name") or "").strip()
+        if not name:
+            return jsonify(error="chýba názov"), 400
+
+        ctx = q.get("context") or {}
+        emails = _parse_emails_field(nc.get("emails"))
+        ctx_email = str(ctx.get("sender_email") or "").strip().lower()
+        if ctx_email and ctx_email not in [e.lower() for e in emails]:
+            emails.append(ctx_email)
+        city = str(nc.get("city") or "").strip()
+        street = str(nc.get("street") or "").strip()
+        zip_ = str(nc.get("zip") or "").strip()
+
+        try:
+            with _db_tx() as c:
+                existing = [r for r in snapshot.customers_for_management(c)
+                           if str(r.get("ean_edi") or "") == ean]
+                if existing and not nc.get("confirm_existing"):
+                    hit = existing[0]
+                    return jsonify(
+                        error=f"EAN {ean} už má zákazník {hit.get('name', '')}.",
+                        existing={"ean_edi": hit.get("ean_edi", ""),
+                                 "name": hit.get("name", ""),
+                                 "street": hit.get("street", ""),
+                                 "override_id": hit.get("override_id")}), 409
+                snapshot.upsert_customer(c, override_id=None, orig_ean_edi=None,
+                                         orig_street=None, ean_edi=ean, name=name,
+                                         emails=emails, city=city, street=street,
+                                         zip_=zip_)
+                snapshot.rebuild_from_overrides(c)
+                teach.add_candidate(c, qid, {"ean_edi": ean, "name": name, "city": city,
+                                             "street": street, "address_match": False,
+                                             "source": "new"})
+                answered = teach.answer_customer(c, qid, ean_edi=ean, name=name, by="sklad")
+                report.log_event(
+                    c, q["message_id"], stage="review", status="ok",
+                    outcome=f"Sklad doplnil nového zákazníka {name} ({ean})",
+                    detail={"question_id": qid, "ean_edi": ean}, rollup=False)
+        except teach.AlreadyAnswered as e:
+            return jsonify(error=str(e)), 409
+        except teach.NotACandidate as e:
+            return jsonify(error=str(e)), 400
+        except snapshot.InvalidCustomer as e:
+            return jsonify(error=str(e)), 400
+
+        sender_email = ctx.get("sender_email", "")
+        with _db() as c2:
+            snapshot.remember_customer_email(c2, ean, sender_email)
+            hold.set_customer(c2, qid, ean, name)
+            released = hold.release_for_question(c2, cfg, qid)
+        return jsonify(ok=True, question=answered, released=released,
+                       customer={"ean_edi": ean, "name": name})
+
     def _api_orders_answer_customer(qid: int, q: dict, body: dict):
-        """#159: the customer-half of the same click — "this order belongs to THIS
-        customer", or "neviem, kto to je". A real pick durably remembers the sender
-        address (#128's override mechanism) and releases through the SAME `_ship_one`/
-        `edi.claim_send` ledger as the product half, now that the customer is known —
-        `hold.set_customer` must land BEFORE `release_for_question`, which builds the
-        `Matched` object straight from `held_orders.customer_ean`/`customer_name`. Both
-        the remember-write and the release run on ONE autocommit connection, same
-        reasoning as the product half's own docstring above (a real external upload must
-        never share a rollback-able transaction with anything after it).
+        """#159/#234: the customer-half of the same click — "this order belongs to THIS
+        customer" (a frozen candidate button, OR a customer found via the live search box
+        — #234), a brand-new customer typed in from CODEX (`new_customer`, #234), or
+        "neviem, kto to je". A real pick durably remembers the sender address (#128's
+        override mechanism) and releases through the SAME `_ship_one`/`edi.claim_send`
+        ledger as the product half, now that the customer is known — `hold.set_customer`
+        must land BEFORE `release_for_question`, which builds the `Matched` object
+        straight from `held_orders.customer_ean`/`customer_name`. Both the remember-write
+        and the release run on ONE autocommit connection, same reasoning as the product
+        half's own docstring above (a real external upload must never share a
+        rollback-able transaction with anything after it).
         """
         from .orders import hold, teach
+        if isinstance(body.get("new_customer"), dict):
+            return _api_orders_answer_new_customer(qid, q, body["new_customer"])
         unknown = bool(body.get("unknown"))
         ean_edi = "" if unknown else str(body.get("ean_edi") or "")
         name = "" if unknown else str(body.get("name") or "")
@@ -587,6 +668,22 @@ def create_app(cfg) -> Flask:
             return jsonify(error="chýba zákazník"), 400
         try:
             with _db_tx() as c:
+                # #234: a pick may come from the live search box over ALL current
+                # customers, never just the frozen candidate set the question was asked
+                # with — legitimise it server-side (never trust the client) before
+                # answer_customer's own "must have been offered" check would refuse it.
+                offered = {str(cd.get("ean_edi")) for cd in q["candidates"]}
+                if not unknown and ean_edi not in offered:
+                    hit = next((r for r in snapshot.customers_for_management(c)
+                               if str(r.get("ean_edi") or "") == ean_edi
+                               and r.get("ean_edi")), None)
+                    if not hit:
+                        return jsonify(error="Tento zákazník nie je v databáze."), 400
+                    teach.add_candidate(c, qid, {
+                        "ean_edi": hit["ean_edi"], "name": hit.get("name", ""),
+                        "city": hit.get("city", ""), "street": hit.get("street", ""),
+                        "address_match": False, "source": "search"})
+                    name = name or hit.get("name", "")
                 answered = teach.answer_customer(c, qid, ean_edi=ean_edi, name=name,
                                                  by="sklad")
         except teach.AlreadyAnswered as e:
@@ -900,16 +997,29 @@ def create_app(cfg) -> Flask:
         name = str(body.get("name") or "").strip()
         if not name:
             return jsonify(error="chýba názov"), 400
+        # #234: the identical EAN validation the question-card "new customer" flow uses —
+        # the EAN must never be forgettable, whichever screen a customer is added from.
+        ean = _EAN_STRIP_RE.sub("", str(body.get("ean_edi") or ""))
+        if not ean:
+            return jsonify(error="Bez EAN kódu EDI sa zákazník nedá uložiť — nájdeš ho v "
+                                 "CODEXe pri odberateľovi."), 400
+        if not ean.isdigit():
+            return jsonify(error="EAN kód EDI musí byť len číslice."), 400
+        from .orders import hold
         with _db() as c:
             rid = snapshot.upsert_customer(
                 c, override_id=body.get("override_id"),
                 orig_ean_edi=body.get("orig_ean_edi"), orig_street=body.get("orig_street"),
-                ean_edi=str(body.get("ean_edi") or "").strip(), name=name,
+                ean_edi=ean, name=name,
                 emails=_parse_emails_field(body.get("emails")),
                 city=str(body.get("city") or "").strip(),
                 street=str(body.get("street") or "").strip(),
                 zip_=str(body.get("zip") or "").strip())
             snapshot.rebuild_from_overrides(c)
+            # #234: this save may be exactly what an ALREADY-OPEN customer question was
+            # waiting for (the customer was added on /znalosti instead of on the card) —
+            # never leave that order stuck until the periodic worker sweep catches up.
+            hold.retry_unknown_customer_questions(c, cfg)
         return jsonify(ok=True, id=rid)
 
     @app.delete("/api/znalosti/clients")
@@ -1543,12 +1653,14 @@ _ASK_HTML_TEMPLATE = r"""<!doctype html><html lang="sk"><head><meta charset="utf
  .sres:hover{background:#ddf4ff}
  .sres.none{cursor:default;color:#57606a;background:transparent;border-style:dashed}
  .sres.none:hover{background:transparent}
+ input{width:100%;padding:9px 10px;margin-top:6px;border:1px solid #d0d7de;border-radius:8px;font:inherit}
 </style></head><body>
 <header><h1>__HEADING__</h1><span class="ver" data-testid="version">v__VERSION__</span>__STATS_HEADER__</header>
 <main id="wrap"><div class="empty">Nahrávam&hellip;</div></main>
 <script>
 async function api(u,o){const r=await fetch(u,Object.assign({headers:{'Content-Type':'application/json'}},o||{}));
-  if(!r.ok){throw new Error((await r.json().catch(()=>({}))).error||('HTTP '+r.status))}return r.json()}
+  if(!r.ok){const b=await r.json().catch(()=>({}));const e=new Error(b.error||('HTTP '+r.status));e.body=b;throw e}
+  return r.json()}
 let render=0;
 // #149: what the warehouse has typed into each open question's catalog search, keyed by
 // question id — the list auto-refreshes every 5s (see setInterval below), and without this
@@ -1603,8 +1715,79 @@ function genericQuestionCard(q){
 async function answerGeneric(qid,choice){try{await api('/api/orders/question/'+qid+'/answer',
   {method:'POST',body:JSON.stringify({choice:choice})});await load()}
   catch(e){alert(e.message||'chyba')}}
+// #234: a live search over ALL current customers — not just the frozen candidates the
+// question was asked with. Mirrors searchBox() above, one input, debounced.
+function customerSearchBox(q){
+  const wrap=el('div');
+  const inp=el('input','search');inp.placeholder='hľadaj zákazníka (názov alebo EAN)…';
+  const res=el('div','sres-wrap');
+  wrap.appendChild(inp);wrap.appendChild(res);
+  let seq=0;
+  async function run(v){
+    const mine=++seq;
+    if(v.length<2){res.textContent='';return}
+    let d;try{d=await api('/api/znalosti/clients?q='+encodeURIComponent(v))}catch(e){return}
+    if(mine!==seq)return;
+    res.textContent='';
+    const hits=d.items.filter(it=>it.ean_edi);   // an EAN-less row cannot be picked either
+    if(!hits.length){res.appendChild(el('div','sres none','žiadna zhoda'));return}
+    for(const it of hits){
+      const addr=[it.street,it.city].filter(Boolean).join(', ');
+      const b=el('div','sres',it.name+(addr?'  ('+addr+')':'')+'  ('+it.ean_edi+')');
+      b.onclick=()=>answerCustomer(q.id,it.ean_edi,it.name||'');res.appendChild(b)}
+  }
+  let t=null;
+  inp.oninput=()=>{clearTimeout(t);t=setTimeout(()=>run(inp.value.trim()),200)};
+  return wrap}
+// #234: the customer genuinely does not exist anywhere yet — create it right on the card,
+// prefilled from the mail. Collapsed by default so the common (candidate/search) path
+// stays uncluttered.
+function newCustomerForm(q){
+  const ctx=q.context||{};
+  const box=el('div');box.style.marginTop='12px';
+  const toggle=el('button',null,'➕ Nový zákazník (najprv ho vytvor v CODEXe)');
+  toggle.style.borderColor='#d0d7de';toggle.style.background='#f6f8fa';toggle.style.color='#57606a';
+  const form=el('div');form.style.display='none';
+  const ean=el('input');ean.placeholder='EAN kód EDI *';
+  const name=el('input');name.placeholder='názov firmy *';
+  name.value=ctx.company_name||ctx.sender_name||'';
+  const emails=el('input');emails.placeholder='e-maily';emails.value=ctx.sender_email||'';
+  const city=el('input');city.placeholder='obec';
+  const street=el('input');street.placeholder='ulica';street.value=ctx.delivery_address_guess||'';
+  const zip=el('input');zip.placeholder='PSČ';
+  for(const i of [ean,name,emails,city,street,zip])form.appendChild(i);
+  const status=el('div','slabel','');form.appendChild(status);
+  const extra=el('div');form.appendChild(extra);
+  const save=el('button',null,'Uložiť nového zákazníka');
+  save.style.borderColor='#1f6feb';save.style.background='#ddf4ff';save.style.color='#0969da';
+  save.onclick=async()=>{
+    const e=ean.value.replace(/[\s-]/g,'');
+    if(!e){alert('Bez EAN kódu EDI sa zákazník nedá uložiť — nájdeš ho v CODEXe pri odberateľovi.');return}
+    if(!/^\d+$/.test(e)){alert('EAN kód EDI musí byť len číslice.');return}
+    if(!name.value.trim()){alert('vyplň názov firmy');return}
+    if(e.length!==13&&!confirm('EAN kód EDI má obvykle 13 číslic, zadal si '+e.length+'. Naozaj uložiť?'))return;
+    status.textContent='';extra.textContent='';
+    try{
+      await api('/api/orders/question/'+q.id+'/answer',{method:'POST',body:JSON.stringify({
+        new_customer:{ean_edi:e,name:name.value.trim(),emails:emails.value.trim(),
+          city:city.value.trim(),street:street.value.trim(),zip:zip.value.trim()}})});
+      await load()
+    }catch(err){
+      status.textContent=err.message||'chyba';
+      if(err.body&&err.body.existing){
+        const b=el('button',null,'Doplniť e-mail k '+err.body.existing.name);
+        b.onclick=()=>answerCustomer(q.id,err.body.existing.ean_edi,err.body.existing.name);
+        extra.appendChild(b)}
+    }
+  };
+  form.appendChild(save);
+  toggle.onclick=()=>{form.style.display=form.style.display==='none'?'block':'none'};
+  box.appendChild(toggle);box.appendChild(form);
+  return box}
 // #159: "who is this customer?" candidates render as name + address (+ a ✓ badge when
 // the ranking already found the address in the mail), plus a "neviem, kto to je" escape.
+// #234: a candidate with no EAN renders disabled (would just 400), plus a live search over
+// every current customer and a "add a brand-new one" form, right on the same card.
 function customerQuestionCard(q){
   const ctx=q.context||{};const c=el('div','q');
   c.appendChild(el('div','who','Neznámy zákazník'+(q.delivery_date?' · na '+q.delivery_date:'')));
@@ -1616,9 +1799,17 @@ function customerQuestionCard(q){
   c.appendChild(el('div','why',(q.reason||'Kto to objednal?')+(bits.length?' — '+bits.join(' · '):'')));
   for(const cand of (q.candidates||[])){
     const addr=[cand.street,cand.city].filter(Boolean).join(', ');
+    if(!cand.ean_edi){
+      const b=el('button',null,(cand.name||'(bez mena)')+(addr?'  ('+addr+')':'')+
+        '  — bez EAN, doplň v databáze znalostí');
+      b.disabled=true;b.style.opacity='0.55';b.style.cursor='default';b.style.borderColor='#d0d7de';
+      b.style.background='#f6f8fa';b.style.color='#57606a';c.appendChild(b);continue}
     const label=(cand.name||cand.ean_edi)+(addr?'  ('+addr+')':'')+(cand.address_match?'  ✓ adresa sedí':'');
     const b=el('button',null,label);
     b.onclick=()=>answerCustomer(q.id,cand.ean_edi,cand.name||'');c.appendChild(b)}
+  c.appendChild(el('div','slabel','alebo nájdi v celej databáze zákazníkov:'));
+  c.appendChild(customerSearchBox(q));
+  c.appendChild(newCustomerForm(q));
   const nb=el('button',null,'Neviem, kto to je');
   nb.style.borderColor='#d0d7de';nb.style.background='#f6f8fa';nb.style.color='#57606a';
   nb.onclick=()=>answerCustomer(q.id,'','',true);c.appendChild(nb);
@@ -1834,7 +2025,7 @@ function productsBox(){
 function clientsBox(){
   const box=el('div','box');
   box.appendChild(el('h2',null,'Odberatelia'));
-  const ean=el('input');ean.placeholder='EAN kód EDI';
+  const ean=el('input');ean.placeholder='EAN kód EDI *';
   const name=el('input');name.placeholder='názov firmy';
   const emails=el('input');emails.placeholder='e-maily (čiarkou oddelené)';
   const city=el('input');city.placeholder='obec';
@@ -1851,7 +2042,8 @@ function clientsBox(){
     if(!d.items.length){list.appendChild(el('div','empty','Zatiaľ nič.'));return}
     for(const it of d.items){
       const r=el('div','row');
-      r.appendChild(el('div',null,it.name+'  ('+(it.ean_edi||'bez EAN')+')'+
+      // #234: a legacy blank-EAN row must be VISIBLE as needing attention, not silent.
+      r.appendChild(el('div',null,it.name+'  ('+(it.ean_edi||'bez EAN — doplň')+')'+
         (it.street?(' · '+it.street):'')));
       const b=el('button',null,'upraviť');
       b.onclick=()=>{
@@ -1866,7 +2058,10 @@ function clientsBox(){
   const save=el('button','add','Uložiť');
   save.onclick=async()=>{
     if(!name.value.trim()){alert('vyplň názov');return}
-    const body={ean_edi:ean.value.trim(),name:name.value.trim(),emails:emails.value.trim(),
+    const cleaned=ean.value.trim().replace(/[\s-]/g,'');
+    if(!cleaned){alert('Bez EAN kódu EDI sa zákazník nedá uložiť — nájdeš ho v CODEXe pri odberateľovi.');return}
+    if(!/^\d+$/.test(cleaned)){alert('EAN kód EDI musí byť len číslice.');return}
+    const body={ean_edi:cleaned,name:name.value.trim(),emails:emails.value.trim(),
       city:city.value.trim(),street:street.value.trim(),zip:zip.value.trim()};
     if(editing)Object.assign(body,editing);
     try{await api('/api/znalosti/clients',{method:'POST',body:JSON.stringify(body)});

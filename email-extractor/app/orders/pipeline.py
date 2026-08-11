@@ -42,13 +42,17 @@ class Reason(enum.Enum):
     LLM_REFUSED = "llm_refused"
     UPLOAD_FAILED = "upload_failed"
     DEDUP_ALREADY_SENT = "dedup_already_sent"
+    # #234: a MATCHED customer whose EAN is blank (a legacy snapshot/override row) — this
+    # cannot be settled by a board click; it needs a /znalosti edit (which validates the
+    # EAN) plus a reprocess, which is exactly what TECHNICAL_REASONS means.
+    CUSTOMER_EAN_MISSING = "customer_ean_missing"
 
 
 # Nothing a warehouse click could ever settle — a genuine engineering/instruction matter.
 # Every OTHER "review"/"error" reason MUST carry an open board question, enforced in
 # `_finish` below.
 TECHNICAL_REASONS = {Reason.CHANGE_REQUEST, Reason.LLM_REFUSED, Reason.UPLOAD_FAILED,
-                     Reason.DEDUP_ALREADY_SENT}
+                     Reason.DEDUP_ALREADY_SENT, Reason.CUSTOMER_EAN_MISSING}
 
 # The rungs that mean the engine could not settle the line on its own. Each becomes
 # ONE question for the warehouse (#88) — answering it teaches the wording for good.
@@ -642,6 +646,15 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
     elif not matched:
         result["reject_reason"] = "Zákazník nebol nájdený v tabuľke zákazníkov"
         reason = Reason.CUSTOMER_UNKNOWN
+    elif not str(matched.ean_edi or "").strip():
+        # #234: a matched customer with NO EAN (a legacy blank-EAN snapshot/override row)
+        # must never reach edi.build — it would silently write four blank 17-char buyer
+        # fields into an otherwise structurally valid ORION file. Caught here, before
+        # edi.build ever runs.
+        result["reject_reason"] = (
+            f"Zákazník „{matched.name}“ nemá v databáze EAN kód EDI — doplň mu ho v "
+            "databáze znalostí a pusti objednávku znova")
+        reason = Reason.CUSTOMER_EAN_MISSING
     elif not shipped_items:
         result["reject_reason"] = "Žiadnu položku sa nedalo priradiť ku karte"
         reason = Reason.ITEM_OPEN

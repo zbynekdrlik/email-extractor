@@ -29,6 +29,27 @@ class SnapshotRefused(Exception):
     """The imported CSV is unusable (empty), so it must not replace a good snapshot."""
 
 
+class InvalidCustomer(Exception):
+    """A customer write with no usable EAN kód EDI (#234) — without it `edi.build` can
+    never produce a real ORION document for that customer, so the write is refused rather
+    than silently accepted and forgotten."""
+
+
+_EAN_STRIP_RE = re.compile(r"[\s\-]")
+
+
+def normalize_ean(value) -> str:
+    """Strip spaces/dashes and validate. `upsert_customer` calls this UNCONDITIONALLY —
+    #234's whole point is that the EAN can never again be silently forgotten, so every
+    write path funnels through here, not just the ones that remembered to check."""
+    ean = _EAN_STRIP_RE.sub("", str(value or ""))
+    if not ean:
+        raise InvalidCustomer("Bez EAN kódu EDI sa zákazník nedá uložiť.")
+    if not ean.isdigit():
+        raise InvalidCustomer("EAN kód EDI musí byť len číslice.")
+    return ean
+
+
 def _rows(text: str) -> list[dict]:
     return list(csv.DictReader(io.StringIO(text)))
 
@@ -379,7 +400,12 @@ def upsert_customer(conn, *, override_id: int | None, orig_ean_edi: str | None,
     """Add a brand-new customer (override_id=None, orig_ean_edi=None), or edit one —
     either an already-overridden row (pass its override_id) or a still-sheet-only row
     (pass its CURRENT orig_ean_edi/orig_street, from `customers_for_management`; the
-    partial unique index makes a repeat call idempotent, no duplicate rows)."""
+    partial unique index makes a repeat call idempotent, no duplicate rows).
+
+    #234: `ean_edi` is validated + normalized UNCONDITIONALLY (`normalize_ean` raises
+    `InvalidCustomer` on blank/non-numeric) — every write funnels through here, so this is
+    the single place the EAN can never again be silently forgotten."""
+    ean_edi = normalize_ean(ean_edi)
     if override_id is not None:
         row = conn.execute(
             """UPDATE customer_overrides
@@ -390,6 +416,28 @@ def upsert_customer(conn, *, override_id: int | None, orig_ean_edi: str | None,
         if not row:
             raise KeyError(f"no such override id {override_id}")
         return int(row[0])
+    if orig_ean_edi is None:
+        # #234 review finding: the unique index below only covers `orig_ean_edi IS NOT
+        # NULL` (a still-sheet-only row being edited) — a genuinely BRAND-NEW customer has
+        # no ON CONFLICT target at all, so a double-submit (a warehouse double-click, or
+        # the auto-retry sweep re-adding the same sender) silently inserted TWO rows for
+        # one real customer. `customer.resolve`'s exact_email rung then refuses ANY order
+        # from that address once `len(owners) > 1` — the order gets stuck BECAUSE the
+        # customer was added twice. Application-level reclaim: find an already-added
+        # brand-new row with the identical (ean, street) identity and update it in place.
+        existing = conn.execute(
+            """SELECT id FROM customer_overrides
+                WHERE orig_ean_edi IS NULL AND ean_edi = %s AND street = %s
+                  AND NOT retired""",
+            (ean_edi, street)).fetchone()
+        if existing:
+            row = conn.execute(
+                """UPDATE customer_overrides
+                      SET name=%s, emails=%s, city=%s, street=%s, zip=%s,
+                          retired=false, updated_at=now()
+                    WHERE id=%s RETURNING id""",
+                (name, emails, city, street, zip_, existing[0])).fetchone()
+            return int(row[0])
     row = conn.execute(
         """INSERT INTO customer_overrides
                (orig_ean_edi, orig_street, ean_edi, name, emails, city, street, zip,

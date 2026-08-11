@@ -377,9 +377,11 @@ def test_a_matched_customer_without_an_ean_is_never_uploaded(pg):
     assert result["status"] == "review"
     assert rec.uploads == []
     assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 0
-    reject = result["order_results"][0]["reject_reason"]
-    assert "EAN" in reject
-    assert "Pekáreň Bez EAN" in reject
+    # reject_reason lives on the Odoo summary (order_results doesn't carry it — see
+    # report.build_summary), so this is the reachable place to check the wording.
+    assert len(rec.posts) == 1
+    assert "EAN" in rec.posts[0]
+    assert "Pekáreň Bez EAN" in rec.posts[0]
 
 
 def test_the_same_order_is_never_uploaded_twice(pg, env):

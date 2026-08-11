@@ -273,10 +273,15 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pra
             # confirm.sweep (desadv_sent, #203) and dl_worker.tick (#204) key on.
             dl_python = resolve_engine(getattr(cfg, "delivery_notes_engine", "n8n")) == "python"
             if orders_python:
+                # #234: a customer added on /znalosti (rather than answered straight on
+                # the question card) must also unstick any order still waiting for it —
+                # runs BEFORE the deadline backstop so a genuinely resolvable order never
+                # has to wait for its delivery date to arrive first.
+                from .hold import release_due, retry_unknown_customer_questions
+                retry_unknown_customer_questions(conn, cfg)
                 # #93: the deadline backstop — ship whatever is still held once its
                 # delivery date arrives. Shadow/n8n modes never hold an order, so there is
                 # never anything for this to release there.
-                from .hold import release_due
                 release_due(conn, cfg)
             if orders_python or dl_python:
                 # #151/#203: has Communicator actually taken what we uploaded? Covers

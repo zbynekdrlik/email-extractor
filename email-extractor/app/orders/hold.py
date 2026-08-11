@@ -575,6 +575,54 @@ def release_unknown_customer(conn, cfg, qid: int, post=None) -> list[dict]:
     return released
 
 
+def retry_unknown_customer_questions(conn, cfg, upload=None, post=None) -> list[dict]:
+    """A customer added on /znalosti (rather than answered straight on the question card,
+    #234 §3) must also unstick any order still waiting for it. For every OPEN `customer`
+    question, re-resolve the sender against the CURRENT customer list and act ONLY when
+    the match is a genuine exact-address hit with a real EAN — never the model rung (no
+    store header, no model call reaches this far, so `resolve()`'s `llm` rung never fires)
+    and never a fuzzy name/branch hit (`store=""` makes `_by_store` always return `None`):
+    a wrongly addressed order is worse than one still waiting (`customer.py`'s own module
+    docstring). Called from `/api/znalosti/clients` right after a save, and from the
+    order worker's own periodic tick (mirrors `release_due`'s own sweep)."""
+    from . import customer as customer_mod
+    from . import report, teach
+    from . import snapshot as snapshot_mod
+
+    rows = conn.execute(
+        "SELECT id FROM order_questions WHERE kind = 'customer' AND status = 'open'"
+    ).fetchall()
+    released: list[dict] = []
+    for (qid,) in rows:
+        q = teach.get(conn, qid)
+        if not q:
+            continue
+        ctx = q.get("context") or {}
+        sender_email = str(ctx.get("sender_email") or "")
+        if not sender_email:
+            continue
+        customers = snapshot_mod.customers_for_management(conn)
+        matched = customer_mod.resolve(customers, sender_email, ctx.get("sender_name", ""),
+                                       ctx.get("company_name", ""))
+        if not (matched and matched.rule == "exact_email" and matched.ean_edi):
+            continue
+        teach.add_candidate(conn, qid, {
+            "ean_edi": matched.ean_edi, "name": matched.name, "city": "", "street": "",
+            "address_match": False, "source": "auto"})
+        try:
+            teach.answer_customer(conn, qid, ean_edi=matched.ean_edi, name=matched.name,
+                                  by="auto")
+        except (teach.AlreadyAnswered, teach.NotACandidate):
+            continue
+        report.log_event(
+            conn, q["message_id"], stage="review", status="ok",
+            outcome=f"Automaticky doplnený zákazník {matched.name} ({matched.ean_edi})",
+            detail={"question_id": qid, "ean_edi": matched.ean_edi}, rollup=False)
+        set_customer(conn, qid, matched.ean_edi, matched.name)
+        released.extend(release_for_question(conn, cfg, qid, upload=upload, post=post))
+    return released
+
+
 def _has_non_shippable_open_question(conn, question_ids: list[int]) -> bool:
     """#164: does this held order still wait on a question whose KIND is not safe to
     silently ship past the deadline? `item` questions keep today's behaviour (ship what

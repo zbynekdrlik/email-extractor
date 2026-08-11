@@ -196,6 +196,43 @@ def test_customer_override_replaces_the_sheet_row_it_names(pg):
     assert customers["Dva maily OPRAVENÉ"]["ean_edi"] == "2000000000871"
 
 
+# --- #234: the EAN kód EDI can never be silently forgotten -----------------------------
+
+def test_upsert_customer_refuses_a_blank_ean(pg):
+    with pytest.raises(snapshot.InvalidCustomer):
+        snapshot.upsert_customer(
+            pg, override_id=None, orig_ean_edi=None, orig_street=None,
+            ean_edi="", name="Bez EAN", emails=[], city="", street="", zip_="")
+
+
+def test_upsert_customer_refuses_a_non_numeric_ean(pg):
+    with pytest.raises(snapshot.InvalidCustomer):
+        snapshot.upsert_customer(
+            pg, override_id=None, orig_ean_edi=None, orig_street=None,
+            ean_edi="SK123", name="Zlý EAN", emails=[], city="", street="", zip_="")
+
+
+def test_adding_a_brand_new_customer_twice_updates_one_row(pg):
+    """Review finding on #234's own design (§2.2): the unique index below only covers a
+    still-sheet-only row being edited (`orig_ean_edi IS NOT NULL`) — a genuinely brand-new
+    customer had NO conflict target at all, so a double submit (or the auto-retry sweep
+    re-adding the same sender) silently inserted TWO rows for one real customer, and
+    `customer.resolve`'s exact_email rung then refuses ANY order from that address once
+    `len(owners) > 1` — the order gets stuck BECAUSE the customer was added twice."""
+    for name in ("Nový Zákazník", "Nový Zákazník OPRAVA"):
+        snapshot.upsert_customer(
+            pg, override_id=None, orig_ean_edi=None, orig_street=None,
+            ean_edi="7000000000001", name=name, emails=["novy@x.sk"],
+            city="Košice", street="Nová 5", zip_="04001")
+    assert pg.execute(
+        "SELECT count(*) FROM customer_overrides WHERE ean_edi='7000000000001'"
+    ).fetchone()[0] == 1
+    rows = [r for r in snapshot.customers_for_management(pg)
+           if r["ean_edi"] == "7000000000001"]
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Nový Zákazník OPRAVA"
+
+
 def test_customer_override_can_add_a_brand_new_customer(pg):
     snapshot.upsert_customer(
         pg, override_id=None, orig_ean_edi=None, orig_street=None,
