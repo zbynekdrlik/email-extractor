@@ -728,13 +728,21 @@ def _validate_dl_item(q: dict, choice: str, by: str) -> None:
 
 
 def _apply_dl_item(conn, cfg, q: dict, choice: str, by: str) -> dict:
+    """#240: teaches the wording (unchanged), then gives the DOCUMENT that raised this
+    question its own second chance to finish — `dl_worker.release_for_question` re-runs
+    the message once every dl_item/dl_supplier question it still has open is answered.
+    Lazy import: `dl_worker` imports `teach` at its own top, so a module-level import
+    here would deadlock the same way `hold.py`'s own docstring already explains for its
+    `pipeline` import."""
     payload = q.get("payload") or {}
     supplier_ean = payload.get("supplier_ean", "")
     card = next((c.get("label", "") for c in (q.get("candidates") or [])
                 if str(c.get("value")) == str(choice)), "")
     dl_memory.remember(conn, supplier_ean, q.get("wording", ""), str(choice), card,
                        _today(conn), source="human")
-    return {}
+    from . import dl_worker
+    released = dl_worker.release_for_question(conn, cfg, q["id"])
+    return {"released": released}
 
 
 def _undo_dl_item(conn, q: dict) -> dict:
@@ -791,14 +799,20 @@ def _validate_dl_supplier(q: dict, choice: str, by: str) -> None:
 
 def _apply_dl_supplier(conn, cfg, q: dict, choice: str, by: str) -> dict:
     """A blank choice ('neviem, ktorý dodávateľ to je') teaches nothing — same honesty as
-    `_apply_customer`'s own 'neviem' path; the document stays for manual review."""
+    `_apply_customer`'s own 'neviem' path; the document stays for manual review.
+
+    #240: a REAL pick also gives the document that raised this question its own second
+    chance to finish — see `_apply_dl_item`'s own docstring for why the import is lazy
+    and what `release_for_question` actually does."""
     if not choice:
         return {}
     payload = q.get("payload") or {}
     name = next((c.get("label", "") for c in (q.get("candidates") or [])
                 if str(c.get("value")) == str(choice)), "")
     dl_supplier_memory.remember(conn, payload.get("sender_email", ""), str(choice), name)
-    return {}
+    from . import dl_worker
+    released = dl_worker.release_for_question(conn, cfg, q["id"])
+    return {"released": released}
 
 
 def _undo_dl_supplier(conn, q: dict) -> dict:
