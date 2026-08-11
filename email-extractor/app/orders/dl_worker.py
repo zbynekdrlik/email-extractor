@@ -80,6 +80,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime
+from html import escape
 from pathlib import Path
 
 import psycopg
@@ -88,6 +89,7 @@ from .. import store
 from . import (
     desadv,
     desadv_edi,
+    dl_alerts,
     dl_extract,
     dl_match,
     dl_memory,
@@ -563,19 +565,44 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
               dir_override=getattr(cfg, "orion_dl_dir", upload_mod.DL_DIR))
     except Exception as e:
         desadv.release_send(conn, supplier_decision.ean_edi, built.doc_number)
+        # #239 class 2: a TRANSIENT-looking upload failure (a network blip, ORION
+        # briefly unreachable) now gets the SAME automatic retry R17 already gives a
+        # transient LLM failure — the claim was just released above, so a retry can
+        # safely re-claim and re-upload without ever risking a duplicate. Raises
+        # _RetryLater when transient and attempts<3, aborting up through
+        # _process_message -> _run_and_finish exactly like every other _check_retry
+        # call site in this module (re-arms the message for the 30-min stale reclaim,
+        # no alert needed yet — it is not terminal).
+        _check_retry(message.get("attempts", 0), str(e))
         log.exception("DL upload of %s failed", built.filename)
         note = ("Odoslanie dodacieho listu do ORIONu zlyhalo — skús znova alebo "
                "nahlás administrátorovi")
-        # `e` is captured into a plain string BEFORE the lambda, never referenced
-        # inside it — `except ... as e` implicitly deletes `e` at the end of this
+        # `e` is captured into a plain string BEFORE any closure, never referenced
+        # inside one — `except ... as e` implicitly deletes `e` at the end of this
         # block, which would otherwise make a closure over it fragile (it happens to
-        # run early enough today, but `_post`'s own try/except would silently
-        # swallow a future NameError here and degrade the alert to a bare generic
-        # message — the exact silent-loss failure mode fix #5 exists to prevent).
+        # run early enough today, but a later failure here would silently swallow a
+        # future NameError and degrade the alert to a bare generic message — the
+        # exact silent-loss failure mode fix #5 exists to prevent).
         detail_text = f"{note} ({built.filename}): {e}"
-        _post(cfg, shadow, lambda: dl_report.build_review(
-            detail_text, supplier_decision.name, built.doc_number, delivery_date,
-            from_addr, subject, link=link), post=post)
+        # #239 class 2, requirement 3: NEVER a fire-and-forget best-effort post here —
+        # a lost upload-failure alert is exactly the "invisible one layer up" failure
+        # this ticket exists to close (Odoo is down right now — a bare `_post()` at
+        # this exact moment would vanish with no trace, ever). Durably enqueued
+        # instead; `dl_alerts.flush_pending` (run on the same ~15s tick as
+        # confirm.sweep, see worker.run_forever) retries delivery until Odoo genuinely
+        # confirms it, grouped with any other pending alert of the same kind. A
+        # builder exception (dl_report.build_review) must not blow up processing
+        # either — same discipline `_post`'s own docstring already established.
+        try:
+            html = dl_report.build_review(
+                detail_text, supplier_decision.name, built.doc_number, delivery_date,
+                from_addr, subject, link=link)
+            dl_alerts.enqueue(
+                conn, int(getattr(cfg, "delivery_notes_channel_id", 0) or 0),
+                "dl_upload_failed", html, message_id=message["message_id"])
+        except Exception:
+            log.exception("failed to enqueue the DL upload-failure alert for %s",
+                          built.filename)
         _event(conn, shadow, message["message_id"], stage="review", status="error",
               outcome=note, detail={"error": repr(e), "filename": built.filename},
               rollup=False, workflow=dl_report.WORKFLOW)
@@ -976,6 +1003,59 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
         result = _run_and_finish(conn, cfg, client, message, snapshot_id, catalog,
                                  suppliers, upload=upload, post=post)
         return (result or {}).get("documents", [])
+
+
+# --- #239 class 3: classified as DL but never even attempted ----------------
+
+# Deliberately generous — `worker.run_forever`'s tick claims a message within ~15s
+# under normal operation, so this many minutes with ZERO order_runs rows is already a
+# strong anomaly (delivery_notes_engine misconfigured, or the worker thread died before
+# its first claim), not routine backlog. Matches CLAIM_STALE_MINUTES for consistency.
+STUCK_CLASSIFIED_MINUTES = 30
+
+
+def stuck_classified_sweep(conn, cfg, threshold_minutes: int = STUCK_CLASSIFIED_MINUTES) -> int:
+    """A message classified `dodacie_listy` that never got a first processing attempt
+    AT ALL (zero `order_runs` rows) within a generous threshold — the ONE class none of
+    the existing safety nets cover: the hourly n8n "Stuck message watchdog"
+    (`EPe5WWMVZR0lzUld`, active, alerts channel 243 for this category) only fires once
+    `attempts>=3`, which a message that was NEVER claimed (engine misconfigured, the
+    worker thread died before its first claim) never reaches — `attempts` stays 0
+    forever.
+
+    Deduped via `dl_alerts.already_pending` keyed on `message_id` — deliberately NOT
+    `messages.alerted_stuck` (see the design comment on #239 for why: that flag belongs
+    to the n8n watchdog's own dedup, and setting it here would silently suppress that
+    watchdog's own future alert if the message later starts retrying and crosses
+    `attempts>=3`). Returns how many NEW messages were enqueued this pass (0 on a clean
+    sweep, or when every candidate was already alerted)."""
+    channel = int(getattr(cfg, "delivery_notes_channel_id", 0) or 0)
+    if not channel:
+        return 0
+    rows = conn.execute(
+        """SELECT m.message_id, m.subject, m.from_addr, m.created_at
+             FROM messages m
+            WHERE m.category = %s AND m.processed = false
+              AND m.created_at < now() - make_interval(mins => %s)
+              AND NOT EXISTS (SELECT 1 FROM order_runs r
+                              WHERE r.message_id = m.message_id)
+            ORDER BY m.created_at ASC LIMIT 20""",
+        (CATEGORY, max(1, int(threshold_minutes)))).fetchall()
+    n = 0
+    for message_id, subject, from_addr, created_at in rows:
+        if dl_alerts.already_pending(conn, "dl_stuck_classified", message_id):
+            continue
+        html = (
+            "<p>&#9888;&#65039; E-mail bol zaradený ako dodací list, ale spracovanie "
+            "sa vôbec nezačalo &mdash; over, či beží spracovanie dodacích listov.</p>"
+            f"<p>Od: {escape(from_addr or '-')} / Predmet: {escape(subject or '-')} / "
+            f"prijaté: {escape(str(created_at))}</p>")
+        dl_alerts.enqueue(conn, channel, "dl_stuck_classified", html,
+                          message_id=message_id)
+        n += 1
+    if n:
+        log.warning("dl stuck-classified: %d message(s) never got a first attempt", n)
+    return n
 
 
 # --- one tick ----------------------------------------------------------------
