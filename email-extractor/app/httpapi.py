@@ -2207,9 +2207,14 @@ ASK_DL_HTML = (_ASK_HTML_TEMPLATE
               .replace("__STATS_SCRIPT__", r"""
 async function loadStats(){try{const d=await api('/api/orders/dl/stats');
   const t=d.today||{},y=d.yesterday||{};
-  document.getElementById('dlStats').textContent=
-    'dnes: '+(t.runs||0)+' spracovaných, '+(t.duplicates||0)+' duplicít, '+
-    (t.announced_mismatch||0)+' nezhôd · včera: '+(y.runs||0)+' spracovaných'}
+  let s='dnes: '+(t.runs||0)+' spracovaných, '+(t.duplicates||0)+' duplicít, '+
+    (t.announced_mismatch||0)+' nezhôd · včera: '+(y.runs||0)+' spracovaných';
+  // #239: three current-state gauges — only shown when non-zero, same "mention
+  // problems, stay quiet otherwise" discipline as the counts above.
+  if(t.quarantined) s+=' · '+t.quarantined+' zaseknutých';
+  if(t.pending_alerts) s+=' · '+t.pending_alerts+' čaká na odoslanie';
+  if(t.open_import_incidents) s+=' · '+t.open_import_incidents+' problém(ov) s importom';
+  document.getElementById('dlStats').textContent=s}
   catch(e){}}
 loadStats();setInterval(loadStats,30000);"""))
 

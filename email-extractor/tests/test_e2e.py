@@ -705,3 +705,28 @@ def test_znalosti_lets_the_warehouse_curate_products_and_customers_directly(
 
     assert page.request.get(f"{live_server}/api/messages").status == 401
     assert console == [], f"browser console not clean: {console}"
+
+
+def test_the_dl_board_stats_strip_shows_the_new_reliability_gauges(live_server, pg, page):
+    """#239: the three current-state gauges (quarantined / pending alerts / open import
+    incidents) must actually render on the `/sklad-dl` board she already looks at, not
+    just be queryable via the JSON API."""
+    from app.httpapi import dl_key
+    from app.orders import dl_alerts
+
+    pg.execute(
+        "INSERT INTO messages (message_id, category, processed, attempts) "
+        "VALUES ('e-dl-stuck', 'dodacie_listy', false, 5)")
+    dl_alerts.enqueue(pg, 243, "dl_stuck_classified", "<p>x</p>",
+                      message_id="e-dl-stuck2")
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/otazky-dl")
+
+    page.wait_for_selector("#dlStats:has-text('zaseknutých')")
+    stats_text = page.locator("#dlStats").inner_text()
+    assert "1 zaseknutých" in stats_text
+    assert "1 čaká na odoslanie" in stats_text
+
+    assert console == [], f"browser console not clean: {console}"
