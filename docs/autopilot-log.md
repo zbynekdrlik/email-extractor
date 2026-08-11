@@ -2108,3 +2108,109 @@ Playbook: none new — this round's findings (a mirrored re-arm fix, two missing
 tests, a corrected docstring) are narrow to `dl_worker.py`/`teach.py` and already fully
 explained in their own commit messages, this log entry, and the review comment on
 #240; no new reusable cross-file *procedure* emerged.
+
+## 2026-08-11 — #238 (PR #252) — silent multi-DL loss + audit of all "ok" DLs
+
+- Root cause: the OLD (retired, pre-Python-migration) n8n "Dodacie Listy EDI" workflow
+  fetched only the FIRST attachment (`LIMIT 1`) and used a single-document extraction
+  schema — a mail with 2+ delivery notes silently dropped everything past the first,
+  while still logging its own "ok" rollup event. Confirmed on live production message
+  6202 (2026-08-06): its only `order_runs` row is a SHADOW run from 2026-08-08 (two
+  days after the message was actually processed by the old workflow), which correctly
+  found and processed BOTH of its documents and reported "partial" — proving the
+  Python engine (`dl_extract.extract_email`/`DL_SCHEMA`, #204/#205) already fixes the
+  STRUCTURAL loss for future mails.
+- Two residual gaps closed in `app/orders/dl_worker.py`'s `_process_message`, both
+  additive/detection-only (zero change to claim/upload/retry/dedup logic):
+  1. A universal, supplier-format-independent completeness check — a successfully-read
+     attachment that contributed zero documents (a plain LLM/vision omission, no
+     exception) now gets its own `review` entry, marked `synthetic` so it demotes
+     `proc_status` without being double-counted as a real processed document. Skips
+     `extract.py`'s own `method='skipped'` decorative attachments (logos/signatures) to
+     avoid false alarms (mirrors the #133/#151 false-alarm class).
+  2. The existing Lunys-only announced-vs-attached mismatch now ALSO feeds
+     `_aggregate_status` (kept, still supplier-specific but real) — `proc_status` was
+     previously staying "ok" even when the mismatch alert fired.
+- Deep-review round (fresh-context Opus subagent) caught a CRITICAL regression before
+  merge: the DL corpus's `lunys_announced_not_attached` case expected `status: "ok"`,
+  which the fix correctly changes to `"partial"` — updated on dev2
+  (`~/eval-corpus/email-extractor/dl/manifest.json`, deliberately outside git),
+  re-verified `--require-all` 8/8 exit 0, `baseline.json` unchanged (pass/fail state
+  didn't move). Also fixed: `_summary_outcome`/rollup-detail/`dl_evaluate.score()` all
+  now exclude `synthetic` entries from document counts; deduped `missing`; a Slovak
+  gender-agreement bug; and `httpapi.py`'s dashboard `state=review`
+  filter/count/badge now also matches `proc_status='partial'` (previously fell through
+  to a neutral grey badge and never appeared in the "⚠ review" filtered view — would
+  have quietly reintroduced the exact "no one notices" failure this ticket exists to
+  fix).
+- Audit (read-only, production Postgres + read-only ORION SFTP) of all 115 `ok` DL
+  messages: 5 had ≥2 real attachments (structurally suspect). 3 documents confirmed
+  genuinely lost (never in ORION at all — `P26034244`, `P26036049`, `P26035800`, all
+  MPC); a 4th (`611741`, Jackulík) found via a bonus discovery on a `proc_status='skip'`
+  message (5900, a false "duplicate" skip — spec's own documented W4 registry-collision
+  class, pre-existing n8n-era only). 2 other apparently-missing documents (610461,
+  68944×2) turned out to have been delivered successfully via unrelated LATER messages —
+  reassuring but confirms the old pipeline relied on luck (a supplier resend), not
+  correct first-pass handling. 110 single-attachment `ok` messages got an automated
+  text-heuristic pass (63/110 covered by 2 known suppliers' wording, 0 multi-doc
+  markers found; 47/110 honestly left unhand-verified — different doc formats, out of
+  session scope). Filed as #251 (remediation of the 4 confirmed losses, same safe
+  procedure as #236/#241 — never re-run a message that already uploaded).
+- Live post-deploy verification (v0.9.69) caught a REAL production Lunys mail (#6784,
+  23:07) mid-verification: subject announced 2 DL numbers, only 1 attached — the
+  dashboard correctly showed `1 dokument(y): 1x partial` (not the pre-fix `1x ok`), the
+  `announced_mismatch` timeline event correctly named the missing doc `0100242689`, and
+  the "⚠ review" filter correctly included it with a `b-review`-styled badge reading
+  "partial" — full end-to-end confirmation on a genuine live document, not just a test.
+- CI: dev PR #252 all 4 jobs green (`test`/`e2e-orders`/`e2e-dl`/`build`) on both the PR
+  run and the push run; main run `31536299463` all 4 green. Merged `05256c4`. Deployed
+  v0.9.68→v0.9.69, verified `/health`, DOM `v0.9.69`, and a grep of the RUNNING
+  container's own source for `synthetic`/`_flag_attachment`/the httpapi `proc_status IN`
+  clause to confirm the new code is actually live, not just the version string.
+
+Playbook: `.claude/rules/orders-corpus.md` already documents the corpus-update
+obligation for a production-incident fix; no new reusable procedure emerged beyond
+what commit messages / this entry / the #238 issue comments already capture in full.
+
+## #251 — dotiahnutie 4 stratených dodacích listov z auditu #238 (2026-08-12)
+
+LIVE OPS ticket, no code commits (same shape as #236). Re-verified live (SFTP) that all
+4 documents were still absent from ORION before touching anything, then shipped them
+ONE AT A TIME via `dl_worker._process_document()` called directly (never `_process_message`/
+`_claim` — see the new `.claude/rules/n8n-workflow-edits.md` section this ticket added,
+"Re-shipping ONE missing document out of a multi-document DL message via the Python
+engine"), shadow preview first, live commit second, ORION-verify after every commit:
+
+- **P26034244** (MPC, msg 823) → `Z-DESADV_000276_P26034244_20260627_000429615.txt` in
+  `in_DL`. Sibling P26034036 (already in `archCodex`) untouched.
+- **P26036049** + **P26035800** (MPC, msg 2191, same mail carried BOTH) → shipped
+  sequentially, each its own shadow+live+verify cycle. P26035800's first shadow preview
+  came back `partial` (1 item unmatched — LLM non-determinism); a second preview and the
+  eventual live run both matched all 7 items cleanly (`llm_sure`, conf 0.96, unanimous
+  recent history). Sibling P26036281 untouched.
+- **611741** (Pekáreň Jackulík, msg 5900) → 14/14 items matched, `Z-DESADV_000825_611741_
+  20260805_001823982.txt` in `in_DL`. Clarified vs the ticket's own hypothesis: msg 5900's
+  FIRST attachment (611494) was a GENUINE duplicate (already shipped a day earlier by msg
+  5557) — old n8n correctly flagged it, but its LIMIT-1 bug then never even read the
+  second attachment (611741). Not a NEW W4 registry-collision class; the current engine's
+  `desadv_sent` already scopes by `(supplier_ean, doc_number)` since #200, so this class
+  is structurally excluded today. No code change needed or made.
+- Final checklist: 4/4 files confirmed in ORION `in_DL`, 3/3 siblings confirmed untouched
+  in `archCodex`, `desadv_sent` has exactly 4 new confirmed rows (correct supplier_ean/
+  message_id each), `messages.processed/attempts/proc_status` for all 3 source messages
+  completely unchanged (deliberate — this was a per-document backfill, not a message
+  reprocess).
+- **Side finding, filed as #253** (own ticket, not this one's scope): `erp.slovnormal.sk`
+  Odoo's API is entirely down (every `POST /json/2/*` → 405 via nginx, every `GET` → 503)
+  — confirmed independently of the add-on via direct `curl`, confirmed it's instance-wide
+  not endpoint-specific. Blocks BOTH this app's own best-effort Odoo posts (R97 already
+  swallows the failure, so processing itself is unaffected) AND this ticket's own
+  warehouse-notification requirement — retried periodically through the rest of this
+  session, still down at close; will deliver the warehouse summary the moment Odoo
+  recovers.
+
+Playbook: added a new `.claude/rules/n8n-workflow-edits.md` section — the safe
+shadow-preview + direct-`_process_document` technique for re-shipping ONE missing
+document out of an old, multi-document, pre-ledger DL message without risking a
+duplicate upload of its already-shipped sibling(s), plus the LLM-matching-is-
+non-deterministic caveat (re-preview once before trusting a surprising `partial`).
