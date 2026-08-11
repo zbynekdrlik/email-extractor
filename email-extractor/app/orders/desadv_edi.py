@@ -62,6 +62,16 @@ LIN_MIN_WIDTH = 209
 LIN_MAX_WIDTH = 221
 # R89: the buyer-EAN tail + the doc-number alnum cap the filename uses.
 MAX_DOC_NUMBER_IN_FILENAME = 10
+# #245: the DESADV LIN record's GTIN field is a FIXED 13 characters (WINCODEX/CODEX
+# spec — docs/superpowers/specs/2026-08-07-delivery-notes-python-design.md §3 "LIN
+# GTIN(13)"). `_pad()` below TRUNCATES anything longer instead of erroring — a real
+# GTIN-14 catalog code (e.g. a bulk/wholesale trade unit) silently loses its last
+# digit if it ever reaches this function. `dl_match.decide_item()` is the actual
+# guard (a card whose gtin overflows this width is never allowed to match at all,
+# so `generate()` never receives one in production) — this constant is the shared
+# source of truth both modules must agree on; `dl_match.py` imports it rather than
+# hardcoding its own "13".
+GTIN_FIELD_WIDTH = 13
 
 # toWin1250, byte-exact port of the JS map — deliberately includes Czech 'ě'/'Ě' (the
 # orders-side edi.py's own table lacks it; real DL supplier/product names do carry
@@ -315,7 +325,7 @@ def generate(data: dict, sklad_by_gtin: dict, cena_by_gtin: dict) -> Desadv:
 
         lin = "LIN"
         lin += _pad_left(str(line_no), 6)
-        lin += _pad(str(gtin), 13)
+        lin += _pad(str(gtin), GTIN_FIELD_WIDTH)
         lin += _pad_left("0", 14)
         lin += _pad("", 23)
         lin += "Z"

@@ -33,6 +33,8 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
+from .desadv_edi import GTIN_FIELD_WIDTH
+
 log = logging.getLogger("orders.dl_match")
 
 # R71 confidence bands.
@@ -322,6 +324,19 @@ def _card(catalog: list[dict], gtin) -> dict | None:
     return next((c for c in catalog if str(c.get("gtin")) == str(gtin or "")), None)
 
 
+def _gtin_edi_overflow(gtin) -> bool:
+    """#245: a catalog card's own GTIN can legitimately be a valid GTIN-14 (a bulk/
+    wholesale trade unit, e.g. a 30kg block) that does NOT fit the DESADV LIN record's
+    FIXED 13-character GTIN field (`desadv_edi.GTIN_FIELD_WIDTH`). `desadv_edi._pad()`
+    silently TRUNCATES anything longer instead of erroring, corrupting the code into a
+    value that matches no real ORION stock card — this is exactly what shipped
+    18585037201518 ("Margarín stolný - Favorit") as the truncated 1858503720151 and left
+    the document permanently stuck, rejected on every CODEX import attempt. A card this
+    wide can never be represented through this channel — treat it the same as "no card
+    at all", never let it ship."""
+    return len(str(gtin or "")) > GTIN_FIELD_WIDTH
+
+
 def _partner_tokens(name: str) -> list[str]:
     return [w for w in re.sub(r"[^a-z0-9\s]", " ", _fold(name)).split()
             if len(w) >= 4 and w not in SUPPLIER_STOPWORDS]
@@ -369,6 +384,18 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
     if unknown_gtin:
         llm_gtin, llm_card = None, None
 
+    # #245: a card that DOES exist but whose gtin cannot fit the DESADV LIN field must be
+    # treated the same as "no card" — never silently truncated downstream. Capture the
+    # card's name BEFORE resetting so the final unmatched note can still tell the warehouse
+    # what the model actually proposed (mirrors R71's own "kept the rejected name" pattern).
+    gtin_overflow_card = None
+    if llm_card is not None and _gtin_edi_overflow(llm_gtin):
+        gtin_overflow_card = llm_card["name"]
+        log.warning("dl gtin edi overflow: %r card %r gtin %s is %d chars, DESADV LIN "
+                   "field is %d — cannot ship, routing to review", item_name,
+                   llm_card["name"], llm_gtin, len(llm_gtin), GTIN_FIELD_WIDTH)
+        llm_gtin, llm_card = None, None
+
     ordered_w = mass_grams(item_name)
     card_w = mass_grams((llm_card or {}).get("name", "")) if llm_card else None
     weight_conflict = _weights_disagree(ordered_w, card_w)
@@ -409,6 +436,12 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
     # overrides a confident (>=0.85) model match — that condition is right here in the guard.
     if recalled and (conf < GATE_SURE or not llm_gtin):
         rec_card = _card(catalog, recalled.gtin)
+        # #245: a remembered gtin that overflows the DESADV field is exactly as unshippable
+        # as a fresh model answer that does — never resurrect it either.
+        if rec_card and _gtin_edi_overflow(recalled.gtin):
+            log.warning("dl memory rescue skipped: %r -> %s (%d chars > %d) — cannot ship",
+                       item_name, recalled.gtin, len(str(recalled.gtin)), GTIN_FIELD_WIDTH)
+            rec_card = None
         if rec_card:
             log.info("dl memory rescue: %r -> %s (%s)", item_name, recalled.gtin, recalled.note)
             return done("memory_rescue", recalled.gtin, recalled.card,
@@ -433,6 +466,12 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
                     f"(kandidát „{llm_card['name']}“).")
 
     if not llm_gtin:
+        if gtin_overflow_card:
+            return done("unmatched", None, "", 0.0, conf,
+                        f"Karta „{gtin_overflow_card}“ má v CODEXe EAN dlhší ako "
+                        f"{GTIN_FIELD_WIDTH} znakov — do DESADV takto poslať nemožno "
+                        "(skrátenie by kód poškodilo). Treba doplniť/opraviť skladovú "
+                        "kartu v CODEXe alebo označiť správny kód.")
         return done("unmatched", None, "", 0.0, conf,
                     str(llm.get("matchReason") or "Model nenašiel zhodu (NO_MATCH)."))
 
