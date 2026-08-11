@@ -1985,3 +1985,72 @@ CODEX-side question: does an alternate 13-char code exist for these?).
 Playbook: `.claude/rules/orders-corpus.md` gained 3 entries (GTIN-14 overflow + guard
 placement, `desadv_sent`'s 2026-08-09 start date, the surgical fixed-width-file-edit
 technique for manual ORION corrections with no recoverable `matched_items` input).
+
+## 2026-08-11 — #235 review-findings closeout + #245 shipped (PR #244, merge `4c11a66`)
+
+PR #244 was already CI-green (`255c56b`/`de3cbe3` #235 feature, `723bdb0`/`fd99c8c` #245 —
+see above) but blocked on a `requesting-code-review` pass (comment 5253714038) whose
+3 findings never got fixed before a prior worker died on a rate limit. Closed in two
+RED→GREEN rounds, both on `dev`, same PR:
+
+**Round 1** — `d8ae10d` [red] / `eefcb23` [green]: (1) 🔴 restored the 5 dead-but-still-
+live-in-`/data/options.json` config keys (`catalog_sheet_id`/`catalog_gid`/`customer_gid`/
+`catalog_refresh_minutes`/`dl_catalog_gid`) to `config.yaml` + `Config` — the first draft
+had removed them entirely, directly against this repo's own recorded #129 precedent
+(`.claude/rules/deploy.md`); verified live post-deploy that the Supervisor's options
+validation is genuinely clean with all 5 still declared. (2) 🟡 EAN-collision check on
+`_api_orders_answer_new_dl_supplier`, mirroring the customer path's #234 fix. (3) 🟡
+`WHERE status='open'` race guard on `_api_orders_answer_generic`'s UPDATE, mirroring
+`teach.answer_customer`'s own #234 hardening — proven with two real threads + real HTTP
+requests through the Flask test client.
+
+An independent fresh-context review of round 1 (0 🔴 0 🟡, 2 optional 🔵) triggered
+**round 2** — `5f8a6bc` [red] / `419441d` [green]: implementing the 🔵 "customer path has
+a one-click 409-reclaim button, DL supplier doesn't" finding surfaced a REAL, pre-existing,
+previously-undiscovered bug (predates this whole fix pass, shipped with #235's original
+commits): `dlSupplierSearchBox`/`dlItemSearchBox`'s live search over the FULL current DL
+list posts a plain `{"choice": ...}`, but `_validate_dl_supplier`/`_validate_dl_item` only
+ever accept a value already in the question's FROZEN (often empty) `candidates` — so
+clicking ANY search result, or the new reclaim button, was silently rejected 400 "nebolo
+ponúknuté". Fixed by legitimizing a search-picked value against the real current DL
+supplier/catalog list before validating (mirrors what `_api_orders_answer_customer`
+already does for its own search box) — verified live: a plain-`{"choice"}` POST against a
+real supplier went from 400→200 after the fix. The OTHER 🔵 (a residual TOCTOU in the
+EAN-collision pre-check, matching `upsert_customer`'s own identical already-accepted
+limitation) is documented in a code comment, not changed — would need widening the
+advisory lock symmetrically in both functions, out of proportion to a manual, low-
+concurrency warehouse form.
+
+**Live verify (v0.9.65→0.9.67):** `ha addons update`, container restarted `15:36:08Z`,
+Supervisor validation clean (proves finding 1 above was real, not theoretical). Playwright
+against `/sklad-dl/<key>` (cookies cleared first): 0 console errors/warnings throughout;
+role boundary (`SKLAD_DL_ROLE` ↔ `SKLAD_ROLE`) still holds both directions live; `e6bfb64`
+(#234's own race fixes) confirmed present in the RUNNING container's actual source
+(`pg_advisory_xact_lock` in `snapshot.py`, the `status='open'` guard in `teach.py`), not
+inferred from the version string.
+
+**HK LOAN acceptance case (#236's own "first real test"):** live reprocess of her most
+recent message (id 6389, verified safe — no ORION upload, no `edi_file`) revealed she
+can never reach the new dl_supplier board question automatically: ALL 13 of her historical
+attachments are tiny (150×76px/2.4KB) JPEGs that OpenAI Vision rejects outright before the
+pipeline ever reaches supplier-lookup — filed **#247** (separate, deeper scope: `extract.py`
+never applies its own documented "skip decorative/tiny images" rule on the DL path). To
+still give the owner a genuine, live, fillable HK LOAN question today, manually raised the
+SAME question the pipeline would (`teach.ask_dl_supplier`, real sender, real message
+thread, no candidates) — verified live via Playwright: card renders, "➕ Nový dodávateľ"
+form opens, EAN/name fields fillable, save button live. Not synthetic test data — a real
+open question, honestly raised.
+
+**Closed:** #235 (auto-closed by PR's `Closes #235`), #245 (closed explicitly — its `#245`
+mention in the PR body had no trigger keyword next to it, so GitHub never auto-closed it).
+**Left open:** #236 (FEAST/HK LOAN/TLS still need real EAN data, not a technical fix —
+updated with current honest state), #247 (new, the vision-processing bug).
+Odoo ch.243: retracted the dead 2026-07-24 "NÁVOD point 5" Google-Sheet instruction
+(stopped being read 2026-08-08, nobody told her until now), pointed her at the same
+`/sklad-dl/<key>` link she already gets on every "Rieš na nástenke" ping, asked for HK
+LOAN's EAN-EDI right there.
+
+Playbook: none new this round — the 3 fix findings and the search-legitimization bug are
+narrow to `httpapi.py`/`config.py`, already fully explained in their own commit messages
+and this log entry; no new reusable *procedure* emerged beyond what `orders-corpus.md`
+already documents for this file's shared patterns.
