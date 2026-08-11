@@ -5,11 +5,17 @@ mail (this repo is public).
 """
 from __future__ import annotations
 
+import os
+import threading
+import time
+
+import psycopg
 import pytest
+from psycopg.types.json import Json
 
 from app import store
 from app.config import Config
-from app.orders import desadv, dl_snapshot, dl_worker, reliability
+from app.orders import desadv, dl_memory, dl_snapshot, dl_supplier_memory, dl_worker, reliability
 
 DL_CATALOG_CSV = ("GTIN,Názov,doplnok,hmotnost,Sklad,Cena\n"
                   "8588000000001,Rožok 50g,,0.05,1,0.50\n")
@@ -23,8 +29,13 @@ ITEM_GTIN = "8588000000001"
 
 
 def _cfg(**kw):
-    base = dict(pg_dsn="", data_dir="/tmp", delivery_notes_engine="n8n",
-                delivery_notes_shadow=False)
+    # #240: release_for_question() opens its own separate DB connection (the sibling-
+    # question advisory lock) via cfg.pg_dsn — a bare "" here would connect via psycopg's
+    # own libpq env defaults instead of the actual test Postgres, so every call site now
+    # needs the real DSN, same convention test_orders_teach_kinds.py's own _cfg() (which
+    # exercises hold.py's identical dual-connection pattern) already uses.
+    base = dict(pg_dsn=os.environ.get("PG_TEST_DSN", ""), data_dir="/tmp",
+                delivery_notes_engine="n8n", delivery_notes_shadow=False)
     base.update(kw)
     return Config(**base)
 
@@ -733,3 +744,559 @@ def test_a_hard_pipeline_failure_stays_tagged_as_a_dl_run_not_an_orders_run(
     assert n == 0
     row = pg.execute("SELECT status, result->>'kind' FROM order_runs").fetchone()
     assert row == ("error", "dl")
+
+
+# --- #240: answering a dl_item/dl_supplier question finishes the DOCUMENT that raised it -
+#
+# Before this fix, `teach._apply_dl_item`/`_apply_dl_supplier` only wrote the taught
+# memory and stopped — the document that raised the question stayed unfinished forever,
+# even after the exact wording/address that blocked it was taught. `release_for_question`
+# is the fix: it reprocesses the SAME message once every dl_item/dl_supplier question it
+# still has open is answered, reusing the ordinary (already-tested) `_process_message`
+# pipeline — so a now-resolvable document actually ships, and a still-unresolvable one
+# raises a fresh, visible question instead of hanging silently.
+
+class _NeverCalledClient:
+    """Proves a code path returns BEFORE ever touching the LLM — used where reprocessing
+    must not happen at all (a sibling question still open)."""
+
+    def json_call(self, *a, **kw):
+        raise AssertionError("must not call the model — this path must not reprocess")
+
+    def vision_call(self, *a, **kw):
+        raise AssertionError("must not call the model — this path must not reprocess")
+
+
+def test_release_for_question_ships_a_previously_blocked_dl_item_document(pg, tmp_path):
+    """The live production incident this ticket closes: a document whose ONLY item never
+    matched (0 of 1 items with a GTIN) never even reaches `can_create` — nothing ships,
+    nothing is left to finish it. Teaching the wording (a real human answer) must now
+    make THIS document ship, not just help the next one."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    doc = _doc(total=3.0, items=[{"name": "Neznámy chlebík", "quantity": 3, "unit": "ks",
+                                  "unitPrice": 1.0, "totalPrice": 3.0}])
+    client1 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [{"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                                     "matchReason": "žiadna zhoda"}]})
+    uploaded, posted = [], []
+    n = dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client1,
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+        post=lambda c, h: posted.append(h))
+    assert n == 1
+    assert uploaded == [], "nothing shippable on the first pass"
+    qid = pg.execute(
+        "SELECT id FROM order_questions WHERE kind='dl_item'").fetchone()[0]
+
+    # The answer: teach the wording (what `_apply_dl_item` does), then mark the question
+    # answered (what the real HTTP dispatch does BEFORE calling apply()).
+    dl_memory.remember(pg, SUPPLIER_EAN, "Neznámy chlebík", ITEM_GTIN, "Rožok 50g",
+                       "2026-08-10", source="human")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": ITEM_GTIN}), qid))
+
+    # The model is asked again (it never learned anything) and still says NO_MATCH — the
+    # document only finishes because R73's memory rescue now has a human-taught row to
+    # use, exactly the mechanism `hold.py`'s own AI-orders release relies on.
+    client2 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [{"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                                     "matchReason": "žiadna zhoda"}]})
+    uploaded2, posted2 = [], []
+    released = dl_worker.release_for_question(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), qid,
+        client=client2,
+        upload=lambda c, name, content, dir_override=None: uploaded2.append(name),
+        post=lambda c, h: posted2.append(h))
+    assert len(uploaded2) == 1, "the document must now ship"
+    assert released and released[0]["outcome"] == "ok"
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE supplier_ean=%s AND doc_number=%s "
+        "AND uploaded_at IS NOT NULL", (SUPPLIER_EAN, "0100000001")).fetchone()[0] == 1
+    # a second order_runs row records the reprocess — the first attempt is not overwritten
+    assert pg.execute("SELECT count(*) FROM order_runs").fetchone()[0] == 2
+
+
+def test_release_for_question_ships_a_previously_blocked_dl_supplier_document_without_asking_the_model_again(
+        pg, tmp_path):
+    """#240: `_match_supplier`'s new memory-rescue rung is what makes THIS reprocess
+    actually finish — without it, asking the model again for the same address would get
+    back the exact same "not matched" verdict (the model has no way to know a human just
+    resolved it), and the document could never ship. The scripted client below has NO
+    `dl_supplier` answer at all — if the model were asked again, the test would fail with
+    a "no scripted answer left" error, proving the model genuinely was never called."""
+    _snapshot(pg)
+    _msg(pg, mid="dl2", from_addr="neznamy@somewhere.sk")
+    _attach(pg, tmp_path, "dl2")
+    doc = _doc()
+    doc["documents"][0]["supplierEmail"] = "neznamy@somewhere.sk"
+    doc["documents"][0]["supplierName"] = "Neznáma pekáreň s.r.o."
+    client1 = FakeClient({
+        "dl_documents": [doc],
+        "dl_supplier": [{"matched": False, "matchReason": "nie je v zozname"}]})
+    uploaded, posted = [], []
+    n = dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client1,
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+        post=lambda c, h: posted.append(h))
+    assert n == 1
+    assert uploaded == [], "the item loop never even runs while the supplier is unknown"
+    qid = pg.execute(
+        "SELECT id FROM order_questions WHERE kind='dl_supplier'").fetchone()[0]
+
+    dl_supplier_memory.remember(pg, "neznamy@somewhere.sk", SUPPLIER_EAN, "Pekáreň Lunys")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": SUPPLIER_EAN}), qid))
+
+    client2 = FakeClient({"dl_documents": [doc], "dl_item": [ITEM_MATCHED]})
+    uploaded2, posted2 = [], []
+    released = dl_worker.release_for_question(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), qid,
+        client=client2,
+        upload=lambda c, name, content, dir_override=None: uploaded2.append(name),
+        post=lambda c, h: posted2.append(h))
+    assert len(uploaded2) == 1, "the document must now ship"
+    assert released and released[0]["outcome"] == "ok"
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE supplier_ean=%s AND doc_number=%s "
+        "AND uploaded_at IS NOT NULL", (SUPPLIER_EAN, "0100000001")).fetchone()[0] == 1
+
+
+def test_release_for_question_waits_for_every_sibling_dl_item_question_before_reprocessing(
+        pg, tmp_path):
+    """Two unmatched items on the SAME document raise TWO separate dl_item questions.
+    Answering only one must not trigger a reprocess yet — mirrors `hold.
+    release_for_question`'s own "every question_id answered" gate; reprocessing on a
+    partial answer would just re-raise the exact same still-open question for nothing."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    doc = _doc(total=6.0, items=[
+        {"name": "Neznámy chlebík", "quantity": 3, "unit": "ks", "unitPrice": 1.0,
+         "totalPrice": 3.0},
+        {"name": "Tajomný koláč", "quantity": 3, "unit": "ks", "unitPrice": 1.0,
+         "totalPrice": 3.0}])
+    client1 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [{"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                                     "matchReason": "žiadna zhoda"},
+                                    {"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                                     "matchReason": "žiadna zhoda"}]})
+    n = dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client1,
+        upload=lambda *a, **k: None, post=lambda c, h: None)
+    assert n == 1
+    qid_a = pg.execute(
+        "SELECT id FROM order_questions WHERE kind='dl_item' AND wording='Neznámy "
+        "chlebík'").fetchone()[0]
+    qid_b = pg.execute(
+        "SELECT id FROM order_questions WHERE kind='dl_item' AND wording='Tajomný "
+        "koláč'").fetchone()[0]
+
+    dl_memory.remember(pg, SUPPLIER_EAN, "Neznámy chlebík", ITEM_GTIN, "Rožok 50g",
+                       "2026-08-10", source="human")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": ITEM_GTIN}), qid_a))
+
+    released = dl_worker.release_for_question(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), qid_a,
+        client=_NeverCalledClient())
+    assert released == [], "the sibling question (koláč) is still open — must not reprocess"
+    assert pg.execute("SELECT count(*) FROM order_runs").fetchone()[0] == 1, \
+        "no second run — the reprocess genuinely never started"
+
+    dl_memory.remember(pg, SUPPLIER_EAN, "Tajomný koláč", ITEM_GTIN, "Rožok 50g",
+                       "2026-08-10", source="human")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": ITEM_GTIN}), qid_b))
+
+    client2 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [{"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                                     "matchReason": "žiadna zhoda"},
+                                    {"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                                     "matchReason": "žiadna zhoda"}]})
+    uploaded2 = []
+    released = dl_worker.release_for_question(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), qid_b,
+        client=client2,
+        upload=lambda c, name, content, dir_override=None: uploaded2.append(name),
+        post=lambda c, h: None)
+    assert len(uploaded2) == 1, "now that BOTH siblings are answered, it ships"
+    assert released and released[0]["outcome"] == "ok"
+
+
+def test_release_for_question_raises_a_fresh_question_when_still_unresolved(pg, tmp_path):
+    """Requirement 2: when the document STILL cannot fully resolve after the answer (a
+    second, genuinely different wording was never taught), it must not silently hang —
+    it ships what it can (existing "ship what matched" behaviour, unchanged) AND raises a
+    FRESH, visible question for what remains, so the warehouse is never left guessing."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    doc = _doc(total=6.0, items=[
+        {"name": "Neznámy chlebík", "quantity": 3, "unit": "ks", "unitPrice": 1.0,
+         "totalPrice": 3.0},
+        {"name": "Úplne iný produkt", "quantity": 3, "unit": "ks", "unitPrice": 1.0,
+         "totalPrice": 3.0}])
+    client1 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [{"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                                     "matchReason": "žiadna zhoda"},
+                                    {"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                                     "matchReason": "žiadna zhoda"}]})
+    n = dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client1,
+        upload=lambda *a, **k: None, post=lambda c, h: None)
+    assert n == 1
+    qid_a = pg.execute(
+        "SELECT id FROM order_questions WHERE kind='dl_item' AND wording='Neznámy "
+        "chlebík'").fetchone()[0]
+    qid_b = pg.execute(
+        "SELECT id FROM order_questions WHERE kind='dl_item' AND wording='Úplne iný "
+        "produkt'").fetchone()[0]
+
+    # "Neznámy chlebík" gets a real, currently-valid answer. "Úplne iný produkt" ALSO
+    # gets a real, non-blank pick — but the card it named has since been retired from the
+    # catalog (review finding, #240: a blank/"neviem" choice is unreachable through the
+    # real HTTP path — `_api_orders_answer_generic` never marks THAT kind of answer
+    # 'answered' at all, per its own docstring — so a genuinely production-representative
+    # "still unresolved after a real answer" trigger is a taught card the catalog no
+    # longer has, which `dl_memory.resolve()`'s own `catalog_gtins` filter correctly
+    # refuses to rescue with).
+    RETIRED_GTIN = "9999999999999"
+    dl_memory.remember(pg, SUPPLIER_EAN, "Neznámy chlebík", ITEM_GTIN, "Rožok 50g",
+                       "2026-08-10", source="human")
+    dl_memory.remember(pg, SUPPLIER_EAN, "Úplne iný produkt", RETIRED_GTIN,
+                       "Karta, ktorá už nie je v katalógu", "2026-08-10", source="human")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": ITEM_GTIN}), qid_a))
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": RETIRED_GTIN}), qid_b))
+
+    client2 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [{"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                                     "matchReason": "žiadna zhoda"},
+                                    {"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                                     "matchReason": "stále žiadna zhoda"}]})
+    uploaded2, posted2 = [], []
+    released = dl_worker.release_for_question(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), qid_a,
+        client=client2,
+        upload=lambda c, name, content, dir_override=None: uploaded2.append(name),
+        post=lambda c, h: posted2.append(h))
+    assert len(uploaded2) == 1, "the resolvable item still ships (partial EDI, unchanged)"
+    assert released and released[0]["outcome"] == "partial"
+    fresh = pg.execute(
+        "SELECT id, status FROM order_questions WHERE kind='dl_item' AND "
+        "wording='Úplne iný produkt' ORDER BY id").fetchall()
+    assert len(fresh) == 2, "a brand-new question was raised — the old one is not reused"
+    assert fresh[0] == (qid_b, "answered")
+    assert fresh[1][1] == "open", "the still-unresolved item is visibly asked about again"
+    assert any("Nespárované" in h and "Úplne iný produkt" in h for h in posted2), \
+        "also visible in the Odoo message, not just the nástenka question"
+
+
+def test_release_for_question_never_reuploads_an_already_partially_shipped_document(
+        pg, tmp_path):
+    """HARD SAFETY (#240): a document that already shipped (partial — one item excluded)
+    must NEVER be re-uploaded just because its excluded item's dl_item question later
+    gets answered. The guard is the SAME `desadv.claim_send_or_identify` ledger every
+    `_process_document` call already makes — not new code added for this ticket — this
+    test proves it holds across the reprocess-on-answer path too, exactly as required
+    ("the re-run path must itself carry the ORION/registry check as a guard in code")."""
+    _snapshot(pg)
+    _msg(pg, mid="dl3")
+    _attach(pg, tmp_path, "dl3")
+    doc = _doc(total=8.0, items=[
+        {"name": "Rožok 50g", "quantity": 10, "unit": "ks", "unitPrice": 0.5,
+         "totalPrice": 5.0},
+        {"name": "Neznámy chlebík", "quantity": 3, "unit": "ks", "unitPrice": 1.0,
+         "totalPrice": 3.0}])
+    client1 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED,
+                                    {"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                                     "matchReason": "žiadna zhoda"}]})
+    uploaded, posted = [], []
+    n = dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client1,
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+        post=lambda c, h: posted.append(h))
+    assert n == 1
+    assert len(uploaded) == 1, "partial EDI still ships today (R81, unchanged)"
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE supplier_ean=%s AND doc_number=%s "
+        "AND uploaded_at IS NOT NULL", (SUPPLIER_EAN, "0100000001")).fetchone()[0] == 1
+
+    qid = pg.execute(
+        "SELECT id FROM order_questions WHERE kind='dl_item'").fetchone()[0]
+    dl_memory.remember(pg, SUPPLIER_EAN, "Neznámy chlebík", ITEM_GTIN, "Rožok 50g",
+                       "2026-08-10", source="human")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": ITEM_GTIN}), qid))
+
+    client2 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED,
+                                    {"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                                     "matchReason": "žiadna zhoda"}]})
+    uploaded2, posted2 = [], []
+    released = dl_worker.release_for_question(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), qid,
+        client=client2,
+        upload=lambda c, name, content, dir_override=None: uploaded2.append(name),
+        post=lambda c, h: posted2.append(h))
+    assert uploaded2 == [], "the already-shipped document must NEVER be re-uploaded"
+    assert released and released[0]["outcome"] == "duplicate"
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE supplier_ean=%s AND doc_number=%s",
+        (SUPPLIER_EAN, "0100000001")).fetchone()[0] == 1, \
+        "still exactly one ledger row — no second claim was ever created"
+    ev = pg.execute(
+        "SELECT stage FROM email_events WHERE message_id='dl3' AND "
+        "stage='already_shipped_this_run'").fetchone()
+    assert ev == ("already_shipped_this_run",)
+
+
+def test_release_for_question_hard_failure_re_arms_processed_for_reclaim(
+        pg, tmp_path, monkeypatch):
+    """Review finding (#240, this ticket's own second round): `_run_and_finish`'s
+    `except Exception` (hard-failure) branch had the IDENTICAL strand-forever bug the
+    `_RetryLater` branch was just fixed for, but the fix was not extended to it — a
+    reprocess (the message already has `processed=true` from its earlier, successful
+    first pass) that hits a genuine, non-transient, STRUCTURAL failure left `processed`
+    untouched, permanently excluding the message from `_claim()`'s own `WHERE processed
+    = false` filter, exactly like the retry bug did.
+
+    `_match_supplier`'s and `extract_email`'s own per-document/per-attachment guards
+    already swallow an ordinary LLM failure into a graceful "review" outcome (the happy
+    path — see `test_non_transient_llm_failure_goes_to_review_immediately` above, which
+    never reaches this branch at all) — reaching the TRUE hard-failure branch needs a
+    structural failure BELOW those guards, simulated here by monkeypatching
+    `dl_extract.extract_email` itself to raise, the same way a real bug in
+    `desadv_edi.build()`/a DB error would."""
+    _snapshot(pg)
+    _msg(pg, mid="dlhard")
+    _attach(pg, tmp_path, "dlhard")
+    doc = _doc(total=3.0, items=[{"name": "Neznámy chlebík", "quantity": 3, "unit": "ks",
+                                  "unitPrice": 1.0, "totalPrice": 3.0}])
+    n = dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)),
+        client=FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                          "dl_item": [{"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                                      "matchReason": "žiadna zhoda"}]}),
+        upload=lambda *a, **k: None, post=lambda c, h: None)
+    assert n == 1
+    qid = pg.execute("SELECT id FROM order_questions WHERE kind='dl_item'").fetchone()[0]
+    dl_memory.remember(pg, SUPPLIER_EAN, "Neznámy chlebík", ITEM_GTIN, "Rožok 50g",
+                       "2026-08-10", source="human")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": ITEM_GTIN}), qid))
+    row = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='dlhard'").fetchone()
+    assert row[0] is True, "setup: the message must already be fully processed"
+
+    def _boom(client, attachments):
+        raise RuntimeError("structural bug below the per-document guards")
+
+    monkeypatch.setattr(dl_worker.dl_extract, "extract_email", _boom)
+    released = dl_worker.release_for_question(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), qid,
+        client=FakeClient({}))
+    assert released == []
+    row = pg.execute(
+        "SELECT processed, processing_at FROM messages WHERE message_id='dlhard'"
+    ).fetchone()
+    assert row == (False, None), (
+        "a hard failure during reprocess must re-arm processed=false so _claim() can "
+        "reclaim the message — it must never stay permanently processed=true")
+    assert pg.execute(
+        "SELECT status FROM order_runs ORDER BY id DESC LIMIT 1").fetchone()[0] == "error"
+
+
+def test_release_for_question_waits_for_a_mixed_dl_supplier_and_dl_item_sibling_pair(
+        pg, tmp_path):
+    """Review finding (#240): the sibling gate is tested elsewhere only with two `dl_item`
+    questions — a single MESSAGE can just as easily raise one `dl_supplier` question
+    (its first document's supplier unmatched) and one `dl_item` question (a DIFFERENT
+    document in the SAME message, whose OWN supplier already matched) at once. Both are
+    `kind IN ('dl_item', 'dl_supplier')` siblings of the same message_id — the generic
+    SQL gate must wait for both regardless of kind, never just same-kind pairs."""
+    _snapshot(pg)
+    _msg(pg, mid="dlmix")
+    _attach(pg, tmp_path, "dlmix")
+    two_docs = {"documents": [
+        {"supplierName": "Neznáma pekáreň s.r.o.", "supplierCity": "",
+         "supplierEmail": "neznamy2@somewhere.sk", "docNumber": "0100000005",
+         "deliveryDate": "01.08.2026", "documentTotalWithoutVAT": 5.0,
+         "items": [{"name": "Rožok 50g", "quantity": 10, "unit": "ks", "unitPrice": 0.5,
+                   "totalPrice": 5.0}]},
+        {"supplierName": "Pekáreň Lunys", "supplierCity": "Prešov",
+         "supplierEmail": "dodavatel@lunys.sk", "docNumber": "0100000006",
+         "deliveryDate": "01.08.2026", "documentTotalWithoutVAT": 3.0,
+         "items": [{"name": "Neznámy chlebík", "quantity": 3, "unit": "ks",
+                   "unitPrice": 1.0, "totalPrice": 3.0}]},
+    ]}
+    client1 = FakeClient({
+        "dl_documents": [two_docs],
+        "dl_supplier": [{"matched": False, "matchReason": "nie je v zozname"},
+                        SUPPLIER_MATCHED],
+        "dl_item": [{"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                    "matchReason": "žiadna zhoda"}]})
+    n = dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client1,
+        upload=lambda *a, **k: None, post=lambda c, h: None)
+    assert n == 1
+    qid_supplier = pg.execute(
+        "SELECT id FROM order_questions WHERE kind='dl_supplier'").fetchone()[0]
+    qid_item = pg.execute(
+        "SELECT id FROM order_questions WHERE kind='dl_item'").fetchone()[0]
+
+    # Answer only the dl_supplier question — the dl_item sibling (a DIFFERENT kind, on a
+    # DIFFERENT document, but the SAME message) must still block reprocessing.
+    dl_supplier_memory.remember(pg, "neznamy2@somewhere.sk", SUPPLIER_EAN, "Pekáreň Lunys")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": SUPPLIER_EAN}), qid_supplier))
+    released = dl_worker.release_for_question(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), qid_supplier,
+        client=_NeverCalledClient())
+    assert released == [], "the dl_item sibling is still open — must not reprocess yet"
+    assert pg.execute("SELECT count(*) FROM order_runs").fetchone()[0] == 1
+
+    # Now answer the dl_item sibling too — every question on the message is answered.
+    dl_memory.remember(pg, SUPPLIER_EAN, "Neznámy chlebík", ITEM_GTIN, "Rožok 50g",
+                       "2026-08-10", source="human")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": ITEM_GTIN}), qid_item))
+    client2 = FakeClient({
+        "dl_documents": [two_docs],
+        "dl_supplier": [SUPPLIER_MATCHED],   # doc1 is memory-rescued, never asks the
+                                             # model again — only doc2 needs a fresh call
+        "dl_item": [ITEM_MATCHED,            # doc1's own item, matched fresh
+                   {"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                    "matchReason": "žiadna zhoda"}]})  # doc2's item, memory-rescued
+    uploaded2 = []
+    released = dl_worker.release_for_question(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), qid_item,
+        client=client2,
+        upload=lambda c, name, content, dir_override=None: uploaded2.append(name),
+        post=lambda c, h: None)
+    assert len(uploaded2) == 2, "both documents now ship"
+    assert {d["outcome"] for d in released} == {"ok"}
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE supplier_ean=%s AND doc_number IN "
+        "('0100000005', '0100000006') AND uploaded_at IS NOT NULL",
+        (SUPPLIER_EAN,)).fetchone()[0] == 2
+
+
+def test_release_for_question_advisory_lock_serializes_two_genuinely_concurrent_racers(
+        pg, tmp_path):
+    """Review finding (#240, this ticket's own second round): every other test in this
+    file exercises `release_for_question` SEQUENTIALLY (one Python call after another),
+    which proves the sibling-gate LOGIC but nothing about whether
+    `pg_advisory_xact_lock(hashtext(message_id))` actually SERIALIZES two callers that
+    are genuinely running AT THE SAME TIME — sequential calls would look identical
+    whether the lock does anything at all. This test spawns two real OS threads, each on
+    its OWN Postgres connection (a single psycopg connection is not safe for concurrent
+    use across threads), both calling `release_for_question` for the SAME already-fully-
+    answered question at once. A `_TimedClient` records the wall-clock SPAN of every
+    LLM call — since the entire reprocess pipeline runs INSIDE `release_for_question`'s
+    `with lock_tx:` block, the lock's guarantee is exactly "these two spans never
+    overlap." Deliberately timing-based rather than a fixed sleep+assert (`no-timeout-
+    band-aids.md`): the assertion is on the RECORDED spans after both threads finish, not
+    on which one "wins" a race, so it is not flaky under CI scheduling variance — a
+    missing/broken lock would show up as an actual timestamp overlap, not as a hang."""
+    _snapshot(pg)
+    _msg(pg, mid="dlrace")
+    _attach(pg, tmp_path, "dlrace")
+    doc = _doc(total=3.0, items=[{"name": "Neznámy chlebík", "quantity": 3, "unit": "ks",
+                                  "unitPrice": 1.0, "totalPrice": 3.0}])
+    n = dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)),
+        client=FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                          "dl_item": [{"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                                      "matchReason": "žiadna zhoda"}]}),
+        upload=lambda *a, **k: None, post=lambda c, h: None)
+    assert n == 1
+    qid = pg.execute("SELECT id FROM order_questions WHERE kind='dl_item'").fetchone()[0]
+    dl_memory.remember(pg, SUPPLIER_EAN, "Neznámy chlebík", ITEM_GTIN, "Rožok 50g",
+                       "2026-08-10", source="human")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": ITEM_GTIN}), qid))
+
+    pg_dsn = os.environ["PG_TEST_DSN"]
+    spans_lock = threading.Lock()
+    spans: list[tuple[int, float, float]] = []   # (thread index, call start, call end)
+    errors: list[Exception] = []
+
+    class _TimedClient(FakeClient):
+        def __init__(self, answers, idx):
+            super().__init__(answers)
+            self._idx = idx
+
+        def json_call(self, *a, **kw):
+            start = time.monotonic()
+            time.sleep(0.2)   # widen the window deliberately — makes a real overlap,
+                              # if the lock were missing, easy to observe rather than
+                              # depending on the two threads happening to be scheduled
+                              # at exactly the same instant
+            result = super().json_call(*a, **kw)
+            with spans_lock:
+                spans.append((self._idx, start, time.monotonic()))
+            return result
+
+    def _racer(idx):
+        conn = psycopg.connect(pg_dsn, autocommit=True)
+        try:
+            client = _TimedClient(
+                {"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                 "dl_item": [{"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                             "matchReason": "žiadna zhoda"}]}, idx)
+            dl_worker.release_for_question(
+                conn, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), qid,
+                client=client, upload=lambda *a, **k: None, post=lambda c, h: None)
+        except Exception as e:  # pragma: no cover - surfaced via `errors`, not swallowed
+            errors.append(e)
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=_racer, args=(i,)) for i in (1, 2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+    assert not any(t.is_alive() for t in threads), "a racer thread hung"
+    assert errors == [], f"a racer raised: {errors}"
+
+    # Both racers must have genuinely reached the model (proves the sibling-gate passed
+    # for BOTH — the lock does not skip the second one, see dl_worker.py's own corrected
+    # docstring) — group each thread's own calls into its [earliest start, latest end]
+    # window and assert the two windows never overlap.
+    assert len(spans) == 6, f"expected 3 LLM calls per racer, got {spans}"
+    windows = {}
+    for idx, start, end in spans:
+        lo, hi = windows.get(idx, (start, end))
+        windows[idx] = (min(lo, start), max(hi, end))
+    (w1_lo, w1_hi), (w2_lo, w2_hi) = sorted(windows.values())
+    assert w2_lo >= w1_hi, (
+        f"the two reprocess attempts overlapped ({w1_lo:.3f}-{w1_hi:.3f} vs "
+        f"{w2_lo:.3f}-{w2_hi:.3f}) — the advisory lock did not serialize them")
+    # And the SAME real safety net as every other test in this file — even racing, the
+    # document is never uploaded twice.
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE supplier_ean=%s AND doc_number=%s "
+        "AND uploaded_at IS NOT NULL", (SUPPLIER_EAN, "0100000001")).fetchone()[0] == 1
+    # Both racers DID run a full reprocess (a real, if wasteful, race outcome per the
+    # corrected docstring) — two order_runs rows, not one, and not a crash from a
+    # doubled upload attempt.
+    assert pg.execute("SELECT count(*) FROM order_runs").fetchone()[0] == 3  # tick() + 2
+
+
+def test_release_for_question_is_a_safe_no_op_when_the_message_row_is_gone(pg):
+    """`teach.ask_dl_item`/`ask_dl_supplier` (and the existing #235 tests) are exercised
+    directly with synthetic message ids that were never inserted into `messages` at all —
+    `release_for_question` must degrade to a harmless empty release, never raise, so
+    every existing dl_item/dl_supplier answer flow keeps working exactly as before."""
+    from app.orders import teach
+    qid = teach.ask_dl_item(pg, message_id="ghost-message", supplier_ean="S1",
+                            supplier_name="X", wording="čosi", quantity=1, unit="ks",
+                            candidates=[{"gtin": "G1", "name": "Karta"}])
+    pg.execute("UPDATE order_questions SET status='answered' WHERE id=%s", (qid,))
+    assert dl_worker.release_for_question(pg, _cfg(), qid) == []

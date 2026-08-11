@@ -82,6 +82,8 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
+import psycopg
+
 from .. import store
 from . import (
     desadv,
@@ -91,6 +93,7 @@ from . import (
     dl_memory,
     dl_report,
     dl_snapshot,
+    dl_supplier_memory,
     llm,
     report,
     teach,
@@ -280,7 +283,30 @@ def _item_input(item: dict, cands: list[dict], partner_name: str) -> str:
     return "\n".join(lines)
 
 
-def _match_supplier(client, doc: dict, suppliers: list[dict]) -> dl_match.SupplierDecision:
+def _match_supplier(conn, client, doc: dict, suppliers: list[dict],
+                    sender_email: str = "") -> dl_match.SupplierDecision:
+    """#240: a HUMAN-taught address (`dl_supplier_memory`, written the moment a
+    `dl_supplier` nástenka question is answered) is checked FIRST, before the model is
+    ever asked — mirrors AI-orders' own `human_taught` rung sitting above the whole
+    `decide_without_model` ladder (`match.py`). Without this, `release_for_question`'s
+    reprocess-on-answer would just ask the model again and get the exact same "not
+    matched" verdict it got the first time (the model has no way to know a human already
+    resolved this address) — the document would never actually finish. A taught EAN that
+    no longer exists in the CURRENT supplier snapshot (a retired card) falls through to
+    the model exactly as before, the same defensive shape `decide_item`'s own
+    `unknown_gtin` guard already uses."""
+    if sender_email:
+        recalled = dl_supplier_memory.resolve(conn, sender_email)
+        if recalled:
+            row = next((s for s in suppliers
+                       if str(s.get("ean_edi")) == str(recalled["ean_edi"])), None)
+            if row:
+                log.info("dl supplier memory rescue: %r -> %s (%s)", sender_email,
+                         recalled["ean_edi"], recalled.get("name"))
+                return dl_match.SupplierDecision(
+                    matched=True, ean_edi=row["ean_edi"], name=row.get("name", ""),
+                    confidence=0.95,
+                    note="Potvrdené naučenou adresou — sklad ju už raz priradil.")
     cands = dl_match.supplier_candidates(doc.get("supplierName", ""),
                                          doc.get("supplierEmail", ""),
                                          doc.get("supplierCity", ""), suppliers)
@@ -362,6 +388,10 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     subject, from_addr = message.get("subject", ""), message.get("from_addr", "")
     doc_number = doc.get("docNumber") or ""
     delivery_date = doc.get("deliveryDate", "")
+    # #240: computed once, reused both for the memory-rescue lookup in `_match_supplier`
+    # and for the `teach.ask_dl_supplier` call below — the SAME address must key both,
+    # or a taught mapping would never actually match what a later ask/resolve looks up.
+    sender_email = doc.get("supplierEmail") or from_addr
     upload = upload or (lambda c, name, content, dir_override=None:
                         upload_mod.put(c, name, content, dir_override=dir_override))
     # #229 follow-up 2: computed once, reused by every build_review/build_success call
@@ -382,7 +412,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                "supplier_name": doc.get("supplierName", ""), "reason": reason}
 
     try:
-        supplier_decision = _match_supplier(client, doc, suppliers)
+        supplier_decision = _match_supplier(conn, client, doc, suppliers, sender_email)
     except Exception as e:
         _check_retry(message.get("attempts", 0), str(e))
         reason = f"Zlyhalo párovanie dodávateľa: {e}"
@@ -400,8 +430,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             cands = dl_match.supplier_candidates(
                 doc.get("supplierName", ""), doc.get("supplierEmail", ""),
                 doc.get("supplierCity", ""), suppliers)
-            teach.ask_dl_supplier(conn, message["message_id"],
-                                  doc.get("supplierEmail") or from_addr, cands,
+            teach.ask_dl_supplier(conn, message["message_id"], sender_email, cands,
                                   delivery_date=delivery_date)
         _post(cfg, shadow, lambda: dl_report.build_review(
             supplier_decision.note, "", doc_number, delivery_date, from_addr, subject,
@@ -453,7 +482,8 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             teach.ask_dl_item(conn, message["message_id"], supplier_decision.ean_edi,
                               supplier_decision.name, item.get("name", ""),
                               item.get("quantity"), item.get("unit", ""), cands,
-                              delivery_date=delivery_date, reason=decision.note)
+                              delivery_date=delivery_date, reason=decision.note,
+                              catalog_gtins=catalog_gtins)
 
     header = {"customerName": supplier_decision.name,
              "customerEanEdi": supplier_decision.ean_edi}
@@ -700,6 +730,191 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
            "items": all_items, "announced_mismatch": missing}
 
 
+# --- one full pipeline pass, finished off exactly like the live claim branch -------
+
+def _run_and_finish(conn, cfg, client, message: dict, snapshot_id: int | None,
+                    catalog: list[dict], suppliers: list[dict], upload=None,
+                    post=None) -> dict | None:
+    """One full `_process_message` pass for `message`, finished off exactly like the
+    live `engine=python` claim branch of `tick()` always has: an `order_runs` row,
+    `messages` marked processed, and the rollup summary event. Returns the result dict
+    on a completed pass, `None` on a transient retry or a hard failure (both already
+    logged/recorded here — the caller has nothing further to do in either case).
+
+    Shared by `tick()`'s own claim branch AND `release_for_question`'s reprocess-on-
+    answer (#240) — the SAME safe, already-tested shape either way: `_process_message`
+    always calls `_process_document`, which always claims through `desadv.
+    claim_send_or_identify` before any upload, so an ALREADY-SHIPPED document inside
+    `message` is never re-uploaded here, no matter which caller triggered this pass."""
+    run_id = worker._start_run(conn, message["message_id"], None, shadow=False)
+    try:
+        result = _process_message(conn, cfg, client, message, snapshot_id, catalog,
+                                  suppliers, shadow=False, upload=upload, post=post)
+    except _RetryLater as e:
+        log.info("DL message %s: transient failure (attempts=%s) — leaving for the "
+                 "30-min stale reclaim: %s", message["message_id"],
+                 message.get("attempts"), e)
+        worker._finish_run(conn, run_id, "retry",
+                           {"kind": "dl", "dl_snapshot_id": snapshot_id, "reason": str(e)},
+                           error=str(e))
+        # Deep-review finding on this ticket's own PR (#240): `tick()`'s claim branch
+        # relies on `_claim()` having already set `processing_at = now()` and `processed
+        # = false` — leaving both UNTOUCHED here is what lets R10's 30-minute stale
+        # window reclaim the message later. `release_for_question`'s reprocess call
+        # never went through `_claim()` at all: the message arrives here with `processed
+        # = true` (its earlier, successful pass already set that) and `processing_at =
+        # NULL` — leaving BOTH untouched would permanently strand the message outside
+        # `_claim()`'s own `WHERE processed = false` filter, with no path back into the
+        # normal retry cycle at all (a human's answer recorded, but the document never
+        # gets the "second chance" this whole ticket exists to give it). Explicitly
+        # re-arming both columns here makes the message reclaimable by the SAME stale
+        # window either way — a genuine no-op for the tick()-claim path (both columns
+        # already held these values moments earlier) and the actual fix for the
+        # release_for_question-reprocess path.
+        conn.execute(
+            """UPDATE messages SET processed = false, processing_at = now()
+                WHERE message_id = %s""", (message["message_id"],))
+        report.log_event(conn, message["message_id"], stage="retry", status="retry",
+                         outcome=str(e)[:500], rollup=False, workflow=dl_report.WORKFLOW)
+        return None
+    except Exception as e:
+        log.exception("DL pipeline failed for %s", message["message_id"])
+        # Deep-review finding, #204: `result=None` leaves `result->>'kind'` NULL, which
+        # `reliability.provenance_stats_for_day`'s own `IS DISTINCT FROM 'dl'` exclusion
+        # treats as an ORDERS run (NULL is distinct from 'dl') — exactly the rows the
+        # DL/orders split exists to keep apart end up miscounted on the busiest signal
+        # (a hard failure). Always tag `kind`.
+        worker._finish_run(conn, run_id, "error",
+                           {"kind": "dl", "dl_snapshot_id": snapshot_id}, error=repr(e))
+        # Deep-review finding on this ticket's own PR (#240), same reasoning as the
+        # `_RetryLater` branch above: a hard failure during a `release_for_question`
+        # reprocess also arrives here with `processed = true` (its earlier, successful
+        # pass already set that) — `processing_at = NULL` alone would leave `processed`
+        # untouched and permanently strand the message outside `_claim()`'s own `WHERE
+        # processed = false` filter, exactly like the retry case, just with no 30-minute
+        # stale window at all (a hard failure has always been immediately reclaimable —
+        # `processing_at = NULL` puts it straight back in `_claim()`'s pool, matching the
+        # existing tick()-claim behaviour this line already had). Re-arming `processed`
+        # too is a genuine no-op for the tick()-claim path (already `false`) and the
+        # actual fix for the reprocess path.
+        conn.execute(
+            "UPDATE messages SET processed = false, processing_at = NULL "
+            "WHERE message_id = %s", (message["message_id"],))
+        return None
+    worker._finish_run(conn, run_id, result.get("status", "ok"), result)
+    conn.execute(
+        """UPDATE messages
+              SET processed = true, processed_at = now(), processed_by = %s,
+                  processing_at = NULL
+            WHERE message_id = %s""", (CATEGORY, message["message_id"]))
+    report.log_event(conn, message["message_id"], stage=result.get("status", "ok"),
+                     status=result.get("status", "ok"),
+                     outcome=_summary_outcome(result),
+                     detail={"documents": len(result.get("documents", []))},
+                     rollup=True, workflow=dl_report.WORKFLOW)
+    return result
+
+
+# --- #240: an answered dl_item/dl_supplier question gives its document another chance --
+
+def release_for_question(conn, cfg, qid: int, client=None, upload=None,
+                         post=None) -> list[dict]:
+    """Once every `dl_item`/`dl_supplier` nástenka question raised for ONE message has
+    been answered, that message is given a genuine second chance to finish — the exact
+    thing that was missing before this ticket (`teach._apply_dl_item`/`_apply_dl_supplier`
+    used to just write memory and stop, so an answered question never unstuck the
+    document that raised it, per the design comment on #240).
+
+    Waits for EVERY sibling `dl_item`/`dl_supplier` question of the SAME message before
+    reprocessing (mirrors `hold.release_for_question`'s own "every question_id answered"
+    gate) — reprocessing after only SOME of them are answered would just re-raise the
+    exact same still-open questions for nothing. The caller (`teach._apply_dl_item`/
+    `_apply_dl_supplier`) already marks `qid` itself 'answered' BEFORE calling this, so
+    it never counts itself as still-open.
+
+    Re-runs the WHOLE message through the ordinary, already-tested `_process_message`
+    pipeline (`_run_and_finish`) rather than a bespoke "redecide without a model call"
+    path (the design AI-orders' `hold.py` uses): unlike AI-orders' hold, a DL document
+    blocked on `dl_supplier` never even reached item matching the first time (the item
+    loop only runs after a successful supplier match) — there is no earlier decision to
+    redecide, the model genuinely has to be asked. Safety against re-uploading an
+    ALREADY-shipped document (e.g. one that partially shipped, then later got its
+    excluded item's `dl_item` question answered) is NOT new code here — it is the SAME
+    `desadv.claim_send_or_identify` claim every `_process_document` call already makes
+    before any upload; reprocessing this message again, the ledger reports the confirmed
+    claim exactly like a genuine R17 self-retry and refuses the upload (see
+    `_process_document`'s own `already_shipped_this_run` handling) — see
+    `test_release_for_question_never_reuploads_an_already_partially_shipped_document`.
+
+    Returns the reprocessed message's own `documents` list (mirrors AI-orders'
+    `hold.release_for_question`'s `released` list) — `[]` when nothing happened yet (a
+    sibling question is still open), or when there is genuinely nothing to reprocess
+    (the message row is gone, or no catalog snapshot is loaded).
+
+    Deep-review finding on this ticket's own PR (#240): the "every sibling answered?"
+    check below has no lock of its own — two near-simultaneous answers to SIBLING
+    questions of the SAME message could each independently observe "every question
+    answered" under READ COMMITTED and both dispatch a reprocess (the exact race
+    `hold._release_locked`'s own docstring already documents and fixes for AI-orders,
+    #118). Bounded to WASTED work, never corruption (`desadv.claim_send_or_identify` is
+    still the real, atomic backstop against a double-upload) — but a doubled LLM call, a
+    duplicate `order_runs` row and duplicate digest noise per collision is real, avoidable
+    waste. `pg_advisory_xact_lock(hashtext(message_id))`, taken on a SEPARATE connection
+    and held for the WHOLE check-through-reprocess decision (mirrors the `db.py`
+    migration-lock idiom this codebase already uses, and `hold._release_locked`'s own
+    "separate connection, held for the whole decision" shape — DL has no natural row to
+    `FOR UPDATE` the way `held_orders` gives AI-orders, so a plain advisory lock keyed on
+    the message id is the closest honest equivalent).
+
+    Correction (review of THIS lock's own first draft, same PR): the SECOND of two racing
+    answers does NOT "no-op" once it acquires the lock — the sibling questions it re-reads
+    are the SAME `status='answered'` rows the first racer already saw (answering a
+    question doesn't reopen it), so the second racer still runs its own full
+    `_run_and_finish` pass (a second LLM call, a second `order_runs` row) — the lock only
+    SERIALIZES the two attempts instead of letting them run truly concurrently; it does
+    not skip the second one. What actually stops the waste from becoming a real
+    duplicate DELIVERY is the same `desadv.claim_send_or_identify` claim two paragraphs
+    up — the second pass's own upload attempt sees the first pass's already-confirmed
+    claim and refuses to re-ship. The lock's whole value is narrower than "no-op": it
+    guarantees the two attempts never touch `desadv.claim_send_or_identify` at the same
+    instant (no TOCTOU on the claim check itself), and it keeps the SQL cheap
+    (no genuinely parallel Postgres work on the same message) — it does not, by itself,
+    prevent the wasted second LLM call and `order_runs` row this docstring already
+    called out above as the acceptable cost."""
+    qrow = conn.execute(
+        "SELECT message_id FROM order_questions WHERE id = %s", (qid,)).fetchone()
+    if not qrow:
+        return []
+    message_id = qrow[0]
+    with psycopg.connect(cfg.pg_dsn) as lock_tx:
+        lock_tx.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (message_id,))
+        still_open = conn.execute(
+            """SELECT 1 FROM order_questions
+                WHERE message_id = %s AND kind IN ('dl_item', 'dl_supplier')
+                  AND status = 'open' LIMIT 1""", (message_id,)).fetchone()
+        if still_open:
+            return []
+        msg_row = conn.execute(
+            """SELECT message_id, subject, from_addr, from_name, combined_text,
+                      body_text, has_attachments FROM messages
+                WHERE message_id = %s""", (message_id,)).fetchone()
+        if not msg_row:
+            return []
+        message = _as_message(msg_row)
+        snapshot_id = dl_snapshot.latest_snapshot_id(conn)
+        if not snapshot_id:
+            log.warning("release_for_question(%s): no DL catalog snapshot yet — cannot "
+                        "reprocess %s", qid, message_id)
+            return []
+        catalog = dl_snapshot.load_catalog(conn, snapshot_id)
+        suppliers = dl_snapshot.load_suppliers(conn, snapshot_id)
+        if client is None:
+            client = llm.from_config(cfg)
+        result = _run_and_finish(conn, cfg, client, message, snapshot_id, catalog,
+                                 suppliers, upload=upload, post=post)
+        return (result or {}).get("documents", [])
+
+
 # --- one tick ----------------------------------------------------------------
 
 def tick(conn, cfg, client=None, upload=None, post=None) -> int:
@@ -731,46 +946,9 @@ def tick(conn, cfg, client=None, upload=None, post=None) -> int:
         message = _claim(conn)
         if not message:
             return 0
-        run_id = worker._start_run(conn, message["message_id"], None, shadow=False)
-        try:
-            result = _process_message(conn, cfg, client, message, snapshot_id, catalog,
-                                      suppliers, shadow=False, upload=upload, post=post)
-        except _RetryLater as e:
-            log.info("DL message %s: transient failure (attempts=%s) — leaving for the "
-                     "30-min stale reclaim: %s", message["message_id"],
-                     message.get("attempts"), e)
-            worker._finish_run(conn, run_id, "retry",
-                               {"kind": "dl", "dl_snapshot_id": snapshot_id,
-                                "reason": str(e)}, error=str(e))
-            report.log_event(conn, message["message_id"], stage="retry", status="retry",
-                             outcome=str(e)[:500], rollup=False, workflow=dl_report.WORKFLOW)
-            return 0
-        except Exception as e:
-            log.exception("DL pipeline failed for %s", message["message_id"])
-            # Deep-review finding, #204: `result=None` leaves `result->>'kind'` NULL,
-            # which `reliability.provenance_stats_for_day`'s own `IS DISTINCT FROM
-            # 'dl'` exclusion treats as an ORDERS run (NULL is distinct from 'dl') —
-            # exactly the rows the DL/orders split exists to keep apart end up
-            # miscounted on the busiest signal (a hard failure). Always tag `kind`.
-            worker._finish_run(conn, run_id, "error",
-                               {"kind": "dl", "dl_snapshot_id": snapshot_id},
-                               error=repr(e))
-            conn.execute(
-                "UPDATE messages SET processing_at = NULL WHERE message_id = %s",
-                (message["message_id"],))
-            return 0
-        worker._finish_run(conn, run_id, result.get("status", "ok"), result)
-        conn.execute(
-            """UPDATE messages
-                  SET processed = true, processed_at = now(), processed_by = %s,
-                      processing_at = NULL
-                WHERE message_id = %s""", (CATEGORY, message["message_id"]))
-        report.log_event(conn, message["message_id"], stage=result.get("status", "ok"),
-                         status=result.get("status", "ok"),
-                         outcome=_summary_outcome(result),
-                         detail={"documents": len(result.get("documents", []))},
-                         rollup=True, workflow=dl_report.WORKFLOW)
-        return 1
+        result = _run_and_finish(conn, cfg, client, message, snapshot_id, catalog,
+                                 suppliers, upload=upload, post=post)
+        return 1 if result is not None else 0
 
     message = _peek_for_shadow(conn, getattr(cfg, "delivery_notes_shadow_days",
                                              SHADOW_DAYS))
