@@ -207,18 +207,18 @@ def _peek_for_shadow(conn, days: int = SHADOW_DAYS) -> dict | None:
 
 def _read_attachments(cfg, message_id: str, conn) -> list[dict]:
     rows = conn.execute(
-        """SELECT idx, filename, mime, extracted_text FROM attachments
+        """SELECT idx, filename, mime, extracted_text, method FROM attachments
             WHERE message_id = %s ORDER BY idx""", (message_id,)).fetchall()
     data_dir = getattr(cfg, "data_dir", "") or "/data/store"
     out = []
-    for idx, filename, mime, extracted_text in rows:
+    for idx, filename, mime, extracted_text, method in rows:
         if not (_ATTACHMENT_MIME_RE.search(mime or "")
                or _ATTACHMENT_EXT_RE.search(filename or "")):
             continue
         matches = sorted(store.message_dir(data_dir, message_id).glob(f"att{idx}__*"))
         pdf_bytes = matches[0].read_bytes() if matches else b""
         out.append({"idx": idx, "filename": filename or "", "pdf_bytes": pdf_bytes,
-                   "machine_text": extracted_text or ""})
+                   "machine_text": extracted_text or "", "method": method or ""})
     return out
 
 
@@ -363,6 +363,28 @@ def _num(value) -> float:
         return f if f == f else 0.0   # filters NaN
     except (TypeError, ValueError):
         return 0.0
+
+
+def _flag_attachment(conn, cfg, shadow: bool, message: dict, link: str,
+                     att: dict, reason: str, status: str, synthetic: bool = False,
+                     post=None) -> dict:
+    """Shared shape for "this attachment needs a human to look at it" — posts a review
+    message, logs a non-rollup event, and returns the `documents_out` entry. Used both
+    by the pre-existing attachment-extraction-error path and #238's own completeness
+    check (an attachment that read fine but contributed zero documents) — the only
+    difference is the event `status` and whether the entry is marked `synthetic`
+    (never a REAL document, so callers that count "documents" — `_summary_outcome`,
+    the rollup detail, `dl_evaluate.score()` — must exclude it, per #238's own review)."""
+    _post(cfg, shadow, lambda: dl_report.build_review(
+        reason, from_addr=message.get("from_addr", ""),
+        subject=message.get("subject", ""), link=link), post=post)
+    _event(conn, shadow, message["message_id"], stage="review", status=status,
+          outcome=reason, detail={"idx": att.get("idx")}, rollup=False,
+          workflow=dl_report.WORKFLOW)
+    out = {"outcome": "review", "reason": reason, "attachment_idx": att.get("idx")}
+    if synthetic:
+        out["synthetic"] = True
+    return out
 
 
 def _shipped_items(decisions: list[tuple[dict, dl_match.Decision]]) -> list[dict]:
@@ -640,7 +662,10 @@ def _aggregate_status(documents_out: list[dict]) -> str:
 
 
 def _summary_outcome(result: dict) -> str:
-    docs = result.get("documents") or []
+    # #238 review: `synthetic` entries (a missing/unattached document that was NEVER
+    # actually processed) are not real documents this run touched — counting them here
+    # would make a mail that carried ONE real document read as "2 dokument(y)".
+    docs = [d for d in (result.get("documents") or []) if not d.get("synthetic")]
     if not docs:
         return "žiadny dodací list sa nepodarilo rozpoznať"
     counts: dict[str, int] = {}
@@ -688,14 +713,8 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
             _check_retry(message.get("attempts", 0), att["error"])
             reason = (f"Príloha {att.get('filename') or att.get('idx')} sa nepodarilo "
                       f"spracovať: {att['error']}")
-            _post(cfg, shadow, lambda reason=reason: dl_report.build_review(
-                reason, from_addr=message.get("from_addr", ""),
-                subject=message.get("subject", ""), link=link), post=post)
-            _event(conn, shadow, message["message_id"], stage="review", status="error",
-                  outcome=reason, detail={"idx": att.get("idx")}, rollup=False,
-                  workflow=dl_report.WORKFLOW)
-            documents_out.append({"outcome": "review", "reason": reason,
-                                  "attachment_idx": att.get("idx")})
+            documents_out.append(_flag_attachment(
+                conn, cfg, shadow, message, link, att, reason, status="error", post=post))
 
     for doc in extraction["documents"]:
         extracted_doc_numbers.append(doc.get("docNumber") or "")
@@ -711,12 +730,44 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
         documents_out.append({"outcome": "review", "reason": reason})
+    else:
+        # #238: a UNIVERSAL, supplier-format-independent completeness check —
+        # replaces relying on the Lunys-only subject check alone. A successfully-read
+        # attachment (`error is None`) that contributed ZERO documents to
+        # `extraction["documents"]` is the CURRENT engine's own analogue of the old
+        # n8n W1a loss: an LLM/vision extraction call can omit a genuine document with
+        # no exception at all, so nothing upstream ever learns it was missed. Marked
+        # `synthetic` — this is a MISSING document, never a processed one (review
+        # finding: `dl_evaluate.score()`/`_summary_outcome`/the rollup detail count
+        # must not treat it as an extra REAL document).
+        #
+        # A decorative/junk attachment (`extract.py`'s own `method='skipped'` —
+        # a logo, a signature image, a banner) is excluded: it was never expected to
+        # carry a delivery note in the first place (review finding — without this, a
+        # signature image attached alongside a real DL would falsely demote a clean
+        # run to "partial" and spam the warehouse channel with a false alert, the
+        # exact false-alarm class already documented in #133/#151).
+        skip_idxs = {a.get("idx") for a in attachments if (a.get("method") or "") == "skipped"}
+        found_idxs = {d.get("source_attachment_idx") for d in extraction["documents"]}
+        for att in extraction["attachments"]:
+            idx = att.get("idx")
+            if att.get("error") or idx in found_idxs or idx in skip_idxs:
+                continue
+            reason = (f"Príloha {att.get('filename') or idx} bola spracovaná, ale "
+                      f"nenašiel sa v nej žiadny dodací list — over ručne, či naozaj "
+                      f"neobsahuje ďalší doklad")
+            documents_out.append(_flag_attachment(
+                conn, cfg, shadow, message, link, att, reason, status="review",
+                synthetic=True, post=post))
 
-    # spec §4: announced-vs-attached. Shadow guarantees nothing observable leaves the
-    # process, so neither the event log nor the Odoo post fire while shadowing (deep-
-    # review finding, #204 — the mismatch count must not be inflated by shadow runs).
+    # spec §4: announced-vs-attached (Lunys subject shape only — a real, still-useful
+    # signal for that supplier, kept as-is). Shadow guarantees nothing observable
+    # leaves the process, so neither the event log nor the Odoo post fire while
+    # shadowing (deep-review finding, #204 — the mismatch count must not be inflated
+    # by shadow runs). `dict.fromkeys` dedupes while keeping order — a subject naming
+    # the same DL number twice must not produce two identical synthetic entries.
     announced = _subject_doc_numbers(message.get("subject", ""))
-    missing = [a for a in announced if a not in extracted_doc_numbers]
+    missing = list(dict.fromkeys(a for a in announced if a not in extracted_doc_numbers))
     if missing and not shadow:
         dl_report.log_announced_mismatch(conn, message["message_id"],
                                          message.get("subject", ""), missing,
@@ -724,6 +775,17 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
         _post(cfg, shadow, lambda: dl_report.build_announced_mismatch(
             message.get("subject", ""), message.get("from_addr", ""), missing,
             extracted_doc_numbers, documents=documents_out, link=link), post=post)
+    if missing:
+        # #238 requirement #2: fed into the AGGREGATE (`_aggregate_status` below) —
+        # AFTER the Odoo post/event above so `build_announced_mismatch`'s own
+        # per-document rendering never doubles up with these synthetic entries — so
+        # `messages.proc_status` itself is never "ok" while a document the mail's own
+        # subject announces is genuinely missing, not just alerted separately.
+        for num in missing:
+            documents_out.append({
+                "outcome": "review", "doc_number": num, "synthetic": True,
+                "reason": f"V predmete e-mailu je ohlásený dodací list {num}, ale "
+                         f"nebol nájdený v žiadnej prílohe"})
 
     return {"kind": "dl", "dl_snapshot_id": snapshot_id,
            "status": _aggregate_status(documents_out), "documents": documents_out,
@@ -807,10 +869,11 @@ def _run_and_finish(conn, cfg, client, message: dict, snapshot_id: int | None,
               SET processed = true, processed_at = now(), processed_by = %s,
                   processing_at = NULL
             WHERE message_id = %s""", (CATEGORY, message["message_id"]))
+    real_docs = [d for d in result.get("documents", []) if not d.get("synthetic")]
     report.log_event(conn, message["message_id"], stage=result.get("status", "ok"),
                      status=result.get("status", "ok"),
                      outcome=_summary_outcome(result),
-                     detail={"documents": len(result.get("documents", []))},
+                     detail={"documents": len(real_docs)},
                      rollup=True, workflow=dl_report.WORKFLOW)
     return result
 

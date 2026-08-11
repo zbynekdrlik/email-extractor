@@ -364,7 +364,11 @@ def create_app(cfg) -> Flask:
         if state == "done":
             where.append("m.processed = true")
         elif state == "review":
-            where.append("m.proc_status = 'review'")
+            # #238 review: a DL run that is honestly "partial" (some but not all
+            # documents made it) needs the same warehouse attention as "review" — it
+            # must not silently fall out of the "needs review" chip just because its
+            # proc_status spells the outcome differently.
+            where.append("m.proc_status IN ('review', 'partial')")
         elif state == "error":
             where.append("m.proc_status = 'error'")
         elif state == "processing":
@@ -413,7 +417,7 @@ def create_app(cfg) -> Flask:
             cnt = c.execute(
                 """SELECT count(*) AS total,
                           count(*) FILTER (WHERE processed) AS done,
-                          count(*) FILTER (WHERE proc_status='review') AS review,
+                          count(*) FILTER (WHERE proc_status IN ('review', 'partial')) AS review,
                           count(*) FILTER (WHERE proc_status='error') AS error,
                           count(*) FILTER (WHERE processing_at IS NOT NULL AND NOT processed) AS proc
                    FROM messages""").fetchone()
@@ -1557,9 +1561,10 @@ async function loadList(){
   if(view!=='mails')return;
   if(!d.items.length){L.innerHTML='<div class="empty">Žiadne maily pre tento filter.</div>';return}
   L.innerHTML=d.items.map(it=>{
-    const st=it.processed?'done':(it.proc_status==='review'?'review':it.proc_status==='error'?'error':it.processing?'processing':'');
+    const isRev=it.proc_status==='review'||it.proc_status==='partial';
+    const st=it.processed?'done':(isRev?'review':it.proc_status==='error'?'error':it.processing?'processing':'');
     const out=it.on_fix?'<span class="out" style="color:#bf3989">🔧 na oprave</span>':
-      (it.proc_outcome?'<span class="out '+(it.proc_status==='error'?'err':it.proc_status==='review'?'rev':'ok')+'">'+E(it.proc_outcome)+'</span>':'');
+      (it.proc_outcome?'<span class="out '+(it.proc_status==='error'?'err':isRev?'rev':'ok')+'">'+E(it.proc_outcome)+'</span>':'');
     return '<div class="row s-'+st+(sel===it.id?' sel':'')+'" onclick="openDetail('+it.id+')">'+
       '<div class="t"><span class="f">#'+it.id+' '+E(it.from||'')+'</span><span class="when">'+tsShort(it.last_event_at||it.created_at)+'</span></div>'+
       '<div class="sub">'+(it.has_attachments?'📎 ':'')+E(it.subject||'(bez predmetu)')+'</div>'+
@@ -1573,7 +1578,7 @@ async function openDetail(id){
   sel=id;document.querySelectorAll('.row').forEach(r=>r.classList.toggle('sel',r.getAttribute('onclick').includes('('+id+')')));
   const D=document.getElementById('detail');D.innerHTML='<div class="empty">načítavam…</div>';
   let m;try{m=await api('/api/message/'+id)}catch(e){D.innerHTML='<div class="empty">chyba</div>';return}
-  const badge=m.proc_status?('<span class="badge b-'+(m.proc_status==='ok'?'ok':m.proc_status==='review'?'review':m.proc_status==='error'?'error':'none')+'">'+E(m.proc_status)+'</span>'):
+  const badge=m.proc_status?('<span class="badge b-'+(m.proc_status==='ok'?'ok':(m.proc_status==='review'||m.proc_status==='partial')?'review':m.proc_status==='error'?'error':'none')+'">'+E(m.proc_status)+'</span>'):
     (m.processed?'<span class="badge b-ok">hotové</span>':'<span class="badge b-none">nové</span>');
   const fb='/files/'+encodeURIComponent(m.message_id);
   const evs=(m.events||[]).map(e=>'<div class="ev"><span class="dot d-'+(e.status==='ok'?'ok':e.status==='review'?'review':e.status==='error'?'error':'')+'"></span>'+

@@ -554,6 +554,50 @@ def test_announced_but_not_attached_dl_is_flagged_not_silently_lost(pg, tmp_path
         "AND stage='announced_mismatch'").fetchone()
     assert ev is not None
     assert ev[0]["announced"] == ["0100000002"]
+    # #238 requirement #2: a run with a genuinely missing announced document must
+    # NEVER roll up as "ok" — the whole point of an audit-by-proc_status is that
+    # proc_status itself must be honest, not just the separate Odoo alert.
+    row = pg.execute(
+        "SELECT proc_status FROM messages WHERE message_id='dl1'").fetchone()
+    assert row[0] == "partial", \
+        "proc_status must reflect the missing announced document, not just the " \
+        "one doc that happened to arrive"
+
+
+def test_an_attachment_that_yields_no_document_is_flagged_not_silently_lost(pg, tmp_path):
+    """#238: message 6202's own confirmed shape (verified live, read-only, against
+    production) — TWO real attachments, the OLD n8n workflow's `LIMIT 1` fetch only
+    ever read the first one and the mail rolled up as `proc_status='ok'` regardless.
+    The current Python engine already reads every attachment (fixes W1a) — but has
+    no check that a successfully-read attachment (no exception at all) actually
+    CONTRIBUTED a document. This reproduces the current engine's own analogue of the
+    same loss: the SECOND attachment's extraction call genuinely returns zero
+    documents (a plain LLM omission, no error raised), universal — no subject-format
+    dependency, unlike the Lunys-only announced-vs-attached check above."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1", idx=0, filename="prvy.pdf")
+    _attach(pg, tmp_path, "dl1", idx=1, filename="druhy.pdf")
+    client = FakeClient({
+        "dl_documents": [_doc(doc_number="0100000001"), {"documents": []}],
+        "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [ITEM_MATCHED]})
+    posted = []
+    dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client,
+        upload=lambda *a, **k: None, post=lambda c, h: posted.append(h))
+
+    row = pg.execute(
+        "SELECT proc_status FROM messages WHERE message_id='dl1'").fetchone()
+    assert row[0] == "partial", \
+        "one processed attachment must never make the WHOLE run 'ok' when another " \
+        "attachment silently yielded no document"
+    flagged = [h for h in posted
+              if "druhy.pdf" in h and "nenašiel sa v nej žiadny dodací list" in h]
+    assert flagged, "the empty attachment must be individually visible with a reason"
+    ev = pg.execute(
+        "SELECT detail FROM email_events WHERE message_id='dl1' "
+        "AND status='review' AND outcome LIKE '%druhy.pdf%'").fetchone()
+    assert ev is not None and ev[0]["idx"] == 1
 
 
 def test_no_lunys_shaped_subject_flags_nothing(pg, tmp_path):

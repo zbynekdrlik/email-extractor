@@ -183,13 +183,20 @@ def score(expected: dict, actual: dict) -> Score:
     wrong item inside the SECOND document of a multi-document mail all are. Documents that
     share the SAME doc_number are matched by best-fit CONTENT (`_best_fit_group`), not by
     the order they happen to appear in either list.
+
+    A `synthetic` entry (#238 — a completeness-check or announced-vs-attached MISSING-
+    document marker `dl_worker._process_message` appends to `documents_out` so
+    `proc_status` stays honest) is NEVER a real document — it is excluded here, or it
+    would show up as a spurious "dokument navyše" (extra document) for a mail that
+    carried exactly the documents the case expects. The `announced_mismatch` check below
+    already covers this same signal precisely.
     """
     problems: list[str] = []
     if "status" in expected and expected["status"] != actual.get("status"):
         problems.append(f"iný stav správy: čakáme {expected['status']!r}, "
                         f"dostali {actual.get('status')!r}")
 
-    got_docs = list(actual.get("documents") or [])
+    got_docs = [d for d in (actual.get("documents") or []) if not d.get("synthetic")]
     want_docs = expected.get("documents") or []
 
     want_groups: dict[str, list[dict]] = {}

@@ -192,7 +192,11 @@ def _outcome_line(doc: dict) -> str:
         return (f"{_OUTCOME_ICON['duplicate']} {label} bol už spracovaný skôr "
                "&mdash; duplicitné oznámenie, nič sa neposiela znova.")
     reason = escape(doc.get("reason") or "potrebuje kontrolu")
-    return f"{_OUTCOME_ICON['review']} {label} NEBOL spracovaný &mdash; {reason}."
+    # #238 review: gender agreement — "Dodací list" (masculine) vs the "Táto správa"
+    # (feminine) fallback used when there is no doc_number at all (a whole-attachment
+    # or whole-message review entry).
+    verb = "NEBOL spracovaný" if doc_number else "NEBOLA spracovaná"
+    return f"{_OUTCOME_ICON['review']} {label} {verb} &mdash; {reason}."
 
 
 def _outcome_needs_link(doc: dict) -> bool:
