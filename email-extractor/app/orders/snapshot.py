@@ -423,20 +423,41 @@ def upsert_customer(conn, *, override_id: int | None, orig_ean_edi: str | None,
         # the auto-retry sweep re-adding the same sender) silently inserted TWO rows for
         # one real customer. `customer.resolve`'s exact_email rung then refuses ANY order
         # from that address once `len(owners) > 1` — the order gets stuck BECAUSE the
-        # customer was added twice. Application-level reclaim: find an already-added
-        # brand-new row with the identical (ean, street) identity and update it in place.
-        existing = conn.execute(
-            """SELECT id FROM customer_overrides
-                WHERE orig_ean_edi IS NULL AND ean_edi = %s AND street = %s
-                  AND NOT retired""",
-            (ean_edi, street)).fetchone()
-        if existing:
+        # customer was added twice.
+        #
+        # Deep-review finding: the reclaim-or-insert decision below is itself a
+        # check-then-act with NO db-level uniqueness behind it — two genuinely
+        # concurrent callers for the SAME ean_edi (the server runs `threaded=True`) could
+        # both pass the SELECT before either commits and each INSERT their own row. An
+        # advisory TRANSACTION lock keyed on the EAN serializes that decision across
+        # connections with zero schema change — the same class of fix this project
+        # already uses for `edi_sent`'s two-phase claim (see orders-corpus.md). `conn.
+        # transaction()` works whether `conn` already has an open transaction (this
+        # nests as a SAVEPOINT; the lock is still held until the REAL enclosing
+        # transaction commits, so it stays effective) or is autocommit (opens + commits
+        # its own transaction here).
+        with conn.transaction():
+            conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (ean_edi,))
+            existing = conn.execute(
+                """SELECT id FROM customer_overrides
+                    WHERE orig_ean_edi IS NULL AND ean_edi = %s AND street = %s
+                      AND NOT retired""",
+                (ean_edi, street)).fetchone()
+            if existing:
+                row = conn.execute(
+                    """UPDATE customer_overrides
+                          SET name=%s, emails=%s, city=%s, street=%s, zip=%s,
+                              retired=false, updated_at=now()
+                        WHERE id=%s RETURNING id""",
+                    (name, emails, city, street, zip_, existing[0])).fetchone()
+                return int(row[0])
             row = conn.execute(
-                """UPDATE customer_overrides
-                      SET name=%s, emails=%s, city=%s, street=%s, zip=%s,
-                          retired=false, updated_at=now()
-                    WHERE id=%s RETURNING id""",
-                (name, emails, city, street, zip_, existing[0])).fetchone()
+                """INSERT INTO customer_overrides
+                       (orig_ean_edi, orig_street, ean_edi, name, emails, city, street,
+                        zip, retired, updated_at)
+                   VALUES (NULL,%s,%s,%s,%s,%s,%s,%s,false,now())
+                   RETURNING id""",
+                (orig_street, ean_edi, name, emails, city, street, zip_)).fetchone()
             return int(row[0])
     row = conn.execute(
         """INSERT INTO customer_overrides

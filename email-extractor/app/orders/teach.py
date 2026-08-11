@@ -324,11 +324,22 @@ def answer_customer(conn, qid: int, ean_edi: str, name: str, by: str = "") -> di
         offered = {str(c.get("ean_edi")) for c in q["candidates"]}
         if str(ean_edi) not in offered:
             raise NotACandidate(f"{ean_edi} was not offered for question {qid}")
-    conn.execute(
+    # #234 review finding: the "already answered" check above is a Python-level read
+    # from an EARLIER select, not a WHERE-clause guard on this write — two genuinely
+    # racing answers to the SAME question could both pass it and the second UPDATE
+    # would silently overwrite the first's answer (no `status='open'` predicate to fail
+    # against). Guard the write itself and re-check on 0 rows affected.
+    row = conn.execute(
         """UPDATE order_questions
               SET status = 'answered', answer_gtin = %s, answer_card = %s,
                   answered_by = %s, answered_at = now()
-            WHERE id = %s""", (str(ean_edi or ""), name or "", by or "", qid))
+            WHERE id = %s AND status = 'open'
+            RETURNING id""", (str(ean_edi or ""), name or "", by or "", qid)).fetchone()
+    if not row:
+        lost = get(conn, qid) or {}
+        raise AlreadyAnswered(
+            f"question {qid} was answered on {lost.get('answered_at')} with "
+            f"{lost.get('answer_gtin')}")
     log.info("customer question %s answered: %r (%s) by %s", qid, ean_edi, name, by)
     return get(conn, qid) or {}
 

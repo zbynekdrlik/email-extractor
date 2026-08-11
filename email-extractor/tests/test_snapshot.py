@@ -6,9 +6,13 @@ regression test can exist. These tests pin the replacement: parse the two sheet 
 freeze them into Postgres as an immutable, content-addressed snapshot, and let a run
 reference the snapshot it used.
 """
+import os
+
 import pytest
 
 from app.orders import snapshot
+
+PG_DSN = os.environ.get("PG_TEST_DSN")
 
 CATALOG_CSV = (
     "GTIN,Sklad,Názov,doplnok\n"
@@ -231,6 +235,46 @@ def test_adding_a_brand_new_customer_twice_updates_one_row(pg):
            if r["ean_edi"] == "7000000000001"]
     assert len(rows) == 1
     assert rows[0]["name"] == "Nový Zákazník OPRAVA"
+
+
+def test_two_concurrent_brand_new_customer_adds_for_the_same_ean_produce_one_row(pg):
+    """Deep-review finding on #234: the reclaim-or-insert decision in `upsert_customer`
+    is a check-then-act with no db-level uniqueness of its own for a genuinely
+    brand-new customer. Proven with two REAL, separate connections racing on the actual
+    advisory lock — not a mock — to add the IDENTICAL new customer (same EAN + street)
+    at (as close as possible to) the same instant. Exactly ONE row must survive."""
+    import threading
+
+    import psycopg
+
+    barrier = threading.Barrier(2)
+    errors = []
+
+    def add(name):
+        conn = psycopg.connect(PG_DSN)
+        try:
+            barrier.wait(timeout=5)
+            snapshot.upsert_customer(
+                conn, override_id=None, orig_ean_edi=None, orig_street=None,
+                ean_edi="7000000000900", name=name, emails=["race@x.sk"],
+                city="Košice", street="Preteková 1", zip_="")
+            conn.commit()
+        except Exception as e:  # pragma: no cover - surfaced via `errors` below
+            errors.append(e)
+        finally:
+            conn.close()
+
+    t1 = threading.Thread(target=add, args=("Pretekár A",))
+    t2 = threading.Thread(target=add, args=("Pretekár B",))
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+
+    assert not errors, f"a racing upsert_customer call must never raise: {errors}"
+    assert pg.execute(
+        "SELECT count(*) FROM customer_overrides WHERE ean_edi='7000000000900'"
+    ).fetchone() == (1,), "two concurrent brand-new-customer adds must leave ONE row"
 
 
 def test_customer_override_can_add_a_brand_new_customer(pg):
