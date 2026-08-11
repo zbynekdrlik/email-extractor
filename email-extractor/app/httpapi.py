@@ -607,9 +607,18 @@ def create_app(cfg) -> Flask:
 
         try:
             with _db_tx() as c:
+                # #234 review finding: an unconditional 409 here (no "confirm and
+                # proceed anyway" escape hatch) — the earlier draft had one
+                # (`confirm_existing`), but it was reachable with no real caller and
+                # would have bypassed the exact EAN-uniqueness guarantee this ticket
+                # exists to add (`upsert_customer`'s own reclaim is keyed on
+                # (ean, street), so confirming past a DIFFERENT street would silently
+                # insert a second row sharing one EAN). The card's own reaction to a
+                # 409 is "Doplniť e-mail k <name>", which re-posts through the
+                # EXISTING-customer path below — never a forced re-submit of new_customer.
                 existing = [r for r in snapshot.customers_for_management(c)
                            if str(r.get("ean_edi") or "") == ean]
-                if existing and not nc.get("confirm_existing"):
+                if existing:
                     hit = existing[0]
                     return jsonify(
                         error=f"EAN {ean} už má zákazník {hit.get('name', '')}.",
@@ -1767,12 +1776,16 @@ function newCustomerForm(q){
     if(!name.value.trim()){alert('vyplň názov firmy');return}
     if(e.length!==13&&!confirm('EAN kód EDI má obvykle 13 číslic, zadal si '+e.length+'. Naozaj uložiť?'))return;
     status.textContent='';extra.textContent='';
+    // #234 review finding: a fast double-click sent two overlapping POSTs — the server
+    // is now race-safe (advisory lock) either way, but this closes off the easy trigger.
+    save.disabled=true;
     try{
       await api('/api/orders/question/'+q.id+'/answer',{method:'POST',body:JSON.stringify({
         new_customer:{ean_edi:e,name:name.value.trim(),emails:emails.value.trim(),
           city:city.value.trim(),street:street.value.trim(),zip:zip.value.trim()}})});
       await load()
     }catch(err){
+      save.disabled=false;
       status.textContent=err.message||'chyba';
       if(err.body&&err.body.existing){
         const b=el('button',null,'Doplniť e-mail k '+err.body.existing.name);

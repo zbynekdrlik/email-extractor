@@ -343,6 +343,54 @@ def test_answering_a_customer_question_twice_is_refused(pg):
         teach.answer_customer(pg, qid, ean_edi="2000000000864", name="Martin", by="sklad")
 
 
+def test_two_concurrent_answers_to_the_same_customer_question_leave_exactly_one_winner(
+        pg):
+    """Deep-review finding on #234: the pre-existing "already answered" check was a
+    Python-level read from an earlier SELECT, not a WHERE-clause guard on the UPDATE
+    itself — two REAL, separate connections racing to answer the SAME open question
+    could both pass it and the second write would silently overwrite the first's
+    answer. Proven with real threads + real connections, not a mock."""
+    import os
+    import threading
+
+    import psycopg
+
+    PG_DSN = os.environ.get("PG_TEST_DSN")
+    qid = _ask_customer(pg)
+    barrier = threading.Barrier(2)
+    results: dict[str, object] = {}
+
+    def answer(key, ean, name):
+        conn = psycopg.connect(PG_DSN)
+        try:
+            barrier.wait(timeout=5)
+            try:
+                results[key] = teach.answer_customer(conn, qid, ean_edi=ean, name=name,
+                                                      by="sklad")
+                conn.commit()
+            except teach.AlreadyAnswered as e:
+                results[key] = e
+                conn.rollback()
+        finally:
+            conn.close()
+
+    t1 = threading.Thread(target=answer, args=("a", "2000000000861", "Žilina"))
+    t2 = threading.Thread(target=answer, args=("b", "2000000000864", "Martin"))
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+
+    outcomes = [results.get("a"), results.get("b")]
+    wins = [o for o in outcomes if isinstance(o, dict)]
+    losses = [o for o in outcomes if isinstance(o, teach.AlreadyAnswered)]
+    assert len(wins) == 1 and len(losses) == 1, \
+        f"exactly one racing answer may win, got wins={wins} losses={losses}"
+    q = teach.get(pg, qid)
+    assert q["status"] == "answered"
+    assert q["answer_gtin"] == wins[0]["answer_gtin"]
+
+
 def test_answer_customer_refuses_an_item_kind_question(pg):
     """The wrong endpoint pointed at the wrong kind must fail loudly, not silently
     misinterpret a product gtin as a customer ean_edi."""
