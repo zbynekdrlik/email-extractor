@@ -456,3 +456,37 @@ def test_dl_duplicates_alone_still_render_the_section():
                                      dl_stats=_dl_stats(duplicates=1))
     assert "Dodacie listy" in html
     assert "1" in html
+
+
+# --- #239: three current-state gauges — a silent backlog must never hide -----------
+
+def test_quarantined_alone_triggers_the_section_even_with_zero_runs():
+    """A day with no NEW DL activity but an EXISTING quarantined backlog must still be
+    mentioned — the whole point of #239 is that a silent backlog is invisible."""
+    html = report.build_daily_digest(_stats(), days_since_incident=3,
+                                     dl_stats=_dl_stats(quarantined=2))
+    assert "Dodacie listy" in html
+    assert "2" in html
+    assert "vzdal" in html.lower()
+
+
+def test_pending_alerts_alone_triggers_the_section():
+    html = report.build_daily_digest(_stats(), days_since_incident=3,
+                                     dl_stats=_dl_stats(pending_alerts=3))
+    assert "Dodacie listy" in html
+    assert "3" in html
+    assert "čaká na odoslanie" in html.lower() or "čakajú na odoslanie" in html.lower()
+
+
+def test_open_import_incidents_alone_triggers_the_section():
+    html = report.build_daily_digest(_stats(), days_since_incident=3,
+                                     dl_stats=_dl_stats(open_import_incidents=1))
+    assert "Dodacie listy" in html
+    assert "problém s importom" in html.lower()
+
+
+def test_a_genuinely_quiet_dl_day_still_renders_no_extra_section_with_gauges_present():
+    """The three new gauges default to 0 via `_dl_stats()` — a quiet day must stay
+    quiet even though the digest now checks three more fields."""
+    html = report.build_daily_digest(_stats(), days_since_incident=3, dl_stats=_dl_stats())
+    assert "Dodacie listy" not in html

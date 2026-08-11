@@ -130,6 +130,59 @@ def test_dl_duplicate_and_mismatch_events_are_counted(pg):
     assert stats["announced_mismatch"] == 1
 
 
+## --- #239: three current-state gauges, dashboard/digest half of requirement 1 -------
+
+def test_dl_provenance_stats_includes_the_quarantined_count(pg):
+    pg.execute(
+        "INSERT INTO messages (message_id, category, processed, attempts) "
+        "VALUES ('q1', 'dodacie_listy', false, 5)")
+    # a still-active or already-processed message must NOT count.
+    pg.execute(
+        "INSERT INTO messages (message_id, category, processed, attempts) "
+        "VALUES ('q2', 'dodacie_listy', false, 4)")
+    pg.execute(
+        "INSERT INTO messages (message_id, category, processed, attempts) "
+        "VALUES ('q3', 'dodacie_listy', true, 5)")
+    stats = reliability.dl_provenance_stats_for_day(pg, "2026-08-05")
+    assert stats["quarantined"] == 1
+
+
+def test_dl_provenance_stats_includes_the_pending_alerts_count(pg):
+    from app.orders import dl_alerts
+
+    dl_alerts.enqueue(pg, 243, "dl_upload_failed", "<p>x</p>", message_id="m1")
+    stats = reliability.dl_provenance_stats_for_day(pg, "2026-08-05")
+    assert stats["pending_alerts"] == 1
+    dl_alerts.flush_pending(pg, cfg=None, post=lambda c, h, **kw: {"id": 1})
+    stats2 = reliability.dl_provenance_stats_for_day(pg, "2026-08-05")
+    assert stats2["pending_alerts"] == 0
+
+
+def test_dl_provenance_stats_includes_open_import_incidents_for_desadv_only(pg):
+    pg.execute(
+        "INSERT INTO import_alert_incidents (channel_id, kind, source, opened_at, "
+        "last_alert_at) VALUES (243, 'carryover', 'desadv', now(), now())")
+    # a CLOSED incident, and an 'edi' one, must not count.
+    pg.execute(
+        "INSERT INTO import_alert_incidents (channel_id, kind, source, opened_at, "
+        "last_alert_at, closed_at) VALUES (243, 'failed', 'desadv', now(), now(), now())")
+    pg.execute(
+        "INSERT INTO import_alert_incidents (channel_id, kind, source, opened_at, "
+        "last_alert_at) VALUES (152, 'unknown', 'edi', now(), now())")
+    stats = reliability.dl_provenance_stats_for_day(pg, "2026-08-05")
+    assert stats["open_import_incidents"] == 1
+
+
+def test_dl_current_health_is_never_day_scoped(pg):
+    """A quarantined message from LAST WEEK still counts today — these are CURRENT
+    state, not tied to any one day's activity."""
+    pg.execute(
+        "INSERT INTO messages (message_id, category, processed, attempts, created_at) "
+        "VALUES ('old1', 'dodacie_listy', false, 5, now() - interval '10 days')")
+    health = reliability.dl_current_health(pg)
+    assert health == {"quarantined": 1, "pending_alerts": 0, "open_import_incidents": 0}
+
+
 def test_a_dl_only_day_reports_honest_zeros_for_orders(pg):
     _run(pg, "2026-08-05", rules=("llm_sure",), kind="dl")
     stats = reliability.provenance_stats_for_day(pg, "2026-08-05")
