@@ -138,7 +138,41 @@ def dl_provenance_stats_for_day(conn, day: str = "") -> dict:
 
     return {"day": day or _today(conn), "runs": runs_n, "errors": errors_n,
            "items": items_n, "deterministic": det_n, "llm": llm_n, "review": review_n,
-           "duplicates": dup_n, "announced_mismatch": mismatch_n}
+           "duplicates": dup_n, "announced_mismatch": mismatch_n,
+           **dl_current_health(conn)}
+
+
+def dl_current_health(conn) -> dict:
+    """#239: three CURRENT-STATE gauges (deliberately NOT day-scoped — a stuck backlog
+    matters regardless of which day it originated on) so every one of #239's five
+    invisible-failure classes is queryable/visible on the DL nástenka's own stats strip
+    (`/api/orders/dl/stats`) and the daily Odoo digest, not just alerted into the
+    channel:
+
+    - `quarantined` (class 1) — DL messages that exhausted all 5 claim attempts and are
+      never picked up again. The hourly n8n "Stuck message watchdog" already alerts
+      this class into the Odoo channel (attempts>=3) — this is the dashboard half of
+      requirement 1, which that channel-only alert does not cover on its own.
+    - `pending_alerts` (classes 2/3) — rows `dl_alerts` has enqueued but not yet
+      delivered (an upload failure, or a stuck-classified finding). A nonzero count
+      here for more than a sweep or two means Odoo delivery itself is struggling, which
+      is exactly the "alert-delivery failure must itself be visible" requirement.
+    - `open_import_incidents` (classes 4/5) — currently-open `import_alert_incidents`
+      for the DESADV ledger (`confirm.py`), the same ground truth that module's own
+      sweep already uses to decide whether to keep reminding.
+    """
+    from . import dl_alerts
+
+    quarantined_row = conn.execute(
+        """SELECT count(*) FROM messages
+            WHERE category = 'dodacie_listy' AND processed = false
+              AND coalesce(attempts,0) >= 5""").fetchone()
+    incidents_row = conn.execute(
+        """SELECT count(*) FROM import_alert_incidents
+            WHERE closed_at IS NULL AND source = 'desadv'""").fetchone()
+    return {"quarantined": int(quarantined_row[0] or 0),
+           "pending_alerts": dl_alerts.pending_count(conn),
+           "open_import_incidents": int(incidents_row[0] or 0)}
 
 
 def days_since_incident(conn) -> int | None:
