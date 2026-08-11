@@ -764,6 +764,19 @@ def create_app(cfg) -> Flask:
                 # land in dl_suppliers_for_management and dl_match.py picks whichever comes
                 # first, possibly a stale name. So: refuse up front, same shape as the
                 # customer path, ignoring city on purpose (the collision is on the EAN).
+                #
+                # Residual (independent review, same PR): this read happens BEFORE
+                # `upsert_dl_supplier`'s own advisory lock is taken, and that lock is keyed
+                # on ean_edi alone while its internal reclaim still matches on the narrower
+                # (ean_edi, city) pair — so two genuinely SIMULTANEOUS "new supplier"
+                # submissions for the SAME never-before-seen EAN under DIFFERENT city
+                # values could both pass this check and still insert two rows. This is not
+                # a new gap: `_api_orders_answer_new_customer`'s identical collision check
+                # above (and `upsert_customer`'s matching lock) has the exact same
+                # limitation, already reviewed and accepted on #234 — a real fix would
+                # widen the lock scope in BOTH `upsert_dl_supplier` and `upsert_customer`
+                # symmetrically, out of proportion to this ticket on a manual, low-
+                # concurrency warehouse form. Left as-is, consistent with that precedent.
                 existing = [r for r in dl_snapshot.dl_suppliers_for_management(c)
                            if str(r.get("ean_edi") or "") == ean]
                 if existing:
@@ -830,6 +843,30 @@ def create_app(cfg) -> Flask:
         raw = body.get("choice")
         choice = "" if raw in (None, "unknown") else str(raw)
         by = str(body.get("by") or "sklad")
+        # Deep-review finding (independent review, same PR): dlSupplierSearchBox/
+        # dlItemSearchBox (#235) search over the FULL current DL supplier/catalog list,
+        # not just this question's frozen candidates — but `_validate_dl_supplier`/
+        # `_validate_dl_item` only ever accept an OFFERED value, so a search hit (or the
+        # new collision-reclaim button in newDlSupplierForm above) that was never in the
+        # original candidate set was silently rejected with 400 "nebolo ponúknuté", even
+        # though it IS a real, current supplier/card — the "live search over everything"
+        # promise this ticket's own design comment describes was structurally unreachable.
+        # Mirrors what `_api_orders_answer_customer` already does for its OWN search box
+        # (legitimise server-side before validating) — scoped to the two DL kinds only;
+        # mail/date/line have no search box and keep the strict offered-only check as-is.
+        offered = {str(c.get("value")) for c in (q.get("candidates") or [])}
+        if choice and choice not in offered and q.get("kind") in ("dl_supplier", "dl_item"):
+            with _db() as clook:
+                if q.get("kind") == "dl_supplier":
+                    hit = next((r for r in dl_snapshot.dl_suppliers_for_management(clook)
+                               if str(r.get("ean_edi") or "") == choice), None)
+                else:
+                    hit = next((r for r in dl_snapshot.dl_catalog_for_management(clook)
+                               if str(r.get("gtin") or "") == choice), None)
+                if hit:
+                    cand = {"value": choice, "label": hit.get("name", "")}
+                    teach.add_candidate(clook, qid, cand)
+                    q = dict(q, candidates=[*(q.get("candidates") or []), cand])
         try:
             kind.validate(q, choice, by)
         except teach.NotACandidate as e:
@@ -1917,6 +1954,7 @@ function newDlSupplierForm(q){
   const city=el('input');city.placeholder='obec';
   for(const i of [ean,name,emails,city])form.appendChild(i);
   const status=el('div','slabel','');form.appendChild(status);
+  const extra=el('div');form.appendChild(extra);
   const save=el('button',null,'Uložiť nového dodávateľa');
   save.style.borderColor='#1f6feb';save.style.background='#ddf4ff';save.style.color='#0969da';
   save.onclick=async()=>{
@@ -1924,13 +1962,24 @@ function newDlSupplierForm(q){
     if(!e){alert('Bez EAN kódu EDI sa dodávateľ nedá uložiť — nájdeš ho v CODEXe pri dodávateľovi.');return}
     if(!/^\d+$/.test(e)){alert('EAN kód EDI musí byť len číslice.');return}
     if(!name.value.trim()){alert('vyplň názov firmy');return}
-    status.textContent='';save.disabled=true;
+    status.textContent='';extra.textContent='';save.disabled=true;
     try{
       await api('/api/orders/question/'+q.id+'/answer',{method:'POST',body:JSON.stringify({
         new_supplier:{ean_edi:e,name:name.value.trim(),emails:emails.value.trim(),
           city:city.value.trim()}})});
       await load()
-    }catch(err){save.disabled=false;status.textContent=err.message||'chyba'}
+    }catch(err){
+      save.disabled=false;
+      status.textContent=err.message||'chyba';
+      // Deep-review finding (independent review, same PR): mirror newCustomerForm's own
+      // one-click reclaim button — a 409 collision (see the httpapi.py collision check
+      // this form posts to) already carries err.body.existing; render it instead of
+      // leaving her to re-type the same EAN into the search box above.
+      if(err.body&&err.body.existing){
+        const b=el('button',null,'Použiť existujúceho '+err.body.existing.name);
+        b.onclick=()=>answerGeneric(q.id,err.body.existing.ean_edi);
+        extra.appendChild(b)}
+    }
   };
   form.appendChild(save);
   toggle.onclick=()=>{form.style.display=form.style.display==='none'?'block':'none'};
