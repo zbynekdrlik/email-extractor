@@ -1906,3 +1906,47 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
   question (id 26, real production data, real supplier assignment) — the
   click-to-answer wiring is already proven by local Playwright e2e tests against a
   fixture DB. Discord run-card delivered.
+
+## #236 — Zaseknuté dodacie listy: FEAST, HK LOAN, TLS Great 15/20 kg (2026-08-11)
+
+LIVE OPS ticket, no code commits. All data changes via the live dashboard's own
+`/api/znalosti/dl-suppliers` / `/api/znalosti/dl-products` (session auth), verified
+via SSH+psql on the HA box + read-only DuckDB queries against Codex ERP on dev2.
+
+- **FEAST s.r.o.** — added as `dl_supplier` (`ean_edi=2000000000866`, cross-verified
+  against `raw.firma.AEDIEAN` in Codex, independent of the warehouse's own screenshot;
+  `emails=[objednavky@feast.sk, obejdnavky@feast.sk]`, `city=Nitra`). Its item
+  ("Soľ jedlá kamenná jódovaná 0,7-0,16 mm") separately failed `dl_match.py`'s R75
+  lexical tripwire even AFTER the warehouse (sklad) answered the board question live
+  mid-session — the memory-rescue rung (R73) only fires below `GATE_SURE`, so a
+  human-taught mapping never overrides an already-"sure"-but-lexically-orphaned model
+  guess. Fixed with a DATA-only alias (`doplnok="Soľ jedlá kamenná jódovaná"` on the
+  matched card, gtin `4003885181808`) — `card_words` in the lexical guard includes
+  `doplnok`, so this closes the gap without touching `dl_match.py`. DL 20263245 now
+  ships (`DESADV_000866_20263245_...txt`, confirmed on ORION `in_DL`).
+- **TLS Logistics / Forbak s.r.o.** — the ticket's premise was slightly off: "TLS
+  Logistics" isn't an unonboarded supplier, it's the 3PL warehouse operator that
+  prints Forbak s.r.o.'s (`ean_edi=2000000000549`) pick slips — Forbak was ALREADY a
+  supplier, just under a name with zero word-overlap with "TLS Logistics, s.r.o." (the
+  document's own header). Renamed the supplier record to `"Forbak s. r. o. (TLS
+  Logistics, s.r.o.)"` (supplier has no separate alias field — folded into `name`) so
+  R60's word-overlap scoring finds it. Separately, "Great 15 kg" vs the existing card
+  "Great 20 kg" (Codex `NEANKOD 3605`, ONE card for both bag sizes) tripped
+  `dl_match.py`'s weight-conflict guard (±10% tolerance, 20/15=1.33× over). Renamed the
+  card to weight-neutral `"Great"` (kept `doplnok="Great-náhrada fresca"`, left `mass`
+  blank so per-line kg conversion falls back to each delivery's own stated weight via
+  `_extract_mass`, verified correct for both 15kg and 20kg runs). 3 stuck docs
+  reprocessed: 07-21 (Great 20kg) → shipped, 08-05 (Great 15kg) → shipped, 08-06 (exact
+  duplicate of 08-05, same `doc_number`) → correctly caught as `duplicate`, NOT
+  double-uploaded (`desadv_sent` ledger + ORION `in_DL` both confirm 2 files, not 3).
+- **HK LOAN** — genuinely unresolvable EAN-EDI without the user: checked Codex
+  `raw.firma`, `dl_supplier_snapshot`/`overrides`, `order_questions` — zero record
+  anywhere. Asked the user (`❓`), ticket stays open + `needs-answer` labelled.
+- Two stray `order_questions` (id 26 FEAST-supplier, id 32 TLS/tlaciaren-supplier)
+  left `open` by the direct data fixes (resolved outside the normal answer flow) were
+  closed via a narrow, scoped `UPDATE order_questions SET status='answered', ...`
+  (same class of repair as #147's playbook precedent) — no teaching-table side effect,
+  just stops them showing as stale pending items on the dashboard.
+- Safety: every reprocess checked `desadv_sent` (empty for all 4 doc numbers before
+  reprocessing) AND read-only SFTP on ORION (`in`/`in_DL`/`archCodex`/`unconfirmed`,
+  with and without `Z-`) before touching anything — confirmed nothing had shipped.
