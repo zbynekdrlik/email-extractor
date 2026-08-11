@@ -1435,3 +1435,33 @@ intentional there for cards it was tuned against.
   collision`'s own `real_errors = [m for m in console if "Failed to load resource" not
   in m]`), with a comment explaining why, so a real `console.error()` in that same test
   is still caught.
+- **Proving a `pg_advisory_xact_lock` claim actually SERIALIZES two callers needs two
+  real threads on two real connections and a TIMESTAMP-based assertion — never a
+  sleep-based race (#240, second-round review).** Every existing test of
+  `release_for_question`'s new lock called it sequentially (one Python call after
+  another), which proves the sibling-gate LOGIC but is silent on whether the lock does
+  anything at all — a missing lock and a working one look IDENTICAL under sequential
+  calls. `test_release_for_question_advisory_lock_serializes_two_genuinely_concurrent_
+  racers` (`tests/test_dl_worker.py`) is the reusable shape for any FUTURE test of a
+  similar claim in this codebase (`db.py`'s migration lock, `edi.claim_send`'s atomic
+  claim, any future advisory-lock use): two threads, each its OWN
+  `psycopg.connect(...)` (a shared connection is not safe for concurrent use across
+  threads), each running the SAME operation with a small deliberate `time.sleep()`
+  inside the thing being locked (widens the race window so a missing lock shows up
+  reliably, not by luck) while a shared, lock-protected list records
+  `(thread_id, start, end)` per call; after both threads join, group into a
+  `[min(start), max(end)]` window PER THREAD and assert the windows never overlap.
+  Deterministic and CI-safe (`no-timeout-band-aids.md`) because the assertion is on the
+  RECORDED spans after the fact, never on which thread happens to "win" — a real
+  missing lock shows up as an actual timestamp overlap, not as flakiness.
+- **When a review fix mirrors an EARLIER fix in a sibling `except`/branch, check every
+  OTHER sibling branch for the identical gap before calling it done (#240, second-round
+  review).** The `_RetryLater` branch of `dl_worker._run_and_finish` was fixed to
+  re-arm `messages.processed = false` (so a reprocess-triggered retry doesn't strand
+  outside `_claim()`'s `WHERE processed = false` filter) — but the sibling
+  `except Exception` (hard-failure) branch, right next to it, had the IDENTICAL bug and
+  was NOT fixed in the same round; an independent deep-review pass caught it only
+  because it was told to check the whole diff, not just the one hunk that prompted the
+  original fix. Any fix framed as "this exception branch now does X" should trigger an
+  explicit grep for sibling `except`/`if`/branch blocks in the SAME function doing
+  something structurally similar, before considering the fix complete.
