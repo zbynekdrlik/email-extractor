@@ -264,6 +264,13 @@ def build_daily_digest(stats: dict, days_since_incident: int | None, link: str =
     # exactly the silent-backlog failure this ticket exists to prevent), so these widen
     # the trigger below rather than only decorating an already-active DL section.
     dl_quarantined = int(dl.get("quarantined") or 0)
+    # Deep-review finding on this ticket's own PR: the "5 attempts" number used to be
+    # hardcoded here too (a THIRD copy of `dl_worker.MAX_ATTEMPTS`, after the DB query
+    # and the constant itself) — read it from the stats dict `reliability.
+    # dl_current_health` now carries it in, falling back to 5 only for an old caller/
+    # test that predates this field (never actually diverges from the real constant in
+    # production, since `dl_current_health` is the only real producer of `dl_stats`).
+    dl_quarantine_threshold = int(dl.get("quarantine_threshold") or 5)
     dl_pending_alerts = int(dl.get("pending_alerts") or 0)
     dl_open_import = int(dl.get("open_import_incidents") or 0)
     if (dl_runs or dl_dups or dl_mismatch or dl_quarantined or dl_pending_alerts
@@ -293,9 +300,12 @@ def build_daily_digest(stats: dict, days_since_incident: int | None, link: str =
         if dl_quarantined:
             parts.append(f"<p>&#128683; {dl_quarantined} " +
                          _plural(dl_quarantined,
-                                 "dodací list sa po 5 pokusoch vzdal spracovania",
-                                 "dodacie listy sa po 5 pokusoch vzdali spracovania",
-                                 "dodacích listov sa po 5 pokusoch vzdalo spracovania") +
+                                 f"dodací list sa po {dl_quarantine_threshold} pokusoch "
+                                 "vzdal spracovania",
+                                 f"dodacie listy sa po {dl_quarantine_threshold} "
+                                 "pokusoch vzdali spracovania",
+                                 f"dodacích listov sa po {dl_quarantine_threshold} "
+                                 "pokusoch vzdalo spracovania") +
                          " &mdash; skontroluj v dashboarde.</p>")
         if dl_pending_alerts:
             parts.append(f"<p>&#128276; {dl_pending_alerts} " +

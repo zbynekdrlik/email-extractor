@@ -180,7 +180,8 @@ def test_dl_current_health_is_never_day_scoped(pg):
         "INSERT INTO messages (message_id, category, processed, attempts, created_at) "
         "VALUES ('old1', 'dodacie_listy', false, 5, now() - interval '10 days')")
     health = reliability.dl_current_health(pg)
-    assert health == {"quarantined": 1, "pending_alerts": 0, "open_import_incidents": 0}
+    assert health == {"quarantined": 1, "quarantine_threshold": 5, "pending_alerts": 0,
+                      "open_import_incidents": 0}
 
 
 def test_a_dl_only_day_reports_honest_zeros_for_orders(pg):

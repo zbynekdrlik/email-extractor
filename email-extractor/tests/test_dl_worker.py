@@ -782,7 +782,44 @@ def test_upload_failure_at_attempts_3_or_more_enqueues_immediately(pg, tmp_path)
     assert pg.execute("SELECT count(*) FROM pending_alerts").fetchone()[0] == 1
 
 
+def test_upload_failure_with_no_channel_configured_never_enqueues_a_stuck_alert(pg, tmp_path):
+    """Deep-review finding on #239's own PR: `stuck_classified_sweep` already bails
+    when `delivery_notes_channel_id` resolves to 0 — the upload-failure call site must
+    have the SAME guard, or it would enqueue a row with `channel_id=0` that can never
+    be delivered (nothing posts to channel 0) and sits pending forever."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+
+    def _raise_upload(c, name, content, dir_override=None):
+        raise OSError("disk quota exceeded on remote host")
+
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path),
+              delivery_notes_channel_id=0)
+    n = dl_worker.tick(pg, cfg, client=client, upload=_raise_upload)
+    assert n == 1
+    assert pg.execute("SELECT count(*) FROM pending_alerts").fetchone()[0] == 0
+
+
 # --- #239 class 3: classified as DL but never even attempted -----------------
+
+def test_stuck_classified_sweep_stamps_a_detection_time_alongside_the_received_time(pg):
+    """Deep-review finding on #239's own PR: `flush_pending` may deliver this alert
+    long after detection (a queued Odoo outage) — by then the message could already be
+    processed. Stamping the DETECTION time lets a reader judge staleness for
+    themselves, distinct from the message's own `created_at`."""
+    _msg(pg, mid="dl1")
+    pg.execute(
+        "UPDATE messages SET created_at = now() - interval '31 minutes' "
+        "WHERE message_id = 'dl1'")
+    dl_worker.stuck_classified_sweep(pg, _cfg())
+    html = pg.execute(
+        "SELECT body_html FROM pending_alerts WHERE message_id='dl1'").fetchone()[0]
+    assert "prijaté:" in html
+    assert "zistené:" in html
+
 
 def test_stuck_classified_sweep_alerts_a_message_with_no_order_runs_row(pg):
     _msg(pg, mid="dl1")

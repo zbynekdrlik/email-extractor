@@ -593,16 +593,26 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         # confirms it, grouped with any other pending alert of the same kind. A
         # builder exception (dl_report.build_review) must not blow up processing
         # either — same discipline `_post`'s own docstring already established.
-        try:
-            html = dl_report.build_review(
-                detail_text, supplier_decision.name, built.doc_number, delivery_date,
-                from_addr, subject, link=link)
-            dl_alerts.enqueue(
-                conn, int(getattr(cfg, "delivery_notes_channel_id", 0) or 0),
-                "dl_upload_failed", html, message_id=message["message_id"])
-        except Exception:
-            log.exception("failed to enqueue the DL upload-failure alert for %s",
-                          built.filename)
+        # Deep-review finding on this ticket's own PR: `stuck_classified_sweep` below
+        # already bails out when `delivery_notes_channel_id` resolves to 0 (unset) —
+        # this call site lacked the same guard, so an unset channel would enqueue a
+        # `pending_alerts` row that can NEVER be delivered (nothing posts to channel 0)
+        # and would sit pending forever, growing the "stuck backlog" gauge with no way
+        # to resolve it. Match the same guard here.
+        channel = int(getattr(cfg, "delivery_notes_channel_id", 0) or 0)
+        if channel:
+            try:
+                html = dl_report.build_review(
+                    detail_text, supplier_decision.name, built.doc_number,
+                    delivery_date, from_addr, subject, link=link)
+                dl_alerts.enqueue(conn, channel, "dl_upload_failed", html,
+                                  message_id=message["message_id"])
+            except Exception:
+                log.exception("failed to enqueue the DL upload-failure alert for %s",
+                              built.filename)
+        else:
+            log.warning("delivery_notes_channel_id is unset — the upload-failure "
+                       "alert for %s could not be enqueued", built.filename)
         _event(conn, shadow, message["message_id"], stage="review", status="error",
               outcome=note, detail={"error": repr(e), "filename": built.filename},
               rollup=False, workflow=dl_report.WORKFLOW)
@@ -1041,6 +1051,15 @@ def stuck_classified_sweep(conn, cfg, threshold_minutes: int = STUCK_CLASSIFIED_
                               WHERE r.message_id = m.message_id)
             ORDER BY m.created_at ASC LIMIT 20""",
         (CATEGORY, max(1, int(threshold_minutes)))).fetchall()
+    # Deep-review finding on this ticket's own PR: `flush_pending` may deliver this
+    # alert well after it was detected here (a queued Odoo outage, a busy sweep) — by
+    # then the message may already have been claimed and finished normally, which
+    # would make a reader think it "never started" when it since has. Stamping the
+    # DETECTION time (read once, shared by every row this pass) alongside the
+    # message's own received time lets a reader judge staleness for themselves;
+    # `created_at` alone cannot distinguish "just detected" from "detected an hour
+    # ago, still undelivered".
+    detected_at = conn.execute("SELECT now()").fetchone()[0]
     n = 0
     for message_id, subject, from_addr, created_at in rows:
         if dl_alerts.already_pending(conn, "dl_stuck_classified", message_id):
@@ -1049,7 +1068,8 @@ def stuck_classified_sweep(conn, cfg, threshold_minutes: int = STUCK_CLASSIFIED_
             "<p>&#9888;&#65039; E-mail bol zaradený ako dodací list, ale spracovanie "
             "sa vôbec nezačalo &mdash; over, či beží spracovanie dodacích listov.</p>"
             f"<p>Od: {escape(from_addr or '-')} / Predmet: {escape(subject or '-')} / "
-            f"prijaté: {escape(str(created_at))}</p>")
+            f"prijaté: {escape(str(created_at))} / "
+            f"zistené: {escape(str(detected_at))}</p>")
         dl_alerts.enqueue(conn, channel, "dl_stuck_classified", html,
                           message_id=message_id)
         n += 1

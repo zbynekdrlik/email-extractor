@@ -1341,9 +1341,14 @@ def create_app(cfg) -> Flask:
         from .orders import reliability
         with _db() as c:
             today = reliability.dl_provenance_stats_for_day(c)
+            # #239 deep-review finding: the three current-health gauges are NOT
+            # day-scoped — the JS badge only ever reads them off `today` (see
+            # ASK_DL_HTML's loadStats()), so recomputing the identical three queries
+            # for "yesterday" would be pure waste.
             yesterday = reliability.dl_provenance_stats_for_day(
                 c, c.execute(
-                    "SELECT to_char(now() - interval '1 day', 'YYYY-MM-DD')").fetchone()[0])
+                    "SELECT to_char(now() - interval '1 day', 'YYYY-MM-DD')").fetchone()[0],
+                include_current_health=False)
         return jsonify(today=today, yesterday=yesterday)
 
     @app.get("/api/imap-failures")

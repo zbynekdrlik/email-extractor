@@ -54,7 +54,17 @@ def already_pending(conn, kind: str, message_id: str) -> bool:
     not) — the dedup a persistently-stuck message needs so a sweep that keeps
     rediscovering it does not enqueue (and eventually post) a fresh copy every ~15s.
     Deliberately checks ALL rows, not just undelivered ones: once alerted, a message
-    should not be re-alerted for the SAME condition even after delivery succeeds."""
+    should not be re-alerted for the SAME condition even after delivery succeeds.
+
+    Deep-review finding on this ticket's own PR: this dedup is PERMANENT, by design —
+    once a `(kind, message_id)` pair has ever been alerted, it never fires again for
+    that pair, even if the condition genuinely recurs much later (e.g. a message stuck
+    once, later fixed, then somehow stuck again). Accepted tradeoff for the two kinds
+    this currently guards (`dl_upload_failed`/`dl_stuck_classified`, both keyed to a
+    SINGLE message that structurally cannot re-enter its own sweep's candidate set
+    without an unusual manual reset) — a future kind whose condition genuinely CAN
+    recur for the same key should either dedupe on something that changes per
+    occurrence (e.g. include a document/run id in the key) or add an age bound here."""
     if not message_id:
         return False
     row = conn.execute(

@@ -93,6 +93,30 @@ def test_flush_never_mixes_two_different_kinds_into_one_post(pg):
     assert len(posted) == 2
 
 
+def test_one_failing_group_never_blocks_a_different_group_in_the_same_sweep(pg):
+    """Deep-review finding on #239's own PR: `flush_pending` reads every undelivered
+    row in ONE query spanning potentially several (channel_id, kind) groups — a group
+    whose post() raises must not prevent a DIFFERENT group, later in the same dict
+    iteration, from being attempted and delivered in this SAME sweep call."""
+    dl_alerts.enqueue(pg, 243, "dl_upload_failed", "<p>fails</p>", message_id="a")
+    dl_alerts.enqueue(pg, 243, "dl_stuck_classified", "<p>succeeds</p>", message_id="b")
+    posted = []
+
+    def _post(c, h, **kw):
+        if "fails" in h:
+            raise Exception("Odoo unreachable for this group")
+        posted.append(h)
+        return {"id": 1}
+
+    n = dl_alerts.flush_pending(pg, cfg=None, post=_post)
+    assert n == 1, "only the succeeding group's row counts as delivered"
+    assert posted == ["<p>succeeds</p>"]
+
+    delivered = {row[0]: row[1] for row in pg.execute(
+        "SELECT message_id, delivered_at IS NOT NULL FROM pending_alerts").fetchall()}
+    assert delivered == {"a": False, "b": True}
+
+
 def test_already_pending_dedupes_by_kind_and_message_id(pg):
     assert dl_alerts.already_pending(pg, "dl_stuck_classified", "m1") is False
     dl_alerts.enqueue(pg, 243, "dl_stuck_classified", "<p>x</p>", message_id="m1")
