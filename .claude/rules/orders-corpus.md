@@ -1561,3 +1561,34 @@ intentional there for cards it was tuned against.
   it to matching-CORRECTNESS incidents (wrong catalog card picked), not general
   crash/extraction bugs; conflating the two would make "days since a wrong AI match"
   silently report an unrelated crash fix instead.
+- **`messages.combined_text` is NOT "just the mail body" — `app/process.py`'s
+  `_combined_text()` folds in Subject + From + Body, THEN, only when at least one
+  attachment was successfully read as real text (not `flag.startswith("skipped")`, not
+  `needs_vision`), an appended `"\n\nAttachments:\n===== <filename> =====\n<text>"`
+  block — for EVERY attachment TYPE that extracted real text, not just PDF/image (#258,
+  deep-review finding). Any future code that wants "the mail's own prose, nothing an
+  attachment contributed" must NOT read `combined_text` raw — it will silently also see
+  a .docx/.xlsx/.csv/... attachment's own extracted text, even when that attachment type
+  is deliberately out of scope for the consumer (as `dl_worker.py`'s own module
+  docstring documents for DL: "a .docx ... is skipped rather than fed to Vision"). Strip
+  the block first: split on the literal `"\n\nAttachments:\n"` marker (ASCII-only,
+  survives `_strip_invisible`, always the LAST part `_combined_text` joins, so a `.split
+  (marker, 1)[0]` is exact) — see `dl_worker._mail_body_only()` for the reusable shape.
+  This is the SAME distinction the module docstring's own "Attachment selection is this
+  worker's OWN scope decision" paragraph already draws for the ATTACHMENTS table
+  (`_ATTACHMENT_MIME_RE`/`_ATTACHMENT_EXT_RE`, PDF/image only) — `combined_text` needs
+  its own, separate guard because it is built from a DIFFERENT, wider filter
+  (`extract.py`'s ingest-time `flag`/`needs_vision`, not this module's MIME/ext check).
+- **Building a corpus case FROM a session already running physically ON dev2 needs no
+  `ssh dev2` at all** (#258) — `hostname` first; if it already prints `dev2`,
+  `~/eval-corpus/email-extractor/` and the cached CI checkout
+  (`~/actions-runner-emailextract/_work/email-extractor/email-extractor/email-extractor`)
+  are both plain local paths, no SSH wrapper/quoting gymnastics needed. `ssh dev2`
+  issued FROM dev2 itself resolves to loopback (the documented `/etc/hosts` self-alias
+  quirk — see the global `machine-identities.md`) and silently "worked" by hitting the
+  SAME local containers, which is easy to mistake for having reached the actual other
+  box. `ssh dev1` bare-name resolution can fail entirely from dev2 (`Temporary failure
+  in name resolution`) even though the tailnet route is fine — if a `dl_eval_run.py
+  --live` recording session needs the OTHER box specifically, verify with `hostname`
+  first, and don't assume `ssh <name>` reached where you think it did just because it
+  didn't error.

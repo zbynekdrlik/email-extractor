@@ -2354,3 +2354,55 @@ tests. Full local suite green throughout (`pytest tests/ -q --cov=app --cov-fail
 93.77%, all tests passing).
 
 Version bumped 0.9.72 → 0.9.73.
+
+## 2026-08-12 — #258 (PR #263)
+
+- **#258** (DL: HK LOAN never attaches a real document — the delivery note is written
+  directly in the mail's own BODY TEXT, only a decorative signature logo as "attachment").
+  `dl_worker._process_message` used to bail out immediately with a generic review reason
+  whenever `usable_attachments` was empty, never reading `message["combined_text"]` at
+  all. Fix: when there's no usable attachment, build ONE synthetic source entry from the
+  mail's own body text (`{"idx": -1, "pdf_bytes": b"", "machine_text": body_text}`) and
+  feed it through the SAME `dl_extract.extract_email()` call an attachment goes through —
+  `dl_extract.py`'s existing W13/R42 routing already skips vision whenever `machine_text`
+  is present and `pdf_bytes` is empty, so zero changes needed there. Item matching, EDI
+  build, ORION upload, `desadv_sent`, board questions — all unchanged downstream.
+- STEP 0 validation + design comments posted on #258 BEFORE the first commit (live
+  production evidence: 12 HK LOAN messages, all `method='skipped'` decorative attachment,
+  real delivery-note text in `combined_text`). The ticket's own `needs-decision` question
+  was already resolved by the dispatch (build it) — recorded + label removed.
+- Commits: `28757d0` (version bump 0.9.74), `91a7c54` (RED — 3 new tests fail on
+  unfixed code, 0 model calls), `510e4c7` (GREEN — mechanism), `e1214ee` (deep-review
+  fix: `_mail_body_only()` strips `_combined_text`'s own "Attachments:" block so a
+  non-PDF/image attachment's OWN extracted text — folded into `combined_text` by
+  `app/process.py` regardless of type — never leaks into the body-text fallback;
+  reworded the body-text error path to stop calling body text a "príloha"; added an
+  observability log line; new regression test captures the actual extraction-call
+  input text).
+- Deep review: one fresh-context `general-purpose` subagent (never the built-in
+  `Skill({skill:"review"})`), 0 🔴, 4 🟡, 2 🔵 — all fixed in the same branch/commit
+  before merge (see `e1214ee` above); one 🟡 (corpus-regression risk unverifiable from
+  the diff alone) was already covered by the corpus work below.
+- **DL eval corpus** (dev2, `~/eval-corpus/email-extractor/dl/`, outside git — real
+  customer mail): new case `hkloan_delivery_note_in_body_text_no_attachment` using the
+  ACTUAL HK LOAN production wording (read-only SELECT off the live HA box). `--live`
+  verified twice (consistent): the model does NOT recognize this specific informal,
+  no-doc-number/no-price wording as a delivery note (`documents: []`) — a genuine,
+  separate prompt-coverage gap in the shared `dl_extract.md`, filed as its own
+  cross-cutting follow-up (**#262**) rather than folded into this fix (a prompt used by
+  every DL supplier needs a full corpus re-verify to change safely). The corpus case
+  locks in the CURRENT honest behavior (extraction genuinely attempted, correctly
+  worded review) — 9/9 cases pass offline (`--require-all`, exit 0), baseline updated.
+- CI: `test`/`e2e-orders`/`e2e-dl`/`build` all green on both the `push` and
+  `pull_request` triggers, both commits. PR #263 merged `61aaace`. Main CI green
+  (build pushed `ghcr.io/zbynekdrlik/email-extractor-amd64:0.9.74`).
+- Deployed + verified live: `/health` → `{"ok":true,"version":"0.9.74"}`; dashboard DOM
+  shows `v0.9.74` (Playwright, 0 console errors); **functional** — reprocessed a real,
+  already-reviewed, never-shipped HK LOAN message (id 6389, confirmed zero
+  `desadv_sent` rows first) and confirmed live in `email_events`/the dashboard API: the
+  NEW reason text `"Nepodarilo sa rozpoznať žiadny dodací list v texte e-mailu"` fired
+  in production, proving the fixed code path genuinely executes on real HK LOAN mail
+  (matches the corpus finding — extraction is attempted, this particular wording just
+  isn't recognized yet, tracked in #262).
+- Run card fired for #258 (`v0.9.74`). Filed follow-up: **#262** (`dl_extract.md`
+  prompt doesn't recognize an informal free-text delivery announcement).

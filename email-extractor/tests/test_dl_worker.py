@@ -15,7 +15,15 @@ from psycopg.types.json import Json
 
 from app import store
 from app.config import Config
-from app.orders import desadv, dl_memory, dl_snapshot, dl_supplier_memory, dl_worker, reliability
+from app.orders import (
+    desadv,
+    desadv_edi,
+    dl_memory,
+    dl_snapshot,
+    dl_supplier_memory,
+    dl_worker,
+    reliability,
+)
 
 DL_CATALOG_CSV = ("GTIN,Názov,doplnok,hmotnost,Sklad,Cena\n"
                   "8588000000001,Rožok 50g,,0.05,1,0.50\n")
@@ -506,6 +514,73 @@ def test_retry_after_partial_ship_logs_a_self_retry_not_a_false_duplicate(pg, tm
     stats = reliability.dl_provenance_stats_for_day(pg)
     assert stats["duplicates"] == 0, \
         "the daily digest's duplicates bucket must not count a message retrying itself"
+
+
+# --- #262: a document with NO extracted docNumber (an informal delivery announcement
+# in mail body text) must get a STABLE synthesized identity across retries ----------
+
+def test_a_numberless_document_gets_a_stable_doc_number_so_a_retry_never_double_ships(
+        pg, tmp_path):
+    """A document whose extraction found no docNumber at all (an informal delivery
+    announcement, #262) must be assigned the SAME synthesized identity every time the
+    SAME message is reprocessed — a stale-claim reclaim (R10, 30 min) or an R17
+    transient retry calls the worker again for the SAME message, and if the
+    synthesized doc_number changed between attempts, `desadv.
+    claim_send_or_identify()`'s (supplier_ean, doc_number) key would treat the retry
+    as a BRAND NEW document and genuinely re-upload it to ORION — the same class of
+    bug #239 fixed one layer up (the upload-retry path itself), here one layer
+    earlier (deciding the document's identity before the first claim attempt).
+
+    Simulated the same way a real stale-claim reclaim looks from the worker's own
+    point of view: `tick()` runs the message to completion once, then the message's
+    claim state is reset exactly like `_claim()`'s own reclaim SQL would leave it
+    (`processed=false, processing_at=NULL`) and `tick()` runs again."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", has_attachments=False,
+        combined_text="Dobrý deň avizácia na vykládku, dodanie zajtra.")
+    doc = _doc(doc_number="", total=0,
+              items=[{"name": "Rožok 50g", "quantity": 10, "unit": "ks"}])
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+
+    client1 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                          "dl_item": [ITEM_MATCHED]})
+    uploaded, posted = [], []
+    n1 = dl_worker.tick(
+        pg, cfg, client=client1,
+        upload=lambda c, name, content, dir_override=None:
+            uploaded.append((name, content, dir_override)),
+        post=lambda c, html: posted.append(html))
+    assert n1 == 1
+    assert len(uploaded) == 1, "the first attempt must ship normally"
+
+    row = pg.execute(
+        "SELECT doc_number FROM desadv_sent WHERE supplier_ean=%s", (SUPPLIER_EAN,)
+    ).fetchone()
+    assert row is not None
+    first_doc_number = row[0]
+    assert first_doc_number == desadv_edi.generate_stable_doc_number("dl1")
+    assert first_doc_number.startswith("AVIZO")
+
+    # Simulate the SAME message being reprocessed (a stale-claim reclaim / R17 retry).
+    pg.execute("UPDATE messages SET processed=false, processing_at=NULL "
+              "WHERE message_id='dl1'")
+
+    client2 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                          "dl_item": [ITEM_MATCHED]})
+    n2 = dl_worker.tick(
+        pg, cfg, client=client2,
+        upload=lambda c, name, content, dir_override=None:
+            uploaded.append((name, content, dir_override)),
+        post=lambda c, html: posted.append(html))
+    assert n2 == 1
+    assert len(uploaded) == 1, (
+        "a retry of the SAME message must be recognized as already-shipped under "
+        "the SAME synthesized identity, never re-uploaded a second time")
+
+    ev = pg.execute(
+        "SELECT stage FROM email_events WHERE message_id='dl1' "
+        "AND stage='already_shipped_this_run'").fetchone()
+    assert ev is not None, "the retry must be logged as a self-retry, not silently dropped"
 
 
 def test_a_genuine_cross_message_duplicate_still_counts_when_claimant_is_unknown(pg,
