@@ -3,8 +3,10 @@ paths:
   - "email-extractor/app/orders/**"
   - "email-extractor/app/httpapi.py"
   - "email-extractor/app/config.py"
+  - "email-extractor/app/db.py"
   - "email-extractor/config.yaml"
   - "email-extractor/tests/test_e2e.py"
+  - "email-extractor/tests/test_db.py"
   - ".github/workflows/ci.yml"
 ---
 
@@ -883,6 +885,40 @@ intentional there for cards it was tuned against.
   `SELECT count(*) total, count(uploaded_at) confirmed, count(*) FILTER (WHERE
   uploaded_at IS NULL) unconfirmed FROM edi_sent` — see `deploy.md`'s
   `PGPASSWORD`-through-`sudo` gotcha for how to actually run that query on the box.
+- **A partial UNIQUE INDEX's `WHERE` clause must exclude a blank string EXPLICITLY —
+  Postgres does NOT ignore `''` the way it ignores NULL (#248).** A NULL never
+  collides with anything in a unique index (two rows can both be NULL); an empty
+  string `''` is an ORDINARY, EQUAL value, so two active rows that both happen to
+  carry `ean_edi=''` DO collide and crash `CREATE UNIQUE INDEX` — a real gap caught
+  by a second review pass, not by the first: the de-dup step preceding the index
+  already excluded blank values (`AND ean_edi <> ''`) but the index itself did not,
+  so two blank-EAN duplicates would still crash boot even though the migration's own
+  comment claimed that could never happen. **Whenever a migration's de-dup UPDATE and
+  the unique index it protects both key on the same column, their exclusion
+  predicates must be kept IDENTICAL — write the WHERE clause once conceptually and
+  copy it into both statements, don't let the index "inherit" the de-dup's exclusions
+  by assumption.** Any FUTURE partial unique index in this project should default to
+  excluding both NULL (automatic) and the empty string (`AND <col> <> ''`, explicit)
+  for any text column a row can legitimately leave blank before validation — proven
+  live: `db.init_schema()` raised `UniqueViolation: Key (ean_edi)=() is duplicated`
+  the moment two such rows existed, reproduced directly against the real test
+  Postgres before the fix.
+  **Catching a `psycopg.errors.UniqueViolation` from an INSERT/UPDATE that runs
+  inside an advisory-lock `with conn.transaction():` block needs its OWN NESTED
+  `conn.transaction()` around just that statement (#248).** `conn.transaction()`
+  opens a real transaction the first time it's used on a connection, or a SAVEPOINT
+  if the connection already has one open (which it does here, since the advisory
+  lock's own `with conn.transaction():` is already active). Catching the exception
+  OUTSIDE that inner nested block (after it has already unwound via its own SAVEPOINT
+  rollback) leaves the connection perfectly usable for a follow-up recovery query
+  (e.g. re-`SELECT`ing the row that won the race, to build a clean error message);
+  catching it INSIDE the same scope where the failing statement ran, with no nested
+  transaction of its own, leaves Postgres in "current transaction is aborted" state
+  and the very next `conn.execute()` fails too. Reusable shape for any future
+  DB-level-uniqueness backstop layered under an app-level advisory lock in this
+  project: `try: \n    with conn.transaction():\n        <the statement that might
+  violate the constraint> \nexcept psycopg.errors.UniqueViolation:\n    <a recovery
+  query using the SAME conn, now safe to run>`.
 - **A "classify + notify" sweep must NOT persist a row as terminal until the notification
   itself genuinely succeeds — else a real problem is silently and permanently lost, just
   one layer above the thing the sweep exists to catch (#151, review-caught on PR #179).**
