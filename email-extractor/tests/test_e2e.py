@@ -707,10 +707,13 @@ def test_znalosti_lets_the_warehouse_curate_products_and_customers_directly(
     assert console == [], f"browser console not clean: {console}"
 
 
-def test_the_dl_board_stats_strip_shows_the_new_reliability_gauges(live_server, pg, page):
-    """#239: the three current-state gauges (quarantined / pending alerts / open import
-    incidents) must actually render on the `/sklad-dl` board she already looks at, not
-    just be queryable via the JSON API."""
+def test_the_dl_board_shows_a_prominent_alert_banner_for_the_reliability_gauges(
+        live_server, pg, page):
+    """#239 reopened, finding 5: the three current-state gauges (quarantined / pending
+    alerts / open import incidents) used to be three words silently appended to the
+    small `#dlStats` header strip — visually indistinguishable from ordinary text, and
+    on a quiet day nothing rendered at all so the feature was easy to miss entirely.
+    They now render in their own prominent, plain-Slovak banner."""
     from app.httpapi import dl_key
     from app.orders import dl_alerts
 
@@ -724,9 +727,26 @@ def test_the_dl_board_stats_strip_shows_the_new_reliability_gauges(live_server, 
     page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
     page.wait_for_url(f"{live_server}/otazky-dl")
 
-    page.wait_for_selector("#dlStats:has-text('zaseknutých')")
-    stats_text = page.locator("#dlStats").inner_text()
-    assert "1 zaseknutých" in stats_text
-    assert "1 čaká na odoslanie" in stats_text
+    page.wait_for_selector("#dlAlertBanner:visible")
+    banner_text = page.locator("#dlAlertBanner").inner_text()
+    assert "1 dodací(ch) list(ov)" in banner_text
+    assert "1 upozornenie/upozornení" in banner_text
+    # the plain today/yesterday summary strip stays separate and unaffected
+    assert "zaseknutých" not in page.locator("#dlStats").inner_text()
 
+    assert console == [], f"browser console not clean: {console}"
+
+
+def test_the_dl_alert_banner_stays_hidden_on_a_quiet_day(live_server, pg, page):
+    from app.httpapi import dl_key
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/otazky-dl")
+    page.wait_for_selector("#dlStats")
+    # `state="attached"` proves the banner element genuinely EXISTS in the DOM on a
+    # quiet day (not just "no such element", which would also satisfy a bare
+    # is_hidden() check and prove nothing about the fix).
+    page.wait_for_selector("#dlAlertBanner", state="attached")
+    assert page.locator("#dlAlertBanner").is_hidden()
     assert console == [], f"browser console not clean: {console}"
