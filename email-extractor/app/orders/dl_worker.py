@@ -126,6 +126,11 @@ TRANSIENT_RE = re.compile(
 _ATTACHMENT_MIME_RE = re.compile(r"pdf|image", re.IGNORECASE)
 _ATTACHMENT_EXT_RE = re.compile(r"\.(pdf|jpe?g|png|tiff?|bmp)$", re.IGNORECASE)
 
+# #258: the synthetic "attachment" idx used for the mail's own combined_text when there
+# is no usable real attachment — real attachment idx values are non-negative (see
+# `_read_attachments`'s `ORDER BY idx`), so -1 can never collide with one.
+_BODY_TEXT_IDX = -1
+
 # Spec §4: the documented Lunys "IS KARAT" DL-number shape inside a subject line.
 _SUBJECT_DOC_RE = re.compile(r"\d{2,}LT\d{4,}", re.IGNORECASE)
 
@@ -749,17 +754,39 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     # usable — unaffected by this filter.
     usable_attachments = [a for a in attachments if (a.get("method") or "") != "skipped"]
 
-    if not usable_attachments:
+    # #258: some suppliers (HK LOAN, gnip@hkloan.eu — verified live, STEP 0 evidence on
+    # the ticket) never attach a real document at all; the delivery note is written
+    # directly in the mail's own BODY TEXT. When there is no usable attachment, try the
+    # message's own `combined_text` (subject+body, already stored on every message) as a
+    # document SOURCE through the exact same extraction call an attachment goes through —
+    # `dl_extract.extract_attachment`'s own W13/R42 routing already skips vision whenever
+    # `machine_text` is non-empty and `pdf_bytes` is empty (`is_scanned()` is False with
+    # no embedded JPEG bytes to find), so this adds no vision call, only one extra
+    # multi-document extraction call over plain text. Everything downstream (item
+    # matching, EDI build, ORION upload, the desadv_sent ledger, board questions) is the
+    # SAME pipeline every attachment-sourced document already goes through — a document
+    # cannot tell whether it came from an attachment or the mail body.
+    sources = usable_attachments
+    used_body_text = False
+    if not sources:
+        body_text = (message.get("combined_text") or "").strip()
+        if body_text:
+            sources = [{"idx": _BODY_TEXT_IDX, "filename": "text e-mailu",
+                       "pdf_bytes": b"", "machine_text": body_text}]
+            used_body_text = True
+
+    if not sources:
         if attachments:
-            # Attachment(s) existed but were ALL decorative/junk — distinct, more
-            # actionable wording than "no attachment at all" (still posted to Odoo
-            # review + the /sklad-dl board, never silent — R15's own visibility path).
+            # Attachment(s) existed but were ALL decorative/junk, and the mail's own
+            # body text is empty too — distinct, more actionable wording than "no
+            # attachment at all" (still posted to Odoo review + the /sklad-dl board,
+            # never silent — R15's own visibility path).
             reason = ("Príloha/y sú len drobný/nepoužiteľný obrázok (napr. podpis "
-                      "alebo logo) — žiadny skutočný dodací list sa v nich nenašiel; "
-                      "ak je dokument v texte e-mailu, treba ho spracovať ručne")
+                      "alebo logo) a text e-mailu je prázdny — žiadny skutočný "
+                      "dodací list sa nenašiel; treba ho spracovať ručne")
         else:
             # R15: no attachment (or nothing PDF/image-shaped) is NOT an error.
-            reason = "Email bez prílohy — pravdepodobne bežná správa"
+            reason = "Email bez prílohy a bez textu — pravdepodobne bežná správa"
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, from_addr=message.get("from_addr", ""),
             subject=message.get("subject", ""), link=link), post=post)
@@ -768,7 +795,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
         return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
                "documents": [{"outcome": "review", "reason": reason}], "items": []}
 
-    extraction = dl_extract.extract_email(client, usable_attachments)
+    extraction = dl_extract.extract_email(client, sources)
 
     documents_out: list[dict] = []
     all_items: list[dict] = []
@@ -789,7 +816,12 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                                                 upload=upload, post=post))
 
     if not documents_out:
-        reason = "Nepodarilo sa rozpoznať žiadny dodací list v prílohách"
+        # #258: the text of the failure must say where it actually looked — a text-
+        # sourced attempt that found nothing did not fail to read "prílohy" (there
+        # were none to read).
+        reason = ("Nepodarilo sa rozpoznať žiadny dodací list v texte e-mailu"
+                  if used_body_text else
+                  "Nepodarilo sa rozpoznať žiadny dodací list v prílohách")
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, from_addr=message.get("from_addr", ""),
             subject=message.get("subject", ""), link=link), post=post)
