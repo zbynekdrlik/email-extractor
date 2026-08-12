@@ -372,6 +372,18 @@ def _doc_part(doc_number) -> str:
     return f"_{cleaned}" if cleaned else ""
 
 
+def stable_prefix(ean_edi: str, doc_number: str) -> str:
+    """#239 finding 6: the part of `filename()`'s output that stays IDENTICAL across
+    every retry of the SAME document — everything up to (not including) the
+    `_<YYYYMMDD>_<HHMMSSmmm>.txt` suffix, which changes on every attempt (a fresh
+    timestamp, R89). A safe presence/absence check on ORION must match on THIS, never
+    on a full filename — a full filename built for a retry can never equal an earlier
+    attempt's own name, so filename equality can never answer "did an earlier attempt
+    already land this document." See `already_landed()` below."""
+    ean_short = str(ean_edi or "")[-6:] or "000000"
+    return f"DESADV_{ean_short}{_doc_part(doc_number)}_"
+
+
 def filename(ean_edi: str, delivery_date: str, doc_number: str, stamp: str = "") -> str:
     """R89: `DESADV_<last 6 of buyer EAN>_<docNumber alnum, max 10>_<YYYYMMDD from
     deliveryDate>_<HHMMSSmmm>.txt` — mirrors `generateUniqueFilename()` (`orderIndex`
@@ -381,9 +393,44 @@ def filename(ean_edi: str, delivery_date: str, doc_number: str, stamp: str = "")
     if not stamp:
         now = datetime.now()
         stamp = now.strftime("%H%M%S") + f"{now.microsecond // 1000:03d}"
-    ean_short = str(ean_edi or "")[-6:] or "000000"
-    return (f"DESADV_{ean_short}{_doc_part(doc_number)}_{_date_stamp(delivery_date)}"
-            f"_{stamp}.txt")
+    return f"{stable_prefix(ean_edi, doc_number)}{_date_stamp(delivery_date)}_{stamp}.txt"
+
+
+def _matches_stable_prefix(name: str, prefix: str) -> bool:
+    """Tolerates R89's own upload-time `Z-` wire prefix, PLUS Communicator's separate,
+    uncontrolled archCodex rename job's OWN extra `Z-` on top of that — the identical
+    tolerance `confirm.py`'s own `_decide()` already applies (`wire_name in archCodex
+    or f"Z-{wire_name}" in archCodex`). Strips any number of leading `Z-` before
+    comparing, so `Z-DESADV_...`, `Z-Z-DESADV_...` (or, in principle, a name with no
+    `Z-` at all) all match the same underlying document identity."""
+    candidate = name
+    while True:
+        if candidate.startswith(prefix):
+            return True
+        if candidate.startswith("Z-"):
+            candidate = candidate[2:]
+            continue
+        return False
+
+
+def already_landed(dirs: dict, ean_edi: str, doc_number: str) -> bool:
+    """#239 finding 6: has a document with THIS identity (buyer/supplier EAN + doc
+    number) already reached ORION under ANY prior attempt's filename? `dirs` is
+    `upload.list_dirs(cfg)`'s return shape (`in_DL`/`archCodex`/`unconfirmed` name
+    sets). Matches the STABLE prefix `stable_prefix()` builds — the trailing
+    date/timestamp is the only part that differs between attempts, so a prefix match
+    is genuine document identity, never a guess.
+
+    Checked against all three folders a DESADV upload can legitimately be found in:
+    `in_DL` (still queued for her morning import), `archCodex` (imported), `unconfirmed`
+    (import FAILED — but the UPLOAD itself still succeeded, so retrying now would still
+    be a duplicate upload, just of a document CODEX later rejected)."""
+    prefix = stable_prefix(ean_edi, doc_number)
+    for folder in ("in_DL", "archCodex", "unconfirmed"):
+        for name in (dirs or {}).get(folder) or ():
+            if _matches_stable_prefix(name, prefix):
+                return True
+    return False
 
 
 def upload_name(name: str) -> str:

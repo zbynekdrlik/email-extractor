@@ -3,10 +3,23 @@
 ORION watches a Windows folder over SFTP. The transport is injectable so the pipeline's
 composition can be tested without a live host, and so a future change of transport does
 not touch the pipeline.
+
+**#239 finding 6: `put()` writes to a TEMPORARY name and renames to the final name only
+after the write completes.** The original single-step write (`sftp.file(target, "w")`)
+could leave an INCOMPLETE/corrupt file under the final, validly-named target if the
+transfer was interrupted mid-write — Communicator would try to import it as if it were
+complete. A single SFTP `rename()` is atomic on the same filesystem: either it happened
+(final name present, temp name gone) or it didn't (only the temp name exists, under a
+name nothing else recognizes) — no half-state. This makes "is the final name present"
+trustworthy evidence the transfer genuinely completed, independent of whether the
+CLIENT received a confirming response — see `desadv_edi.already_landed()`, the
+identity-based presence check this enables. `.claude/rules/n8n-workflow-edits.md` has
+the full incident history.
 """
 from __future__ import annotations
 
 import logging
+import time
 
 from . import edi
 
@@ -37,9 +50,20 @@ def _connect(cfg):
     return client
 
 
+def _temp_name(name: str) -> str:
+    """A name nothing else on ORION recognizes as a real EDI file — never matches
+    `desadv_edi.stable_prefix()`'s pattern, so a leftover temp file (a crash between
+    write and rename) can never be mistaken for a landed document by `already_landed()`
+    or by Communicator's own import scan."""
+    now = time.time()
+    stamp = f"{int(now * 1000) % 1_000_000_000:09d}"
+    return f".part-{stamp}-{name}"
+
+
 def put(cfg, name: str, content: str, dir_override: str = "") -> bool:
-    """Write `content` as `<dir_override or orion_dir>/<name>`. Raises on failure — the
-    caller releases the ledger claim so the order/document can be retried.
+    """Write `content` as `<dir_override or orion_dir>/<name>`, via a temp-write +
+    rename (#239 finding 6 — see the module docstring). Raises on failure — the caller
+    releases the ledger claim so the order/document can be retried.
 
     `dir_override` (#203, DL migration F4) lets a DESADV upload target `in_DL` — a
     DIFFERENT top-level folder than orders' own `orion_dir` (`in`) — without a second,
@@ -50,8 +74,10 @@ def put(cfg, name: str, content: str, dir_override: str = "") -> bool:
         try:
             base = dir_override or getattr(cfg, "orion_dir", edi.ORION_DIR)
             target = f"{base}\\{name}"
-            with sftp.file(target, "w") as fh:
+            tmp_target = f"{base}\\{_temp_name(name)}"
+            with sftp.file(tmp_target, "w") as fh:
                 fh.write(content)
+            sftp.rename(tmp_target, target)
             log.info("uploaded %s (%d bytes) to %s", name, len(content),
                      getattr(cfg, "orion_host", ""))
         finally:

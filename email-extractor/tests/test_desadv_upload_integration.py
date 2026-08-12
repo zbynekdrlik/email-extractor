@@ -59,8 +59,14 @@ def test_happy_path_claims_uploads_to_in_dl_with_z_prefix_then_confirms(pg):
         ok = upload.put(_cfg(), desadv_edi.upload_name(built.filename), built.content,
                         dir_override=ORION_DL_DIR)
     assert ok is True
-    fake_sftp.file.assert_called_once_with(
-        ORION_DL_DIR + "\\" + "Z-" + built.filename, "w")
+    # #239 finding 6: the write targets a TEMP name; only rename() ever touches the
+    # real final Z-prefixed target — see test_orders_upload.py for the dedicated
+    # temp-write+rename coverage, this test just proves the composed flow still ends
+    # up with the correct final name.
+    written_path = fake_sftp.file.call_args.args[0]
+    final_path = ORION_DL_DIR + "\\" + "Z-" + built.filename
+    assert written_path != final_path
+    fake_sftp.rename.assert_called_once_with(written_path, final_path)
 
     desadv.confirm_sent(pg, built.customer_ean_edi, built.doc_number)
     row = pg.execute(
