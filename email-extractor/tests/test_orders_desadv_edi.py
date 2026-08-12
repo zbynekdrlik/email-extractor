@@ -352,6 +352,16 @@ def test_already_landed_handles_a_missing_or_empty_dirs_dict():
     assert desadv_edi.already_landed(None, "2000000000864", "P26036931") is False
 
 
+def test_already_landed_never_tolerates_more_than_two_leading_z_prefixes():
+    """Review finding: an earlier draft stripped an UNBOUNDED number of leading `Z-`,
+    which is more permissive than confirm.py's own `_decide()` tolerance (exactly one
+    extra `Z-` beyond R89's own wire prefix, never more) despite the docstring's claim
+    of parity. A THIRD `Z-` must not match."""
+    name = desadv_edi.filename("2000000000864", "04.08.2026", "P26036931", stamp="1")
+    dirs = {"in_DL": set(), "archCodex": {f"Z-Z-Z-{name}"}, "unconfirmed": set()}
+    assert desadv_edi.already_landed(dirs, "2000000000864", "P26036931") is False
+
+
 def test_generate_doc_number_uses_first_word_of_supplier_ascii_folded():
     doc = desadv_edi._generate_doc_number("Čerešňový mlyn s.r.o.")
     assert doc.startswith("DL-CERESNOV-")          # 8-char cap: "Čerešňový" -> "CERESNOV"

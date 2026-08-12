@@ -201,3 +201,38 @@ def test_put_propagates_a_rename_failure_without_leaving_it_silent():
             upload.put(_cfg(), "ORDER_x.txt", "content")
     fake_sftp.close.assert_called_once()
     fake_client.close.assert_called_once()
+
+
+def test_put_best_effort_removes_the_temp_file_on_a_rename_failure_too():
+    """Review finding: an earlier draft only cleaned up on a WRITE failure — a RENAME
+    failure (the connection dropping right after a successful write, the exact
+    'timed out' incident shape) left the temp file orphaned forever. Cleanup must
+    cover both failure points, not just the write one."""
+    fake_file = MagicMock()
+    fake_sftp = MagicMock()
+    fake_sftp.file.return_value.__enter__.return_value = fake_file
+    fake_sftp.rename.side_effect = OSError("connection timed out")
+    fake_client = MagicMock()
+    fake_client.open_sftp.return_value = fake_sftp
+    with patch("paramiko.SSHClient", return_value=fake_client):
+        with pytest.raises(OSError):
+            upload.put(_cfg(), "ORDER_x.txt", "content")
+    written_path = fake_sftp.file.call_args.args[0]
+    fake_sftp.remove.assert_called_once_with(written_path)
+
+
+def test_put_rename_cleanup_failure_is_harmless_when_the_rename_actually_succeeded():
+    """A rename can genuinely succeed server-side even though the confirming response
+    was lost (the whole ambiguity this design exists to survive) — in that case the
+    temp name is already gone, so the best-effort remove() simply no-ops (raises on
+    the fake, caught and logged) without hiding the real rename error."""
+    fake_file = MagicMock()
+    fake_sftp = MagicMock()
+    fake_sftp.file.return_value.__enter__.return_value = fake_file
+    fake_sftp.rename.side_effect = OSError("connection timed out")
+    fake_sftp.remove.side_effect = OSError("No such file")   # already renamed away
+    fake_client = MagicMock()
+    fake_client.open_sftp.return_value = fake_sftp
+    with patch("paramiko.SSHClient", return_value=fake_client):
+        with pytest.raises(OSError, match="connection timed out"):
+            upload.put(_cfg(), "ORDER_x.txt", "content")

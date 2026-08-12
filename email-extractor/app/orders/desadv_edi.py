@@ -379,7 +379,16 @@ def stable_prefix(ean_edi: str, doc_number: str) -> str:
     timestamp, R89). A safe presence/absence check on ORION must match on THIS, never
     on a full filename — a full filename built for a retry can never equal an earlier
     attempt's own name, so filename equality can never answer "did an earlier attempt
-    already land this document." See `already_landed()` below."""
+    already land this document." See `already_landed()` below.
+
+    Review finding: `_doc_part()`'s existing `MAX_DOC_NUMBER_IN_FILENAME=10`
+    truncation (needed for the filename itself, R89) is REUSED here as a document-
+    IDENTITY key — two genuinely different doc numbers that happen to share their
+    first 10 alnum characters would collide onto the same stable prefix. Harmless
+    today: `stable_prefix()`/`already_landed()` are not yet wired into any decision
+    (deliberately deferred, see the design comment on #239) — but this collision risk
+    MUST be re-examined before either function becomes load-bearing for an actual
+    safe-retry decision."""
     ean_short = str(ean_edi or "")[-6:] or "000000"
     return f"DESADV_{ean_short}{_doc_part(doc_number)}_"
 
@@ -398,19 +407,16 @@ def filename(ean_edi: str, delivery_date: str, doc_number: str, stamp: str = "")
 
 def _matches_stable_prefix(name: str, prefix: str) -> bool:
     """Tolerates R89's own upload-time `Z-` wire prefix, PLUS Communicator's separate,
-    uncontrolled archCodex rename job's OWN extra `Z-` on top of that — the identical
-    tolerance `confirm.py`'s own `_decide()` already applies (`wire_name in archCodex
-    or f"Z-{wire_name}" in archCodex`). Strips any number of leading `Z-` before
-    comparing, so `Z-DESADV_...`, `Z-Z-DESADV_...` (or, in principle, a name with no
-    `Z-` at all) all match the same underlying document identity."""
-    candidate = name
-    while True:
-        if candidate.startswith(prefix):
-            return True
-        if candidate.startswith("Z-"):
-            candidate = candidate[2:]
-            continue
-        return False
+    uncontrolled archCodex rename job's OWN extra `Z-` on top of that — mirrors
+    `confirm.py`'s own `_decide()` tolerance EXACTLY (`wire_name in archCodex or
+    f"Z-{wire_name}" in archCodex`, `wire_name` already carrying ONE `Z-`): a name with
+    no `Z-`, exactly one, or exactly two leading `Z-`s all match. Review finding: an
+    earlier draft stripped an UNBOUNDED number of leading `Z-`, which is more
+    permissive than confirm.py's own check despite the docstring claiming parity —
+    fixed to the exact same three-way check."""
+    return (name.startswith(prefix)
+           or name.startswith(f"Z-{prefix}")
+           or name.startswith(f"Z-Z-{prefix}"))
 
 
 def already_landed(dirs: dict, ean_edi: str, doc_number: str) -> bool:

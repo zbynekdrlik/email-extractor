@@ -78,17 +78,25 @@ def put(cfg, name: str, content: str, dir_override: str = "") -> bool:
             try:
                 with sftp.file(tmp_target, "w") as fh:
                     fh.write(content)
+                sftp.rename(tmp_target, target)
             except Exception:
-                # Best-effort cleanup so a write failure doesn't leave an orphaned
-                # `.part-*` file on ORION forever — never lets a SECOND (cleanup)
-                # failure hide or replace the REAL one the caller needs to see.
+                # Review finding: an earlier draft only cleaned up on a WRITE failure —
+                # a RENAME failure (e.g. the connection drops right after a successful
+                # write) left the temp file orphaned forever with nothing cleaning it
+                # up. Best-effort cleanup covers BOTH failure points now. Safe even when
+                # the rename itself actually succeeded before the confirming response
+                # was lost (the exact "bytes landed, only the reply vanished" ambiguity
+                # this whole design exists to survive): removing an already-renamed-away
+                # temp name simply no-ops (FileNotFoundError, caught below). Never lets
+                # a SECOND (cleanup) failure hide or replace the REAL error the caller
+                # needs to see.
                 try:
                     sftp.remove(tmp_target)
                 except Exception:
-                    log.warning("could not remove orphaned temp file %s after a "
-                               "failed write", tmp_target)
+                    log.warning("could not remove temp file %s after a failed upload "
+                               "(may already be gone if the rename itself actually "
+                               "succeeded)", tmp_target)
                 raise
-            sftp.rename(tmp_target, target)
             log.info("uploaded %s (%d bytes) to %s", name, len(content),
                      getattr(cfg, "orion_host", ""))
         finally:
