@@ -63,6 +63,8 @@ options:
   delivery_notes_shadow: false
   delivery_notes_shadow_days: 3
   dl_catalog_gid: ""
+  question_stale_working_days: 2
+  question_escalate_working_days: 4
 schema:
   imap_host: str
   imap_port: int
@@ -122,3 +124,5 @@ schema:
   delivery_notes_shadow: bool?
   delivery_notes_shadow_days: int?
   dl_catalog_gid: str?
+  question_stale_working_days: int?
+  question_escalate_working_days: int?
