@@ -126,10 +126,35 @@ TRANSIENT_RE = re.compile(
 _ATTACHMENT_MIME_RE = re.compile(r"pdf|image", re.IGNORECASE)
 _ATTACHMENT_EXT_RE = re.compile(r"\.(pdf|jpe?g|png|tiff?|bmp)$", re.IGNORECASE)
 
-# #258: the synthetic "attachment" idx used for the mail's own combined_text when there
-# is no usable real attachment — real attachment idx values are non-negative (see
-# `_read_attachments`'s `ORDER BY idx`), so -1 can never collide with one.
+# #258: the synthetic "attachment" idx used for the mail's own body text when there is
+# no usable real attachment — a real `attachments.idx` is always a non-negative 0-based
+# index assigned at ingest (`app/db.py`'s `enumerate()` insert), so -1 can never collide
+# with one.
 _BODY_TEXT_IDX = -1
+
+# #258 deep-review finding: `messages.combined_text` (built by `app/process.py`'s
+# `_combined_text`) is Subject + From + Body, and then — ONLY when at least one
+# attachment was successfully read as real text (not skipped, not vision-only) — an
+# "Attachments:\n===== <filename> =====\n<text>" block appended after a blank line. A
+# message whose only attachment is a non-PDF/image type (.docx/.xlsx/.csv/...) is
+# entirely invisible to `_read_attachments` (its MIME/ext filter is PDF/image only, see
+# `_ATTACHMENT_MIME_RE`/`_ATTACHMENT_EXT_RE` above) — so `usable_attachments` is empty
+# for it too, and WITHOUT this marker the body-text fallback below would silently start
+# reading that attachment's own extracted text as if it were mail prose. That directly
+# contradicts this module's own documented scope decision ("anything else — a .docx,
+# ... — is skipped rather than fed to Vision"): a .docx/.xlsx delivery note should stay
+# out of scope here, exactly as before this fix, not sneak back in through the body-text
+# side door. `_combined_text` always inserts this exact marker (a literal, ASCII-only
+# string the `_strip_invisible` pass never touches) as the LAST part it joins, so
+# truncating the first occurrence is safe and exact.
+_COMBINED_TEXT_ATTACHMENTS_MARKER = "\n\nAttachments:\n"
+
+
+def _mail_body_only(combined_text: str) -> str:
+    """Subject + From + Body ONLY — strips `_combined_text`'s own attachment-text block,
+    if present, so the #258 body-text fallback below can never accidentally read a
+    non-PDF/image attachment's extracted text instead of the mail's own prose."""
+    return (combined_text or "").split(_COMBINED_TEXT_ATTACHMENTS_MARKER, 1)[0]
 
 # Spec §4: the documented Lunys "IS KARAT" DL-number shape inside a subject line.
 _SUBJECT_DOC_RE = re.compile(r"\d{2,}LT\d{4,}", re.IGNORECASE)
@@ -757,9 +782,10 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     # #258: some suppliers (HK LOAN, gnip@hkloan.eu — verified live, STEP 0 evidence on
     # the ticket) never attach a real document at all; the delivery note is written
     # directly in the mail's own BODY TEXT. When there is no usable attachment, try the
-    # message's own `combined_text` (subject+body, already stored on every message) as a
-    # document SOURCE through the exact same extraction call an attachment goes through —
-    # `dl_extract.extract_attachment`'s own W13/R42 routing already skips vision whenever
+    # message's own body text (subject+From+body ONLY, via `_mail_body_only` — see its
+    # own docstring for why NOT raw `combined_text`) as a document SOURCE through the
+    # exact same extraction call an attachment goes through — `dl_extract.
+    # extract_attachment`'s own W13/R42 routing already skips vision whenever
     # `machine_text` is non-empty and `pdf_bytes` is empty (`is_scanned()` is False with
     # no embedded JPEG bytes to find), so this adds no vision call, only one extra
     # multi-document extraction call over plain text. Everything downstream (item
@@ -769,8 +795,11 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     sources = usable_attachments
     used_body_text = False
     if not sources:
-        body_text = (message.get("combined_text") or "").strip()
+        body_text = _mail_body_only(message.get("combined_text", "")).strip()
         if body_text:
+            log.info("DL message %s: no usable attachment — trying %d char(s) of mail "
+                     "body text as the document source (#258)",
+                     message.get("message_id"), len(body_text))
             sources = [{"idx": _BODY_TEXT_IDX, "filename": "text e-mailu",
                        "pdf_bytes": b"", "machine_text": body_text}]
             used_body_text = True
@@ -804,8 +833,14 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     for att in extraction["attachments"]:
         if att.get("error"):
             _check_retry(message.get("attempts", 0), att["error"])
-            reason = (f"Príloha {att.get('filename') or att.get('idx')} sa nepodarilo "
-                      f"spracovať: {att['error']}")
+            # #258 deep-review finding: the body-text pseudo-source is NOT a "príloha"
+            # (attachment) — calling it one in a message a human reads is exactly the
+            # category confusion this ticket exists to eliminate.
+            if att.get("idx") == _BODY_TEXT_IDX:
+                reason = f"Text e-mailu sa nepodarilo spracovať: {att['error']}"
+            else:
+                reason = (f"Príloha {att.get('filename') or att.get('idx')} sa nepodarilo "
+                          f"spracovať: {att['error']}")
             documents_out.append(_flag_attachment(
                 conn, cfg, shadow, message, link, att, reason, status="error", post=post))
 

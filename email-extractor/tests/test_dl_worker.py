@@ -91,10 +91,15 @@ class FakeClient:
     def __init__(self, answers: dict[str, list[dict]]):
         self._answers = {k: list(v) for k, v in answers.items()}
         self.calls: list[str] = []
+        # #258 deep-review: (name, user) per call — lets a test assert on what text a
+        # call actually received, e.g. that the body-text fallback never leaks an
+        # attachment's own extracted text into the "mail body" it sends the model.
+        self.users: list[tuple[str, str]] = []
         self.last_prompt_hash = ""
 
     def json_call(self, system, user, schema, name="result"):
         self.calls.append(name)
+        self.users.append((name, user))
         self.last_prompt_hash = name
         queue = self._answers.get(name)
         if not queue:
@@ -351,6 +356,46 @@ def test_empty_body_text_and_no_attachment_still_reviews_without_calling_the_mod
                        post=lambda c, h: posted.append(h))
     assert n == 1
     assert len(posted) == 1 and "bez prílohy" in posted[0]
+
+
+def test_a_non_pdf_attachments_own_extracted_text_never_leaks_into_the_body_text_source(
+        pg, tmp_path):
+    """Deep-review finding on #258's own PR: `app/process.py`'s `_combined_text` folds
+    ANY successfully-read, non-skipped attachment's own extracted text (docx/xlsx/csv/...
+    -- not just PDF/image) into `messages.combined_text` as a trailing "Attachments:\\n..."
+    block. `_read_attachments`'s own PDF/image-only filter (this module's documented scope
+    decision -- ".docx ... is skipped rather than fed to Vision") already keeps such an
+    attachment OUT of `usable_attachments` -- but without stripping that trailing block
+    first, the #258 body-text fallback would silently start reading the docx's own text
+    anyway (through combined_text), quietly reversing that scope decision. Confirms the
+    fallback only ever sees "Subject/From/Body", never the attachment block, by capturing
+    the actual extraction-call input text."""
+    _snapshot(pg)
+    combined_text = (
+        "Subject: Objednávka + dodací list príloha\n\n"
+        "From: dodavatel@lunys.sk\n\n"
+        "Body: v prílohe posielame dodací list.\n\n"
+        "Attachments:\n"
+        "===== dodaci_list.docx =====\n"
+        "Dodávateľ: Pekáreň Lunys, Prešov, dodavatel@lunys.sk\n"
+        "Dodací list č. 0100000001, dátum dodania 01.08.2026\n"
+        "Rožok 50g / 10 ks / 0,50 €/ks / 5,00 €")
+    _msg(pg, mid="dl1", combined_text=combined_text)
+    _attach(pg, tmp_path, "dl1", filename="dodaci_list.docx",
+           mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+           text="Dodávateľ: Pekáreň Lunys ...", method="docx")
+    client = FakeClient({"dl_documents": [{"documents": []}]})
+    posted = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, post=lambda c, h: posted.append(h))
+    assert n == 1
+    doc_calls = [u for name, u in client.users if name == "dl_documents"]
+    assert len(doc_calls) == 1
+    sent = doc_calls[0]
+    assert "0100000001" not in sent
+    assert "dodaci_list.docx" not in sent
+    assert "Rožok 50g" not in sent
+    assert "v prílohe posielame dodací list" in sent
 
 
 # --- live engine: the happy path --------------------------------------------
