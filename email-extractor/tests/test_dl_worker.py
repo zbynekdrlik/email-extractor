@@ -769,6 +769,48 @@ def test_transient_upload_failure_retries_without_alerting(pg, tmp_path):
     ).fetchone()[0] == 0
 
 
+def test_a_timed_out_upload_is_never_auto_retried_so_orion_can_never_get_two_copies(
+        pg, tmp_path):
+    """#239, found by independent verification of this ticket's own PR: an upload
+    failure must never be re-uploaded automatically.
+
+    `upload.put()` writes straight to the FINAL `in_DL\\<name>` with no temp-write +
+    rename, so a transfer that lands its bytes and only loses the reply (`timed out` --
+    which `TRANSIENT_RE` matches) leaves a complete, validly-named file on ORION.
+    `desadv_edi.filename()` then stamps a retry with a fresh `HHMMSSmmm`, so the second
+    attempt cannot collide with the first, and `desadv.release_send()` has already
+    DELETED the ledger row -- so `claim_send_or_identify()`, the one atomic
+    anti-double-upload backstop, has nothing left to guard and `confirm.py` never sees
+    the orphan either. The warehouse's next manual morning import would take in BOTH
+    copies: a real duplicate delivery.
+
+    So exactly ONE upload attempt must be made, the message must end terminal (not
+    re-armed for the 30-minute stale reclaim), and the durable alert -- the half of
+    #239 that is correct -- must still be enqueued so the failure stays visible.
+    """
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    tries = []
+
+    def _timed_out_upload(c, name, content, dir_override=None):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, upload=_timed_out_upload)
+    assert n == 1
+    assert len(tries) == 1, "a second upload of the same document is a duplicate delivery"
+    row = pg.execute(
+        "SELECT processed, attempts FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True, 1), "terminal, never re-armed for an automatic second upload"
+    assert pg.execute(
+        "SELECT count(*) FROM pending_alerts WHERE kind='dl_upload_failed'"
+    ).fetchone()[0] == 1, "the failure must still be visible, just not retried"
+
+
 def test_non_transient_upload_failure_enqueues_a_durable_alert_not_a_direct_post(pg, tmp_path):
     """Requirement 3 of #239: the upload-failure alert must be DURABLE (retried until
     Odoo confirms delivery), never a fire-and-forget `post()` call that silently loses
