@@ -372,6 +372,55 @@ def test_generate_doc_number_handles_empty_name():
     assert doc.startswith("DL-UNKNOWN-")
 
 
+# --- generate_stable_doc_number (#262) -----------------------------------------
+#
+# `_generate_doc_number()` above is wall-clock based (R83 byte parity with the
+# production `generateDocNumber()`) and stays that way. This is a SEPARATE fallback
+# for a document whose extraction found no doc number AT ALL and never will (an
+# informal delivery announcement in mail body text, #262) — it must be STABLE across
+# every reprocessing attempt of the SAME message (a stale-claim reclaim, an R17
+# transient retry), or `desadv.claim_send_or_identify()`'s (supplier_ean, doc_number)
+# dedup key changes on every retry and a numberless document can be uploaded to
+# ORION twice under two different synthesized identities.
+
+def test_generate_stable_doc_number_is_deterministic_for_the_same_message():
+    a = desadv_edi.generate_stable_doc_number("eval-hkloan-1")
+    b = desadv_edi.generate_stable_doc_number("eval-hkloan-1")
+    assert a == b
+
+
+def test_generate_stable_doc_number_differs_for_different_messages():
+    a = desadv_edi.generate_stable_doc_number("eval-hkloan-1")
+    b = desadv_edi.generate_stable_doc_number("eval-hkloan-2")
+    assert a != b
+
+
+def test_generate_stable_doc_number_carries_digits_for_the_edi_hdr_field():
+    """R83's own comment: ORION/EDITEL parses the HDR docNumber field as a NUMBER, so
+    `build()` strips the human-facing doc_number to digits-only for the EDI content
+    (`re.sub(r"[^0-9]", "", doc_number) or doc_number`) — a synthesized identity with
+    zero digit characters would fall back to the raw (non-numeric) string and crash
+    the import, exactly the weak point `build()`'s own docstring already flags for a
+    plain extraction miss. The stable synthesis must never produce that shape."""
+    doc = desadv_edi.generate_stable_doc_number("eval-hkloan-1")
+    assert any(c.isdigit() for c in doc)
+    import re as _re
+    assert _re.sub(r"[^0-9]", "", doc) != ""
+
+
+def test_generate_stable_doc_number_never_crashes_on_an_empty_message_id():
+    doc = desadv_edi.generate_stable_doc_number("")
+    assert doc.startswith("AVIZO")
+
+
+def test_generate_stable_doc_number_is_never_confused_with_a_real_extracted_number():
+    """The prefix must be obviously synthetic — never collide with a real printed doc
+    number's shape (`docNumber`s in this corpus/production look like plain digits or
+    an LT-prefixed code, never start with a supplier-unrelated word)."""
+    doc = desadv_edi.generate_stable_doc_number("eval-hkloan-1")
+    assert doc.startswith("AVIZO")
+
+
 # --- build(): orchestration (R80-R83, R89) ------------------------------------
 
 def _header(ean="2000000000099", name="Testovaci Dodavatel s.r.o."):
