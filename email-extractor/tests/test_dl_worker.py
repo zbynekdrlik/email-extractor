@@ -45,12 +45,12 @@ def _snapshot(pg):
 
 
 def _msg(pg, mid="dl1", subject="Dodací list", from_addr="dodavatel@lunys.sk",
-        has_attachments=True):
+        has_attachments=True, combined_text=""):
     pg.execute(
         """INSERT INTO messages (message_id, category, subject, from_addr,
                                  combined_text, has_attachments, processed)
-           VALUES (%s, 'dodacie_listy', %s, %s, '', %s, false)""",
-        (mid, subject, from_addr, has_attachments))
+           VALUES (%s, 'dodacie_listy', %s, %s, %s, %s, false)""",
+        (mid, subject, from_addr, combined_text, has_attachments))
     return mid
 
 
@@ -91,10 +91,15 @@ class FakeClient:
     def __init__(self, answers: dict[str, list[dict]]):
         self._answers = {k: list(v) for k, v in answers.items()}
         self.calls: list[str] = []
+        # #258 deep-review: (name, user) per call — lets a test assert on what text a
+        # call actually received, e.g. that the body-text fallback never leaks an
+        # attachment's own extracted text into the "mail body" it sends the model.
+        self.users: list[tuple[str, str]] = []
         self.last_prompt_hash = ""
 
     def json_call(self, system, user, schema, name="result"):
         self.calls.append(name)
+        self.users.append((name, user))
         self.last_prompt_hash = name
         queue = self._answers.get(name)
         if not queue:
@@ -247,6 +252,150 @@ def test_a_real_attachment_still_passes_alongside_a_decorative_one(pg, tmp_path)
     assert "dl_documents" in client.calls
     row = pg.execute("SELECT processed FROM messages WHERE message_id='dl1'").fetchone()
     assert row[0] is True
+
+
+# --- #258: no usable attachment, but a delivery note in the mail's own BODY TEXT --
+
+# SYNTHETIC — constructed to match the documented template shape (see the module
+# docstring), never real customer mail. Mirrors the HK LOAN live incident's own shape
+# (a plain-prose delivery notice, no attachment at all) without reusing any real text.
+BODY_TEXT_DL = (
+    "Dobrý deň,\n\n"
+    "posielame avizáciu dodania priamo v texte, bez prílohy:\n\n"
+    "Dodávateľ: Pekáreň Lunys, Prešov, dodavatel@lunys.sk\n"
+    "Dodací list č. 0100000001, dátum dodania 01.08.2026\n"
+    "Rožok 50g / 10 ks / 0,50 €/ks / 5,00 €\n\n"
+    "S pozdravom"
+)
+
+
+def test_body_text_delivery_note_is_extracted_when_there_is_no_attachment_at_all(
+        pg, tmp_path):
+    """#258 live incident (HK LOAN, gnip@hkloan.eu): the supplier never attaches a real
+    document at all — the delivery note is written directly in the mail BODY TEXT. Before
+    this fix, `_process_message` never even looked at `combined_text` once
+    `usable_attachments` was empty; it declared review immediately, with
+    `dl_extract.extract_email` never called at all — RED on the pre-fix code (client.calls
+    stays empty, nothing uploaded)."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", has_attachments=False, combined_text=BODY_TEXT_DL)
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    uploaded, posted = [], []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(
+        pg, cfg, client=client,
+        upload=lambda c, name, content, dir_override=None:
+            uploaded.append((name, content, dir_override)),
+        post=lambda c, html: posted.append(html))
+    assert n == 1
+    assert "dl_documents" in client.calls
+    assert len(uploaded) == 1
+    assert uploaded[0][0].startswith("Z-DESADV_")
+    assert len(posted) == 1
+    assert "spracovaný a nahratý do ORIONu" in posted[0]
+    row = pg.execute(
+        "SELECT processed, processed_by FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True, "dodacie_listy")
+
+
+def test_body_text_delivery_note_is_extracted_when_the_only_attachment_is_decorative(
+        pg, tmp_path):
+    """Same #258 fix, but combined with the #247 shape: a decorative/skipped attachment
+    (e.g. a signature logo) sits ALONGSIDE a real delivery note in the body text — the
+    decorative attachment must not stop the body-text extraction from being tried."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", combined_text=BODY_TEXT_DL)
+    _attach(pg, tmp_path, "dl1", filename="podpis.jpeg", mime="image/jpeg",
+           text="", method="skipped")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    uploaded = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(
+        pg, cfg, client=client,
+        upload=lambda c, name, content, dir_override=None:
+            uploaded.append((name, content, dir_override)))
+    assert n == 1
+    assert len(uploaded) == 1
+    assert "dl_documents" in client.calls
+
+
+def test_body_text_with_no_real_delivery_note_still_reviews_cleanly(pg, tmp_path):
+    """The body-text fallback must not fabricate a document out of ordinary prose — when
+    extraction over the text genuinely finds nothing, the message still reviews cleanly,
+    with wording that reflects the mail TEXT was checked (not the old, now-stale
+    'ak je dokument v texte e-mailu, treba ho spracovať ručne' hint, which used to tell a
+    human to do by hand exactly what this fix now does automatically)."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", has_attachments=False,
+        combined_text="Dobrý deň, potvrdzujeme prijatie faktúry. S pozdravom.")
+    client = FakeClient({"dl_documents": [{"documents": []}]})
+    posted = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, post=lambda c, h: posted.append(h))
+    assert n == 1
+    assert "dl_documents" in client.calls
+    assert len(posted) == 1
+    assert "texte e-mailu" in posted[0]
+    assert "ak je dokument v texte e-mailu, treba ho spracovať ručne" not in posted[0]
+    row = pg.execute(
+        "SELECT processed, processed_by FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True, "dodacie_listy")
+
+
+def test_empty_body_text_and_no_attachment_still_reviews_without_calling_the_model(
+        pg, tmp_path):
+    """No attachment AND no body text either -- must stay a cheap, immediate review (no
+    LLM call at all), exactly like before this fix."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", has_attachments=False, combined_text="")
+    posted = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=FakeClient({}),
+                       post=lambda c, h: posted.append(h))
+    assert n == 1
+    assert len(posted) == 1 and "bez prílohy" in posted[0]
+
+
+def test_a_non_pdf_attachments_own_extracted_text_never_leaks_into_the_body_text_source(
+        pg, tmp_path):
+    """Deep-review finding on #258's own PR: `app/process.py`'s `_combined_text` folds
+    ANY successfully-read, non-skipped attachment's own extracted text (docx/xlsx/csv/...
+    -- not just PDF/image) into `messages.combined_text` as a trailing "Attachments:\\n..."
+    block. `_read_attachments`'s own PDF/image-only filter (this module's documented scope
+    decision -- ".docx ... is skipped rather than fed to Vision") already keeps such an
+    attachment OUT of `usable_attachments` -- but without stripping that trailing block
+    first, the #258 body-text fallback would silently start reading the docx's own text
+    anyway (through combined_text), quietly reversing that scope decision. Confirms the
+    fallback only ever sees "Subject/From/Body", never the attachment block, by capturing
+    the actual extraction-call input text."""
+    _snapshot(pg)
+    combined_text = (
+        "Subject: Objednávka + dodací list príloha\n\n"
+        "From: dodavatel@lunys.sk\n\n"
+        "Body: v prílohe posielame dodací list.\n\n"
+        "Attachments:\n"
+        "===== dodaci_list.docx =====\n"
+        "Dodávateľ: Pekáreň Lunys, Prešov, dodavatel@lunys.sk\n"
+        "Dodací list č. 0100000001, dátum dodania 01.08.2026\n"
+        "Rožok 50g / 10 ks / 0,50 €/ks / 5,00 €")
+    _msg(pg, mid="dl1", combined_text=combined_text)
+    _attach(pg, tmp_path, "dl1", filename="dodaci_list.docx",
+           mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+           text="Dodávateľ: Pekáreň Lunys ...", method="docx")
+    client = FakeClient({"dl_documents": [{"documents": []}]})
+    posted = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, post=lambda c, h: posted.append(h))
+    assert n == 1
+    doc_calls = [u for name, u in client.users if name == "dl_documents"]
+    assert len(doc_calls) == 1
+    sent = doc_calls[0]
+    assert "0100000001" not in sent
+    assert "dodaci_list.docx" not in sent
+    assert "Rožok 50g" not in sent
+    assert "v prílohe posielame dodací list" in sent
 
 
 # --- live engine: the happy path --------------------------------------------
