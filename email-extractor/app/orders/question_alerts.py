@@ -127,6 +127,19 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
 
 
 def _repeat_count(conn, kind: str, customer_ean: str, item_key: str) -> int:
+    """Deep-review finding on #237: for `mail`/`date`/`line`, `item_key` is built by
+    `teach.ask_mail`/`ask_date`/`ask_line` as `f"mail:{message_id}"` /
+    `f"date:{message_id}"` / `f"line:{message_id}:{...}"` — scoped to ONE specific
+    e-mail by design (`teach.py`'s own docstrings: "ONE question per message"). Two
+    rows can only ever share that key if the literal same message is reprocessed, so
+    this always returns 1 for those three kinds — never a bug, just structurally
+    "no recurring identity to count" for a question that is inherently about one
+    e-mail's own content, not a recurring product/customer/supplier gap. The ticket's
+    own repeat-highlighting requirement (#237 AC 3) is about the LATTER — `item`/
+    `customer`/`dl_item`/`dl_supplier` all key on a real, stable identity (customer +
+    wording, sender address, supplier + wording) and are the kinds this genuinely
+    matters for; verified against the ticket's own motivating case (HK LOAN,
+    dl_supplier)."""
     row = conn.execute(
         "SELECT count(*) FROM order_questions WHERE kind = %s AND customer_ean = %s "
         "AND item_key = %s", (kind, customer_ean, item_key)).fetchone()
