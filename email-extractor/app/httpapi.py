@@ -628,11 +628,13 @@ def create_app(cfg) -> Flask:
                 # proceed anyway" escape hatch) — the earlier draft had one
                 # (`confirm_existing`), but it was reachable with no real caller and
                 # would have bypassed the exact EAN-uniqueness guarantee this ticket
-                # exists to add (`upsert_customer`'s own reclaim is keyed on
-                # (ean, street), so confirming past a DIFFERENT street would silently
-                # insert a second row sharing one EAN). The card's own reaction to a
-                # 409 is "Doplniť e-mail k <name>", which re-posts through the
-                # EXISTING-customer path below — never a forced re-submit of new_customer.
+                # exists to add (`upsert_customer`'s own reclaim raises `DuplicateEan`
+                # for a DIFFERENT street rather than silently inserting a second row —
+                # #248 tightened this from a silent duplicate to a raised conflict; a
+                # forced "confirm anyway" here would still bypass it either way). The
+                # card's own reaction to a 409 is "Doplniť e-mail k <name>", which
+                # re-posts through the EXISTING-customer path below — never a forced
+                # re-submit of new_customer.
                 existing = [r for r in snapshot.customers_for_management(c)
                            if str(r.get("ean_edi") or "") == ean]
                 if existing:
@@ -662,6 +664,14 @@ def create_app(cfg) -> Flask:
             return jsonify(error=str(e)), 400
         except snapshot.InvalidCustomer as e:
             return jsonify(error=str(e)), 400
+        except snapshot.DuplicateEan as e:
+            # #248: the pre-check above already returns this same shape for the
+            # sequential case; this is the LOSER of a genuine race — `upsert_customer`
+            # detected it INSIDE the advisory lock, after the pre-check above had
+            # already passed for both requests.
+            return jsonify(
+                error=f"EAN {ean} už má zákazník {e.existing.get('name', '')}.",
+                existing=e.existing), 409
 
         sender_email = ctx.get("sender_email", "")
         with _db() as c2:
@@ -769,18 +779,19 @@ def create_app(cfg) -> Flask:
                 # first, possibly a stale name. So: refuse up front, same shape as the
                 # customer path, ignoring city on purpose (the collision is on the EAN).
                 #
-                # Residual (independent review, same PR): this read happens BEFORE
-                # `upsert_dl_supplier`'s own advisory lock is taken, and that lock is keyed
-                # on ean_edi alone while its internal reclaim still matches on the narrower
-                # (ean_edi, city) pair — so two genuinely SIMULTANEOUS "new supplier"
-                # submissions for the SAME never-before-seen EAN under DIFFERENT city
-                # values could both pass this check and still insert two rows. This is not
-                # a new gap: `_api_orders_answer_new_customer`'s identical collision check
-                # above (and `upsert_customer`'s matching lock) has the exact same
-                # limitation, already reviewed and accepted on #234 — a real fix would
-                # widen the lock scope in BOTH `upsert_dl_supplier` and `upsert_customer`
-                # symmetrically, out of proportion to this ticket on a manual, low-
-                # concurrency warehouse form. Left as-is, consistent with that precedent.
+                # #248 (was "Residual, independent review, same PR" — CLOSED): this read
+                # happens BEFORE `upsert_dl_supplier`'s own advisory lock is taken, so two
+                # genuinely SIMULTANEOUS "new supplier" submissions for the SAME
+                # never-before-seen EAN under DIFFERENT city values could both pass this
+                # fast-path check before either commits. The race is no longer open,
+                # though: `upsert_dl_supplier`'s own reclaim SELECT (inside the lock) is
+                # now scoped by ean_edi alone, so it tells a genuine retry (same city)
+                # apart from a real second submission (different city) and raises
+                # `DuplicateEan` for the latter — caught below, same 409 shape this
+                # fast-path check already returns. A DB-level partial unique index
+                # (db.py's #248 migration) backstops both paths. See `upsert_dl_supplier`'s
+                # own docstring for the full trace; `upsert_customer`'s #248 fix is the
+                # identical shape, mirrored for `street` instead of `city`.
                 existing = [r for r in dl_snapshot.dl_suppliers_for_management(c)
                            if str(r.get("ean_edi") or "") == ean]
                 if existing:
@@ -798,6 +809,10 @@ def create_app(cfg) -> Flask:
                 teach.add_candidate(c, qid, {"value": ean, "label": name})
         except snapshot.InvalidCustomer as e:
             return jsonify(error=str(e)), 400
+        except snapshot.DuplicateEan as e:
+            return jsonify(
+                error=f"EAN {ean} už má dodávateľ {e.existing.get('name', '')}.",
+                existing=e.existing), 409
         with _db() as c2:
             q2 = teach.get(c2, qid)
         return _api_orders_answer_generic(qid, q2, {"choice": ean, "by": "sklad"})

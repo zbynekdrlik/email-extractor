@@ -73,10 +73,13 @@ def test_customer_overrides_new_ean_index_migration_tolerates_pre_existing_dupli
 
     db.init_schema(pg)   # must not raise — the whole point of #248's guarded de-dup step
 
-    rows = pg.execute(
+    # Query by NAME, not by `updated_at` order — the migration's own retiring UPDATE
+    # bumps `updated_at` on the row it retires (same convention as `retire_customer`),
+    # so `updated_at DESC` would no longer distinguish winner from loser afterward.
+    rows = {name: retired for name, retired in pg.execute(
         "SELECT name, retired FROM customer_overrides "
-        "WHERE ean_edi='6000000000001' ORDER BY updated_at DESC").fetchall()
-    assert rows == [("Nový duplikát", False), ("Starý duplikát", True)], (
+        "WHERE ean_edi='6000000000001'").fetchall()}
+    assert rows == {"Nový duplikát": False, "Starý duplikát": True}, (
         "the freshest row must stay active and survive; the older duplicate must be "
         "retired, never deleted")
     active = pg.execute(
@@ -106,10 +109,10 @@ def test_dl_supplier_overrides_new_ean_index_migration_tolerates_pre_existing_du
 
     db.init_schema(pg)
 
-    rows = pg.execute(
+    rows = {name: retired for name, retired in pg.execute(
         "SELECT name, retired FROM dl_supplier_overrides "
-        "WHERE ean_edi='6000000000002' ORDER BY updated_at DESC").fetchall()
-    assert rows == [("Nový dodávateľ", False), ("Starý dodávateľ", True)]
+        "WHERE ean_edi='6000000000002'").fetchall()}
+    assert rows == {"Nový dodávateľ": False, "Starý dodávateľ": True}
     active = pg.execute(
         "SELECT count(*) FROM dl_supplier_overrides "
         "WHERE ean_edi='6000000000002' AND NOT retired").fetchone()

@@ -1009,6 +1009,77 @@ SCHEMA = [
     # simply starts as "never reminded", which is the honest truth for all of them. ---
     "ALTER TABLE order_questions ADD COLUMN IF NOT EXISTS reminder_sent_at TIMESTAMPTZ",
     "ALTER TABLE order_questions ADD COLUMN IF NOT EXISTS escalated_at TIMESTAMPTZ",
+    # --- #248: DB-level uniqueness for a hand-added (`orig_ean_edi IS NULL`) row's
+    # `ean_edi` — the app-level advisory lock in `upsert_customer`/`upsert_dl_supplier`
+    # already closes the actual race (see those functions' own #248 comments for the
+    # full trace), but the ticket asks for the invariant to be true at the DB level too,
+    # not just for callers that remember to take the lock. Checked LIVE against
+    # production 2026-08-12 before writing this: `SELECT ean_edi, count(*) FROM
+    # customer_overrides WHERE orig_ean_edi IS NULL AND NOT retired AND ean_edi <> ''
+    # GROUP BY ean_edi HAVING count(*) > 1` (and the same for dl_supplier_overrides)
+    # returned ZERO duplicate groups — 2 active hand-added customer rows, 1 active
+    # hand-added supplier row, none of them null/blank EAN, none colliding. So a plain
+    # `CREATE UNIQUE INDEX` would succeed today. It is written as a guarded de-dup step
+    # anyway, unconditionally, so a duplicate discovered LATER (a different environment,
+    # a bug elsewhere, a restored backup) can never turn this migration into a crash
+    # loop on boot — the whole reason this ticket exists. Same guarded-DO-block shape as
+    # the #153/#151 migrations above (advisory lock so two `init_schema` callers — the
+    # live add-on AND a one-off admin CLI, see #153's own docstring — can't race the
+    # de-dup itself; an IF-NOT-EXISTS-yet check on the TARGET INDEX so the retiring
+    # UPDATE can only ever run once, before the index exists, never again after — once
+    # the index exists this block is a single cheap `pg_indexes` lookup on every future
+    # boot). The de-dup keeps the most-recently-updated ACTIVE row per duplicate
+    # `ean_edi` group (the freshest edit is the most likely to be the correct one) and
+    # RETIRES the rest — never deletes a row, so a wrongly-chosen loser is still fully
+    # visible and recoverable in the dashboard, just no longer counted as active. ---
+    """
+    DO $$
+    BEGIN
+        PERFORM pg_advisory_xact_lock(
+            hashtext('email-extractor:customer_overrides.ean_edi_unique#248'));
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_indexes
+             WHERE schemaname = 'public'
+               AND indexname = 'idx_customer_overrides_new_ean'
+        ) THEN
+            UPDATE customer_overrides t
+               SET retired = true, updated_at = now()
+             WHERE t.orig_ean_edi IS NULL AND NOT t.retired
+               AND t.ean_edi IS NOT NULL AND t.ean_edi <> ''
+               AND t.id <> (
+                   SELECT d.id FROM customer_overrides d
+                    WHERE d.orig_ean_edi IS NULL AND NOT d.retired
+                      AND d.ean_edi = t.ean_edi
+                    ORDER BY d.updated_at DESC, d.id DESC LIMIT 1);
+        END IF;
+    END $$
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_overrides_new_ean "
+    "ON customer_overrides(ean_edi) WHERE orig_ean_edi IS NULL AND NOT retired",
+    """
+    DO $$
+    BEGIN
+        PERFORM pg_advisory_xact_lock(
+            hashtext('email-extractor:dl_supplier_overrides.ean_edi_unique#248'));
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_indexes
+             WHERE schemaname = 'public'
+               AND indexname = 'idx_dl_supplier_overrides_new_ean'
+        ) THEN
+            UPDATE dl_supplier_overrides t
+               SET retired = true, updated_at = now()
+             WHERE t.orig_ean_edi IS NULL AND NOT t.retired
+               AND t.ean_edi IS NOT NULL AND t.ean_edi <> ''
+               AND t.id <> (
+                   SELECT d.id FROM dl_supplier_overrides d
+                    WHERE d.orig_ean_edi IS NULL AND NOT d.retired
+                      AND d.ean_edi = t.ean_edi
+                    ORDER BY d.updated_at DESC, d.id DESC LIMIT 1);
+        END IF;
+    END $$
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_dl_supplier_overrides_new_ean "
+    "ON dl_supplier_overrides(ean_edi) WHERE orig_ean_edi IS NULL AND NOT retired",
 ]
 
 
