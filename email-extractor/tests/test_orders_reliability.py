@@ -215,6 +215,7 @@ def test_only_the_most_recent_incident_counts(pg):
 
 class _Cfg:
     orders_channel_id = 152
+    delivery_notes_channel_id = 243
     odoo_url = "https://odoo.example"
     odoo_api_key = "k"
     dashboard_base_url = ""
@@ -224,16 +225,16 @@ def test_the_digest_posts_once_per_day_not_once_per_tick(pg):
     posted = []
     cfg = _Cfg()
     assert reliability.maybe_post_daily_digest(
-        pg, cfg, post=lambda c, h: posted.append(h)) is True
+        pg, cfg, post=lambda c, h, **kw: posted.append(h)) is True
     assert reliability.maybe_post_daily_digest(
-        pg, cfg, post=lambda c, h: posted.append(h)) is False
-    assert len(posted) == 1
+        pg, cfg, post=lambda c, h, **kw: posted.append(h)) is False
+    assert len(posted) == 1, "a quiet DL day posts nothing extra — only the orders digest"
 
 
 def test_shadow_mode_posts_nothing(pg):
     posted = []
     assert reliability.maybe_post_daily_digest(
-        pg, _Cfg(), shadow=True, post=lambda c, h: posted.append(h)) is False
+        pg, _Cfg(), shadow=True, post=lambda c, h, **kw: posted.append(h)) is False
     assert posted == []
 
 
@@ -246,9 +247,14 @@ def test_a_posting_failure_never_raises(pg):
     assert reliability.maybe_post_daily_digest(pg, _Cfg(), post=_boom) is True
 
 
-def test_the_digest_folds_dl_activity_into_the_same_single_post(pg):
-    """#204: 'DL run[s go] into the daily reliability digest' — one claim, one message,
-    not a second post."""
+# --- #239 reopened, finding 2: the DL digest is its OWN post, to its OWN channel ----
+
+def test_the_dl_digest_is_a_separate_post_to_the_delivery_notes_channel(pg):
+    """The old behaviour folded DL activity into the SAME orders-channel message
+    (#204) — that meant every DL notice landed with the sales audience instead of the
+    warehouse's own channel (243), exactly the #229 complaint repeated. Now: TWO posts,
+    the orders one unchanged (152, the default `post_from_config` channel), the DL one
+    explicitly routed to `delivery_notes_channel_id`."""
     from app.orders import dl_report
 
     pg.execute("INSERT INTO messages (message_id, category) VALUES ('dlm2', "
@@ -259,9 +265,43 @@ def test_the_digest_folds_dl_activity_into_the_same_single_post(pg):
     pg.execute("UPDATE email_events SET ts = now() - interval '1 day' "
               "WHERE message_id = 'dlm2'")
     posted = []
-    reliability.maybe_post_daily_digest(pg, _Cfg(), post=lambda c, h: posted.append(h))
+    reliability.maybe_post_daily_digest(
+        pg, _Cfg(), post=lambda c, h, **kw: posted.append((h, kw.get("channel_id"))))
+    assert len(posted) == 2
+    orders_html, orders_channel = posted[0]
+    dl_html, dl_channel = posted[1]
+    assert "Dodacie listy" not in orders_html
+    assert orders_channel is None
+    assert "Denný prehľad dodacích listov" in dl_html
+    assert dl_channel == 243
+
+
+def test_a_quiet_dl_day_posts_only_the_orders_digest(pg):
+    posted = []
+    reliability.maybe_post_daily_digest(
+        pg, _Cfg(), post=lambda c, h, **kw: posted.append((h, kw.get("channel_id"))))
     assert len(posted) == 1
-    assert "Dodacie listy" in posted[0]
+    assert "Dodacie listy" not in posted[0][0]
+
+
+def test_dl_digest_is_never_posted_when_the_channel_is_unset(pg):
+    """Never a silent fallback to the orders channel — the fix this finding exists for.
+    An unset delivery_notes_channel_id just skips the DL post entirely."""
+    from app.orders import dl_report
+
+    class _CfgNoDl(_Cfg):
+        delivery_notes_channel_id = 0
+
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('dlm3', "
+              "'dodacie_listy')")
+    dl_report.log_duplicate(pg, "dlm3", "0100000010", "999")
+    pg.execute("UPDATE email_events SET ts = now() - interval '1 day' "
+              "WHERE message_id = 'dlm3'")
+    posted = []
+    reliability.maybe_post_daily_digest(
+        pg, _CfgNoDl(),
+        post=lambda c, h, **kw: posted.append((h, kw.get("channel_id"))))
+    assert len(posted) == 1, "only the orders post — the DL one is skipped, never 152"
 
 
 # --- wired into worker.tick(), same pattern as _check_spend_cap ------------

@@ -296,9 +296,15 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pra
                 # enqueued (an upload failure, or this same sweep's own findings) —
                 # both gated on the live python engine, same discipline confirm.sweep
                 # above already uses (shadow/n8n modes never write to either table).
+                # `quiet_seconds=FLUSH_QUIET_SECONDS` (#239 reopened, finding 1) makes a
+                # burst of same-kind alerts land as ONE grouped Odoo post instead of one
+                # per row — see dl_alerts.py's own module docstring. `prune_delivered`
+                # (finding 4) bounds the table's growth; it is cheap and idempotent, so
+                # running it on the same tick as everything else needs no extra timer.
                 from . import dl_alerts
                 dl_worker.stuck_classified_sweep(conn, cfg)
-                dl_alerts.flush_pending(conn, cfg)
+                dl_alerts.flush_pending(conn, cfg, quiet_seconds=dl_alerts.FLUSH_QUIET_SECONDS)
+                dl_alerts.prune_delivered(conn)
             handled = tick(conn, cfg, pipeline=pipeline)
             handled = static_worker.tick(conn, cfg) or handled
             # #204: shadow ALSO needs a tick (it never claims, but it does need to be

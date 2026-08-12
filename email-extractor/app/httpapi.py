@@ -1822,6 +1822,9 @@ _ASK_HTML_TEMPLATE = r"""<!doctype html><html lang="sk"><head><meta charset="utf
         align-items:center;position:sticky;top:0}
  h1{font-size:16px;margin:0}
  .ver{font-size:12px;color:#8b949e}
+ .dl-alert-banner{background:#fff3cd;border-bottom:2px solid #d4a72c;color:#5c4813;
+   padding:10px 14px;font-size:14px;font-weight:600;position:sticky;top:44px}
+ .dl-alert-banner div{margin:3px 0}
  main{padding:14px 12px;max-width:760px;margin:0 auto}
  .q{background:#fff;border:1px solid #d0d7de;border-radius:12px;padding:14px;margin-bottom:14px}
  .who{font-size:13px;color:#57606a}
@@ -1848,6 +1851,7 @@ _ASK_HTML_TEMPLATE = r"""<!doctype html><html lang="sk"><head><meta charset="utf
  input{width:100%;padding:9px 10px;margin-top:6px;border:1px solid #d0d7de;border-radius:8px;font:inherit}
 </style></head><body>
 <header><h1>__HEADING__</h1><span class="ver" data-testid="version">v__VERSION__</span>__STATS_HEADER__</header>
+__ALERT_BANNER__
 <main id="wrap"><div class="empty">Nahrávam&hellip;</div></main>
 <script>
 async function api(u,o){const r=await fetch(u,Object.assign({headers:{'Content-Type':'application/json'}},o||{}));
@@ -2198,6 +2202,7 @@ ASK_HTML = (_ASK_HTML_TEMPLATE
            .replace("__TITLE__", "Otázky skladu")
            .replace("__HEADING__", "&#128230; Otázky skladu")
            .replace("__STATS_HEADER__", "")
+           .replace("__ALERT_BANNER__", "")
            .replace("__STATS_SCRIPT__", ""))
 
 # #231: the DL nástenka additionally shows today/yesterday's DL run "stavy" (states) —
@@ -2205,21 +2210,46 @@ ASK_HTML = (_ASK_HTML_TEMPLATE
 # httpapi.py's `api_orders_dl_stats`). The orders board has no equivalent (out of scope
 # for this ticket) — the placeholders above are replaced with "" for it, so nothing is
 # fetched or rendered there.
+#
+# #239 reopened, finding 5: the three current-state gauges used to be three words
+# silently appended to this SAME small header strip, shown only when non-zero — visually
+# indistinguishable from ordinary text, easy to miss entirely (verified live: on a quiet
+# day nothing at all was rendered, so the warehouse never learned the feature existed).
+# A separate, visually prominent banner (`__ALERT_BANNER__`, hidden when quiet) now
+# carries them instead, each on its own line with plain wording explaining what happened
+# and what to do — the header strip itself stays the plain today/yesterday summary only.
 ASK_DL_HTML = (_ASK_HTML_TEMPLATE
               .replace("__TITLE__", "Dodacie listy — sklad")
               .replace("__HEADING__", "&#128666; Dodacie listy")
               .replace("__STATS_HEADER__", '<span class="ver" id="dlStats"></span>')
+              .replace("__ALERT_BANNER__",
+                      '<div id="dlAlertBanner" class="dl-alert-banner" '
+                      'style="display:none"></div>')
               .replace("__STATS_SCRIPT__", r"""
 async function loadStats(){try{const d=await api('/api/orders/dl/stats');
   const t=d.today||{},y=d.yesterday||{};
   let s='dnes: '+(t.runs||0)+' spracovaných, '+(t.duplicates||0)+' duplicít, '+
     (t.announced_mismatch||0)+' nezhôd · včera: '+(y.runs||0)+' spracovaných';
-  // #239: three current-state gauges — only shown when non-zero, same "mention
-  // problems, stay quiet otherwise" discipline as the counts above.
-  if(t.quarantined) s+=' · '+t.quarantined+' zaseknutých';
-  if(t.pending_alerts) s+=' · '+t.pending_alerts+' čaká na odoslanie';
-  if(t.open_import_incidents) s+=' · '+t.open_import_incidents+' problém(ov) s importom';
-  document.getElementById('dlStats').textContent=s}
+  document.getElementById('dlStats').textContent=s;
+  // #239 reopened, finding 5: each nonzero class gets its OWN plain-Slovak line in a
+  // prominent banner, explaining what happened and what to do — never just a number
+  // silently glued onto the header strip above.
+  const banner=document.getElementById('dlAlertBanner');
+  const lines=[];
+  if(t.quarantined) lines.push('&#128683; '+t.quarantined+' dodací(ch) list(ov) sa po '+
+    (t.quarantine_threshold||5)+' pokusoch vzdalo spracovania &mdash; skontroluj v '+
+    'dashboarde.');
+  if(t.pending_alerts) lines.push('&#128276; '+t.pending_alerts+
+    ' upozornenie/upozornení stále čaká na odoslanie do Odoo.');
+  if(t.open_import_incidents) lines.push('&#128230; '+t.open_import_incidents+
+    ' otvorený problém s importom do ORIONu.');
+  if(lines.length){
+    banner.innerHTML=lines.map(l=>'<div>'+l+'</div>').join('');
+    banner.style.display='block';
+  }else{
+    banner.style.display='none';
+    banner.innerHTML='';
+  }}
   catch(e){}}
 loadStats();setInterval(loadStats,30000);"""))
 

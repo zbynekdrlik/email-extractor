@@ -372,6 +372,27 @@ def _doc_part(doc_number) -> str:
     return f"_{cleaned}" if cleaned else ""
 
 
+def stable_prefix(ean_edi: str, doc_number: str) -> str:
+    """#239 finding 6: the part of `filename()`'s output that stays IDENTICAL across
+    every retry of the SAME document — everything up to (not including) the
+    `_<YYYYMMDD>_<HHMMSSmmm>.txt` suffix, which changes on every attempt (a fresh
+    timestamp, R89). A safe presence/absence check on ORION must match on THIS, never
+    on a full filename — a full filename built for a retry can never equal an earlier
+    attempt's own name, so filename equality can never answer "did an earlier attempt
+    already land this document." See `already_landed()` below.
+
+    Review finding: `_doc_part()`'s existing `MAX_DOC_NUMBER_IN_FILENAME=10`
+    truncation (needed for the filename itself, R89) is REUSED here as a document-
+    IDENTITY key — two genuinely different doc numbers that happen to share their
+    first 10 alnum characters would collide onto the same stable prefix. Harmless
+    today: `stable_prefix()`/`already_landed()` are not yet wired into any decision
+    (deliberately deferred, see the design comment on #239) — but this collision risk
+    MUST be re-examined before either function becomes load-bearing for an actual
+    safe-retry decision."""
+    ean_short = str(ean_edi or "")[-6:] or "000000"
+    return f"DESADV_{ean_short}{_doc_part(doc_number)}_"
+
+
 def filename(ean_edi: str, delivery_date: str, doc_number: str, stamp: str = "") -> str:
     """R89: `DESADV_<last 6 of buyer EAN>_<docNumber alnum, max 10>_<YYYYMMDD from
     deliveryDate>_<HHMMSSmmm>.txt` — mirrors `generateUniqueFilename()` (`orderIndex`
@@ -381,9 +402,41 @@ def filename(ean_edi: str, delivery_date: str, doc_number: str, stamp: str = "")
     if not stamp:
         now = datetime.now()
         stamp = now.strftime("%H%M%S") + f"{now.microsecond // 1000:03d}"
-    ean_short = str(ean_edi or "")[-6:] or "000000"
-    return (f"DESADV_{ean_short}{_doc_part(doc_number)}_{_date_stamp(delivery_date)}"
-            f"_{stamp}.txt")
+    return f"{stable_prefix(ean_edi, doc_number)}{_date_stamp(delivery_date)}_{stamp}.txt"
+
+
+def _matches_stable_prefix(name: str, prefix: str) -> bool:
+    """Tolerates R89's own upload-time `Z-` wire prefix, PLUS Communicator's separate,
+    uncontrolled archCodex rename job's OWN extra `Z-` on top of that — mirrors
+    `confirm.py`'s own `_decide()` tolerance EXACTLY (`wire_name in archCodex or
+    f"Z-{wire_name}" in archCodex`, `wire_name` already carrying ONE `Z-`): a name with
+    no `Z-`, exactly one, or exactly two leading `Z-`s all match. Review finding: an
+    earlier draft stripped an UNBOUNDED number of leading `Z-`, which is more
+    permissive than confirm.py's own check despite the docstring claiming parity —
+    fixed to the exact same three-way check."""
+    return (name.startswith(prefix)
+           or name.startswith(f"Z-{prefix}")
+           or name.startswith(f"Z-Z-{prefix}"))
+
+
+def already_landed(dirs: dict, ean_edi: str, doc_number: str) -> bool:
+    """#239 finding 6: has a document with THIS identity (buyer/supplier EAN + doc
+    number) already reached ORION under ANY prior attempt's filename? `dirs` is
+    `upload.list_dirs(cfg)`'s return shape (`in_DL`/`archCodex`/`unconfirmed` name
+    sets). Matches the STABLE prefix `stable_prefix()` builds — the trailing
+    date/timestamp is the only part that differs between attempts, so a prefix match
+    is genuine document identity, never a guess.
+
+    Checked against all three folders a DESADV upload can legitimately be found in:
+    `in_DL` (still queued for her morning import), `archCodex` (imported), `unconfirmed`
+    (import FAILED — but the UPLOAD itself still succeeded, so retrying now would still
+    be a duplicate upload, just of a document CODEX later rejected)."""
+    prefix = stable_prefix(ean_edi, doc_number)
+    for folder in ("in_DL", "archCodex", "unconfirmed"):
+        for name in (dirs or {}).get(folder) or ():
+            if _matches_stable_prefix(name, prefix):
+                return True
+    return False
 
 
 def upload_name(name: str) -> str:

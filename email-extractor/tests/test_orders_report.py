@@ -417,7 +417,12 @@ def test_the_link_is_only_rendered_when_given():
     assert 'href="http://x/sklad/k"' in with_link
 
 
-# --- #204 (DL migration F5): the optional DL section ------------------------
+# --- #239 reopened, finding 2: the DL digest is its own STANDALONE message -------
+#
+# Was an optional section embedded in build_daily_digest() (#204) — that made the
+# WHOLE combined message (orders + DL) post to orders_channel_id, so every DL notice
+# landed with the wrong (sales) audience. build_dl_digest() is now independent, so the
+# caller (reliability.maybe_post_daily_digest) can route it to delivery_notes_channel_id.
 
 def _dl_stats(**over):
     base = {"day": "2026-08-05", "runs": 0, "errors": 0, "items": 0, "deterministic": 0,
@@ -426,67 +431,69 @@ def _dl_stats(**over):
     return base
 
 
-def test_omitted_dl_stats_leaves_the_digest_byte_identical_to_before_204():
-    """Every pre-#204 caller/test must be unaffected."""
-    without = report.build_daily_digest(_stats(), days_since_incident=3)
-    with_none = report.build_daily_digest(_stats(), days_since_incident=3, dl_stats=None)
-    assert without == with_none
-    assert "Dodacie listy" not in without
-
-
-def test_a_quiet_dl_day_renders_no_extra_section():
-    html = report.build_daily_digest(_stats(), days_since_incident=3, dl_stats=_dl_stats())
+def test_build_daily_digest_never_mentions_delivery_notes():
+    """The orders-only digest must stay orders-only — DL content belongs exclusively
+    in build_dl_digest()'s own separate message."""
+    html = report.build_daily_digest(_stats(), days_since_incident=3)
     assert "Dodacie listy" not in html
+    assert "dodacích listov" not in html.lower()
 
 
-def test_dl_activity_renders_its_own_section():
-    html = report.build_daily_digest(
-        _stats(), days_since_incident=3,
-        dl_stats=_dl_stats(runs=5, items=8, errors=1, duplicates=2, announced_mismatch=1))
-    assert "Dodacie listy" in html
+def test_a_quiet_dl_day_renders_nothing():
+    assert report.build_dl_digest(_dl_stats()) == ""
+    assert report.build_dl_digest(None) == ""
+
+
+def test_dl_activity_renders_its_own_message():
+    html = report.build_dl_digest(
+        _dl_stats(runs=5, items=8, errors=1, duplicates=2, announced_mismatch=1))
+    assert html != ""
+    assert "Denný prehľad dodacích listov" in html
     assert "5" in html and "8" in html
     assert "duplicitn" in html.lower()
     assert "ohlásil dodací list" in html
 
 
-def test_dl_duplicates_alone_still_render_the_section():
+def test_dl_duplicates_alone_still_render_the_message():
     """Runs can be 0 (nothing new the DL worker touched) while a duplicate/mismatch
-    was still found — the section must appear either way, never gated on `runs` alone."""
-    html = report.build_daily_digest(_stats(), days_since_incident=3,
-                                     dl_stats=_dl_stats(duplicates=1))
-    assert "Dodacie listy" in html
+    was still found — the message must appear either way, never gated on `runs` alone."""
+    html = report.build_dl_digest(_dl_stats(duplicates=1))
+    assert html != ""
     assert "1" in html
 
 
 # --- #239: three current-state gauges — a silent backlog must never hide -----------
 
-def test_quarantined_alone_triggers_the_section_even_with_zero_runs():
+def test_quarantined_alone_triggers_the_message_even_with_zero_runs():
     """A day with no NEW DL activity but an EXISTING quarantined backlog must still be
     mentioned — the whole point of #239 is that a silent backlog is invisible."""
-    html = report.build_daily_digest(_stats(), days_since_incident=3,
-                                     dl_stats=_dl_stats(quarantined=2))
-    assert "Dodacie listy" in html
+    html = report.build_dl_digest(_dl_stats(quarantined=2))
+    assert html != ""
     assert "2" in html
     assert "vzdal" in html.lower()
 
 
-def test_pending_alerts_alone_triggers_the_section():
-    html = report.build_daily_digest(_stats(), days_since_incident=3,
-                                     dl_stats=_dl_stats(pending_alerts=3))
-    assert "Dodacie listy" in html
+def test_pending_alerts_alone_triggers_the_message():
+    html = report.build_dl_digest(_dl_stats(pending_alerts=3))
+    assert html != ""
     assert "3" in html
     assert "čaká na odoslanie" in html.lower() or "čakajú na odoslanie" in html.lower()
 
 
-def test_open_import_incidents_alone_triggers_the_section():
-    html = report.build_daily_digest(_stats(), days_since_incident=3,
-                                     dl_stats=_dl_stats(open_import_incidents=1))
-    assert "Dodacie listy" in html
+def test_open_import_incidents_alone_triggers_the_message():
+    html = report.build_dl_digest(_dl_stats(open_import_incidents=1))
+    assert html != ""
     assert "problém s importom" in html.lower()
 
 
-def test_a_genuinely_quiet_dl_day_still_renders_no_extra_section_with_gauges_present():
+def test_a_genuinely_quiet_dl_day_still_renders_nothing_with_gauges_present():
     """The three new gauges default to 0 via `_dl_stats()` — a quiet day must stay
     quiet even though the digest now checks three more fields."""
-    html = report.build_daily_digest(_stats(), days_since_incident=3, dl_stats=_dl_stats())
-    assert "Dodacie listy" not in html
+    assert report.build_dl_digest(_dl_stats()) == ""
+
+
+def test_dl_digest_link_is_only_rendered_when_given():
+    no_link = report.build_dl_digest(_dl_stats(runs=1), link="")
+    assert "<a href" not in no_link
+    with_link = report.build_dl_digest(_dl_stats(runs=1), link="http://x/sklad-dl/k")
+    assert 'href="http://x/sklad-dl/k"' in with_link

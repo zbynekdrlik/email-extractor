@@ -103,7 +103,10 @@ def test_put_writes_to_orion_dir_by_default():
     with patch("paramiko.SSHClient", return_value=fake_client):
         ok = upload.put(_cfg(), "ORDER_x.txt", "content")
     assert ok is True
-    fake_sftp.file.assert_called_once_with(ORION_DIR + "\\ORDER_x.txt", "w")
+    written_path = fake_sftp.file.call_args.args[0]
+    assert written_path.startswith(ORION_DIR + "\\.part-")
+    assert written_path.endswith("-ORDER_x.txt")
+    fake_sftp.rename.assert_called_once_with(written_path, ORION_DIR + "\\ORDER_x.txt")
 
 
 def test_put_writes_to_dir_override_when_given():
@@ -117,4 +120,119 @@ def test_put_writes_to_dir_override_when_given():
     with patch("paramiko.SSHClient", return_value=fake_client):
         ok = upload.put(_cfg(), "Z-DESADV_x.txt", "content", dir_override=DL_DIR)
     assert ok is True
-    fake_sftp.file.assert_called_once_with(DL_DIR + "\\Z-DESADV_x.txt", "w")
+    written_path = fake_sftp.file.call_args.args[0]
+    assert written_path.startswith(DL_DIR + "\\.part-")
+    fake_sftp.rename.assert_called_once_with(written_path, DL_DIR + "\\Z-DESADV_x.txt")
+
+
+# --- put() temp-write + rename (#239 finding 6) --------------------------------
+
+def test_put_never_writes_the_final_name_directly():
+    """#239 finding 6: an interrupted write must never leave bytes under the FINAL,
+    validly-named target — a real incident's root cause. The write always targets a
+    temp name; only rename() ever touches the final name."""
+    fake_file = MagicMock()
+    fake_sftp = MagicMock()
+    fake_sftp.file.return_value.__enter__.return_value = fake_file
+    fake_client = MagicMock()
+    fake_client.open_sftp.return_value = fake_sftp
+    with patch("paramiko.SSHClient", return_value=fake_client):
+        upload.put(_cfg(), "ORDER_x.txt", "content")
+    written_path = fake_sftp.file.call_args.args[0]
+    assert written_path != ORION_DIR + "\\ORDER_x.txt"
+
+
+def test_put_never_renames_when_the_write_itself_raises():
+    """A write failure must leave only the (unrecognizable) temp name behind — never
+    call rename(), so the final name is never touched at all."""
+    fake_sftp = MagicMock()
+    fake_sftp.file.side_effect = OSError("connection timed out")
+    fake_client = MagicMock()
+    fake_client.open_sftp.return_value = fake_sftp
+    with patch("paramiko.SSHClient", return_value=fake_client):
+        with pytest.raises(OSError):
+            upload.put(_cfg(), "ORDER_x.txt", "content")
+    fake_sftp.rename.assert_not_called()
+
+
+def test_put_best_effort_removes_the_temp_file_on_a_write_failure():
+    """A write failure must not leave an orphaned .part-* file on ORION forever."""
+    fake_file = MagicMock()
+    fake_file.write.side_effect = OSError("connection reset")
+    fake_sftp = MagicMock()
+    fake_sftp.file.return_value.__enter__.return_value = fake_file
+    fake_client = MagicMock()
+    fake_client.open_sftp.return_value = fake_sftp
+    with patch("paramiko.SSHClient", return_value=fake_client):
+        with pytest.raises(OSError):
+            upload.put(_cfg(), "ORDER_x.txt", "content")
+    written_path = fake_sftp.file.call_args.args[0]
+    fake_sftp.remove.assert_called_once_with(written_path)
+    fake_sftp.rename.assert_not_called()
+
+
+def test_put_reraises_the_original_error_even_if_temp_cleanup_itself_fails():
+    """A SECOND failure (the cleanup remove() itself) must never hide or replace the
+    REAL error the caller needs to see and act on."""
+    fake_file = MagicMock()
+    fake_file.write.side_effect = OSError("connection reset")
+    fake_sftp = MagicMock()
+    fake_sftp.file.return_value.__enter__.return_value = fake_file
+    fake_sftp.remove.side_effect = OSError("cleanup also failed")
+    fake_client = MagicMock()
+    fake_client.open_sftp.return_value = fake_sftp
+    with patch("paramiko.SSHClient", return_value=fake_client):
+        with pytest.raises(OSError, match="connection reset"):
+            upload.put(_cfg(), "ORDER_x.txt", "content")
+
+
+def test_put_propagates_a_rename_failure_without_leaving_it_silent():
+    """If the rename itself fails (e.g. the connection drops right after the write),
+    put() must still raise — the caller's own failure handling (release the claim, no
+    retry, durable alert) is what makes this visible, same as a write failure."""
+    fake_file = MagicMock()
+    fake_sftp = MagicMock()
+    fake_sftp.file.return_value.__enter__.return_value = fake_file
+    fake_sftp.rename.side_effect = OSError("connection timed out")
+    fake_client = MagicMock()
+    fake_client.open_sftp.return_value = fake_sftp
+    with patch("paramiko.SSHClient", return_value=fake_client):
+        with pytest.raises(OSError):
+            upload.put(_cfg(), "ORDER_x.txt", "content")
+    fake_sftp.close.assert_called_once()
+    fake_client.close.assert_called_once()
+
+
+def test_put_best_effort_removes_the_temp_file_on_a_rename_failure_too():
+    """Review finding: an earlier draft only cleaned up on a WRITE failure — a RENAME
+    failure (the connection dropping right after a successful write, the exact
+    'timed out' incident shape) left the temp file orphaned forever. Cleanup must
+    cover both failure points, not just the write one."""
+    fake_file = MagicMock()
+    fake_sftp = MagicMock()
+    fake_sftp.file.return_value.__enter__.return_value = fake_file
+    fake_sftp.rename.side_effect = OSError("connection timed out")
+    fake_client = MagicMock()
+    fake_client.open_sftp.return_value = fake_sftp
+    with patch("paramiko.SSHClient", return_value=fake_client):
+        with pytest.raises(OSError):
+            upload.put(_cfg(), "ORDER_x.txt", "content")
+    written_path = fake_sftp.file.call_args.args[0]
+    fake_sftp.remove.assert_called_once_with(written_path)
+
+
+def test_put_rename_cleanup_failure_is_harmless_when_the_rename_actually_succeeded():
+    """A rename can genuinely succeed server-side even though the confirming response
+    was lost (the whole ambiguity this design exists to survive) — in that case the
+    temp name is already gone, so the best-effort remove() simply no-ops (raises on
+    the fake, caught and logged) without hiding the real rename error."""
+    fake_file = MagicMock()
+    fake_sftp = MagicMock()
+    fake_sftp.file.return_value.__enter__.return_value = fake_file
+    fake_sftp.rename.side_effect = OSError("connection timed out")
+    fake_sftp.remove.side_effect = OSError("No such file")   # already renamed away
+    fake_client = MagicMock()
+    fake_client.open_sftp.return_value = fake_sftp
+    with patch("paramiko.SSHClient", return_value=fake_client):
+        with pytest.raises(OSError, match="connection timed out"):
+            upload.put(_cfg(), "ORDER_x.txt", "content")

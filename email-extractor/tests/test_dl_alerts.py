@@ -135,3 +135,118 @@ def test_pending_count_reflects_only_undelivered_rows(pg):
     assert dl_alerts.pending_count(pg) == 2
     dl_alerts.flush_pending(pg, cfg=None, post=lambda c, h, **kw: {"id": 6})
     assert dl_alerts.pending_count(pg) == 0
+
+
+# --- #239 reopened, finding 1: the burst must land as ONE grouped post ------
+
+def test_flush_waits_for_a_quiet_period_before_delivering_a_burst(pg):
+    """Production hits `flush_pending` on almost every worker tick — enqueuing rows one
+    at a time as an ORION outage claims one DL message after another used to produce
+    one Odoo post PER ROW, the exact 18:18 flood shape a real incident already got
+    deleted as spam. `quiet_seconds>0` makes flush wait until NO NEW alert of that
+    (channel, kind) has arrived recently, so a burst is always delivered as ONE grouped
+    post — regardless of exactly when the caller happens to call flush relative to the
+    burst."""
+    dl_alerts.enqueue(pg, 243, "dl_upload_failed", "<p>A</p>", message_id="a")
+    posted = []
+
+    def _post(c, h, **kw):
+        posted.append(h)
+        return {"id": 1}
+
+    n = dl_alerts.flush_pending(pg, cfg=None, post=_post, quiet_seconds=30)
+    assert n == 0, "still within the quiet window — must wait for more of the burst"
+    assert posted == []
+
+    # A second failure lands 5s "later" — still inside the same quiet window (extends it).
+    pg.execute("UPDATE pending_alerts SET created_at = created_at - interval '5 seconds' "
+              "WHERE message_id = 'a'")
+    dl_alerts.enqueue(pg, 243, "dl_upload_failed", "<p>B</p>", message_id="b")
+    n = dl_alerts.flush_pending(pg, cfg=None, post=_post, quiet_seconds=30)
+    assert n == 0, "b just arrived — the group is still not quiet"
+    assert posted == []
+
+    # No further arrivals; once BOTH rows are older than the quiet window, one post.
+    pg.execute("UPDATE pending_alerts SET created_at = created_at - interval '31 seconds'")
+    n = dl_alerts.flush_pending(pg, cfg=None, post=_post, quiet_seconds=30)
+    assert n == 2
+    assert len(posted) == 1
+    assert "<p>A</p>" in posted[0] and "<p>B</p>" in posted[0]
+
+
+def test_quiet_seconds_zero_is_the_unchanged_immediate_behaviour(pg):
+    """The default (0) must behave exactly like before this ticket — every existing
+    caller/test relies on immediate delivery."""
+    dl_alerts.enqueue(pg, 243, "dl_upload_failed", "<p>x</p>", message_id="m1")
+    posted = []
+    n = dl_alerts.flush_pending(pg, cfg=None, post=lambda c, h, **kw: posted.append(h) or
+                                {"id": 1})
+    assert n == 1
+    assert posted == ["<p>x</p>"]
+
+
+# --- #239 reopened, finding 3: the dedup must not be permanent -------------
+
+def test_already_pending_expires_after_the_window_so_a_reprocessed_message_can_realert(pg):
+    """The old permanent dedup assumed a stuck-classified message can never
+    structurally re-enter its own sweep's candidate set without an 'unusual manual
+    reset' — the dashboard's one-click reprocess IS exactly that reset. A dedup entry
+    older than the window must stop suppressing a genuinely fresh occurrence."""
+    dl_alerts.enqueue(pg, 243, "dl_stuck_classified", "<p>x</p>", message_id="m1")
+    assert dl_alerts.already_pending(pg, "dl_stuck_classified", "m1",
+                                     window_hours=4) is True
+    pg.execute("UPDATE pending_alerts SET created_at = created_at - interval '5 hours'")
+    assert dl_alerts.already_pending(pg, "dl_stuck_classified", "m1",
+                                     window_hours=4) is False
+
+
+def test_already_pending_default_window_is_four_hours(pg):
+    dl_alerts.enqueue(pg, 243, "dl_stuck_classified", "<p>x</p>", message_id="m1")
+    assert dl_alerts.already_pending(pg, "dl_stuck_classified", "m1") is True
+    pg.execute("UPDATE pending_alerts SET created_at = created_at - interval '4 hours "
+              "1 minute'")
+    assert dl_alerts.already_pending(pg, "dl_stuck_classified", "m1") is False
+
+
+# --- #239 reopened, finding 4: bounded growth -------------------------------
+
+def test_flush_stops_retrying_a_row_past_the_attempt_cap(pg, monkeypatch):
+    """A durably-broken Odoo config must not be hammered forever — a row past
+    MAX_FLUSH_ATTEMPTS stops being actively retried, but stays counted (never silently
+    dropped, only no longer hammered)."""
+    monkeypatch.setattr(dl_alerts, "MAX_FLUSH_ATTEMPTS", 3)
+    dl_alerts.enqueue(pg, 243, "dl_upload_failed", "<p>x</p>", message_id="m1")
+    pg.execute("UPDATE pending_alerts SET attempts = 3 WHERE message_id = 'm1'")
+    posted = []
+    n = dl_alerts.flush_pending(pg, cfg=None, post=lambda c, h, **kw: posted.append(h) or
+                                {"id": 1})
+    assert n == 0
+    assert posted == [], "a row at/over the cap must never be retried again"
+    assert dl_alerts.pending_count(pg) == 1, "still visible — never silently dropped"
+
+
+def test_prune_delivered_removes_only_old_delivered_rows(pg):
+    dl_alerts.enqueue(pg, 243, "dl_upload_failed", "<p>old</p>", message_id="old")
+    dl_alerts.enqueue(pg, 243, "dl_upload_failed", "<p>recent</p>", message_id="recent")
+    dl_alerts.enqueue(pg, 243, "dl_upload_failed", "<p>pending</p>", message_id="pending")
+    dl_alerts.flush_pending(pg, cfg=None, post=lambda c, h, **kw: {"id": 1})
+    # the "pending" row's post below fails, so it stays undelivered
+    pg.execute("UPDATE pending_alerts SET delivered_at = NULL, channel_id = 999 "
+              "WHERE message_id = 'pending'")
+    pg.execute("UPDATE pending_alerts SET delivered_at = now() - interval '31 days' "
+              "WHERE message_id = 'old'")
+    pg.execute("UPDATE pending_alerts SET delivered_at = now() - interval '1 day' "
+              "WHERE message_id = 'recent'")
+    n = dl_alerts.prune_delivered(pg, older_than_days=30)
+    assert n == 1
+    remaining = {row[0] for row in pg.execute(
+        "SELECT message_id FROM pending_alerts").fetchall()}
+    assert remaining == {"recent", "pending"}
+
+
+def test_prune_delivered_never_touches_an_undelivered_row_however_old(pg):
+    dl_alerts.enqueue(pg, 243, "dl_upload_failed", "<p>x</p>", message_id="m1")
+    pg.execute("UPDATE pending_alerts SET created_at = created_at - interval '90 days'")
+    n = dl_alerts.prune_delivered(pg, older_than_days=30)
+    assert n == 0
+    assert dl_alerts.pending_count(pg) == 1
