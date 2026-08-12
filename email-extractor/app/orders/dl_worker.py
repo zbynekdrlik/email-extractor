@@ -728,9 +728,30 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     # #231: the DL-only nástenka link, never the mixed AI-orders `sklad_link`.
     link = report.dl_sklad_link(cfg)
 
-    if not attachments:
-        # R15: no attachment (or nothing PDF/image-shaped) is NOT an error.
-        reason = "Email bez prílohy — pravdepodobne bežná správa"
+    # #247: a decorative/tiny/junk attachment (`app/extract.py`'s own ingest-time
+    # `method='skipped'` classification, e.g. `flag='skipped_tiny_image'` for a
+    # signature logo) must never be handed to `dl_extract` at all — it has no way to
+    # tell "a real tiny scan" from "a decorative image" and, for one with no
+    # `machine_text`, falls into the digital-PDF-no-text vision fallback and sends the
+    # raw image bytes to OpenAI labelled as a PDF file, which is rejected with a 400
+    # (the HK LOAN incident this fixes). Reuses the EXISTING classification already
+    # computed at ingest and threaded through `_read_attachments()` — never a second,
+    # parallel decorative-image decision. An eval-harness fixture (`dl_evaluate.
+    # _decode_attachment`) never sets `method` at all, so it is always treated as
+    # usable — unaffected by this filter.
+    usable_attachments = [a for a in attachments if (a.get("method") or "") != "skipped"]
+
+    if not usable_attachments:
+        if attachments:
+            # Attachment(s) existed but were ALL decorative/junk — distinct, more
+            # actionable wording than "no attachment at all" (still posted to Odoo
+            # review + the /sklad-dl board, never silent — R15's own visibility path).
+            reason = ("Príloha/y sú len drobný/nepoužiteľný obrázok (napr. podpis "
+                      "alebo logo) — žiadny skutočný dodací list sa v nich nenašiel; "
+                      "ak je dokument v texte e-mailu, treba ho spracovať ručne")
+        else:
+            # R15: no attachment (or nothing PDF/image-shaped) is NOT an error.
+            reason = "Email bez prílohy — pravdepodobne bežná správa"
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, from_addr=message.get("from_addr", ""),
             subject=message.get("subject", ""), link=link), post=post)
@@ -739,7 +760,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
         return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
                "documents": [{"outcome": "review", "reason": reason}], "items": []}
 
-    extraction = dl_extract.extract_email(client, attachments)
+    extraction = dl_extract.extract_email(client, usable_attachments)
 
     documents_out: list[dict] = []
     all_items: list[dict] = []
