@@ -290,6 +290,15 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pra
                 # neither ledger ever gets a row for confirm.sweep to find there.
                 from . import confirm
                 confirm.sweep(conn, cfg)
+            if dl_python:
+                # #239 classes 2/3: a message classified `dodacie_listy` that never got
+                # a first attempt at all, and delivering any alert `dl_worker.py`
+                # enqueued (an upload failure, or this same sweep's own findings) —
+                # both gated on the live python engine, same discipline confirm.sweep
+                # above already uses (shadow/n8n modes never write to either table).
+                from . import dl_alerts
+                dl_worker.stuck_classified_sweep(conn, cfg)
+                dl_alerts.flush_pending(conn, cfg)
             handled = tick(conn, cfg, pipeline=pipeline)
             handled = static_worker.tick(conn, cfg) or handled
             # #204: shadow ALSO needs a tick (it never claims, but it does need to be

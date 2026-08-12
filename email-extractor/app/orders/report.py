@@ -259,7 +259,22 @@ def build_daily_digest(stats: dict, days_since_incident: int | None, link: str =
     dl_runs = int(dl.get("runs") or 0)
     dl_dups = int(dl.get("duplicates") or 0)
     dl_mismatch = int(dl.get("announced_mismatch") or 0)
-    if dl_runs or dl_dups or dl_mismatch:
+    # #239: three CURRENT-STATE gauges (`reliability.dl_current_health`) — a day with
+    # zero NEW activity but an EXISTING stuck backlog must still be mentioned (that is
+    # exactly the silent-backlog failure this ticket exists to prevent), so these widen
+    # the trigger below rather than only decorating an already-active DL section.
+    dl_quarantined = int(dl.get("quarantined") or 0)
+    # Deep-review finding on this ticket's own PR: the "5 attempts" number used to be
+    # hardcoded here too (a THIRD copy of `dl_worker.MAX_ATTEMPTS`, after the DB query
+    # and the constant itself) — read it from the stats dict `reliability.
+    # dl_current_health` now carries it in, falling back to 5 only for an old caller/
+    # test that predates this field (never actually diverges from the real constant in
+    # production, since `dl_current_health` is the only real producer of `dl_stats`).
+    dl_quarantine_threshold = int(dl.get("quarantine_threshold") or 5)
+    dl_pending_alerts = int(dl.get("pending_alerts") or 0)
+    dl_open_import = int(dl.get("open_import_incidents") or 0)
+    if (dl_runs or dl_dups or dl_mismatch or dl_quarantined or dl_pending_alerts
+            or dl_open_import):
         dl_items = int(dl.get("items") or 0)
         dl_day = escape(str(dl.get("day") or stats.get("day", "")))
         parts.append(f"<p><b>Dodacie listy &mdash; {dl_day}</b></p>")
@@ -282,6 +297,28 @@ def build_daily_digest(stats: dict, days_since_incident: int | None, link: str =
                          _plural(dl_mismatch, "e-mail ohlásil dodací list, ktorý neprišiel",
                                  "e-maily ohlásili dodací list, ktorý neprišiel",
                                  "e-mailov ohlásilo dodací list, ktorý neprišiel") + "</p>")
+        if dl_quarantined:
+            parts.append(f"<p>&#128683; {dl_quarantined} " +
+                         _plural(dl_quarantined,
+                                 f"dodací list sa po {dl_quarantine_threshold} pokusoch "
+                                 "vzdal spracovania",
+                                 f"dodacie listy sa po {dl_quarantine_threshold} "
+                                 "pokusoch vzdali spracovania",
+                                 f"dodacích listov sa po {dl_quarantine_threshold} "
+                                 "pokusoch vzdalo spracovania") +
+                         " &mdash; skontroluj v dashboarde.</p>")
+        if dl_pending_alerts:
+            parts.append(f"<p>&#128276; {dl_pending_alerts} " +
+                         _plural(dl_pending_alerts, "upozornenie stále čaká na odoslanie",
+                                 "upozornenia stále čakajú na odoslanie",
+                                 "upozornení stále čaká na odoslanie") + ".</p>")
+        if dl_open_import:
+            parts.append(f"<p>&#128230; {dl_open_import} " +
+                         _plural(dl_open_import,
+                                 "otvorený problém s importom dodacieho listu do ORIONu",
+                                 "otvorené problémy s importom dodacích listov do ORIONu",
+                                 "otvorených problémov s importom dodacích listov do "
+                                 "ORIONu") + ".</p>")
 
     if link:
         parts.append(f'<p>&#128203; Nástenka: '

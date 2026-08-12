@@ -971,6 +971,35 @@ SCHEMA = [
     """,
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_dl_supplier_overrides_orig "
     "ON dl_supplier_overrides(orig_ean_edi, orig_city) WHERE orig_ean_edi IS NOT NULL",
+    # --- #239: a durable outbox for a processing-health alert that has NO other trace
+    # if its Odoo post is lost — an upload-failure alert (class 2) or a stuck-classified
+    # alert (class 3). Requirement 3 of #239: "an alert that cannot be delivered must be
+    # recorded and retried, never silently dropped — otherwise you have rebuilt the very
+    # problem this ticket exists to fix, one layer up." `app/orders/dl_alerts.py`
+    # enqueues here FIRST (durable, before any delivery attempt) and a periodic sweep
+    # (`flush_pending`, on the same ~15s tick `confirm.sweep` already runs on) retries
+    # delivery, grouped by (channel_id, kind), until Odoo genuinely confirms it — never
+    # one Odoo message per item (the 2026-08-05 5-alerts-at-once flood the user deleted
+    # is the precedent this avoids). `message_id` is nullable (a class-2 alert always has
+    # one; a future non-message-scoped alert kind would not) and is what
+    # `dl_alerts.already_pending()` dedupes a persistently-stuck message on. ---
+    """
+    CREATE TABLE IF NOT EXISTS pending_alerts (
+        id           BIGSERIAL PRIMARY KEY,
+        channel_id   INTEGER NOT NULL,
+        kind         TEXT NOT NULL,
+        message_id   TEXT,
+        body_html    TEXT NOT NULL,
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        delivered_at TIMESTAMPTZ,
+        attempts     INTEGER NOT NULL DEFAULT 0,
+        last_error   TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_pending_alerts_undelivered "
+    "ON pending_alerts(kind, channel_id) WHERE delivered_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS idx_pending_alerts_message "
+    "ON pending_alerts(kind, message_id) WHERE message_id IS NOT NULL",
 ]
 
 

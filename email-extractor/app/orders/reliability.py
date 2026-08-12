@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import logging
 
-from . import report
+from . import dl_alerts, dl_worker, report
 from .pipeline import ASK_THE_WAREHOUSE
 
 log = logging.getLogger("orders.reliability")
@@ -100,11 +100,19 @@ def provenance_stats_for_day(conn, day: str = "") -> dict:
 DL_ASK_THE_WAREHOUSE = ("unmatched", "llm_borderline", "llm_sure_lexical_gap")
 
 
-def dl_provenance_stats_for_day(conn, day: str = "") -> dict:
+def dl_provenance_stats_for_day(conn, day: str = "",
+                               include_current_health: bool = True) -> dict:
     """The DL mirror of `provenance_stats_for_day` — `kind='dl'` runs/items ONLY, plus
     two message/document-level `email_events` counts `order_items` has no row for at
     all: W7's duplicate-skip visibility and the spec §4 announced-vs-attached mismatch
-    (both `dl_report.log_duplicate`/`log_announced_mismatch`, #204)."""
+    (both `dl_report.log_duplicate`/`log_announced_mismatch`, #204).
+
+    `include_current_health` (#239, deep-review finding on this ticket's own PR):
+    `dl_current_health`'s three gauges are current-STATE, not day-scoped — calling this
+    function once for "today" and once for "yesterday" (as `/api/orders/dl/stats` does)
+    would otherwise run the SAME three queries twice for the identical answer. Set
+    `False` for a caller that already has (or doesn't need) that section — the "today"
+    call keeps the default so every pre-existing caller/test is unaffected."""
     row = conn.execute(
         """SELECT count(*),
                   count(*) FILTER (WHERE i.rule = 'llm_sure'),
@@ -136,9 +144,54 @@ def dl_provenance_stats_for_day(conn, day: str = "") -> dict:
         (day,)).fetchone()
     dup_n, mismatch_n = (int(x or 0) for x in events_row)
 
-    return {"day": day or _today(conn), "runs": runs_n, "errors": errors_n,
-           "items": items_n, "deterministic": det_n, "llm": llm_n, "review": review_n,
-           "duplicates": dup_n, "announced_mismatch": mismatch_n}
+    stats = {"day": day or _today(conn), "runs": runs_n, "errors": errors_n,
+            "items": items_n, "deterministic": det_n, "llm": llm_n, "review": review_n,
+            "duplicates": dup_n, "announced_mismatch": mismatch_n}
+    if include_current_health:
+        stats.update(dl_current_health(conn))
+    return stats
+
+
+def dl_current_health(conn) -> dict:
+    """#239: three CURRENT-STATE gauges (deliberately NOT day-scoped — a stuck backlog
+    matters regardless of which day it originated on) so every one of #239's five
+    invisible-failure classes is queryable/visible on the DL nástenka's own stats strip
+    (`/api/orders/dl/stats`) and the daily Odoo digest, not just alerted into the
+    channel:
+
+    - `quarantined` (class 1) — DL messages that exhausted all 5 claim attempts and are
+      never picked up again. The hourly n8n "Stuck message watchdog" already alerts
+      this class into the Odoo channel (attempts>=3) — this is the dashboard half of
+      requirement 1, which that channel-only alert does not cover on its own.
+    - `pending_alerts` (classes 2/3) — rows `dl_alerts` has enqueued but not yet
+      delivered (an upload failure, or a stuck-classified finding). A nonzero count
+      here for more than a sweep or two means Odoo delivery itself is struggling, which
+      is exactly the "alert-delivery failure must itself be visible" requirement.
+    - `open_import_incidents` (classes 4/5) — currently-open `import_alert_incidents`
+      for the DESADV ledger (`confirm.py`), the same ground truth that module's own
+      sweep already uses to decide whether to keep reminding.
+
+    Deep-review finding on this ticket's own PR: the quarantine threshold (5 attempts)
+    used to be a bare literal duplicated across THREE places (this query,
+    `dl_worker.MAX_ATTEMPTS`, and the digest's own Slovak wording) with nothing keeping
+    them in sync. Reading `dl_worker.MAX_ATTEMPTS`/`dl_worker.CATEGORY` directly (no
+    import cycle — `dl_worker` never imports `reliability`, confirmed by tracing its
+    whole dependency chain) collapses it to ONE source of truth; `quarantine_threshold`
+    is carried in the returned dict so `report.build_daily_digest` can interpolate the
+    real number into its own text instead of hardcoding it a second time.
+    """
+    quarantined_row = conn.execute(
+        """SELECT count(*) FROM messages
+            WHERE category = %s AND processed = false
+              AND coalesce(attempts,0) >= %s""",
+        (dl_worker.CATEGORY, dl_worker.MAX_ATTEMPTS)).fetchone()
+    incidents_row = conn.execute(
+        """SELECT count(*) FROM import_alert_incidents
+            WHERE closed_at IS NULL AND source = 'desadv'""").fetchone()
+    return {"quarantined": int(quarantined_row[0] or 0),
+           "quarantine_threshold": dl_worker.MAX_ATTEMPTS,
+           "pending_alerts": dl_alerts.pending_count(conn),
+           "open_import_incidents": int(incidents_row[0] or 0)}
 
 
 def days_since_incident(conn) -> int | None:

@@ -1341,9 +1341,14 @@ def create_app(cfg) -> Flask:
         from .orders import reliability
         with _db() as c:
             today = reliability.dl_provenance_stats_for_day(c)
+            # #239 deep-review finding: the three current-health gauges are NOT
+            # day-scoped — the JS badge only ever reads them off `today` (see
+            # ASK_DL_HTML's loadStats()), so recomputing the identical three queries
+            # for "yesterday" would be pure waste.
             yesterday = reliability.dl_provenance_stats_for_day(
                 c, c.execute(
-                    "SELECT to_char(now() - interval '1 day', 'YYYY-MM-DD')").fetchone()[0])
+                    "SELECT to_char(now() - interval '1 day', 'YYYY-MM-DD')").fetchone()[0],
+                include_current_health=False)
         return jsonify(today=today, yesterday=yesterday)
 
     @app.get("/api/imap-failures")
@@ -2207,9 +2212,14 @@ ASK_DL_HTML = (_ASK_HTML_TEMPLATE
               .replace("__STATS_SCRIPT__", r"""
 async function loadStats(){try{const d=await api('/api/orders/dl/stats');
   const t=d.today||{},y=d.yesterday||{};
-  document.getElementById('dlStats').textContent=
-    'dnes: '+(t.runs||0)+' spracovaných, '+(t.duplicates||0)+' duplicít, '+
-    (t.announced_mismatch||0)+' nezhôd · včera: '+(y.runs||0)+' spracovaných'}
+  let s='dnes: '+(t.runs||0)+' spracovaných, '+(t.duplicates||0)+' duplicít, '+
+    (t.announced_mismatch||0)+' nezhôd · včera: '+(y.runs||0)+' spracovaných';
+  // #239: three current-state gauges — only shown when non-zero, same "mention
+  // problems, stay quiet otherwise" discipline as the counts above.
+  if(t.quarantined) s+=' · '+t.quarantined+' zaseknutých';
+  if(t.pending_alerts) s+=' · '+t.pending_alerts+' čaká na odoslanie';
+  if(t.open_import_incidents) s+=' · '+t.open_import_incidents+' problém(ov) s importom';
+  document.getElementById('dlStats').textContent=s}
   catch(e){}}
 loadStats();setInterval(loadStats,30000);"""))
 
