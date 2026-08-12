@@ -238,6 +238,10 @@ def test_orders_digest_happy_path_returns_todays_and_yesterdays_provenance_stats
     assert body["today"]["items"] == 1
     assert body["today"]["llm"] == 1
     assert body["today"]["errors"] == 0
+    # exercises reliability.py's subtraction-based bucketing (det_n = items_n - llm_n -
+    # review_n) directly, not just implied by items/llm above (review-caught, PR #276).
+    assert body["today"]["deterministic"] == 0
+    assert body["today"]["review"] == 0
     assert body["yesterday"]["runs"] == 0
 
     # a real, live-computed value (never a hand-maintained constant) — the seeded
