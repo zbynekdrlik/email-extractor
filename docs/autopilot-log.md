@@ -2298,3 +2298,59 @@ class 4 delegated to its own ticket) stay open on #239 with evidence.
 Both changes were written from the MAIN session, deliberately and logged: no subagent capacity
 was available (weekly account limit, resets Aug 17) and the duplicate-upload hazard was live in
 production ahead of the warehouse morning import.
+
+## 2026-08-12 — #239 reopened, findings 1-7 (v0.9.73)
+
+Six independent-review findings against the merged #239 PR (the critical auto-retry-duplicate-
+upload bug was already fixed and deployed as v0.9.71/72, unaffected here), plus the playbook
+lesson (finding 7).
+
+**Finding 1 (flood shape):** `dl_alerts.flush_pending()` gets `quiet_seconds` (default 0,
+unchanged for existing callers) — a `(channel_id, kind)` group only posts once its newest row is
+older than the window, so a burst of same-kind alerts always lands as ONE grouped post regardless
+of loop timing. `worker.run_forever` passes `FLUSH_QUIET_SECONDS=30`. RED `979064b` → GREEN
+`34a3caa`.
+
+**Finding 2 (wrong channel):** `report.build_daily_digest()` drops its `dl_stats` param (orders-
+only again); new `report.build_dl_digest()` is a standalone DL-only message (`""` on a quiet day).
+`reliability.maybe_post_daily_digest()` posts both separately — DL routed to
+`delivery_notes_channel_id`, skipped (never a fallback to 152) when unset. RED `0d857ff` → GREEN
+`ed91a5d`.
+
+**Finding 3 (dedup defeated by reprocess):** `dl_alerts.already_pending()` changes from a
+PERMANENT dedup to a bounded `window_hours` (default `DEDUP_WINDOW_HOURS=4`, mirrors
+`confirm.py`'s own `DEFAULT_REMINDER_HOURS`) — a message that stays stuck past the window (via
+reprocess or just persisting) gets alerted again. Part of RED `979064b` → GREEN `34a3caa`.
+
+**Finding 4 (unbounded growth):** `dl_alerts.prune_delivered()` (new) removes DELIVERED rows past
+`DELIVERED_RETENTION_DAYS=30`, never touching undelivered ones; `flush_pending()` only selects
+rows under `MAX_FLUSH_ATTEMPTS=200` — a row past the cap stops being actively retried but stays
+counted in `pending_count()`. Same RED/GREEN pair as finding 1/3.
+
+**Finding 5 (weak dashboard visibility):** the three current-state gauges move off the small
+`#dlStats` header strip into a new, visually prominent `#dlAlertBanner` (yellow, own lines per
+class, hidden on a quiet day). RED `431b96e` → GREEN `136f44c`.
+
+**Finding 6 (safe retry infrastructure, deliberately PARTIAL):** `upload.put()` now writes to a
+temp name and `sftp.rename()`s to the final name only after the write succeeds, with best-effort
+temp-file cleanup on EITHER failure point (write or rename — a review finding fixed the rename
+half, which an earlier draft missed). `desadv_edi.stable_prefix()`/`already_landed()` prove
+presence/absence by document IDENTITY (buyer/supplier EAN + doc number), never by filename,
+tolerant of the `Z-` wire prefix and Communicator's own extra rename-job `Z-` (tightened by review
+to match `confirm.py`'s exact one-extra-`Z-` tolerance, not unbounded). Deliberately NOT wired
+into `dl_worker._process_document`'s auto-retry — see the design comment on #239 for why (a
+structural refactor of the exact function that caused the original incident deserves its own
+focused PR). RED `7c84bad`/`be2435d` → GREEN `4f921cc`/`d75a048`, review-fix `5be2baf`.
+
+**Finding 7 (playbook):** new section in `.claude/rules/n8n-workflow-edits.md` — never auto-retry
+an upload whose failure could have left bytes on the target without BOTH a temp-write+rename and
+a stable-identity absence proof.
+
+Deep review (fresh-context `general-purpose` subagent, full diff `e677149..HEAD`): 0 🔴, 1 🟡, 2
+🔵 on the finding-6 primitives (rename-failure cleanup gap, an over-permissive `Z-`-stripping loop
+that didn't actually match its own docstring's claimed parity with `confirm.py`, and an
+undocumented 10-char-truncation identity-collision caveat). All three fixed in `5be2baf` with new
+tests. Full local suite green throughout (`pytest tests/ -q --cov=app --cov-fail-under=85` →
+93.77%, all tests passing).
+
+Version bumped 0.9.72 → 0.9.73.
