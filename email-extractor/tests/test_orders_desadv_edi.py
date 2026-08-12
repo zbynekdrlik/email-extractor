@@ -276,6 +276,82 @@ def test_upload_name_adds_the_z_prefix():
     assert desadv_edi.upload_name("DESADV_x.txt") == "Z-DESADV_x.txt"
 
 
+# --- #239 finding 6: stable identity + presence proof --------------------------
+
+def test_stable_prefix_is_a_true_prefix_of_filename():
+    prefix = desadv_edi.stable_prefix("2000000000864", "P26036931")
+    name = desadv_edi.filename("2000000000864", "04.08.2026", "P26036931",
+                               stamp="123456789")
+    assert name.startswith(prefix)
+    assert prefix == "DESADV_000864_P26036931_"
+
+
+def test_stable_prefix_is_identical_across_retries_with_different_timestamps():
+    """The whole point: two filenames built for the SAME document at different times
+    must share the same stable prefix, even though the full filenames differ."""
+    p1 = desadv_edi.stable_prefix("2000000000864", "P26036931")
+    n1 = desadv_edi.filename("2000000000864", "04.08.2026", "P26036931", stamp="111111111")
+    n2 = desadv_edi.filename("2000000000864", "05.08.2026", "P26036931", stamp="222222222")
+    assert n1 != n2
+    assert n1.startswith(p1) and n2.startswith(p1)
+
+
+def test_already_landed_is_false_when_nothing_matches():
+    dirs = {"in_DL": {"Z-DESADV_999999_OTHER_20260804_000000000.txt"},
+           "archCodex": set(), "unconfirmed": set()}
+    assert desadv_edi.already_landed(dirs, "2000000000864", "P26036931") is False
+
+
+def test_already_landed_matches_the_wire_prefixed_name_in_in_dl():
+    name = desadv_edi.upload_name(
+        desadv_edi.filename("2000000000864", "04.08.2026", "P26036931",
+                            stamp="123456789"))
+    dirs = {"in_DL": {name}, "archCodex": set(), "unconfirmed": set()}
+    assert desadv_edi.already_landed(dirs, "2000000000864", "P26036931") is True
+
+
+def test_already_landed_matches_archcodex_even_with_a_different_attempt_timestamp():
+    """This is the whole reason a filename check would be wrong — a RETRY builds a
+    DIFFERENT filename, so only a stable-prefix match can prove the earlier attempt's
+    document already landed."""
+    earlier_attempt = desadv_edi.upload_name(
+        desadv_edi.filename("2000000000864", "04.08.2026", "P26036931",
+                            stamp="111111111"))
+    dirs = {"in_DL": set(), "archCodex": {earlier_attempt}, "unconfirmed": set()}
+    assert desadv_edi.already_landed(dirs, "2000000000864", "P26036931") is True
+
+
+def test_already_landed_matches_archcodex_with_the_tolerant_extra_z_rename():
+    """confirm.py's own `_decide()` tolerates an EXTRA Z- from Communicator's separate
+    rename job — already_landed() must be equally tolerant."""
+    name = desadv_edi.filename("2000000000864", "04.08.2026", "P26036931",
+                               stamp="111111111")
+    dirs = {"in_DL": set(), "archCodex": {f"Z-Z-{name}"}, "unconfirmed": set()}
+    assert desadv_edi.already_landed(dirs, "2000000000864", "P26036931") is True
+
+
+def test_already_landed_true_for_unconfirmed_too_the_upload_still_happened():
+    """A file in `unconfirmed` means CODEX rejected the IMPORT — but the UPLOAD itself
+    still succeeded, so retrying now would still duplicate the upload."""
+    name = desadv_edi.upload_name(
+        desadv_edi.filename("2000000000864", "04.08.2026", "P26036931",
+                            stamp="111111111"))
+    dirs = {"in_DL": set(), "archCodex": set(), "unconfirmed": {name}}
+    assert desadv_edi.already_landed(dirs, "2000000000864", "P26036931") is True
+
+
+def test_already_landed_never_matches_a_different_documents_prefix():
+    name = desadv_edi.upload_name(
+        desadv_edi.filename("2000000000864", "04.08.2026", "P99999999", stamp="1"))
+    dirs = {"in_DL": {name}, "archCodex": set(), "unconfirmed": set()}
+    assert desadv_edi.already_landed(dirs, "2000000000864", "P26036931") is False
+
+
+def test_already_landed_handles_a_missing_or_empty_dirs_dict():
+    assert desadv_edi.already_landed({}, "2000000000864", "P26036931") is False
+    assert desadv_edi.already_landed(None, "2000000000864", "P26036931") is False
+
+
 def test_generate_doc_number_uses_first_word_of_supplier_ascii_folded():
     doc = desadv_edi._generate_doc_number("Čerešňový mlyn s.r.o.")
     assert doc.startswith("DL-CERESNOV-")          # 8-char cap: "Čerešňový" -> "CERESNOV"
