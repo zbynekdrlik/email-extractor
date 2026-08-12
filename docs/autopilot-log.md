@@ -2276,3 +2276,25 @@ poplachov.
 Playbook: `.claude/rules/n8n-workflow-edits.md` už dokumentuje `confirm.py`'s
 carryover model — žiadna nová sekcia potrebná; tento ticket len POTVRDZUJE, že
 mechanizmus funguje správne od 2026-08-09 a prečo staršie incidenty naň neplatia.
+
+## 2026-08-12 — #247 + #239 (v0.9.71)
+
+**#247 — DL pipeline died on a decorative attachment.** Salvaged from a worker that hit the
+weekly account limit before pushing: root cause live-verified (all 13 stored attachments from
+the reporting supplier are the identical 2472-byte 150x76px signature logo, already classified
+ by `app/extract.py` at ingest), fix filters those out before extraction so
+they never reach the vision fallback. RED 2671eaa -> GREEN 7baeb9d.
+
+**#239 reopened — the auto-retry it added could duplicate a delivery in ORION.** Independent
+verification of PR #256 refuted its own comment ("the claim was released so a retry can safely
+re-upload without a duplicate"): releasing the claim is what removes the protection. Removed the
+single `_check_retry` call in the upload except block; the durable alert stays. RED a68612e ->
+GREEN 9b59edd, with the obsolete retry-asserting test dropped in its own commit 802bd00.
+
+Five further verification findings (per-file alert flood shape, reprocess-button dedup hole,
+digest posting to the orders channel instead of the DL channel, unbounded `pending_alerts`,
+class 4 delegated to its own ticket) stay open on #239 with evidence.
+
+Both changes were written from the MAIN session, deliberately and logged: no subagent capacity
+was available (weekly account limit, resets Aug 17) and the duplicate-upload hazard was live in
+production ahead of the warehouse morning import.

@@ -1519,3 +1519,45 @@ intentional there for cards it was tuned against.
   across a SQL query, the constant itself, and a digest's own Slovak wording) to one
   source of truth — check the target module's dependency chain the same way before
   assuming a needed cross-module import would cycle.
+- **`dl_extract.py` has NO image-vs-PDF distinction of its own — a raw image attachment
+  with no `machine_text` silently gets treated as "a digital PDF with no text" and its
+  bytes are sent to OpenAI labelled as a PDF file (#247, live incident: HK LOAN's every
+  stored attachment is the identical 2472-byte/150×76px signature logo).** `is_scanned()`
+  only classifies based on embedded-JPEG byte scanning of what it assumes are PDF bytes;
+  for a genuinely tiny/decorative image attachment (already correctly flagged
+  `method='skipped'` by `app/extract.py`'s OWN ingest-time classification —
+  `MIN_IMG_BYTES`/`MIN_IMG_PIXELS`/`BANNER_ASPECT` in `extract.py`), `is_scanned()` returns
+  `False` (well under the 20kB scan threshold) and `extract_attachment()` falls into the
+  `elif not machine_text.strip():` vision-fallback branch, calling
+  `client.vision_call(vision_prompt(), pdf_bytes=pdf_bytes)` with the raw image bytes
+  wrapped as `file_data: data:application/pdf;base64,...` (`llm.py`) — OpenAI rejects this
+  with a 400 `"The uploaded file could not be processed"`. Since this happens PER
+  ATTACHMENT (never per message), a message whose ONLY attachment is decorative never
+  produces a document, so `_process_document` (where supplier lookup runs) is never even
+  called — reads exactly like "the pipeline crashed before reaching the supplier lookup."
+  **Fix belongs in `dl_worker._process_message`, never in `dl_extract.py`** — that module's
+  own docstring explicitly delegates "attachment selection" to the worker and is
+  deliberately DB-free/standalone; duplicating `extract.py`'s decorative-image thresholds
+  there would create a SECOND, parallel "is this decorative" decision. `_read_attachments()`
+  already threads the ingest-time `method` column through each attachment dict (added
+  earlier for the `#238` synthetic-missing-document check, `skip_idxs` at the bottom of
+  `_process_message`) — it just wasn't being used to filter BEFORE extraction. The actual
+  fix: build `usable_attachments = [a for a in attachments if (a.get("method") or "") !=
+  "skipped"]` and pass THAT to `dl_extract.extract_email`, never the raw `attachments` list
+  (which stays unfiltered for the pre-existing `skip_idxs` check, unaffected). Any FUTURE
+  attachment-shaped bug in the DL vision-routing path should check FIRST whether
+  `app/extract.py`'s ingest-time classification (`method`/`flag` columns) already answers
+  the question, before adding new decision logic in `dl_extract.py` or `dl_worker.py`.
+- **A DL eval-corpus case (`dl_evaluate._decode_attachment`) structurally CANNOT exercise
+  the `method='skipped'` filter above (#247)** — it never sets a `method` key at all
+  (`{"idx", "filename", "pdf_bytes", "machine_text"}` only), and the corpus's own
+  documented design (`--- A DL eval-corpus case NEVER needs a real scanned image ---`
+  earlier in this file) means every case supplies non-empty `machine_text`, which never
+  reaches the vision-fallback branch anyway. Regression coverage for this class of bug
+  belongs in `tests/test_dl_worker.py` (unit-level, drives `dl_worker.tick()` directly
+  with a `method='skipped'` fixture row) — do NOT try to force this into the DL corpus.
+  `match_incidents` (the `reliability.days_since_incident()` trust-metric table) was
+  ALSO deliberately not extended for this ticket — its own seeded rows/docstring scope
+  it to matching-CORRECTNESS incidents (wrong catalog card picked), not general
+  crash/extraction bugs; conflating the two would make "days since a wrong AI match"
+  silently report an unrelated crash fix instead.
