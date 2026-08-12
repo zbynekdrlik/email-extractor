@@ -2566,3 +2566,47 @@ LOAN item-matching confirmed live, new HK LOAN multi-message gap found)
   here. All 3 questions confirmed still `status=open`/`answered_at=null` via
   `/api/orders/questions` — nothing was resolved as a side effect.
 - Run card fired for #237 (`v0.9.76`).
+
+## 2026-08-12 — #248 (PR #274, v0.9.76 → v0.9.77)
+
+- **Bug**: two truly-simultaneous "add new customer/supplier" requests for the SAME
+  not-yet-existing EAN with a DIFFERENT street/city both silently inserted a row —
+  `upsert_customer`/`upsert_dl_supplier`'s advisory lock (`pg_advisory_xact_lock`,
+  keyed on `ean_edi` alone) correctly serialized the two calls, but the reclaim SELECT
+  under it was scoped narrower (`AND street/city = %s`), so the second caller's own
+  check never saw the first's already-committed row and fell through to INSERT anyway.
+- Commits: `fbcaf7d` (version bump), `356ef93` (2 module-level + 2 migration RED
+  tests), `bbe6dcb` (GREEN: widened reclaim SELECT to `ean_edi` alone, new
+  `DuplicateEan` exception, guarded `#151/#153`-style migration adding a partial
+  unique index on both `customer_overrides`/`dl_supplier_overrides`), `347d72b`
+  (review-fix: blank-EAN index exclusion + `override_id`-edit branch collision
+  handling), `3e95cbf` (HTTP-level test coverage for all four new `DuplicateEan` 409
+  paths).
+- **Two independent fresh-context review passes** (never the built-in review skill):
+  first found 2 real gaps (🔴 blank-`ean_edi` duplicate would crash the new unique
+  index at boot — Postgres treats `''` as an ordinary equal value, unlike NULL; 🟡 the
+  `override_id`-edit branch had no collision handling at all, so the new index turned
+  a pre-existing silent-duplicate bug into an uncaught 500) — both fixed same PR.
+  Second pass: 0 🔴 0 blocking 🟡, one 🟡 (zero HTTP-level test coverage for the 4 new
+  `except DuplicateEan` blocks) fixed with 4 new tests; two 🔵 informational notes, one
+  filed as a tracked follow-up (`#275`, `needs-decision` — should EAN uniqueness ever
+  extend to sheet-linked override edits too? Explicitly out of #248's scope).
+- **Live-DB pre-check** (before writing the migration): 0 duplicate `ean_edi` groups
+  in either table; `customer_overrides` had 2 hand-added rows total but BOTH already
+  `retired` since 2026-08-02 (old autopilot verification rows) — corrected a
+  mis-stated "2 active" in the design comment via a follow-up issue comment; actual
+  active-hand-added count was 0 for customers, 1 for dl_supplier, confirmed again
+  post-deploy.
+- Deployed + verified live: `/health` → `{"ok":true,"version":"0.9.77"}`; dashboard
+  DOM shows `v0.9.77` (Playwright, 0 console errors); container logs show a clean
+  boot with the migration's own log lines and no crash loop; both
+  `idx_customer_overrides_new_ean`/`idx_dl_supplier_overrides_new_ean` confirmed
+  present live via `pg_indexes`, WHERE clause includes the blank-EAN exclusion.
+  **Functional**: exercised the actual collision path live via `/api/znalosti/clients`
+  — added two verification customers (`AUTOPILOT #248 verifikacia A/B - zmazat`, same
+  naming convention as the pre-existing retired verification rows), attempted to edit
+  B's EAN onto A's via a different street, got the exact clean 409 (`existing` dict
+  correct, neither row corrupted), then retired both immediately (active-hand-added
+  count back to 0, matching pre-verification state). Confirmed `order_questions.id=35`
+  (HK LOAN) still `open`/`answered_at=null` throughout — never touched.
+- Run card fired for #248 (`v0.9.77`).
