@@ -185,3 +185,23 @@ actually redirects to `/login` first as proof the session is genuinely clean.
   After any restart, check `SELECT id,message_id FROM order_runs WHERE status='running'
   AND started_at < now() - interval '10 minutes';` and delete stale shadow rows
   (`shadow=true`) — a live-engine stale row needs investigation, not blind deletion.
+- **The dashboard's own `/api/messages?q=<text>&limit=N` (session-cookie-gated) is a much
+  lighter post-deploy functional-verification path than the SSH→docker exec→psql chain
+  for a simple lookup** (#258) — once logged in via Playwright (`dash_password`, see
+  above), `page.evaluate(() => fetch('/api/messages?q=...', {credentials:'include'}))`
+  returns real live JSON (`proc_status`/`proc_outcome`/`last_event_at`/etc.) with zero
+  quoting gymnastics, and doubles as a real UI-adjacent check (same code path the
+  dashboard itself uses) instead of a raw table read. Reach for the multi-layer psql
+  chain only when you need something the dashboard API doesn't expose (raw
+  `email_events` rows, `desadv_sent`, schema introspection).
+- **Reprocessing a single already-reviewed (never-shipped) message as a genuine
+  functional post-deploy check, THEN reading back via `email_events` (not just
+  `messages.proc_outcome`), is what actually proves a review-reason WORDING change
+  landed** (#258) — `messages.proc_outcome` only ever shows the LATEST rollup summary
+  (`"N dokument(y): Nx review"`, generic regardless of which exact code path produced
+  it); the real, distinguishing text only lives in `email_events.outcome` for that
+  specific event. `SELECT e.stage, e.status, e.outcome, e.ts FROM email_events e JOIN
+  messages m ON m.message_id = e.message_id WHERE m.id = <id> ORDER BY e.ts DESC LIMIT
+  5` — read the newest row's exact wording, don't trust the summary column alone to
+  distinguish "the new code path ran" from "the old one did, coincidentally producing a
+  similarly-shaped summary".
