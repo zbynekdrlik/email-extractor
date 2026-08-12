@@ -21,7 +21,6 @@ Tri testy nižšie (zachytené proti HEAD `bd9e28e` na `dev`, docs-only commit n
 Toto sú CHARAKTERIZAČNÉ testy — pinujú SÚČASNÉ chovanie ako základňu na porovnanie po
 každom kroku presunu, nie regresný RED->GREEN pár (žiadna produkčná zmena v tomto PR).
 """
-import datetime
 import hashlib
 import os
 
@@ -200,7 +199,15 @@ def test_html_template_constants_match_their_pre_split_checksum():
 def _seed_todays_run(pg):
     """One order_runs + order_items row dated TODAY (the endpoint computes "today" via
     SQL now(), so this must use now() too, not a fixed date string like
-    test_orders_reliability.py's `_run` helper uses)."""
+    test_orders_reliability.py's `_run` helper uses).
+
+    #277: `match_incidents.occurred_on` is seeded via SQL `CURRENT_DATE - 3`, NEVER
+    Python `datetime.date.today()` — the endpoint (`reliability.days_since_incident()`)
+    computes the day-delta entirely in SQL against Postgres's own `now()::date`, and the
+    test container runs `TimeZone=Etc/UTC`. A Python-local seed disagrees with Postgres
+    UTC for ~2h/night on a non-UTC host (00:00-02:00 CEST) once the local date rolls
+    over before the UTC one does — this is the exact bug #277 fixed; keep the seed on
+    Postgres's own clock so it never regresses."""
     rid = int(pg.execute(
         "INSERT INTO order_runs (message_id, shadow, status, started_at, finished_at, "
         "result) VALUES ('char-test-msg', false, 'ok', now(), now(), %s) RETURNING id",
@@ -209,8 +216,7 @@ def _seed_todays_run(pg):
               (rid,))
     pg.execute(
         "INSERT INTO match_incidents (occurred_on, description, issue_ref) "
-        "VALUES (%s, 'characterization test seed', '#268-char-test')",
-        (str(datetime.date.today() - datetime.timedelta(days=3)),))
+        "VALUES (CURRENT_DATE - 3, 'characterization test seed', '#268-char-test')")
 
 
 def test_orders_digest_happy_path_returns_todays_and_yesterdays_provenance_stats(pg):
