@@ -277,6 +277,89 @@ def test_two_concurrent_brand_new_customer_adds_for_the_same_ean_produce_one_row
     ).fetchone() == (1,), "two concurrent brand-new-customer adds must leave ONE row"
 
 
+def test_two_concurrent_new_customer_adds_for_the_same_ean_with_different_street_produce_one_row(pg):
+    """#248: the actual bug — the test above races two IDENTICAL submissions (same
+    street), which only proves the idempotent-retry path is safe. Here the two racing
+    submissions carry the SAME brand-new EAN but a DIFFERENT street, i.e. two genuinely
+    different customers colliding on one EAN — exactly what the ticket reports
+    (`customer.resolve` sees len(owners) > 1 and the order gets stuck, or worse, a stale
+    duplicate wins). Before the fix, `upsert_customer`'s reclaim SELECT was scoped
+    `AND street = %s` — one notch narrower than the advisory lock above it (keyed on
+    `ean_edi` alone) — so the two calls were serialized by the lock, but the SECOND
+    caller's own reclaim SELECT never saw the FIRST caller's already-committed row
+    (different street ⇒ no match) and fell through to INSERT: two rows sharing one EAN,
+    with no error raised at all. Exactly ONE row must survive, and the loser must be
+    told about the conflict (not silently succeed)."""
+    import threading
+
+    import psycopg
+
+    barrier = threading.Barrier(2)
+    errors = []
+
+    def add(name, street):
+        conn = psycopg.connect(PG_DSN)
+        try:
+            barrier.wait(timeout=5)
+            snapshot.upsert_customer(
+                conn, override_id=None, orig_ean_edi=None, orig_street=None,
+                ean_edi="7000000000901", name=name, emails=["race2@x.sk"],
+                city="Košice", street=street, zip_="")
+            conn.commit()
+        except Exception as e:  # pragma: no cover - surfaced via `errors` below
+            errors.append(e)
+        finally:
+            conn.close()
+
+    t1 = threading.Thread(target=add, args=("Pretekár Košice", "Ulica A 1"))
+    t2 = threading.Thread(target=add, args=("Pretekár Prešov", "Ulica B 2"))
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+
+    assert pg.execute(
+        "SELECT count(*) FROM customer_overrides WHERE ean_edi='7000000000901'"
+    ).fetchone() == (1,), (
+        "two concurrent new-customer adds with different streets must leave ONE row, "
+        "not two duplicate customers sharing an EAN")
+    assert len(errors) == 1, (
+        f"exactly one of the two conflicting submissions must be refused, got: {errors}")
+    assert isinstance(errors[0], snapshot.DuplicateEan), (
+        f"the refused submission must raise DuplicateEan, not silently fail: {errors[0]!r}")
+
+
+def test_editing_an_already_overridden_customer_by_override_id_into_a_colliding_ean_raises(pg):
+    """#248 review finding: the `override_id is not None` branch (editing an
+    already-overridden row by its own id — the /znalosti admin dashboard's second edit
+    of the same row) had NO uniqueness check of its own at all before this fix; it
+    would have silently retargeted the row's EAN onto another active customer's EAN,
+    creating the exact same #248 duplicate-EAN bug from a different screen. Now the
+    partial unique index (db.py) turns that into `DuplicateEan`, not a duplicate row
+    and not a raw crash."""
+    a_id = snapshot.upsert_customer(
+        pg, override_id=None, orig_ean_edi=None, orig_street=None,
+        ean_edi="7100000000001", name="Zákazník A", emails=["a@x.sk"],
+        city="Košice", street="Ulica A", zip_="")
+    b_id = snapshot.upsert_customer(
+        pg, override_id=None, orig_ean_edi=None, orig_street=None,
+        ean_edi="7100000000002", name="Zákazník B", emails=["b@x.sk"],
+        city="Prešov", street="Ulica B", zip_="")
+
+    with pytest.raises(snapshot.DuplicateEan) as exc_info:
+        snapshot.upsert_customer(
+            pg, override_id=b_id, orig_ean_edi=None, orig_street=None,
+            ean_edi="7100000000001",  # A's EAN, but B's own (different) street
+            name="Zákazník B premenovaný", emails=["b2@x.sk"],
+            city="Prešov", street="Ulica B", zip_="")
+    assert exc_info.value.existing["override_id"] == a_id
+
+    # Neither row was corrupted by the failed edit.
+    rows = {r["ean_edi"]: r["name"] for r in snapshot.customers_for_management(pg)}
+    assert rows["7100000000001"] == "Zákazník A"
+    assert rows["7100000000002"] == "Zákazník B"
+
+
 def test_customer_override_can_add_a_brand_new_customer(pg):
     snapshot.upsert_customer(
         pg, override_id=None, orig_ean_edi=None, orig_street=None,

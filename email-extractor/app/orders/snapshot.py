@@ -20,6 +20,8 @@ import io
 import logging
 import re
 
+import psycopg
+
 log = logging.getLogger("orders.snapshot")
 
 _EMAIL_RE = re.compile(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}")
@@ -33,6 +35,25 @@ class InvalidCustomer(Exception):
     """A customer write with no usable EAN kód EDI (#234) — without it `edi.build` can
     never produce a real ORION document for that customer, so the write is refused rather
     than silently accepted and forgotten."""
+
+
+class DuplicateEan(Exception):
+    """#248: raised by `upsert_customer`/`dl_snapshot.upsert_dl_supplier` when a
+    brand-new (`orig_ean_edi IS NULL`) write's `ean_edi` collides with an already-ACTIVE
+    hand-added row for a genuinely DIFFERENT logical entry (a different street/city) —
+    two truly-simultaneous "add a new customer/supplier" submissions for the same
+    not-yet-existing EAN. See `upsert_customer`'s own docstring for the full race trace:
+    the advisory lock serializes the two callers, but that alone is not the fix — this
+    exception is raised by the LOSER once it observes, inside the lock, that the winner
+    already claimed this EAN under different data. `existing` carries the SAME shape
+    httpapi.py's own outer pre-check already builds for the sequential 409, so the loser
+    gets the identical, warehouse-readable error either way — just reliably now instead
+    of racily."""
+
+    def __init__(self, ean_edi: str, existing: dict):
+        self.ean_edi = ean_edi
+        self.existing = existing
+        super().__init__(f"EAN {ean_edi} už existuje ({existing.get('name', '')}).")
 
 
 _EAN_STRIP_RE = re.compile(r"[\s\-]")
@@ -399,6 +420,22 @@ def customers_for_management(conn) -> list[dict]:
     return _merge_customers(base, _load_customer_overrides(conn))
 
 
+def _active_customer_conflict(conn, ean_edi: str) -> dict | None:
+    """#248 review finding: the SAME lookup was duplicated three times (the reclaim
+    check, the fresh-insert UniqueViolation backstop, and the override-id-edit
+    UniqueViolation backstop below) — factored out so all three build the identical
+    `DuplicateEan.existing` shape."""
+    hit = conn.execute(
+        """SELECT id, name, street FROM customer_overrides
+            WHERE orig_ean_edi IS NULL AND ean_edi = %s AND NOT retired""",
+        (ean_edi,)).fetchone()
+    if not hit:
+        return None
+    hit_id, hit_name, hit_street = hit
+    return {"ean_edi": ean_edi, "name": hit_name, "street": hit_street,
+            "override_id": hit_id}
+
+
 def upsert_customer(conn, *, override_id: int | None, orig_ean_edi: str | None,
                      orig_street: str | None, ean_edi: str, name: str,
                      emails: list[str], city: str, street: str, zip_: str) -> int:
@@ -412,12 +449,27 @@ def upsert_customer(conn, *, override_id: int | None, orig_ean_edi: str | None,
     the single place the EAN can never again be silently forgotten."""
     ean_edi = normalize_ean(ean_edi)
     if override_id is not None:
-        row = conn.execute(
-            """UPDATE customer_overrides
-                  SET ean_edi=%s, name=%s, emails=%s, city=%s, street=%s, zip=%s,
-                      retired=false, updated_at=now()
-                WHERE id=%s RETURNING id""",
-            (ean_edi, name, emails, city, street, zip_, override_id)).fetchone()
+        # #248 review finding: this branch (editing an ALREADY-overridden row by its
+        # own id, e.g. from the /znalosti admin dashboard) had NO uniqueness check of
+        # its own at all — retargeting an existing override's EAN to collide with a
+        # DIFFERENT active row used to silently create a duplicate (the same #248 bug
+        # class, just reached from a different screen). The new partial unique index
+        # (db.py) now makes that raise `UniqueViolation` instead of silently
+        # duplicating — caught here and turned into the same clean `DuplicateEan` every
+        # other collision path in this module raises.
+        try:
+            with conn.transaction():
+                row = conn.execute(
+                    """UPDATE customer_overrides
+                          SET ean_edi=%s, name=%s, emails=%s, city=%s, street=%s, zip=%s,
+                              retired=false, updated_at=now()
+                        WHERE id=%s RETURNING id""",
+                    (ean_edi, name, emails, city, street, zip_, override_id)).fetchone()
+        except psycopg.errors.UniqueViolation:
+            raise DuplicateEan(
+                ean_edi, _active_customer_conflict(conn, ean_edi) or
+                {"ean_edi": ean_edi, "name": "", "street": "", "override_id": None}
+            ) from None
         if not row:
             raise KeyError(f"no such override id {override_id}")
         return int(row[0])
@@ -441,28 +493,53 @@ def upsert_customer(conn, *, override_id: int | None, orig_ean_edi: str | None,
         # nests as a SAVEPOINT; the lock is still held until the REAL enclosing
         # transaction commits, so it stays effective) or is autocommit (opens + commits
         # its own transaction here).
+        #
+        # #248 fix: the RECLAIM check above was itself scoped one notch too narrow —
+        # `AND street = %s` — while the LOCK it runs under is keyed on `ean_edi` ALONE.
+        # Two truly-simultaneous submissions of the SAME brand-new EAN under DIFFERENT
+        # street values were fully serialized by the lock (one genuinely waits for the
+        # other), but each one's own reclaim SELECT never saw the OTHER's row, because
+        # the street differed — so the second caller fell through to INSERT and produced
+        # a second row for one EAN anyway. Fixed by widening the reclaim SELECT to match
+        # the lock's own key (`ean_edi` alone): an active row is now found regardless of
+        # street, and the two outcomes are told apart explicitly — the SAME street means
+        # this is a genuine retry (double-click, retry sweep) and reclaims idempotently;
+        # a DIFFERENT street means a second, conflicting submission and raises
+        # `DuplicateEan` instead of silently corrupting the first submitter's row. The
+        # `except psycopg.errors.UniqueViolation` below is a DB-level backstop for the
+        # partial unique index added in #248's migration (db.py) — belt-and-suspenders
+        # for any future write path that forgets to take this lock, converting what
+        # would otherwise be a raw constraint-violation crash into the same clean
+        # `DuplicateEan` the app-level check above already raises.
         with conn.transaction():
             conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (ean_edi,))
-            existing = conn.execute(
-                """SELECT id FROM customer_overrides
-                    WHERE orig_ean_edi IS NULL AND ean_edi = %s AND street = %s
-                      AND NOT retired""",
-                (ean_edi, street)).fetchone()
-            if existing:
+            conflict = _active_customer_conflict(conn, ean_edi)
+            if conflict:
+                if conflict["street"] != street:
+                    raise DuplicateEan(ean_edi, conflict)
                 row = conn.execute(
                     """UPDATE customer_overrides
                           SET name=%s, emails=%s, city=%s, street=%s, zip=%s,
                               retired=false, updated_at=now()
                         WHERE id=%s RETURNING id""",
-                    (name, emails, city, street, zip_, existing[0])).fetchone()
+                    (name, emails, city, street, zip_,
+                     conflict["override_id"])).fetchone()
                 return int(row[0])
-            row = conn.execute(
-                """INSERT INTO customer_overrides
-                       (orig_ean_edi, orig_street, ean_edi, name, emails, city, street,
-                        zip, retired, updated_at)
-                   VALUES (NULL,%s,%s,%s,%s,%s,%s,%s,false,now())
-                   RETURNING id""",
-                (orig_street, ean_edi, name, emails, city, street, zip_)).fetchone()
+            try:
+                with conn.transaction():
+                    row = conn.execute(
+                        """INSERT INTO customer_overrides
+                               (orig_ean_edi, orig_street, ean_edi, name, emails, city,
+                                street, zip, retired, updated_at)
+                           VALUES (NULL,%s,%s,%s,%s,%s,%s,%s,false,now())
+                           RETURNING id""",
+                        (orig_street, ean_edi, name, emails, city, street,
+                         zip_)).fetchone()
+            except psycopg.errors.UniqueViolation:
+                raise DuplicateEan(
+                    ean_edi, _active_customer_conflict(conn, ean_edi) or
+                    {"ean_edi": ean_edi, "name": "", "street": "", "override_id": None}
+                ) from None
             return int(row[0])
     row = conn.execute(
         """INSERT INTO customer_overrides
