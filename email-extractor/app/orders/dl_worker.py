@@ -541,7 +541,17 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
 
     header = {"customerName": supplier_decision.name,
              "customerEanEdi": supplier_decision.ean_edi}
-    extraction = {"docNumber": doc_number, "deliveryDate": delivery_date}
+    # #262: an informal delivery announcement (mail body text, no printed document)
+    # extracts with NO docNumber at all — synthesize a STABLE identity here, keyed on
+    # the message itself, BEFORE build() ever sees an empty docNumber. This is the
+    # ONLY call site build() has, so its own `extraction_doc_number or
+    # _generate_doc_number(...)` wall-clock fallback (R83) is never reached from the
+    # live worker any more — see `desadv_edi.generate_stable_doc_number()`'s own
+    # docstring for why a wall-clock value is unsafe here (a stale-claim reclaim or
+    # an R17 retry would change the desadv_sent dedup key on every attempt).
+    stable_doc_number = doc_number or desadv_edi.generate_stable_doc_number(
+        message["message_id"])
+    extraction = {"docNumber": stable_doc_number, "deliveryDate": delivery_date}
     built = desadv_edi.build(header, extraction, matched_items, catalog)
 
     if not built.can_create:

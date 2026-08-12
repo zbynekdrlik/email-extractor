@@ -44,6 +44,7 @@ usually stripped from the matched catalog name), `quantity`, `unit`, `unitPrice`
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import unicodedata
@@ -348,6 +349,46 @@ def generate(data: dict, sklad_by_gtin: dict, cena_by_gtin: dict) -> Desadv:
 
 
 # --- naming (R89) ----------------------------------------------------------
+
+def generate_stable_doc_number(message_id: str) -> str:
+    """#262: a STABLE fallback identity for a document whose extraction found NO
+    doc number at all and never will (an informal delivery announcement written
+    directly in a mail's body text — no printed document to carry a number) — keyed
+    on the ORIGINATING MESSAGE, never wall-clock time, so every reprocessing attempt
+    of the SAME message (a stale-claim reclaim, R10; an R17 transient retry; a
+    quarantine attempt) produces the IDENTICAL string.
+
+    `_generate_doc_number()` below (R83's byte-for-byte port of the production
+    `generateDocNumber()`) is wall-clock-based BY DESIGN — it stays exactly that way,
+    unchanged, for parity — and is deliberately NOT reused here: a document with no
+    real doc number has NOTHING but `desadv_sent`'s (supplier_ean, doc_number) row to
+    protect it from a duplicate ORION upload (`desadv.claim_send_or_identify()`), so
+    a fallback whose VALUE changes between retries would defeat that protection
+    outright — the exact class of bug #239 fixed one layer up, for the upload-retry
+    path itself; this is the identical fix one layer earlier, deciding the
+    document's identity before the first claim attempt is even made. Callers with a
+    genuine extracted doc number never reach this function — `build()`'s own
+    `extraction_doc_number or ...` fallback wins first, and the caller (`dl_worker.
+    _process_document`) only reaches THIS function when extraction produced none.
+
+    Prefixed `AVIZO` ("avízo" = a delivery advice note in Slovak logistics usage,
+    matching how #262's own ticket already names this class of mail) — unmistakably
+    synthetic, never confusable with a real printed doc number's shape (plain digits,
+    or an LT-prefixed code, per R47). The numeric suffix is guaranteed non-empty
+    (`build()`'s own `re.sub(r"[^0-9]", "", doc_number)` needs real digits — ORION/
+    EDITEL parses the EDI HDR field as a NUMBER; an all-non-digit fallback would fall
+    back to the raw string and risk the exact import crash R83 exists to prevent).
+
+    NOT a general substitute for `_generate_doc_number()`: it protects every RETRY of
+    ONE message, never a genuine resend of the same physical delivery under a
+    DIFFERENT message — there is no printed number to recognize that case by, so a
+    supplier's own resend of a numberless announcement is (correctly) accepted as a
+    new document, same as a warehouse worker reading two separate emails with no
+    doc number to compare would do."""
+    digest = hashlib.sha256((message_id or "").encode("utf-8", "surrogatepass")).hexdigest()
+    numeric = str(int(digest[:16], 16))[-10:].zfill(10)
+    return f"AVIZO{numeric}"
+
 
 def _generate_doc_number(customer_name: str) -> str:
     """R83's fallback when extraction found no docNumber at all:

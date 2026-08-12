@@ -645,6 +645,28 @@ def test_extraction_prompt_is_non_empty_slovak_text():
     assert "documents" in text or "dodac" in text.lower()
 
 
+def test_extraction_prompt_recognizes_an_informal_body_text_announcement_fixes_262():
+    """#262: the prompt must explicitly teach the model that an informal delivery
+    announcement in mail body text (no printed doc — no docNumber/price/VAT/table)
+    is STILL a valid delivery note when supplier+goods+quantity are clear. A silent
+    regression here (someone trims this section back out) would resurrect the exact
+    HK LOAN gap this ticket closes with zero test signal, since the corpus's own
+    `--live` gate only runs on-demand, never in offline pytest CI."""
+    text = dl_extract.extract_prompt().lower()
+    assert "avizác" in text or "avízo" in text
+    assert "docnumber" in text and '""' in text  # explicitly allows an empty docNumber
+
+
+def test_extraction_prompt_excludes_price_lists_and_orders_fixes_262():
+    """The other half of #262's own risk: the widened prompt must not start treating an
+    ordinary cenník/objednávka/faktúra mail as a delivery note just because it mentions
+    products/quantities/prices."""
+    text = dl_extract.extract_prompt().lower()
+    assert "cenník" in text or "cennik" in text
+    assert "objednávka" in text or "objednavka" in text
+    assert "faktúra" in text or "faktura" in text
+
+
 def test_vision_prompt_is_non_empty():
     text = dl_extract.vision_prompt()
     assert len(text) > 50
