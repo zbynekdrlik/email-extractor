@@ -205,14 +205,22 @@ def days_since_incident(conn) -> int | None:
 
 
 def maybe_post_daily_digest(conn, cfg, post=None, shadow: bool = False) -> bool:
-    """Post the ONE digest for the day that JUST finished — claimed once per calendar
+    """Post the digest(s) for the day that JUST finished — claimed once per calendar
     day, safe to call on every tick. Never in shadow mode: shadow's whole guarantee is
     that nothing observable leaves the process. Never raises: a notification failure
     must never break the worker loop (mirrors `pipeline._post_summary`/
-    `worker._check_spend_cap`)."""
+    `worker._check_spend_cap`).
+
+    **#239 reopened, finding 2: TWO independent posts, not one.** The orders digest
+    always goes to `orders_channel_id` (unchanged). The DL digest — when there was
+    anything to report — goes to `delivery_notes_channel_id` ONLY; an unset channel
+    just skips it (logged), never a silent fallback to the orders channel (that was
+    exactly the bug: every DL notice used to land with the wrong audience).
+    """
     if shadow:
         return False
-    post = post or (lambda c, html, **kw: report.post_from_config(c, html))
+    post = post or (lambda c, html, **kw: report.post_from_config(
+        c, html, channel_id=kw.get("channel_id")))
     yesterday = _yesterday(conn)
     claimed = conn.execute(
         "INSERT INTO order_digest_sent (day) VALUES (%s) ON CONFLICT (day) DO NOTHING "
@@ -220,13 +228,25 @@ def maybe_post_daily_digest(conn, cfg, post=None, shadow: bool = False) -> bool:
     if not claimed:
         return False
     stats = provenance_stats_for_day(conn, yesterday)
-    dl_stats = dl_provenance_stats_for_day(conn, yesterday)
     html = report.build_daily_digest(stats, days_since_incident(conn),
-                                     link=report.sklad_link(cfg), dl_stats=dl_stats)
+                                     link=report.sklad_link(cfg))
     try:
         post(cfg, html)
     except Exception:
         log.exception("posting the daily provenance digest failed")
+
+    dl_stats = dl_provenance_stats_for_day(conn, yesterday)
+    dl_html = report.build_dl_digest(dl_stats, link=report.dl_sklad_link(cfg))
+    if dl_html:
+        dl_channel = int(getattr(cfg, "delivery_notes_channel_id", 0) or 0)
+        if dl_channel:
+            try:
+                post(cfg, dl_html, channel_id=dl_channel)
+            except Exception:
+                log.exception("posting the daily DL digest failed")
+        else:
+            log.warning("delivery_notes_channel_id is unset — the daily DL digest "
+                       "was not posted")
     return True
 
 

@@ -197,10 +197,9 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
     return "".join(parts)
 
 
-def build_daily_digest(stats: dict, days_since_incident: int | None, link: str = "",
-                       dl_stats: dict | None = None) -> str:
-    """The ONE daily match-provenance digest (#196) — the warehouse's measurable basis
-    for trust, posted through the same Odoo channel as the other order notifications.
+def build_daily_digest(stats: dict, days_since_incident: int | None, link: str = "") -> str:
+    """The daily AI-ORDERS match-provenance digest (#196) — the warehouse's measurable
+    basis for trust, posted through `orders_channel_id` (the sales channel).
 
     `stats` is `reliability.provenance_stats_for_day`'s return shape: per-day counts of
     processed e-mails/orders/lines, bucketed by how each line was decided
@@ -208,12 +207,14 @@ def build_daily_digest(stats: dict, days_since_incident: int | None, link: str =
     `days_since_incident` is `None` (rendered honestly, never a fake "0 days") when no
     incident has ever been recorded yet.
 
-    `dl_stats` (#204, DL migration F5) is `reliability.dl_provenance_stats_for_day`'s
-    return shape (same fields, plus `duplicates`/`announced_mismatch`) — an OPTIONAL
-    second section, rendered only when there was any DL activity that day (runs,
-    duplicates, or an announced-vs-attached mismatch). Omitted/empty keeps this
-    function's output byte-identical to before #204, so every pre-existing caller and
-    test is unaffected.
+    **#239 reopened, finding 2: this function used to ALSO embed an optional DL
+    section (a `dl_stats` parameter, #204).** `maybe_post_daily_digest` posted the
+    WHOLE combined message to `orders_channel_id` (152) — so every delivery-notes
+    notice landed with the sales audience instead of the warehouse's own
+    `delivery_notes_channel_id` (243), the exact complaint #229 already raised once for
+    a different DL message. `build_dl_digest()` is now the DL section's own standalone
+    function, built and posted independently so the caller can route it to the correct
+    channel — this function stays orders-only and never mentions DL at all.
     """
     day = escape(str(stats.get("day", "")))
     runs = int(stats.get("runs") or 0)
@@ -252,74 +253,91 @@ def build_daily_digest(stats: dict, days_since_incident: int | None, link: str =
                      _plural(days_since_incident, "deň", "dni", "dní") +
                      " od posledného potvrdeného incidentu.</p>")
 
-    # #204 (DL migration F5): a second, optional section — only when there was any DL
-    # activity that day (a genuinely quiet DL day renders nothing extra, same "errors
-    # are only mentioned when there are any" discipline the orders section above uses).
+    if link:
+        parts.append(f'<p>&#128203; Nástenka: '
+                     f'<a href="{escape(link)}">{escape(link)}</a></p>')
+    return "".join(parts)
+
+
+def build_dl_digest(dl_stats: dict | None, link: str = "") -> str:
+    """The daily DELIVERY-NOTES digest — #239 finding 2 (reopened): a STANDALONE
+    message, separate from `build_daily_digest()` above, so the caller
+    (`reliability.maybe_post_daily_digest`) can post it to `delivery_notes_channel_id`
+    (243, the warehouse's own channel) instead of `orders_channel_id` (152, sales) —
+    the two audiences must never be mixed into one post again.
+
+    `dl_stats` is `reliability.dl_provenance_stats_for_day`'s return shape (same fields
+    as `provenance_stats_for_day`, plus `duplicates`/`announced_mismatch` and the three
+    #239 current-state gauges: `quarantined`/`pending_alerts`/`open_import_incidents`).
+
+    Returns `""` on a genuinely quiet day (no runs, no duplicates/mismatch, and none of
+    the three current-state gauges nonzero) — a day with zero NEW activity but an
+    EXISTING stuck backlog must still render something (that is exactly the silent-
+    backlog failure #239 exists to prevent), so the trigger checks all six fields, not
+    just `runs`. The caller decides what an empty result means (skip posting) — this
+    function's only job is deciding whether there is anything to say.
+    """
     dl = dl_stats or {}
     dl_runs = int(dl.get("runs") or 0)
     dl_dups = int(dl.get("duplicates") or 0)
     dl_mismatch = int(dl.get("announced_mismatch") or 0)
-    # #239: three CURRENT-STATE gauges (`reliability.dl_current_health`) — a day with
-    # zero NEW activity but an EXISTING stuck backlog must still be mentioned (that is
-    # exactly the silent-backlog failure this ticket exists to prevent), so these widen
-    # the trigger below rather than only decorating an already-active DL section.
     dl_quarantined = int(dl.get("quarantined") or 0)
-    # Deep-review finding on this ticket's own PR: the "5 attempts" number used to be
-    # hardcoded here too (a THIRD copy of `dl_worker.MAX_ATTEMPTS`, after the DB query
-    # and the constant itself) — read it from the stats dict `reliability.
-    # dl_current_health` now carries it in, falling back to 5 only for an old caller/
-    # test that predates this field (never actually diverges from the real constant in
-    # production, since `dl_current_health` is the only real producer of `dl_stats`).
-    dl_quarantine_threshold = int(dl.get("quarantine_threshold") or 5)
     dl_pending_alerts = int(dl.get("pending_alerts") or 0)
     dl_open_import = int(dl.get("open_import_incidents") or 0)
-    if (dl_runs or dl_dups or dl_mismatch or dl_quarantined or dl_pending_alerts
-            or dl_open_import):
-        dl_items = int(dl.get("items") or 0)
-        dl_day = escape(str(dl.get("day") or stats.get("day", "")))
-        parts.append(f"<p><b>Dodacie listy &mdash; {dl_day}</b></p>")
-        head = f"{dl_runs} " + _plural(dl_runs, "spracovaná správa", "spracované správy",
-                                       "spracovaných správ")
-        if dl_items:
-            head += f", {dl_items} " + _plural(dl_items, "položka", "položky", "položiek")
-        parts.append(f"<p>{head}</p>")
-        dl_errors = int(dl.get("errors") or 0)
-        if dl_errors:
-            parts.append(f"<p>&#128721; {dl_errors} " +
-                         _plural(dl_errors, "zlyhanie", "zlyhania", "zlyhaní") + "</p>")
-        if dl_dups:
-            parts.append(f"<p>&#128257; {dl_dups} " +
-                         _plural(dl_dups, "duplicitný dodací list preskočený",
-                                 "duplicitné dodacie listy preskočené",
-                                 "duplicitných dodacích listov preskočených") + "</p>")
-        if dl_mismatch:
-            parts.append(f"<p>&#9888;&#65039; {dl_mismatch} " +
-                         _plural(dl_mismatch, "e-mail ohlásil dodací list, ktorý neprišiel",
-                                 "e-maily ohlásili dodací list, ktorý neprišiel",
-                                 "e-mailov ohlásilo dodací list, ktorý neprišiel") + "</p>")
-        if dl_quarantined:
-            parts.append(f"<p>&#128683; {dl_quarantined} " +
-                         _plural(dl_quarantined,
-                                 f"dodací list sa po {dl_quarantine_threshold} pokusoch "
-                                 "vzdal spracovania",
-                                 f"dodacie listy sa po {dl_quarantine_threshold} "
-                                 "pokusoch vzdali spracovania",
-                                 f"dodacích listov sa po {dl_quarantine_threshold} "
-                                 "pokusoch vzdalo spracovania") +
-                         " &mdash; skontroluj v dashboarde.</p>")
-        if dl_pending_alerts:
-            parts.append(f"<p>&#128276; {dl_pending_alerts} " +
-                         _plural(dl_pending_alerts, "upozornenie stále čaká na odoslanie",
-                                 "upozornenia stále čakajú na odoslanie",
-                                 "upozornení stále čaká na odoslanie") + ".</p>")
-        if dl_open_import:
-            parts.append(f"<p>&#128230; {dl_open_import} " +
-                         _plural(dl_open_import,
-                                 "otvorený problém s importom dodacieho listu do ORIONu",
-                                 "otvorené problémy s importom dodacích listov do ORIONu",
-                                 "otvorených problémov s importom dodacích listov do "
-                                 "ORIONu") + ".</p>")
+    if not (dl_runs or dl_dups or dl_mismatch or dl_quarantined or dl_pending_alerts
+           or dl_open_import):
+        return ""
 
+    # The "5 attempts" number is read from the stats dict (`reliability.
+    # dl_current_health` carries it as `quarantine_threshold`) rather than hardcoded a
+    # fourth time here — falls back to 5 only for an old caller/test that predates the
+    # field (never diverges from the real constant in production).
+    dl_quarantine_threshold = int(dl.get("quarantine_threshold") or 5)
+    dl_items = int(dl.get("items") or 0)
+    dl_errors = int(dl.get("errors") or 0)
+    dl_day = escape(str(dl.get("day", "")))
+
+    parts = [f"<p><b>Denný prehľad dodacích listov &mdash; {dl_day}</b></p>"]
+    head = f"{dl_runs} " + _plural(dl_runs, "spracovaná správa", "spracované správy",
+                                   "spracovaných správ")
+    if dl_items:
+        head += f", {dl_items} " + _plural(dl_items, "položka", "položky", "položiek")
+    parts.append(f"<p>{head}</p>")
+    if dl_errors:
+        parts.append(f"<p>&#128721; {dl_errors} " +
+                     _plural(dl_errors, "zlyhanie", "zlyhania", "zlyhaní") + "</p>")
+    if dl_dups:
+        parts.append(f"<p>&#128257; {dl_dups} " +
+                     _plural(dl_dups, "duplicitný dodací list preskočený",
+                             "duplicitné dodacie listy preskočené",
+                             "duplicitných dodacích listov preskočených") + "</p>")
+    if dl_mismatch:
+        parts.append(f"<p>&#9888;&#65039; {dl_mismatch} " +
+                     _plural(dl_mismatch, "e-mail ohlásil dodací list, ktorý neprišiel",
+                             "e-maily ohlásili dodací list, ktorý neprišiel",
+                             "e-mailov ohlásilo dodací list, ktorý neprišiel") + "</p>")
+    if dl_quarantined:
+        parts.append(f"<p>&#128683; {dl_quarantined} " +
+                     _plural(dl_quarantined,
+                             f"dodací list sa po {dl_quarantine_threshold} pokusoch "
+                             "vzdal spracovania",
+                             f"dodacie listy sa po {dl_quarantine_threshold} "
+                             "pokusoch vzdali spracovania",
+                             f"dodacích listov sa po {dl_quarantine_threshold} "
+                             "pokusoch vzdalo spracovania") +
+                     " &mdash; skontroluj v dashboarde.</p>")
+    if dl_pending_alerts:
+        parts.append(f"<p>&#128276; {dl_pending_alerts} " +
+                     _plural(dl_pending_alerts, "upozornenie stále čaká na odoslanie",
+                             "upozornenia stále čakajú na odoslanie",
+                             "upozornení stále čaká na odoslanie") + ".</p>")
+    if dl_open_import:
+        parts.append(f"<p>&#128230; {dl_open_import} " +
+                     _plural(dl_open_import,
+                             "otvorený problém s importom dodacieho listu do ORIONu",
+                             "otvorené problémy s importom dodacích listov do ORIONu",
+                             "otvorených problémov s importom dodacích listov do "
+                             "ORIONu") + ".</p>")
     if link:
         parts.append(f'<p>&#128203; Nástenka: '
                      f'<a href="{escape(link)}">{escape(link)}</a></p>')
