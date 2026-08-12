@@ -194,3 +194,39 @@ encodes, while `archCodex`/`unconfirmed` stay unconditionally read from `in`'s b
 (`upload.list_dirs()`). If a NEW ORION upload target is ever added, verify its real
 directory structure live the same way — don't trust a design doc's prose description of
 folder layout without an SFTP listing, the conflict here was real.
+
+## Never auto-retry an upload whose failure could have left bytes on the target (#239)
+
+**Releasing a claim REMOVES the anti-duplicate protection — it does not make a retry
+safe.** PR #256 added an automatic retry of a failed ORION upload, reasoning "the claim
+was released, so a retry can safely re-upload without a duplicate" — backwards: the
+claim being released is EXACTLY what removes the protection. Live incident chain
+(`upload.py::put()` writes straight to the FINAL name with no temp-write + rename,
+`desadv_edi.py::filename()` stamps a fresh timestamp on every attempt so the retry's
+name can never collide with the first one, `desadv.py::release_send()` deletes the
+ledger row on failure, and `TRANSIENT_RE` treats `timed out` as safely retryable) meant
+a transfer whose BYTES landed but whose REPLY timed out got silently re-uploaded under
+a second filename — two copies of one delivery note in ORION, both taken in at the
+warehouse's next manual import. Fixed for real by removing the retry entirely
+(0.9.71), then (0.9.73, #239) by two structural pieces together:
+
+1. **A safe upload writes to a TEMPORARY name and renames to the final name only after
+   the write completes.** A single SFTP `rename()` is atomic on the same filesystem —
+   either it happened (final name present) or it didn't (only the temp name exists,
+   under a name nothing else recognizes). This makes "is the final name present"
+   trustworthy evidence of whether the transfer genuinely completed, regardless of
+   whether the CLIENT received a confirming response.
+2. **Presence must be checked by the document's STABLE IDENTITY (buyer/supplier EAN +
+   doc number), never by filename.** A filename embeds a fresh per-attempt timestamp,
+   so filename equality can never answer "did an EARLIER attempt already land this
+   document" — only the part of the name that stays constant across every retry does
+   (`desadv_edi.stable_prefix()`). Check that stable prefix against EVERY folder the
+   document could legitimately be sitting in (queued, imported, import-failed) — a
+   match in any of them means the upload already happened, whatever this attempt's own
+   response said.
+
+A safe automatic retry needs BOTH pieces together, checked immediately before deciding
+to retry — never one alone, and never "the claim was released" as a substitute for
+either. Any FUTURE upload-with-retry in this codebase (a different ORION target, a
+different external transfer) should default to this same shape from the start, rather
+than discovering the gap the expensive way.
