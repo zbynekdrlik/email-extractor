@@ -1151,6 +1151,25 @@ intentional there for cards it was tuned against.
   OWN captured log output for `DL attachment ... failed to extract` before assuming the
   worker logic itself is wrong — set `self.last_prompt_hash = ""` on the fake client and
   update it in `json_call` the same way the real `llm.Client` does.
+- **`dl_eval_run.py --live`'s `LLM_CACHE_DIR` MUST point at the SAME shared top-level
+  `$CORPUS/llm-cache/` the AI-orders `eval_run.py` uses — NEVER a separate `dl/
+  llm-cache/` subdirectory (#262, review-caught before merge).** The comment right
+  above the `e2e-dl` job in `.github/workflows/ci.yml` already says this
+  ("DL cases... SHARE the same `$CORPUS/llm-cache/`"), but it is easy to miss while
+  iterating and instead create a plausible-looking `~/eval-corpus/email-extractor/
+  dl/llm-cache/` next to the DL corpus's own `manifest.json`/`customers.csv` — CI
+  never reads that path, so a `--live` re-record written there passes locally and
+  then fails in CI with `CacheMiss` on every case (and, worse, a case whose EXPECTED
+  outcome happens to equal the CacheMiss-triggered fallback outcome — e.g. a negative
+  "must NOT be extracted" case expecting `review` — silently "passes" for the WRONG
+  reason, giving false confidence a prompt change is verified when it never actually
+  ran against the live model in that offline replay). Correct invocation:
+  `LLM_CACHE_DIR="/home/newlevel/eval-corpus/email-extractor/llm-cache"` (no `dl/` in
+  the path), same as the AI-orders recipe documented above. After any `--live` DL
+  corpus recording, sanity-check the shared cache didn't break the OTHER corpus by
+  re-running `eval_run.py --require-all` offline too — cheap (seconds) and catches a
+  genuine key collision, though none has ever been observed (content-addressed by
+  model+prompt+input hash).
 - **A DL eval-corpus case NEVER needs a real scanned image / vision call — supply
   non-empty `machine_text` with NO `pdf_bytes` and `dl_extract.extract_attachment`
   structurally cannot reach `vision_call`** (#205, DL migration F6). R42/W13's own

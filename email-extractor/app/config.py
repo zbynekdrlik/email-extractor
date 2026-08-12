@@ -141,6 +141,14 @@ class Config:
     # without a code change.
     static_digest_batch_size: int = 30
     static_digest_idle_minutes: int = 60
+    # #237: stale-question reminder sweep (app/orders/question_alerts.py). "Working
+    # days" = distinct Mon-Fri calendar dates the question has been open across,
+    # inclusive of both its creation date and today. First reminder at
+    # question_stale_working_days; ONE escalation at question_escalate_working_days,
+    # then silent until answered — see that module's own docstring + the #237 design
+    # comment for the full reasoning.
+    question_stale_working_days: int = 2
+    question_escalate_working_days: int = 4
 
     @classmethod
     def load(cls) -> Config:
@@ -249,4 +257,10 @@ class Config:
                 _get(o, "static_digest_batch_size", "STATIC_DIGEST_BATCH_SIZE", 30) or 30),
             static_digest_idle_minutes=int(
                 _get(o, "static_digest_idle_minutes", "STATIC_DIGEST_IDLE_MINUTES", 60) or 60),
+            question_stale_working_days=int(
+                _get(o, "question_stale_working_days", "QUESTION_STALE_WORKING_DAYS", 2)
+                or 2),
+            question_escalate_working_days=int(
+                _get(o, "question_escalate_working_days",
+                     "QUESTION_ESCALATE_WORKING_DAYS", 4) or 4),
         )

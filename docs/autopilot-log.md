@@ -2406,3 +2406,117 @@ Version bumped 0.9.72 → 0.9.73.
   isn't recognized yet, tracked in #262).
 - Run card fired for #258 (`v0.9.74`). Filed follow-up: **#262** (`dl_extract.md`
   prompt doesn't recognize an informal free-text delivery announcement).
+
+## 2026-08-12 — #262 (PR #264)
+
+- **#262** (DL prompt: recognize an informal delivery announcement in mail body text as
+  a valid dodací list, even with no docNumber/price/VAT). Root cause: `dl_extract.md`
+  was written entirely for a printed/scanned document — HK LOAN's real production text
+  (no doc number, no table, no price) got `documents: []` from gpt-5.4, reproduced fresh
+  in STEP 0 (own live `--live` call, same result as #258's own finding).
+- Two prompt sections added: "Neformálna avizácia" (recognize when BOTH delivery
+  vocabulary+date AND a concrete item are present; docNumber/price/VAT explicitly left
+  empty, never invented) and "Toto NIE JE dodací list" (explicit negative list — cenník,
+  objednávka/dopyt, faktúra, reklamácia, bežná správa — so the widened prompt cannot
+  start false-positiving on ordinary mail).
+- Second fix, explicitly required by the ticket itself: `desadv_edi.build()`'s existing
+  no-docNumber fallback (`_generate_doc_number`, wall-clock based, R83) is unsafe once
+  numberless documents become routine — a retry of the same message would get a
+  DIFFERENT synthesized identity and could double-upload to ORION. New
+  `desadv_edi.generate_stable_doc_number(message_id)` (sha256, deterministic, prefix
+  `AVIZO`) is synthesized in `dl_worker._process_document()` BEFORE `build()`, only when
+  extraction found no docNumber. `desadv.claim_send_or_identify()` itself untouched.
+- Commits: `ec96159` (bump 0.9.75), `947023c` (RED — 6 tests: `generate_stable_doc_number`
+  doesn't exist yet; `test_a_numberless_document_gets_a_stable_doc_number_so_a_retry_never_double_ships`
+  fails via a genuine wiring gap, mutation-verified by the review subagent), `5e41084`
+  (GREEN — prompt + stable-doc-number wiring + prompt content-lock tests).
+- STEP 0 + design comments posted on #262 BEFORE the first commit — **initially posted
+  with `gh api -f body=@file` (lowercase `-f`, which does NOT read `@file` — the literal
+  string landed as the comment body), caught by the deep-review subagent and fixed via
+  `gh api ... -X PATCH -F body=@file` (capital `-F`).** Lesson already existed in
+  `gh-cli-recipes.md` for `create`/`comment`; extend the same caution to raw `gh api -f`
+  vs `-F` — `-f` is ALWAYS a literal string, never a file reference.
+- Deep review: one fresh-context `general-purpose` subagent — 1 🔴 (critical, confirmed
+  + fixed), 1 🟡 (confirmed + fixed, see above), 2 🔵 (documented, not regressions).
+  🔴: the `--live` corpus re-record was written to `~/eval-corpus/email-extractor/dl/
+  llm-cache/` — but `.github/workflows/ci.yml`'s `e2e-dl` job reads the SHARED top-level
+  `$CORPUS/llm-cache/` (`orders-corpus.md`'s own documented convention — DL cases share
+  the AI-orders cache, this ticket's own worker missed it). 9/10 cases would have
+  `CacheMiss`'d in CI, and the new negative (price-list) case's "pass" was accidental
+  (CacheMiss produces the same outward review as a genuine rejection — the negative
+  proof was actually unverified). Fixed: re-ran `--live` against the correct shared
+  cache, verified offline `--require-all` (10/10, exit 0), updated baseline, deleted the
+  stray `dl/llm-cache/` dir, and sanity-checked the AI-orders (non-DL) corpus still
+  passes offline against the same shared cache (pre-existing `KNOWN DEFECT #120` cases
+  only, exit 0 — no collision from the new content-addressed entries).
+- **DL eval corpus**: 8 pre-existing cases unchanged; `hkloan_delivery_note_in_body_text_
+  no_attachment` updated from `review`/`documents:[]` to a full `ok` (added a synthetic
+  `HK LOAN Sp. z o.o.` customer row + a `Múka pšeničná typ 650` catalog row to the
+  corpus's own frozen `customers.csv`/`dl_catalog.csv`, mirroring the convention other
+  real-named-supplier cases already use) — proves the FULL pipeline (extraction → supplier
+  match → item match → EDI build), not just extraction alone. New negative case
+  `cennik_price_list_never_becomes_a_delivery_note` (synthetic price-list mail) proves the
+  widened prompt does NOT false-positive — genuinely verified against a real `--live` model
+  call after the cache-directory fix. 10/10 `--live` + 10/10 offline, baseline updated.
+- CI: `test`/`e2e-dl`/`e2e-orders`/`build` green on both `push` and `pull_request`
+  triggers. PR #264 merged `1099dbb`. Main CI green (`build` pushed
+  `ghcr.io/zbynekdrlik/email-extractor-amd64:0.9.75`).
+- Deployed + verified live: `/health` → `{"ok":true,"version":"0.9.75"}`; dashboard DOM
+  shows `v0.9.75` (Playwright, 0 console errors, confirmed via `browser_console_messages`);
+  **functional** — zero-write/zero-post shadow run of `dl_worker._process_message()`
+  inside the deployed container against the REAL production HK LOAN message
+  (`<TIN8T7$...@hkloan.eu>`, "Avizacia/17.7.2026/ G-P"): extraction now genuinely
+  recognizes the document (`documents` no longer empty) — the review reason changed from
+  the old "Nepodarilo sa rozpoznať žiadny dodací list v texte e-mailu" to "Názov,
+  e-mailová doména aj mesto sa nezhodujú so žiadnym z kandidátov" (a SEPARATE,
+  already-tracked #236 gap — HK LOAN is not yet a registered DL supplier in production;
+  confirmed via read-only SELECT against `dl_supplier_snapshot`, zero rows for hkloan).
+  `messages` row confirmed byte-identical before/after (`processed=true, attempts=1`,
+  unchanged) — shadow mode genuinely wrote nothing. Container's own deployed
+  `dl_extract.md`/`desadv_edi.py` grepped for the new content to rule out a stale image.
+  Finding posted as a comment on #236 (its own item #2 already tracked "HK LOAN never
+  registered" — this confirms the remaining blocker after #262 is purely that, not
+  extraction quality).
+- Run card fired for #262 (`v0.9.75`). No new follow-up filed — the one real discovery
+  (HK LOAN still not a registered DL supplier) was already #236's own tracked item #2;
+  posted fresh confirming evidence there instead of duplicating.
+
+## #236 — re-verification pass (no code change; FEAST + TLS/Great already shipped, HK
+LOAN item-matching confirmed live, new HK LOAN multi-message gap found)
+
+- Re-verified the CURRENT live DB state (never trusted prior comments' own claims,
+  one of which — FEAST question 26 timing — turned out stale vs the DB): FEAST s.r.o.
+  fully done (`dl_supplier_overrides id=2`, doc 20263245 `desadv_sent id=13
+  import_status=imported`, `order_questions id=26 status=answered`); TLS/Forbak fully
+  done (`dl_supplier_overrides id=3`, catalog `gtin=3605` renamed to weight-neutral
+  `"Great"`, both `VP20261501`/`VP20261598` `desadv_sent import_status=imported`, a
+  third attempt correctly recognized `duplicate`). Neither needed any new action.
+- **HK LOAN item-matching, explicitly requested by #262's own worker** ("Múka pšeničná
+  typ 650" only tested against the corpus copy, never live) — verified live via
+  `dl_worker._match_item()` called directly inside the deployed container against the
+  real `dl_snapshot.load_catalog()` (snapshot 9, 491 cards), `gpt-5.4`/`high`: matches
+  `gtin=1564` ("T 650 - chlebová múka"), confidence 0.98, rule `llm_sure`, lexical
+  guard did not fire. Works correctly against the live production catalog.
+  Supplier itself intentionally still unregistered (2026-08-11 user directive: the
+  sklad fills it in on her board, not the owner) — `order_questions id=35` open,
+  correctly worded, not a duplicate of any other open question.
+- **New finding, filed as #265 (`Scope-gate: needs-user-decision`)**: HK LOAN writes
+  delivery notes directly into mail body text (#258) and routinely sends a SHORT
+  follow-up "correction" mail restating only the changed line ("OPRAVA HMOTNOSTI" /
+  "zvyšok bez zmien") — the DL engine has NO cross-message memory anywhere, so
+  reprocessing that correction mail alone (verified live via a read-only
+  `dl_extract.extract_email()` call against its real text) extracts exactly ONE item,
+  silently dropping the other two items from the same physical delivery. Compounding:
+  `release_for_question()` only ever reprocesses the ONE message its `qid` is tied to
+  — `order_questions.id=35` is tied to that correction mail specifically, and 5 OLDER
+  HK LOAN delivery mails (verified: zero `order_questions` rows reference them) will
+  never auto-unstick even after the sklad answers question 35. Documented on `#236`
+  and playbook-recorded in `.claude/rules/n8n-workflow-edits.md` (new "mail-body-only
+  CORRECTION/AMENDMENT" section) so a future HK LOAN-shaped supplier hits a known gap,
+  not a fresh incident.
+- No code changed — this session was pure live-DB/live-catalog re-verification plus
+  one new investigation; `#265` intentionally left the actual fix undesigned (several
+  valid directions with real automation-vs-safety tradeoffs). No PR, no version bump,
+  no deploy. `#236` stays OPEN — still genuinely parked on the sklad answering
+  `order_questions.id=35`, now with the `#265` risk explicitly flagged for whoever
+  reviews that answer.

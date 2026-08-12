@@ -290,21 +290,34 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pra
                 # neither ledger ever gets a row for confirm.sweep to find there.
                 from . import confirm
                 confirm.sweep(conn, cfg)
-            if dl_python:
-                # #239 classes 2/3: a message classified `dodacie_listy` that never got
-                # a first attempt at all, and delivering any alert `dl_worker.py`
-                # enqueued (an upload failure, or this same sweep's own findings) —
-                # both gated on the live python engine, same discipline confirm.sweep
-                # above already uses (shadow/n8n modes never write to either table).
+                # #237: a board question (order_questions, either audience — item/
+                # customer/mail/date/line from the orders_python path, dl_item/
+                # dl_supplier from the dl_python path) that has sat open too long gets
+                # reminded/escalated here, grouped, via the SAME durable pending_alerts
+                # outbox flushed below. Gated the same way confirm.sweep is: shadow/n8n
+                # modes never write an order_questions row through either engine, so
+                # there is never anything for this to find there either.
+                from . import question_alerts
+                question_alerts.sweep(conn, cfg)
+                # #239 finding 4 / #237: deliver every durably-queued alert (DL
+                # processing-health AND, since #237, stale-question reminders) —
                 # `quiet_seconds=FLUSH_QUIET_SECONDS` (#239 reopened, finding 1) makes a
                 # burst of same-kind alerts land as ONE grouped Odoo post instead of one
                 # per row — see dl_alerts.py's own module docstring. `prune_delivered`
                 # (finding 4) bounds the table's growth; it is cheap and idempotent, so
                 # running it on the same tick as everything else needs no extra timer.
+                # Moved OUT of the dl_python-only gate (#237): a plain orders_python-only
+                # install (no DL engine) can now also have pending question_reminder/
+                # question_escalation rows that need flushing.
                 from . import dl_alerts
-                dl_worker.stuck_classified_sweep(conn, cfg)
                 dl_alerts.flush_pending(conn, cfg, quiet_seconds=dl_alerts.FLUSH_QUIET_SECONDS)
                 dl_alerts.prune_delivered(conn)
+            if dl_python:
+                # #239 classes 2/3: a message classified `dodacie_listy` that never got
+                # a first attempt at all — gated on the live DL python engine, same
+                # discipline confirm.sweep above already uses (shadow/n8n modes never
+                # write to messages the way this sweep's own query expects).
+                dl_worker.stuck_classified_sweep(conn, cfg)
             handled = tick(conn, cfg, pipeline=pipeline)
             handled = static_worker.tick(conn, cfg) or handled
             # #204: shadow ALSO needs a tick (it never claims, but it does need to be

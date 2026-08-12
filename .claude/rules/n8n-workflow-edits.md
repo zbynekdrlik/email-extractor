@@ -230,3 +230,75 @@ to retry — never one alone, and never "the claim was released" as a substitute
 either. Any FUTURE upload-with-retry in this codebase (a different ORION target, a
 different external transfer) should default to this same shape from the start, rather
 than discovering the gap the expensive way.
+
+## A SYNTHESIZED fallback identity feeding a claim/dedup key must be STABLE across retries too (#262)
+
+The same "stable identity" principle above applies one layer EARLIER than the upload
+itself: whatever VALUE gets fed into a claim/dedup key (here, `desadv_sent`'s
+`(supplier_ean, doc_number)`) must be identical every time the SAME logical work item
+is reprocessed — not just checked correctly at retry time. `desadv_edi.build()`'s
+existing no-docNumber fallback (`_generate_doc_number()`, R83) is wall-clock based
+(`datetime.now()` → MMDD-HHMM) — harmless while essentially unreached (a formal
+printed doc almost always HAS a number), but #262 made "extraction found no
+docNumber at all" the NORMAL case for an informal delivery announcement in mail body
+text. A stale-claim reclaim or a transient-failure retry recomputes `built.doc_number`
+fresh each time; a wall-clock fallback would hand `claim_send_or_identify()` a
+DIFFERENT key on each attempt, and a genuinely-already-shipped document would look
+brand new on retry — the exact double-upload risk the section above exists to
+prevent, just one decision earlier (choosing the document's IDENTITY, before the
+first claim attempt is even made). Fixed with `desadv_edi.generate_stable_doc_number
+(message_id)` — deterministic (sha256 of the originating message's own stable id),
+synthesized by the CALLER (`dl_worker._process_document`) before ever handing an
+empty docNumber to `build()`, so `build()`'s own wall-clock fallback is never reached
+from the live worker at all. Any FUTURE feature that needs to claim/dedup an entity
+with no natural stable identifier (no printed number, no external reference) should
+derive it from something that is ALREADY guaranteed stable per retry (a message id, a
+row id) — never from wall-clock time, a random value, or anything else that changes
+between attempts of the SAME logical item.
+
+## A supplier that sends a mail-body-only CORRECTION/AMENDMENT (#258 path) can silently
+ship an INCOMPLETE delivery — the DL engine has zero cross-message memory (#236, #265)
+
+`dl_extract.extract_email()`/`dl_worker._process_message()` extract a document from
+EXACTLY one message's own text (`_mail_body_only(combined_text)` for the #258 body-text
+path) — nothing anywhere correlates two DIFFERENT messages as "the same physical
+delivery". A supplier that follows the printed-document convention (one doc = one
+mail = one full doc) is fine; a supplier that writes the delivery straight into the
+mail body (HK LOAN, `gnip@hkloan.eu`) routinely sends a SHORT follow-up mail that only
+restates the CHANGED line and says "zvyšok bez zmien" ("rest unchanged") — e.g.
+"OPRAVA HMOTNOSTI" (subject) with `Múka pšeničná T650 = 15,88 ton (nie 17,74 ton)` and
+nothing else, correcting one line of an earlier 3-item mail. **Verified live** (read-only
+`dl_extract.extract_email()` call against the real correction mail's own text, no
+writes): the extraction returns exactly ONE item — the two items the correction never
+repeats are silently gone, and nothing detects it (no exception, no completeness
+warning — `#238`'s own missing-document check only catches an attachment that produced
+ZERO documents, not a document that produced FEWER items than the physical delivery
+actually had).
+
+**Compounding gap: `dl_worker.release_for_question()` reprocesses ONLY the ONE message
+its `qid` is tied to** — `teach.ask_dl_supplier()`/`ask_generic()`'s dedupe
+(`ON CONFLICT (customer_ean, item_key) WHERE status='open' DO NOTHING`) means only the
+FIRST successful `ask` call per sender wins a row; every later `dodacie_listy` message
+from that same still-unregistered sender is left `processed=true`/`proc_status=review`
+with **no `order_questions` row linked to it at all** — verified live: HK LOAN had 5
+such orphaned messages with zero tied questions, vs. exactly 1 (the newest) tied to the
+sklad's open `dl_supplier` question. None of the 5 will ever auto-unstick; only the one
+tied message reprocesses when the question is answered.
+
+**Diagnostic pattern used to prove both of these (reusable for any future "what would
+the engine actually DO with this text" question)**: `docker cp` a small script into the
+add-on container, run it with `PYTHONPATH=/app` — `dl_extract.extract_email(client,
+[{"machine_text": ..., "pdf_bytes": b""}])` for a pure extraction check, or
+`dl_worker._match_item(client, item, catalog, recalled=None, partner_name=...)` for a
+pure item-matching check against the REAL current `dl_snapshot.load_catalog()`. Both
+are read-only (no claim, no upload, no Odoo post) even though they make a real
+`gpt-5.4` call — safe to run against production data/catalog without any `shadow=`
+plumbing, since neither function touches the DB or an external system.
+
+Fix is intentionally NOT baked in ad-hoc — filed as `#265` (`Scope-gate:
+needs-user-decision`) with the proposed directions (force-review anything mail-body
+sourced whose subject looks like a correction; widen `release_for_question` to also
+re-check sibling same-sender stuck messages) since there are several valid designs with
+real automation-vs-safety tradeoffs. Any FUTURE mail-body-sourced-document engine
+(should this pattern extend to another supplier) should assume the SAME two gaps exist
+until `#265` actually ships a fix.

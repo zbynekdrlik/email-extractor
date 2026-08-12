@@ -202,7 +202,8 @@ def undo(conn, qid: int) -> dict:
         conn.execute(
             """UPDATE order_questions
                   SET status = 'open', answer_gtin = NULL, answer_card = NULL,
-                      answered_by = NULL, answered_at = NULL
+                      answered_by = NULL, answered_at = NULL, reminder_sent_at = NULL,
+                      escalated_at = NULL
                 WHERE id = %s""", (qid,))
         log.warning("customer teaching taken back for question %s (%s)", qid,
                     (q.get("context") or {}).get("sender_email", ""))
@@ -214,7 +215,8 @@ def undo(conn, qid: int) -> dict:
     conn.execute(
         """UPDATE order_questions
               SET status = 'open', answer_gtin = NULL, answer_card = NULL,
-                  answered_by = NULL, answered_at = NULL
+                  answered_by = NULL, answered_at = NULL, reminder_sent_at = NULL,
+                  escalated_at = NULL
             WHERE id = %s""", (qid,))
     log.warning("teaching taken back for %r (%s)", q["wording"], q["customer_ean"])
     return get(conn, qid) or {}
@@ -581,7 +583,8 @@ def _undo_mail(conn, q: dict) -> dict:
     conn.execute("DELETE FROM mail_rules WHERE question_id = %s", (q["id"],))
     conn.execute(
         """UPDATE order_questions
-              SET status = 'open', answer = NULL, answered_by = NULL, answered_at = NULL
+              SET status = 'open', answer = NULL, answered_by = NULL, answered_at = NULL,
+                  reminder_sent_at = NULL, escalated_at = NULL
             WHERE id = %s""", (q["id"],))
     return get(conn, q["id"]) or {}
 
@@ -612,7 +615,8 @@ def _apply_date(conn, cfg, q: dict, choice: str, by: str) -> dict:
 def _undo_date(conn, q: dict) -> dict:
     conn.execute(
         """UPDATE order_questions
-              SET status = 'open', answer = NULL, answered_by = NULL, answered_at = NULL
+              SET status = 'open', answer = NULL, answered_by = NULL, answered_at = NULL,
+                  reminder_sent_at = NULL, escalated_at = NULL
             WHERE id = %s""", (q["id"],))
     return get(conn, q["id"]) or {}
 
@@ -649,7 +653,8 @@ def _apply_line(conn, cfg, q: dict, choice: str, by: str) -> dict:
 def _undo_line(conn, q: dict) -> dict:
     conn.execute(
         """UPDATE order_questions
-              SET status = 'open', answer = NULL, answered_by = NULL, answered_at = NULL
+              SET status = 'open', answer = NULL, answered_by = NULL, answered_at = NULL,
+                  reminder_sent_at = NULL, escalated_at = NULL
             WHERE id = %s""", (q["id"],))
     return get(conn, q["id"]) or {}
 
@@ -775,7 +780,8 @@ def _undo_dl_item(conn, q: dict) -> dict:
             q.get("wording", ""))))
     conn.execute(
         """UPDATE order_questions
-              SET status = 'open', answer = NULL, answered_by = NULL, answered_at = NULL
+              SET status = 'open', answer = NULL, answered_by = NULL, answered_at = NULL,
+                  reminder_sent_at = NULL, escalated_at = NULL
             WHERE id = %s""", (q["id"],))
     return get(conn, q["id"]) or {}
 
@@ -840,7 +846,8 @@ def _undo_dl_supplier(conn, q: dict) -> dict:
     dl_supplier_memory.forget(conn, payload.get("sender_email", ""))
     conn.execute(
         """UPDATE order_questions
-              SET status = 'open', answer = NULL, answered_by = NULL, answered_at = NULL
+              SET status = 'open', answer = NULL, answered_by = NULL, answered_at = NULL,
+                  reminder_sent_at = NULL, escalated_at = NULL
             WHERE id = %s""", (q["id"],))
     return get(conn, q["id"]) or {}
 

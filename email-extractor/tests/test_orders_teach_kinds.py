@@ -48,6 +48,54 @@ def test_only_item_is_deadline_shippable():
         assert teach.KINDS[name].deadline_shippable is False, name
 
 
+def _ask_one_of_each_kind(pg):
+    """One real question per kind, via each kind's own `ask_*` helper (#237 review
+    finding) — a dict {kind_name: qid}."""
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('mkX', 'ai_orders')")
+    return {
+        "item": teach.ask(pg, message_id="mkX", customer_ean="2000000000001",
+                          customer_name="Zákazník A", wording="Šiška", quantity=1,
+                          unit="ks", candidates=[{"gtin": "SLI50", "name": "Šiška 50g"}]),
+        "customer": teach.ask_customer(pg, message_id="mkX", sender_email="a@b.sk",
+                                       candidates=[], delivery_date="04.08.2026",
+                                       context={}),
+        "mail": teach.ask_mail(pg, message_id="mkX", sender_email="c@d.sk",
+                               subject="Objednávka"),
+        "date": teach.ask_date(pg, message_id="mkX", dates=["04.08.2026"], reason="r"),
+        "line": teach.ask_line(pg, message_id="mkX", wording="záhadná položka",
+                               quantity=1, unit="ks", reason="r"),
+        "dl_item": teach.ask_dl_item(pg, message_id="mkX", supplier_ean="9000000000001",
+                                     supplier_name="Dodávateľ X", wording="Great",
+                                     quantity=1, unit="ks", candidates=[]),
+        "dl_supplier": teach.ask_dl_supplier(pg, message_id="mkX",
+                                             sender_email="e@f.sk", candidates=[]),
+    }
+
+
+def test_undo_clears_the_reminder_cadence_for_every_kind(pg):
+    """#237 deep-review finding: `undo()` reopens a question but, before this fix, left
+    `reminder_sent_at`/`escalated_at` untouched — a reopened question that had already
+    been reminded (or escalated) would then never be reminded again, silently
+    reintroducing the exact "stuck open, nobody notified" failure #237 exists to fix.
+    Every kind's own undo path (the shared `undo()` for item/customer, `_undo_mail`/
+    `_undo_date`/`_undo_line`/`_undo_dl_item`/`_undo_dl_supplier` for the rest) must
+    clear both columns on reopen."""
+    qids = _ask_one_of_each_kind(pg)
+    ids = list(qids.values())
+    pg.execute(
+        "UPDATE order_questions SET reminder_sent_at = now(), escalated_at = now() "
+        "WHERE id = ANY(%s)", (ids,))
+    for name, qid in qids.items():
+        q = teach.get(pg, qid)
+        assert q["status"] == "open"  # none of these were ever answered
+        reopened = teach.KINDS[name].undo(pg, q)
+        assert reopened["status"] == "open", name
+        row = pg.execute(
+            "SELECT reminder_sent_at, escalated_at FROM order_questions WHERE id = %s",
+            (qid,)).fetchone()
+        assert row == (None, None), f"{name}: reminder cadence not cleared on undo"
+
+
 # --- mail_rules key normalization -------------------------------------------------------
 
 def test_subject_key_folds_away_dates_and_order_numbers():

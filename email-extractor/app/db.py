@@ -1000,6 +1000,15 @@ SCHEMA = [
     "ON pending_alerts(kind, channel_id) WHERE delivered_at IS NULL",
     "CREATE INDEX IF NOT EXISTS idx_pending_alerts_message "
     "ON pending_alerts(kind, message_id) WHERE message_id IS NOT NULL",
+    # --- #237: a board question that stays `open` too long gets NO further signal
+    # today — only the one-shot `on_new` notify fires, at creation. `reminder_sent_at`/
+    # `escalated_at` are the per-question cadence state `app/orders/question_alerts.py`
+    # reads/writes: NULL means "not yet sent"; once set, that level never fires again
+    # for this row (no daily nag — "escalate once", see that module's own docstring).
+    # Additive, nullable, no backfill needed: every existing row (open or answered)
+    # simply starts as "never reminded", which is the honest truth for all of them. ---
+    "ALTER TABLE order_questions ADD COLUMN IF NOT EXISTS reminder_sent_at TIMESTAMPTZ",
+    "ALTER TABLE order_questions ADD COLUMN IF NOT EXISTS escalated_at TIMESTAMPTZ",
 ]
 
 
