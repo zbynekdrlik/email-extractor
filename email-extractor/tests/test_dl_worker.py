@@ -739,35 +739,8 @@ def test_attempts_3_or_more_goes_to_review_even_for_a_transient_reason(pg, tmp_p
     assert row == (True, 3)
 
 
-# --- #239 class 2: upload-failure retry + durable alert (never fire-and-forget) -----
-
-def test_transient_upload_failure_retries_without_alerting(pg, tmp_path):
-    """A network-shaped upload failure gets the SAME automatic retry R17 already gives
-    a transient LLM failure — no alert yet, it is not terminal."""
-    _snapshot(pg)
-    _msg(pg, mid="dl1")
-    _attach(pg, tmp_path, "dl1")
-    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
-                         "dl_item": [ITEM_MATCHED]})
-
-    def _raise_upload(c, name, content, dir_override=None):
-        raise OSError("connection timed out")
-
-    n = dl_worker.tick(pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)),
-                       client=client, upload=_raise_upload)
-    assert n == 0
-    row = pg.execute(
-        "SELECT processed, processing_at, attempts FROM messages "
-        "WHERE message_id='dl1'").fetchone()
-    assert row[0] is False
-    assert row[1] is not None, "the claim stays set — the 30-min stale window reclaims it"
-    assert row[2] == 1
-    assert pg.execute("SELECT count(*) FROM pending_alerts").fetchone()[0] == 0
-    # the claim was released so a retry can safely re-upload without a duplicate
-    assert pg.execute(
-        "SELECT count(*) FROM desadv_sent WHERE uploaded_at IS NOT NULL"
-    ).fetchone()[0] == 0
-
+# --- #239 class 2: upload-failure durable alert (never fire-and-forget, never a
+# --- silent automatic re-upload) -----------------------------------------------------
 
 def test_a_timed_out_upload_is_never_auto_retried_so_orion_can_never_get_two_copies(
         pg, tmp_path):
