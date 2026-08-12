@@ -55,10 +55,14 @@ def _msg(pg, mid="dl1", subject="Dodací list", from_addr="dodavatel@lunys.sk",
 
 
 def _attach(pg, tmp_path, mid, idx=0, filename="dl.pdf", text="dodaci list text",
-           mime="application/pdf"):
+           mime="application/pdf", method=""):
+    # #247: `method` mirrors `app/extract.py`'s own ingest-time classification stored
+    # on the real `attachments.method` column (e.g. `'skipped'` for a decorative/tiny
+    # image, `flag='skipped_tiny_image'`) — default "" matches every PRE-#247 caller
+    # unchanged (NULL/"" both read back as "" via `_read_attachments`'s `method or ""`).
     pg.execute(
-        """INSERT INTO attachments (message_id, idx, filename, mime, extracted_text)
-           VALUES (%s, %s, %s, %s, %s)""", (mid, idx, filename, mime, text))
+        """INSERT INTO attachments (message_id, idx, filename, mime, extracted_text, method)
+           VALUES (%s, %s, %s, %s, %s, %s)""", (mid, idx, filename, mime, text, method))
     d = store.message_dir(str(tmp_path), mid)
     d.mkdir(parents=True, exist_ok=True)
     (d / f"att{idx}__{filename}").write_bytes(b"%PDF-1.4 no embedded jpeg here\n")
@@ -170,6 +174,77 @@ def test_a_non_pdf_non_image_attachment_is_treated_as_no_usable_attachment(pg, t
     n = dl_worker.tick(pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)),
                        client=FakeClient({}))
     assert n == 1
+    row = pg.execute("SELECT processed FROM messages WHERE message_id='dl1'").fetchone()
+    assert row[0] is True
+
+
+# --- #247: a decorative/tiny attachment (extract.py's own ingest-time
+# method='skipped') must never reach dl_extract/vision at all ----------------
+
+def test_a_decorative_skipped_attachment_never_reaches_vision_and_reviews_cleanly(
+        pg, tmp_path):
+    """Live incident: ALL 13 stored HK LOAN (gnip@hkloan.eu) attachments are the exact
+    same 2472-byte/150x76px signature logo, and `extract.py`'s own ingest already
+    classifies every one of them `method='skipped'` (`flag='skipped_tiny_image'`).
+    `dl_worker._read_attachments` used to hand its raw bytes to `dl_extract` anyway --
+    `dl_extract.extract_attachment` has no image-vs-PDF distinction of its own (its
+    module docstring leaves "attachment selection" entirely to this worker), so a tiny
+    image with no machine_text falls into the "digital PDF, no text -> vision fallback"
+    branch and sends the raw JPEG bytes to OpenAI labelled as a PDF file
+    (`llm.vision_call(pdf_bytes=...)`) -- which OpenAI rejects with a 400 "could not be
+    processed", exactly the log line `DL attachment idx=0 filename='00000I0G.jpeg'
+    failed to extract` from the ticket. Because this is the message's ONLY attachment,
+    no document is ever produced, so `_process_document` (where supplier lookup runs)
+    is never even called -- the pipeline "crashes" before it gets there.
+
+    FakeClient({})'s `vision_call` always raises `AssertionError` -- if the worker
+    still calls it for a skipped attachment, that raised message leaks into the Odoo
+    review reason instead of a clean, actionable one.
+    """
+    _snapshot(pg)
+    _msg(pg, mid="dl1", from_addr="gnip@example-supplier.sk",
+        subject="Avizacia G-P")
+    _attach(pg, tmp_path, "dl1", filename="00000I0G.jpeg", mime="image/jpeg",
+           text="", method="skipped")
+    posted = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=FakeClient({}),
+                       post=lambda c, h: posted.append(h))
+    assert n == 1
+    row = pg.execute(
+        "SELECT processed, processed_by FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True, "dodacie_listy")
+    assert len(posted) == 1
+    # the crash symptom must be GONE -- no LLM/vision failure text leaking through
+    assert "vision must not be called" not in posted[0]
+    assert "sa nepodarilo spracovať" not in posted[0]
+    # a clear, actionable reason instead (a warehouse-readable review, never silent)
+    assert any(w in posted[0] for w in ("drobný", "logo", "podpis"))
+
+
+def test_a_real_attachment_still_passes_alongside_a_decorative_one(pg, tmp_path):
+    """Owner's own acceptance criterion on #247: 'ak je v maili aj použiteľná
+    príloha, doklad musí prejsť z nej' -- a decorative attachment sitting next to a
+    real, usable one must not affect the real one's processing at all."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1", idx=0, filename="podpis.jpeg", mime="image/jpeg",
+           text="", method="skipped")
+    _attach(pg, tmp_path, "dl1", idx=1, filename="dl.pdf", mime="application/pdf",
+           text="dodaci list text", method="pdf-text")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    uploaded, posted = [], []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(
+        pg, cfg, client=client,
+        upload=lambda c, name, content, dir_override=None:
+            uploaded.append((name, content, dir_override)),
+        post=lambda c, html: posted.append(html))
+    assert n == 1
+    assert len(uploaded) == 1
+    assert uploaded[0][0].startswith("Z-DESADV_")
+    assert "dl_documents" in client.calls
     row = pg.execute("SELECT processed FROM messages WHERE message_id='dl1'").fetchone()
     assert row[0] is True
 
