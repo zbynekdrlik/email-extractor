@@ -21,8 +21,7 @@ import logging
 import re
 import threading
 import time
-import unicodedata
-from datetime import date, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 import psycopg
@@ -32,43 +31,21 @@ from werkzeug.exceptions import HTTPException
 
 from . import __version__, db, linkutil
 from .db import MAX_UID_ATTEMPTS
+from .httpapi_common import (
+    _EAN_STRIP_RE,
+    CATEGORIES,
+    FIX_STATUSES,
+    PROBLEM_TYPES,
+    _escape_like,
+    _fold,
+    _parse_emails_field,
+    _valid_date,
+)
 from .orders import dl_snapshot, memory, snapshot
 from .orders import teach as _teach
 from .store import message_dir
 
-CATEGORIES = ["ai_orders", "invoices", "reklamacie", "dodacie_listy",
-              "static_orders", "human_processing", "no_processing"]
-PROBLEM_TYPES = ["mis_sorted", "mis_processed", "other"]
-FIX_STATUSES = ["open", "in_progress", "fixed", "wontfix"]
-
 log = logging.getLogger("email_extractor.httpapi")
-
-def _valid_date(s: str) -> bool:
-    """True iff s is a real ISO date (YYYY-MM-DD); rejects bad months/days."""
-    try:
-        date.fromisoformat(s)
-        return True
-    except ValueError:
-        return False
-
-
-def _escape_like(s: str) -> str:
-    """Escape LIKE/ILIKE metacharacters so user input is a literal substring."""
-    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
-# #234: the exact same EAN normalization/validation `snapshot.normalize_ean` uses,
-# duplicated here (not imported) so both HTTP entry points can return their own precise
-# 400 body BEFORE ever calling into the DB layer.
-_EAN_STRIP_RE = re.compile(r"[\s\-]")
-
-
-def _fold(s: str) -> str:
-    """Diacritics- and case-insensitive substring match for the /znalosti card/customer
-    search — a warehouse worker types "rozok" and must still find "Rožok"."""
-    return "".join(c for c in unicodedata.normalize("NFD", str(s or "").lower())
-                   if unicodedata.category(c) != "Mn")
-
 
 # The Flask session secret + the /sklad/<key> derivation both live in `linkutil` (#139) —
 # the order worker's background thread mints the SAME link with no Flask request at all,
@@ -1176,11 +1153,6 @@ def create_app(cfg) -> Flask:
             rows = [r for r in rows if q in _fold(r["name"]) or q in _fold(r["ean_edi"])]
         rows.sort(key=lambda r: _fold(r["name"]))
         return jsonify(items=rows[:50])
-
-    def _parse_emails_field(v) -> list[str]:
-        if isinstance(v, list):
-            return [str(e).strip() for e in v if str(e).strip()]
-        return [e.strip() for e in str(v or "").split(",") if e.strip()]
 
     @app.post("/api/znalosti/clients")
     def api_znalosti_clients_upsert():
