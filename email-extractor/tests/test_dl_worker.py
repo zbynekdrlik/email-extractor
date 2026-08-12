@@ -45,12 +45,12 @@ def _snapshot(pg):
 
 
 def _msg(pg, mid="dl1", subject="Dodací list", from_addr="dodavatel@lunys.sk",
-        has_attachments=True):
+        has_attachments=True, combined_text=""):
     pg.execute(
         """INSERT INTO messages (message_id, category, subject, from_addr,
                                  combined_text, has_attachments, processed)
-           VALUES (%s, 'dodacie_listy', %s, %s, '', %s, false)""",
-        (mid, subject, from_addr, has_attachments))
+           VALUES (%s, 'dodacie_listy', %s, %s, %s, %s, false)""",
+        (mid, subject, from_addr, combined_text, has_attachments))
     return mid
 
 
@@ -247,6 +247,110 @@ def test_a_real_attachment_still_passes_alongside_a_decorative_one(pg, tmp_path)
     assert "dl_documents" in client.calls
     row = pg.execute("SELECT processed FROM messages WHERE message_id='dl1'").fetchone()
     assert row[0] is True
+
+
+# --- #258: no usable attachment, but a delivery note in the mail's own BODY TEXT --
+
+# SYNTHETIC — constructed to match the documented template shape (see the module
+# docstring), never real customer mail. Mirrors the HK LOAN live incident's own shape
+# (a plain-prose delivery notice, no attachment at all) without reusing any real text.
+BODY_TEXT_DL = (
+    "Dobrý deň,\n\n"
+    "posielame avizáciu dodania priamo v texte, bez prílohy:\n\n"
+    "Dodávateľ: Pekáreň Lunys, Prešov, dodavatel@lunys.sk\n"
+    "Dodací list č. 0100000001, dátum dodania 01.08.2026\n"
+    "Rožok 50g / 10 ks / 0,50 €/ks / 5,00 €\n\n"
+    "S pozdravom"
+)
+
+
+def test_body_text_delivery_note_is_extracted_when_there_is_no_attachment_at_all(
+        pg, tmp_path):
+    """#258 live incident (HK LOAN, gnip@hkloan.eu): the supplier never attaches a real
+    document at all — the delivery note is written directly in the mail BODY TEXT. Before
+    this fix, `_process_message` never even looked at `combined_text` once
+    `usable_attachments` was empty; it declared review immediately, with
+    `dl_extract.extract_email` never called at all — RED on the pre-fix code (client.calls
+    stays empty, nothing uploaded)."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", has_attachments=False, combined_text=BODY_TEXT_DL)
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    uploaded, posted = [], []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(
+        pg, cfg, client=client,
+        upload=lambda c, name, content, dir_override=None:
+            uploaded.append((name, content, dir_override)),
+        post=lambda c, html: posted.append(html))
+    assert n == 1
+    assert "dl_documents" in client.calls
+    assert len(uploaded) == 1
+    assert uploaded[0][0].startswith("Z-DESADV_")
+    assert len(posted) == 1
+    assert "spracovaný a nahratý do ORIONu" in posted[0]
+    row = pg.execute(
+        "SELECT processed, processed_by FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True, "dodacie_listy")
+
+
+def test_body_text_delivery_note_is_extracted_when_the_only_attachment_is_decorative(
+        pg, tmp_path):
+    """Same #258 fix, but combined with the #247 shape: a decorative/skipped attachment
+    (e.g. a signature logo) sits ALONGSIDE a real delivery note in the body text — the
+    decorative attachment must not stop the body-text extraction from being tried."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", combined_text=BODY_TEXT_DL)
+    _attach(pg, tmp_path, "dl1", filename="podpis.jpeg", mime="image/jpeg",
+           text="", method="skipped")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    uploaded = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(
+        pg, cfg, client=client,
+        upload=lambda c, name, content, dir_override=None:
+            uploaded.append((name, content, dir_override)))
+    assert n == 1
+    assert len(uploaded) == 1
+    assert "dl_documents" in client.calls
+
+
+def test_body_text_with_no_real_delivery_note_still_reviews_cleanly(pg, tmp_path):
+    """The body-text fallback must not fabricate a document out of ordinary prose — when
+    extraction over the text genuinely finds nothing, the message still reviews cleanly,
+    with wording that reflects the mail TEXT was checked (not the old, now-stale
+    'ak je dokument v texte e-mailu, treba ho spracovať ručne' hint, which used to tell a
+    human to do by hand exactly what this fix now does automatically)."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", has_attachments=False,
+        combined_text="Dobrý deň, potvrdzujeme prijatie faktúry. S pozdravom.")
+    client = FakeClient({"dl_documents": [{"documents": []}]})
+    posted = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, post=lambda c, h: posted.append(h))
+    assert n == 1
+    assert "dl_documents" in client.calls
+    assert len(posted) == 1
+    assert "texte e-mailu" in posted[0]
+    assert "ak je dokument v texte e-mailu, treba ho spracovať ručne" not in posted[0]
+    row = pg.execute(
+        "SELECT processed, processed_by FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True, "dodacie_listy")
+
+
+def test_empty_body_text_and_no_attachment_still_reviews_without_calling_the_model(
+        pg, tmp_path):
+    """No attachment AND no body text either -- must stay a cheap, immediate review (no
+    LLM call at all), exactly like before this fix."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", has_attachments=False, combined_text="")
+    posted = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=FakeClient({}),
+                       post=lambda c, h: posted.append(h))
+    assert n == 1
+    assert len(posted) == 1 and "bez prílohy" in posted[0]
 
 
 # --- live engine: the happy path --------------------------------------------
