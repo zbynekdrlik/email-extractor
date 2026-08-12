@@ -565,15 +565,23 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
               dir_override=getattr(cfg, "orion_dl_dir", upload_mod.DL_DIR))
     except Exception as e:
         desadv.release_send(conn, supplier_decision.ean_edi, built.doc_number)
-        # #239 class 2: a TRANSIENT-looking upload failure (a network blip, ORION
-        # briefly unreachable) now gets the SAME automatic retry R17 already gives a
-        # transient LLM failure — the claim was just released above, so a retry can
-        # safely re-claim and re-upload without ever risking a duplicate. Raises
-        # _RetryLater when transient and attempts<3, aborting up through
-        # _process_message -> _run_and_finish exactly like every other _check_retry
-        # call site in this module (re-arms the message for the 30-min stale reclaim,
-        # no alert needed yet — it is not terminal).
-        _check_retry(message.get("attempts", 0), str(e))
+        # #239: an upload failure is NEVER auto-retried here. The removed code called
+        # `_check_retry(...)` at this point, reasoning that "the claim was just released
+        # above, so a retry can safely re-claim and re-upload without ever risking a
+        # duplicate" — backwards: releasing the claim is exactly what REMOVES the
+        # protection. `upload_mod.put()` writes straight to the FINAL `in_DL\<name>` with
+        # no temp-write + rename, `desadv_edi.filename()` stamps a retry with a fresh
+        # `HHMMSSmmm` (so it cannot collide), `release_send()` above DELETED the ledger
+        # row (so `claim_send_or_identify()`, the one atomic anti-double-upload backstop,
+        # has nothing left to guard and `confirm.py` never sees the orphan), and
+        # `TRANSIENT_RE` matches `timed out` — the exact shape of "the bytes DID land,
+        # only the reply was lost". Composed: two copies of one document in `in_DL`, both
+        # taken in at the warehouse's next manual morning import. R17's retry semantics
+        # for LLM/vision failures are untouched; only this upload call site is affected.
+        # Re-enabling a retry needs an absence proof (by doc_number + supplier, never by
+        # filename, which changes between attempts) plus a temp-write+rename upload —
+        # tracked on #239. The durable alert below is kept: that half is correct, and is
+        # what makes this failure visible instead of silent.
         log.exception("DL upload of %s failed", built.filename)
         note = ("Odoslanie dodacieho listu do ORIONu zlyhalo — skús znova alebo "
                "nahlás administrátorovi")
