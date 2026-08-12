@@ -258,6 +258,36 @@ def test_add_a_new_customer_is_visible_immediately(pg):
     assert [i["ean_edi"] for i in items] == ["999"]
 
 
+def test_editing_a_customer_via_znalosti_into_a_colliding_ean_returns_409(pg):
+    """#248 review finding: `api_znalosti_clients_upsert`'s `override_id`-edit path had
+    zero test coverage of its new `except snapshot.DuplicateEan` catch — retargeting an
+    already-overridden customer's EAN onto ANOTHER active customer's EAN via the admin
+    dashboard must return the same clean 409 the warehouse question-card flow already
+    gets, not a raw 500."""
+    _snap(pg)
+    c = _client()
+    _login(c)
+    assert c.post("/api/znalosti/clients", json={
+        "ean_edi": "8100000000001", "name": "Zákazník A", "city": "Košice",
+        "street": "Ulica A"}).status_code == 200
+    rb = c.post("/api/znalosti/clients", json={
+        "ean_edi": "8100000000002", "name": "Zákazník B", "city": "Prešov",
+        "street": "Ulica B"})
+    b_id = rb.get_json()["id"]
+
+    r = c.post("/api/znalosti/clients", json={
+        "override_id": b_id, "ean_edi": "8100000000001",  # A's EAN, B's own street
+        "name": "Zákazník B premenovaný", "city": "Prešov", "street": "Ulica B"})
+    assert r.status_code == 409
+    body = r.get_json()
+    assert body["existing"]["ean_edi"] == "8100000000001"
+    assert "Zákazník A" in body["error"]
+
+    items = {i["ean_edi"]: i["name"] for i in c.get("/api/znalosti/clients").get_json()["items"]}
+    assert items["8100000000001"] == "Zákazník A"
+    assert items["8100000000002"] == "Zákazník B"
+
+
 def test_add_customer_needs_a_name(pg):
     _snap(pg)
     c = _client()
@@ -448,6 +478,33 @@ def test_add_a_new_dl_supplier_is_visible_immediately(pg):
     assert r.status_code == 200 and r.get_json()["ok"] is True
     items = c.get("/api/znalosti/dl-suppliers?q=nový").get_json()["items"]
     assert [i["ean_edi"] for i in items] == ["999"]
+
+
+def test_editing_a_dl_supplier_via_znalosti_into_a_colliding_ean_returns_409(pg):
+    """Mirror of test_editing_a_customer_via_znalosti_into_a_colliding_ean_returns_409
+    for `api_znalosti_dl_suppliers_upsert`."""
+    _dl_snap(pg)
+    c = _client()
+    _login(c)
+    assert c.post("/api/znalosti/dl-suppliers", json={
+        "ean_edi": "8100000000003", "name": "Dodávateľ A", "city": "Košice"}
+    ).status_code == 200
+    rb = c.post("/api/znalosti/dl-suppliers", json={
+        "ean_edi": "8100000000004", "name": "Dodávateľ B", "city": "Prešov"})
+    b_id = rb.get_json()["id"]
+
+    r = c.post("/api/znalosti/dl-suppliers", json={
+        "override_id": b_id, "ean_edi": "8100000000003",  # A's EAN, B's own city
+        "name": "Dodávateľ B premenovaný", "city": "Prešov"})
+    assert r.status_code == 409
+    body = r.get_json()
+    assert body["existing"]["ean_edi"] == "8100000000003"
+    assert "Dodávateľ A" in body["error"]
+
+    items = {i["ean_edi"]: i["name"]
+             for i in c.get("/api/znalosti/dl-suppliers").get_json()["items"]}
+    assert items["8100000000003"] == "Dodávateľ A"
+    assert items["8100000000004"] == "Dodávateľ B"
 
 
 def test_add_dl_supplier_needs_a_name(pg):

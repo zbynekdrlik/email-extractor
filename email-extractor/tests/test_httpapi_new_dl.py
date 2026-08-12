@@ -127,6 +127,43 @@ def test_a_new_dl_supplier_ean_already_belonging_to_another_supplier_is_refused(
     assert teach.get(pg, qid)["status"] == "open"
 
 
+def test_two_concurrent_new_dl_supplier_ean_collisions_leave_exactly_one_winner(pg):
+    """#248 review finding: mirrors test_two_concurrent_new_customer_ean_collisions_
+    leave_exactly_one_winner in test_httpapi_new_customer.py — httpapi.py's `except
+    snapshot.DuplicateEan` in `_api_orders_answer_new_dl_supplier` had zero HTTP-level
+    test coverage (the sequential 409 test above only covers a pre-existing EAN, never
+    the race). Two DIFFERENT dl_supplier questions both add a "new supplier" with the
+    SAME brand-new EAN but a DIFFERENT city."""
+    import threading
+
+    qid_a = teach.ask_dl_supplier(pg, message_id="m248dla", sender_email="preteka@dl.sk",
+                                  candidates=[])
+    qid_b = teach.ask_dl_supplier(pg, message_id="m248dlb", sender_email="pretekb@dl.sk",
+                                  candidates=[])
+    c1, c2 = _dl_client(), _dl_client()
+    barrier = threading.Barrier(2)
+    results: dict[str, int] = {}
+
+    def answer(key, client, qid, city):
+        barrier.wait(timeout=5)
+        r = client.post(f"/api/orders/question/{qid}/answer", json={"new_supplier": {
+            "ean_edi": "7200000000002", "name": f"Pretekár {key}", "city": city}})
+        results[key] = r.status_code
+
+    t1 = threading.Thread(target=answer, args=("A", c1, qid_a, "Košice"))
+    t2 = threading.Thread(target=answer, args=("B", c2, qid_b, "Prešov"))
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+
+    codes = sorted([results.get("A"), results.get("B")])
+    assert codes == [200, 409], f"exactly one racing new-supplier add may win, got {results}"
+    assert pg.execute(
+        "SELECT count(*) FROM dl_supplier_overrides WHERE ean_edi='7200000000002'"
+    ).fetchone()[0] == 1
+
+
 def test_adding_a_new_dl_product_from_the_card_teaches_it_and_answers(pg):
     qid = teach.ask_dl_item(
         pg, message_id="m235d", supplier_ean="S1", supplier_name="Mlyn s.r.o.",

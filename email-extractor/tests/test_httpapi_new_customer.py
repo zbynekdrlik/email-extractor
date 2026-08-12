@@ -138,6 +138,49 @@ def test_an_ean_that_already_belongs_to_someone_returns_409_with_that_customer(p
         "SELECT status FROM held_orders WHERE message_id='m234'").fetchone() == ("held",)
 
 
+def test_two_concurrent_new_customer_ean_collisions_leave_exactly_one_winner(pg, monkeypatch):
+    """#248 review finding: httpapi.py's `except snapshot.DuplicateEan` in
+    `_api_orders_answer_new_customer` had zero HTTP-level test coverage — the existing
+    409 test above only exercises the SEQUENTIAL pre-check (an EAN that already belongs
+    to someone BEFORE the request starts), never the race path this whole ticket is
+    about. Proven with two real HTTP requests through the Flask test client racing the
+    actual advisory lock — same shape as `test_two_concurrent_answers_to_the_same_dl_
+    question_leave_exactly_one_winner` in test_httpapi_new_dl.py, one layer up at the
+    HTTP boundary for #248's own race. Two DIFFERENT held orders/questions (a single
+    question can only be answered once, which would hit AlreadyAnswered instead) both
+    add a "new customer" with the SAME brand-new EAN but a DIFFERENT street."""
+    import threading
+
+    qid_a = _seed_held_order(pg, sender_email="preteka@x.sk", message_id="m248a")
+    qid_b = _seed_held_order(pg, sender_email="pretekb@x.sk", message_id="m248b")
+    monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
+    c1, c2 = _client(), _client()
+    _login(c1)
+    _login(c2)
+    barrier = threading.Barrier(2)
+    results: dict[str, int] = {}
+
+    def answer(key, client, qid, street):
+        barrier.wait(timeout=5)
+        r = client.post(f"/api/orders/question/{qid}/answer", json={"new_customer": {
+            "ean_edi": "7200000000001", "name": f"Pretekár {key}",
+            "emails": "", "city": "Košice", "street": street, "zip": ""}})
+        results[key] = r.status_code
+
+    t1 = threading.Thread(target=answer, args=("A", c1, qid_a, "Ulica A"))
+    t2 = threading.Thread(target=answer, args=("B", c2, qid_b, "Ulica B"))
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+
+    codes = sorted([results.get("A"), results.get("B")])
+    assert codes == [200, 409], f"exactly one racing new-customer add may win, got {results}"
+    assert pg.execute(
+        "SELECT count(*) FROM customer_overrides WHERE ean_edi='7200000000001'"
+    ).fetchone()[0] == 1
+
+
 def test_the_next_mail_from_the_same_address_needs_no_question(pg, monkeypatch):
     """The teaching is durable (#234's whole point) — the sender address gets appended to
     the new customer's e-mail list, so `customer.resolve` finds it via `exact_email` with
