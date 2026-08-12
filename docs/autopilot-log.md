@@ -2480,3 +2480,43 @@ Version bumped 0.9.72 → 0.9.73.
 - Run card fired for #262 (`v0.9.75`). No new follow-up filed — the one real discovery
   (HK LOAN still not a registered DL supplier) was already #236's own tracked item #2;
   posted fresh confirming evidence there instead of duplicating.
+
+## #236 — re-verification pass (no code change; FEAST + TLS/Great already shipped, HK
+LOAN item-matching confirmed live, new HK LOAN multi-message gap found)
+
+- Re-verified the CURRENT live DB state (never trusted prior comments' own claims,
+  one of which — FEAST question 26 timing — turned out stale vs the DB): FEAST s.r.o.
+  fully done (`dl_supplier_overrides id=2`, doc 20263245 `desadv_sent id=13
+  import_status=imported`, `order_questions id=26 status=answered`); TLS/Forbak fully
+  done (`dl_supplier_overrides id=3`, catalog `gtin=3605` renamed to weight-neutral
+  `"Great"`, both `VP20261501`/`VP20261598` `desadv_sent import_status=imported`, a
+  third attempt correctly recognized `duplicate`). Neither needed any new action.
+- **HK LOAN item-matching, explicitly requested by #262's own worker** ("Múka pšeničná
+  typ 650" only tested against the corpus copy, never live) — verified live via
+  `dl_worker._match_item()` called directly inside the deployed container against the
+  real `dl_snapshot.load_catalog()` (snapshot 9, 491 cards), `gpt-5.4`/`high`: matches
+  `gtin=1564` ("T 650 - chlebová múka"), confidence 0.98, rule `llm_sure`, lexical
+  guard did not fire. Works correctly against the live production catalog.
+  Supplier itself intentionally still unregistered (2026-08-11 user directive: the
+  sklad fills it in on her board, not the owner) — `order_questions id=35` open,
+  correctly worded, not a duplicate of any other open question.
+- **New finding, filed as #265 (`Scope-gate: needs-user-decision`)**: HK LOAN writes
+  delivery notes directly into mail body text (#258) and routinely sends a SHORT
+  follow-up "correction" mail restating only the changed line ("OPRAVA HMOTNOSTI" /
+  "zvyšok bez zmien") — the DL engine has NO cross-message memory anywhere, so
+  reprocessing that correction mail alone (verified live via a read-only
+  `dl_extract.extract_email()` call against its real text) extracts exactly ONE item,
+  silently dropping the other two items from the same physical delivery. Compounding:
+  `release_for_question()` only ever reprocesses the ONE message its `qid` is tied to
+  — `order_questions.id=35` is tied to that correction mail specifically, and 5 OLDER
+  HK LOAN delivery mails (verified: zero `order_questions` rows reference them) will
+  never auto-unstick even after the sklad answers question 35. Documented on `#236`
+  and playbook-recorded in `.claude/rules/n8n-workflow-edits.md` (new "mail-body-only
+  CORRECTION/AMENDMENT" section) so a future HK LOAN-shaped supplier hits a known gap,
+  not a fresh incident.
+- No code changed — this session was pure live-DB/live-catalog re-verification plus
+  one new investigation; `#265` intentionally left the actual fix undesigned (several
+  valid directions with real automation-vs-safety tradeoffs). No PR, no version bump,
+  no deploy. `#236` stays OPEN — still genuinely parked on the sklad answering
+  `order_questions.id=35`, now with the `#265` risk explicitly flagged for whoever
+  reviews that answer.
