@@ -75,8 +75,19 @@ def put(cfg, name: str, content: str, dir_override: str = "") -> bool:
             base = dir_override or getattr(cfg, "orion_dir", edi.ORION_DIR)
             target = f"{base}\\{name}"
             tmp_target = f"{base}\\{_temp_name(name)}"
-            with sftp.file(tmp_target, "w") as fh:
-                fh.write(content)
+            try:
+                with sftp.file(tmp_target, "w") as fh:
+                    fh.write(content)
+            except Exception:
+                # Best-effort cleanup so a write failure doesn't leave an orphaned
+                # `.part-*` file on ORION forever — never lets a SECOND (cleanup)
+                # failure hide or replace the REAL one the caller needs to see.
+                try:
+                    sftp.remove(tmp_target)
+                except Exception:
+                    log.warning("could not remove orphaned temp file %s after a "
+                               "failed write", tmp_target)
+                raise
             sftp.rename(tmp_target, target)
             log.info("uploaded %s (%d bytes) to %s", name, len(content),
                      getattr(cfg, "orion_host", ""))
