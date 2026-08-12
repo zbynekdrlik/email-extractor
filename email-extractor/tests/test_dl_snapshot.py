@@ -2,9 +2,13 @@
 for the AI-orders snapshot — the two things under test that are genuinely NEW here:
 R20's catalog UNION of two tabs, and the dedicated dl_snapshots versioning line.
 """
+import os
+
 import pytest
 
 from app.orders import dl_snapshot, snapshot
+
+PG_DSN = os.environ.get("PG_TEST_DSN")
 
 DL_CATALOG_CSV = (
     "GTIN,Názov,doplnok,hmotnost,Sklad,Cena\n"
@@ -307,6 +311,54 @@ def test_dl_supplier_override_can_add_a_brand_new_supplier(pg):
     sid = _dl_snap(pg)
     suppliers = {r["name"]: r for r in dl_snapshot.load_suppliers(pg, sid)}
     assert suppliers["Nový dodávateľ"]["ean_edi"] == "9999999999999"
+
+
+def test_two_concurrent_new_dl_supplier_adds_for_the_same_ean_with_different_city_produce_one_row(pg):
+    """#248: the DL-supplier mirror of `test_two_concurrent_new_customer_adds_for_the_
+    same_ean_with_different_street_produce_one_row` in tests/test_snapshot.py — see
+    that test's docstring for the full race trace (`city` standing in for `street`
+    here). Before the fix, `upsert_dl_supplier`'s reclaim SELECT was scoped
+    `AND city = %s`, narrower than the advisory lock (keyed on `ean_edi` alone), so two
+    genuinely simultaneous "new supplier" submissions for the same brand-new EAN under
+    DIFFERENT cities both inserted — two rows sharing one EAN, `dl_match.py` then
+    silently picking whichever row comes first, possibly a stale/wrong name. Exactly
+    ONE row must survive, and the loser must be told about the conflict."""
+    import threading
+
+    import psycopg
+
+    barrier = threading.Barrier(2)
+    errors = []
+
+    def add(name, city):
+        conn = psycopg.connect(PG_DSN)
+        try:
+            barrier.wait(timeout=5)
+            dl_snapshot.upsert_dl_supplier(
+                conn, override_id=None, orig_ean_edi=None, orig_city=None,
+                ean_edi="7000000000902", name=name, emails=["race@dl.sk"], city=city)
+            conn.commit()
+        except Exception as e:  # pragma: no cover - surfaced via `errors` below
+            errors.append(e)
+        finally:
+            conn.close()
+
+    t1 = threading.Thread(target=add, args=("Dodávateľ Košice", "Košice"))
+    t2 = threading.Thread(target=add, args=("Dodávateľ Prešov", "Prešov"))
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+
+    assert pg.execute(
+        "SELECT count(*) FROM dl_supplier_overrides WHERE ean_edi='7000000000902'"
+    ).fetchone() == (1,), (
+        "two concurrent new-dl-supplier adds with different cities must leave ONE row, "
+        "not two duplicate suppliers sharing an EAN")
+    assert len(errors) == 1, (
+        f"exactly one of the two conflicting submissions must be refused, got: {errors}")
+    assert isinstance(errors[0], snapshot.DuplicateEan), (
+        f"the refused submission must raise DuplicateEan, not silently fail: {errors[0]!r}")
 
 
 def test_retiring_a_dl_supplier_override_excludes_it(pg):
