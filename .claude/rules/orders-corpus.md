@@ -1611,3 +1611,19 @@ intentional there for cards it was tuned against.
   --live` recording session needs the OTHER box specifically, verify with `hostname`
   first, and don't assume `ssh <name>` reached where you think it did just because it
   didn't error.
+- **A NEW per-question bookkeeping column on `order_questions` (any future one, not
+  just #237's `reminder_sent_at`/`escalated_at`) must be cleared by EVERY reopen path
+  in `teach.py`, not just the one or two you happened to test (#237, deep-review
+  finding).** `undo()` (item + customer branches) and the 5 sibling `_undo_mail`/
+  `_undo_date`/`_undo_line`/`_undo_dl_item`/`_undo_dl_supplier` functions ALL run the
+  same `UPDATE order_questions SET status = 'open', ...` shape — 7 separate SQL
+  statements, not one shared helper. Adding a state column and updating only the
+  ONE branch you're actively working on (or the two a reviewer happens to name first)
+  leaves the other 5 silently stale: a question reopened via a kind whose statement
+  you missed keeps its OLD bookkeeping value forever, which for a cadence/gate column
+  means that gate never opens again. `grep -n "SET status = 'open'" app/orders/
+  teach.py` before considering such an addition done — it must return exactly as many
+  matches as it did before your change (same count, just with the new column added to
+  each). A single `Edit(replace_all: true)` on the shared 5-line generic-kind block
+  fixes all 5 of those in one shot; the item/customer branches need their own two
+  edits since their SQL shape differs slightly.

@@ -205,3 +205,45 @@ actually redirects to `/login` first as proof the session is genuinely clean.
   5` — read the newest row's exact wording, don't trust the summary column alone to
   distinguish "the new code path ran" from "the old one did, coincidentally producing a
   similarly-shaped summary".
+- **A `report.post()`/`dl_alerts.flush_pending` failure with `urllib.error.HTTPError:
+  HTTP Error 405: Not Allowed` in the container logs is almost certainly Odoo itself
+  being down, NOT a bug in this repo — check LIVE before assuming a code regression
+  (#237, second real occurrence of the exact #253 signature).** Confirmed read-only,
+  from inside the container, with NO message ever sent (safe, side-effect-free):
+  ```python
+  import json, urllib.request, urllib.error
+  opts = json.load(open("/data/options.json"))
+  req = urllib.request.Request(opts["odoo_url"].rstrip("/") + "/",
+      headers={"Authorization": f"Bearer {opts['odoo_api_key']}"})
+  try:
+      urllib.request.urlopen(req, timeout=20)
+  except urllib.error.HTTPError as e:
+      print(e.code, e.headers.get("server"), e.read()[:200])
+  ```
+  The tell (both incidents, identical): `GET /` → `503`, body is an "ERP - Maintenance"
+  HTML page (not an Odoo error page); `POST /json/2/<anything>` → `405 Not Allowed`
+  from `nginx/1.31.3` (not Odoo's own JSON error shape) — this is nginx rejecting the
+  method because the whole backend behind it is in maintenance, not Odoo rejecting the
+  specific endpoint/payload. `dl_alerts`'s own durable outbox (`pending_alerts`,
+  `MAX_FLUSH_ATTEMPTS=200`, ~15s tick ≈ 50 min of retries) is BY DESIGN for exactly
+  this — nothing is lost, it delivers once Odoo recovers (confirmed by #253's own
+  closing comment: the earlier outage self-resolved and the blocked message went out).
+  Never try to "fix" this in the repo — file a fresh tracking issue (mirroring #253's
+  `Scope-gate: user-request` shape) if it recurs, and move on; there is nothing to
+  change here.
+- **Verifying a NEW alert-producing feature (a sweep that calls `dl_alerts.enqueue`)
+  against LIVE production data, without ever letting a message actually reach a real
+  Odoo channel — a rollback-based dry run on your OWN connection, not a callback
+  substitution** (#237). `question_alerts.sweep(conn, cfg)` (like `confirm.sweep`) calls
+  `dl_alerts.enqueue()` directly rather than accepting an injectable `post` callback, so
+  the #247/#262 "pass a capture function in place of the poster" technique doesn't
+  apply cleanly here — the DB writes (both the `pending_alerts` insert AND the
+  `order_questions.reminder_sent_at`/`escalated_at` UPDATE) would still happen for
+  real even with a stubbed `enqueue`. The safe alternative: open your OWN
+  `psycopg.connect(cfg.pg_dsn, autocommit=False)` (the app's real connections are
+  autocommit), call the real sweep function against it, print whatever you need to
+  verify (the composed HTML, the row counts), then **always `conn.rollback()`** in a
+  `finally` block regardless of outcome — nothing persists, so no `pending_alerts` row
+  ever exists for a LATER `flush_pending()` call (on a DIFFERENT connection) to
+  discover and actually deliver. Reusable for any future backend sweep in this
+  codebase that writes durably before an eventual Odoo post.

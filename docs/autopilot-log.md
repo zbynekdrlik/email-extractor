@@ -2520,3 +2520,49 @@ LOAN item-matching confirmed live, new HK LOAN multi-message gap found)
   no deploy. `#236` stays OPEN — still genuinely parked on the sklad answering
   `order_questions.id=35`, now with the `#265` risk explicitly flagged for whoever
   reviews that answer.
+
+## 2026-08-12 — #237 (PR #266, v0.9.75 → v0.9.76)
+
+- **#237** (report long-open board questions to Odoo, grouped, escalate once — HK
+  LOAN's `dl_supplier` question #35 sat open 24h+ with zero reminder): new
+  `app/orders/question_alerts.py`, wired into `worker.run_forever` on the same tick as
+  `confirm.sweep`. "Working days" = distinct Mon-Fri calendar dates the question has
+  been open across (inclusive of creation date + today) — reuses
+  `confirm.morning_check_active` (same weekday/hour config) rather than a second gate.
+  Reminder at `question_stale_working_days` (default 2), ONE escalation at
+  `question_escalate_working_days` (default 4, only after ≥1 full calendar day since
+  the reminder), then silent forever. Two new nullable columns
+  (`order_questions.reminder_sent_at`/`escalated_at`). Grouped per (audience, level) —
+  DL kinds (`dl_item`/`dl_supplier`) → channel 243, everything else → 152. Delivery
+  reuses the existing `dl_alerts` durable outbox (`enqueue`/`flush_pending`), not a new
+  post path. Repeat count = real `count(*)` over `(kind, customer_ean, item_key)`.
+- Commits: `66b5291` (version bump), `3aad6ab` (schema+config), `dbb77f9` (feature +
+  tests), `3eeaf95` (review-finding fix). Feature work, no RED/GREEN split per
+  `regression-test-first.md` (calibrated TDD — tests mandatory, order flexible).
+- **Deep-review pass (dispatched fresh-context subagent) found 2 🟡, both fixed same
+  branch**: (1) `teach.undo()` and its 5 sibling `_undo_*` kind functions never cleared
+  `reminder_sent_at`/`escalated_at` on reopen — a reminded-then-answered-then-undone
+  question would sit reopened forever with the cadence gate stuck closed, silently
+  reintroducing exactly the bug #237 fixes. Fixed in all 7 occurrences + new
+  cross-kind test `test_undo_clears_the_reminder_cadence_for_every_kind`. (2) Repeat
+  detection is structurally always "1×" for `mail`/`date`/`line` (their `item_key` is
+  message-scoped by design) — documented in code, not changed; the ticket's actual
+  motivating case (`item`/`customer`/`dl_item`/`dl_supplier`) works correctly.
+- Deployed + verified live: `/health` → `{"ok":true,"version":"0.9.76"}`; dashboard DOM
+  shows `v0.9.76` (Playwright, 0 console errors on `/` and `/otazky-dl`); **functional**
+  — rollback-based dry run of the REAL deployed `question_alerts.sweep()` against live
+  production data (own psycopg connection, `autocommit=False`, always rolled back —
+  nothing persisted, no Odoo post) captured the exact grouped Slovak HTML it would send
+  for the 3 real open stale questions (#29 customer, #30 dl_item, #35 dl_supplier —
+  HK LOAN, the ticket's own cited example). Separately confirmed the LIVE worker had
+  already (for real, on its own tick) enqueued both grouped alerts into `pending_alerts`
+  — visible on `/otazky-dl`'s own existing "🔔 N upozornenie stále čaká" counter. Odoo
+  delivery is currently PENDING (retrying every ~15s), not yet delivered: `erp.slovnormal.sk`
+  is in maintenance right now (`GET /` → 503 "ERP - Maintenance", `POST /json/2/*` → 405
+  nginx) — same signature as the already-closed #253, confirmed via read-only diagnostic
+  requests (no message sent). This is the durable-retry outbox working exactly as
+  designed: nothing lost, will deliver once Odoo recovers. Filed as `#267` (external,
+  `Scope-gate: user-request`) to track the fresh Odoo outage — no code change needed
+  here. All 3 questions confirmed still `status=open`/`answered_at=null` via
+  `/api/orders/questions` — nothing was resolved as a side effect.
+- Run card fired for #237 (`v0.9.76`).
