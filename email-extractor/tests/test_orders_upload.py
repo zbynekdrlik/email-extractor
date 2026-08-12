@@ -155,6 +155,37 @@ def test_put_never_renames_when_the_write_itself_raises():
     fake_sftp.rename.assert_not_called()
 
 
+def test_put_best_effort_removes_the_temp_file_on_a_write_failure():
+    """A write failure must not leave an orphaned .part-* file on ORION forever."""
+    fake_file = MagicMock()
+    fake_file.write.side_effect = OSError("connection reset")
+    fake_sftp = MagicMock()
+    fake_sftp.file.return_value.__enter__.return_value = fake_file
+    fake_client = MagicMock()
+    fake_client.open_sftp.return_value = fake_sftp
+    with patch("paramiko.SSHClient", return_value=fake_client):
+        with pytest.raises(OSError):
+            upload.put(_cfg(), "ORDER_x.txt", "content")
+    written_path = fake_sftp.file.call_args.args[0]
+    fake_sftp.remove.assert_called_once_with(written_path)
+    fake_sftp.rename.assert_not_called()
+
+
+def test_put_reraises_the_original_error_even_if_temp_cleanup_itself_fails():
+    """A SECOND failure (the cleanup remove() itself) must never hide or replace the
+    REAL error the caller needs to see and act on."""
+    fake_file = MagicMock()
+    fake_file.write.side_effect = OSError("connection reset")
+    fake_sftp = MagicMock()
+    fake_sftp.file.return_value.__enter__.return_value = fake_file
+    fake_sftp.remove.side_effect = OSError("cleanup also failed")
+    fake_client = MagicMock()
+    fake_client.open_sftp.return_value = fake_sftp
+    with patch("paramiko.SSHClient", return_value=fake_client):
+        with pytest.raises(OSError, match="connection reset"):
+            upload.put(_cfg(), "ORDER_x.txt", "content")
+
+
 def test_put_propagates_a_rename_failure_without_leaving_it_silent():
     """If the rename itself fails (e.g. the connection drops right after the write),
     put() must still raise — the caller's own failure handling (release the claim, no
