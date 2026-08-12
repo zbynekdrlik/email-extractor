@@ -1465,3 +1465,57 @@ intentional there for cards it was tuned against.
   original fix. Any fix framed as "this exception branch now does X" should trigger an
   explicit grep for sibling `except`/`if`/branch blocks in the SAME function doing
   something structurally similar, before considering the fix complete.
+- **Before building a fix for a ticket's named "invisible failure" class, check whether
+  infrastructure OUTSIDE the obvious Python code path already covers it (#239).** This
+  repo is a hybrid stack — the live n8n instance still owns some workflows
+  (`n8n-workflow-edits.md`), and several Python modules already solve adjacent problems
+  (`confirm.py`'s grouped-incident carryover/failed/unknown sweep). #239 named FIVE
+  invisible-failure classes; live investigation (via the n8n MCP + direct Postgres/SFTP
+  reads) found that classes 1, 4 and 5 were ALREADY solved — an active, undocumented-
+  in-this-repo n8n workflow ("Stuck message watchdog", `EPe5WWMVZR0lzUld`, since
+  2026-07-10) already alerts exhausted-attempt messages into the SAME Odoo channel the
+  ticket asked for, and `confirm.py`'s existing mechanism already covers CODEX
+  rejection/carryover for every DESADV upload since 2026-08-09. Building NEW code for
+  those three classes would have been pure duplication (and risked double-alerting via
+  a shared dedup flag — see the `messages.alerted_stuck` note below). Only classes 2/3
+  were genuine gaps. Before implementing ANY "X is never detected/reported" ticket in
+  this repo: (1) grep the Python code for anything already touching the same table/
+  condition, (2) check live n8n workflows via `search_workflows`/`get_workflow_details`
+  for anything with an overlapping schedule + query shape, (3) only build new code for
+  what survives that check — and record the "already solved" findings on the ticket
+  with evidence, don't silently skip them.
+- **`messages.alerted_stuck` is OWNED by the n8n "Stuck message watchdog" workflow's own
+  dedup (`attempts>=3 AND alerted_stuck=false`, channel by category) — never set it
+  from Python code for a DIFFERENT alerting condition (#239).** A Python-side sweep
+  that reused this flag for its own dedup (e.g. a "never even claimed" check keyed on
+  `attempts=0`) would silently suppress the n8n workflow's OWN future alert if that
+  same message later starts retrying and crosses `attempts>=3` — reintroducing exactly
+  the invisible-failure class the flag exists to prevent, just moved one condition
+  over. Any new Python-side alert needs its OWN dedup key (`app/orders/dl_alerts.py`'s
+  `already_pending(kind, message_id)` is the reusable one — see below).
+- **A durable, retry-until-delivered, grouped Odoo-alert outbox now exists as a
+  generic primitive — `app/orders/dl_alerts.py`'s `pending_alerts` table (#239).**
+  Before this, every DL alert was a fire-and-forget `_post()`: if Odoo happened to be
+  down at that exact moment (a real, currently-open condition — #253), the alert was
+  lost forever with zero trace. `dl_alerts.enqueue(conn, channel_id, kind, body_html,
+  message_id=...)` writes durably FIRST, before any delivery attempt; `dl_alerts.
+  flush_pending(conn, cfg)` (wired into `worker.run_forever` on the same ~15s tick
+  `confirm.sweep` runs on) retries delivery until Odoo genuinely confirms it, GROUPING
+  every undelivered row of the same `(channel_id, kind)` into ONE Odoo post per sweep
+  (never one message per item — the 2026-08-05 flood-of-5-alerts precedent
+  `n8n-workflow-edits.md` already documents). `dl_alerts.already_pending(kind,
+  message_id)` is the companion permanent per-message dedup (documented tradeoff: a
+  genuinely NEW occurrence of the same condition for the same message, much later,
+  will never re-alert — fine for the two kinds that exist today, both structurally
+  single-shot per message; a future recurring-condition kind should dedupe on
+  something that changes per occurrence instead, e.g. include a run/document id in the
+  key). Any FUTURE DL alert that must survive an Odoo outage should reuse this outbox
+  (a new `kind` string, calling `enqueue`) rather than another one-shot `_post()`.
+- **`dl_worker.MAX_ATTEMPTS`/`dl_worker.CATEGORY` are safely importable at module TOP
+  LEVEL from `reliability.py` — no import cycle (#239, verified by tracing the whole
+  dependency graph: `dl_worker` and everything it imports has zero reference to
+  `reliability`).** Useful precedent for collapsing a duplicated-literal threshold
+  (e.g. the "5 attempts" quarantine number, which used to be a bare literal repeated
+  across a SQL query, the constant itself, and a digest's own Slovak wording) to one
+  source of truth — check the target module's dependency chain the same way before
+  assuming a needed cross-module import would cycle.

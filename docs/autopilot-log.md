@@ -2214,3 +2214,65 @@ shadow-preview + direct-`_process_document` technique for re-shipping ONE missin
 document out of an old, multi-document, pre-ledger DL message without risking a
 duplicate upload of its already-shipped sibling(s), plus the LLM-matching-is-
 non-deterministic caveat (re-preview once before trusting a surprising `partial`).
+
+## #239 — päť neviditeľných tried zlyhaní dodacích listov (2026-08-12)
+
+Bump 0.9.69→0.9.70. Investigation-first: naživo overené (prod Postgres, ORION SFTP
+read-only, n8n MCP), že každá z 5 tried má inú skutočnú príčinu než ticket predpokladal:
+
+- **Trieda 1** (vyčerpané pokusy) — už riešená externe: aktívny n8n workflow "Stuck
+  message watchdog" (`EPe5WWMVZR0lzUld`, od 2026-07-10) alertuje `attempts>=3` do
+  kanála 243 pre `category='dodacie_listy'`. Chýbala len dashboard viditeľnosť.
+- **Trieda 2** (zlyhanie uploadu) — reálna medzera, opravená: `dl_worker.py`'s upload-
+  except blok teraz volá `_check_retry` (rovnaký transient-retry mechanizmus ako pre
+  LLM zlyhania — claim je uvoľnený PRED kontrolou, žiadne riziko duplicity), a
+  netransientné/vyčerpané zlyhanie sa zaraďuje do novej trvanlivej `pending_alerts`
+  schránky (`app/orders/dl_alerts.py`) namiesto jednorazového best-effort postu.
+- **Trieda 3** (zaradené, nikdy nespracované) — reálna medzera, opravená: nová
+  `dl_worker.stuck_classified_sweep()` — `category='dodacie_listy' AND processed=false
+  AND created_at < now()-30min AND NOT EXISTS (order_runs row)`, dedup cez
+  `dl_alerts.already_pending` (VEDOME NIE `messages.alerted_stuck` — ten flag patrí
+  n8n watchdogu).
+- **Triedy 4 a 5** (odmietnutie CODEXu / viacdňové čakanie) — `confirm.py`'s existujúci
+  grouped-incident mechanizmus (od #203) už funguje správne pre KAŽDÝ desadv upload od
+  2026-08-09. Historický EKVIA incident (#245) predchádza tomuto dátumu — štrukturálne
+  nemohol byť zachytený, nie živá chyba. Zostávajúce architektonické obmedzenie
+  (rovnaký-deň detekcia odmietnutia, keďže CODEX necháva odmietnutý súbor ležať v
+  `in_DL` namiesto presunu do `unconfirmed`) založené ako samostatný #255
+  (`needs-user-decision` — vyžaduje vlastníkovu voľbu ohľadom miery falošných
+  poplachov, nie technické riešenie).
+
+Dashboard/digest doplnok pre všetkých 5 tried: `reliability.dl_current_health()` — tri
+current-state metriky (`quarantined`/`pending_alerts`/`open_import_incidents`,
+deliberately NIE viazané na deň) zlúčené do `dl_provenance_stats_for_day`, viditeľné cez
+existujúci `/api/orders/dl/stats` (ktorý `/sklad-dl` nástenka už pravidelne pollovala) aj
+v dennom Odoo digest-e (`report.build_daily_digest`'s DL sekcia teraz spúšťaná aj len
+jedným z týchto troch gauge-ov, nie len `runs`/`duplicates`/`mismatch`).
+
+Deep review (samostatný fresh-context `general-purpose` subagent, celý diff
+`72e3243..HEAD`): 0 🔴, 3 🟡, 4 🔵. Kritická claim/release/retry cesta overená bezpečná
+(žiadne riziko duplicitného ORION uploadu). Všetkých 7 nálezov opravených v tej istej
+vetve (commit `66a3f66`) — channel_id=0 guard na upload-failure enqueue, detekčný
+časový údaj v stuck-classified alertoch (odlišný od `created_at`), dokumentovaný
+permanent-dedup kompromis, `dl_worker.MAX_ATTEMPTS` ako jediný zdroj pravdy namiesto
+trojnásobného literálu "5", `include_current_health=False` proti zbytočnému
+dvojitému počítaniu current-state gauge-ov, nový regression test na cross-group
+izoláciu vo `flush_pending`.
+
+CI: PR #256, všetky 4 joby (`test`/`e2e-orders`/`e2e-dl`/`build`) zelené na push aj PR
+runoch. Merged `dbbcab6`. Deploy v0.9.69→v0.9.70, overené `/health`, DOM `v0.9.70`, grep
+bežiaceho kontajnera potvrdil nový kód (`pending_alerts`/`stuck_classified_sweep`/
+`quarantine_threshold`/`already_pending`), a funkčné overenie: vložený syntetický
+`pending_alerts` testovací riadok, `/sklad-dl` nástenka LIVE zobrazila "1 čaká na
+odoslanie", `/api/orders/dl/stats` potvrdil `pending_alerts:1, quarantine_threshold:5`
+v `today` a SPRÁVNE vynechal tieto polia v `yesterday` (potvrdzuje aj
+`include_current_health=False` opravu naživo), testovací riadok následne vymazaný,
+stav overený späť na 0.
+
+Filed as #255: rovnaký-deň odmietnutie importu sa zistí až nasledujúce ráno —
+architektonické obmedzenie vyžadujúce vlastníkovo rozhodnutie o miere falošných
+poplachov.
+
+Playbook: `.claude/rules/n8n-workflow-edits.md` už dokumentuje `confirm.py`'s
+carryover model — žiadna nová sekcia potrebná; tento ticket len POTVRDZUJE, že
+mechanizmus funguje správne od 2026-08-09 a prečo staršie incidenty naň neplatia.
