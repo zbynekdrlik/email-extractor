@@ -36,6 +36,12 @@ Skip decorative/banner/tiny images. See `docs/superpowers/specs/`.
   add-on image to GHCR. All gates green before merge; auto-merge on green (default).
 - No real email data in git (`_spike_*`, `pipeline.py` are gitignored). Synthetic
   fixtures only in tests.
+- **After `git commit -F <file>`, verify `git log -1 --format="%B"` matches the file
+  you wrote** (#268 krok 1, 2026-08-12: one commit landed with the correct staged
+  diff but a completely unrelated, hallucinated message — recovered via a sanctioned
+  `git reset --soft HEAD~1` + re-commit, never `--amend`). Not reproduced on retry with
+  everything on ONE bash line (stage, commit, any hook-bypass comment, no separate
+  lines) — prefer that shape and always verify immediately after.
 - **The git repo root is THIS directory** (`email_extract/`, containing this
   `CLAUDE.md`, `docs/`, `.claude/`) — ONE LEVEL ABOVE the `email-extractor/`
   subdirectory that `.github/workflows/ci.yml` treats as its `working-directory`
@@ -58,3 +64,4 @@ Load the matching skill BEFORE working on that area (don't re-derive):
 - AI objednávky (matching, korpus, CI gate) → `.claude/rules/orders-corpus.md` (auto-loads on `app/orders/**`)
 - nasadenie na živý HA add-on → `.claude/rules/deploy.md` (auto-loads on config.yaml/app/__init__.py/Dockerfile)
 - lokálne spúšťanie pytest proti dev1 test-Postgres → `.claude/rules/local-testing.md` (auto-loads on `email-extractor/tests/**`)
+- rozdelenie `app/httpapi.py` (#268) / charakterizačné testy → `.claude/rules/httpapi-characterization.md` (auto-loads on `app/httpapi*.py` a `test_httpapi_characterization.py`)

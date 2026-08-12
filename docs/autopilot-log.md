@@ -2610,3 +2610,41 @@ LOAN item-matching confirmed live, new HK LOAN multi-message gap found)
   count back to 0, matching pre-verification state). Confirmed `order_questions.id=35`
   (HK LOAN) still `open`/`answered_at=null` throughout — never touched.
 - Run card fired for #248 (`v0.9.77`).
+
+## #268 krok 1/11 — charakterizačné testy pred rozdelením `app/httpapi.py` (2026-08-12, v0.9.78)
+
+- Krok 1 z 11-krokového plánu (issuecomment na #268) na rozdelenie `app/httpapi.py`
+  (2693 riadkov) na 9 modulov. **Toto NIE JE rozdelenie samotné** — iba tri nové testy,
+  ktoré ho majú ochrániť pred kroky 4/10 (1226 riadkov HTML presunutých naraz;
+  446-riadkový nedeliteľný blok s dvojspojením proti duplicitnému uploadu). #268
+  zostáva OTVORENÝ, kým nedobehne krok 11.
+- STEP 0: plán bol písaný proti `3e95cbf`; `dev` mal odvtedy jeden docs-only commit
+  (`bd9e28e`, žiadna zmena kódu). Všetky citované čísla riadkov v pláne overené
+  `grep`om a sedeli presne, okrem drobnej odchýlky v ručne spočítanom počte
+  `with _db(`/`with _db_tx(` výskytov (plán: 42/8, skutočnosť: 43/9 — nemení nič na
+  kroku 1, žiadne z troch nových testov nepoužíva hardcoded číslo riadku).
+- Tri nové charakterizačné testy (`tests/test_httpapi_characterization.py`, commity
+  `bceacb1`/`86618fa`): (1) presná inventúra `app.url_map.iter_rules()` (51 route bez
+  vstavanej `static`) proti pevnému zoznamu, (2) sha256 piatich VYRENDEROVANÝCH HTML
+  konštánt (`LOGIN_HTML`, `DASH_HTML`, `ASK_HTML`, `ASK_DL_HTML`, `ZNALOSTI_HTML` —
+  zámerne NIE `_ASK_HTML_TEMPLATE` samostatne, keďže deriváty striktne nadmnožinovo
+  pokrývajú jeho obsah AJ prípadnú chybu v `.replace()` reťazci), (3) prvý skutočný
+  happy-path test pre `/api/orders/digest` (dovtedy len 401-bez-session).
+- Každý z troch testov overený, že GENUINE zlyhá pri poškodení toho, čo chráni
+  (preklep v ceste route, jeden preklepnutý znak v `LOGIN_HTML`, zámena today/yesterday
+  v digest handleri) a znova prejde po presnom vrátení zmeny (`diff` proti zálohe —
+  byte-identické). Žiadna produkčná zmena v žiadnom commite tohto PR.
+- Review (fresh-context `general-purpose` subagent, nikdy vstavaný skill): 0 🔴 0 🟡
+  2 🔵 — nezávisle znovu vygeneroval route tabuľku aj sha256 hashe a potvrdil zhodu.
+  Nález 1 (digest test overoval len prítomnosť `deterministic`/`review` kľúčov, nie
+  hodnotu) opravený v tom istom PR (commit `86618fa`). Nález 2 (nesúvisiaci docs-only
+  commit `bd9e28e` legitímne jazdí v PR) — informačná poznámka, bez akcie.
+- PR #276 (dev→main), 3 commity, `Closes`/`Fixes`/`Resolves #268` zámerne NIKDE — issue
+  zostáva otvorený. CI zelené (test/e2e-orders/e2e-dl/build) na oboch push aj
+  pull_request eventoch, oba razy po pushi aj po review-fixe. Merged `adfa104`.
+- Deploy: `ha apps update e0ac7775_email_extractor` → v0.9.78. Overené: `/health`
+  `{"ok":true,"version":"0.9.78"}`; DOM (Playwright, čerstvé cookies) ukazuje `v0.9.78`
+  na `/`, `/otazky`, `/otazky-dl`, 0 console chýb/varovaní; `/api/orders/digest`
+  vrátil reálne živé dáta (days_since_incident=6, dnešné aj včerajšie štatistiky) —
+  presne ten endpoint, ktorý nový test teraz chráni.
+- Run card fired for #268 krok 1/11 (`v0.9.78`).
