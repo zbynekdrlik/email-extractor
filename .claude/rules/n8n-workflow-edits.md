@@ -230,3 +230,28 @@ to retry — never one alone, and never "the claim was released" as a substitute
 either. Any FUTURE upload-with-retry in this codebase (a different ORION target, a
 different external transfer) should default to this same shape from the start, rather
 than discovering the gap the expensive way.
+
+## A SYNTHESIZED fallback identity feeding a claim/dedup key must be STABLE across retries too (#262)
+
+The same "stable identity" principle above applies one layer EARLIER than the upload
+itself: whatever VALUE gets fed into a claim/dedup key (here, `desadv_sent`'s
+`(supplier_ean, doc_number)`) must be identical every time the SAME logical work item
+is reprocessed — not just checked correctly at retry time. `desadv_edi.build()`'s
+existing no-docNumber fallback (`_generate_doc_number()`, R83) is wall-clock based
+(`datetime.now()` → MMDD-HHMM) — harmless while essentially unreached (a formal
+printed doc almost always HAS a number), but #262 made "extraction found no
+docNumber at all" the NORMAL case for an informal delivery announcement in mail body
+text. A stale-claim reclaim or a transient-failure retry recomputes `built.doc_number`
+fresh each time; a wall-clock fallback would hand `claim_send_or_identify()` a
+DIFFERENT key on each attempt, and a genuinely-already-shipped document would look
+brand new on retry — the exact double-upload risk the section above exists to
+prevent, just one decision earlier (choosing the document's IDENTITY, before the
+first claim attempt is even made). Fixed with `desadv_edi.generate_stable_doc_number
+(message_id)` — deterministic (sha256 of the originating message's own stable id),
+synthesized by the CALLER (`dl_worker._process_document`) before ever handing an
+empty docNumber to `build()`, so `build()`'s own wall-clock fallback is never reached
+from the live worker at all. Any FUTURE feature that needs to claim/dedup an entity
+with no natural stable identifier (no printed number, no external reference) should
+derive it from something that is ALREADY guaranteed stable per retry (a message id, a
+row id) — never from wall-clock time, a random value, or anything else that changes
+between attempts of the SAME logical item.
