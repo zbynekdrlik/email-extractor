@@ -389,6 +389,22 @@ def dl_suppliers_for_management(conn) -> list[dict]:
     return _merge_dl_suppliers(base, _load_dl_supplier_overrides(conn))
 
 
+def _active_dl_supplier_conflict(conn, ean_edi: str) -> dict | None:
+    """#248 review finding: mirrors `snapshot._active_customer_conflict` — factored out
+    so the reclaim check, the fresh-insert UniqueViolation backstop, and the
+    override-id-edit UniqueViolation backstop all build the identical
+    `DuplicateEan.existing` shape."""
+    hit = conn.execute(
+        """SELECT id, name, city FROM dl_supplier_overrides
+            WHERE orig_ean_edi IS NULL AND ean_edi = %s AND NOT retired""",
+        (ean_edi,)).fetchone()
+    if not hit:
+        return None
+    hit_id, hit_name, hit_city = hit
+    return {"ean_edi": ean_edi, "name": hit_name, "city": hit_city,
+            "override_id": hit_id}
+
+
 def upsert_dl_supplier(conn, *, override_id: int | None, orig_ean_edi: str | None,
                        orig_city: str | None, ean_edi: str, name: str,
                        emails: list[str], city: str) -> int:
@@ -403,11 +419,24 @@ def upsert_dl_supplier(conn, *, override_id: int | None, orig_ean_edi: str | Non
     EAN-EDI a DL delivery cannot be built without)."""
     ean_edi = snapshot.normalize_ean(ean_edi, entity="dodávateľ")
     if override_id is not None:
-        row = conn.execute(
-            """UPDATE dl_supplier_overrides
-                  SET ean_edi=%s, name=%s, emails=%s, city=%s, retired=false, updated_at=now()
-                WHERE id=%s RETURNING id""",
-            (ean_edi, name, emails, city, override_id)).fetchone()
+        # #248 review finding: mirrors `upsert_customer`'s own override-id-edit fix —
+        # this branch (editing an already-overridden supplier row by id, e.g. from the
+        # /znalosti admin dashboard) had no uniqueness check of its own; the new partial
+        # unique index (db.py) now turns a collision into `UniqueViolation` instead of a
+        # silent duplicate, caught here and raised as the same clean `DuplicateEan`.
+        try:
+            with conn.transaction():
+                row = conn.execute(
+                    """UPDATE dl_supplier_overrides
+                          SET ean_edi=%s, name=%s, emails=%s, city=%s, retired=false,
+                              updated_at=now()
+                        WHERE id=%s RETURNING id""",
+                    (ean_edi, name, emails, city, override_id)).fetchone()
+        except psycopg.errors.UniqueViolation:
+            raise snapshot.DuplicateEan(
+                ean_edi, _active_dl_supplier_conflict(conn, ean_edi) or
+                {"ean_edi": ean_edi, "name": "", "city": "", "override_id": None}
+            ) from None
         if not row:
             raise KeyError(f"no such override id {override_id}")
         return int(row[0])
@@ -439,21 +468,15 @@ def upsert_dl_supplier(conn, *, override_id: int | None, orig_ean_edi: str | Non
         # raw constraint-violation crash.
         with conn.transaction():
             conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (ean_edi,))
-            existing = conn.execute(
-                """SELECT id, name, city FROM dl_supplier_overrides
-                    WHERE orig_ean_edi IS NULL AND ean_edi = %s AND NOT retired""",
-                (ean_edi,)).fetchone()
-            if existing:
-                existing_id, existing_name, existing_city = existing
-                if existing_city != city:
-                    raise snapshot.DuplicateEan(ean_edi, {
-                        "ean_edi": ean_edi, "name": existing_name,
-                        "city": existing_city, "override_id": existing_id})
+            conflict = _active_dl_supplier_conflict(conn, ean_edi)
+            if conflict:
+                if conflict["city"] != city:
+                    raise snapshot.DuplicateEan(ean_edi, conflict)
                 row = conn.execute(
                     """UPDATE dl_supplier_overrides
                           SET name=%s, emails=%s, city=%s, retired=false, updated_at=now()
                         WHERE id=%s RETURNING id""",
-                    (name, emails, city, existing_id)).fetchone()
+                    (name, emails, city, conflict["override_id"])).fetchone()
                 return int(row[0])
             try:
                 with conn.transaction():
@@ -465,14 +488,10 @@ def upsert_dl_supplier(conn, *, override_id: int | None, orig_ean_edi: str | Non
                            RETURNING id""",
                         (orig_city, ean_edi, name, emails, city)).fetchone()
             except psycopg.errors.UniqueViolation:
-                hit = conn.execute(
-                    """SELECT id, name, city FROM dl_supplier_overrides
-                        WHERE orig_ean_edi IS NULL AND ean_edi = %s AND NOT retired""",
-                    (ean_edi,)).fetchone()
-                hit_id, hit_name, hit_city = hit if hit else (None, "", "")
-                raise snapshot.DuplicateEan(ean_edi, {
-                    "ean_edi": ean_edi, "name": hit_name, "city": hit_city,
-                    "override_id": hit_id}) from None
+                raise snapshot.DuplicateEan(
+                    ean_edi, _active_dl_supplier_conflict(conn, ean_edi) or
+                    {"ean_edi": ean_edi, "name": "", "city": "", "override_id": None}
+                ) from None
             return int(row[0])
     row = conn.execute(
         """INSERT INTO dl_supplier_overrides

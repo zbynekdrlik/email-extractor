@@ -1054,8 +1054,20 @@ SCHEMA = [
         END IF;
     END $$
     """,
+    # #248 review finding: the index below must exclude a blank `ean_edi` the SAME way
+    # the de-dup UPDATE above does (`AND t.ean_edi <> ''`) — Postgres treats `''` as an
+    # ORDINARY, EQUAL value for a unique index (unlike NULL, which the index correctly
+    # never sees any two rows sharing), so without this exclusion two active hand-added
+    # rows that both happen to carry a blank EAN would collide on `CREATE UNIQUE INDEX`
+    # and crash boot — exactly the failure this migration exists to prevent. Reproduced
+    # against a real Postgres before this fix: two `ean_edi=''` active rows raised
+    # `UniqueViolation: Key (ean_edi)=() is duplicated` on `init_schema()`. Does not
+    # happen against production data today (confirmed live: 0 blank-EAN active rows),
+    # but the de-dup step above is explicitly unconditional for exactly this class of
+    # future/other-environment case, so the index it protects must be too.
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_overrides_new_ean "
-    "ON customer_overrides(ean_edi) WHERE orig_ean_edi IS NULL AND NOT retired",
+    "ON customer_overrides(ean_edi) WHERE orig_ean_edi IS NULL AND NOT retired "
+    "AND ean_edi <> ''",
     """
     DO $$
     BEGIN
@@ -1078,8 +1090,10 @@ SCHEMA = [
         END IF;
     END $$
     """,
+    # Same blank-EAN exclusion as the customer index above — see that comment.
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_dl_supplier_overrides_new_ean "
-    "ON dl_supplier_overrides(ean_edi) WHERE orig_ean_edi IS NULL AND NOT retired",
+    "ON dl_supplier_overrides(ean_edi) WHERE orig_ean_edi IS NULL AND NOT retired "
+    "AND ean_edi <> ''",
 ]
 
 

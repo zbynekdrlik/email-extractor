@@ -329,6 +329,37 @@ def test_two_concurrent_new_customer_adds_for_the_same_ean_with_different_street
         f"the refused submission must raise DuplicateEan, not silently fail: {errors[0]!r}")
 
 
+def test_editing_an_already_overridden_customer_by_override_id_into_a_colliding_ean_raises(pg):
+    """#248 review finding: the `override_id is not None` branch (editing an
+    already-overridden row by its own id — the /znalosti admin dashboard's second edit
+    of the same row) had NO uniqueness check of its own at all before this fix; it
+    would have silently retargeted the row's EAN onto another active customer's EAN,
+    creating the exact same #248 duplicate-EAN bug from a different screen. Now the
+    partial unique index (db.py) turns that into `DuplicateEan`, not a duplicate row
+    and not a raw crash."""
+    a_id = snapshot.upsert_customer(
+        pg, override_id=None, orig_ean_edi=None, orig_street=None,
+        ean_edi="7100000000001", name="Zákazník A", emails=["a@x.sk"],
+        city="Košice", street="Ulica A", zip_="")
+    b_id = snapshot.upsert_customer(
+        pg, override_id=None, orig_ean_edi=None, orig_street=None,
+        ean_edi="7100000000002", name="Zákazník B", emails=["b@x.sk"],
+        city="Prešov", street="Ulica B", zip_="")
+
+    with pytest.raises(snapshot.DuplicateEan) as exc_info:
+        snapshot.upsert_customer(
+            pg, override_id=b_id, orig_ean_edi=None, orig_street=None,
+            ean_edi="7100000000001",  # A's EAN, but B's own (different) street
+            name="Zákazník B premenovaný", emails=["b2@x.sk"],
+            city="Prešov", street="Ulica B", zip_="")
+    assert exc_info.value.existing["override_id"] == a_id
+
+    # Neither row was corrupted by the failed edit.
+    rows = {r["ean_edi"]: r["name"] for r in snapshot.customers_for_management(pg)}
+    assert rows["7100000000001"] == "Zákazník A"
+    assert rows["7100000000002"] == "Zákazník B"
+
+
 def test_customer_override_can_add_a_brand_new_customer(pg):
     snapshot.upsert_customer(
         pg, override_id=None, orig_ean_edi=None, orig_street=None,

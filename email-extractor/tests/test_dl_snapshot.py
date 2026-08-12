@@ -451,3 +451,27 @@ def test_upsert_dl_supplier_by_override_id_refuses_a_nonexistent_id(pg):
         dl_snapshot.upsert_dl_supplier(
             pg, override_id=999999, orig_ean_edi=None, orig_city=None,
             ean_edi="1", name="x", emails=[], city="")
+
+
+def test_editing_an_already_overridden_dl_supplier_by_override_id_into_a_colliding_ean_raises(pg):
+    """#248 review finding: mirrors the identical customer-side test in
+    tests/test_snapshot.py — the `override_id is not None` branch had no uniqueness
+    check of its own; now the partial unique index turns a collision into
+    `DuplicateEan`, not a silent duplicate."""
+    a_id = dl_snapshot.upsert_dl_supplier(
+        pg, override_id=None, orig_ean_edi=None, orig_city=None,
+        ean_edi="7100000000003", name="Dodávateľ A", emails=["a@dl.sk"], city="Košice")
+    b_id = dl_snapshot.upsert_dl_supplier(
+        pg, override_id=None, orig_ean_edi=None, orig_city=None,
+        ean_edi="7100000000004", name="Dodávateľ B", emails=["b@dl.sk"], city="Prešov")
+
+    with pytest.raises(snapshot.DuplicateEan) as exc_info:
+        dl_snapshot.upsert_dl_supplier(
+            pg, override_id=b_id, orig_ean_edi=None, orig_city=None,
+            ean_edi="7100000000003",  # A's EAN, but B's own (different) city
+            name="Dodávateľ B premenovaný", emails=["b2@dl.sk"], city="Prešov")
+    assert exc_info.value.existing["override_id"] == a_id
+
+    rows = {r["ean_edi"]: r["name"] for r in dl_snapshot.dl_suppliers_for_management(pg)}
+    assert rows["7100000000003"] == "Dodávateľ A"
+    assert rows["7100000000004"] == "Dodávateľ B"

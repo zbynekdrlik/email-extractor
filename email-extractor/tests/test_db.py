@@ -117,6 +117,51 @@ def test_dl_supplier_overrides_new_ean_index_migration_tolerates_pre_existing_du
         "SELECT count(*) FROM dl_supplier_overrides "
         "WHERE ean_edi='6000000000002' AND NOT retired").fetchone()
     assert active == (1,)
+
+
+def test_customer_overrides_new_ean_index_ignores_blank_ean_duplicates(pg):
+    """#248 review finding: Postgres treats '' as an ORDINARY, EQUAL value for a unique
+    index (unlike NULL, which two rows can always share) — so two ACTIVE hand-added
+    rows that both happen to carry a blank ean_edi must NOT collide on the new index,
+    or `init_schema()` crashes boot on data the de-dup step (which explicitly excludes
+    blank EAN, `AND ean_edi <> ''`) never touches."""
+    pg.execute("DROP INDEX IF EXISTS idx_customer_overrides_new_ean")
+    for label in ("A", "B"):
+        pg.execute(
+            """INSERT INTO customer_overrides
+                   (orig_ean_edi, orig_street, ean_edi, name, emails, city, street, zip,
+                    retired, updated_at)
+               VALUES (NULL, NULL, '', %s, ARRAY['blank@x.sk'], 'Košice', %s, '',
+                       false, now())""",
+            (f"Bez EAN {label}", f"Ulica {label}"))
+
+    db.init_schema(pg)   # must not raise
+
+    active = pg.execute(
+        "SELECT count(*) FROM customer_overrides "
+        "WHERE ean_edi = '' AND orig_ean_edi IS NULL AND NOT retired").fetchone()
+    assert active == (2,), (
+        "two active rows sharing a BLANK ean_edi must both survive untouched — the "
+        "unique index must not treat '' as a real duplicate")
+
+
+def test_dl_supplier_overrides_new_ean_index_ignores_blank_ean_duplicates(pg):
+    """Mirror of the customer test above for dl_supplier_overrides."""
+    pg.execute("DROP INDEX IF EXISTS idx_dl_supplier_overrides_new_ean")
+    for label in ("A", "B"):
+        pg.execute(
+            """INSERT INTO dl_supplier_overrides
+                   (orig_ean_edi, orig_city, ean_edi, name, emails, city, retired,
+                    updated_at)
+               VALUES (NULL, NULL, '', %s, ARRAY['blank@dl.sk'], %s, false, now())""",
+            (f"Bez EAN {label}", f"Mesto {label}"))
+
+    db.init_schema(pg)   # must not raise
+
+    active = pg.execute(
+        "SELECT count(*) FROM dl_supplier_overrides "
+        "WHERE ean_edi = '' AND orig_ean_edi IS NULL AND NOT retired").fetchone()
+    assert active == (2,)
     assert pg.execute(
         "SELECT 1 FROM pg_indexes WHERE indexname='idx_dl_supplier_overrides_new_ean'"
     ).fetchone(), "the unique index must exist after the migration runs"

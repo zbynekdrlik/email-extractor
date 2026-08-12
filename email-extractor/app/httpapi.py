@@ -1197,20 +1197,30 @@ def create_app(cfg) -> Flask:
         if not ean.isdigit():
             return jsonify(error="EAN kód EDI musí byť len číslice."), 400
         from .orders import hold
-        with _db() as c:
-            rid = snapshot.upsert_customer(
-                c, override_id=body.get("override_id"),
-                orig_ean_edi=body.get("orig_ean_edi"), orig_street=body.get("orig_street"),
-                ean_edi=ean, name=name,
-                emails=_parse_emails_field(body.get("emails")),
-                city=str(body.get("city") or "").strip(),
-                street=str(body.get("street") or "").strip(),
-                zip_=str(body.get("zip") or "").strip())
-            snapshot.rebuild_from_overrides(c)
-            # #234: this save may be exactly what an ALREADY-OPEN customer question was
-            # waiting for (the customer was added on /znalosti instead of on the card) —
-            # never leave that order stuck until the periodic worker sweep catches up.
-            hold.retry_unknown_customer_questions(c, cfg)
+        try:
+            with _db() as c:
+                rid = snapshot.upsert_customer(
+                    c, override_id=body.get("override_id"),
+                    orig_ean_edi=body.get("orig_ean_edi"),
+                    orig_street=body.get("orig_street"),
+                    ean_edi=ean, name=name,
+                    emails=_parse_emails_field(body.get("emails")),
+                    city=str(body.get("city") or "").strip(),
+                    street=str(body.get("street") or "").strip(),
+                    zip_=str(body.get("zip") or "").strip())
+                snapshot.rebuild_from_overrides(c)
+                # #234: this save may be exactly what an ALREADY-OPEN customer question
+                # was waiting for (the customer was added on /znalosti instead of on the
+                # card) — never leave that order stuck until the periodic worker sweep
+                # catches up.
+                hold.retry_unknown_customer_questions(c, cfg)
+        except snapshot.DuplicateEan as e:
+            # #248 review finding: this admin dashboard save funnels through the SAME
+            # `upsert_customer` as the warehouse question-card flow, so it can raise the
+            # same conflict — same 409 shape either way.
+            return jsonify(
+                error=f"EAN {ean} už má zákazník {e.existing.get('name', '')}.",
+                existing=e.existing), 409
         return jsonify(ok=True, id=rid)
 
     @app.delete("/api/znalosti/clients")
@@ -1288,14 +1298,22 @@ def create_app(cfg) -> Flask:
                                  "v CODEXe pri dodávateľovi."), 400
         if not ean.isdigit():
             return jsonify(error="EAN kód EDI musí byť len číslice."), 400
-        with _db() as c:
-            rid = dl_snapshot.upsert_dl_supplier(
-                c, override_id=body.get("override_id"),
-                orig_ean_edi=body.get("orig_ean_edi"), orig_city=body.get("orig_city"),
-                ean_edi=ean, name=name,
-                emails=_parse_emails_field(body.get("emails")),
-                city=str(body.get("city") or "").strip())
-            dl_snapshot.dl_rebuild_from_overrides(c)
+        try:
+            with _db() as c:
+                rid = dl_snapshot.upsert_dl_supplier(
+                    c, override_id=body.get("override_id"),
+                    orig_ean_edi=body.get("orig_ean_edi"), orig_city=body.get("orig_city"),
+                    ean_edi=ean, name=name,
+                    emails=_parse_emails_field(body.get("emails")),
+                    city=str(body.get("city") or "").strip())
+                dl_snapshot.dl_rebuild_from_overrides(c)
+        except snapshot.DuplicateEan as e:
+            # #248 review finding: mirrors the customer endpoint's own fix above — this
+            # admin dashboard save funnels through the SAME `upsert_dl_supplier` as the
+            # warehouse question-card flow.
+            return jsonify(
+                error=f"EAN {ean} už má dodávateľ {e.existing.get('name', '')}.",
+                existing=e.existing), 409
         return jsonify(ok=True, id=rid)
 
     @app.delete("/api/znalosti/dl-suppliers")
