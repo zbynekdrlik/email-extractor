@@ -850,9 +850,14 @@ def test_upload_failure_alert_actually_delivers_once_flushed(pg, tmp_path):
     assert len(posted) == 1 and posted[0][1] == 243
 
 
-def test_upload_failure_at_attempts_3_or_more_enqueues_immediately(pg, tmp_path):
-    """W9-mirrored: attempts is already incremented by the claim, so retries happen on
-    attempts 1-2 and a transient-looking reason at attempts>=3 still alerts."""
+def test_upload_failure_enqueues_immediately_whatever_the_attempt_count(pg, tmp_path):
+    """An upload failure is terminal at EVERY attempt count — there is no retry window
+    for uploads (see the duplicate-delivery reasoning in the no-auto-retry test above),
+    so a transient-looking reason alerts immediately here exactly as it does on the
+    first attempt. Kept as a distinct case because it also pins that the claim's own
+    attempts counter still passes through untouched. (W9's `<3` retry gate remains real
+    for LLM/vision failures — `test_attempts_3_or_more_goes_to_review_even_for_a_
+    transient_reason` covers that path, which this change did not touch.)"""
     _snapshot(pg)
     _msg(pg, mid="dl1")
     _attach(pg, tmp_path, "dl1")
