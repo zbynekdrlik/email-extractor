@@ -565,15 +565,23 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
               dir_override=getattr(cfg, "orion_dl_dir", upload_mod.DL_DIR))
     except Exception as e:
         desadv.release_send(conn, supplier_decision.ean_edi, built.doc_number)
-        # #239 class 2: a TRANSIENT-looking upload failure (a network blip, ORION
-        # briefly unreachable) now gets the SAME automatic retry R17 already gives a
-        # transient LLM failure — the claim was just released above, so a retry can
-        # safely re-claim and re-upload without ever risking a duplicate. Raises
-        # _RetryLater when transient and attempts<3, aborting up through
-        # _process_message -> _run_and_finish exactly like every other _check_retry
-        # call site in this module (re-arms the message for the 30-min stale reclaim,
-        # no alert needed yet — it is not terminal).
-        _check_retry(message.get("attempts", 0), str(e))
+        # #239: an upload failure is NEVER auto-retried here. The removed code called
+        # `_check_retry(...)` at this point, reasoning that "the claim was just released
+        # above, so a retry can safely re-claim and re-upload without ever risking a
+        # duplicate" — backwards: releasing the claim is exactly what REMOVES the
+        # protection. `upload_mod.put()` writes straight to the FINAL `in_DL\<name>` with
+        # no temp-write + rename, `desadv_edi.filename()` stamps a retry with a fresh
+        # `HHMMSSmmm` (so it cannot collide), `release_send()` above DELETED the ledger
+        # row (so `claim_send_or_identify()`, the one atomic anti-double-upload backstop,
+        # has nothing left to guard and `confirm.py` never sees the orphan), and
+        # `TRANSIENT_RE` matches `timed out` — the exact shape of "the bytes DID land,
+        # only the reply was lost". Composed: two copies of one document in `in_DL`, both
+        # taken in at the warehouse's next manual morning import. R17's retry semantics
+        # for LLM/vision failures are untouched; only this upload call site is affected.
+        # Re-enabling a retry needs an absence proof (by doc_number + supplier, never by
+        # filename, which changes between attempts) plus a temp-write+rename upload —
+        # tracked on #239. The durable alert below is kept: that half is correct, and is
+        # what makes this failure visible instead of silent.
         log.exception("DL upload of %s failed", built.filename)
         note = ("Odoslanie dodacieho listu do ORIONu zlyhalo — skús znova alebo "
                "nahlás administrátorovi")
@@ -728,9 +736,30 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     # #231: the DL-only nástenka link, never the mixed AI-orders `sklad_link`.
     link = report.dl_sklad_link(cfg)
 
-    if not attachments:
-        # R15: no attachment (or nothing PDF/image-shaped) is NOT an error.
-        reason = "Email bez prílohy — pravdepodobne bežná správa"
+    # #247: a decorative/tiny/junk attachment (`app/extract.py`'s own ingest-time
+    # `method='skipped'` classification, e.g. `flag='skipped_tiny_image'` for a
+    # signature logo) must never be handed to `dl_extract` at all — it has no way to
+    # tell "a real tiny scan" from "a decorative image" and, for one with no
+    # `machine_text`, falls into the digital-PDF-no-text vision fallback and sends the
+    # raw image bytes to OpenAI labelled as a PDF file, which is rejected with a 400
+    # (the HK LOAN incident this fixes). Reuses the EXISTING classification already
+    # computed at ingest and threaded through `_read_attachments()` — never a second,
+    # parallel decorative-image decision. An eval-harness fixture (`dl_evaluate.
+    # _decode_attachment`) never sets `method` at all, so it is always treated as
+    # usable — unaffected by this filter.
+    usable_attachments = [a for a in attachments if (a.get("method") or "") != "skipped"]
+
+    if not usable_attachments:
+        if attachments:
+            # Attachment(s) existed but were ALL decorative/junk — distinct, more
+            # actionable wording than "no attachment at all" (still posted to Odoo
+            # review + the /sklad-dl board, never silent — R15's own visibility path).
+            reason = ("Príloha/y sú len drobný/nepoužiteľný obrázok (napr. podpis "
+                      "alebo logo) — žiadny skutočný dodací list sa v nich nenašiel; "
+                      "ak je dokument v texte e-mailu, treba ho spracovať ručne")
+        else:
+            # R15: no attachment (or nothing PDF/image-shaped) is NOT an error.
+            reason = "Email bez prílohy — pravdepodobne bežná správa"
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, from_addr=message.get("from_addr", ""),
             subject=message.get("subject", ""), link=link), post=post)
@@ -739,7 +768,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
         return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
                "documents": [{"outcome": "review", "reason": reason}], "items": []}
 
-    extraction = dl_extract.extract_email(client, attachments)
+    extraction = dl_extract.extract_email(client, usable_attachments)
 
     documents_out: list[dict] = []
     all_items: list[dict] = []

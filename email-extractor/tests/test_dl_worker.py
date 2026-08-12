@@ -55,10 +55,14 @@ def _msg(pg, mid="dl1", subject="Dodací list", from_addr="dodavatel@lunys.sk",
 
 
 def _attach(pg, tmp_path, mid, idx=0, filename="dl.pdf", text="dodaci list text",
-           mime="application/pdf"):
+           mime="application/pdf", method=""):
+    # #247: `method` mirrors `app/extract.py`'s own ingest-time classification stored
+    # on the real `attachments.method` column (e.g. `'skipped'` for a decorative/tiny
+    # image, `flag='skipped_tiny_image'`) — default "" matches every PRE-#247 caller
+    # unchanged (NULL/"" both read back as "" via `_read_attachments`'s `method or ""`).
     pg.execute(
-        """INSERT INTO attachments (message_id, idx, filename, mime, extracted_text)
-           VALUES (%s, %s, %s, %s, %s)""", (mid, idx, filename, mime, text))
+        """INSERT INTO attachments (message_id, idx, filename, mime, extracted_text, method)
+           VALUES (%s, %s, %s, %s, %s, %s)""", (mid, idx, filename, mime, text, method))
     d = store.message_dir(str(tmp_path), mid)
     d.mkdir(parents=True, exist_ok=True)
     (d / f"att{idx}__{filename}").write_bytes(b"%PDF-1.4 no embedded jpeg here\n")
@@ -170,6 +174,77 @@ def test_a_non_pdf_non_image_attachment_is_treated_as_no_usable_attachment(pg, t
     n = dl_worker.tick(pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)),
                        client=FakeClient({}))
     assert n == 1
+    row = pg.execute("SELECT processed FROM messages WHERE message_id='dl1'").fetchone()
+    assert row[0] is True
+
+
+# --- #247: a decorative/tiny attachment (extract.py's own ingest-time
+# method='skipped') must never reach dl_extract/vision at all ----------------
+
+def test_a_decorative_skipped_attachment_never_reaches_vision_and_reviews_cleanly(
+        pg, tmp_path):
+    """Live incident: ALL 13 stored HK LOAN (gnip@hkloan.eu) attachments are the exact
+    same 2472-byte/150x76px signature logo, and `extract.py`'s own ingest already
+    classifies every one of them `method='skipped'` (`flag='skipped_tiny_image'`).
+    `dl_worker._read_attachments` used to hand its raw bytes to `dl_extract` anyway --
+    `dl_extract.extract_attachment` has no image-vs-PDF distinction of its own (its
+    module docstring leaves "attachment selection" entirely to this worker), so a tiny
+    image with no machine_text falls into the "digital PDF, no text -> vision fallback"
+    branch and sends the raw JPEG bytes to OpenAI labelled as a PDF file
+    (`llm.vision_call(pdf_bytes=...)`) -- which OpenAI rejects with a 400 "could not be
+    processed", exactly the log line `DL attachment idx=0 filename='00000I0G.jpeg'
+    failed to extract` from the ticket. Because this is the message's ONLY attachment,
+    no document is ever produced, so `_process_document` (where supplier lookup runs)
+    is never even called -- the pipeline "crashes" before it gets there.
+
+    FakeClient({})'s `vision_call` always raises `AssertionError` -- if the worker
+    still calls it for a skipped attachment, that raised message leaks into the Odoo
+    review reason instead of a clean, actionable one.
+    """
+    _snapshot(pg)
+    _msg(pg, mid="dl1", from_addr="gnip@example-supplier.sk",
+        subject="Avizacia G-P")
+    _attach(pg, tmp_path, "dl1", filename="00000I0G.jpeg", mime="image/jpeg",
+           text="", method="skipped")
+    posted = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=FakeClient({}),
+                       post=lambda c, h: posted.append(h))
+    assert n == 1
+    row = pg.execute(
+        "SELECT processed, processed_by FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True, "dodacie_listy")
+    assert len(posted) == 1
+    # the crash symptom must be GONE -- no LLM/vision failure text leaking through
+    assert "vision must not be called" not in posted[0]
+    assert "sa nepodarilo spracovať" not in posted[0]
+    # a clear, actionable reason instead (a warehouse-readable review, never silent)
+    assert any(w in posted[0] for w in ("drobný", "logo", "podpis"))
+
+
+def test_a_real_attachment_still_passes_alongside_a_decorative_one(pg, tmp_path):
+    """Owner's own acceptance criterion on #247: 'ak je v maili aj použiteľná
+    príloha, doklad musí prejsť z nej' -- a decorative attachment sitting next to a
+    real, usable one must not affect the real one's processing at all."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1", idx=0, filename="podpis.jpeg", mime="image/jpeg",
+           text="", method="skipped")
+    _attach(pg, tmp_path, "dl1", idx=1, filename="dl.pdf", mime="application/pdf",
+           text="dodaci list text", method="pdf-text")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    uploaded, posted = [], []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(
+        pg, cfg, client=client,
+        upload=lambda c, name, content, dir_override=None:
+            uploaded.append((name, content, dir_override)),
+        post=lambda c, html: posted.append(html))
+    assert n == 1
+    assert len(uploaded) == 1
+    assert uploaded[0][0].startswith("Z-DESADV_")
+    assert "dl_documents" in client.calls
     row = pg.execute("SELECT processed FROM messages WHERE message_id='dl1'").fetchone()
     assert row[0] is True
 
@@ -664,34 +739,49 @@ def test_attempts_3_or_more_goes_to_review_even_for_a_transient_reason(pg, tmp_p
     assert row == (True, 3)
 
 
-# --- #239 class 2: upload-failure retry + durable alert (never fire-and-forget) -----
+# --- #239 class 2: upload-failure durable alert (never fire-and-forget, never a
+# --- silent automatic re-upload) -----------------------------------------------------
 
-def test_transient_upload_failure_retries_without_alerting(pg, tmp_path):
-    """A network-shaped upload failure gets the SAME automatic retry R17 already gives
-    a transient LLM failure — no alert yet, it is not terminal."""
+def test_a_timed_out_upload_is_never_auto_retried_so_orion_can_never_get_two_copies(
+        pg, tmp_path):
+    """#239, found by independent verification of this ticket's own PR: an upload
+    failure must never be re-uploaded automatically.
+
+    `upload.put()` writes straight to the FINAL `in_DL\\<name>` with no temp-write +
+    rename, so a transfer that lands its bytes and only loses the reply (`timed out` --
+    which `TRANSIENT_RE` matches) leaves a complete, validly-named file on ORION.
+    `desadv_edi.filename()` then stamps a retry with a fresh `HHMMSSmmm`, so the second
+    attempt cannot collide with the first, and `desadv.release_send()` has already
+    DELETED the ledger row -- so `claim_send_or_identify()`, the one atomic
+    anti-double-upload backstop, has nothing left to guard and `confirm.py` never sees
+    the orphan either. The warehouse's next manual morning import would take in BOTH
+    copies: a real duplicate delivery.
+
+    So exactly ONE upload attempt must be made, the message must end terminal (not
+    re-armed for the 30-minute stale reclaim), and the durable alert -- the half of
+    #239 that is correct -- must still be enqueued so the failure stays visible.
+    """
     _snapshot(pg)
     _msg(pg, mid="dl1")
     _attach(pg, tmp_path, "dl1")
     client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
                          "dl_item": [ITEM_MATCHED]})
+    tries = []
 
-    def _raise_upload(c, name, content, dir_override=None):
+    def _timed_out_upload(c, name, content, dir_override=None):
+        tries.append(name)
         raise OSError("connection timed out")
 
-    n = dl_worker.tick(pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)),
-                       client=client, upload=_raise_upload)
-    assert n == 0
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, upload=_timed_out_upload)
+    assert n == 1
+    assert len(tries) == 1, "a second upload of the same document is a duplicate delivery"
     row = pg.execute(
-        "SELECT processed, processing_at, attempts FROM messages "
-        "WHERE message_id='dl1'").fetchone()
-    assert row[0] is False
-    assert row[1] is not None, "the claim stays set — the 30-min stale window reclaims it"
-    assert row[2] == 1
-    assert pg.execute("SELECT count(*) FROM pending_alerts").fetchone()[0] == 0
-    # the claim was released so a retry can safely re-upload without a duplicate
+        "SELECT processed, attempts FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True, 1), "terminal, never re-armed for an automatic second upload"
     assert pg.execute(
-        "SELECT count(*) FROM desadv_sent WHERE uploaded_at IS NOT NULL"
-    ).fetchone()[0] == 0
+        "SELECT count(*) FROM pending_alerts WHERE kind='dl_upload_failed'"
+    ).fetchone()[0] == 1, "the failure must still be visible, just not retried"
 
 
 def test_non_transient_upload_failure_enqueues_a_durable_alert_not_a_direct_post(pg, tmp_path):
