@@ -53,6 +53,35 @@ one reminder after `import_alert_reminder_hours`, default 4h); once resolved (so
 has been confirmed imported SINCE the incident opened, proving the pipeline works), ONE
 short all-clear closes it. No in-memory state anywhere — every decision reads straight
 from the DB, so this survives an add-on restart.
+
+**Extended 2026-08-13 (#255) — a SAME-DAY rejection, gated on an ACTIVITY signal.** The
+morning carryover check only catches a file left over from a PRIOR day — a rejection
+CODEX makes on the very day the file was uploaded (e.g. a missing stock card) looks
+IDENTICAL to "not yet checked" from `_decide()`'s point of view (both return `None`,
+still sitting in the queued folder), so it would otherwise sit unnoticed until the
+FOLLOWING morning. A bare fixed evening threshold ("alert anything still queued by
+18:00") was rejected — it is exactly the false-alarm shape #151/#133 already got bitten
+by (5 separate messages at 18:18 for files that simply hadn't been processed yet).
+
+The fix instead requires a genuine ACTIVITY SIGNAL before it will ever alert same-day:
+`evening_check_active()` (mirrors `morning_check_active()`, its own configurable hour —
+default 18:00 — and Saturday/Sunday skip) gates a NEW `_activity_today_at()` read: the
+most recent `import_confirmed_at` (across BOTH ledgers — `edi_sent` is shared with n8n's
+own "Static auto orders" workflow, so this reflects ANY import that happened, not only
+ours) within today's local calendar date. A row is "same-day stuck"
+(`_is_same_day_stuck()`) only when it was uploaded TODAY, is still sitting in its queued
+folder, AND its `uploaded_at` is BEFORE that activity — this is what correctly keeps
+silent the completely normal race the ticket's own decision names ("sklad importuje o
+07:30, my nahráme o 07:31"): an upload AFTER the day's only import pass is simply
+waiting for TOMORROW's click, not evidence of a rejection. No activity signal at all
+(weekend, holiday, no import ran) → nothing to compare against → silent, same as the
+existing carryover check already is on those days.
+
+A same-day-stuck row is folded into the SAME `'carryover'` incident kind/grouping the
+morning check already uses (same underlying condition — a file stuck longer than
+reasonable — just a different trigger) — deliberately NOT a new incident `kind`, which
+would need a `db.py` CHECK-constraint migration; see the #255 design comment for the
+rejected alternatives.
 """
 from __future__ import annotations
 
@@ -69,6 +98,9 @@ log = logging.getLogger("orders.confirm")
 DEFAULT_INTERVAL_MINUTES = 5
 DEFAULT_MORNING_CHECK_HOUR = 10
 DEFAULT_REMINDER_HOURS = 4
+# #255: the evening/same-day check's own default hour — well past a normal working day,
+# so a slow-completing import pass never gets mistaken for a genuine same-day rejection.
+DEFAULT_EVENING_CHECK_HOUR = 18
 LOCAL_TZ = ZoneInfo("Europe/Bratislava")
 
 # Terminal, genuinely-anomalous outcomes — never a timing question, always grouped-alerted.
@@ -203,6 +235,77 @@ def _is_carryover(row: dict, now_utc: datetime) -> bool:
     if not uploaded:
         return False
     return _local(uploaded).date() < _local(now_utc).date()
+
+
+# --- the evening / same-day check (#255) -------------------------------------
+
+def evening_check_active(cfg, now_utc: datetime) -> bool:
+    """True once it is worth asking "did today's own import pass leave one of OUR files
+    behind" — past the configured local hour (default 18:00, well after a normal working
+    day so a slow-completing import pass is never mistaken for a genuine rejection), and
+    not a day the warehouse doesn't work. Mirrors `morning_check_active` exactly (same
+    shape, its own config knobs) — the activity gate in `_activity_today_at` already makes
+    a weekend/holiday naturally silent on its own (nobody clicks "prijať", so there is no
+    activity to compare against), but skipping explicitly too costs nothing and keeps this
+    consistent with the existing convention."""
+    local = _local(now_utc)
+    hour = int(getattr(cfg, "import_evening_check_hour", DEFAULT_EVENING_CHECK_HOUR)
+              or DEFAULT_EVENING_CHECK_HOUR)
+    if local.hour < hour:
+        return False
+    weekday = local.weekday()  # Monday=0 ... Sunday=6
+    if weekday == 5 and bool(getattr(cfg, "import_evening_check_skip_saturday", True)):
+        return False
+    if weekday == 6 and bool(getattr(cfg, "import_evening_check_skip_sunday", True)):
+        return False
+    return True
+
+
+def _activity_today_at(conn, now_utc: datetime) -> datetime | None:
+    """The most recent moment, TODAY (local calendar date), that ANY of our own uploads —
+    across BOTH ledgers, since a single warehouse "prijať" click processes whatever is
+    queued in `in`/`in_DL` together — was actually observed landing in ORION's archCodex
+    (`import_confirmed_at`, written by `sweep()` itself, from the injected `now`, so this
+    is deterministic under test). `edi_sent` is shared with n8n's own "Static auto orders"
+    workflow (`.claude/rules/orders-corpus.md`), so this reflects ANY import that happened
+    today, not only ours — exactly the "iné súbory sa v ten deň pohli do archCodex" signal
+    the #255 decision names.
+
+    `None` when nothing was confirmed imported yet today: no evidence an import pass has
+    happened at all, so `_is_same_day_stuck` has nothing to compare against and stays
+    silent — this is what makes a weekend/holiday/vacation day naturally quiet with no
+    extra day-of-week logic of its own."""
+    today_start_local = _local(now_utc).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    today_start_utc = today_start_local.astimezone(UTC)
+    row = conn.execute(
+        """SELECT max(t) FROM (
+               SELECT import_confirmed_at AS t FROM edi_sent
+                WHERE import_confirmed_at >= %s
+               UNION ALL
+               SELECT import_confirmed_at AS t FROM desadv_sent
+                WHERE import_confirmed_at >= %s
+           ) activity""",
+        (today_start_utc, today_start_utc)).fetchone()
+    return row[0] if row else None
+
+
+def _is_same_day_stuck(row: dict, now_utc: datetime, activity_at: datetime | None) -> bool:
+    """Uploaded TODAY (local calendar date — an older row is already the morning carryover
+    check's own concern, never double-counted here), still sitting in its queued folder,
+    and its `uploaded_at` is BEFORE the most recent import activity observed today. A row
+    uploaded AFTER that activity is the completely normal next-morning case (she already
+    clicked; anything uploaded later simply waits for tomorrow) and must never be flagged —
+    this is what correctly keeps silent the race the #255 decision names ("sklad importuje
+    o 07:30, my nahráme o 07:31")."""
+    if activity_at is None:
+        return False
+    uploaded = row.get("uploaded_at")
+    if not uploaded:
+        return False
+    if _local(uploaded).date() != _local(now_utc).date():
+        return False
+    return uploaded < activity_at
 
 
 # --- alert text (plain Slovak) ----------------------------------------------
@@ -443,6 +546,10 @@ def sweep(conn, cfg, listdir=None, post=None, now=None) -> int:
         return 0
 
     morning_active = morning_check_active(cfg, now)
+    # #255: only pay for the extra read when the evening check could even fire this pass —
+    # the common case (most of the day) skips it entirely.
+    evening_active = evening_check_active(cfg, now)
+    activity_at = _activity_today_at(conn, now) if evening_active else None
     changed = 0
     groups: dict[tuple[int, str, str], list[dict]] = {}
     for ledger, rows in ((EDI_LEDGER, edi_rows), (DESADV_LEDGER, desadv_rows)):
@@ -453,7 +560,12 @@ def sweep(conn, cfg, listdir=None, post=None, now=None) -> int:
                 conn.execute(
                     f"UPDATE {ledger.table} SET import_checked_at = now() WHERE id = %s",
                     (row["id"],))
-                if morning_active and _is_carryover(row, now):
+                # #255: same 'carryover' kind/grouping either way — a morning-leftover row
+                # and a same-day-stuck row are the SAME underlying condition (stuck longer
+                # than reasonable), just a different trigger. See the module docstring.
+                is_stuck = ((morning_active and _is_carryover(row, now))
+                           or (evening_active and _is_same_day_stuck(row, now, activity_at)))
+                if is_stuck:
                     ch = _channel_for(row["filename"], cfg)
                     groups.setdefault((ch, "carryover", ledger.source), []).append(row)
                 continue

@@ -878,7 +878,7 @@ def test_same_day_stuck_file_alerts_once_grouped_in_the_evening_given_real_activ
     """The reference scenario from the ticket: sklad accepts SOME files this morning
     (the activity signal) but silently leaves ONE of ours behind — must be caught the
     SAME evening, grouped exactly like a carryover alert, never one message per file."""
-    a_id = _insert_at(pg, "255a", "ORDER_255a.txt", uploaded_at=MON_EARLY.replace(hour=6))
+    a_id = _insert_at(pg, "255a", "ORDER_255a.txt", uploaded_at=MON_EARLY.replace(hour=6, minute=0))
     posts0 = PostRecorder()
     n0 = confirm.sweep(
         pg, _cfg(),
@@ -890,7 +890,7 @@ def test_same_day_stuck_file_alerts_once_grouped_in_the_evening_given_real_activ
 
     # our own file, uploaded at 07:00 -- BEFORE the 07:30 activity above -- silently left
     # behind (still sitting in /in, never moved to unconfirmed either)
-    b_id = _insert_at(pg, "255b", "ORDER_255b.txt", uploaded_at=MON_EARLY.replace(hour=7))
+    b_id = _insert_at(pg, "255b", "ORDER_255b.txt", uploaded_at=MON_EARLY.replace(hour=7, minute=0))
     posts = PostRecorder()
     n = confirm.sweep(
         pg, _cfg(),
@@ -921,7 +921,7 @@ def test_upload_after_todays_activity_stays_silent_the_normal_next_morning_case(
     """The exact race the ROZHODNUTÉ names: sklad imports at 07:30, we upload at 07:31 --
     that upload is simply waiting for TOMORROW's click, not evidence of a rejection, and
     must stay silent even once the evening check is active."""
-    a_id = _insert_at(pg, "255d", "ORDER_255d.txt", uploaded_at=MON_EARLY.replace(hour=6))
+    a_id = _insert_at(pg, "255d", "ORDER_255d.txt", uploaded_at=MON_EARLY.replace(hour=6, minute=0))
     posts0 = PostRecorder()
     confirm.sweep(
         pg, _cfg(),
@@ -969,7 +969,7 @@ def test_same_day_incident_does_not_repost_within_the_same_evening(pg):
     """A second evening sweep discovering the SAME condition folds into the already-open
     incident -- no second message, same dedup the morning carryover incident already
     gets (see test_dedup_no_repeat_message_while_the_carryover_incident_persists)."""
-    a_id = _insert_at(pg, "255h", "ORDER_255h.txt", uploaded_at=MON_EARLY.replace(hour=6))
+    a_id = _insert_at(pg, "255h", "ORDER_255h.txt", uploaded_at=MON_EARLY.replace(hour=6, minute=0))
     posts0 = PostRecorder()
     confirm.sweep(
         pg, _cfg(),
@@ -977,7 +977,7 @@ def test_same_day_incident_does_not_repost_within_the_same_evening(pg):
         post=posts0, now=MON_EARLY)
     assert _status(pg, a_id) == "imported"
 
-    b_id = _insert_at(pg, "255i", "ORDER_255i.txt", uploaded_at=MON_EARLY.replace(hour=7))
+    b_id = _insert_at(pg, "255i", "ORDER_255i.txt", uploaded_at=MON_EARLY.replace(hour=7, minute=0))
     posts = PostRecorder()
     n = confirm.sweep(
         pg, _cfg(),
@@ -1005,7 +1005,7 @@ def test_same_day_incident_does_not_repost_within_the_same_evening(pg):
 def test_evening_check_hour_is_configurable(pg):
     """Mirrors the existing morning-hour test: before the configured evening hour,
     nothing is checked yet -- even with a genuine activity signal already present."""
-    a_id = _insert_at(pg, "255j", "ORDER_255j.txt", uploaded_at=MON_EARLY.replace(hour=6))
+    a_id = _insert_at(pg, "255j", "ORDER_255j.txt", uploaded_at=MON_EARLY.replace(hour=6, minute=0))
     posts0 = PostRecorder()
     confirm.sweep(
         pg, _cfg(),
@@ -1013,8 +1013,8 @@ def test_evening_check_hour_is_configurable(pg):
         post=posts0, now=MON_EARLY)
     assert _status(pg, a_id) == "imported"
 
-    b_id = _insert_at(pg, "255k", "ORDER_255k.txt", uploaded_at=MON_EARLY.replace(hour=7))
-    before_default_hour = MON_EARLY.replace(hour=15)  # 15:00, before the default 18:00
+    b_id = _insert_at(pg, "255k", "ORDER_255k.txt", uploaded_at=MON_EARLY.replace(hour=7, minute=0))
+    before_default_hour = MON_EARLY.replace(hour=15, minute=0)  # 15:00, before the default 18:00
     posts = PostRecorder()
     n = confirm.sweep(
         pg, _cfg(),
