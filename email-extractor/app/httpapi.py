@@ -95,6 +95,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import psycopg
+import waitress
 from flask import Flask, abort, jsonify, redirect, request, session
 from werkzeug.exceptions import HTTPException
 
@@ -358,9 +359,33 @@ def create_app(cfg) -> Flask:
     return app
 
 
+# #272: a fixed worker/thread-pool size, never unbounded growth. Every request opens
+# its own Postgres connection via `_db()`/`_db_tx()` (see the module docstring's
+# "two-connection rule"), so this constant is ALSO the hard cap on how many concurrent
+# dashboard/API connections the bundled Postgres ever sees — bounded well under its
+# default `max_connections=100` alongside the IMAP-loop and order-worker connections.
+# Sized for 2-3 human users (predaj/sklad/sklad-dl) plus periodic n8n polling
+# (`/files`, `/eml`) with headroom to spare; see the #272 design comment on the issue
+# for the full sizing rationale.
+HTTP_SERVER_THREADS = 8
+
+
 def start(cfg) -> None:
+    """Serve the dashboard/API behind waitress — a bounded thread pool, never the
+    Flask/Werkzeug development server (#272: production was running `app.run(...)`,
+    which opens an unbounded new thread — and therefore an unbounded new Postgres
+    connection — per request). Runs in its own daemon thread exactly like the old
+    `app.run(...)` call did, so `main()`'s own thread stays free to continue into the
+    IMAP polling loop right after this returns. waitress is a pure-Python WSGI server
+    with no forking and no process-level signal handling of its own, so this is a
+    drop-in replacement for the one line below — it fits the add-on's existing
+    single-container, single-process, thread-based supervision (`run.sh`, no
+    s6-overlay) with zero change to `run.sh`/Dockerfile/`main()`.
+    """
     app = create_app(cfg)
     threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=cfg.http_port, threaded=True),
+        target=lambda: waitress.serve(
+            app, host="0.0.0.0", port=cfg.http_port, threads=HTTP_SERVER_THREADS,
+        ),
         daemon=True,
     ).start()
