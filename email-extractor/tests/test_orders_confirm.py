@@ -861,3 +861,179 @@ def test_desadv_pre_migration_rows_are_backfilled_as_already_imported(pg):
     assert row[1] is not None and row[1] == row[2]
     assert confirm.due_rows(pg, 5, confirm.DESADV_LEDGER) == [], \
         "a backfilled historical DESADV row must never be swept"
+
+
+# --- #255: a SAME-DAY rejection, detected via an evening activity-signal check --------
+#
+# ROZHODNUTÉ (owner, 2026-08-13): alert same-day ONLY when (a) import activity
+# demonstrably happened that day (some OTHER file moved into archCodex that day) AND
+# (b) our own file, uploaded BEFORE that activity, is still sitting in in/in_DL. No
+# activity that day -> stay silent; the morning carryover check is unaffected.
+
+MON_EARLY = datetime(2026, 8, 3, 7, 30, tzinfo=TZ)   # the activity-creating sweep
+SAT_EVENING = datetime(2026, 8, 8, 18, 0, tzinfo=TZ)  # Saturday, past the default hour
+
+
+def test_same_day_stuck_file_alerts_once_grouped_in_the_evening_given_real_activity(pg):
+    """The reference scenario from the ticket: sklad accepts SOME files this morning
+    (the activity signal) but silently leaves ONE of ours behind — must be caught the
+    SAME evening, grouped exactly like a carryover alert, never one message per file."""
+    a_id = _insert_at(pg, "255a", "ORDER_255a.txt", uploaded_at=MON_EARLY.replace(hour=6, minute=0))
+    posts0 = PostRecorder()
+    n0 = confirm.sweep(
+        pg, _cfg(),
+        listdir=lambda: {"in": set(), "archCodex": {"ORDER_255a.txt"}, "unconfirmed": set()},
+        post=posts0, now=MON_EARLY)
+    assert n0 == 1
+    assert posts0.calls == [], "the activity-creating import itself must never alert"
+    assert _status(pg, a_id) == "imported"
+
+    # our own file, uploaded at 07:00 -- BEFORE the 07:30 activity above -- silently left
+    # behind (still sitting in /in, never moved to unconfirmed either)
+    b_id = _insert_at(pg, "255b", "ORDER_255b.txt", uploaded_at=MON_EARLY.replace(hour=7, minute=0))
+    posts = PostRecorder()
+    n = confirm.sweep(
+        pg, _cfg(),
+        listdir=lambda: {"in": {"ORDER_255b.txt"}, "archCodex": set(), "unconfirmed": set()},
+        post=posts, now=MON_EVENING)
+    assert n == 0, "a same-day-stuck row is never given a terminal status either"
+    assert len(posts.calls) == 1, "exactly ONE grouped message, never one per file"
+    assert "Codex" in posts.calls[0][0]
+    assert _status(pg, b_id) is None, "still pending, so it self-heals if accepted later"
+
+
+def test_no_activity_today_stays_silent_even_past_the_evening_hour(pg):
+    """No file, ours or anyone else's, was ever confirmed imported today -- there is
+    nothing to compare against, so the evening check has no basis to alert, exactly the
+    same way the whole existing carryover check already stays silent on a normal day."""
+    rid = _insert_at(pg, "255c", "ORDER_255c.txt", uploaded_at=MON_EVENING.replace(hour=9))
+    posts = PostRecorder()
+    n = confirm.sweep(
+        pg, _cfg(),
+        listdir=lambda: {"in": {"ORDER_255c.txt"}, "archCodex": set(), "unconfirmed": set()},
+        post=posts, now=MON_EVENING)
+    assert n == 0
+    assert posts.calls == []
+    assert _status(pg, rid) is None
+
+
+def test_upload_after_todays_activity_stays_silent_the_normal_next_morning_case(pg):
+    """The exact race the ROZHODNUTÉ names: sklad imports at 07:30, we upload at 07:31 --
+    that upload is simply waiting for TOMORROW's click, not evidence of a rejection, and
+    must stay silent even once the evening check is active."""
+    a_id = _insert_at(pg, "255d", "ORDER_255d.txt", uploaded_at=MON_EARLY.replace(hour=6, minute=0))
+    posts0 = PostRecorder()
+    confirm.sweep(
+        pg, _cfg(),
+        listdir=lambda: {"in": set(), "archCodex": {"ORDER_255d.txt"}, "unconfirmed": set()},
+        post=posts0, now=MON_EARLY)
+    assert _status(pg, a_id) == "imported"
+
+    # uploaded ONE MINUTE after the 07:30 activity above
+    c_id = _insert_at(pg, "255e", "ORDER_255e.txt", uploaded_at=MON_EARLY.replace(minute=31))
+    posts = PostRecorder()
+    n = confirm.sweep(
+        pg, _cfg(),
+        listdir=lambda: {"in": {"ORDER_255e.txt"}, "archCodex": set(), "unconfirmed": set()},
+        post=posts, now=MON_EVENING)
+    assert n == 0
+    assert posts.calls == [], "uploaded AFTER today's only import pass -- normal, silent"
+    assert _status(pg, c_id) is None
+
+
+def test_evening_check_stays_silent_on_saturday_even_with_a_genuine_activity_signal(pg):
+    """Belt-and-braces, mirrors the existing Saturday/Sunday morning-check tests: the
+    warehouse doesn't work weekends, so the evening check must stay off even if an
+    activity signal technically exists that day."""
+    a_id = _insert_at(pg, "255f", "ORDER_255f.txt", uploaded_at=SAT_EVENING.replace(hour=6))
+    posts0 = PostRecorder()
+    confirm.sweep(
+        pg, _cfg(),
+        listdir=lambda: {"in": set(), "archCodex": {"ORDER_255f.txt"}, "unconfirmed": set()},
+        post=posts0, now=SAT_EVENING.replace(hour=7))
+    assert _status(pg, a_id) == "imported"
+
+    b_id = _insert_at(pg, "255g", "ORDER_255g.txt",
+                      uploaded_at=SAT_EVENING.replace(hour=6, minute=30))
+    posts = PostRecorder()
+    n = confirm.sweep(
+        pg, _cfg(),
+        listdir=lambda: {"in": {"ORDER_255g.txt"}, "archCodex": set(), "unconfirmed": set()},
+        post=posts, now=SAT_EVENING)
+    assert n == 0
+    assert posts.calls == []
+    assert _status(pg, b_id) is None
+
+
+def test_same_day_incident_does_not_repost_within_the_same_evening(pg):
+    """A second evening sweep discovering the SAME condition folds into the already-open
+    incident -- no second message, same dedup the morning carryover incident already
+    gets (see test_dedup_no_repeat_message_while_the_carryover_incident_persists)."""
+    a_id = _insert_at(pg, "255h", "ORDER_255h.txt", uploaded_at=MON_EARLY.replace(hour=6, minute=0))
+    posts0 = PostRecorder()
+    confirm.sweep(
+        pg, _cfg(),
+        listdir=lambda: {"in": set(), "archCodex": {"ORDER_255h.txt"}, "unconfirmed": set()},
+        post=posts0, now=MON_EARLY)
+    assert _status(pg, a_id) == "imported"
+
+    b_id = _insert_at(pg, "255i", "ORDER_255i.txt", uploaded_at=MON_EARLY.replace(hour=7, minute=0))
+    posts = PostRecorder()
+    n = confirm.sweep(
+        pg, _cfg(),
+        listdir=lambda: {"in": {"ORDER_255i.txt"}, "archCodex": set(), "unconfirmed": set()},
+        post=posts, now=MON_EVENING)
+    assert n == 0
+    assert len(posts.calls) == 1
+
+    # a second sweep, one hour later, same evening, well under the 4h default reminder —
+    # the row is still stuck, but must not repost
+    pg.execute("UPDATE edi_sent SET import_checked_at = now() - interval '10 minutes' "
+              "WHERE id = %s", (b_id,))
+    later_same_evening = MON_EVENING.replace(hour=19)
+    n2 = confirm.sweep(
+        pg, _cfg(),
+        listdir=lambda: {"in": {"ORDER_255i.txt"}, "archCodex": set(), "unconfirmed": set()},
+        post=posts, now=later_same_evening)
+    assert n2 == 0
+    assert len(posts.calls) == 1, "folds into the SAME open incident, no repeat message"
+
+    incident = confirm._open_incident(pg, 152, "carryover")
+    assert incident["file_count"] == 1
+
+
+def test_evening_check_hour_is_configurable(pg):
+    """Mirrors the existing morning-hour test: before the configured evening hour,
+    nothing is checked yet -- even with a genuine activity signal already present."""
+    a_id = _insert_at(pg, "255j", "ORDER_255j.txt", uploaded_at=MON_EARLY.replace(hour=6, minute=0))
+    posts0 = PostRecorder()
+    confirm.sweep(
+        pg, _cfg(),
+        listdir=lambda: {"in": set(), "archCodex": {"ORDER_255j.txt"}, "unconfirmed": set()},
+        post=posts0, now=MON_EARLY)
+    assert _status(pg, a_id) == "imported"
+
+    b_id = _insert_at(pg, "255k", "ORDER_255k.txt", uploaded_at=MON_EARLY.replace(hour=7, minute=0))
+    before_default_hour = MON_EARLY.replace(hour=15, minute=0)  # 15:00, before the default 18:00
+    posts = PostRecorder()
+    n = confirm.sweep(
+        pg, _cfg(),
+        listdir=lambda: {"in": {"ORDER_255k.txt"}, "archCodex": set(), "unconfirmed": set()},
+        post=posts, now=before_default_hour)
+    assert n == 0
+    assert posts.calls == [], "before the configured evening hour, nothing is checked yet"
+    assert _status(pg, b_id) is None
+
+    pg.execute("UPDATE edi_sent SET import_checked_at = now() - interval '10 minutes' "
+              "WHERE id = %s", (b_id,))
+    # `import_evening_check_hour` is read via getattr(cfg, ..., DEFAULT) in confirm.py
+    # (not a declared Config dataclass field, deliberately -- see the #255 design
+    # comment) -- setattr on the already-built Config instance is the override.
+    cfg2 = _cfg()
+    cfg2.import_evening_check_hour = 15
+    n2 = confirm.sweep(
+        pg, cfg2,
+        listdir=lambda: {"in": {"ORDER_255k.txt"}, "archCodex": set(), "unconfirmed": set()},
+        post=posts, now=before_default_hour)
+    assert n2 == 0
+    assert len(posts.calls) == 1, "the evening hour can be explicitly lowered"
