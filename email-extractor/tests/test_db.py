@@ -18,6 +18,17 @@ def test_schema_objects_exist(pg):
         "SELECT 1 FROM pg_trigger WHERE tgname='trg_email_events_rollup'").fetchone()
 
 
+# --- #273: attachments.message_id is a foreign key (ON DELETE CASCADE) with no index —
+# Postgres never auto-indexes the referencing side of a FK. The column is queried directly
+# in httpapi_dashboard_data.py (twice) and dl_worker.py, and every cascading delete from
+# messages scans attachments sequentially without one.
+
+def test_attachments_message_id_is_indexed(pg):
+    assert pg.execute(
+        "SELECT 1 FROM pg_indexes WHERE tablename='attachments' "
+        "AND indexname='idx_attachments_message'").fetchone()
+
+
 # --- #203 F4: desadv_sent import-confirmation columns + incident source split ---
 
 def test_desadv_sent_has_import_confirmation_columns(pg):
