@@ -2693,3 +2693,45 @@ LOAN item-matching confirmed live, new HK LOAN multi-message gap found)
   session-y stále vidia vlastné povolené endpointy (200) — `_gate()`/`_role_kinds()`
   hranica funguje po presune identicky naživo.
 - Run card fired for #268 kroky 2-3/11 (`v0.9.79`).
+
+## 2026-08-13 — #277 (PR #279, v0.9.79 → v0.9.80)
+
+- STEP 0: reprodukované ŽIVO priamo v ~2h/noc TZ okne (01:12:21 CEST / 23:12 UTC):
+  `PG_TEST_DSN=... .venv/bin/python -m pytest tests/test_httpapi_characterization.py -v`
+  → `1 failed, 2 passed`, `assert 2 >= 3`. Postgres v tom istom momente:
+  `SHOW timezone` = `Etc/UTC`, `current_date` = `2026-08-12`; hostiteľ už `2026-08-13`.
+  Potvrdilo to presne root cause z tiketu — stále platný, nie zastaraný.
+- Root cause: `_seed_todays_run()` seedovala `match_incidents.occurred_on` cez Python
+  `datetime.date.today()` (lokálny čas), zatiaľ čo `reliability.days_since_incident()`
+  počíta rozdiel dní čisto v SQL proti Postgres `now()::date` (test kontajner
+  `Etc/UTC`). Fix: `commit 17f4aca` — SQL literál (pôvodne `CURRENT_DATE - 3`), žiadna
+  zmena produkčného kódu, iba `tests/test_httpapi_characterization.py`.
+- Review (fresh-context `general-purpose` subagent na PR #279, commit range
+  `ccf1148..17f4aca`): 0 🔴 0 🟡 1 🔵 — `CURRENT_DATE - 3` je správne, ale
+  `test_orders_reliability.py` (rovnaká tabuľka, rovnaký seed účel) už používa
+  `now()::date - interval 'N days'` na 3 miestach. Opravené HNEĎ v tej istej vetve,
+  `commit 5713c4f` (žiadna funkčná zmena, len konzistencia syntaxe) — znova live
+  overené (RED/GREEN dôkaz + celá lokálna suita zelená).
+- GREEN dôkaz (ten istý príkaz, ten istý beh 01:16:57 CEST, stále v okne): `3 passed`.
+  Overené aj deterministicky pod `TZ=Pacific/Kiritimati` a `TZ=Etc/GMT+12` (extrémy) —
+  potvrdzuje nezávislosť od TZ hostiteľa. Celá lokálna suita (`email-extractor/tests/`)
+  po oboch commitoch zelená (0 F/E/s/x, EXIT=0).
+- PR #279 (dev→main), 3 commity (`ccf1148` version bump, `17f4aca` fix, `5713c4f`
+  review-fix), `Closes #277`. CI zelené (test/e2e-orders/e2e-dl/build) na push aj
+  pull_request, oba razy. Merged `324d0ff6`. #277 auto-closed.
+- Deploy: `ha addons update e0ac7775_email_extractor` → v0.9.80. Overené: `/health`
+  `{"ok":true,"version":"0.9.80"}`; DOM (Playwright, čerstvé cookies) ukazuje `v0.9.80`
+  na `/`, 0 console chýb. Funkčná verifikácia: `/api/orders/digest` (endpoint pod
+  opraveným testom) živo `200`, reálne dáta (`today.day: 2026-08-13`,
+  `yesterday.day: 2026-08-12`, `days_since_incident: 7`) — nič user-visible sa
+  nezmenilo (test-only fix), presne ako sa čakalo.
+- Gotcha (nová): stará scratchpad cesta z PREDOŠLEJ session (rovnaké session ID,
+  `/tmp/claude-*/.../scratchpad/`) mala leftover `commit1.txt` s cudzím obsahom — prvý
+  pokus o `git commit -F` (v tom istom Bash volaní ako heredoc write) bol zablokovaný
+  design-gate hookom PRED spustením `cat >`, takže heredoc nikdy nezapísal; druhý
+  pokus (samostatné volanie, bez re-write) omylom skomitoval STARÝ obsah. Zotavené
+  `git reset --soft HEAD~1` (nikdy `--amend`) + nový súbor v OWN Bash volaní. Poučenie:
+  po akomkoľvek BLOCKED compound príkaze s heredoc+consume vždy OVERENE re-napísať
+  scratch súbor (alebo `rm -f` pred `cat >`), nikdy nespoliehať že blokovaný príkaz
+  nezanechal nič.
+- Run card fired for #277 (`v0.9.80`).
