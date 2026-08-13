@@ -24,17 +24,18 @@ from datetime import timedelta
 from pathlib import Path
 
 import psycopg
-from flask import Flask, abort, jsonify, redirect, request, send_file, session
+from flask import Flask, abort, jsonify, redirect, request, session
 from psycopg.types.json import Json
 from werkzeug.exceptions import HTTPException
 
-from . import __version__, db, linkutil
+from . import __version__, db, httpapi_files, linkutil
 from .db import MAX_UID_ATTEMPTS
 from .httpapi_common import (
     _EAN_STRIP_RE,
     CATEGORIES,
     FIX_STATUSES,
     PROBLEM_TYPES,
+    Deps,
     _escape_like,
     _fold,
     _parse_emails_field,
@@ -59,7 +60,6 @@ from .httpapi_templates import (
     ZNALOSTI_HTML,
 )
 from .orders import dl_snapshot, memory, snapshot
-from .store import message_dir
 
 log = logging.getLogger("email_extractor.httpapi")
 
@@ -84,16 +84,6 @@ def create_app(cfg) -> Flask:
         log.warning("dash_password is unset — the dashboard is CLOSED; "
                     "set dash_password to enable it")
 
-    def _token_ok():
-        tok = request.args.get("token") or request.headers.get("X-Token")
-        return bool(cfg.api_token) and tok == cfg.api_token
-
-    def _auth():
-        # File APIs (/files, /eml): a logged-in human OR a valid machine token.
-        # No open-by-default — if neither is configured the endpoint stays closed.
-        if not (session.get("auth") or _token_ok()):
-            abort(403)
-
     def _db():
         return psycopg.connect(cfg.pg_dsn, autocommit=True)
 
@@ -114,6 +104,10 @@ def create_app(cfg) -> Flask:
                              f"Skús to znova po dokončení, najneskôr za "
                              f"{db.CLAIM_STALE_MINUTES} minút.",
                        claimed_at=held.isoformat()), 409
+
+    # #268 krok 5: what a split-out `register(app, deps)` route module may reach for —
+    # never more. Built once here, passed to every split module unchanged.
+    deps = Deps(cfg=cfg, db=_db, db_tx=_db_tx, data_dir=data_dir)
 
     # ---- request + error logging (#28) ----
 
@@ -242,21 +236,11 @@ def create_app(cfg) -> Flask:
     def version():
         return __version__
 
-    @app.get("/files/<mid>/<int:idx>")
-    def get_file(mid: str, idx: int):
-        _auth()
-        matches = sorted(message_dir(str(data_dir), mid).glob(f"att{idx}__*"))
-        if not matches:
-            abort(404)
-        return send_file(matches[0])
-
-    @app.get("/eml/<mid>")
-    def get_eml(mid: str):
-        _auth()
-        path = message_dir(str(data_dir), mid) / "raw.eml"
-        if not path.exists():
-            abort(404)
-        return send_file(path, mimetype="message/rfc822")
+    # #268 krok 5: /files/<mid>/<idx>, /eml/<mid> + their _token_ok/_auth helpers —
+    # moved verbatim into httpapi_files.py, registered here at the same spot they used
+    # to sit at (route registration order is irrelevant to Flask; before_request hook
+    # order, untouched by this move, is what actually matters — see the design comment).
+    httpapi_files.register(app, deps)
 
     # ---- dashboard data API (session-gated via _gate) ----
 
