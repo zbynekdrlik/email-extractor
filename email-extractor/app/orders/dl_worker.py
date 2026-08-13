@@ -181,24 +181,44 @@ def _check_retry(attempts: int, error: str) -> None:
         raise _RetryLater(error)
 
 
-def _check_landed(cfg, list_dirs, ean_edi: str, doc_number: str) -> bool | None:
+def _check_landed(conn, cfg, list_dirs, ean_edi: str, doc_number: str) -> bool | None:
     """#239 finding 6 (remainder): after a TRANSIENT upload failure, is the document
     already on ORION under an EARLIER attempt's name — the "bytes landed, only the
     reply was lost" case `upload.put()`'s temp-write+rename makes provable
     (`desadv_edi.already_landed()`, keyed on the document's STABLE identity, never a
-    filename)? Returns `True`/`False` when the check itself succeeded, `None` when it
-    could not even be attempted — most likely the SAME SFTP connection that just failed
-    the upload is down too, right after failing on it. The caller treats `None` exactly
-    like the pre-finding-6 behaviour: no retry, straight to the durable alert — a blind
-    retry with no absence proof is exactly the v0.9.70 duplicate-delivery incident this
-    whole ticket exists to prevent."""
+    filename)? Returns `True`/`False` when the check itself succeeded AND (review
+    finding on this ticket's own PR) is genuinely trustworthy, `None` when it could not
+    even be attempted — most likely the SAME SFTP connection that just failed the
+    upload is down too, right after failing on it — OR when a presence match was found
+    but is NOT trustworthy (`desadv.has_confirmed_collision`: a different, already-
+    confirmed document from the same supplier shares the same truncated stable prefix,
+    see that function's own docstring). The caller treats `None` exactly like the
+    pre-finding-6 behaviour: no retry, straight to the durable alert — a blind retry
+    (or a blindly-trusted false-positive presence match) is exactly the v0.9.70
+    duplicate-delivery incident this whole ticket exists to prevent, just possibly in
+    the opposite direction (silent loss instead of silent duplication).
+
+    Review finding on this ticket's own PR: `already_landed()` itself must be inside
+    the SAME try/except as `list_dirs(cfg)` — an earlier draft only guarded the SFTP
+    listing call, so an exception from `already_landed()` (e.g. a malformed `dirs`
+    shape) would propagate uncaught out of the whole upload except-block in
+    `_process_document`, skipping `_alert_and_release` entirely and leaving the claim
+    held with no alert ever raised."""
     try:
         dirs = list_dirs(cfg)
+        landed = desadv_edi.already_landed(dirs, ean_edi, doc_number)
     except Exception:
         log.warning("DL upload retry: could not check ORION presence for supplier=%s "
                    "doc=%s — no safe retry possible", ean_edi, doc_number, exc_info=True)
         return None
-    return desadv_edi.already_landed(dirs, ean_edi, doc_number)
+    if landed and desadv.has_confirmed_collision(conn, ean_edi, doc_number):
+        log.warning(
+            "DL upload retry: stable-identity presence match for supplier=%s doc=%s "
+            "collided with a DIFFERENT already-confirmed document sharing the same "
+            "10-char prefix — refusing to trust it, falling back to the safe alert "
+            "path instead of confirming the wrong document", ean_edi, doc_number)
+        return None
+    return landed
 
 
 # --- catalog refresh (mirrors worker.refresh_due) ---------------------------
@@ -746,7 +766,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         # `already_landed()`) but never wired into a decision. A NON-transient failure
         # (`_is_transient(str(e))` False) skips the check entirely and keeps exactly
         # the pre-finding-6 behaviour — `landed` stays `None`.
-        landed = _check_landed(cfg, list_dirs, supplier_decision.ean_edi,
+        landed = _check_landed(conn, cfg, list_dirs, supplier_decision.ean_edi,
                                built.doc_number) if _is_transient(str(e)) else None
         if landed is True:
             # The reply was lost, but the bytes are already on ORION under an earlier
