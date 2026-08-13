@@ -3,6 +3,7 @@ paths:
   - "email-extractor/app/httpapi.py"
   - "email-extractor/app/httpapi_*.py"
   - "email-extractor/tests/test_httpapi_characterization.py"
+  - "email-extractor/tests/test_httpapi_waitress.py"
 ---
 
 # Characterization tests protecting the `app/httpapi.py` split (#268)
@@ -234,3 +235,31 @@ checking) showed 0 errors on all 4. Same root cause as this file's existing
 clock time the page keeps running during) — this is the multi-PAGE-navigation form of
 it. Any future post-deploy Playwright sweep across several pages of this app should
 check each page's console in its own isolated navigate-then-check step.
+
+## Spinning up a REAL server (not `app.test_client()`) to prove WSGI-server-level
+## equivalence — `waitress.server.create_server` mirrors the existing werkzeug
+## pattern exactly (#272, the waitress swap)
+
+`httpapi.start(cfg)`'s production path calls `waitress.serve(app, host=..., port=...,
+threads=...)` — a BLOCKING call, same shape as the old `app.run(...)`. For a test that
+needs a REAL, running server (proving response-header/Range/streaming behavior that
+`app.test_client()` cannot exercise — those go through Werkzeug's test client, never a
+real socket), use `waitress.server.create_server(app, host="127.0.0.1", port=0,
+threads=N)` instead of `waitress.serve(...)` directly: it BINDS the socket
+immediately (so `.effective_port` is available right away, before `.run()` is ever
+called) and returns a server object with a separate blocking `.run()` (call it in its
+own daemon thread) and a `.close()` for teardown — the EXACT same shape
+`tests/conftest.py`'s existing `live_server` fixture already uses for werkzeug's own
+`make_server("127.0.0.1", 0, app, threaded=True)`. Always use a DYNAMIC port (`port=0`)
+in a test, never a fixed one — a fixed port collides with sibling worktree-fleet
+workers verifying the same file concurrently (`.claude/rules/local-testing.md`).
+
+Comparing a real waitress server against the real werkzeug `live_server` shape
+side-by-side (same `create_app(cfg)`, two different real sockets) is what actually
+proves a WSGI-server swap changed nothing — status codes, JSON bodies, AND response
+headers (`Server:` header is the direct, unambiguous proof of which server actually
+answered; `Content-Length`/`Content-Range` on a `send_file` route is what proves Range/
+conditional-response parity, which `app.test_client()`-only tests structurally cannot
+check). See `tests/test_httpapi_waitress.py` for the full worked pattern (three tests:
+wiring via a monkeypatched `waitress.serve`, full request/response equivalence on
+`/health`+an authenticated route+a 401, and `/files` Range-request parity).
