@@ -2,6 +2,50 @@
 
 Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions, shared PR #.
 
+## 2026-08-13 — Integration round C2 (#271, #297)
+
+- **#271** (reusable claim-or-identify primitive): merged `worktree-agent-
+  a0337f6056951e4d0` (7 commits: RED test, `app/orders/claim.py` primitive + port
+  `static_worker._ship` onto it [GREEN], port `desadv.claim_send_or_identify` onto the
+  shared primitive, `CLAIM_STALE_MINUTES` pin test, review-fix `7053b56`, playbook
+  docs). Design/validated/reviewed markers re-posted this round (the original worker's
+  design-posted marker never landed on this box's local store — re-affirmed the SAME
+  accepted decision as a fresh comment satisfying the mechanical gate). 🟡 retry-
+  semantics finding filed + closed as `#298` ("leave as is", needs-user-decision).
+- **#297** (.xls delivery notes): merged `worktree-agent-aa92342dc627b9554` (4 commits:
+  RED test, `.xls` MIME/ext acceptance [GREEN], its own now-stale 0.9.89→0.9.90 bump
+  overridden by this round's 0.9.91, review-fix `6acfa09` fixing a #265-early-return
+  document-merge bug + an idx-vs-value-equality exclusion bug). Its worker died on a
+  session limit right after `6acfa09` and before posting the review-evidence comment —
+  posted it this round from the real diff.
+- Merge conflicts resolved: `.claude/rules/local-testing.md` (both branches
+  independently appended a section — kept both, tail-append pattern per
+  `pr-merge-mechanics.md`); `app/__init__.py`/`config.yaml` (branch B's own stale
+  0.9.90 bump vs this round's 0.9.91 — kept 0.9.91).
+- Branch-scoped test sets green after each merge (`test_orders_static_worker.py`,
+  `test_desadv.py`, `test_dl_worker.py`, `test_orders_worker.py`, `test_orders_claim.py`,
+  `test_orders_edi.py` after #271; `test_dl_worker.py` 93/93 after #297). Full local
+  suite (minus Playwright E2E): 1553+ tests, 0 failed/skipped/errored (Counter
+  technique, zero `F`/`E`/`s`/`x`), `ruff check app/ tests/` clean.
+- PR #302 (`dev`→`main`, `Closes #271 #297`) — both CI runs (pull_request + push)
+  all-green (test/e2e-orders/e2e-dl/build), merged `537fcce`. Main CI (test/e2e-dl/
+  e2e-orders/build incl. GHCR push) green.
+- Deployed `e0ac7775_email_extractor` 0.9.90→0.9.91. Verified: `/health` 0.9.91, DOM
+  `v0.9.91` on `/` (7000 messages, LIVE), 0 console errors on `/` and `/otazky-dl`,
+  board question #35 (dl_supplier) still `open`/untouched.
+- **Sanctioned remediation replay (#297 follow-up):** message 2183 (Bardusch, 2 .xls
+  attachments) driven directly through `dl_worker._process_document` inside the
+  deployed container — shadow preview → ORION absence proof (`already_landed` = False)
+  → live, ONE document at a time, verified between calls. Both documents (workwear
+  items with no SLOVNORMAL catalog match) correctly routed to `review`, raising board
+  questions #43 and #44 (`kind=dl_item`, both `open`) — 0 rows added to `desadv_sent`
+  (nothing shipped to ORION, correctly, since neither item had a GTIN match). Full
+  evidence chain posted to #297.
+- Run cards fired for #271, #297 (`v0.9.91`) — both issues CLOSED (auto, via the PR's
+  `Closes` lines). 2 merged worktrees + their local branches removed
+  (`agent-a0337f6056951e4d0`, `agent-aa92342dc627b9554`) + their dedicated test-pg
+  containers (`ee-agent-a0337f60` port 15607, `ee-agent-aa92342d` port 15608).
+
 ## 2026-08-02 — #93 (PR #116)
 
 - **#93** (AI orders: hold an order while its question is unanswered — but only until the

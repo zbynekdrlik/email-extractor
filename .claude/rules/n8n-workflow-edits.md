@@ -508,3 +508,34 @@ match narratively described elsewhere in this file:
 (`app/orders/desadv_edi.py`, built for #239's own safe-retry decision — tolerant of the
 `Z-`/`Z-Z-` ORION wire-prefix quirks, checks `in_DL`/`archCodex`/`unconfirmed` in one
 call).
+
+## Two documents extracted from the SAME message can get the SAME `docNumber` from the
+## LLM header extraction — harmless when neither has a GTIN-matched item, but a real
+## claim-collision risk to check for the moment either DOES (message 2183 remediation,
+## integration round C2, 2026-08-13)
+
+Message 2183 (Bardusch, #297's own .xls delivery-note case) had TWO `.xls` attachments,
+each producing its own document via `dl_extract.extract_email()` — both came back with
+the IDENTICAL `docNumber` ("AVIZO6875023752"), a model-extraction quirk (both attachments
+likely share the same visible header text/reference), not a real duplicate document (the
+two have different `deliveryDate`s and different single line items). This was harmless
+here ONLY because BOTH documents had 0 GTIN-matched items (workwear, no match in the
+SLOVNORMAL catalog) — `desadv_edi.build().can_create` was `False` for both, so
+`_process_document` returns at the "cannot create EDI" branch and NEVER reaches
+`desadv.claim_send_or_identify()` at all; two live calls, one per document, produced
+two independent `review` outcomes + two separate board `dl_item` questions (#43, #44)
+with zero claim interaction.
+
+**If a future multi-document-per-message case has EITHER document actually reach the
+claim stage with a shared `docNumber`, the SECOND live call would either correctly
+identify itself as "already sent" (this message's own `holder == message["message_id"]`
+branch, per `#216`'s two-cause distinction already documented above) — SAFE — or, if the
+two documents are genuinely DIFFERENT physical deliveries that only coincidentally share
+an extracted docNumber, the second would be wrongly treated as an already-shipped
+duplicate and silently dropped — UNSAFE, a real document loss, not a double-ship.** Before
+running a second live document from the SAME message whose shadow preview showed the
+SAME `docNumber` as an already-processed sibling, verify by hand whether they are
+genuinely the same document (in which case skipping the second is correct) or two real,
+distinct deliveries the extraction merely mislabeled the same way (in which case widen
+the investigation — a docNumber collision this ticket's own remediation never needed to
+resolve, since neither doc ever reached the claim stage).
