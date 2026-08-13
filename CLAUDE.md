@@ -66,3 +66,4 @@ Load the matching skill BEFORE working on that area (don't re-derive):
 - lokálne spúšťanie pytest proti dev1 test-Postgres → `.claude/rules/local-testing.md` (auto-loads on `email-extractor/tests/**`)
 - `git commit -F <scratch-file>` bezpečnosť (stale scratchpad obsah) → `.claude/rules/git-commit-hygiene.md` (auto-loads on `email-extractor/app/**`, `tests/**`, `config.yaml`)
 - rozdelenie `app/httpapi.py` (#268) / charakterizačné testy → `.claude/rules/httpapi-characterization.md` (auto-loads on `app/httpapi*.py` a `test_httpapi_characterization.py`)
+- PR hlási `mergeable_state: "dirty"` hoci lokálny merge je čistý (criss-cross merge-base z fleet integrácie) → `.claude/rules/pr-merge-mechanics.md` (auto-loads on `app/**`, `tests/**`, `config.yaml`, `docs/autopilot-log.md`)

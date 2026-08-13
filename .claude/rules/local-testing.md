@@ -169,3 +169,45 @@ a new test needing it should assert `shutil.which("pdftoppm")` truthy and let th
 loudly if it's somehow missing, rather than skip — matches `test-strictness.md`'s own "a
 missing dependency must fail loudly, never skip" principle anyway, and sidesteps the hook
 entirely (no bypass tag needed for a scoped, well-justified assertion instead of a skip).
+
+## A full local suite that stops advancing (dots stop appearing) mid-run — diagnose via
+## `pg_stat_activity`, don't assume it's just contention (integration round A, 2026-08-13)
+
+`local-testing.md`'s existing contention note above ("genuinely NOT hung, just
+contended") is real but NOT the only cause of an apparently-stalled run. A genuinely
+STUCK run (zero NEW dots for many consecutive minutes, not just slow) is diagnosable in
+seconds against the SAME test-Postgres container the suite is using:
+
+```bash
+docker exec <test-pg-container> psql -U postgres -c \
+  "SELECT pid, state, wait_event_type, wait_event, now()-query_start AS dur, left(query,120) \
+   FROM pg_stat_activity WHERE datname='postgres' ORDER BY query_start;"
+```
+
+A row stuck `state = 'idle in transaction'` for many minutes with NO `wait_event_type`
+(i.e. Postgres is waiting on the CLIENT, not the other way round) — alongside OTHER
+rows `active`/`wait_event_type = 'Lock'` on a `TRUNCATE ...`/`INSERT ...` — means an
+EARLIER test's connection is holding a row lock open (a `FOR UPDATE`, an advisory lock)
+and never committing, which blocks every LATER test's session-scoped schema-reset
+fixture. Root cause found live: `tests/test_orders_hold.py::test_two_concurrent_
+answers_to_sibling_questions_release_it_exactly_once` spawns two threads and does
+`t1.join(timeout=15)`/`t2.join(timeout=15)` — a `timeout=` join does NOT kill the
+thread, it only stops WAITING for it. Under heavy CPU contention (several sibling
+fleet-worktree pytest runs at once), one thread can stall deep inside `hold.
+_release_locked`'s own `with psycopg.connect(...) as tx:` block past its last query,
+holding open a `FOR UPDATE` lock on `held_orders` — the TEST FUNCTION returns (its own
+30s combined timeout elapses) but the orphaned thread/connection lives on, wedging
+every subsequent test that needs the schema truncated. Filed as `#291` (test-infra
+robustness gap, not a `hold.py` logic bug — proven by a clean, all-passing 1519-test
+re-run once the stuck connection was `pg_terminate_backend`'d and sibling contention
+cleared). **Fix for a wedged run: `SELECT pg_terminate_backend(<pid>)` on the stuck
+`idle in transaction` backend, then re-run the WHOLE suite fresh** (don't just resume —
+a forcibly-killed mid-transaction connection leaves the NEXT several tests in a
+misleading `AdminShutdown`/`[BAD]` cascade that looks like new failures but is purely
+an artifact of the kill, not evidence of a real bug).
+
+**The `#160` "missing summary line" verification technique (zero `F`/`E`/`s`/`x` in the
+captured dot-progress output) is what actually confirms a clean re-run** — this incident
+is a second, independent confirmation that trusting dots-reached-100% + an empty
+`collections.Counter` is more reliable than waiting for a "N passed in Xs" line that may
+never get captured.

@@ -256,3 +256,10 @@ actually redirects to `/login` first as proof the session is genuinely clean.
   `localhost` — either alone is enough, `-4` is the more robust fix since it also
   covers a future` localhost` typo). A plain `curl -s http://localhost:8099/health`
   failing is NOT evidence the add-on is down; check with `-4` before escalating.
+- **The Supervisor `/addons/<slug>/info` response's `schema` field is a LIST of `{name,
+  type, ...}` dicts, not a `{key: type}` dict** (integration round A, verifying the
+  #255 config-wiring knobs live, 2026-08-13) — `k in schema` on the raw JSON-decoded
+  value throws `AttributeError: 'list' object has no attribute 'get'` if you assume
+  dict shape. Check membership via `[s.get("name") for s in schema]`. `options` (the
+  SAME response's sibling field, live `/data/options.json` content) IS a plain
+  `{key: value}` dict as expected — only `schema` has this list-of-dicts shape.
