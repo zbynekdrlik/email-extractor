@@ -2951,3 +2951,50 @@ LOAN item-matching confirmed live, new HK LOAN multi-message gap found)
   presne tá hranica, ktorú tento krok presúval.
 - Run card fired for #268 (`v0.9.85`) — issue zostáva OTVORENÝ (krok 11
   čaká).
+
+## 2026-08-13 — #268 krok 11 z 11 (PR #288) — FINÁLNY krok, tiket ZATVORENÝ
+
+- **#268 krok 11**: posledný krok 11-krokového rozdelenia `app/httpapi.py`
+  (2693 -> pôvodne 290, teraz 366 riadkov s rozšíreným docstringom). Pure
+  cleanup, žiadna produkčná logika zmenená.
+- Commity: `e36904c` (chore: bump 0.9.85 -> 0.9.86), `33dc247` (docs: rewritten
+  module docstring popisujúci finálnu architektúru + jeden komentár nad
+  `_gate()` smerujúci na `httpapi_security.py`). `[no-test: ...]` na commite
+  33dc247 (dôkaz = nezmenená charakterizačná trojica + celá suita, rovnaký
+  vzor ako kroky 4-10).
+- Audit (STEP 0 komentár na #268): 0 zostávajúcich `_db()`/`_db_tx()` volaní
+  mimo definícií (len pre `Deps`); oba re-exporty (`db`, `ZNALOSTI_HTML`)
+  overené dvomi grepmi z `httpapi-characterization.md` ako skutočne potrebné;
+  žiadny mŕtvy import.
+- Akceptačný dôkaz proti PÔVODNEJ (pred-split) základni: `EXPECTED_ROUTES`
+  (52 rout) aj HTML-checksum literál v `test_httpapi_characterization.py`
+  zachytené v kroku 1 (`bceacb1`, HEAD `3e95cbf`) a odvtedy NIKDY nezmenené
+  žiadnym neskorším commitom (dva neskoršie zásahy upravili výhradne
+  `_seed_todays_run`'s dátumové seedovanie pre #277) — 3/3 zelené proti
+  finálnemu HEAD = nula driftu naprieč celým reťazcom, nie len týmto krokom.
+- Baseline aj po zmene: 1502 testov, 0 F/E/s/x, `ruff check .` čisté.
+- Review (jeden self-contained `general-purpose` subagent s čerstvým
+  kontextom, nikdy vstavaný `Skill({skill:"review"})`, per #363): 10-bodová
+  nezávislá verifikácia (bajtová/behaviorálna zhoda, route table, re-export
+  claims, ruff, celá suita 2×, CI, scope, secrety, #414 SOTA, faktická
+  presnosť docstringu) — **0 🔴 0 🟡 0 🔵**.
+- PR #288 (dev->main), `Closes #268` — GitHub automaticky zatvoril tiket pri
+  merge. CI zelené (test/e2e-orders/e2e-dl/build). Merged `fe58ae95`.
+- Deploy: `ha apps update e0ac7775_email_extractor` -> v0.9.86. Overené:
+  `/health` `{"ok":true,"version":"0.9.86"}`; DOM (Playwright) ukazuje
+  `v0.9.86`; 0 console chýb na `/`, `/otazky`, `/otazky-dl`, `/znalosti`
+  (overené KAŽDÁ stránka JEDNOTLIVO, nie v rýchlej slučke — MCP round-trip
+  môže race-núť stránkinu vlastnú 5s auto-refresh a vyprodukovať zdanlivé
+  "Failed to load resource" chyby z PREDOŠLEJ stránky, nie skutočný bug).
+  Oddelenie rolí naživo v OBOCH smeroch (nedotknuté): orders sklad link vidí
+  len `kind:"customer"` cez `/api/orders/questions`, 401 na
+  `/api/znalosti/dl-products`; DL sklad link vidí len
+  `kind: dl_item/dl_supplier`. Board otázka č. 35 (`dl_supplier`) ostáva
+  `status='open'`, nedotknutá.
+- Finálne čísla (10 súborov): `httpapi.py` 366, `httpapi_common.py` 86,
+  `httpapi_security.py` 92, `httpapi_templates.py` 1230, `httpapi_files.py`
+  43, `httpapi_dashboard_data.py` 239, `httpapi_fixqueue.py` 116,
+  `httpapi_orders_questions.py` 478, `httpapi_znalosti.py` 323,
+  `httpapi_reports.py` 83.
+- Run card fired for #268 (`v0.9.86`) — issue je CLOSED, celý 11-krokový
+  reťazec HOTOVÝ.
