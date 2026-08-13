@@ -29,13 +29,18 @@ Baseline vs new-revision execution (deliberate asymmetry, see run_migrations):
     idempotent, self-healing way production has run them on every boot — the first boot of
     this mechanism changes NOTHING about how startup behaves, it only records afterwards;
   * a NEW revision runs its statements + the ledger stamp inside ONE transaction, so it
-    applies exactly once and a crash mid-revision rolls back cleanly.
+    applies exactly once and a crash mid-revision rolls back cleanly. Because of that
+    transaction, a new revision's statements MUST be transaction-safe — no
+    `CREATE INDEX CONCURRENTLY`, no `VACUUM`. A future migration that genuinely needs a
+    non-transactional statement must grow its own per-statement path (like the baseline's).
 """
 from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
 from typing import NamedTuple
+
+import psycopg
 
 log = logging.getLogger("email_extractor.migrate")
 
@@ -86,8 +91,8 @@ def pending_revisions(conn, revisions: Sequence[Revision]) -> list[int]:
     applying them. If the ledger table does not exist yet, every revision is pending."""
     try:
         applied = _applied_revisions(conn)
-    except Exception:
-        applied = set()
+    except psycopg.errors.UndefinedTable:
+        applied = set()   # ledger not created yet → every revision is pending
     return [rev.revision for rev in revisions if rev.revision not in applied]
 
 
@@ -98,6 +103,15 @@ def run_migrations(conn, revisions: Sequence[Revision]) -> list[int]:
     idempotent baseline once — non-destructive, self-healing — then records it), and an
     up-to-date DB (does nothing, O(1)).
     """
+    # Enforce the immutable-migrations invariant the docstring documents: revisions are
+    # applied in list order, so a mis-ordered or duplicate id would silently run out of
+    # sequence (or re-run against a stale applied-set snapshot). Fail loudly BEFORE taking
+    # the lock or touching the DB — this is a developer error in REVISIONS, not runtime data.
+    ids = [rev.revision for rev in revisions]
+    if ids != sorted(set(ids)):
+        raise ValueError(
+            "REVISIONS must have strictly ascending, unique revision ids "
+            f"(immutable-migrations invariant); got {ids}")
     conn.execute(_LOCK_SQL)
     try:
         conn.execute(SCHEMA_VERSION_DDL)

@@ -141,6 +141,22 @@ def test_revision_failure_rolls_back_and_records_nothing():
         assert migrate.pending_revisions(conn, [db.REVISIONS[0]]) == []
 
 
+def test_run_migrations_rejects_out_of_order_or_duplicate_revisions():
+    """The immutable-migrations invariant (strictly ascending, unique ids) is CODE-enforced,
+    not just documented — a mis-ordered/duplicate REVISIONS entry fails loudly BEFORE any DB
+    work, never silently runs a revision out of sequence."""
+    rev2 = migrate.Revision(2, "a", ["CREATE TABLE mig_x (id INT)"])
+    rev3 = migrate.Revision(3, "b", ["CREATE TABLE mig_y (id INT)"])
+    with fresh_db() as (conn, _dsn):
+        for bad in ([db.REVISIONS[0], rev3, rev2],           # out of order
+                    [db.REVISIONS[0], rev2, rev2],           # duplicate id
+                    [db.REVISIONS[0], db.REVISIONS[0]]):     # duplicate baseline
+            with pytest.raises(ValueError, match="ascending"):
+                migrate.run_migrations(conn, bad)
+        # a rejected call never touched the DB (no ledger table created)
+        assert _regclass(conn, "schema_version") is None
+
+
 # --- dry-run primitive ---
 
 def test_pending_revisions_reports_without_applying():
@@ -190,15 +206,20 @@ def test_concurrent_start_no_duplicate_baseline():
         assert _regclass(conn, "messages") is not None   # schema really was built
 
 
-# --- data survives repeated startup migration calls ---
+# --- data survives BOTH the O(1) fast path AND a genuine idempotent baseline re-run ---
 
 def test_data_untouched_across_reruns():
     with fresh_db() as (conn, _dsn):
         db.init_schema(conn)
         conn.execute("INSERT INTO messages (message_id) VALUES ('keep-me-269')")
         before = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
-        db.init_schema(conn)
-        db.init_schema(conn)
+        # up-to-date fast path (baseline already recorded → skipped entirely)
+        assert db.init_schema(conn) == []
+        assert db.init_schema(conn) == []
+        # AND a GENUINE baseline re-run (clear the ledger first, like a pre-mechanism DB):
+        # the ~100 idempotent statements run again against the live row and must not touch it
+        conn.execute("DELETE FROM schema_version")
+        assert db.init_schema(conn) == [migrate.BASELINE_REVISION]
         after = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
         assert before == after == 1
         assert conn.execute(
