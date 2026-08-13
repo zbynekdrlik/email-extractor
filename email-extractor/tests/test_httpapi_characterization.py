@@ -201,7 +201,8 @@ def _seed_todays_run(pg):
     SQL now(), so this must use now() too, not a fixed date string like
     test_orders_reliability.py's `_run` helper uses).
 
-    #277: `match_incidents.occurred_on` is seeded via SQL `CURRENT_DATE - 3`, NEVER
+    #277: `match_incidents.occurred_on` is seeded via SQL `now()::date - interval '3
+    days'` (matching `test_orders_reliability.py`'s own idiom for the same table), NEVER
     Python `datetime.date.today()` — the endpoint (`reliability.days_since_incident()`)
     computes the day-delta entirely in SQL against Postgres's own `now()::date`, and the
     test container runs `TimeZone=Etc/UTC`. A Python-local seed disagrees with Postgres
@@ -216,7 +217,8 @@ def _seed_todays_run(pg):
               (rid,))
     pg.execute(
         "INSERT INTO match_incidents (occurred_on, description, issue_ref) "
-        "VALUES (CURRENT_DATE - 3, 'characterization test seed', '#268-char-test')")
+        "VALUES (now()::date - interval '3 days', 'characterization test seed', "
+        "'#268-char-test')")
 
 
 def test_orders_digest_happy_path_returns_todays_and_yesterdays_provenance_stats(pg):
