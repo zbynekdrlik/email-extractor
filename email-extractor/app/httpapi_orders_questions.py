@@ -266,6 +266,8 @@ def register(app: Flask, deps: Deps) -> None:
                 existing=e.existing), 409
         with deps.db() as c2:
             q2 = teach.get(c2, qid)
+        if q2 is None:
+            return jsonify(error="Otázka už neexistuje."), 404
         return _api_orders_answer_generic(qid, q2, {"choice": ean, "by": "sklad"})
 
     def _api_orders_answer_new_dl_item(qid: int, q: dict, ni: dict):
@@ -287,6 +289,8 @@ def register(app: Flask, deps: Deps) -> None:
             teach.add_candidate(c, qid, {"value": gtin, "label": name})
         with deps.db() as c2:
             q2 = teach.get(c2, qid)
+        if q2 is None:
+            return jsonify(error="Otázka už neexistuje."), 404
         return _api_orders_answer_generic(qid, q2, {"choice": gtin, "by": "sklad"})
 
     def _api_orders_answer_generic(qid: int, q: dict, body: dict):

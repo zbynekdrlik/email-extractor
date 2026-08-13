@@ -108,8 +108,12 @@ def weight_grams(name: str) -> float | None:
     return value * 1000 if m.group(2).lower() == "kg" else value
 
 
-def _fmt_weight(grams: float) -> str:
-    return f"{grams / 1000:g} kg" if grams >= 1000 else f"{grams:g} g"
+def _fmt_weight(grams: float | None) -> str:
+    # Callers only reach this once a weight is proven present (a `_weights_disagree`
+    # guard, which is False when either side is None) — `or 0` is a defensive fallback
+    # the type system needs, never hit in practice.
+    g = grams or 0
+    return f"{g / 1000:g} kg" if g >= 1000 else f"{g:g} g"
 
 
 def _weights_disagree(ordered: float | None, card: float | None) -> bool:
@@ -517,6 +521,7 @@ def decide(item_name: str, llm: dict, catalog: list[dict], recalled=None,
     # 1 — the warehouse wrote the customer's exact wording, weight included, into the
     #     alias. That is a deliberate human mapping and beats the weight guard.
     if llm_gtin and alias_exact_weight:
+        assert llm_card is not None  # llm_gtin truthy ⟹ the model gtin resolved a card (unknown_gtin above)
         return done("alias_exact_weight", str(llm_gtin), llm_card["name"], max(conf, 0.95),
                     f"Alias karty je presné znenie objednávky („{matched_parts[0]}“).")
 
@@ -535,6 +540,7 @@ def decide(item_name: str, llm: dict, catalog: list[dict], recalled=None,
 
     # 3 — the card's alias names the ordering customer: it IS that customer's card.
     if llm_gtin and conf > 0 and alias_names_customer and not weight_conflict:
+        assert llm_card is not None  # llm_gtin truthy ⟹ card resolved (unknown_gtin above)
         # #157: the note only proves the customer buys llm_card for SOME wording — if
         # another card's own name matches THIS wording better, the note confirms
         # nothing; fall through to the ordinary ladder below (history / unique-card /
@@ -565,6 +571,7 @@ def decide(item_name: str, llm: dict, catalog: list[dict], recalled=None,
 
     # 5 / 7 — the model, once the weight guard agrees.
     if llm_gtin and conf >= GATE_MIN and not weight_conflict:
+        assert llm_card is not None  # llm_gtin truthy ⟹ card resolved (unknown_gtin above)
         if conf >= GATE_SURE:
             # #186: rung 3 already found a better-fitting card for this wording and fell
             # through (see `alias_better` above) — a SURE raw model confidence must not
@@ -612,6 +619,7 @@ def decide(item_name: str, llm: dict, catalog: list[dict], recalled=None,
                     _unique_note(only, ordered_w))
 
     if weight_conflict:
+        assert llm_card is not None  # weight_conflict True only when a card weight exists ⟹ card resolved
         card_w = weight_grams(llm_card["name"])
         return done("unmatched", None, "", conf,
                     f"Zamietnuté — gramáž objednávky {_fmt_weight(ordered_w)} vs karta "

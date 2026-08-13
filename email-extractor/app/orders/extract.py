@@ -19,6 +19,7 @@ import re
 import unicodedata
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger("orders.extract")
 
@@ -315,7 +316,7 @@ def run(client, email: dict) -> dict:
         head = (extracted.get("orders") or [{}])[0]
         log.info("tabular attachment recognized: %d item(s) parsed by code (model said %d)",
                  len(table), len(head.get("items") or []))
-        result = {
+        result: dict[str, Any] = {
             "senderName": extracted.get("senderName", "") or "",
             "senderEmail": extracted.get("senderEmail", "") or "",
             "companyName": extracted.get("companyName", "") or "",
@@ -336,7 +337,8 @@ def run(client, email: dict) -> dict:
     # the model can invent a plausible-looking future day (e.g. re-dating a stale quoted
     # order onto "next Saturday") with nothing in the mail to back it up. Drop it here,
     # BEFORE it ever reaches pipeline.py's date_conflict() as if it were a genuine day.
-    grounded, ungrounded = [], []
+    grounded: list[dict] = []
+    ungrounded: list[dict] = []
     for order in result["orders"]:
         (grounded if date_grounded(order.get("deliveryDate", ""), source)
          else ungrounded).append(order)

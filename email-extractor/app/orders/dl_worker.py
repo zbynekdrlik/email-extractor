@@ -1421,6 +1421,7 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
         if not msg_row:
             return []
         message = _as_message(msg_row)
+        assert message is not None  # msg_row proven present above ⟹ _as_message returns a dict
         snapshot_id = dl_snapshot.latest_snapshot_id(conn)
         if not snapshot_id:
             log.warning("release_for_question(%s): no DL catalog snapshot yet — cannot "

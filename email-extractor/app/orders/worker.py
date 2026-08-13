@@ -116,7 +116,7 @@ def _as_message(row) -> dict | None:
 
 # --- run bookkeeping -----------------------------------------------------
 
-def _start_run(conn, message_id: str, snapshot_id: int, shadow: bool) -> int:
+def _start_run(conn, message_id: str, snapshot_id: int | None, shadow: bool) -> int:
     return int(conn.execute(
         """INSERT INTO order_runs (message_id, snapshot_id, shadow, status)
            VALUES (%s, %s, %s, 'running') RETURNING id""",
@@ -129,7 +129,7 @@ def _finish_run(conn, run_id: int, status: str, result: dict | None, error: str 
               SET status = %s, error = %s, result = %s, finished_at = now()
             WHERE id = %s""",
         (status, error or None, Json(result or {}), run_id))
-    if (result or {}).get("spend"):
+    if result and result.get("spend"):
         spend.record(conn, run_id, result["spend"])
     for item in (result or {}).get("items", []):
         conn.execute(

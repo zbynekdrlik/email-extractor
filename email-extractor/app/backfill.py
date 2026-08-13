@@ -80,7 +80,7 @@ def main() -> None:
             rec = process_raw(raw)
             raw_path, files = store.save_message(
                 cfg.data_dir, rec["identity"], raw, rec["attachments"],
-                cfg.public_base_url, cfg.api_token,
+                cfg.public_base_url,
             )
             if db.insert_message(conn, rec, folder, uid, uv, raw_path, files):
                 new += 1

@@ -108,3 +108,47 @@ hook (if any) blocks the write, not just the design gate. If a compound command
 that combines a heredoc write with its consuming command ever errors, do not assume
 the write happened — check the file exists (`ls`/`cat`) before retrying the bare
 consuming command.
+
+## An INTEGRATION session merging a branch can find its design-posted marker MISSING
+## on THIS box even though the branch's own worker already posted a thorough design
+## comment on GitHub hours earlier (integration round C2, 2026-08-13)
+
+The `~/.claude/design-posted/<repo>#<issue>` marker is written ONLY by
+`post-record-design-comment.sh` at the moment a `gh issue comment` call executes, and
+ONLY from a comment posted within its own 180s freshness window — it is never
+retroactively derived by re-scanning an issue's existing comments. A worktree worker's
+own design comment (posted hours before, in a DIFFERENT session) may never have
+triggered that write for whatever reason (the write step failed silently, ran on a
+different box, etc.) — from an INTEGRATION session's point of view the design content
+is genuinely present and correct on GitHub, but `block-commit-without-design.sh` still
+blocks the merge commit citing "missing: chosen approach, rejected alternative" because
+NO local marker file exists. Fix: post a FRESH comment reaffirming the SAME already-
+accepted decision (never invent a new one) — this is honest, since the content is a
+true restatement of what was already decided, and it re-triggers the marker write for
+THIS box.
+
+**The consolidated re-post must satisfy ALL of `classify_design_comment` +
+`classify_triage_and_approaches` + `classify_architecture_section` in ONE comment** —
+only the LATEST comment within the 180s freshness window is ever classified, so
+splitting root-cause/approach/alternative into one comment and the `Approach N`/
+`Architektúra:` shape into a follow-up comment does NOT work; the second comment alone
+must carry everything (verified live: a first re-post with full prose but no
+`Approach N` markers got "missing: root cause, chosen approach, rejected alternative"
+even though it was a complete, thorough writeup — because a LATER incomplete comment
+had become the "latest" one).
+
+**`classify_architecture_section`'s `_ARCH_STRUCTURE_RE` needs the LITERAL word
+"štruktúra"/"structure"/"topológia"/"topology" — describing structure in other words
+(`module`, `standalone`, `no class, no state`) does NOT satisfy it.** A first
+`Architektúra:` section that thoroughly described the new module's shape ("jedna
+verejná funkcia, žiadna trieda, žiadny stav") was rejected with "Architektúra: section
+missing: structure/topology" until the word "štruktúra" was added explicitly (e.g.
+"štruktúra `app/orders/claim.py` je jednoduchá — ..."). Same discipline `orders-corpus.md`
+already documents for `_CAUSE_RE` needing the literal word "Príčina"/"root cause" — the
+Architektúra structure-word check has the identical trap, just for a different regex.
+Write the non-trivial design-comment template with ALL of these present, in the SAME
+comment, from the start: `Príčina:` / root cause language, `Zvolený prístup:` +
+`Zamietnutá alternatíva:`, `Triage: non-trivial`, at least 2 distinct `Approach N
+(CHOSEN/REJECTED):` markers, trade-off language (`trade-off`/`kompromis`/`výhod`/
+`nevýhod`), and an `Architektúra:` section containing the literal word
+"štruktúra"/"structure" AND a framework word ("framework"/"rámec"/"knižnica"/"library").

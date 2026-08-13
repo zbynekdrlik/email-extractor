@@ -284,11 +284,11 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
             conn, message.get("message_id", ""), stage="held", status="held",
             outcome=f"Rozpor dátumu dodania — čaká na sklad ({conflict})",
             detail={"held_ids": held_ids, "question_ids": qids})
-        order_summaries = [{"delivery_date": o.get("deliveryDate", ""), "status": "held",
+        held_summaries = [{"delivery_date": o.get("deliveryDate", ""), "status": "held",
                            "item_count": 0, "missing_count": 0, "reject_reason": ""}
                           for o in orders]
         _post_summary(cfg, post, shadow, customer_name=hold_matched.name,
-                      orders=order_summaries, new_questions=len(new_questions),
+                      orders=held_summaries, new_questions=len(new_questions),
                       unverified_count=len(extracted.get("unverified") or []),
                       notes=extracted.get("notes", ""))
         return {"status": "held", "items": [], "shadow": shadow, "would_ship": False,
@@ -312,10 +312,10 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                            on_new=new_questions.append)
 
     today = str(message.get("today") or "")
-    asked: list[int] = []
     all_items: list[dict] = []
     statuses: list[str] = []
     previews: list[dict] = []
+    preview: dict = {}
     order_results: list[dict] = []
     # #139: exactly ONE Odoo message per processed e-mail — every order's outcome and
     # every genuinely new question is accumulated here and posted ONCE, at the very end of
@@ -387,7 +387,6 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                     # counted into the ONE summary this e-mail posts at the end. The
                     # wording itself stays fully visible on the linked /otazky page.
                     on_new=new_questions.append)
-                asked.append(qid)
                 if qid:
                     order_question_ids.append(qid)
         decisions = match.merge_same_card(match.apply_siblings(decisions))

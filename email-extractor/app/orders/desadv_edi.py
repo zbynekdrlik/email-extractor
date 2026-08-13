@@ -611,7 +611,7 @@ def build(header: dict, extraction: dict, matched_items: list[dict],
         ],
     }
     edi = generate(data, sklad_by_gtin, cena_by_gtin)
-    name = filename(customer_ean_edi, extraction.get("deliveryDate"), doc_number)
+    name = filename(customer_ean_edi, extraction.get("deliveryDate") or "", doc_number)
     log.info("desadv built: doc=%r supplier=%r lines=%d skipped=%d substitutions=%d "
              "-> %s", doc_number, customer_name, edi.line_count, len(edi.skipped),
              len(edi.substituted), name)

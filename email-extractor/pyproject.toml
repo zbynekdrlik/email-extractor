@@ -17,6 +17,35 @@ testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-q"
 
+[tool.mypy]
+# Pragmatic gradual-typing baseline (#270): real type errors FAIL the build, but legacy
+# untyped defs stay allowed (disallow_untyped_defs OFF). Nearly every signature is already
+# annotated, so mypy checks nearly all bodies by default; check_untyped_defs extends that to
+# any future unannotated function too (0 extra errors today).
+python_version = "3.12"
+files = ["app"]
+check_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+# Third-party libraries that ship no type stubs — silence ONLY the missing-stub noise, never
+# our own code (an internal-import typo still fails as import-not-found). NOT a blanket global
+# ignore_missing_imports.
+module = [
+    "imapclient",
+    "odf.*",
+    "openpyxl",
+    "openpyxl.*",
+    "paramiko",
+    "paramiko.*",
+    "pytesseract",
+    "waitress",
+    "waitress.*",
+    "xlrd",
+]
+ignore_missing_imports = true
+
 [tool.coverage.run]
 source = ["app"]
 # backfill.py is a one-off operator script with no tests yet — everything the
