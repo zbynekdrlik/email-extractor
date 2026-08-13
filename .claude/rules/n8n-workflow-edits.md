@@ -231,6 +231,26 @@ either. Any FUTURE upload-with-retry in this codebase (a different ORION target,
 different external transfer) should default to this same shape from the start, rather
 than discovering the gap the expensive way.
 
+**The retry itself IS wired now (finding 6's remainder, #239) — the claim is NEVER
+released before it is proven safe.** `dl_worker._check_landed()` runs the stable-identity
+presence check ONLY for a failure `TRANSIENT_RE` already classifies as transient
+(everything else keeps the pre-#239 no-retry behaviour unconditionally). Four branches,
+all inside the SAME upload `except` block in `dl_worker._process_document`: (1) the
+document is already on ORION under an earlier attempt's name (reply lost, bytes landed)
+— confirm the SAME claim, never a second upload; (2) genuinely absent everywhere — the
+SAME claim stays held (never release-then-reclaim) through exactly ONE bounded retry;
+(3) that one retry also fails — falls back to the pre-existing release+durable-alert
+path; (4) the presence check itself cannot even be attempted (most likely: the SFTP
+connection that just failed the upload is down for a follow-up listdir too) — same
+release+alert fallback as (3), no blind retry ever. The three success paths (a clean
+first-try upload, branch 1, branch 2-succeeded) all share ONE extracted closure
+(`_finish_shipped()`) for the confirm/history/Odoo-post/event tail, deliberately never
+duplicated — a second, independently-maintained copy of that tail is exactly the kind of
+drift a future edit could silently desync. Any FUTURE upload-with-retry in this codebase
+should reuse this exact shape (a `list_dirs=` DI seam threaded down to the call site,
+`_check_landed()`'s `True`/`False`/`None` tri-state, one bounded retry, one shared
+success tail) rather than re-deriving it.
+
 ## A SYNTHESIZED fallback identity feeding a claim/dedup key must be STABLE across retries too (#262)
 
 The same "stable identity" principle above applies one layer EARLIER than the upload

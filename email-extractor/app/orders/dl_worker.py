@@ -181,6 +181,46 @@ def _check_retry(attempts: int, error: str) -> None:
         raise _RetryLater(error)
 
 
+def _check_landed(conn, cfg, list_dirs, ean_edi: str, doc_number: str) -> bool | None:
+    """#239 finding 6 (remainder): after a TRANSIENT upload failure, is the document
+    already on ORION under an EARLIER attempt's name — the "bytes landed, only the
+    reply was lost" case `upload.put()`'s temp-write+rename makes provable
+    (`desadv_edi.already_landed()`, keyed on the document's STABLE identity, never a
+    filename)? Returns `True`/`False` when the check itself succeeded AND (review
+    finding on this ticket's own PR) is genuinely trustworthy, `None` when it could not
+    even be attempted — most likely the SAME SFTP connection that just failed the
+    upload is down too, right after failing on it — OR when a presence match was found
+    but is NOT trustworthy (`desadv.has_confirmed_collision`: a different, already-
+    confirmed document from the same supplier shares the same truncated stable prefix,
+    see that function's own docstring). The caller treats `None` exactly like the
+    pre-finding-6 behaviour: no retry, straight to the durable alert — a blind retry
+    (or a blindly-trusted false-positive presence match) is exactly the v0.9.70
+    duplicate-delivery incident this whole ticket exists to prevent, just possibly in
+    the opposite direction (silent loss instead of silent duplication).
+
+    Review finding on this ticket's own PR: `already_landed()` itself must be inside
+    the SAME try/except as `list_dirs(cfg)` — an earlier draft only guarded the SFTP
+    listing call, so an exception from `already_landed()` (e.g. a malformed `dirs`
+    shape) would propagate uncaught out of the whole upload except-block in
+    `_process_document`, skipping `_alert_and_release` entirely and leaving the claim
+    held with no alert ever raised."""
+    try:
+        dirs = list_dirs(cfg)
+        landed = desadv_edi.already_landed(dirs, ean_edi, doc_number)
+    except Exception:
+        log.warning("DL upload retry: could not check ORION presence for supplier=%s "
+                   "doc=%s — no safe retry possible", ean_edi, doc_number, exc_info=True)
+        return None
+    if landed and desadv.has_confirmed_collision(conn, ean_edi, doc_number):
+        log.warning(
+            "DL upload retry: stable-identity presence match for supplier=%s doc=%s "
+            "collided with a DIFFERENT already-confirmed document sharing the same "
+            "10-char prefix — refusing to trust it, falling back to the safe alert "
+            "path instead of confirming the wrong document", ean_edi, doc_number)
+        return None
+    return landed
+
+
 # --- catalog refresh (mirrors worker.refresh_due) ---------------------------
 
 def refresh_due(conn, cfg) -> int | None:
@@ -438,7 +478,7 @@ def _shipped_items(decisions: list[tuple[dict, dl_match.Decision]]) -> list[dict
 
 def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list[dict],
                       suppliers: list[dict], shadow: bool, all_items: list[dict],
-                      upload=None, post=None) -> dict:
+                      upload=None, post=None, list_dirs=None) -> dict:
     subject, from_addr = message.get("subject", ""), message.get("from_addr", "")
     doc_number = doc.get("docNumber") or ""
     delivery_date = doc.get("deliveryDate", "")
@@ -600,53 +640,103 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         return {"outcome": "duplicate", "doc_number": built.doc_number,
                "supplier_name": supplier_decision.name}
 
-    try:
-        upload(cfg, desadv_edi.upload_name(built.filename), built.content,
-              dir_override=getattr(cfg, "orion_dl_dir", upload_mod.DL_DIR))
-    except Exception as e:
+    upload_name = desadv_edi.upload_name(built.filename)
+    upload_dir = getattr(cfg, "orion_dl_dir", upload_mod.DL_DIR)
+    list_dirs = list_dirs or upload_mod.list_dirs
+
+    def _finish_shipped() -> dict:
+        """The shared "document is CONFIRMED on ORION" tail — called after a normal
+        upload success, AND (finding 6, #239) after a transient upload failure whose
+        stable-identity presence check proved the bytes already landed (reply lost,
+        not the upload itself), or whose single safe retry succeeded. A previous design
+        comment on #239 explicitly deferred wiring retry INTO this function's inline
+        body to avoid duplicating this ~30-line tail into a second, driftable copy —
+        this closure is that extraction: every success path shares EXACTLY one shape,
+        never two independently-maintained ones. Captures `conn`/`cfg`/`shadow`/
+        `message`/`subject`/`from_addr`/`delivery_date`/`link`/`supplier_decision`/
+        `built`/`decisions`/`post` from the enclosing scope — the same free variables
+        the pre-finding-6 inline code already used directly."""
+        desadv.confirm_sent(conn, supplier_decision.ean_edi, built.doc_number,
+                            pg_dsn=getattr(cfg, "pg_dsn", ""))
+
+        today = message.get("today") or datetime.now(UTC).date().isoformat()
+        for _item, decision in decisions:
+            if not desadv_edi._is_unmatched(decision.gtin):
+                # R91: item-history write, ONLY for what actually shipped.
+                dl_memory.remember(conn, supplier_decision.ean_edi, decision.item_name,
+                                  decision.gtin, decision.card, today, source="ship")
+
+        shipped, unmatched_notes, borderline_notes, history_notes = [], [], [], []
+        for item, decision in decisions:
+            if (not desadv_edi._is_unmatched(decision.gtin)
+                    and _num(item.get("quantity")) != 0):
+                shipped.append({"name": decision.card or decision.item_name,
+                               "quantity": item.get("quantity"),
+                               "unit": item.get("unit")})
+                if decision.rule == "llm_borderline":
+                    borderline_notes.append(
+                        f"{decision.item_name} ({decision.card}, istota "
+                        f"{round(decision.confidence * 100)} %)")
+                elif decision.rule == "weight_override":
+                    history_notes.append(f"{decision.item_name} -> {decision.card} "
+                                         f"({decision.note})")
+            elif not decision.gtin:
+                # Same fix as the nástenka gate above: any decision with no real gtin
+                # was excluded from the EDI, regardless of which rule produced it.
+                unmatched_notes.append(f"{decision.item_name} ({decision.note})")
+
+        outcome = "partial" if built.partial else "ok"
+        _post(cfg, shadow, lambda: dl_report.build_success(
+            supplier_decision.name, built.doc_number, delivery_date, from_addr, subject,
+            shipped, unmatched_items=unmatched_notes, borderline_notes=borderline_notes,
+            history_notes=history_notes, price_substitutions=built.price_substitutions,
+            filename=built.filename, partial=built.partial, link=link),
+            post=post)
+        _event(conn, shadow, message["message_id"], stage="uploaded_orion", status="ok",
+              outcome=f"EDI vytvorené: {built.filename}",
+              detail={"doc_number": built.doc_number, "edi_file": built.filename},
+              rollup=False, workflow=dl_report.WORKFLOW)
+        return {"outcome": outcome, "doc_number": built.doc_number,
+               "supplier_name": supplier_decision.name,
+               "supplier_ean": supplier_decision.ean_edi, "filename": built.filename,
+               "line_count": built.line_count,
+               "items_skipped_no_match": built.items_skipped_no_match,
+               "items_skipped_zero_qty": built.items_skipped_zero_qty,
+               "price_substitutions": built.price_substitutions,
+               # #229 follow-up 2, review finding: `outcome`/`built.partial` alone is
+               # NOT a precise "did this raise a real dl_item board question" signal --
+               # desadv_edi.build() excludes a zero-quantity item from its own
+               # no_match/partial computation even when unmatched, but dl_worker's own
+               # teach.ask_dl_item call above fires for ANY unmatched item regardless
+               # of quantity. `unmatched_notes` is that exact, precise signal (same
+               # list build_success's own link condition already reads) -- carry it
+               # through so dl_report._outcome_needs_link can check it directly
+               # instead of re-deriving an imprecise proxy from `outcome`.
+               "unmatched_items": unmatched_notes,
+               "items": _shipped_items(decisions)}
+
+    def _alert_and_release(err: Exception) -> dict:
+        """The pre-finding-6 "upload genuinely failed" tail, unchanged: release the
+        claim so the document can be retried by a LATER independent attempt (a human
+        reprocess, or R17's own message-level retry), and durably enqueue the alert so
+        the failure stays visible instead of silent (#239 class 2, requirement 3) --
+        never a fire-and-forget best-effort post (Odoo being down at this exact moment
+        would otherwise lose the alert with no trace, ever). Reached whenever a safe
+        retry was not possible: a NON-transient failure, a transient one whose presence
+        check proved the document is genuinely absent AND whose single retry also
+        failed, or a transient one whose presence check itself could not be attempted
+        (finding 6, #239)."""
         desadv.release_send(conn, supplier_decision.ean_edi, built.doc_number)
-        # #239: an upload failure is NEVER auto-retried here. The removed code called
-        # `_check_retry(...)` at this point, reasoning that "the claim was just released
-        # above, so a retry can safely re-claim and re-upload without ever risking a
-        # duplicate" — backwards: releasing the claim is exactly what REMOVES the
-        # protection. `upload_mod.put()` writes straight to the FINAL `in_DL\<name>` with
-        # no temp-write + rename, `desadv_edi.filename()` stamps a retry with a fresh
-        # `HHMMSSmmm` (so it cannot collide), `release_send()` above DELETED the ledger
-        # row (so `claim_send_or_identify()`, the one atomic anti-double-upload backstop,
-        # has nothing left to guard and `confirm.py` never sees the orphan), and
-        # `TRANSIENT_RE` matches `timed out` — the exact shape of "the bytes DID land,
-        # only the reply was lost". Composed: two copies of one document in `in_DL`, both
-        # taken in at the warehouse's next manual morning import. R17's retry semantics
-        # for LLM/vision failures are untouched; only this upload call site is affected.
-        # Re-enabling a retry needs an absence proof (by doc_number + supplier, never by
-        # filename, which changes between attempts) plus a temp-write+rename upload —
-        # tracked on #239. The durable alert below is kept: that half is correct, and is
-        # what makes this failure visible instead of silent.
         log.exception("DL upload of %s failed", built.filename)
         note = ("Odoslanie dodacieho listu do ORIONu zlyhalo — skús znova alebo "
                "nahlás administrátorovi")
-        # `e` is captured into a plain string BEFORE any closure, never referenced
-        # inside one — `except ... as e` implicitly deletes `e` at the end of this
-        # block, which would otherwise make a closure over it fragile (it happens to
-        # run early enough today, but a later failure here would silently swallow a
-        # future NameError and degrade the alert to a bare generic message — the
-        # exact silent-loss failure mode fix #5 exists to prevent).
-        detail_text = f"{note} ({built.filename}): {e}"
-        # #239 class 2, requirement 3: NEVER a fire-and-forget best-effort post here —
-        # a lost upload-failure alert is exactly the "invisible one layer up" failure
-        # this ticket exists to close (Odoo is down right now — a bare `_post()` at
-        # this exact moment would vanish with no trace, ever). Durably enqueued
-        # instead; `dl_alerts.flush_pending` (run on the same ~15s tick as
-        # confirm.sweep, see worker.run_forever) retries delivery until Odoo genuinely
-        # confirms it, grouped with any other pending alert of the same kind. A
-        # builder exception (dl_report.build_review) must not blow up processing
-        # either — same discipline `_post`'s own docstring already established.
+        detail_text = f"{note} ({built.filename}): {err}"
         # Deep-review finding on this ticket's own PR: `stuck_classified_sweep` below
         # already bails out when `delivery_notes_channel_id` resolves to 0 (unset) —
-        # this call site lacked the same guard, so an unset channel would enqueue a
+        # this call site needs the SAME guard, or an unset channel would enqueue a
         # `pending_alerts` row that can NEVER be delivered (nothing posts to channel 0)
         # and would sit pending forever, growing the "stuck backlog" gauge with no way
-        # to resolve it. Match the same guard here.
+        # to resolve it.
         channel = int(getattr(cfg, "delivery_notes_channel_id", 0) or 0)
         if channel:
             try:
@@ -662,67 +752,54 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             log.warning("delivery_notes_channel_id is unset — the upload-failure "
                        "alert for %s could not be enqueued", built.filename)
         _event(conn, shadow, message["message_id"], stage="review", status="error",
-              outcome=note, detail={"error": repr(e), "filename": built.filename},
+              outcome=note, detail={"error": repr(err), "filename": built.filename},
               rollup=False, workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": built.doc_number,
                "supplier_name": supplier_decision.name, "reason": note}
 
-    desadv.confirm_sent(conn, supplier_decision.ean_edi, built.doc_number,
-                        pg_dsn=getattr(cfg, "pg_dsn", ""))
+    try:
+        upload(cfg, upload_name, built.content, dir_override=upload_dir)
+    except Exception as e:
+        # #239 finding 6 (remainder): a TRANSIENT failure now gets a stable-identity
+        # presence check BEFORE deciding what to do — the safety this ticket's earlier
+        # increments built (temp-write+rename upload, `desadv_edi.stable_prefix()`/
+        # `already_landed()`) but never wired into a decision. A NON-transient failure
+        # (`_is_transient(str(e))` False) skips the check entirely and keeps exactly
+        # the pre-finding-6 behaviour — `landed` stays `None`.
+        landed = _check_landed(conn, cfg, list_dirs, supplier_decision.ean_edi,
+                               built.doc_number) if _is_transient(str(e)) else None
+        if landed is True:
+            # The reply was lost, but the bytes are already on ORION under an earlier
+            # attempt's name — confirming, never re-uploading, is what actually
+            # prevents the v0.9.70 duplicate-delivery incident (a blind retry here
+            # would be the exact bug this whole ticket exists to fix).
+            log.warning(
+                "DL upload of %s: the reply was lost but the document is already on "
+                "ORION under an earlier attempt's name (stable identity match) — "
+                "confirming instead of re-uploading (%s)", built.filename, e)
+            return _finish_shipped()
+        if landed is False:
+            # Genuinely absent everywhere a document could legitimately be sitting —
+            # exactly ONE retry is safe here, bounded (never a loop), with the SAME
+            # claim held throughout (never release-then-reclaim, which is precisely
+            # what removed the anti-duplicate protection in the v0.9.70 incident).
+            log.info(
+                "DL upload of %s: transient failure (%s), document not yet on ORION "
+                "— retrying exactly once with the same claim", built.filename, e)
+            try:
+                upload(cfg, upload_name, built.content, dir_override=upload_dir)
+            except Exception as e2:
+                log.exception("DL upload retry of %s also failed (original: %s)",
+                              built.filename, e)
+                return _alert_and_release(e2)
+            return _finish_shipped()
+        # `landed is None`: either non-transient, or the presence check itself could
+        # not be attempted (the SFTP connection that just failed the upload is very
+        # likely down for a follow-up listdir too) — no safe retry is possible either
+        # way, so this keeps the pre-finding-6 behaviour exactly.
+        return _alert_and_release(e)
 
-    today = message.get("today") or datetime.now(UTC).date().isoformat()
-    for _item, decision in decisions:
-        if not desadv_edi._is_unmatched(decision.gtin):
-            # R91: item-history write, ONLY for what actually shipped.
-            dl_memory.remember(conn, supplier_decision.ean_edi, decision.item_name,
-                              decision.gtin, decision.card, today, source="ship")
-
-    shipped, unmatched_notes, borderline_notes, history_notes = [], [], [], []
-    for item, decision in decisions:
-        if not desadv_edi._is_unmatched(decision.gtin) and _num(item.get("quantity")) != 0:
-            shipped.append({"name": decision.card or decision.item_name,
-                           "quantity": item.get("quantity"), "unit": item.get("unit")})
-            if decision.rule == "llm_borderline":
-                borderline_notes.append(
-                    f"{decision.item_name} ({decision.card}, istota "
-                    f"{round(decision.confidence * 100)} %)")
-            elif decision.rule == "weight_override":
-                history_notes.append(f"{decision.item_name} -> {decision.card} "
-                                     f"({decision.note})")
-        elif not decision.gtin:
-            # Same fix as the nástenka gate above: any decision with no real gtin was
-            # excluded from the EDI, regardless of which rule produced it.
-            unmatched_notes.append(f"{decision.item_name} ({decision.note})")
-
-    outcome = "partial" if built.partial else "ok"
-    _post(cfg, shadow, lambda: dl_report.build_success(
-        supplier_decision.name, built.doc_number, delivery_date, from_addr, subject,
-        shipped, unmatched_items=unmatched_notes, borderline_notes=borderline_notes,
-        history_notes=history_notes, price_substitutions=built.price_substitutions,
-        filename=built.filename, partial=built.partial, link=link),
-        post=post)
-    _event(conn, shadow, message["message_id"], stage="uploaded_orion", status="ok",
-          outcome=f"EDI vytvorené: {built.filename}",
-          detail={"doc_number": built.doc_number, "edi_file": built.filename},
-          rollup=False, workflow=dl_report.WORKFLOW)
-    return {"outcome": outcome, "doc_number": built.doc_number,
-           "supplier_name": supplier_decision.name,
-           "supplier_ean": supplier_decision.ean_edi, "filename": built.filename,
-           "line_count": built.line_count,
-           "items_skipped_no_match": built.items_skipped_no_match,
-           "items_skipped_zero_qty": built.items_skipped_zero_qty,
-           "price_substitutions": built.price_substitutions,
-           # #229 follow-up 2, review finding: `outcome`/`built.partial` alone is NOT a
-           # precise "did this raise a real dl_item board question" signal --
-           # desadv_edi.build() excludes a zero-quantity item from its own no_match/
-           # partial computation even when unmatched, but dl_worker's own teach.ask_
-           # dl_item call above fires for ANY unmatched item regardless of quantity.
-           # `unmatched_notes` is that exact, precise signal (same list build_success's
-           # own link condition already reads) -- carry it through so
-           # dl_report._outcome_needs_link can check it directly instead of
-           # re-deriving an imprecise proxy from `outcome`.
-           "unmatched_items": unmatched_notes,
-           "items": _shipped_items(decisions)}
+    return _finish_shipped()
 
 
 # --- one message (R1-R17) ---------------------------------------------------
@@ -762,7 +839,8 @@ def _summary_outcome(result: dict) -> str:
 
 def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                      catalog: list[dict], suppliers: list[dict], shadow: bool,
-                     upload=None, post=None, attachments: list[dict] | None = None) -> dict:
+                     upload=None, post=None, attachments: list[dict] | None = None,
+                     list_dirs=None) -> dict:
     # `attachments` injection (#205, DL migration F6 eval harness): mirrors the existing
     # `upload=`/`post=` DI seam. `None` (every real call site, incl. `tick()` below) keeps
     # reading `messages`/`attachments`/disk exactly as before; the eval harness passes a
@@ -858,7 +936,8 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
         extracted_doc_numbers.append(doc.get("docNumber") or "")
         documents_out.append(_process_document(conn, cfg, client, message, doc, catalog,
                                                 suppliers, shadow, all_items,
-                                                upload=upload, post=post))
+                                                upload=upload, post=post,
+                                                list_dirs=list_dirs))
 
     if not documents_out:
         # #258: the text of the failure must say where it actually looked — a text-
@@ -939,7 +1018,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
 
 def _run_and_finish(conn, cfg, client, message: dict, snapshot_id: int | None,
                     catalog: list[dict], suppliers: list[dict], upload=None,
-                    post=None) -> dict | None:
+                    post=None, list_dirs=None) -> dict | None:
     """One full `_process_message` pass for `message`, finished off exactly like the
     live `engine=python` claim branch of `tick()` always has: an `order_runs` row,
     `messages` marked processed, and the rollup summary event. Returns the result dict
@@ -954,7 +1033,8 @@ def _run_and_finish(conn, cfg, client, message: dict, snapshot_id: int | None,
     run_id = worker._start_run(conn, message["message_id"], None, shadow=False)
     try:
         result = _process_message(conn, cfg, client, message, snapshot_id, catalog,
-                                  suppliers, shadow=False, upload=upload, post=post)
+                                  suppliers, shadow=False, upload=upload, post=post,
+                                  list_dirs=list_dirs)
     except _RetryLater as e:
         log.info("DL message %s: transient failure (attempts=%s) — leaving for the "
                  "30-min stale reclaim: %s", message["message_id"],
@@ -1024,7 +1104,7 @@ def _run_and_finish(conn, cfg, client, message: dict, snapshot_id: int | None,
 # --- #240: an answered dl_item/dl_supplier question gives its document another chance --
 
 def release_for_question(conn, cfg, qid: int, client=None, upload=None,
-                         post=None) -> list[dict]:
+                         post=None, list_dirs=None) -> list[dict]:
     """Once every `dl_item`/`dl_supplier` nástenka question raised for ONE message has
     been answered, that message is given a genuine second chance to finish — the exact
     thing that was missing before this ticket (`teach._apply_dl_item`/`_apply_dl_supplier`
@@ -1117,7 +1197,8 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
         if client is None:
             client = llm.from_config(cfg)
         result = _run_and_finish(conn, cfg, client, message, snapshot_id, catalog,
-                                 suppliers, upload=upload, post=post)
+                                 suppliers, upload=upload, post=post,
+                                 list_dirs=list_dirs)
         return (result or {}).get("documents", [])
 
 
@@ -1186,16 +1267,19 @@ def stuck_classified_sweep(conn, cfg, threshold_minutes: int = STUCK_CLASSIFIED_
 
 # --- one tick ----------------------------------------------------------------
 
-def tick(conn, cfg, client=None, upload=None, post=None) -> int:
+def tick(conn, cfg, client=None, upload=None, post=None, list_dirs=None) -> int:
     """Process at most one `dodacie_listy` message. Returns 0 or 1 (whether a MESSAGE
     reached a terminal outcome this tick — a transient retry, per R17, returns 0: nothing
     was actually completed).
 
-    `client`/`upload`/`post` are injected so the worker's claim/shadow/retry/upload
-    guarantees can be tested without the LLM stack, a real ORION host, or Odoo — same
-    convention `static_worker.tick` already uses. Production passes the real
-    `llm.from_config(cfg)` and leaves `upload`/`post` at their defaults
-    (`upload_mod.put`/`dl_report.post`).
+    `client`/`upload`/`post`/`list_dirs` are injected so the worker's claim/shadow/
+    retry/upload guarantees can be tested without the LLM stack, a real ORION host, or
+    Odoo — same convention `static_worker.tick` already uses. Production passes the
+    real `llm.from_config(cfg)` and leaves `upload`/`post`/`list_dirs` at their
+    defaults (`upload_mod.put`/`dl_report.post`/`upload_mod.list_dirs`). `list_dirs`
+    (finding 6, #239) is the stable-identity presence check a transient upload failure
+    consults before deciding whether a single safe retry is possible — see
+    `_check_landed()`.
     """
     engine = resolve_engine(getattr(cfg, "delivery_notes_engine", "n8n"))
     shadow = bool(getattr(cfg, "delivery_notes_shadow", False))
@@ -1216,7 +1300,8 @@ def tick(conn, cfg, client=None, upload=None, post=None) -> int:
         if not message:
             return 0
         result = _run_and_finish(conn, cfg, client, message, snapshot_id, catalog,
-                                 suppliers, upload=upload, post=post)
+                                 suppliers, upload=upload, post=post,
+                                 list_dirs=list_dirs)
         return 1 if result is not None else 0
 
     message = _peek_for_shadow(conn, getattr(cfg, "delivery_notes_shadow_days",

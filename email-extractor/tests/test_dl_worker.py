@@ -966,25 +966,34 @@ def test_attempts_3_or_more_goes_to_review_even_for_a_transient_reason(pg, tmp_p
 # --- #239 class 2: upload-failure durable alert (never fire-and-forget, never a
 # --- silent automatic re-upload) -----------------------------------------------------
 
-def test_a_timed_out_upload_is_never_auto_retried_so_orion_can_never_get_two_copies(
+def test_a_timed_out_upload_falls_back_to_no_retry_when_orion_host_is_unconfigured(
         pg, tmp_path):
-    """#239, found by independent verification of this ticket's own PR: an upload
-    failure must never be re-uploaded automatically.
+    """Renamed + docstring corrected in the SAME commit as #239 finding 6's remainder
+    (own commit, justified — the test's own assertions are unchanged, only the
+    explanation of WHY they hold was stale): the original text claimed `upload.put()`
+    "writes straight to the FINAL ... with no temp-write + rename" — that infrastructure
+    has since shipped (see `upload.py`'s own module docstring) and is no longer true.
+    It also framed "an upload failure must never be re-uploaded automatically" as an
+    unconditional rule — finding 6's remainder makes that conditional: a TRANSIENT
+    failure whose stable-identity presence check proves ABSENCE now gets exactly one
+    safe retry (see the `test_a_transient_upload_failure_*` tests above).
 
-    `upload.put()` writes straight to the FINAL `in_DL\\<name>` with no temp-write +
-    rename, so a transfer that lands its bytes and only loses the reply (`timed out` --
-    which `TRANSIENT_RE` matches) leaves a complete, validly-named file on ORION.
-    `desadv_edi.filename()` then stamps a retry with a fresh `HHMMSSmmm`, so the second
-    attempt cannot collide with the first, and `desadv.release_send()` has already
-    DELETED the ledger row -- so `claim_send_or_identify()`, the one atomic
-    anti-double-upload backstop, has nothing left to guard and `confirm.py` never sees
-    the orphan either. The warehouse's next manual morning import would take in BOTH
-    copies: a real duplicate delivery.
+    This test's own scenario still correctly pins the NO-retry outcome, but for the
+    real reason: `cfg` here has NO `orion_host` configured (`_cfg()`'s default), and no
+    `list_dirs` fake is injected either — so `_check_landed()` calls the REAL
+    `upload_mod.list_dirs(cfg)`, which fails immediately (`_connect()` raises before any
+    network I/O) exactly like a genuinely misconfigured add-on would. That is the
+    "presence check unavailable" branch (see also
+    `test_a_transient_upload_failure_falls_back_when_the_presence_check_is_unavailable`,
+    which pins the SAME branch via an explicit raising `list_dirs` fake instead — kept
+    as two separate regression pins because "orion_host was never configured" and "the
+    SFTP connection is down right now" are two distinct real operational causes for the
+    identical safe fallback).
 
-    So exactly ONE upload attempt must be made, the message must end terminal (not
-    re-armed for the 30-minute stale reclaim), and the durable alert -- the half of
-    #239 that is correct -- must still be enqueued so the failure stays visible.
-    """
+    So: exactly ONE upload attempt must be made, the message must end terminal (not
+    re-armed for the 30-minute stale reclaim), and the durable alert must still be
+    enqueued so the failure stays visible — the v0.9.70 duplicate-delivery incident
+    this whole ticket exists to prevent never gets a chance to recur here."""
     _snapshot(pg)
     _msg(pg, mid="dl1")
     _attach(pg, tmp_path, "dl1")
@@ -1120,6 +1129,229 @@ def test_upload_failure_with_no_channel_configured_never_enqueues_a_stuck_alert(
     n = dl_worker.tick(pg, cfg, client=client, upload=_raise_upload)
     assert n == 1
     assert pg.execute("SELECT count(*) FROM pending_alerts").fetchone()[0] == 0
+
+
+# --- #239 finding 6 (remainder): safe automatic retry, built on the already-shipped
+# --- temp-write+rename upload + stable-identity presence-check primitives -----------
+
+def _stable_prefix():
+    return desadv_edi.stable_prefix(SUPPLIER_EAN, "0100000001")
+
+
+def _dirs(*, in_dl=(), arch=(), unconfirmed=()):
+    return {"in": set(), "in_DL": set(in_dl), "archCodex": set(arch),
+           "unconfirmed": set(unconfirmed)}
+
+
+def test_a_transient_upload_failure_confirms_instead_of_reuploading_when_already_landed(
+        pg, tmp_path):
+    """#239 finding 6, branch 1 (bytes-landed-reply-lost): a TRANSIENT upload failure
+    (`timed out`) whose stable-identity presence check proves the document is ALREADY on
+    ORION under an earlier attempt's name (the exact ambiguity `upload.put()`'s
+    temp-write+rename makes provable) must NEVER trigger a second upload — that would be
+    the live v0.9.70 duplicate-delivery incident all over again. The claim must be kept
+    (confirmed, never released) and the document must finish as a genuine success."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    tries = []
+
+    def _timed_out_upload(c, name, content, dir_override=None):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    list_dirs_calls = []
+
+    def _fake_list_dirs(cfg):
+        list_dirs_calls.append(cfg)
+        return _dirs(in_dl=[f"Z-{_stable_prefix()}20260801_120000000.txt"])
+
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, upload=_timed_out_upload,
+                       list_dirs=_fake_list_dirs)
+    assert n == 1
+    assert len(tries) == 1, "a landed document must never be re-uploaded"
+    assert len(list_dirs_calls) == 1
+    row = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True,)
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE uploaded_at IS NOT NULL"
+    ).fetchone()[0] == 1, "the claim must be CONFIRMED, never released"
+    assert pg.execute(
+        "SELECT count(*) FROM pending_alerts").fetchone()[0] == 0, \
+        "a genuine success must never enqueue an upload-failure alert"
+    event = pg.execute(
+        "SELECT stage, status FROM email_events WHERE message_id='dl1' "
+        "AND stage='uploaded_orion'").fetchone()
+    assert event == ("uploaded_orion", "ok")
+
+
+def test_a_transient_upload_failure_retries_exactly_once_with_the_same_claim_when_absent(
+        pg, tmp_path):
+    """#239 finding 6, branch 2 (absent, safe retry): when the presence check proves the
+    document is genuinely NOT on ORION yet, exactly ONE retry is safe — same claim held
+    throughout (never release-then-reclaim, which is what removed the protection in the
+    v0.9.70 incident this whole ticket exists to fix)."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    tries = []
+
+    def _flaky_upload(c, name, content, dir_override=None):
+        tries.append(name)
+        if len(tries) == 1:
+            raise OSError("connection timed out")
+        return True
+
+    list_dirs_calls = []
+
+    def _fake_list_dirs(cfg):
+        list_dirs_calls.append(cfg)
+        return _dirs()
+
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, upload=_flaky_upload,
+                       list_dirs=_fake_list_dirs)
+    assert n == 1
+    assert len(tries) == 2, "exactly one retry, never a loop"
+    assert len(list_dirs_calls) == 1, "the presence check runs once, before the retry"
+    row = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True,)
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE uploaded_at IS NOT NULL"
+    ).fetchone()[0] == 1, "the SAME claim survived (never released) and got confirmed"
+    assert pg.execute(
+        "SELECT count(*) FROM pending_alerts").fetchone()[0] == 0
+
+
+def test_a_transient_upload_failure_when_the_retry_also_fails_alerts_without_looping(
+        pg, tmp_path):
+    """#239 finding 6, branch 3 (retry-fails): the single retry is BOUNDED, never a
+    loop — when it also fails, this falls back to the existing durable-alert path
+    (release the claim, enqueue durably), unchanged from before finding 6."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    tries = []
+
+    def _always_timed_out_upload(c, name, content, dir_override=None):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    def _fake_list_dirs(cfg):
+        return _dirs()
+
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, upload=_always_timed_out_upload,
+                       list_dirs=_fake_list_dirs)
+    assert n == 1
+    assert len(tries) == 2, "the original attempt plus exactly one bounded retry"
+    row = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True,)
+    assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0, \
+        "a genuinely failed retry releases the claim, same as today's no-retry path"
+    assert pg.execute(
+        "SELECT count(*) FROM pending_alerts WHERE kind='dl_upload_failed'"
+    ).fetchone()[0] == 1
+
+
+def test_a_transient_upload_failure_falls_back_when_the_presence_check_is_unavailable(
+        pg, tmp_path):
+    """#239 finding 6, branch 4 (check-unavailable): the SFTP connection that just
+    failed the upload is very likely down for the presence check too — when the check
+    itself raises, NO retry is attempted (a blind retry with no absence proof is exactly
+    the v0.9.70 duplicate-delivery bug), falling back to today's alert-and-release
+    path."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    tries = []
+
+    def _timed_out_upload(c, name, content, dir_override=None):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    def _broken_list_dirs(cfg):
+        raise OSError("SFTP unavailable")
+
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, upload=_timed_out_upload,
+                       list_dirs=_broken_list_dirs)
+    assert n == 1
+    assert len(tries) == 1, "no retry without an absence proof"
+    row = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True,)
+    assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0
+    assert pg.execute(
+        "SELECT count(*) FROM pending_alerts WHERE kind='dl_upload_failed'"
+    ).fetchone()[0] == 1
+
+
+def test_a_transient_upload_failure_never_trusts_a_stable_prefix_collision(pg, tmp_path):
+    """#239 finding 6, review finding (own commit, RED->GREEN): `desadv_edi.
+    stable_prefix()` truncates `doc_number` to its first 10 alnum characters (R89's
+    on-wire filename budget) — two GENUINELY DIFFERENT doc numbers from the SAME
+    supplier that only differ past position 10 collide onto the IDENTICAL stable
+    prefix. Without a guard, a transient upload failure for document B would see
+    document A's (a different, already-CONFIRMED document) file in the directory
+    listing, `already_landed()` would report `True`, and B would be silently
+    confirmed as shipped without ever actually reaching ORION — the mirror image of
+    the v0.9.70 duplicate-upload incident this whole ticket exists to prevent, just
+    silent LOSS instead of silent DUPLICATION."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    other_doc_number = "01000000011"
+    this_doc_number = "01000000012"
+    assert desadv_edi.stable_prefix(SUPPLIER_EAN, other_doc_number) == \
+        desadv_edi.stable_prefix(SUPPLIER_EAN, this_doc_number), \
+        "the fixture must genuinely collide on the first 10 alnum chars"
+    other_filename = desadv_edi.filename(SUPPLIER_EAN, "01.08.2026", other_doc_number,
+                                         stamp="090000000")
+    pg.execute(
+        """INSERT INTO desadv_sent (supplier_ean, doc_number, filename, uploaded_at)
+           VALUES (%s, %s, %s, now())""",
+        (SUPPLIER_EAN, other_doc_number, other_filename))
+
+    client = FakeClient({"dl_documents": [_doc(doc_number=this_doc_number)],
+                         "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [ITEM_MATCHED]})
+    tries = []
+
+    def _timed_out_upload(c, name, content, dir_override=None):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    def _fake_list_dirs(cfg):
+        # Document A's own file, genuinely sitting on ORION, matches document B's
+        # stable prefix too — the exact collision this test proves is refused.
+        return _dirs(in_dl=[f"Z-{other_filename}"])
+
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, upload=_timed_out_upload,
+                       list_dirs=_fake_list_dirs)
+    assert n == 1
+    assert len(tries) == 1, "a collision must never be trusted as a landed proof"
+    assert pg.execute(
+        "SELECT uploaded_at FROM desadv_sent WHERE doc_number=%s", (this_doc_number,)
+    ).fetchone() is None, "the DIFFERENT document must never be confirmed"
+    assert pg.execute(
+        "SELECT uploaded_at IS NOT NULL FROM desadv_sent WHERE doc_number=%s",
+        (other_doc_number,)).fetchone() == (True,), "the OTHER document stays confirmed"
+    assert pg.execute(
+        "SELECT count(*) FROM pending_alerts WHERE kind='dl_upload_failed'"
+    ).fetchone()[0] == 1
 
 
 # --- #239 class 3: classified as DL but never even attempted -----------------
