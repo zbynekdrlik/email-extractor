@@ -217,3 +217,20 @@ only `dl_item`/`dl_supplier`). Use `page.context().clearCookies()` before switch
 between the admin session and either warehouse link, per the existing cookie-jar gotcha
 in `deploy.md` — the persistent MCP browser profile will otherwise silently reuse a
 still-valid admin cookie and mask a boundary that isn't actually enforcing.
+
+**Post-deploy console-error verification across SEVERAL pages: navigate + check console
+ONE PAGE AT A TIME, never a tight loop of `page.goto()` calls with the console read at
+the end (krok 11 deploy verification, 0.9.86).** Each of `/`, `/otazky`, `/otazky-dl`,
+`/znalosti` fires its own `fetch()`/XHR on load; navigating straight to the NEXT page
+before the CURRENT page's in-flight request settles gets that request CANCELLED by the
+browser mid-flight, which Chromium reports as a real-looking console error (`401`/
+`net::ERR_CONNECTION_REFUSED` on `/api/orders/dl/questions`, `/api/znalosti/products`,
+etc.) attributed to whichever page happened to be current when the cancellation landed
+— NOT a real bug on either page. Looked exactly like 4 fresh console errors after a
+4-page loop; re-running each page INDIVIDUALLY (separate `browser_navigate` +
+`browser_console_messages` call per page, `waitForLoadState('networkidle')` before
+checking) showed 0 errors on all 4. Same root cause as this file's existing
+`browser_click`-races-the-5s-auto-refresh note above (an MCP round-trip is real wall-
+clock time the page keeps running during) — this is the multi-PAGE-navigation form of
+it. Any future post-deploy Playwright sweep across several pages of this app should
+check each page's console in its own isolated navigate-then-check step.
