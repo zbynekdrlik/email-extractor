@@ -420,3 +420,65 @@ the specific `status` value it cares about (`_release_stuck_siblings`'s own
 `NOT EXISTS (... status = 'error')` pattern), never "the most recent event for this
 message" — the rollup summary is always more recent than the diagnostic event that
 caused it.
+
+## Remediation replay (#241, 29 old stuck DL messages) — three things the #251 path doesn't warn you about
+
+Doing a full batch of #251-style direct `_process_document()` replays (5 documents,
+one at a time, shadow-then-live) surfaced three gotchas the #251 section above doesn't
+cover:
+
+1. **`db.connect()` uses `autocommit=True`** (`app/db.py`). A replay script never
+   needs (and should never write) `conn.commit()`/`conn.rollback()` — every statement
+   already lands the instant it executes. Shadow mode's own "zero writes" guarantee
+   comes from `_event`/`_post`/`teach.ask_*` being gated on `not shadow` inside
+   `_process_document` itself, never from a rolled-back transaction.
+
+2. **A shadow-preview's extracted `docNumber` (and sometimes the outcome itself) is
+   NOT guaranteed identical across two calls on the exact same PDF text** — it's an
+   LLM extraction call, not a deterministic parse. Live example: the same Messer
+   Tatragas attachment returned `docNumber="AVIZO5336710511"` on preview call #1,
+   `docNumber=""` on live call #2, and `"AVIZO5336710511"` again on preview call #3 —
+   same text, same prompt, three different answers on the field alone. For a
+   single-document message this is harmless (there is only one document to mean), but
+   a replay script that matches the live call's target document by exact `docNumber`
+   string must fall back to "the sole extracted document" when there is exactly one —
+   never silently refuse just because the string drifted. **Item MATCHING can drift
+   the same way** (already documented playbook-wide, #251's own section above) — but
+   this is the FIRST time doc-HEADER extraction itself was observed to drift, not just
+   item-level matching.
+
+3. **A shadow-preview's outcome can flip from "review" to "ok" between the original
+   investigation and the actual replay, with NO code change in between** — because
+   `dl_memory`'s alias/history rescue means a product the catalog genuinely lacked on
+   the day of the original comment can match today via `alias_rescue` learned from a
+   LATER, unrelated shipment of the same supplier (two of five #241 group-C documents
+   did exactly this: an item genuinely unmatched weeks ago matched cleanly today).
+   **Always re-run the shadow preview immediately before the live call, even when an
+   earlier investigation already characterized the document** — never replay live off
+   a preview that is more than a few minutes old. When a preview surprises you with
+   "ok"/"partial" instead of the expected "review", the FULL safety chain still
+   applies (ORION stable-identity check before AND after), never skip it just because
+   the earlier investigation said "will raise a question".
+
+4. **`_read_attachments()`'s PDF/image-only filter (`_ATTACHMENT_MIME_RE`/
+   `_ATTACHMENT_EXT_RE`, `dl_worker.py`) is invisible unless you go looking** — a
+   supplier whose delivery note is a `.xls`/`.xlsx`/`.docx` attachment gets ZERO
+   usable attachments and ZERO extracted documents, with no distinguishing signal
+   anywhere in `messages`/`email_events` that says "wrong file type" instead of
+   "catalog gap" or "extraction failed". `app/extract.py`'s ingest-time extraction DOES
+   read `.xls` text fine (`attachments.method='xls'`, `extracted_text` populated) —
+   the gap is specifically `dl_worker`'s own narrower, deliberate scope filter (its own
+   docstring calls this out as an intentional decision, not an oversight). Before
+   concluding "catalog gap" for any DL document that produced NO extracted documents
+   at all, check `attachments.mime`/`method` for that message first — a `.xls`/`.docx`
+   attachment reads as "0 documents extracted" exactly like a genuinely bad scan does,
+   but the fix is completely different (and is a scope decision only the user can make
+   — see #297).
+
+The ORION stable-identity check itself needs NO hand-rolled logic — it already exists
+as production code, use it directly rather than re-deriving the folder-tolerant prefix
+match narratively described elsewhere in this file:
+`desadv_edi.already_landed(upload.list_dirs(cfg), supplier_ean, doc_number)`
+(`app/orders/desadv_edi.py`, built for #239's own safe-retry decision — tolerant of the
+`Z-`/`Z-Z-` ORION wire-prefix quirks, checks `in_DL`/`archCodex`/`unconfirmed` in one
+call).
