@@ -57,6 +57,9 @@ options:
   import_morning_check_skip_saturday: true
   import_morning_check_skip_sunday: true
   import_alert_reminder_hours: 4
+  import_evening_check_hour: 18
+  import_evening_check_skip_saturday: true
+  import_evening_check_skip_sunday: true
   static_digest_batch_size: 30
   static_digest_idle_minutes: 60
   delivery_notes_engine: "n8n"
@@ -118,6 +121,9 @@ schema:
   import_morning_check_skip_saturday: bool?
   import_morning_check_skip_sunday: bool?
   import_alert_reminder_hours: int?
+  import_evening_check_hour: int?
+  import_evening_check_skip_saturday: bool?
+  import_evening_check_skip_sunday: bool?
   static_digest_batch_size: int?
   static_digest_idle_minutes: int?
   delivery_notes_engine: list(n8n|python)?
