@@ -966,25 +966,34 @@ def test_attempts_3_or_more_goes_to_review_even_for_a_transient_reason(pg, tmp_p
 # --- #239 class 2: upload-failure durable alert (never fire-and-forget, never a
 # --- silent automatic re-upload) -----------------------------------------------------
 
-def test_a_timed_out_upload_is_never_auto_retried_so_orion_can_never_get_two_copies(
+def test_a_timed_out_upload_falls_back_to_no_retry_when_orion_host_is_unconfigured(
         pg, tmp_path):
-    """#239, found by independent verification of this ticket's own PR: an upload
-    failure must never be re-uploaded automatically.
+    """Renamed + docstring corrected in the SAME commit as #239 finding 6's remainder
+    (own commit, justified — the test's own assertions are unchanged, only the
+    explanation of WHY they hold was stale): the original text claimed `upload.put()`
+    "writes straight to the FINAL ... with no temp-write + rename" — that infrastructure
+    has since shipped (see `upload.py`'s own module docstring) and is no longer true.
+    It also framed "an upload failure must never be re-uploaded automatically" as an
+    unconditional rule — finding 6's remainder makes that conditional: a TRANSIENT
+    failure whose stable-identity presence check proves ABSENCE now gets exactly one
+    safe retry (see the `test_a_transient_upload_failure_*` tests above).
 
-    `upload.put()` writes straight to the FINAL `in_DL\\<name>` with no temp-write +
-    rename, so a transfer that lands its bytes and only loses the reply (`timed out` --
-    which `TRANSIENT_RE` matches) leaves a complete, validly-named file on ORION.
-    `desadv_edi.filename()` then stamps a retry with a fresh `HHMMSSmmm`, so the second
-    attempt cannot collide with the first, and `desadv.release_send()` has already
-    DELETED the ledger row -- so `claim_send_or_identify()`, the one atomic
-    anti-double-upload backstop, has nothing left to guard and `confirm.py` never sees
-    the orphan either. The warehouse's next manual morning import would take in BOTH
-    copies: a real duplicate delivery.
+    This test's own scenario still correctly pins the NO-retry outcome, but for the
+    real reason: `cfg` here has NO `orion_host` configured (`_cfg()`'s default), and no
+    `list_dirs` fake is injected either — so `_check_landed()` calls the REAL
+    `upload_mod.list_dirs(cfg)`, which fails immediately (`_connect()` raises before any
+    network I/O) exactly like a genuinely misconfigured add-on would. That is the
+    "presence check unavailable" branch (see also
+    `test_a_transient_upload_failure_falls_back_when_the_presence_check_is_unavailable`,
+    which pins the SAME branch via an explicit raising `list_dirs` fake instead — kept
+    as two separate regression pins because "orion_host was never configured" and "the
+    SFTP connection is down right now" are two distinct real operational causes for the
+    identical safe fallback).
 
-    So exactly ONE upload attempt must be made, the message must end terminal (not
-    re-armed for the 30-minute stale reclaim), and the durable alert -- the half of
-    #239 that is correct -- must still be enqueued so the failure stays visible.
-    """
+    So: exactly ONE upload attempt must be made, the message must end terminal (not
+    re-armed for the 30-minute stale reclaim), and the durable alert must still be
+    enqueued so the failure stays visible — the v0.9.70 duplicate-delivery incident
+    this whole ticket exists to prevent never gets a chance to recur here."""
     _snapshot(pg)
     _msg(pg, mid="dl1")
     _attach(pg, tmp_path, "dl1")
