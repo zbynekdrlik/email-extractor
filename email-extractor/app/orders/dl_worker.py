@@ -74,6 +74,31 @@ docstring explicitly leaves worker/claim wiring to this phase): only attachments
 of those two; anything else (a signature image, a `.docx`, ...) is skipped rather than fed
 to Vision, which n8n's own `Get Attachment Meta ... LIMIT 1` query implicitly also
 preferred (R16) before F2 widened it to every PDF-shaped attachment (W1a).
+
+**A mail-body-sourced (#258) document whose OWN mail reads as a CORRECTION/AMENDMENT
+never auto-ships (#265).** HK LOAN (`gnip@hkloan.eu`) writes delivery notes directly
+into the mail body and routinely follows up with a short mail that only restates ONE
+changed line of an earlier, separately-sent full delivery ("Zvyšok dodania bez zmien" —
+"rest unchanged"). This worker has zero cross-message memory — extracting such a
+follow-up ALONE would silently produce a document missing every item the follow-up
+never repeats. Per the owner's binding decision on #265 (2026-08-13, "možnosť 1"):
+`_looks_like_correction` detects this from the subject/body BEFORE `dl_extract.
+extract_email` is ever called, and routes straight to `review` — no model call, no
+supplier/item matching, no `dl_item`/`dl_supplier` question, no claim, no upload, ever.
+The review text explicitly tells the warehouse that if the original document was
+already imported into CODEX, the fix has to happen there BY HAND — this engine cannot
+amend an already-imported document and must never try (there is currently no
+system-side way to do it). See the #265 design comment (`gh issue comment`) for the
+full rejected-alternative reasoning behind the exact trigger-word set.
+
+**`release_for_question` also releases orphaned same-sender siblings for a `dl_
+supplier` answer (#265 gap 2).** `teach.ask_dl_supplier`'s per-sender dedupe means only
+the FIRST stuck message from a still-unregistered sender ever gets its own `order_
+questions` row — every later message from that sender is left `processed=true`/`proc_
+status='review'` forever, tied to nothing. Once the sender is finally taught, `_release_
+stuck_siblings` resets every OTHER orphaned same-sender message back into the normal
+`_claim()` pool (bounded, never a synchronous storm) instead of leaving them stuck.
+Deliberately scoped to `dl_supplier` only — see that function's own docstring for why.
 """
 from __future__ import annotations
 
@@ -158,6 +183,56 @@ def _mail_body_only(combined_text: str) -> str:
 
 # Spec §4: the documented Lunys "IS KARAT" DL-number shape inside a subject line.
 _SUBJECT_DOC_RE = re.compile(r"\d{2,}LT\d{4,}", re.IGNORECASE)
+
+# #265: Slovak correction/amendment word stems — see the module docstring's own #265
+# paragraph and the design comment on the ticket (`gh issue comment`) for the full
+# evidence + rejected-alternative reasoning. Deliberately narrow: "oprav"/"korekci" are
+# strong, low-ambiguity signals in a delivery-note mailbox (both real HK LOAN incidents
+# quoted on the ticket trip on "oprav" alone — mail 6389 "OPRAVA HMOTNOSTI", mail 4417
+# "... + oprava v dátume dodania"); "dopln" mirrors the ticket's own framing of the risk
+# class ("DOPLŇUJÚCE/OPRAVNÉ maily"). "zmena" was considered and deliberately EXCLUDED —
+# too common in unrelated administrative mail ("zmena adresy", "zmena banky") to be a
+# safe standalone trigger; see `test_innocent_zmena_wording_does_not_trip_the_
+# correction_detector` for the negative case this is verified against.
+_CORRECTION_RE = re.compile(r"\b(?:oprav|korekci|dopln)\w*", re.IGNORECASE)
+
+_CORRECTION_EXCERPT_LIMIT = 500
+
+
+def _looks_like_correction(subject: str, body_text: str) -> bool:
+    """#265: true when the subject OR the mail's own body text (Subject+From+Body, via
+    `_mail_body_only` — never an attachment's own text) carries a correction/amendment
+    stem. ONLY ever consulted for the #258 mail-body-sourced path (a real PDF/image
+    attachment is out of scope — see the module docstring)."""
+    return bool(_CORRECTION_RE.search(subject or "") or _CORRECTION_RE.search(body_text or ""))
+
+
+def _correction_review_reason(body_text: str) -> str:
+    """The mandated wording (owner's binding #265 decision, 2026-08-13): NEVER auto-
+    ship, always manual review, and — because there is currently no way to amend a
+    document already imported into CODEX — explicitly say the fix may have to happen
+    there BY HAND. One honest wording deliberately covers BOTH "not yet imported" and
+    "already imported": a best-effort `desadv_sent` lookup was considered and rejected
+    (see the design comment) — a correction mail almost never carries its own doc
+    number, so there is no reliable key to look the earlier document up by, and a wrong
+    "not yet imported" claim would be worse than no claim at all. The mail's own text is
+    quoted verbatim (never an AI interpretation of it) so the warehouse reads exactly
+    what the supplier wrote."""
+    excerpt = (body_text or "").strip()
+    if len(excerpt) > _CORRECTION_EXCERPT_LIMIT:
+        excerpt = excerpt[:_CORRECTION_EXCERPT_LIMIT].rstrip() + " (...)"
+    return (
+        "Tento e-mail vyzerá ako OPRAVA/DOPLNOK k dodaciemu listu poslanému skôr "
+        "samostatným mailom, nie je to kompletný nový doklad — preto sa NESPRACOVAL "
+        "automaticky. Skontroluj ho ručne oproti pôvodnému mailu od rovnakého "
+        "dodávateľa — táto správa môže meniť len jednu položku, ostatné položky "
+        "pôvodného dodania v nej môžu úplne chýbať. Ak bol pôvodný dodací list už "
+        "nahratý/naimportovaný do systému ORION (priečinok archCodex v CODEXe), "
+        "TÚTO OPRAVU TREBA UROBIŤ RUČNE PRIAMO V CODEXe — systém naimportovaný "
+        "doklad upraviť nevie, nesmie sa o to ani pokúšať a nikdy ho nenahráva do "
+        f"ORIONu znova. Text e-mailu: {excerpt}"
+    )
+
 
 resolve_engine = worker.resolve_engine
 
@@ -834,6 +909,21 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
         return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
                "documents": [{"outcome": "review", "reason": reason}], "items": []}
 
+    # #265: a mail-body-sourced (#258) document whose OWN mail reads as a correction/
+    # amendment NEVER auto-ships — see the module docstring's own #265 paragraph.
+    # Checked BEFORE extraction (never after): the model is not even called, so there
+    # is no world in which this could accidentally match/claim/upload anything.
+    if used_body_text and _looks_like_correction(message.get("subject", ""), body_text):
+        reason = _correction_review_reason(body_text)
+        _post(cfg, shadow, lambda: dl_report.build_review(
+            reason, from_addr=message.get("from_addr", ""),
+            subject=message.get("subject", ""), link=link), post=post)
+        _event(conn, shadow, message["message_id"], stage="review", status="review",
+              outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
+        return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
+               "documents": [{"outcome": "review", "reason": reason,
+                             "correction_detected": True}], "items": []}
+
     extraction = dl_extract.extract_email(client, sources)
 
     documents_out: list[dict] = []
@@ -1086,12 +1176,18 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
     instant (no TOCTOU on the claim check itself), and it keeps the SQL cheap
     (no genuinely parallel Postgres work on the same message) — it does not, by itself,
     prevent the wasted second LLM call and `order_runs` row this docstring already
-    called out above as the acceptable cost."""
+    called out above as the acceptable cost.
+
+    #265 gap 2: when the just-answered question is `dl_supplier`, this ALSO releases
+    every OTHER same-sender `dodacie_listy` message stuck in `review` with no `order_
+    questions` row of its own — see `_release_stuck_siblings`'s own docstring for the
+    full evidence and why this is scoped to `dl_supplier` only."""
     qrow = conn.execute(
-        "SELECT message_id FROM order_questions WHERE id = %s", (qid,)).fetchone()
+        "SELECT message_id, kind, payload FROM order_questions WHERE id = %s",
+        (qid,)).fetchone()
     if not qrow:
         return []
-    message_id = qrow[0]
+    message_id, kind, payload = qrow[0], qrow[1], qrow[2] or {}
     with psycopg.connect(cfg.pg_dsn) as lock_tx:
         lock_tx.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (message_id,))
         still_open = conn.execute(
@@ -1118,7 +1214,69 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
             client = llm.from_config(cfg)
         result = _run_and_finish(conn, cfg, client, message, snapshot_id, catalog,
                                  suppliers, upload=upload, post=post)
+        if kind == "dl_supplier":
+            _release_stuck_siblings(
+                conn, message_id, str((payload or {}).get("sender_email") or ""))
         return (result or {}).get("documents", [])
+
+
+# #265 gap 2: `ask_dl_supplier`'s per-sender dedupe (`ON CONFLICT ... DO NOTHING`, the
+# SAME `order_questions(customer_ean, item_key) WHERE status='open'` index every other
+# kind shares) means only the FIRST `dodacie_listy` message from a still-unregistered
+# sender ever gets a row of its OWN — every LATER message from that sender is left
+# `processed=true`/`proc_status='review'` forever, with NO `order_questions` row
+# referencing it at all (live evidence on #265: HK LOAN had 5 such messages against
+# exactly 1 tied question). Answering the one open question only ever gave that FIRST
+# message a second chance (`release_for_question` above) — the other 4 stayed stuck.
+#
+# This closes the gap WITHOUT reprocessing every sibling synchronously inside the
+# request that just answered the nástenka question (unbounded cost for a sender with
+# many stuck messages, and this whole function runs under the advisory lock the caller
+# already holds) — it just resets them back into the SAME pool `_claim()` already
+# rate-limits to one message per ~15s tick; the actual reprocessing reuses that
+# existing, already-tested machinery unchanged. `_STUCK_SIBLING_LIMIT` bounds how many
+# rows get flipped per call — a sender with more than that many still gets the rest on
+# the NEXT answered question for it (or the existing `stuck_classified_sweep`/hourly
+# n8n watchdog eventually surfaces anything that never gets picked up).
+#
+# Deliberately scoped to `dl_supplier` only (see the #265 design comment for the full
+# rejected-alternative reasoning) — the only identity that can correlate an
+# UNPROCESSED sibling message with the just-answered question, without extracting it
+# first, is the raw envelope `from_addr`, and that matches `ask_dl_supplier`'s own
+# dedupe key exactly (keyed on the sender ADDRESS). A `dl_item` question's dedupe key is
+# (supplier_ean, wording) instead — by the time one exists the supplier is already
+# matched, but there is no similarly reliable way to find OTHER not-yet-extracted
+# messages sharing that exact wording without extracting them first. No live evidence
+# of the `dl_item` version of this gap has been observed; it needs its own design if it
+# ever is, not a copy of this one.
+_STUCK_SIBLING_LIMIT = 20
+
+
+def _release_stuck_siblings(conn, exclude_message_id: str, sender_email: str) -> int:
+    """Resets up to `_STUCK_SIBLING_LIMIT` orphaned same-sender `dodacie_listy`
+    messages (`processed=true`, `proc_status='review'`, no `order_questions` row of
+    their own) back into the normal claim pool. Returns how many were reset — `0` when
+    `sender_email` is blank or nothing matched, never raises."""
+    sender_email = (sender_email or "").strip()
+    if not sender_email:
+        return 0
+    rows = conn.execute(
+        """SELECT message_id FROM messages
+            WHERE category = %s AND processed = true AND proc_status = 'review'
+              AND message_id <> %s AND lower(from_addr) = lower(%s)
+              AND NOT EXISTS (SELECT 1 FROM order_questions oq
+                              WHERE oq.message_id = messages.message_id)
+            ORDER BY created_at ASC LIMIT %s""",
+        (CATEGORY, exclude_message_id, sender_email, _STUCK_SIBLING_LIMIT)).fetchall()
+    if not rows:
+        return 0
+    ids = [r[0] for r in rows]
+    conn.execute(
+        """UPDATE messages SET processed = false, processing_at = NULL, attempts = 0
+            WHERE message_id = ANY(%s)""", (ids,))
+    log.info("dl release_for_question: released %d orphaned same-sender sibling "
+             "message(s) for %r back into the claim pool", len(ids), sender_email)
+    return len(ids)
 
 
 # --- #239 class 3: classified as DL but never even attempted ----------------
