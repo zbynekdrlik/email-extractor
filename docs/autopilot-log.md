@@ -3121,3 +3121,71 @@ Tri nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
   `agent-a7431f2c6f227576a` (#265, konfliktujú navzájom v `dl_worker.py`)
   ponechané nedotknuté.
 - Run card fired for #289 (`v0.9.88`) — issue CLOSED.
+
+## Integration round B — #239, #265 (0.9.88 -> 0.9.89)
+
+Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté do
+`dev` v jednom kole (integračná dispatch, riešenie reálneho prekryvu v
+`dl_worker.py`, nie nová feature práca):
+
+- **#239** (finding 6, posledný zvyšný kus) — zapojenie bezpečného
+  automatického ORION upload retry: `_check_landed`/`_finish_shipped`/
+  `_alert_and_release` closures nahrádzajú pôvodný upload except-blok,
+  `desadv.has_confirmed_collision()` chráni proti stable-prefix kolízii.
+  Branch `worktree-agent-a9158237081b4beeb`, 5 commitov, review clean
+  (issues#239#issuecomment-5277679977, 1 🔴 kolízny nález opravený). Merge
+  `98ef1dd` — čistý, žiadny konflikt.
+- **#265** — HK LOAN opravný/doplnkový mail (mail-body-only, #258) nikdy
+  needosiela automaticky (Slovak korene "oprav"/"korek"/"dopln", vždy ide na
+  ručnú kontrolu s CODEX-manuálnou formuláciou); `release_for_question`
+  rozšírené o `_release_stuck_siblings` (odpoveď na `dl_supplier` otázku
+  uvoľní aj ostatné zaseknuté súrodenecké správy toho istého odosielateľa).
+  Branch `worktree-agent-a7431f2c6f227576a`, 4 commity, review clean
+  (issues#265#issuecomment-5277877833, 2 🔴 opravené: diacritic-blind regex
+  stem, sibling-widening mohla resetovať skutočne zlyhaný upload). Merge
+  `9cbacc4` — JEDEN konflikt v `release_for_question()` (#239 pridalo
+  `list_dirs=` prevlečenie, #265 pridalo `_release_stuck_siblings()` volanie
+  na to isté miesto) — vyriešené ponechaním OBOCH.
+- Version bump 0.9.88 -> 0.9.89 (`4fbd527`), prvý commit kola.
+- **Composed-safety overenie** (explicitne vyžiadané zadaním): #265's `NOT
+  EXISTS (... status='error')` exclusion v `_release_stuck_siblings` musí
+  prežiť #239's reštrukturáciu presne tej vetvy, ktorú chráni. Overené — KAŽDÁ
+  cesta skutočného zlyhania v `_alert_and_release` (non-transient,
+  transient+presence-check-fail, transient+retry-fail) stále loguje
+  `status="error"`. Nový composed test (`test_sibling_release_still_excludes_
+  a_message_whose_upload_genuinely_failed_through_the_merged_retry_path`,
+  `e6e51c3`) ženie SKUTOČNÉ zlyhanie cez reálnu zlúčenú pipeline (nie ručne
+  vloženú fixture) — prvý draft mal chybu (kontroloval poslednú `stage=
+  'review'` udalosť namiesto existencie `status='error'` riadku — rollup
+  summary event je vždy novší než diagnostic event), opravené.
+- Review integračného diffu (fresh-context general-purpose subagent, CYCLE
+  krok 6): 0 🔴 0 🟡 0 🔵. Nezávisle vystopoval composed safety property,
+  potvrdil konfliktné riešenie správne, spustil `test_dl_worker.py` (87
+  passed) + `ruff check .` (čisté).
+- Full local suite: 1582 testov, EXIT=0, 0 F/E. Počas overovania: vlastná
+  kolízia dvoch súbežných pytest behov proti tomu istému `PG_TEST_DSN`
+  (zabudnutý background full-suite beh + samostatné `-k` debug behy) —
+  zdokumentované ako nový symptóm-variant v `local-testing.md` (deterministický
+  `n==0` s "no DL catalog snapshot yet", nie len "scattered F/E").
+- PR #294 (dev->main), `Closes #239 #265`. CI zelené (test × 2, e2e-orders ×
+  2, e2e-dl × 2, build × 2 — push + pull_request triggery). Merged `5be084c5`.
+- Deploy: `ha apps update e0ac7775_email_extractor` -> v0.9.89. Overené:
+  `/health` `{"ok":true,"version":"0.9.89"}`; DOM (Playwright, cookies
+  vyčistené pred loginom) ukazuje `v0.9.89` na `/` aj `/otazky-dl`; 0 console
+  chýb na oboch stránkach. Funkčne: `docker exec grep` potvrdil `_check_
+  landed`/`_finish_shipped`/`_alert_and_release`/`has_confirmed_collision`
+  (#239) AJ `_looks_like_correction`/`_release_stuck_siblings`/`_correction_
+  review_reason` (#265) prítomné v nasadenom `dl_worker.py`/`desadv.py`. Read-
+  only shadow-check `_looks_like_correction()` priamo v kontajneri: OPRAVA
+  HMOTNOSTI mail detekovaný, bežná dodávka nedetekovaná, nevinné "zmena
+  fakturačných údajov" nedetekované (false-positive guard drží), všetky 4
+  diakritické "dopln" tvary (DOPLŇUJÚCE/dopĺňame/doplňte) správne zachytené.
+  `/api/orders/dl/stats` naživo: `errors:0 pending_alerts:0 quarantined:0`.
+- Playbook: composed-safety-test princíp + email_events rollup-vs-diagnostic
+  gotcha (`n8n-workflow-edits.md`), Counter-technique blind spot + nový
+  PG_TEST_DSN-kolízny symptóm (`local-testing.md`) — samostatný docs-only
+  commit `3e04bc0`, poputuje ako samostatný malý PR (bez app kódu, bez
+  version bumpu, podľa vzoru PR #257).
+- Worktree pár `agent-a9158237081b4beeb` (#239) / `agent-a7431f2c6f227576a`
+  (#265) + ich lokálne branche odstránené po merge.
+- Run cards fired for #239, #265 (`v0.9.89`) — obe issues CLOSED.
