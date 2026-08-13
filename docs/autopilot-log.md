@@ -3216,4 +3216,8 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
   medzičasom zmeniť review→ok cez alias/history rescue, `_read_attachments()`
   xls/docx nevidí vôbec) + odkaz priamo na `desadv_edi.already_landed()` namiesto
   ručného odvodzovania ORION-checku.
+- Note: the previous commit's "Closes #241" text false-positives the
+  push-gate's bug-fix/RED-GREEN pattern (it scans for that phrase, not
+  whether the diff is actually code) — this commit carries the bypass tag
+  since the diff is genuinely docs-only, no code changed for #241 or #297.
 - Run card fired for #241 (žiadna `--version`/`--pr` — nešlo o merge/deploy).
