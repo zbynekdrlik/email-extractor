@@ -1,4 +1,4 @@
-"""Internal HTTP API + live dashboard.
+"""Internal HTTP API + live dashboard — the entry point of a 9-module split (#268).
 
 Machine endpoints (token, used by n8n):
 - /health, /version
@@ -13,6 +13,77 @@ Dashboard (session login):
 - /api/messages, /api/message/<id>           (list/search + detail + timeline)
 - /api/message/<id>/reclassify|reprocess|fix (operator actions)
 - /api/fix-queue, /api/fix/<id>/resolve      (the fix queue Claude works)
+
+Architecture (#268, 2693 lines -> 290 in this file across an 11-step chain, see the
+issue's own comment thread for the full history):
+
+This module is the ONLY entry point (`create_app(cfg)`) and stays that way on purpose —
+every other module below exposes a plain `register(app, deps)` function, called from
+here, never a Flask Blueprint (this app has one `create_app()` and no other module uses
+one — introducing Blueprints for a subset would be a second, inconsistent registration
+mechanism for zero behavioural gain). What actually lives HERE, and why it never moved:
+- `create_app`/`start` — the app factory + the process entry point.
+- `_db`/`_db_tx` — the two connection-shape closures every split module reaches through
+  `Deps` (`db`/`db_tx`, built once as `deps = Deps(cfg=cfg, db=_db, db_tx=_db_tx,
+  data_dir=data_dir)` and passed unchanged to every `register()` call). `_db()` is a
+  plain autocommit connection; `_db_tx()` is a real transaction (commits at exit, rolls
+  back on error). **The two-connection rule**: any route that pairs a DB write with an
+  external side effect that already happened (an ORION upload, an Odoo post) must run
+  the CLAIM and the SIDE EFFECT on separate `_db()` autocommit connections, never inside
+  one `_db_tx()` — a rollback after a real external action would revive a claim on
+  something that cannot be undone. See `httpapi_orders_questions.py` (all four two-
+  connection pairs behind `/api/orders/question/<id>/answer` and friends) for where this
+  actually matters; `.claude/rules/orders-corpus.md`'s own "#93" entry has the original
+  incident this rule comes from.
+  After krok 10, `httpapi.py` itself has ZERO remaining `_db()`/`_db_tx()` CALLS — only
+  the two `def`s survive, to build `Deps`.
+- `_stamp`/`_access_log`/`_on_error`/`_gate` — request logging + the security boundary
+  (see below). `before_request` REGISTRATION ORDER is load-bearing: `_stamp` before
+  `_gate`, so a request `_gate` rejects still gets `request.environ["_t0"]` and
+  `_access_log` never logs a bogus `-1 ms`. No split step has ever touched this order.
+- The auth surface (`login_page`/`login_submit`/`sklad_link`/`dl_sklad_link_route`/
+  `questions_page`/`dl_questions_page`/`logout`/`favicon`/`health`/`version`) — small,
+  tightly bound to `create_app`'s own `app.secret_key`/`key`/`dl_link_key` scope, so it
+  stayed here rather than in its own module (would just be another `Deps`-shaped object
+  for one screenful of code).
+- `/` (`dashboard()`) — needs the same `key`/`dl_link_key` closure variables.
+
+The role/security boundary (#233/#235) is enforced in exactly TWO places, both meant to
+stay auditable on their own:
+- `_gate()` (this file, `before_request`) — matches `request.path` against the
+  `SKLAD_ROLE`/`SKLAD_PATHS`/`SKLAD_ACTION`/`SKLAD_ZNALOSTI_PAGE`/`SKLAD_ZNALOSTI_API`
+  and `SKLAD_DL_ROLE`/`SKLAD_DL_PATHS`/`SKLAD_DL_ZNALOSTI_API` constants — all DEFINED in
+  `httpapi_security.py`, imported back here, never duplicated.
+- `_role_kinds()` (`httpapi_security.py`) — the second, independent layer: filters WHICH
+  question `kind`s a session may answer even when the path itself is allowed (stops a DL
+  session from guessing an `item`-kind question id). Called from
+  `httpapi_orders_questions.py`'s four public routes.
+
+The nine split modules (all `register(app, deps)`, all leaf modules — none of them
+imports `httpapi.py`, so there is no circular-import risk):
+- `httpapi_common.py`    — `Deps`, string/date helpers with no Flask/DB dependency.
+- `httpapi_security.py`  — the role/path constants + `_role_kinds()` (see above).
+- `httpapi_templates.py` — `LOGIN_HTML`/`DASH_HTML`/`ASK_HTML`/`ASK_DL_HTML`/
+                            `ZNALOSTI_HTML` (+ the internal `_ASK_HTML_TEMPLATE` they're
+                            built from) — 1230 lines of HTML/CSS/JS as Python strings,
+                            deliberately kept as ONE module (krok 4: splitting one HTML
+                            document from the sibling constants it shares an origin with
+                            gives nothing).
+- `httpapi_files.py`          — `/files`, `/eml` (token-guarded originals for n8n).
+- `httpapi_dashboard_data.py` — the dashboard's list/detail + operator actions.
+- `httpapi_fixqueue.py`       — the fix queue (`api_fix`/`api_fix_queue`/
+                                 `api_fix_resolve`, reunited here after living in two
+                                 regions ~850 lines apart in the pre-split file).
+- `httpapi_orders_questions.py` — the AI-orders question board; the RISKIEST split step
+                                   (krok 10) because it carries all four two-connection
+                                   pairs above, moved as ONE indivisible block on purpose.
+- `httpapi_znalosti.py`   — the `/znalosti` knowledge-DB page + its 12 CRUD routes.
+- `httpapi_reports.py`    — read-only aggregate/reporting endpoints (spend, digest,
+                             dl-stats, imap-failures).
+
+`tests/test_httpapi_characterization.py` (krok 1) pins the pre-split public contract —
+the full route table, a checksum of the five rendered HTML constants, and a real
+`/api/orders/digest` happy path — and has proven zero drift across all 11 steps.
 """
 from __future__ import annotations
 
@@ -127,6 +198,11 @@ def create_app(cfg) -> Flask:
 
     @app.before_request
     def _gate():
+        # The role/path constants matched below (SKLAD_ROLE/SKLAD_PATHS/SKLAD_ACTION/
+        # SKLAD_ZNALOSTI_PAGE/SKLAD_ZNALOSTI_API and their SKLAD_DL_* siblings) are
+        # DEFINED in httpapi_security.py (#268 krok 2-3) — this function is the ONE
+        # place that enforces the role boundary they describe; see this module's own
+        # docstring for the full security-boundary map.
         p = request.path
         # Open, or self-guarded by their own in-route _auth() (the file APIs).
         if (p in ("/health", "/version", "/login", "/logout", "/favicon.ico")
