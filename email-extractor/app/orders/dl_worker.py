@@ -1026,7 +1026,13 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
         documents_out.append(_flag_attachment(
             conn, cfg, shadow, message, link, att, reason, status="review",
             synthetic=True, post=post))
-    extractable_attachments = [a for a in usable_attachments if a not in empty_spreadsheets]
+    # Review finding: exclude by `idx` (a real `attachments.idx` is always a unique,
+    # non-negative 0-based index per message, see the `_BODY_TEXT_IDX` comment above)
+    # rather than by dict-value equality — safety here should never depend on two
+    # attachment dicts happening to differ in content.
+    empty_spreadsheet_idxs = {a.get("idx") for a in empty_spreadsheets}
+    extractable_attachments = [a for a in usable_attachments
+                               if a.get("idx") not in empty_spreadsheet_idxs]
 
     # #258: some suppliers (HK LOAN, gnip@hkloan.eu — verified live, STEP 0 evidence on
     # the ticket) never attach a real document at all; the delivery note is written
@@ -1112,9 +1118,16 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
             subject=message.get("subject", ""), link=link), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
-        return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
-               "documents": [{"outcome": "review", "reason": reason,
-                             "correction_detected": True}], "items": []}
+        # #297 review finding: merge with `documents_out` (never overwrite it) — it
+        # may already hold empty-spreadsheet review flags from earlier in this
+        # function (reachable when a message has an unreadable/empty .xls attachment
+        # AND falls back to mail-body text that itself reads as a correction). Losing
+        # those entries here would undercount `order_runs.result["documents"]` even
+        # though their own Odoo post/event already fired via `_flag_attachment`.
+        this_doc = {"outcome": "review", "reason": reason, "correction_detected": True}
+        return {"kind": "dl", "dl_snapshot_id": snapshot_id,
+               "status": _aggregate_status(documents_out + [this_doc]),
+               "documents": documents_out + [this_doc], "items": []}
 
     extraction = dl_extract.extract_email(client, sources)
 

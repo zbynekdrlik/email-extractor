@@ -618,6 +618,39 @@ def test_correction_mail_never_auto_ships_goes_to_review_with_manual_codex_wordi
     assert pg.execute("SELECT count(*) FROM order_questions").fetchone()[0] == 0
 
 
+def test_empty_spreadsheet_flag_survives_a_correction_mail_early_return(pg, tmp_path):
+    """#297 review finding: the #265 correction-detection early return used to build a
+    brand-new `documents` list, discarding any entries `documents_out` already held from
+    the #297 empty-spreadsheet flagging earlier in this function — reachable whenever a
+    message has an unreadable/empty .xls attachment AND falls back to mail-body text
+    that itself reads as a correction/amendment. The Odoo post for the spreadsheet flag
+    already fires independently (this test also confirms exactly 2 posts happen) — this
+    proves `order_runs.result['documents']` (the project's own persisted source of
+    truth, see `.claude/rules/n8n-workflow-edits.md`'s #145 pattern) also reflects BOTH
+    entries, not just the correction one."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", subject="OPRAVA HMOTNOSTI", combined_text=CORRECTION_BODY_TEXT)
+    _attach(pg, tmp_path, "dl1", idx=0, filename="prazdny.xls",
+           mime="application/vnd.ms-excel", text="", method="")
+    uploaded, posted = [], []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(
+        pg, cfg, client=_NeverCalledClient(),
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+        post=lambda c, h: posted.append(h))
+    assert n == 1
+    assert uploaded == [], "a correction mail must NEVER auto-ship"
+    assert len(posted) == 2, "one post for the empty .xls flag, one for the correction"
+    result = pg.execute("SELECT result FROM order_runs").fetchone()[0]
+    docs = result["documents"]
+    assert len(docs) == 2, \
+        "the empty-spreadsheet flag must survive the #265 early return, not be discarded"
+    assert any(d.get("synthetic") and "prazdny.xls" in (d.get("reason") or "")
+              for d in docs), "the .xls flag entry must still be present"
+    assert any(d.get("correction_detected") for d in docs), \
+        "the correction entry must still be present"
+
+
 def test_an_ordinary_body_text_delivery_note_still_ships_normally_265(pg, tmp_path):
     """#265: the correction detector must not swallow an ORDINARY full delivery written
     directly into the mail body (#258/#262, unrelated to any earlier mail) — it must
