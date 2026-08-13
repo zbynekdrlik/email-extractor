@@ -475,3 +475,127 @@ def test_editing_an_already_overridden_dl_supplier_by_override_id_into_a_collidi
     rows = {r["ean_edi"]: r["name"] for r in dl_snapshot.dl_suppliers_for_management(pg)}
     assert rows["7100000000003"] == "Dodávateľ A"
     assert rows["7100000000004"] == "Dodávateľ B"
+
+
+# --- #275: sheet-bound EDIT branch vs an active hand-added supplier's EAN -------------
+
+def test_editing_a_sheet_bound_dl_supplier_into_a_colliding_active_hand_added_ean_raises(pg):
+    """#275: mirrors the identical customer-side test in tests/test_snapshot.py, `city`
+    standing in for `street` — the fallthrough branch (editing a still-snapshot-only DL
+    supplier row) had no uniqueness check of its own; the #248 partial index deliberately
+    excludes it (`WHERE orig_ean_edi IS NULL`)."""
+    _dl_snap(pg)
+    hand_added_id = dl_snapshot.upsert_dl_supplier(
+        pg, override_id=None, orig_ean_edi=None, orig_city=None,
+        ean_edi="7200000000010", name="Ručne pridaný dodávateľ", emails=["rucny@dl.sk"],
+        city="Trnava")
+
+    with pytest.raises(snapshot.DuplicateEan) as exc_info:
+        dl_snapshot.upsert_dl_supplier(
+            pg, override_id=None, orig_ean_edi="8586010000001", orig_city="Košice",
+            ean_edi="7200000000010",  # collides with the hand-added supplier's EAN
+            name="Signatus prepísaný", emails=["nove@signatus.sk"], city="Košice")
+    assert exc_info.value.existing["override_id"] == hand_added_id
+
+    rows = {r["ean_edi"]: r["name"] for r in dl_snapshot.dl_suppliers_for_management(pg)}
+    assert rows["7200000000010"] == "Ručne pridaný dodávateľ"
+    assert "Signatus s.r.o." in {r["name"] for r in dl_snapshot.dl_suppliers_for_management(pg)}
+
+
+def test_editing_a_sheet_bound_dl_supplier_into_a_retired_hand_added_eans_ean_is_allowed(pg):
+    _dl_snap(pg)
+    hand_added_id = dl_snapshot.upsert_dl_supplier(
+        pg, override_id=None, orig_ean_edi=None, orig_city=None,
+        ean_edi="7200000000011", name="Zrušený dodávateľ", emails=["x@dl.sk"], city="Trnava")
+    assert dl_snapshot.retire_dl_supplier(
+        pg, override_id=hand_added_id, orig_ean_edi=None, orig_city=None) is True
+
+    rid = dl_snapshot.upsert_dl_supplier(
+        pg, override_id=None, orig_ean_edi="8586010000001", orig_city="Košice",
+        ean_edi="7200000000011",  # same EAN as the now-RETIRED hand-added supplier
+        name="Signatus prepísaný", emails=["nove@signatus.sk"], city="Košice")
+    assert rid is not None
+    rows = {r["ean_edi"]: r["name"] for r in dl_snapshot.dl_suppliers_for_management(pg)}
+    assert rows["7200000000011"] == "Signatus prepísaný"
+
+
+def test_editing_a_sheet_bound_dl_supplier_whose_original_ean_was_blank_is_allowed(pg):
+    """`orig_ean_edi` for a still-snapshot-only row whose ORIGINAL EAN was blank is `""`,
+    not `None` — still enters this branch (`"" is not None`); the new guard must not
+    treat that specially."""
+    dl_catalog_csv = "GTIN,Názov,doplnok,hmotnost,Sklad,Cena\nG1,Múka,,,,\n"
+    supplier_csv = (
+        "Názov organizácie,EAN kód EDI,Obec,E-mail\n"
+        "Dodávateľ bez EAN,,Žilina,ziadny@dl.sk\n")
+    dl_snapshot.import_snapshot(pg, dl_catalog_csv, "GTIN,Sklad,Názov,doplnok\n", supplier_csv)
+    rid = dl_snapshot.upsert_dl_supplier(
+        pg, override_id=None, orig_ean_edi="", orig_city="Žilina",
+        ean_edi="7200000000012", name="Dodávateľ bez EAN", emails=["ziadny@dl.sk"],
+        city="Žilina")
+    assert rid is not None
+    rows = {r["name"]: r for r in dl_snapshot.dl_suppliers_for_management(pg)}
+    assert rows["Dodávateľ bez EAN"]["ean_edi"] == "7200000000012"
+
+
+def test_editing_two_different_sheet_bound_dl_suppliers_to_share_the_same_ean_is_allowed(pg):
+    """The snapshot legitimately repeats an EAN across cities (same intent as
+    snapshot.py's customer sheet) — the new guard only ever checks active hand-added
+    rows, never other sheet-bound rows, so two sheet-bound edits sharing a target EAN
+    must both succeed."""
+    _dl_snap(pg)
+    dl_snapshot.upsert_dl_supplier(
+        pg, override_id=None, orig_ean_edi="8586010000001", orig_city="Košice",
+        ean_edi="7200000000013", name="Pobočka Signatus A", emails=[], city="Košice")
+    dl_snapshot.upsert_dl_supplier(
+        pg, override_id=None, orig_ean_edi="8586010000002", orig_city="Prešov",
+        ean_edi="7200000000013", name="Pobočka Jackulík B", emails=[], city="Prešov")
+    names = {r["name"] for r in dl_snapshot.dl_suppliers_for_management(pg)
+             if r["ean_edi"] == "7200000000013"}
+    assert names == {"Pobočka Signatus A", "Pobočka Jackulík B"}
+
+
+def test_two_concurrent_sheet_bound_dl_supplier_edits_sharing_a_target_ean_do_not_deadlock(pg):
+    """#275 review finding: mirrors `test_two_concurrent_sheet_bound_edits_sharing_a_
+    target_ean_do_not_deadlock` in tests/test_snapshot.py — the customer-side and
+    dl-supplier-side branch-3 guards are byte-for-byte mirrors of each other (same
+    advisory lock, same helper shape), and #248's own branch-2 fix already got a
+    concurrency test mirrored on BOTH sides (see test_two_concurrent_new_dl_supplier_
+    adds_for_the_same_ean_with_different_city_produce_one_row above) — this closes the
+    same asymmetry for branch-3. Two DIFFERENT sheet-bound supplier rows, two real
+    connections/threads, same target EAN, no hand-added row involved at all: proves the
+    new lock does not turn the LEGITIMATE branch-sharing case into a deadlock or
+    spurious failure under real concurrency."""
+    import threading
+
+    import psycopg
+
+    _dl_snap(pg)
+    barrier = threading.Barrier(2)
+    errors = []
+
+    def edit(orig_ean_edi, orig_city, name, city):
+        conn = psycopg.connect(PG_DSN)
+        try:
+            barrier.wait(timeout=5)
+            dl_snapshot.upsert_dl_supplier(
+                conn, override_id=None, orig_ean_edi=orig_ean_edi, orig_city=orig_city,
+                ean_edi="7200000000014", name=name, emails=[], city=city)
+            conn.commit()
+        except Exception as e:  # pragma: no cover - surfaced via `errors` below
+            errors.append(e)
+        finally:
+            conn.close()
+
+    t1 = threading.Thread(target=edit, args=(
+        "8586010000001", "Košice", "Pobočka Signatus súbežne", "Košice"))
+    t2 = threading.Thread(target=edit, args=(
+        "8586010000002", "Prešov", "Pobočka Jackulík súbežne", "Prešov"))
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+
+    assert not errors, f"two legitimate branch-sharing edits must never raise: {errors}"
+    names = {r["name"] for r in dl_snapshot.dl_suppliers_for_management(pg)
+             if r["ean_edi"] == "7200000000014"}
+    assert names == {"Pobočka Signatus súbežne", "Pobočka Jackulík súbežne"}

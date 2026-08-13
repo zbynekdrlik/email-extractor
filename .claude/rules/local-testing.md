@@ -11,6 +11,18 @@ postgres`) exposed on different host ports (`email-extractor-testpg` on 15433 is
 used most, `ee-eval-pg`/`ee-test-pg`/others exist too — check which is actually up before
 picking a port). Point `PG_TEST_DSN` at one of them:
 
+**In WORKTREE-mode dispatch (parallel `autopilot-worker` fleet rounds, #317), also check
+what OTHER SIBLING WORKTREE WORKERS are already using — not just your own history
+(#275, 2026-08-13).** Several isolated worktree workers on this repo run concurrently, each
+in its own `.claude/worktrees/agent-*/email-extractor` checkout, and each picks its own
+`PG_TEST_DSN` independently — nothing coordinates port choice between them. `ps aux | grep
+pytest` before starting shows every currently-running sibling's own `PG_TEST_DSN` right in
+its command line; picking a port ALREADY in use by a sibling reproduces the exact #164
+TRUNCATE-collision risk this file already warns about, just triggered by a DIFFERENT
+worker's process instead of your own. Cross-check against BOTH `docker ps -a` (which
+containers exist) AND `ps aux | grep pytest` (which ports are actually busy RIGHT NOW)
+before picking one.
+
 ```
 export PG_TEST_DSN="postgresql://postgres:postgres@localhost:15433/postgres"
 ```

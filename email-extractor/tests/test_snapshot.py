@@ -536,3 +536,134 @@ def test_remember_customer_email_is_a_noop_when_already_known(pg):
 def test_remember_customer_email_is_a_noop_for_an_unknown_ean(pg):
     snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
     assert snapshot.remember_customer_email(pg, "9999999999999", "x@x.sk") is False
+
+
+# --- #275: sheet-bound EDIT branch vs an active hand-added row's EAN -------------------
+
+def test_editing_a_sheet_bound_customer_into_a_colliding_active_hand_added_ean_raises(pg):
+    """#275: the fallthrough branch (`orig_ean_edi IS NOT NULL`, editing a still-sheet-
+    only row) has NO uniqueness check of its own — the #248 partial index deliberately
+    excludes it (`WHERE orig_ean_edi IS NULL`), since the sheet legitimately repeats/
+    blanks EAN across branches. An edit that would retarget `ean_edi` onto a value an
+    ACTIVE hand-added row already holds must be refused with the same clean
+    `DuplicateEan` every other collision path raises."""
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    hand_added_id = snapshot.upsert_customer(
+        pg, override_id=None, orig_ean_edi=None, orig_street=None,
+        ean_edi="7200000000001", name="Ručne pridaný zákazník", emails=["rucny@x.sk"],
+        city="Košice", street="Ručná 1", zip_="")
+
+    with pytest.raises(snapshot.DuplicateEan) as exc_info:
+        snapshot.upsert_customer(
+            pg, override_id=None, orig_ean_edi="2000000000871", orig_street="Hlavná 2",
+            ean_edi="7200000000001",  # collides with the hand-added row's EAN
+            name="Dva maily prepísané", emails=["a@firma.sk", "b@firma.sk"],
+            city="Poprad", street="Hlavná 2", zip_="")
+    assert exc_info.value.existing["override_id"] == hand_added_id
+
+    # neither row was corrupted by the refused edit
+    rows = {r["ean_edi"]: r["name"] for r in snapshot.customers_for_management(pg)}
+    assert rows["7200000000001"] == "Ručne pridaný zákazník"
+    assert "Dva maily" in {r["name"] for r in snapshot.customers_for_management(pg)}
+
+
+def test_editing_a_sheet_bound_customer_into_a_retired_hand_added_eans_ean_is_allowed(pg):
+    """The new guard reuses `_active_customer_conflict`, which already filters `NOT
+    retired` — a hand-added row that was retired must never block a sheet-bound edit."""
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    hand_added_id = snapshot.upsert_customer(
+        pg, override_id=None, orig_ean_edi=None, orig_street=None,
+        ean_edi="7200000000002", name="Zrušený zákazník", emails=["x@x.sk"],
+        city="Košice", street="Ručná 2", zip_="")
+    assert snapshot.retire_customer(pg, override_id=hand_added_id,
+                                    orig_ean_edi=None, orig_street=None) is True
+
+    rid = snapshot.upsert_customer(
+        pg, override_id=None, orig_ean_edi="2000000000871", orig_street="Hlavná 2",
+        ean_edi="7200000000002",  # same EAN as the now-RETIRED hand-added row
+        name="Dva maily prepísané", emails=["a@firma.sk", "b@firma.sk"],
+        city="Poprad", street="Hlavná 2", zip_="")
+    assert rid is not None
+    rows = {r["ean_edi"]: r["name"] for r in snapshot.customers_for_management(pg)}
+    assert rows["7200000000002"] == "Dva maily prepísané"
+
+
+def test_editing_a_sheet_bound_customer_whose_original_ean_was_blank_is_allowed(pg):
+    """The sheet legitimately leaves EAN blank (this module's own documented intent) —
+    `orig_ean_edi` for such a row is the empty string `""`, not `None`, and still enters
+    this branch (`"" is not None`). The new guard must not treat that specially; a
+    non-colliding edit must succeed exactly like editing any other sheet-bound row."""
+    customer_csv = (
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,E-mail\n"
+        "Zákazník bez EAN v hárku,,Žilina,Bez EAN 1,ziadny@x.sk\n")
+    catalog_csv = "GTIN,Názov,doplnok\nG1,Rožok,\n"
+    snapshot.import_snapshot(pg, catalog_csv, customer_csv)
+    rid = snapshot.upsert_customer(
+        pg, override_id=None, orig_ean_edi="", orig_street="Bez EAN 1",
+        ean_edi="7200000000003", name="Zákazník bez EAN v hárku", emails=["ziadny@x.sk"],
+        city="Žilina", street="Bez EAN 1", zip_="")
+    assert rid is not None
+    rows = {r["name"]: r for r in snapshot.customers_for_management(pg)}
+    assert rows["Zákazník bez EAN v hárku"]["ean_edi"] == "7200000000003"
+
+
+def test_editing_two_different_sheet_bound_customers_to_share_the_same_ean_is_allowed(pg):
+    """The sheet legitimately repeats an EAN across branches (this module's own
+    documented intent, unchanged by #275) — the new guard only ever checks against
+    ACTIVE hand-added rows, never against other sheet-bound rows, so two sheet-bound
+    edits sharing a target EAN must both succeed."""
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    snapshot.upsert_customer(
+        pg, override_id=None, orig_ean_edi="2000000000864", orig_street="Košútka 1",
+        ean_edi="7200000000004", name="Pobočka A", emails=[], city="Martin",
+        street="Košútka 1", zip_="")
+    snapshot.upsert_customer(
+        pg, override_id=None, orig_ean_edi="2000000000871", orig_street="Hlavná 2",
+        ean_edi="7200000000004", name="Pobočka B", emails=[], city="Poprad",
+        street="Hlavná 2", zip_="")
+    names = {r["name"] for r in snapshot.customers_for_management(pg)
+             if r["ean_edi"] == "7200000000004"}
+    assert names == {"Pobočka A", "Pobočka B"}
+
+
+def test_two_concurrent_sheet_bound_edits_sharing_a_target_ean_do_not_deadlock(pg):
+    """#275: the new guard takes the SAME advisory lock (keyed on `ean_edi`) the
+    brand-new-customer branch already takes — this proves that lock does not turn the
+    LEGITIMATE branch-sharing case above into a deadlock or spurious failure under real
+    concurrency (two different sheet-bound rows, two real connections/threads, same
+    target EAN, no hand-added row involved at all)."""
+    import threading
+
+    import psycopg
+
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    barrier = threading.Barrier(2)
+    errors = []
+
+    def edit(orig_ean_edi, orig_street, name, city, street):
+        conn = psycopg.connect(PG_DSN)
+        try:
+            barrier.wait(timeout=5)
+            snapshot.upsert_customer(
+                conn, override_id=None, orig_ean_edi=orig_ean_edi, orig_street=orig_street,
+                ean_edi="7200000000005", name=name, emails=[], city=city, street=street,
+                zip_="")
+            conn.commit()
+        except Exception as e:  # pragma: no cover - surfaced via `errors` below
+            errors.append(e)
+        finally:
+            conn.close()
+
+    t1 = threading.Thread(target=edit, args=(
+        "2000000000864", "Košútka 1", "Pobočka A súbežne", "Martin", "Košútka 1"))
+    t2 = threading.Thread(target=edit, args=(
+        "2000000000871", "Hlavná 2", "Pobočka B súbežne", "Poprad", "Hlavná 2"))
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+
+    assert not errors, f"two legitimate branch-sharing edits must never raise: {errors}"
+    names = {r["name"] for r in snapshot.customers_for_management(pg)
+             if r["ean_edi"] == "7200000000005"}
+    assert names == {"Pobočka A súbežne", "Pobočka B súbežne"}
