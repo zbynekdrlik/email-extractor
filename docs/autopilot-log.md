@@ -2898,3 +2898,56 @@ LOAN item-matching confirmed live, new HK LOAN multi-message gap found)
   link (`/sklad/...`) symetricky naopak.
 - Run card fired for #268 (`v0.9.84`) — issue zostáva OTVORENÝ (kroky 10, 11
   čakajú).
+
+## #268 krok 10 z 11 — extrakcia `app/httpapi_orders_questions.py` (2026-08-13)
+
+- STEP 0 overenie proti HEAD `09ca625` (po merge krok 9, PR #284) — presúvaný
+  blok = riadky 257-702 (446 riadkov), presne zodpovedá pôvodnému "582-1027" zo
+  zadania (posun z predošlých krokov, nie zmena obsahu). Baseline: 1502 testov,
+  0 F/E/s/x.
+- **NAJRIZIKOVEJŠÍ krok** (plán #268): presunuté ako JEDEN nedeliteľný celok —
+  `api_orders_questions`, `_api_orders_answer_new_customer/_customer/
+  _new_dl_supplier/_new_dl_item/_generic`, `api_orders_answer`,
+  `api_orders_held`, `api_orders_taught`, `api_orders_undo`. Obsahuje VŠETKY
+  štyri výskyty dvojspojenia proti duplicitnému uploadu (`deps.db_tx()`
+  zapíše+odpovie, samostatný autocommit `deps.db()` uvoľní/nahrá) a
+  `_role_kinds` hranicu rolí (4 volania). `register(app, deps)` vzor, rovnaký
+  ako kroky 5/6/7/8/9. 7× `_db_tx()` → `deps.db_tx()`, 13× `_db()` →
+  `deps.db()`, 5× `cfg` → `deps.cfg`.
+- Import hygiena: `snapshot`/`dl_snapshot`/`_EAN_STRIP_RE`/
+  `_parse_emails_field`/`_role_kinds`/`Json` odstránené z `httpapi.py`
+  (používané výhradne vo vnútri presunutého bloku) — dva-grep kontrola
+  (monkeypatch `httpapi.<name>` + `from app.httpapi import <name>`) proti
+  `tests/` pred odstránením, žiadny zásah.
+- Commity: `5c4de47` (bump 0.9.84→0.9.85), `e9f2322` (refactor,
+  `[no-test: ...]`).
+- Dôkaz nula zmeny chovania: bajtový diff tela `register()` proti
+  extrahovanému bloku identický (po normalizácii, overené programovo);
+  `_db`/`_db_tx` počty zhodné pred/po (20 celkom); `httpapi.py` má po presune
+  0 zostávajúcich `_db()`/`_db_tx()` VOLANÍ; `ruff check .` čisté; cold-import
+  oboch modulov; poradie `before_request` hookov nedotknuté; žiadny kruhový
+  import; celá lokálna suita 1502 testov 0 F/E/s/x; pokrytie 94.01 % (strop
+  85 %, nový modul sám 91 %).
+- `app/httpapi.py`: 733 → 290 riadkov; nový `httpapi_orders_questions.py`:
+  478 riadkov.
+- Nezávislý review (`general-purpose` subagent, čerstvý kontext, nikdy
+  vstavaný `Skill({skill:"review"})`, per #363): **0 🔴 0 🟡 0 🔵**.
+- PR #286 (dev→main), 2 commity, "časť #268 (krok 10 z 11)" (bez
+  Closes/Fixes/Resolves — #268 zostáva otvorený do kroku 11). CI zelené
+  (test/e2e-orders/e2e-dl/build, ×2 behy). Merged `de57d7d4`.
+- Deploy: `ha apps update e0ac7775_email_extractor` → v0.9.85. Overené:
+  `/health` `{"ok":true,"version":"0.9.85"}`; DOM (Playwright) ukazuje
+  `v0.9.85` na `/`; 0 console chýb na `/`, `/otazky`, `/otazky-dl`,
+  `/znalosti`. Funkčná verifikácia presunutého povrchu naživo: `/otazky`
+  naozaj vykreslila skutočné question karty (4 otázky vrátane HK LOAN
+  dodávateľskej otázky, board question 35 — ponechaná OTVORENÁ, len
+  read-only overenie, nič odpovedané ani vrátené) a "Naposledy naučené" (20
+  položiek); `/api/orders/questions` autentifikovane 200 so 4 položkami,
+  neautentifikovane 401; `/api/orders/held` 200 (0 podržaných),
+  `/api/orders/taught` 200 (20 položiek). Oddelenie rolí naživo v OBOCH
+  smeroch: orders sklad link vidí len `customer`/`mail` druhy otázok a dostane
+  401 na `/api/znalosti/dl-products`; DL sklad link vidí len
+  `dl_item`/`dl_supplier` druhy a dostane 401 na `/api/znalosti/products` —
+  presne tá hranica, ktorú tento krok presúval.
+- Run card fired for #268 (`v0.9.85`) — issue zostáva OTVORENÝ (krok 11
+  čaká).

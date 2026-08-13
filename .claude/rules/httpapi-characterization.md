@@ -178,3 +178,42 @@ appears in any of those import lists (direct import, mainly
 five HTML constants specifically needs this check). A hit in either grep means
 `# noqa: F401` + a comment, same shape as `db`. Krok 11 (final `httpapi.py` cleanup +
 re-export audit) should run BOTH greps against every symbol it's tempted to drop.
+
+## Krok 10 (`orders_questions`, the riskiest step) landed clean — three reusable notes
+## for krok 11 and any future split of this shape
+
+**After krok 10, `httpapi.py` has ZERO remaining `_db()`/`_db_tx()` CALLS — only the
+two `def`s survive** (kept solely to build `Deps(cfg=cfg, db=_db, db_tx=_db_tx, ...)`).
+Every call site that used to live directly in `create_app()` has now moved into a split
+module and goes through `deps.db()`/`deps.db_tx()`. Krok 11's cleanup/re-export audit
+should expect this — if a future `grep '_db(' app/httpapi.py` (excluding the two `def`
+lines) ever finds a bare call again, something regressed the split.
+
+**Programmatic byte-diff beats eyeballing for a large (400+ line) verbatim move.** For
+krok 10 (446 lines, all 4 two-connection pairs + the role/kind boundary in one block),
+extracting the pre-move block with `sed -n 'START,ENDp'`, applying the claimed
+mechanical substitutions (`_db()`→`deps.db()`, `_db_tx()`→`deps.db_tx()`, `\bcfg\b`→
+`deps.cfg`) with a small Python script, and then `diff`-ing the transformed block
+against the actual new file gives a mechanical, zero-doubt proof that NOTHING else
+changed — far more reliable than reading 446 lines twice looking for a stray edit.
+Worth reusing for any future large verbatim-move step (this repo or elsewhere).
+
+**Don't hand-guess import ordering in a new split module — write it, then `ruff check
+--fix`.** Ruff's import sort is NOT plain case-sensitive alphabetical (it groups
+CONSTANTS/Classes/functions and sorts within each group, e.g. `_EAN_STRIP_RE, Deps,
+_parse_emails_field` — a constant, then a class, then a function, alphabetical within
+each bucket) — non-obvious enough that a manual guess got it wrong on the first pass.
+Cheaper to let `ruff check --fix .` auto-correct than to reason it out by hand.
+
+**Live-verifying a role/kind security boundary post-deploy: clear cookies, hit BOTH
+warehouse links, read the actual `kind` values in the JSON body — not just the HTTP
+status.** A shared endpoint like `/api/orders/questions` returns 200 for EITHER
+warehouse-role session (it's on both `SKLAD_PATHS` and `SKLAD_DL_PATHS`) — the real
+boundary is enforced INSIDE the handler via `_role_kinds()`, filtering which `kind`
+values come back, not by blocking the path. So a 200-only check proves nothing; fetch
+the body and assert the returned `kind`s are exactly the expected subset (confirmed
+live on krok 10's deploy: the orders link saw only `customer`/`mail`, the DL link saw
+only `dl_item`/`dl_supplier`). Use `page.context().clearCookies()` before switching
+between the admin session and either warehouse link, per the existing cookie-jar gotcha
+in `deploy.md` — the persistent MCP browser profile will otherwise silently reuse a
+still-valid admin cookie and mask a boundary that isn't actually enforcing.
