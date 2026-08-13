@@ -48,7 +48,13 @@ class DuplicateEan(Exception):
     already claimed this EAN under different data. `existing` carries the SAME shape
     httpapi.py's own outer pre-check already builds for the sequential 409, so the loser
     gets the identical, warehouse-readable error either way — just reliably now instead
-    of racily."""
+    of racily.
+
+    #275 extends this to a SECOND source branch: `upsert_customer`/`upsert_dl_supplier`'s
+    fallthrough sheet-bound-EDIT branch (`orig_ean_edi IS NOT NULL`) now ALSO raises this
+    when the edit would retarget `ean_edi` onto a value an active hand-added row already
+    holds — the #248 partial index structurally cannot cover that branch (see that
+    branch's own comment), so this is purely an app-level check under the same lock."""
 
     def __init__(self, ean_edi: str, existing: dict):
         self.ean_edi = ean_edi
@@ -541,17 +547,46 @@ def upsert_customer(conn, *, override_id: int | None, orig_ean_edi: str | None,
                     {"ean_edi": ean_edi, "name": "", "street": "", "override_id": None}
                 ) from None
             return int(row[0])
-    row = conn.execute(
-        """INSERT INTO customer_overrides
-               (orig_ean_edi, orig_street, ean_edi, name, emails, city, street, zip,
-                retired, updated_at)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,false,now())
-           ON CONFLICT (orig_ean_edi, orig_street) WHERE orig_ean_edi IS NOT NULL
-           DO UPDATE SET ean_edi=EXCLUDED.ean_edi, name=EXCLUDED.name, emails=EXCLUDED.emails,
-                          city=EXCLUDED.city, street=EXCLUDED.street, zip=EXCLUDED.zip,
-                          retired=false, updated_at=now()
-           RETURNING id""",
-        (orig_ean_edi, orig_street, ean_edi, name, emails, city, street, zip_)).fetchone()
+    # #275: this fallthrough branch (editing a still-sheet-only row, `orig_ean_edi IS
+    # NOT NULL`) is EXCLUDED by design from the #248 partial unique index (`WHERE
+    # orig_ean_edi IS NULL`) — the sheet legitimately repeats/blanks `ean_edi` across
+    # branches (see this module's own docstring above `customer_overrides`), so DB-level
+    # uniqueness can never be widened to cover this row without breaking that. But that
+    # also means nothing at the DB level ever caught an edit that retargets `ean_edi`
+    # onto a value an ACTIVE hand-added row (`orig_ean_edi IS NULL AND NOT retired`)
+    # already holds — #275's whole finding. Guarded here with the SAME app-level check
+    # the brand-new-customer branch above already uses (`_active_customer_conflict`),
+    # under the SAME advisory lock keyed on this EAN — closes the race where a
+    # concurrent brand-new hand-added insert for this EAN commits (or wins the lock)
+    # WHILE this edit's own check is still open; a bare pre-check with no lock would
+    # reproduce the exact TOCTOU gap #248 already proved insufficient.
+    #
+    # Deliberately does NOT close the reverse ordering (this edit committing/winning the
+    # lock first, then an unrelated brand-new hand-added insert never checking
+    # sheet-bound rows at all) — that is the SAME "opposite direction" the #275
+    # ROZHODNUTÉ decision explicitly scopes out as unchanged (widening
+    # `_active_customer_conflict` to also scan sheet-bound rows is a separate, larger
+    # change this ticket does not make). See #275's design comment for the full
+    # reasoning; a related but distinct gap (the `override_id is not None` branch above
+    # has the identical hole when the row it edits is itself sheet-bound) is filed
+    # separately as #285, out of this ticket's named scope.
+    with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (ean_edi,))
+        conflict = _active_customer_conflict(conn, ean_edi)
+        if conflict:
+            raise DuplicateEan(ean_edi, conflict)
+        row = conn.execute(
+            """INSERT INTO customer_overrides
+                   (orig_ean_edi, orig_street, ean_edi, name, emails, city, street, zip,
+                    retired, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,false,now())
+               ON CONFLICT (orig_ean_edi, orig_street) WHERE orig_ean_edi IS NOT NULL
+               DO UPDATE SET ean_edi=EXCLUDED.ean_edi, name=EXCLUDED.name,
+                              emails=EXCLUDED.emails, city=EXCLUDED.city,
+                              street=EXCLUDED.street, zip=EXCLUDED.zip,
+                              retired=false, updated_at=now()
+               RETURNING id""",
+            (orig_ean_edi, orig_street, ean_edi, name, emails, city, street, zip_)).fetchone()
     return int(row[0])
 
 

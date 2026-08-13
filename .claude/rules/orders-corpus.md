@@ -1663,3 +1663,32 @@ intentional there for cards it was tuned against.
   each). A single `Edit(replace_all: true)` on the shared 5-line generic-kind block
   fixes all 5 of those in one shot; the item/customer branches need their own two
   edits since their SQL shape differs slightly.
+- **Python's `datetime.replace(hour=N)` carries over EVERY field you did NOT pass —
+  including a non-zero `minute` a test constant already has (#255).** A test-timing
+  constant like `MON_EARLY = datetime(2026, 8, 3, 7, 30, tzinfo=TZ)` (minute=30) means
+  `MON_EARLY.replace(hour=7)` is STILL `07:30`, not `07:00` — an easy silent trap when
+  you intend "same hour I'm thinking of, on a clean minute" but only pass `hour=`. This
+  produced a real bug in `confirm.py`'s #255 test suite: an "uploaded BEFORE the
+  activity" row landed at the EXACT SAME instant as the activity itself (both 07:30),
+  making a strict `<` comparison correctly-but-silently return `False` — the test still
+  ran, still asserted, and failed with a confusing "0 == 1", not an obvious off-by-one.
+  Caught only by writing a throwaway debug script that printed the actual `uploaded_at`/
+  `activity_at` values side by side (`.venv/bin/python <script>` against the real test
+  Postgres) rather than staring at the test source. Whenever `.replace(hour=N)` (or any
+  single-field `.replace()`) is applied to a datetime constant that ISN'T a round value
+  on every other field, pass EVERY field you actually intend explicitly (`.replace(hour=
+  N, minute=0)`) — never assume the untouched fields are zero.
+- **A brand-new `confirm.py`-style config knob (`import_evening_check_hour` and
+  siblings, #255) can be read safely via the file's existing `getattr(cfg, ..., DEFAULT)`
+  convention WITHOUT yet being a declared `Config` dataclass field** — production code
+  works fine (the getattr fallback is real), but `Config(**base)` in `_cfg()`
+  (`tests/test_orders_confirm.py`) is a PLAIN dataclass and rejects any kwarg that isn't
+  a declared field with a `TypeError`. A test that needs to override such an
+  undeclared-field knob cannot pass it through `_cfg(**kw)` — build the Config normally,
+  then `setattr` the extra attribute directly on the instance (`cfg2 = _cfg();
+  cfg2.import_evening_check_hour = 15`) — a plain (non-frozen, non-slotted) dataclass
+  instance accepts an undeclared attribute via ordinary assignment. Wiring the field
+  into `Config`/`config.yaml`/`Config.load()` properly (mirroring the existing
+  `import_morning_check_hour` etc. lines) is the real fix when it's in scope — #255 left
+  it as a deliberate, ticket-noted scope decision (a multi-worktree fleet round confined
+  that ticket's work to `confirm.py` + its tests only) rather than doing it in that PR.

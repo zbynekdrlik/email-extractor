@@ -136,6 +136,13 @@ class Config:
     # #133: while an import-alert incident (carryover/failed/unknown) stays open, at most
     # one reminder is sent after this many hours — never a repeat per file.
     import_alert_reminder_hours: int = 4
+    # #255: the evening/same-day check (confirm.py's evening_check_active) — mirrors
+    # import_morning_check_hour/_skip_saturday/_skip_sunday above, same shape, own knobs.
+    # Default hour 18:00 is well past a normal working day so a slow-completing import
+    # pass is never mistaken for a genuine same-day CODEX rejection.
+    import_evening_check_hour: int = 18
+    import_evening_check_skip_saturday: bool = True
+    import_evening_check_skip_sunday: bool = True
     # #133 "DOPLNENIE ROZHODNUTIA": grouped Odoo digest for cleanly-uploaded static
     # orders (see static_digest.py) — batch-size and idle-timeout triggers, tunable
     # without a code change.
@@ -253,6 +260,16 @@ class Config:
             import_alert_reminder_hours=int(
                 _get(o, "import_alert_reminder_hours", "IMPORT_ALERT_REMINDER_HOURS", 4)
                 or 4),
+            import_evening_check_hour=int(
+                _get(o, "import_evening_check_hour", "IMPORT_EVENING_CHECK_HOUR", 18) or 18),
+            import_evening_check_skip_saturday=str(
+                _get(o, "import_evening_check_skip_saturday",
+                     "IMPORT_EVENING_CHECK_SKIP_SATURDAY", "true")).lower() in (
+                    "1", "true", "yes", "on"),
+            import_evening_check_skip_sunday=str(
+                _get(o, "import_evening_check_skip_sunday",
+                     "IMPORT_EVENING_CHECK_SKIP_SUNDAY", "true")).lower() in (
+                    "1", "true", "yes", "on"),
             static_digest_batch_size=int(
                 _get(o, "static_digest_batch_size", "STATIC_DIGEST_BATCH_SIZE", 30) or 30),
             static_digest_idle_minutes=int(

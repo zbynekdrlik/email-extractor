@@ -11,6 +11,18 @@ postgres`) exposed on different host ports (`email-extractor-testpg` on 15433 is
 used most, `ee-eval-pg`/`ee-test-pg`/others exist too — check which is actually up before
 picking a port). Point `PG_TEST_DSN` at one of them:
 
+**In WORKTREE-mode dispatch (parallel `autopilot-worker` fleet rounds, #317), also check
+what OTHER SIBLING WORKTREE WORKERS are already using — not just your own history
+(#275, 2026-08-13).** Several isolated worktree workers on this repo run concurrently, each
+in its own `.claude/worktrees/agent-*/email-extractor` checkout, and each picks its own
+`PG_TEST_DSN` independently — nothing coordinates port choice between them. `ps aux | grep
+pytest` before starting shows every currently-running sibling's own `PG_TEST_DSN` right in
+its command line; picking a port ALREADY in use by a sibling reproduces the exact #164
+TRUNCATE-collision risk this file already warns about, just triggered by a DIFFERENT
+worker's process instead of your own. Cross-check against BOTH `docker ps -a` (which
+containers exist) AND `ps aux | grep pytest` (which ports are actually busy RIGHT NOW)
+before picking one.
+
 ```
 export PG_TEST_DSN="postgresql://postgres:postgres@localhost:15433/postgres"
 ```
@@ -78,6 +90,68 @@ hang, a truncated capture, or a reason to re-run: verify success from **exit cod
 `F`/`E`/`s`/`x` characters** in the dot-progress output (`python3 -c "print(collections.
 Counter(ch for ch in open('out.log').read() if ch not in '.\n[] %0123456789'))"` — an empty
 Counter means every test passed) rather than grepping for `"passed in"`.
+
+## A worktree-isolated worker needs its OWN venv AND its OWN test-Postgres container (#273, 2026-08-13)
+
+A `.claude/worktrees/agent-<id>/` checkout shares only `.git` with the main tree and any
+sibling worktrees dispatched in the same fleet round — it has **no `.venv/`** (worktrees
+never share working-tree files), so the first thing to do is `python3 -m venv .venv &&
+.venv/bin/pip install -r requirements.txt -r requirements-dev.txt` before any test can
+run at all.
+
+More importantly: a fleet round can have 2-3 sibling autopilot-workers running full local
+suites CONCURRENTLY on the same box, each in its own worktree. `email-extractor-testpg`
+(port 15433) is the box's one long-lived, commonly-reused container — check `ps aux |
+grep pytest` (not just `docker ps`) before pointing `PG_TEST_DSN` at it; if another
+worker's `pytest` is already running against it, the "never two invocations against the
+same DSN" rule above applies EQUALLY across separate worktrees, not just separate
+invocations in your own session. Reach for a DIFFERENT throwaway container instead
+(`email-extractor-test-pg` on port 55499 is already documented in
+`n8n-workflow-edits.md`'s fork-danger incident as exactly this kind of isolated fallback;
+`ee-eval-pg`/`ee-test-pg` are two more options) — confirm it's genuinely idle first
+(`docker exec <container> psql -U postgres -c "SELECT pid, state, query FROM
+pg_stat_activity WHERE datname='postgres'"`, only your own `SELECT` should show).
+
+**3 sibling workers each running the full 1503-test suite (incl. Playwright E2E) on the
+same 8-core box drives load average past 12 and swap into several GB — a single run can
+take ~14 minutes wall-clock this way (vs. seconds for a scoped file like `test_db.py`
+alone), and it is genuinely NOT hung, just contended.** Before assuming a stuck run:
+check `/proc/<pid>/status` (`State: S` sleeping, not `D`/zombie) and whether CPU time
+(`ps -o etimes,time`) is barely accumulating relative to wall-clock elapsed — that pattern
+means it's waiting on scheduler/I/O contention, not stuck in a real hang. For a suite that
+launches its own subprocess (Playwright's driver spawns a `chrome-headless-shell` child),
+`ps --ppid <pid>` shows the live child still consuming CPU, which is the clean way to
+confirm real progress instead of a wedge. `uptime`/`free -h` (load average vs `nproc`,
+swap usage) is the fast way to confirm "the whole box is just busy" as the explanation
+before investigating your own change.
+
+## Multiple parallel worktree-fleet workers need their OWN dedicated test-Postgres container, not the shared ports (#255, 2026-08-13)
+
+During a multi-worker fleet round (several `.claude/worktrees/agent-<id>/` checkouts
+running concurrently, each an independent `autopilot-worker`), the well-known ports this
+file already documents (`email-extractor-testpg` 15433, `ee-eval-pg` 55434, etc.) can
+ALREADY be busy with a sibling worker's own `pytest` run at the exact moment you need to
+verify — `ps aux | grep pytest` (filter each hit's own `cd .../agent-<id>/...` prefix in
+its command line) is the way to check, not just `docker ps` (a container being UP does
+not mean it's currently idle). Rather than wait/retry against a port a sibling might be
+using, spin up your OWN throwaway container on an unused port and use that exclusively
+for this session's verification:
+
+```
+docker run -d --name ee-agent-<your-worktree-id-prefix> -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=postgres -p <free-port>:5432 postgres:16
+# then, after a few seconds for it to accept connections:
+export PG_TEST_DSN="postgresql://postgres:postgres@localhost:<free-port>/postgres"
+```
+
+`db.init_schema()` runs automatically via `conftest.py`'s session-scoped `_schema`
+fixture on first use — no manual schema setup needed. This costs nothing extra (a fresh
+`postgres:16` container starts in seconds) and completely removes the #164 TRUNCATE-race
+risk this file's own top section warns about, for the price of one `docker run`. Also
+needs its own venv if the worktree checkout doesn't already have one (`python3 -m venv
+.venv && .venv/bin/pip install -q -r requirements.txt -r requirements-dev.txt`) — a
+fresh worktree checkout has no `.venv/` of its own, it is gitignored like everywhere else
+in this repo.
 
 ## `pytest.mark.skipif` in a NEW test line blocks the push, even though `.skip(` is what's actually banned (#224, 2026-08-08)
 
