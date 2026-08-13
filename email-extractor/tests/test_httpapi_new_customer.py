@@ -151,6 +151,8 @@ def test_two_concurrent_new_customer_ean_collisions_leave_exactly_one_winner(pg,
     add a "new customer" with the SAME brand-new EAN but a DIFFERENT street."""
     import threading
 
+    from _race import run_racers
+
     qid_a = _seed_held_order(pg, sender_email="preteka@x.sk", message_id="m248a")
     qid_b = _seed_held_order(pg, sender_email="pretekb@x.sk", message_id="m248b")
     monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
@@ -167,12 +169,11 @@ def test_two_concurrent_new_customer_ean_collisions_leave_exactly_one_winner(pg,
             "emails": "", "city": "Košice", "street": street, "zip": ""}})
         results[key] = r.status_code
 
-    t1 = threading.Thread(target=answer, args=("A", c1, qid_a, "Ulica A"))
-    t2 = threading.Thread(target=answer, args=("B", c2, qid_b, "Ulica B"))
-    t1.start()
-    t2.start()
-    t1.join(timeout=15)
-    t2.join(timeout=15)
+    t1 = threading.Thread(target=answer, args=("A", c1, qid_a, "Ulica A"), name="answer-A")
+    t2 = threading.Thread(target=answer, args=("B", c2, qid_b, "Ulica B"), name="answer-B")
+    # #291: bounded join() alone never kills a genuinely-stalled thread — run_racers
+    # fails loudly + cleans up any stray backend instead of wedging later tests.
+    run_racers(pg, [t1, t2], timeout=15, label="new_customer_ean_collision")
 
     codes = sorted([results.get("A"), results.get("B")])
     assert codes == [200, 409], f"exactly one racing new-customer add may win, got {results}"

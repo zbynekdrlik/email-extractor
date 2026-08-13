@@ -326,6 +326,7 @@ def test_two_concurrent_new_dl_supplier_adds_for_the_same_ean_with_different_cit
     import threading
 
     import psycopg
+    from _race import run_racers
 
     barrier = threading.Barrier(2)
     errors = []
@@ -343,12 +344,11 @@ def test_two_concurrent_new_dl_supplier_adds_for_the_same_ean_with_different_cit
         finally:
             conn.close()
 
-    t1 = threading.Thread(target=add, args=("Dodávateľ Košice", "Košice"))
-    t2 = threading.Thread(target=add, args=("Dodávateľ Prešov", "Prešov"))
-    t1.start()
-    t2.start()
-    t1.join(timeout=15)
-    t2.join(timeout=15)
+    t1 = threading.Thread(target=add, args=("Dodávateľ Košice", "Košice"), name="add-a")
+    t2 = threading.Thread(target=add, args=("Dodávateľ Prešov", "Prešov"), name="add-b")
+    # #291: bounded join() alone never kills a genuinely-stalled thread — run_racers
+    # fails loudly + cleans up any stray backend instead of wedging later tests.
+    run_racers(pg, [t1, t2], timeout=15, label="new_dl_supplier_different_city")
 
     assert pg.execute(
         "SELECT count(*) FROM dl_supplier_overrides WHERE ean_edi='7000000000902'"
@@ -568,6 +568,7 @@ def test_two_concurrent_sheet_bound_dl_supplier_edits_sharing_a_target_ean_do_no
     import threading
 
     import psycopg
+    from _race import run_racers
 
     _dl_snap(pg)
     barrier = threading.Barrier(2)
@@ -587,13 +588,12 @@ def test_two_concurrent_sheet_bound_dl_supplier_edits_sharing_a_target_ean_do_no
             conn.close()
 
     t1 = threading.Thread(target=edit, args=(
-        "8586010000001", "Košice", "Pobočka Signatus súbežne", "Košice"))
+        "8586010000001", "Košice", "Pobočka Signatus súbežne", "Košice"), name="edit-a")
     t2 = threading.Thread(target=edit, args=(
-        "8586010000002", "Prešov", "Pobočka Jackulík súbežne", "Prešov"))
-    t1.start()
-    t2.start()
-    t1.join(timeout=15)
-    t2.join(timeout=15)
+        "8586010000002", "Prešov", "Pobočka Jackulík súbežne", "Prešov"), name="edit-b")
+    # #291: bounded join() alone never kills a genuinely-stalled thread — run_racers
+    # fails loudly + cleans up any stray backend instead of wedging later tests.
+    run_racers(pg, [t1, t2], timeout=15, label="sheet_bound_dl_supplier_no_deadlock")
 
     assert not errors, f"two legitimate branch-sharing edits must never raise: {errors}"
     names = {r["name"] for r in dl_snapshot.dl_suppliers_for_management(pg)
@@ -757,6 +757,7 @@ def test_two_concurrent_already_overridden_sheet_bound_dl_supplier_edits_by_over
     import threading
 
     import psycopg
+    from _race import run_racers
 
     _dl_snap(pg)
     a_first = _override_a_sheet_bound_dl_supplier(
@@ -783,13 +784,12 @@ def test_two_concurrent_already_overridden_sheet_bound_dl_supplier_edits_by_over
             conn.close()
 
     t1 = threading.Thread(target=edit, args=(a_first, "Pobočka Signatus súbežne",
-                                              "Košice"))
+                                              "Košice"), name="edit-a")
     t2 = threading.Thread(target=edit, args=(b_first, "Pobočka Jackulík súbežne",
-                                              "Prešov"))
-    t1.start()
-    t2.start()
-    t1.join(timeout=15)
-    t2.join(timeout=15)
+                                              "Prešov"), name="edit-b")
+    # #291: bounded join() alone never kills a genuinely-stalled thread — run_racers
+    # fails loudly + cleans up any stray backend instead of wedging later tests.
+    run_racers(pg, [t1, t2], timeout=15, label="dl_supplier_override_id_no_deadlock")
 
     assert not errors, f"two legitimate branch-sharing edits must never raise: {errors}"
     names = {r["name"] for r in dl_snapshot.dl_suppliers_for_management(pg)

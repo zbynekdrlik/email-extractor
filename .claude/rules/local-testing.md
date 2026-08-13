@@ -325,3 +325,31 @@ harness-level trap that has nothing to do with this repo's own code:
   colliding with it (confirmed working this session) — but only if the dispatch prompt
   says so explicitly, per this file's own "never two invocations at once" rule at the
   top.
+
+## `#291` shipped a fix — any NEW "two real threads race a real Postgres connection"
+## test MUST use `tests/_race.py::run_racers`, never hand-roll `t.join(timeout=...)` again
+
+The wedge mechanism this file already documents above (a stalled thread's
+`join(timeout=...)` returning without killing it, leaving a stray Postgres backend
+holding a lock that blocks every later test's `pg` fixture TRUNCATE) is now FIXED at
+the test-infrastructure level, not just diagnosed. `tests/_race.py::run_racers(pg,
+threads, timeout=15, label="...")` replaces the old `t1.start(); t2.start();
+t1.join(timeout=15); t2.join(timeout=15)` idiom: it marks every racer thread daemon,
+joins with the same bounded timeout, and — the moment ANY thread is still alive past
+its join — terminates every stray non-idle backend on the test database (via
+`pg_stat_activity` + `pg_terminate_backend`, releasing whatever lock it holds) and
+`pytest.fail()`s the CURRENT test loudly instead of silently continuing. All 11
+existing racer tests (`test_orders_hold.py`, `test_snapshot.py` x3,
+`test_httpapi_new_customer.py`, `test_httpapi_new_dl.py` x2, `test_orders_teach.py`,
+`test_dl_worker.py`, `test_dl_snapshot.py` x2) were migrated to it. `tests/
+test_race_helper.py` proves the stall-detection+cleanup+fail path actually works
+(a deliberately-stalled racer holding a `FOR UPDATE` lock; the helper both fails the
+test AND releases the lock, proven by a follow-up `TRUNCATE` succeeding right after).
+
+**Any FUTURE test that races two real threads against real Postgres connections
+(or Flask test-client requests that open their own connections internally) must call
+`run_racers` instead of writing a new hand-rolled start/join loop** — copy the shape
+from any of the 11 migrated tests (`from _race import run_racers` as a local import,
+same convention as the existing local `import threading`/`import psycopg`). Do NOT
+reintroduce the old idiom even for "just one more quick racer test" — that is exactly
+how the suite acquired 11 instances of the same hazard in the first place.
