@@ -321,3 +321,30 @@ def test_the_production_claim_path_feeds_a_real_today_into_memorys_date_fence(pg
     # gated by the real, production-supplied "today", they must not
     assert memory.resolve(pg, ean, "rozok buduci", as_of=message["today"]) is None, \
         "a shipment dated after today must never decide today's order"
+
+
+# --- #271: the n8n stale-window tripwire — a PIN, not a live comparison ------------
+#
+# CI has no n8n API credentials/URL configured anywhere in `.github/workflows/ci.yml`
+# (confirmed: no n8n secret exists in this repo), so a genuinely LIVE comparison
+# against the running n8n instance is not possible from CI without adding new n8n API
+# access to a public repo's CI — an infra/security decision of its own, out of scope
+# here. This test PINS the value instead (`worker.py`'s own module-level comment
+# carries the full explanation + the exact n8n workflow/node this must stay in sync
+# with) — the honest fallback the ticket itself anticipated. If this test ever fails,
+# it means THIS side changed; it says nothing about whether the n8n side also has.
+
+def test_claim_stale_minutes_matches_n8n_ai_orders_window():
+    """PIN, not a live check (see the module-level comment on `CLAIM_STALE_MINUTES`
+    and this test's own file-level comment above). Verified live via the n8n MCP
+    (`get_workflow_details`, 2026-08-13): workflow "AI auto orders"
+    (`wlORIhkVZISCdZNmBTM4Z`), node "Get AI Orders", has `interval '30 minutes'`
+    hardcoded in its claim query. If you change `worker.CLAIM_STALE_MINUTES`, update
+    (or knowingly diverge from) that n8n node too — this test only catches an
+    accidental drift on the Python side."""
+    assert worker.CLAIM_STALE_MINUTES == 30, (
+        "worker.CLAIM_STALE_MINUTES must match the n8n workflow 'AI auto orders' "
+        "(wlORIhkVZISCdZNmBTM4Z), node 'Get AI Orders' — hardcoded 'interval "
+        "'30 minutes'' there. This is a PIN (CI has no n8n API access), not a live "
+        "comparison — if you intentionally change this constant, also update that "
+        "n8n node (or document why they now intentionally diverge).")
