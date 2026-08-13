@@ -354,6 +354,7 @@ def test_two_concurrent_answers_to_the_same_customer_question_leave_exactly_one_
     import threading
 
     import psycopg
+    from _race import run_racers
 
     PG_DSN = os.environ.get("PG_TEST_DSN")
     qid = _ask_customer(pg)
@@ -374,12 +375,11 @@ def test_two_concurrent_answers_to_the_same_customer_question_leave_exactly_one_
         finally:
             conn.close()
 
-    t1 = threading.Thread(target=answer, args=("a", "2000000000861", "Žilina"))
-    t2 = threading.Thread(target=answer, args=("b", "2000000000864", "Martin"))
-    t1.start()
-    t2.start()
-    t1.join(timeout=15)
-    t2.join(timeout=15)
+    t1 = threading.Thread(target=answer, args=("a", "2000000000861", "Žilina"), name="answer-a")
+    t2 = threading.Thread(target=answer, args=("b", "2000000000864", "Martin"), name="answer-b")
+    # #291: bounded join() alone never kills a genuinely-stalled thread — run_racers
+    # fails loudly + cleans up any stray backend instead of wedging later tests.
+    run_racers(pg, [t1, t2], timeout=15, label="same_customer_question")
 
     outcomes = [results.get("a"), results.get("b")]
     wins = [o for o in outcomes if isinstance(o, dict)]
