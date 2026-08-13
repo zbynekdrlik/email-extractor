@@ -1663,3 +1663,48 @@ intentional there for cards it was tuned against.
   each). A single `Edit(replace_all: true)` on the shared 5-line generic-kind block
   fixes all 5 of those in one shot; the item/customer branches need their own two
   edits since their SQL shape differs slightly.
+- **Manually re-shipping missing ORDER-pipeline days after a bugfix (#289, 2026-08-13) —
+  never let a whole-message reprocess touch a day that already shipped.** A message with
+  several delivery-day orders can have SOME already correctly uploaded and OTHERS
+  silently dropped by a bug — resetting `messages.processed=false` and letting the
+  worker reprocess the WHOLE message is tempting but genuinely unsafe here, unlike the DL
+  engine's `desadv_sent` ledger (`#251` above): `edi.claim_send()`'s dedup key includes a
+  **content hash**, and `_ship_one` recomputes item matching from scratch on every call —
+  any item resolved via `llm_sure` (a real, non-deterministic model call, not
+  `history_sure`/`alias_exact`/`catalog_name`) could plausibly re-derive a slightly
+  different card on a fresh run, changing the content hash and letting `claim_send`
+  insert a brand-new, genuinely duplicate claim for an ALREADY-shipped day instead of
+  recognizing it as sent. The safe shape: (1) copy the FIXED `extract.py` into the LIVE
+  container temporarily (`docker cp`; the running worker daemon's own already-imported
+  module stays unaffected — only a FRESH `python3 script.py` process picks up the new
+  file), (2) run `extract.run()` against the real `messages` row to get the corrected
+  order list, (3) filter OUT any delivery date that already has a confirmed `edi_sent`
+  row — never rebuild or re-touch it, (4) for each remaining date, build a
+  `customer.Matched` directly from the ALREADY-KNOWN correct `order_runs.result` (never
+  re-resolve the customer with a fresh LLM call either), run the per-item matching loop
+  by hand (mirrors `pipeline._run`'s inner loop: `memory.resolve` → `match.
+  decide_without_model` → `match.candidates`/`client.json_call` fallback → `match.
+  decide` → `match.merge_same_card(match.apply_siblings(...))`), (5) preview via
+  `pipeline._ship_one(..., shadow=True, ...)` (zero writes) and verify every line against
+  the source mail BEFORE any live call, (6) ship ONE date at a time with
+  `shadow=False`, verifying via `upload.list_dirs()` (read-only SFTP) between EVERY
+  call, never batching, (7) restore the container's original `extract.py` afterward
+  (`md5sum` before/after) — the real fix ships through the normal PR/CI/deploy path, a
+  live file swap is a scratch tool for the remediation script only, never a substitute
+  for the real deploy. A weight-label mismatch between the ordered wording ("Tekvicový
+  maslový chlebík 500g") and the matched card is NOT automatically a bug — check the
+  decision's `rule`: `unique_card` (only one card of that family exists, "beats weight
+  guard" by design) and `human_taught` (a warehouse-confirmed alias) both legitimately
+  override a naive weight check; only a `llm_sure`/`llm_borderline` mismatch with no
+  such rule backing it is worth a second look.
+- **`docker cp /dev/stdin container:/path` through an `ssh ... | sudo -S docker cp`
+  wrapper creates a SYMLINK to `/proc/self/fd/0` inside the container instead of a real
+  file (#289)** — `docker exec container cat /tmp/x.py` on it then fails with
+  `lstat /proc/self/fd: no such file`, or a later `docker cp` FROM that same path
+  produces "Could not find the file /proc/self/fd" — confusing either way, no obvious
+  connection to the stdin-piping cause. Never pipe a script into `docker cp` this way for
+  a one-off container script: write it to a real file on the remote HOST first (`ssh
+  host "cat > /tmp/x.py" <<'EOF' ... EOF`, a genuine heredoc-to-file, not `/dev/stdin`),
+  THEN `docker cp` that real host path into the container. Same fix, and same root cause,
+  as `gh-cli-recipes.md`'s "write the scratch file in its own call" guidance — a
+  redirection composed across an ssh+sudo wrapper does not behave like a local one.
