@@ -3189,3 +3189,40 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
 - Worktree pár `agent-a9158237081b4beeb` (#239) / `agent-a7431f2c6f227576a`
   (#265) + ich lokálne branche odstránené po merge.
 - Run cards fired for #239, #265 (`v0.9.89`) — obe issues CLOSED.
+
+## 2026-08-13 — #272 (waitress swap, WORKTREE — awaiting integration)
+
+- **#272** (produkcia bežala na Flask/Werkzeug dev serveri, žiadny gunicorn/waitress,
+  neobmedzený rast vlákien/DB spojení): `httpapi.start()` prepnutý z `app.run(...,
+  threaded=True)` na `waitress.serve(app, ..., threads=HTTP_SERVER_THREADS)` — fixný
+  pool 8 vlákien, čo priamo obmedzuje aj počet súbežných Postgres spojení (každá
+  požiadavka si otvára vlastné cez `_db()`/`_db_tx()`). Žiadna zmena `run.sh`/
+  Dockerfile/`main()`/route handlerov/security gate/dvojspojenia. `waitress>=3.0` do
+  `requirements.txt`.
+- Design komentár (root cause/prístup/alternatíva + Triage/Architektúra):
+  https://github.com/zbynekdrlik/email-extractor/issues/272#issuecomment-5281394571
+- STEP 0 overenie (živé logy produkcie: `WARNING: This is a development server...`):
+  https://github.com/zbynekdrlik/email-extractor/issues/272#issuecomment-5281313936
+- Commity (branch `worktree-agent-ac9825acecd43702a`, worktree
+  `.claude/worktrees/agent-ac9825acecd43702a`):
+  - `0f719ee` feat: serve the dashboard/API behind waitress, never the Flask dev
+    server (#272) — + `tests/test_httpapi_waitress.py` (2 testy).
+  - `fc29303` fix: log waitress startup failures + pin /files Range parity (#272
+    review) — nezávislý fresh-context review našiel 0🔴 0🟡 2🔵, oba opravené v tomto
+    commite (try/except okolo `waitress.serve()` + tretí test na Range požiadavky).
+- Review komentár (0🔴 0🟡 2🔵, oba fixnuté):
+  https://github.com/zbynekdrlik/email-extractor/issues/272#issuecomment-5282086167
+- Testy: `tests/test_httpapi_waitress.py` (3 nové testy — wiring, plná ekvivalencia
+  waitress vs. werkzeug na /health + auth route + 401, a Range parity na /files).
+  Celá lokálna sada (1553 testov) zelená DVAKRÁT (pred aj po review-fix commite),
+  ruff čisto. `test_httpapi_characterization.py` bez driftu.
+- Žiadny push/PR/deploy/version bump v tomto worktree — integrácia (merge do `dev`,
+  version bump, PR, CI, deploy) je na supervízorovi. **Integračná poznámka**: pri
+  deployi extra-opatrne overiť (1) že produkcia SKUTOČNE beží cez waitress v
+  kontajneri (logy by mali stratiť `werkzeug`-ovské "development server" varovanie a
+  `Server:` hlavička odpovede by mala hovoriť `waitress`, nie `Werkzeug`), (2) že
+  reštart cez `run.sh`/supervisor (žiadny s6) prebehne rovnako ako doteraz — žiadny
+  druhý PID, žiadne zaseknutie pri `TERM`, (3) tvar logov sa mierne zmení (waitress
+  nepridáva vlastný `werkzeug`-logger riadok pre každú požiadavku — appka si už
+  loguje vlastnú `access_log` cez `_access_log()`, takže viditeľnosť requestov
+  ostáva, len zmizne druhý, redundantný werkzeug riadok).
