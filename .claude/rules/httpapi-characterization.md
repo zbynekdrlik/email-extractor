@@ -150,6 +150,31 @@ locally unused, grep the test suite for `httpapi\.<name>` (e.g. `grep -rn
 "httpapi\.db\|httpapi\.<other>" tests/`)** — a hit means some test reaches a DIFFERENT
 module's code through `httpapi.py`'s own namespace as a monkeypatch handle. If a hit
 exists, keep the import with `# noqa: F401` and a comment explaining which tests need
-it and why patching it still reaches the real code (same module object). Kroky 9-11
-(`znalosti`, `orders_questions`, cleanup) should run this same grep before dropping
+it and why patching it still reaches the real code (same module object). Kroky 10-11
+(`orders_questions`, cleanup) should run this same grep before dropping
 `_role_kinds`'s or any other still-referenced-only-in-tests import.
+
+## ...OR a DIRECT `from app.httpapi import <name>` in a test — not just monkeypatch
+## (krok 9, `ZNALOSTI_HTML`)
+
+The `httpapi.<name>` grep above only catches the MONKEYPATCH shape
+(`httpapi.db`/`monkeypatch.setattr(httpapi.X, ...)`). Krok 9 hit the OTHER shape: once
+`znalosti_page` (the only thing that rendered `ZNALOSTI_HTML`) moved into
+`httpapi_znalosti.py`, `ZNALOSTI_HTML` looked locally unused in `httpapi.py` — but
+`tests/test_httpapi_characterization.py`'s krok-1 checksum test does
+`from app.httpapi import (..., ZNALOSTI_HTML, ...)` directly, because that test's whole
+POINT is pinning the pre-split public surface of `app.httpapi` and must stay
+unmodified across every later step. Dropping the import broke the full suite live on
+the first attempt: `ImportError: cannot import name 'ZNALOSTI_HTML' from
+'app.httpapi'` — caught before commit only because the full local suite was run before
+committing, not by the targeted checks.
+
+**So the pre-removal check for ANY newly-unused import in `httpapi.py` is TWO greps,
+not one:** `grep -rn "httpapi\.<name>" tests/` (monkeypatch reach-through) AND
+`grep -rn "from app\.httpapi import" tests/` followed by checking whether `<name>`
+appears in any of those import lists (direct import, mainly
+`test_httpapi_characterization.py`'s own `ASK_DL_HTML`/`ASK_HTML`/`DASH_HTML`/
+`LOGIN_HTML`/`ZNALOSTI_HTML`/`create_app` list — any future step touching one of THOSE
+five HTML constants specifically needs this check). A hit in either grep means
+`# noqa: F401` + a comment, same shape as `db`. Krok 11 (final `httpapi.py` cleanup +
+re-export audit) should run BOTH greps against every symbol it's tempted to drop.

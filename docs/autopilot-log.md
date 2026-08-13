@@ -2852,3 +2852,49 @@ LOAN item-matching confirmed live, new HK LOAN multi-message gap found)
   → 401 (žiadna reálna správa nezmenená).
 - Run card fired for #268 (`v0.9.83`) — issue zostáva OTVORENÝ (kroky 9, 10, 11
   čakajú).
+
+## #268 krok 9 z 11 — extrakcia `app/httpapi_znalosti.py` (2026-08-13)
+
+- STEP 0 overenie proti HEAD `92b1693` (po merge krok 6, PR #282) — presúvaný
+  blok = riadky 701-995 (295 riadkov), presne zodpovedá pôvodnému "1033-1329" zo
+  zadania (posun z predošlých krokov, nie zmena obsahu). Baseline: 1502 testov,
+  0 F/E/s/x (krok-6 review).
+- Presunuté: `znalosti_page` (stránka `/znalosti`) + 12 CRUD rout
+  (products/clients/global/customer-alias/dl-products/dl-suppliers) + 3 zdieľané
+  pomocníky (`_current_catalog`/`_current_customers`/`_customer_name`) — doslovne,
+  `register(app, deps)` vzor, rovnaký ako kroky 5/6/7/8. `_db()` → `deps.db()`
+  ×20, jediné `cfg` použitie (`hold.retry_unknown_customer_questions`) →
+  `deps.cfg`.
+- Import hygiena: `memory`/`_fold` odstránené z `httpapi.py` (používané výhradne
+  vo vnútri presunutého bloku). `snapshot`/`dl_snapshot`/`_EAN_STRIP_RE`/
+  `_parse_emails_field` zostávajú (používané aj v `orders_questions` bloku).
+  `ZNALOSTI_HTML` zostáva re-exportované s `# noqa: F401` — `tests/
+  test_httpapi_characterization.py` ho importuje priamo z `app.httpapi` (krok-1
+  checksum test, nesmie sa meniť). Prvý pokus bez tohto re-exportu zlomil
+  charakterizačný test živo (`ImportError`) — opravené pred commitom.
+- Commity: `ac23dcf` (bump 0.9.83→0.9.84), `6cdb494` (refactor, `[no-test: ...]`).
+- Dôkaz nula zmeny chovania: bajtový diff tela `register()` proti extrahovanému
+  bloku identický (po normalizácii); `ruff check .` čisté; cold-import leaf;
+  route-table (krok 1) 51/51 nezmenené; `Deps` identita naprieč 5 modulmi
+  (files/dashboard_data/fixqueue/reports/znalosti) — ten istý objekt; celá
+  lokálna suita 1502 testov 0 F/E/s/x (dvakrát nezávisle); `git diff -- tests/`
+  prázdny.
+- `app/httpapi.py`: 1020 → 733 riadkov; nový `httpapi_znalosti.py`: 323 riadkov.
+- Nezávislý review (`general-purpose` subagent, čerstvý kontext, nikdy vstavaný
+  `Skill({skill:"review"})`, per #363): **0 🔴 0 🟡 0 🔵** — 12 samostatne overených
+  bodov.
+- PR #283 (dev→main), 2 commity, "časť #268 (krok 9 z 11)" (bez
+  Closes/Fixes/Resolves — #268 zostáva otvorený do kroku 11). CI zelené
+  (test/e2e-orders/e2e-dl/build, ×2 behy). Merged `2e5ebba4`.
+- Deploy: `ha apps update e0ac7775_email_extractor` → v0.9.84. Overené: `/health`
+  `{"ok":true,"version":"0.9.84"}`; DOM (Playwright) ukazuje `v0.9.84` na `/`;
+  0 console chýb na `/`, `/otazky`, `/otazky-dl`, `/znalosti`. Funkčná
+  verifikácia presunutého povrchu naživo: `/znalosti` naozaj vykreslila skutočné
+  karty výrobkov, odberateľov, DL katalóg, DL dodávateľov aj globálne
+  priradenia; neautentifikovaný GET `/api/znalosti/products` → 401; oddelenie
+  rolí naživo v OBOCH smeroch — DL sklad link (`/sklad-dl/...`) vidí len
+  `dl-products`/`dl-suppliers` API + `/otazky-dl` (200), na orders-only
+  `products`/`customers` API a `/znalosti` stránku dostane 401/302; orders sklad
+  link (`/sklad/...`) symetricky naopak.
+- Run card fired for #268 (`v0.9.84`) — issue zostáva OTVORENÝ (kroky 10, 11
+  čakajú).
