@@ -3258,3 +3258,39 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
   nepridáva vlastný `werkzeug`-logger riadok pre každú požiadavku — appka si už
   loguje vlastnú `access_log` cez `_access_log()`, takže viditeľnosť requestov
   ostáva, len zmizne druhý, redundantný werkzeug riadok).
+
+## 2026-08-13 — INTEGRATION ROUND C1 (#285 + #291 + #272, PR #299)
+
+- Merged 3 isolated worktree branches into `dev` one at a time
+  (`a23ff71`→`e3cee90`→`5333f43`): `worktree-agent-adf1578cd02de68bf` (#285),
+  `worktree-agent-a42e17d765e54f227` (#291), `worktree-agent-ac9825acecd43702a`
+  (#272). Version bump 0.9.89→0.9.90 landed via #285's own first commit (`68ef60e`),
+  merged first.
+- 2 real merge conflicts, both textual-only (each branch independently appended a new
+  section at the same tail position in `.claude/rules/local-testing.md` and
+  `docs/autopilot-log.md`) — resolved by keeping every section from all three, no
+  semantic loss.
+- Integration-only commit `e3cee90`: ported #285's two new racer tests
+  (`test_snapshot.py`/`test_dl_snapshot.py`'s own
+  `..._by_override_id_sharing_a_target_ean_do_not_deadlock` tests, written against
+  the pre-#291 raw `threading.Thread`+`join(15)` idiom) onto #291's
+  `tests/_race.py::run_racers` helper.
+- #291's own CYCLE-step-6 review comment (found live already posted, verified against
+  commit `aa55d77`'s actual diff — matches: shared `time.monotonic()` deadline,
+  before/after backend-pid snapshot scoping, bounded DROP TABLE cleanup on its own
+  connection) — no duplicate comment needed.
+- Full local suite: 1567 tests, 0 failed/skipped/errored (Counter technique, zero
+  `F`/`E`/`s`/`x`), `ruff check .` clean. PR #299 (`dev`→`main`, `Closes #285 #291
+  #272`) — both CI runs (pull_request + push) all-green (test/e2e-orders/e2e-dl/build),
+  merged `242404b`. Main CI (build+GHCR push) green.
+- Deployed `e0ac7775_email_extractor` 0.9.89→0.9.90. Verified: `/health` 0.9.90,
+  `Server: waitress` (not Werkzeug), dev-server warning gone from fresh logs +
+  `_access_log` lines present, DOM `v0.9.90`, 0 console errors on `/`, `/otazky`,
+  `/otazky-dl`, `/znalosti` (checked individually), `/sklad/<key>` role sees only
+  `kind=customer`, `/sklad-dl/<key>` role sees only `kind∈{dl_item,dl_supplier}`,
+  board question #35 (dl_supplier) still `open`/untouched.
+- Run cards fired for #285, #291, #272 (`v0.9.90`) — all three issues CLOSED (auto,
+  via the PR's `Closes` lines). 3 merged worktrees + their local branches removed
+  (`agent-adf1578cd02de68bf`, `agent-a42e17d765e54f227`, `agent-ac9825acecd43702a`);
+  the 2 unrelated sibling worktrees (`agent-a0337f6056951e4d0`,
+  `agent-aa92342dc627b9554`) left untouched.
