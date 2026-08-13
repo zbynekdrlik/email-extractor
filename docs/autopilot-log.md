@@ -3189,3 +3189,72 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
 - Worktree pár `agent-a9158237081b4beeb` (#239) / `agent-a7431f2c6f227576a`
   (#265) + ich lokálne branche odstránené po merge.
 - Run cards fired for #239, #265 (`v0.9.89`) — obe issues CLOSED.
+
+## 2026-08-13 — #241 REMEDIATION (production data, žiadny kód/PR/deploy)
+
+- **#241** (29 starých dodacích listov len s "Odoo kontrola" — dotiahnuť): žiadny kód
+  sa nemenil, žiadna verzia sa nebumpovala. Priame prehratie `dl_worker.
+  _process_document()` v `app_e0ac7775_email_extractor` (v0.9.89), jeden doklad naraz,
+  shadow→ORION-check→live→ORION-check (per `.claude/rules/n8n-workflow-edits.md`
+  "#251 path"). Skripty (`/tmp/replay_dl.py`, `/tmp/orion_check.py`) žili len v
+  kontajneri, necommitnuté (reálne dáta zákazníkov).
+- Skupina C (5, chýba karta): 1568 (Messer Tatragas) → nástenková otázka **#40**;
+  4658 (Pracovné odevy Zigo, 2 položky) → otázky **#41**, **#42**; 2070 (Mäsiarstvo
+  Tony) a 6137 (Zeelandia) → medzičasom sa produkt naučil (alias_rescue) → naozaj
+  odoslané do ORIONu (`desadv_sent` id 31, 32; ORION overené pred aj po); 2183
+  (Bardusch, `.xls` príloha) → DL engine `.xls` prílohy vôbec nečíta (zámerný scope
+  filter) → nedá sa dotiahnuť → filed **#297** (needs-decision).
+- Skupina D (5, HK LOAN): otázka **#35** stále otvorená, bez zmeny.
+- Skupina B (6, už doručené): znova overené v `archCodex`, bez zmeny žiadneho záznamu.
+- Skupina A (12): 6 bez akcie, 6 s reálnou požiadavkou zákazníka → Odoo kanál 152,
+  msg id 38027082.
+- Skupina G (1, zlý sken PKB Slovakia): nedá sa opraviť, poznámka do tej istej 152
+  správy.
+- Close-out komentár + issue **#241 CLOSED**.
+- Playbook: 4 nové gotchy pridané do `n8n-workflow-edits.md` (autocommit=True na
+  `db.connect()`, LLM docNumber-drift naprieč volaniami, shadow outcome sa môže
+  medzičasom zmeniť review→ok cez alias/history rescue, `_read_attachments()`
+  xls/docx nevidí vôbec) + odkaz priamo na `desadv_edi.already_landed()` namiesto
+  ručného odvodzovania ORION-checku.
+- Note: the previous commit's "Closes #241" text false-positives the
+  push-gate's bug-fix/RED-GREEN pattern (it scans for that phrase, not
+  whether the diff is actually code) — this commit carries the bypass tag
+  since the diff is genuinely docs-only, no code changed for #241 or #297.
+- Run card fired for #241 (žiadna `--version`/`--pr` — nešlo o merge/deploy).
+
+## 2026-08-13 — #272 (waitress swap, WORKTREE — awaiting integration)
+
+- **#272** (produkcia bežala na Flask/Werkzeug dev serveri, žiadny gunicorn/waitress,
+  neobmedzený rast vlákien/DB spojení): `httpapi.start()` prepnutý z `app.run(...,
+  threaded=True)` na `waitress.serve(app, ..., threads=HTTP_SERVER_THREADS)` — fixný
+  pool 8 vlákien, čo priamo obmedzuje aj počet súbežných Postgres spojení (každá
+  požiadavka si otvára vlastné cez `_db()`/`_db_tx()`). Žiadna zmena `run.sh`/
+  Dockerfile/`main()`/route handlerov/security gate/dvojspojenia. `waitress>=3.0` do
+  `requirements.txt`.
+- Design komentár (root cause/prístup/alternatíva + Triage/Architektúra):
+  https://github.com/zbynekdrlik/email-extractor/issues/272#issuecomment-5281394571
+- STEP 0 overenie (živé logy produkcie: `WARNING: This is a development server...`):
+  https://github.com/zbynekdrlik/email-extractor/issues/272#issuecomment-5281313936
+- Commity (branch `worktree-agent-ac9825acecd43702a`, worktree
+  `.claude/worktrees/agent-ac9825acecd43702a`):
+  - `0f719ee` feat: serve the dashboard/API behind waitress, never the Flask dev
+    server (#272) — + `tests/test_httpapi_waitress.py` (2 testy).
+  - `fc29303` fix: log waitress startup failures + pin /files Range parity (#272
+    review) — nezávislý fresh-context review našiel 0🔴 0🟡 2🔵, oba opravené v tomto
+    commite (try/except okolo `waitress.serve()` + tretí test na Range požiadavky).
+- Review komentár (0🔴 0🟡 2🔵, oba fixnuté):
+  https://github.com/zbynekdrlik/email-extractor/issues/272#issuecomment-5282086167
+- Testy: `tests/test_httpapi_waitress.py` (3 nové testy — wiring, plná ekvivalencia
+  waitress vs. werkzeug na /health + auth route + 401, a Range parity na /files).
+  Celá lokálna sada (1553 testov) zelená DVAKRÁT (pred aj po review-fix commite),
+  ruff čisto. `test_httpapi_characterization.py` bez driftu.
+- Žiadny push/PR/deploy/version bump v tomto worktree — integrácia (merge do `dev`,
+  version bump, PR, CI, deploy) je na supervízorovi. **Integračná poznámka**: pri
+  deployi extra-opatrne overiť (1) že produkcia SKUTOČNE beží cez waitress v
+  kontajneri (logy by mali stratiť `werkzeug`-ovské "development server" varovanie a
+  `Server:` hlavička odpovede by mala hovoriť `waitress`, nie `Werkzeug`), (2) že
+  reštart cez `run.sh`/supervisor (žiadny s6) prebehne rovnako ako doteraz — žiadny
+  druhý PID, žiadne zaseknutie pri `TERM`, (3) tvar logov sa mierne zmení (waitress
+  nepridáva vlastný `werkzeug`-logger riadok pre každú požiadavku — appka si už
+  loguje vlastnú `access_log` cez `_access_log()`, takže viditeľnosť requestov
+  ostáva, len zmizne druhý, redundantný werkzeug riadok).

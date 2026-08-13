@@ -136,6 +136,8 @@ def test_two_concurrent_new_dl_supplier_ean_collisions_leave_exactly_one_winner(
     SAME brand-new EAN but a DIFFERENT city."""
     import threading
 
+    from _race import run_racers
+
     qid_a = teach.ask_dl_supplier(pg, message_id="m248dla", sender_email="preteka@dl.sk",
                                   candidates=[])
     qid_b = teach.ask_dl_supplier(pg, message_id="m248dlb", sender_email="pretekb@dl.sk",
@@ -150,12 +152,11 @@ def test_two_concurrent_new_dl_supplier_ean_collisions_leave_exactly_one_winner(
             "ean_edi": "7200000000002", "name": f"Pretekár {key}", "city": city}})
         results[key] = r.status_code
 
-    t1 = threading.Thread(target=answer, args=("A", c1, qid_a, "Košice"))
-    t2 = threading.Thread(target=answer, args=("B", c2, qid_b, "Prešov"))
-    t1.start()
-    t2.start()
-    t1.join(timeout=15)
-    t2.join(timeout=15)
+    t1 = threading.Thread(target=answer, args=("A", c1, qid_a, "Košice"), name="answer-A")
+    t2 = threading.Thread(target=answer, args=("B", c2, qid_b, "Prešov"), name="answer-B")
+    # #291: bounded join() alone never kills a genuinely-stalled thread — run_racers
+    # fails loudly + cleans up any stray backend instead of wedging later tests.
+    run_racers(pg, [t1, t2], timeout=15, label="new_dl_supplier_ean_collision")
 
     codes = sorted([results.get("A"), results.get("B")])
     assert codes == [200, 409], f"exactly one racing new-supplier add may win, got {results}"
@@ -242,6 +243,8 @@ def test_two_concurrent_answers_to_the_same_dl_question_leave_exactly_one_winner
     exactly_one_winner` in test_orders_teach.py, one layer up at the HTTP boundary."""
     import threading
 
+    from _race import run_racers
+
     qid = teach.ask_dl_supplier(
         pg, message_id="m235race", sender_email="race@x.sk",
         candidates=[{"ean_edi": "2000000000961", "name": "Pretekár s.r.o."}])
@@ -255,12 +258,11 @@ def test_two_concurrent_answers_to_the_same_dl_question_leave_exactly_one_winner
                         json={"choice": "2000000000961", "by": "sklad"})
         results[key] = r.status_code
 
-    t1 = threading.Thread(target=answer, args=("a", c1))
-    t2 = threading.Thread(target=answer, args=("b", c2))
-    t1.start()
-    t2.start()
-    t1.join(timeout=15)
-    t2.join(timeout=15)
+    t1 = threading.Thread(target=answer, args=("a", c1), name="answer-a")
+    t2 = threading.Thread(target=answer, args=("b", c2), name="answer-b")
+    # #291: bounded join() alone never kills a genuinely-stalled thread — run_racers
+    # fails loudly + cleans up any stray backend instead of wedging later tests.
+    run_racers(pg, [t1, t2], timeout=15, label="same_dl_question")
 
     codes = sorted([results.get("a"), results.get("b")])
     assert codes == [200, 409], f"exactly one racing answer may win, got {results}"

@@ -263,3 +263,158 @@ path works fine in isolation. Before trusting ANY single-test-alone failure as r
 run `ps aux | grep pytest` FIRST — this class of failure looks exactly like a genuine
 regression (a clean, reproducible assertion failure, not flakiness) and can easily
 mislead a fix attempt if taken at face value.
+
+## Waiting for a full local suite that genuinely takes 15-25 minutes on a contended box
+## — a `sleep && check` loop gets HARD-BLOCKED; use `Monitor` with a real until-loop
+## (#285, 2026-08-13)
+
+A `run_in_background` full-suite invocation on a box with 2-3 sibling worktree workers
+(load average 10-14 on 8 cores is normal during a fleet round, per this file's own
+"3 sibling workers" section above) genuinely runs 15-25 minutes wall-clock, not the
+"seconds for a scoped file" number that section quotes — that number is for ONE file,
+not the full suite. Waiting this out correctly, as a worktree-isolated worker, hits a
+harness-level trap that has nothing to do with this repo's own code:
+
+- **A single `sleep N && <check>` (or `sleep N; <check>`) Bash call is BLOCKED** by a
+  PreToolUse hook the moment it looks like a repeat of an earlier wait attempt — the
+  block message says to use `Monitor` with an until-loop, or `run_in_background: true`.
+  Trying to work around it with a shorter sleep, a `timeout N cat` substitute, or any
+  other sleep-shaped primitive is explicitly against the hook's own instruction and
+  will just re-trigger it.
+- **The correct mechanism is the `Monitor` tool**, armed with a real shell until-loop
+  polling the target PID and printing a marker line on exit — e.g. `until ! ps -p
+  <pid> > /dev/null 2>&1; do sleep 10; done; echo DONE`. This delivers a genuine
+  `<task-notification>` back into the SAME conversation once the condition is met —
+  confirmed working end-to-end this session (armed at pytest's ~13-min mark, notified
+  cleanly at 100%). Do NOT then also manually re-poll the PID via repeated bare `ps -p
+  <pid>` calls while the Monitor is armed — each individual bare `ps` call is not
+  itself blocked, but it is redundant with what the Monitor is already doing and just
+  burns turns for no benefit; better to do OTHER useful work (dispatching the review
+  subagent, re-reading the diff, drafting commit/report text) between checks, or none
+  at all, and trust the notification.
+- **A `SubagentStop` hook BLOCKS ending your turn while ANY `Monitor` task you armed is
+  still outstanding** — as a worktree-isolated worker (a subagent from the supervisor's
+  point of view), simply going quiet with an `⏳ WORKING` marker while a Monitor task is
+  pending does NOT safely hand off; the hook explicitly warns the notification would
+  fire to your PARENT instead of back into your own session. So: never try to "just
+  stop and wait for the notification" while a Monitor is armed — keep taking (even
+  trivial) actions until the notification actually lands in-line.
+- **If a Monitor task's own until-loop needs adjusting (e.g. you want to also print
+  progress, or you started one with the wrong PID) and the Stop hook is blocking you
+  citing that task id, `TaskStop` it first** — this does NOT kill the underlying
+  process/command being watched (a `Monitor`'s target PID is independent of the
+  Monitor's own polling shell), only the polling wrapper. Re-arm a fresh `Monitor`
+  immediately after with the corrected command; the Stop hook's block clears once no
+  outstanding task id remains.
+- **A dispatched review subagent (per `agents/autopilot-worker.md` CYCLE step 6) can
+  run for 15+ minutes on its own** on a contended box, since it typically re-runs the
+  same scoped tests itself as part of verifying the diff. Its own completion
+  `task-notification` fires only ONCE, at the very end (no incremental progress
+  events) — watching its `output_file`'s mtime/size via `stat` is USELESS as a
+  progress signal (observed: stayed at a constant small size for the agent's entire
+  ~17-minute run, only useful as evidence "it exists", not "it's progressing"). A
+  better proxy, when genuinely needed: `ps aux | grep '<a literal, unique substring of
+  its own worktree path>'` shows whatever shell/test command the subagent is currently
+  running (the exact command line, including its own `PG_TEST_DSN`), which changes as
+  the subagent moves through its own review steps — armed as its own `Monitor`
+  until-loop, the SAME way as the main suite wait above.
+- **Never start a SECOND pytest invocation against the same isolated container while a
+  review subagent might reuse it** — a dispatched review subagent that is told "there
+  is already a dedicated container on port N for this worktree, use it, don't start a
+  new one" will correctly wait for an in-flight run against that port rather than
+  colliding with it (confirmed working this session) — but only if the dispatch prompt
+  says so explicitly, per this file's own "never two invocations at once" rule at the
+  top.
+
+## `#291` shipped a fix — any NEW "two real threads race a real Postgres connection"
+## test MUST use `tests/_race.py::run_racers`, never hand-roll `t.join(timeout=...)` again
+
+The wedge mechanism this file already documents above (a stalled thread's
+`join(timeout=...)` returning without killing it, leaving a stray Postgres backend
+holding a lock that blocks every later test's `pg` fixture TRUNCATE) is now FIXED at
+the test-infrastructure level, not just diagnosed. `tests/_race.py::run_racers(pg,
+threads, timeout=15, label="...")` replaces the old `t1.start(); t2.start();
+t1.join(timeout=15); t2.join(timeout=15)` idiom: it marks every racer thread daemon,
+joins with the same bounded timeout, and — the moment ANY thread is still alive past
+its join — terminates every stray non-idle backend on the test database (via
+`pg_stat_activity` + `pg_terminate_backend`, releasing whatever lock it holds) and
+`pytest.fail()`s the CURRENT test loudly instead of silently continuing. All 11
+existing racer tests (`test_orders_hold.py`, `test_snapshot.py` x3,
+`test_httpapi_new_customer.py`, `test_httpapi_new_dl.py` x2, `test_orders_teach.py`,
+`test_dl_worker.py`, `test_dl_snapshot.py` x2) were migrated to it. `tests/
+test_race_helper.py` proves the stall-detection+cleanup+fail path actually works
+(a deliberately-stalled racer holding a `FOR UPDATE` lock; the helper both fails the
+test AND releases the lock, proven by a follow-up `TRUNCATE` succeeding right after).
+
+**Any FUTURE test that races two real threads against real Postgres connections
+(or Flask test-client requests that open their own connections internally) must call
+`run_racers` instead of writing a new hand-rolled start/join loop** — copy the shape
+from any of the 11 migrated tests (`from _race import run_racers` as a local import,
+same convention as the existing local `import threading`/`import psycopg`). Do NOT
+reintroduce the old idiom even for "just one more quick racer test" — that is exactly
+how the suite acquired 11 instances of the same hazard in the first place.
+
+## A worktree-isolated worker's stray `cd .../email-extractor && ...` (no worktree
+## segment in the path) silently reads the SHARED main checkout, not your own copy
+## (#272, 2026-08-13)
+
+The worktree-isolation guard blocks `cd` to the shared checkout's TOP-LEVEL root
+(`/home/.../email_extract`) with an explicit refusal, but a `cd` straight into that
+same shared checkout's `email-extractor/` SUBDIRECTORY (e.g. `cd /home/.../email_
+extract/email-extractor && cat Dockerfile`) is NOT caught — it silently runs against
+the shared tree instead of your own `.claude/worktrees/agent-<id>/email-extractor/`
+copy. Harmless for a plain READ (the shared checkout is usually at/near the same
+commit your worktree branched from, and no `Edit`/`Write` call ever targets a
+relative path this way — those always need the file to already be open via `Read`,
+which only succeeds against a path you actually passed), but it means anything you
+`cat`/`grep`/`ls` this way is NOT provably your own worktree's content, and it also
+means a `.venv`/`pip install` done this way lands in the SHARED checkout's
+environment, not yours (a worktree checkout has no `.venv/` of its own — see the
+section above — so accidentally landing in the shared one can look like "it already
+has a venv" and mask the fact your OWN worktree still needs
+`python3 -m venv .venv && pip install -r requirements.txt -r requirements-dev.txt`
+before anything can actually run there). **Always use the FULL absolute worktree
+path** (`.../  .claude/worktrees/agent-<your-id>/email-extractor/...`) for every
+read/list/install from the very first command, never a path that happens to also
+resolve inside the shared checkout — don't rely on the guard to catch a subdirectory
+`cd` the way it catches the top-level one.
+
+## The full local suite (1553 tests) reliably exceeds the Bash tool's own timeout,
+## even near its 600000 ms cap, under sibling-fleet contention — the working
+## foreground-wait recovery shape (#272, 2026-08-13)
+
+A plain `pytest tests/ -q > log 2>&1` run, even given `timeout: 598000` (near the
+tool's 600000 ms ceiling), routinely does NOT finish inside that window while 2-3
+sibling worktree-fleet workers are also running full suites on this box (see the
+existing contention notes above) — the harness auto-backgrounds it and hands back a
+task id + PID-less wrapper. A SUBAGENT must not end its turn or launch a background
+waiter of its own while that run is still in flight (it would be silently orphaned) —
+the working recovery sequence:
+
+1. `ps -o pid,ppid,cmd --ppid <wrapper-bash-pid>` (or `pgrep -P <wrapper-pid>`) to get
+   the REAL child `.venv/bin/python -m pytest ...` PID — the wrapper bash's own PID
+   is NOT what you want to wait on.
+2. Wait on that specific PID with the SIMPLEST possible one-liner:
+   `while ps -p <pid> >/dev/null 2>&1; do sleep 15; done; echo DONE` — a single `while`
+   loop plus one trailing `echo`, all on ONE line. A multi-statement / multi-line
+   version of the SAME wait (a `DEADLINE=$((SECONDS+N))`-bounded variant, or anything
+   using `&&`/`;`-joined assignment before the loop) gets REJECTED by the worktree-
+   isolation complexity guard as "too complex to verify it stays inside the worktree"
+   — even though it touches no `git`/`cd` at all. Only the plain single-`while`-loop
+   shape above is accepted.
+3. If that same normalized loop shape needs to be re-issued (the run STILL isn't done
+   after one ~598s call), `hooks/block-local-poll-repeat.sh` blocks the literal
+   repeat — append `# airuleset:poll-ok <reason>` on its OWN line right after the
+   command to pass through (logged, not a silent bypass).
+4. A bare `sleep N` (with no condition to wait on) is separately blocked outright —
+   "use Monitor with an until-loop" or `run_in_background` instead; chaining shorter
+   sleeps to route around the block is explicitly rejected too.
+5. `Monitor` (a background watcher with the same `while ps -p <pid>; do sleep 15;
+   done; echo DONE; tail -N <log>` script) works as a genuine alternative/backup to
+   the plain Bash wait and is NOT subject to the same "too complex"/"repeat" guards —
+   useful to fire in parallel with a dispatched review subagent so both wake you at
+   once instead of serially.
+
+Verify a completed run succeeded the same way `local-testing.md` already documents
+above (exit code 0 + the `#160` zero-`F`/`E`/`s`/`x` Counter technique on the
+dot-progress output) — do not trust "the wait finished" alone as proof of a clean run.

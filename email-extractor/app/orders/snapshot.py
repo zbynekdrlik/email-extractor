@@ -54,7 +54,15 @@ class DuplicateEan(Exception):
     fallthrough sheet-bound-EDIT branch (`orig_ean_edi IS NOT NULL`) now ALSO raises this
     when the edit would retarget `ean_edi` onto a value an active hand-added row already
     holds — the #248 partial index structurally cannot cover that branch (see that
-    branch's own comment), so this is purely an app-level check under the same lock."""
+    branch's own comment), so this is purely an app-level check under the same lock.
+
+    #285 extends this to a THIRD, symmetric entry point into the exact same #275 gap:
+    `upsert_customer`/`upsert_dl_supplier`'s `override_id is not None` branch ALSO
+    raises this when the edited row is ITSELF sheet-bound (`orig_ean_edi IS NOT NULL`
+    — it was already given its own `override_id` by an earlier #275-fixed edit, and is
+    now being edited a SECOND time via that id) and the new `ean_edi` collides with an
+    active hand-added row — the SAME partial-index gap, reached from a different call
+    shape, guarded the same way under the same lock."""
 
     def __init__(self, ean_edi: str, existing: dict):
         self.ean_edi = ean_edi
@@ -462,9 +470,46 @@ def upsert_customer(conn, *, override_id: int | None, orig_ean_edi: str | None,
         # class, just reached from a different screen). The new partial unique index
         # (db.py) now makes that raise `UniqueViolation` instead of silently
         # duplicating — caught here and turned into the same clean `DuplicateEan` every
-        # other collision path in this module raises.
+        # other collision path in this module raises. This backstop only ever fires
+        # for a genuinely HAND-ADDED row (`orig_ean_edi IS NULL`) — the only partition
+        # the partial index actually covers; see the #285 guard immediately below for
+        # the sibling SHEET-BOUND case, which this backstop structurally cannot catch.
+        #
+        # #285: a row that FIRST became sheet-bound (this same `id` was created by the
+        # fallthrough branch further down, `orig_ean_edi IS NOT NULL`) and is now being
+        # edited a SECOND time — this time via its own `override_id` — has the
+        # IDENTICAL gap #275 already fixed for the fallthrough branch itself: the
+        # #248 partial index (`WHERE orig_ean_edi IS NULL`) never covers this row,
+        # whatever its `ean_edi`, so the `except UniqueViolation` below can never fire
+        # for it. Read the row's own CURRENT `orig_ean_edi` first — a write-once value
+        # (no UPDATE in this module ever changes it), so reading it outside the lock
+        # below is safe — to tell the two cases apart: NULL means genuinely
+        # hand-added, stays on the unchanged backstop path; NOT NULL (including an
+        # empty string — the sheet legitimately leaves it blank, same as #275's own
+        # fallthrough-branch guard) means sheet-bound, and gets the SAME app-level
+        # `_active_customer_conflict` guard under the SAME advisory lock the
+        # fallthrough branch already takes, with the lock-acquire/conflict-check AND
+        # the UPDATE inside ONE transaction (mirrors the fallthrough branch's own
+        # single-transaction shape — no gap between the check and the write). This can
+        # never self-collide: `_active_customer_conflict` only ever matches a row with
+        # `orig_ean_edi IS NULL`, and the row being edited here structurally has
+        # `orig_ean_edi IS NOT NULL` — it is never a candidate to collide with itself,
+        # whether or not `ean_edi` is actually changing on this edit. Deliberately does
+        # NOT close the reverse ordering (a concurrent brand-new hand-added insert
+        # never checking sheet-bound rows) — the SAME "opposite direction" #275's own
+        # ROZHODNUTÉ decision already scopes out as unchanged; see that branch's own
+        # comment for the full reasoning.
+        current = conn.execute(
+            "SELECT orig_ean_edi FROM customer_overrides WHERE id=%s", (override_id,)
+        ).fetchone()
+        sheet_bound = current is not None and current[0] is not None
         try:
             with conn.transaction():
+                if sheet_bound:
+                    conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (ean_edi,))
+                    conflict = _active_customer_conflict(conn, ean_edi)
+                    if conflict:
+                        raise DuplicateEan(ean_edi, conflict)
                 row = conn.execute(
                     """UPDATE customer_overrides
                           SET ean_edi=%s, name=%s, emails=%s, city=%s, street=%s, zip=%s,

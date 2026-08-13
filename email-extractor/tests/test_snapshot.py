@@ -246,6 +246,7 @@ def test_two_concurrent_brand_new_customer_adds_for_the_same_ean_produce_one_row
     import threading
 
     import psycopg
+    from _race import run_racers
 
     barrier = threading.Barrier(2)
     errors = []
@@ -264,12 +265,11 @@ def test_two_concurrent_brand_new_customer_adds_for_the_same_ean_produce_one_row
         finally:
             conn.close()
 
-    t1 = threading.Thread(target=add, args=("Pretekár A",))
-    t2 = threading.Thread(target=add, args=("Pretekár B",))
-    t1.start()
-    t2.start()
-    t1.join(timeout=15)
-    t2.join(timeout=15)
+    t1 = threading.Thread(target=add, args=("Pretekár A",), name="add-a")
+    t2 = threading.Thread(target=add, args=("Pretekár B",), name="add-b")
+    # #291: bounded join() alone never kills a genuinely-stalled thread — run_racers
+    # fails loudly + cleans up any stray backend instead of wedging later tests.
+    run_racers(pg, [t1, t2], timeout=15, label="brand_new_customer")
 
     assert not errors, f"a racing upsert_customer call must never raise: {errors}"
     assert pg.execute(
@@ -293,6 +293,7 @@ def test_two_concurrent_new_customer_adds_for_the_same_ean_with_different_street
     import threading
 
     import psycopg
+    from _race import run_racers
 
     barrier = threading.Barrier(2)
     errors = []
@@ -311,12 +312,11 @@ def test_two_concurrent_new_customer_adds_for_the_same_ean_with_different_street
         finally:
             conn.close()
 
-    t1 = threading.Thread(target=add, args=("Pretekár Košice", "Ulica A 1"))
-    t2 = threading.Thread(target=add, args=("Pretekár Prešov", "Ulica B 2"))
-    t1.start()
-    t2.start()
-    t1.join(timeout=15)
-    t2.join(timeout=15)
+    t1 = threading.Thread(target=add, args=("Pretekár Košice", "Ulica A 1"), name="add-a")
+    t2 = threading.Thread(target=add, args=("Pretekár Prešov", "Ulica B 2"), name="add-b")
+    # #291: bounded join() alone never kills a genuinely-stalled thread — run_racers
+    # fails loudly + cleans up any stray backend instead of wedging later tests.
+    run_racers(pg, [t1, t2], timeout=15, label="different_street")
 
     assert pg.execute(
         "SELECT count(*) FROM customer_overrides WHERE ean_edi='7000000000901'"
@@ -635,6 +635,7 @@ def test_two_concurrent_sheet_bound_edits_sharing_a_target_ean_do_not_deadlock(p
     import threading
 
     import psycopg
+    from _race import run_racers
 
     snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
     barrier = threading.Barrier(2)
@@ -655,15 +656,219 @@ def test_two_concurrent_sheet_bound_edits_sharing_a_target_ean_do_not_deadlock(p
             conn.close()
 
     t1 = threading.Thread(target=edit, args=(
-        "2000000000864", "Košútka 1", "Pobočka A súbežne", "Martin", "Košútka 1"))
+        "2000000000864", "Košútka 1", "Pobočka A súbežne", "Martin", "Košútka 1"),
+        name="edit-a")
     t2 = threading.Thread(target=edit, args=(
-        "2000000000871", "Hlavná 2", "Pobočka B súbežne", "Poprad", "Hlavná 2"))
-    t1.start()
-    t2.start()
-    t1.join(timeout=15)
-    t2.join(timeout=15)
+        "2000000000871", "Hlavná 2", "Pobočka B súbežne", "Poprad", "Hlavná 2"),
+        name="edit-b")
+    # #291: bounded join() alone never kills a genuinely-stalled thread — run_racers
+    # fails loudly + cleans up any stray backend instead of wedging later tests.
+    run_racers(pg, [t1, t2], timeout=15, label="sheet_bound_no_deadlock")
 
     assert not errors, f"two legitimate branch-sharing edits must never raise: {errors}"
     names = {r["name"] for r in snapshot.customers_for_management(pg)
              if r["ean_edi"] == "7200000000005"}
+    assert names == {"Pobočka A súbežne", "Pobočka B súbežne"}
+
+
+# --- #285: override_id-edit branch (re-editing an already-overridden SHEET-BOUND row)
+# vs an active hand-added row's EAN — the symmetric gap #275 left named/out-of-scope
+# (see that ticket's own design comment). The EXISTING `test_editing_an_already_
+# overridden_customer_by_override_id_into_a_colliding_ean_raises` above (#248) already
+# covers the OTHER partition of this branch — a genuinely HAND-ADDED row
+# (orig_ean_edi IS NULL) edited by its own override_id — and stays untouched by this fix.
+
+def _override_a_sheet_bound_customer(pg, *, orig_ean_edi, orig_street, ean_edi, name,
+                                      city, street, emails=None):
+    """Helper: gives a still-sheet-only row its FIRST override (the #275 fallthrough
+    path), so the resulting row has BOTH an override_id AND orig_ean_edi IS NOT NULL in
+    the DB — the exact precondition #285's guard must detect on the SECOND edit."""
+    return snapshot.upsert_customer(
+        pg, override_id=None, orig_ean_edi=orig_ean_edi, orig_street=orig_street,
+        ean_edi=ean_edi, name=name, emails=emails or [], city=city, street=street,
+        zip_="")
+
+
+def test_editing_an_already_overridden_sheet_bound_customer_by_its_override_id_into_a_colliding_active_hand_added_ean_raises(pg):
+    """#285: a sheet-bound row that already got its FIRST override (so it now carries
+    its own override_id) is edited a SECOND time, this time via that override_id — the
+    #248 partial index still excludes it (WHERE orig_ean_edi IS NULL), so retargeting
+    ean_edi onto an ACTIVE hand-added row's EAN must be refused with the same clean
+    DuplicateEan every other collision path raises."""
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    hand_added_id = snapshot.upsert_customer(
+        pg, override_id=None, orig_ean_edi=None, orig_street=None,
+        ean_edi="7300000000001", name="Ručne pridaný zákazník", emails=["rucny@x.sk"],
+        city="Košice", street="Ručná 1", zip_="")
+    first_id = _override_a_sheet_bound_customer(
+        pg, orig_ean_edi="2000000000871", orig_street="Hlavná 2",
+        ean_edi="2000000000871", name="Dva maily v1", city="Poprad", street="Hlavná 2",
+        emails=["a@firma.sk", "b@firma.sk"])
+    # precondition: this row really is sheet-bound in the DB (orig_ean_edi IS NOT NULL)
+    assert pg.execute(
+        "SELECT orig_ean_edi FROM customer_overrides WHERE id=%s", (first_id,)
+    ).fetchone()[0] is not None
+
+    with pytest.raises(snapshot.DuplicateEan) as exc_info:
+        snapshot.upsert_customer(
+            pg, override_id=first_id, orig_ean_edi=None, orig_street=None,
+            ean_edi="7300000000001",  # collides with the hand-added row's EAN
+            name="Dva maily v2 cez override_id", emails=["a@firma.sk"],
+            city="Poprad", street="Hlavná 2", zip_="")
+    assert exc_info.value.existing["override_id"] == hand_added_id
+
+    # neither row was corrupted by the refused edit
+    rows = {r["ean_edi"]: r["name"] for r in snapshot.customers_for_management(pg)}
+    assert rows["7300000000001"] == "Ručne pridaný zákazník"
+    assert rows["2000000000871"] == "Dva maily v1"
+
+
+def test_editing_an_already_overridden_sheet_bound_customer_by_its_override_id_into_a_retired_hand_added_eans_ean_is_allowed(pg):
+    """The guard reuses `_active_customer_conflict`, which already filters NOT retired —
+    a retired hand-added row must never block this second, override_id-driven edit."""
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    hand_added_id = snapshot.upsert_customer(
+        pg, override_id=None, orig_ean_edi=None, orig_street=None,
+        ean_edi="7300000000002", name="Zrušený zákazník", emails=["x@x.sk"],
+        city="Košice", street="Ručná 2", zip_="")
+    assert snapshot.retire_customer(pg, override_id=hand_added_id,
+                                    orig_ean_edi=None, orig_street=None) is True
+    first_id = _override_a_sheet_bound_customer(
+        pg, orig_ean_edi="2000000000864", orig_street="Košútka 1",
+        ean_edi="2000000000864", name="Martin v1", city="Martin", street="Košútka 1")
+
+    rid = snapshot.upsert_customer(
+        pg, override_id=first_id, orig_ean_edi=None, orig_street=None,
+        ean_edi="7300000000002",  # same EAN as the now-RETIRED hand-added row
+        name="Martin v2 cez override_id", emails=[], city="Martin", street="Košútka 1",
+        zip_="")
+    assert rid == first_id
+    rows = {r["ean_edi"]: r["name"] for r in snapshot.customers_for_management(pg)}
+    assert rows["7300000000002"] == "Martin v2 cez override_id"
+
+
+def test_editing_an_already_overridden_sheet_bound_customer_by_its_override_id_whose_original_ean_was_blank_is_allowed(pg):
+    """`orig_ean_edi` for a still-sheet-only row whose ORIGINAL sheet EAN was blank is
+    "" (not None) — it still lands in `customer_overrides.orig_ean_edi` as "" after the
+    first override, which is still `IS NOT NULL` in SQL. The guard must not special-case
+    this; a non-colliding second, override_id-driven edit must succeed exactly like any
+    other sheet-bound row."""
+    customer_csv = (
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,E-mail\n"
+        "Zákazník bez EAN v hárku,,Žilina,Bez EAN 1,ziadny@x.sk\n")
+    catalog_csv = "GTIN,Názov,doplnok\nG1,Rožok,\n"
+    snapshot.import_snapshot(pg, catalog_csv, customer_csv)
+    first_id = _override_a_sheet_bound_customer(
+        pg, orig_ean_edi="", orig_street="Bez EAN 1", ean_edi="7300000000003",
+        name="Zákazník bez EAN v1", city="Žilina", street="Bez EAN 1",
+        emails=["ziadny@x.sk"])
+    assert pg.execute(
+        "SELECT orig_ean_edi FROM customer_overrides WHERE id=%s", (first_id,)
+    ).fetchone()[0] == ""
+
+    rid = snapshot.upsert_customer(
+        pg, override_id=first_id, orig_ean_edi=None, orig_street=None,
+        ean_edi="7300000000004", name="Zákazník bez EAN v2", emails=["ziadny@x.sk"],
+        city="Žilina", street="Bez EAN 1", zip_="")
+    assert rid == first_id
+    rows = {r["name"]: r for r in snapshot.customers_for_management(pg)}
+    assert rows["Zákazník bez EAN v2"]["ean_edi"] == "7300000000004"
+
+
+def test_editing_an_already_overridden_sheet_bound_customer_by_its_override_id_with_unchanged_ean_does_not_false_positive(pg):
+    """Self-collision safety: `_active_customer_conflict` only ever matches a row with
+    `orig_ean_edi IS NULL`; the row being edited here structurally has `orig_ean_edi IS
+    NOT NULL` (that is what put it on this branch), so it can never be found as a
+    conflict with ITSELF — resubmitting the SAME ean_edi while changing only other
+    fields must never raise DuplicateEan."""
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    first_id = _override_a_sheet_bound_customer(
+        pg, orig_ean_edi="2000000000871", orig_street="Hlavná 2",
+        ean_edi="2000000000871", name="Dva maily v1", city="Poprad", street="Hlavná 2",
+        emails=["a@firma.sk", "b@firma.sk"])
+
+    rid = snapshot.upsert_customer(
+        pg, override_id=first_id, orig_ean_edi=None, orig_street=None,
+        ean_edi="2000000000871",  # UNCHANGED — same EAN this row already holds
+        name="Dva maily premenovaný", emails=["a@firma.sk", "b@firma.sk", "c@firma.sk"],
+        city="Poprad", street="Hlavná 2", zip_="")
+    assert rid == first_id
+    rows = {r["ean_edi"]: r["name"] for r in snapshot.customers_for_management(pg)}
+    assert rows["2000000000871"] == "Dva maily premenovaný"
+
+
+def test_editing_two_different_already_overridden_sheet_bound_customers_by_override_id_to_share_the_same_ean_is_allowed(pg):
+    """The sheet legitimately repeats an EAN across branches (unchanged by #285) — the
+    new guard only ever checks against ACTIVE hand-added rows, never other sheet-bound
+    rows, so two override_id-driven edits sharing a target EAN must both succeed."""
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    a_first = _override_a_sheet_bound_customer(
+        pg, orig_ean_edi="2000000000864", orig_street="Košútka 1",
+        ean_edi="2000000000864", name="Pobočka A v1", city="Martin", street="Košútka 1")
+    b_first = _override_a_sheet_bound_customer(
+        pg, orig_ean_edi="2000000000871", orig_street="Hlavná 2",
+        ean_edi="2000000000871", name="Pobočka B v1", city="Poprad", street="Hlavná 2")
+
+    snapshot.upsert_customer(
+        pg, override_id=a_first, orig_ean_edi=None, orig_street=None,
+        ean_edi="7300000000005", name="Pobočka A v2", emails=[], city="Martin",
+        street="Košútka 1", zip_="")
+    snapshot.upsert_customer(
+        pg, override_id=b_first, orig_ean_edi=None, orig_street=None,
+        ean_edi="7300000000005", name="Pobočka B v2", emails=[], city="Poprad",
+        street="Hlavná 2", zip_="")
+    names = {r["name"] for r in snapshot.customers_for_management(pg)
+             if r["ean_edi"] == "7300000000005"}
+    assert names == {"Pobočka A v2", "Pobočka B v2"}
+
+
+def test_two_concurrent_already_overridden_sheet_bound_customer_edits_by_override_id_sharing_a_target_ean_do_not_deadlock(pg):
+    """#285: mirrors `test_two_concurrent_sheet_bound_edits_sharing_a_target_ean_do_not_
+    deadlock` above, one level further — the guard here takes the SAME advisory lock
+    (keyed on ean_edi) under a different entry point (override_id, not orig_ean_edi/
+    orig_street). Two DIFFERENT already-overridden sheet-bound rows, edited
+    concurrently by their OWN override_ids, to the SAME target EAN, no hand-added row
+    involved: proves the lock does not turn this legitimate branch-sharing case into a
+    deadlock or spurious failure under real concurrency."""
+    import threading
+
+    import psycopg
+    from _race import run_racers
+
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    a_first = _override_a_sheet_bound_customer(
+        pg, orig_ean_edi="2000000000864", orig_street="Košútka 1",
+        ean_edi="2000000000864", name="Pobočka A v1", city="Martin", street="Košútka 1")
+    b_first = _override_a_sheet_bound_customer(
+        pg, orig_ean_edi="2000000000871", orig_street="Hlavná 2",
+        ean_edi="2000000000871", name="Pobočka B v1", city="Poprad", street="Hlavná 2")
+
+    barrier = threading.Barrier(2)
+    errors = []
+
+    def edit(override_id, name, city, street):
+        conn = psycopg.connect(PG_DSN)
+        try:
+            barrier.wait(timeout=5)
+            snapshot.upsert_customer(
+                conn, override_id=override_id, orig_ean_edi=None, orig_street=None,
+                ean_edi="7300000000006", name=name, emails=[], city=city, street=street,
+                zip_="")
+            conn.commit()
+        except Exception as e:  # pragma: no cover - surfaced via `errors` below
+            errors.append(e)
+        finally:
+            conn.close()
+
+    t1 = threading.Thread(target=edit, args=(a_first, "Pobočka A súbežne", "Martin",
+                                              "Košútka 1"), name="edit-a")
+    t2 = threading.Thread(target=edit, args=(b_first, "Pobočka B súbežne", "Poprad",
+                                              "Hlavná 2"), name="edit-b")
+    # #291: bounded join() alone never kills a genuinely-stalled thread — run_racers
+    # fails loudly + cleans up any stray backend instead of wedging later tests.
+    run_racers(pg, [t1, t2], timeout=15, label="override_id_no_deadlock")
+
+    assert not errors, f"two legitimate branch-sharing edits must never raise: {errors}"
+    names = {r["name"] for r in snapshot.customers_for_management(pg)
+             if r["ean_edi"] == "7300000000006"}
     assert names == {"Pobočka A súbežne", "Pobočka B súbežne"}

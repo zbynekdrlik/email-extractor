@@ -47,3 +47,44 @@ This cost one wrong-then-recovered commit on #277 (`git reset --soft HEAD~1`,
 re-committed correctly as `ccf1148`) — cheap because it was caught immediately by
 step 3 above. Skipping steps 2/3 is what would let a wrong commit message actually
 ship.
+
+## The `#N`-in-commit-message design gate ALSO checks the ISSUE COMMENT's own SHAPE
+## for a NON-TRIVIAL ticket — a prose "Triage: non-trivial" paragraph is not enough
+## on its own (#291, 2026-08-13)
+
+`orders-corpus.md` already documents that the design-gate hook's `_CAUSE_RE`
+classifier needs the literal word "Príčina:" on the commit-message-referenced
+ISSUE COMMENT. There is a SEPARATE, additional classifier
+(`design_gate.classify_triage_and_approaches`/`classify_architecture_section`) that
+fires whenever that same comment's own `Triage:` line names the ticket non-trivial
+(matches words like "non-trivial"/"cross-cutting"/"architektonick*"/"komplexn*") —
+and it needs a MECHANICALLY specific shape, not just a longer prose writeup:
+
+- At least **2 DISTINCT** literal `Approach N`/`Option N`/`Variant N`/`Prístup N`/
+  `Možnosť N` markers (N = 1-3) — "Approach chosen: X" plus a separate prose list of
+  "rejected alternatives" does **NOT** satisfy this; the numbered word itself must
+  precede the number for EACH candidate, including the one you chose (`Approach 1
+  (CHOSEN): ...`, `Approach 2 (REJECTED): ...`).
+- Explicit trade-off language somewhere in the comment (`trade-off`, `kompromis`,
+  `výhod`/`nevýhod`, `pros`/`cons`, "on the other hand"/"na druhej strane").
+- An `Architektúra:` (or `Architecture:`) section HEADER, containing a
+  structure/topology word (`štruktúra`/`structure`/`topológia`/`topology`) AND
+  either a framework/library word (`framework`, `rámec`, `knižnica`/`library`) OR an
+  evidenced "no existing framework fits" justification.
+
+A first design comment written as normal, thorough prose (root cause + "the chosen
+approach" + a numbered "alternatives considered and rejected" list, no
+`Architektúra:` header at all) was REJECTED by the hook on the first commit attempt
+of a non-trivial ticket, even though the actual engineering content was already
+complete and correct — the gate wants the MECHANICAL markers, not just the
+substance. Fix: re-post as a SECOND comment restructured with the literal headers
+above (`Approach 1 (CHOSEN): ...` / `Approach 2 (REJECTED): ...` / `Approach 3
+(REJECTED): ...` / `Approach 4 (REJECTED): ...`, then an `Architektúra:` paragraph
+naming the new module's structure + confirming no existing internal framework
+covers the narrow concern) — the retried commit then went through immediately. For
+a **TRIVIAL** ticket (`Triage: trivial`) none of this applies — one honest
+paragraph is still sufficient, per `autonomous-batch-issue-development.md`'s own
+"depth scales with the problem" principle. Write the non-trivial shape correctly
+the FIRST time by drafting the `Approach N (CHOSEN/REJECTED):` headers and the
+`Architektúra:` section from the start, rather than writing normal prose and
+discovering the mechanical requirement only after a rejection.

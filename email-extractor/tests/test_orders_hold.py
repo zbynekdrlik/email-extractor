@@ -268,6 +268,7 @@ def test_two_concurrent_answers_to_sibling_questions_release_it_exactly_once(pg,
     import time
 
     import psycopg
+    from _race import run_racers
 
     answers = _answers(
         extra_item={"name": "šiška", "quantity": 3, "unit": "ks", "sourceQuote": "3x šiška"},
@@ -305,12 +306,13 @@ def test_two_concurrent_answers_to_sibling_questions_release_it_exactly_once(pg,
         finally:
             conn.close()
 
-    t1 = threading.Thread(target=release, args=("a", qs["torta"]))
-    t2 = threading.Thread(target=release, args=("b", qs["šiška"]))
-    t1.start()
-    t2.start()
-    t1.join(timeout=15)
-    t2.join(timeout=15)
+    t1 = threading.Thread(target=release, args=("a", qs["torta"]), name="release-a")
+    t2 = threading.Thread(target=release, args=("b", qs["šiška"]), name="release-b")
+    # #291: a hand-rolled join(timeout=15) never kills a genuinely-stalled thread — it
+    # left a stray connection holding this order's FOR UPDATE lock open, wedging every
+    # later test's schema TRUNCATE. run_racers fails loudly + cleans up the stray
+    # backend instead.
+    run_racers(pg, [t1, t2], timeout=15, label="release_for_question")
 
     released_total = len(results.get("a") or []) + len(results.get("b") or [])
     assert released_total == 1, \
