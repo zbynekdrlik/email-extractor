@@ -11,6 +11,7 @@ import time
 
 import psycopg
 import pytest
+from _race import run_racers
 from psycopg.types.json import Json
 
 from app import store
@@ -2259,12 +2260,13 @@ def test_release_for_question_advisory_lock_serializes_two_genuinely_concurrent_
         finally:
             conn.close()
 
-    threads = [threading.Thread(target=_racer, args=(i,)) for i in (1, 2)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=15)
-    assert not any(t.is_alive() for t in threads), "a racer thread hung"
+    threads = [threading.Thread(target=_racer, args=(i,), name=f"racer-{i}")
+              for i in (1, 2)]
+    # #291: the old `assert not any(t.is_alive() ...)` DETECTED a hang but never
+    # cleaned it up — a genuinely stalled racer's connection would still hold the
+    # advisory lock open, wedging every later test. run_racers fails loudly AND
+    # terminates the stray backend so the suite is never wedged.
+    run_racers(pg, threads, timeout=15, label="dl_advisory_lock")
     assert errors == [], f"a racer raised: {errors}"
 
     # Both racers must have genuinely reached the model (proves the sibling-gate passed
