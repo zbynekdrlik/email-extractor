@@ -247,3 +247,12 @@ actually redirects to `/login` first as proof the session is genuinely clean.
   ever exists for a LATER `flush_pending()` call (on a DIFFERENT connection) to
   discover and actually deliver. Reusable for any future backend sweep in this
   codebase that writes durably before an eventual Odoo post.
+- **`curl http://localhost:8099/health` from inside an SSH session on the HA box can
+  fail with `Recv failure: Connection reset by peer` even though the add-on is
+  perfectly healthy (#268 kroky 5/7/8 post-deploy check).** `curl` resolves
+  `localhost` to `::1` (IPv6) FIRST and the connection gets reset on that path — the
+  add-on's Flask dev server binds `0.0.0.0` (IPv4-only). Force IPv4 explicitly:
+  `curl -4 -s http://127.0.0.1:8099/health` (or use `127.0.0.1` instead of
+  `localhost` — either alone is enough, `-4` is the more robust fix since it also
+  covers a future` localhost` typo). A plain `curl -s http://localhost:8099/health`
+  failing is NOT evidence the add-on is down; check with `-4` before escalating.
