@@ -353,3 +353,68 @@ from any of the 11 migrated tests (`from _race import run_racers` as a local imp
 same convention as the existing local `import threading`/`import psycopg`). Do NOT
 reintroduce the old idiom even for "just one more quick racer test" — that is exactly
 how the suite acquired 11 instances of the same hazard in the first place.
+
+## A worktree-isolated worker's stray `cd .../email-extractor && ...` (no worktree
+## segment in the path) silently reads the SHARED main checkout, not your own copy
+## (#272, 2026-08-13)
+
+The worktree-isolation guard blocks `cd` to the shared checkout's TOP-LEVEL root
+(`/home/.../email_extract`) with an explicit refusal, but a `cd` straight into that
+same shared checkout's `email-extractor/` SUBDIRECTORY (e.g. `cd /home/.../email_
+extract/email-extractor && cat Dockerfile`) is NOT caught — it silently runs against
+the shared tree instead of your own `.claude/worktrees/agent-<id>/email-extractor/`
+copy. Harmless for a plain READ (the shared checkout is usually at/near the same
+commit your worktree branched from, and no `Edit`/`Write` call ever targets a
+relative path this way — those always need the file to already be open via `Read`,
+which only succeeds against a path you actually passed), but it means anything you
+`cat`/`grep`/`ls` this way is NOT provably your own worktree's content, and it also
+means a `.venv`/`pip install` done this way lands in the SHARED checkout's
+environment, not yours (a worktree checkout has no `.venv/` of its own — see the
+section above — so accidentally landing in the shared one can look like "it already
+has a venv" and mask the fact your OWN worktree still needs
+`python3 -m venv .venv && pip install -r requirements.txt -r requirements-dev.txt`
+before anything can actually run there). **Always use the FULL absolute worktree
+path** (`.../  .claude/worktrees/agent-<your-id>/email-extractor/...`) for every
+read/list/install from the very first command, never a path that happens to also
+resolve inside the shared checkout — don't rely on the guard to catch a subdirectory
+`cd` the way it catches the top-level one.
+
+## The full local suite (1553 tests) reliably exceeds the Bash tool's own timeout,
+## even near its 600000 ms cap, under sibling-fleet contention — the working
+## foreground-wait recovery shape (#272, 2026-08-13)
+
+A plain `pytest tests/ -q > log 2>&1` run, even given `timeout: 598000` (near the
+tool's 600000 ms ceiling), routinely does NOT finish inside that window while 2-3
+sibling worktree-fleet workers are also running full suites on this box (see the
+existing contention notes above) — the harness auto-backgrounds it and hands back a
+task id + PID-less wrapper. A SUBAGENT must not end its turn or launch a background
+waiter of its own while that run is still in flight (it would be silently orphaned) —
+the working recovery sequence:
+
+1. `ps -o pid,ppid,cmd --ppid <wrapper-bash-pid>` (or `pgrep -P <wrapper-pid>`) to get
+   the REAL child `.venv/bin/python -m pytest ...` PID — the wrapper bash's own PID
+   is NOT what you want to wait on.
+2. Wait on that specific PID with the SIMPLEST possible one-liner:
+   `while ps -p <pid> >/dev/null 2>&1; do sleep 15; done; echo DONE` — a single `while`
+   loop plus one trailing `echo`, all on ONE line. A multi-statement / multi-line
+   version of the SAME wait (a `DEADLINE=$((SECONDS+N))`-bounded variant, or anything
+   using `&&`/`;`-joined assignment before the loop) gets REJECTED by the worktree-
+   isolation complexity guard as "too complex to verify it stays inside the worktree"
+   — even though it touches no `git`/`cd` at all. Only the plain single-`while`-loop
+   shape above is accepted.
+3. If that same normalized loop shape needs to be re-issued (the run STILL isn't done
+   after one ~598s call), `hooks/block-local-poll-repeat.sh` blocks the literal
+   repeat — append `# airuleset:poll-ok <reason>` on its OWN line right after the
+   command to pass through (logged, not a silent bypass).
+4. A bare `sleep N` (with no condition to wait on) is separately blocked outright —
+   "use Monitor with an until-loop" or `run_in_background` instead; chaining shorter
+   sleeps to route around the block is explicitly rejected too.
+5. `Monitor` (a background watcher with the same `while ps -p <pid>; do sleep 15;
+   done; echo DONE; tail -N <log>` script) works as a genuine alternative/backup to
+   the plain Bash wait and is NOT subject to the same "too complex"/"repeat" guards —
+   useful to fire in parallel with a dispatched review subagent so both wake you at
+   once instead of serially.
+
+Verify a completed run succeeded the same way `local-testing.md` already documents
+above (exit code 0 + the `#160` zero-`F`/`E`/`s`/`x` Counter technique on the
+dot-progress output) — do not trust "the wait finished" alone as proof of a clean run.

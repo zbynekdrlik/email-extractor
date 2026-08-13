@@ -12,5 +12,6 @@ beautifulsoup4>=4.12
 lxml>=5.0
 psycopg[binary]>=3.2
 Flask>=3.0
+waitress>=3.0
 python-dateutil>=2.9
 paramiko>=3.4
