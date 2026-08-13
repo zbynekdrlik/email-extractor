@@ -221,3 +221,45 @@ captured dot-progress output) is what actually confirms a clean re-run** — thi
 is a second, independent confirmation that trusting dots-reached-100% + an empty
 `collections.Counter` is more reliable than waiting for a "N passed in Xs" line that may
 never get captured.
+
+## The `#160` Counter technique breaks down the moment there IS a real failure — count
+## the `FAILED`/`ERROR` SUMMARY lines, not raw characters in the whole file (integration
+## round B, 2026-08-13)
+
+`collections.Counter(ch for ch in open(log).read() if ch in 'FEsx.')` over the ENTIRE
+captured file (not just the dot-progress lines) is only safe when the run is CLEAN — a
+genuine failure prints a full traceback + this project's own `log.exception`/
+`log.warning` output into the same file, and THAT text is riddled with the letters
+`F`/`E`/`s`/`x` too (the words "Error", "Exception", "failed", a stack trace's file
+paths). A single real test failure inflated one such count to `{'.': 1582, 's': 275,
+'x': 41, 'E': 39, 'F': 15}` — reading like 15 distinct failures across the suite, when
+there was exactly ONE. Don't panic-diagnose a wide blast radius from an inflated raw
+character count: `grep -c "^FAILED\|^ERROR"` (pytest's own short-summary lines, always
+prefixed at the start of a line) gives the TRUE failure count regardless of how much
+traceback noise surrounds it, and `grep "^FAILED"` names every actually-failed test.
+Reserve the raw-Counter technique for confirming a run is clean (zero failures) —
+once ANY `FAILED`/`ERROR` line exists, switch to counting those lines instead.
+
+## A `PG_TEST_DSN`-collision symptom that is NOT "scattered F/E" — a clean, CONSISTENT
+## `n == 0` with "no DL catalog snapshot yet — DL worker idle" (integration round B,
+## 2026-08-13)
+
+The existing collision warning above describes "scattered F/E in an otherwise-passing
+run" as the tell for two concurrent `pytest` invocations against the same
+`PG_TEST_DSN`. A DIFFERENT, equally real symptom showed up this session: running a
+SINGLE targeted test (`-k <name>`) while an EARLIER full-suite background run was
+still mid-flight on the SAME port produced a clean, deterministic `assert n == 1`
+failure (`n` was `0`) with the log line `WARNING orders.dl_worker: no DL catalog
+snapshot yet — DL worker idle` — reproduced identically on TWO unrelated existing
+tests run alone this way, both of which pass individually once nothing else is
+running. Root cause: the concurrent run's OWN test setup (`pg` fixture) `TRUNCATE`d
+`dl_snapshots` mid-way through this test's `_snapshot(pg)` → `dl_worker.tick(...)`
+window, wiping the snapshot row this test had just inserted before `tick()` could read
+it back. The tell that this is contamination, not a real bug: (1) `ps aux | grep
+pytest` shows a SECOND python process against the exact same `PG_TEST_DSN` port, and
+(2) a scratch script calling `dl_snapshot.import_snapshot`/`latest_snapshot_id`
+directly (bypassing pytest and any concurrent fixture entirely) proves the snapshot
+path works fine in isolation. Before trusting ANY single-test-alone failure as real,
+run `ps aux | grep pytest` FIRST — this class of failure looks exactly like a genuine
+regression (a clean, reproducible assertion failure, not flakiness) and can easily
+mislead a fix attempt if taken at face value.

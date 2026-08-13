@@ -376,3 +376,47 @@ codebase that auto-recovers/re-releases a stuck message based on its CURRENT sta
 columns must apply the same check**: absence of a positive signal (a question, a
 claim) is not the same as absence of a NEGATIVE one (a logged failure) — query for
 both before deciding something is safe to retry.
+
+## Merging two branches that each depend on the OTHER's safety invariant — prove the
+## composition with ONE test through the REAL merged code, never trust two isolated tests
+
+Integration round B (2026-08-13) merged #239 (safe automatic ORION upload retry,
+restructured `_process_document`'s upload except-block into `_check_landed`/
+`_finish_shipped`/`_alert_and_release`) and #265 (`_release_stuck_siblings`, whose
+`status='error'` exclusion above exists SPECIFICALLY to stay compatible with #239's
+retry) — two branches built and adversarially reviewed in COMPLETE isolation, each
+0 🔴 0 🟡 0 🔵, each with its own regression tests all green. Neither branch's own test
+suite could have caught a REAL regression in the seam between them: #265's own
+regression test for the exclusion (`test_release_for_question_sibling_widening_never_
+touches_unrelated_messages`) manually `INSERT`s a synthetic `email_events` row instead
+of driving a real failure through the code — it pins the SQL predicate, not the actual
+interaction. Had #239's restructuring changed WHICH stage/status `_alert_and_release`
+logs (a plausible refactor slip), that hand-built fixture would still pass, silently
+lying about the merged system's real safety.
+
+**The fix pattern, reusable for any future merge of two branches with an inter-
+dependent safety property:** after resolving the textual conflict, write ONE NEW test
+that drives the FULL real pipeline through BOTH features together (here:
+`test_sibling_release_still_excludes_a_message_whose_upload_genuinely_failed_through_
+the_merged_retry_path` — a genuine transient upload failure + the one bounded retry,
+both failing, landing in the real merged `_alert_and_release`, THEN answering a
+sibling's `dl_supplier` question and checking `_release_stuck_siblings` against what
+that real closure produced). A test built from hand-inserted fixture rows proves the
+QUERY is correct in isolation; it can never prove the PRODUCER and the CONSUMER of that
+data still agree after either side changes shape.
+
+**Non-obvious event-log gotcha this test's own first draft tripped on:** the LATEST
+`email_events` row for a message that ends in `review` is usually NOT the diagnostic
+`status='error'`/`status='review'` event a specific closure logged (e.g.
+`_alert_and_release`'s own `_event(..., stage="review", status="error", rollup=False,
+...)`) — `_run_and_finish`'s own ROLLUP summary event, logged immediately afterward via
+`report.log_event(..., stage=result.get("status", "ok"), status=result.get("status",
+"ok"), rollup=True, ...)`, reuses the SAME `stage="review"` (since `_aggregate_status`
+returns `"review"` for an all-review document set) with `status="review"` — always the
+newer row. Querying "the latest `stage='review'` event" for a message therefore reads
+the ROLLUP, not the specific failure diagnostic. Any future test (or dashboard query)
+that needs to distinguish WHY a message ended in review must check for EXISTENCE of
+the specific `status` value it cares about (`_release_stuck_siblings`'s own
+`NOT EXISTS (... status = 'error')` pattern), never "the most recent event for this
+message" — the rollup summary is always more recent than the diagnostic event that
+caused it.
