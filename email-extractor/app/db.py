@@ -63,6 +63,15 @@ SCHEMA = [
         extracted_text  TEXT
     )
     """,
+    # --- #273: message_id is the referencing side of a FK (ON DELETE CASCADE) —
+    # Postgres does not auto-index it. Queried directly in httpapi_dashboard_data.py
+    # (x2) and dl_worker.py; a cascading delete from messages also scans this
+    # sequentially without it. Plain btree CREATE INDEX IF NOT EXISTS (no
+    # CONCURRENTLY, no advisory lock — same shape as idx_messages_status/
+    # idx_events_message below: a single atomic DDL statement Postgres itself
+    # serializes across concurrent init_schema() callers, unlike the ALTER TABLE +
+    # backfill migrations elsewhere in this file that genuinely need the lock). ---
+    "CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id)",
     """
     CREATE TABLE IF NOT EXISTS processed (
         id           BIGSERIAL PRIMARY KEY,

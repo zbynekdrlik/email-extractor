@@ -79,6 +79,40 @@ hang, a truncated capture, or a reason to re-run: verify success from **exit cod
 Counter(ch for ch in open('out.log').read() if ch not in '.\n[] %0123456789'))"` — an empty
 Counter means every test passed) rather than grepping for `"passed in"`.
 
+## A worktree-isolated worker needs its OWN venv AND its OWN test-Postgres container (#273, 2026-08-13)
+
+A `.claude/worktrees/agent-<id>/` checkout shares only `.git` with the main tree and any
+sibling worktrees dispatched in the same fleet round — it has **no `.venv/`** (worktrees
+never share working-tree files), so the first thing to do is `python3 -m venv .venv &&
+.venv/bin/pip install -r requirements.txt -r requirements-dev.txt` before any test can
+run at all.
+
+More importantly: a fleet round can have 2-3 sibling autopilot-workers running full local
+suites CONCURRENTLY on the same box, each in its own worktree. `email-extractor-testpg`
+(port 15433) is the box's one long-lived, commonly-reused container — check `ps aux |
+grep pytest` (not just `docker ps`) before pointing `PG_TEST_DSN` at it; if another
+worker's `pytest` is already running against it, the "never two invocations against the
+same DSN" rule above applies EQUALLY across separate worktrees, not just separate
+invocations in your own session. Reach for a DIFFERENT throwaway container instead
+(`email-extractor-test-pg` on port 55499 is already documented in
+`n8n-workflow-edits.md`'s fork-danger incident as exactly this kind of isolated fallback;
+`ee-eval-pg`/`ee-test-pg` are two more options) — confirm it's genuinely idle first
+(`docker exec <container> psql -U postgres -c "SELECT pid, state, query FROM
+pg_stat_activity WHERE datname='postgres'"`, only your own `SELECT` should show).
+
+**3 sibling workers each running the full 1503-test suite (incl. Playwright E2E) on the
+same 8-core box drives load average past 12 and swap into several GB — a single run can
+take ~14 minutes wall-clock this way (vs. seconds for a scoped file like `test_db.py`
+alone), and it is genuinely NOT hung, just contended.** Before assuming a stuck run:
+check `/proc/<pid>/status` (`State: S` sleeping, not `D`/zombie) and whether CPU time
+(`ps -o etimes,time`) is barely accumulating relative to wall-clock elapsed — that pattern
+means it's waiting on scheduler/I/O contention, not stuck in a real hang. For a suite that
+launches its own subprocess (Playwright's driver spawns a `chrome-headless-shell` child),
+`ps --ppid <pid>` shows the live child still consuming CPU, which is the clean way to
+confirm real progress instead of a wedge. `uptime`/`free -h` (load average vs `nproc`,
+swap usage) is the fast way to confirm "the whole box is just busy" as the explanation
+before investigating your own change.
+
 ## `pytest.mark.skipif` in a NEW test line blocks the push, even though `.skip(` is what's actually banned (#224, 2026-08-08)
 
 `hooks/block-test-skips.sh`'s content scanner matches the raw substring `pytest\.mark\.skip`
