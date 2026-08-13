@@ -1,15 +1,23 @@
-"""Pure helpers + shared constants used across the HTTP API surface (#268 krok 2).
+"""Pure helpers + shared constants + the `Deps` carrier used across the HTTP API
+surface (#268 kroky 2, 5).
 
-No Flask, no DB — these are leaf-level string/date helpers so `httpapi.py` and every
-future split module can import them without pulling in the whole app. Moved VERBATIM
-out of `httpapi.py` (no behavior change) — see the design comment on #268 for exactly
-what moved and why.
+No Flask, no DB — these are leaf-level string/date helpers (plus, since krok 5, one
+small dataclass) so `httpapi.py` and every future split module can import them without
+pulling in the whole app, and without risking a circular import (every `register(app,
+deps)` route module needs `Deps`, and `httpapi.py` itself builds one and imports every
+route module — this module sits BELOW all of them). The string/date helpers were moved
+VERBATIM out of `httpapi.py` (no behavior change) — see the design comment on #268 for
+exactly what moved and why.
 """
 from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
+from typing import Any
 
 CATEGORIES = ["ai_orders", "invoices", "reklamacie", "dodacie_listy",
               "static_orders", "human_processing", "no_processing"]
@@ -56,3 +64,23 @@ def _parse_emails_field(v) -> list[str]:
     if isinstance(v, list):
         return [str(e).strip() for e in v if str(e).strip()]
     return [e.strip() for e in str(v or "").split(",") if e.strip()]
+
+
+@dataclass
+class Deps:
+    """What a split-out `register(app, deps)` route module may use from `create_app`
+    (#268 krok 5) — never more. `db`/`db_tx` are the EXACT `_db`/`_db_tx` closures
+    `create_app` defines once (one pair of Postgres connection factories, shared by
+    every split module — never redefined per module); `cfg` is the raw `Config`
+    object, for anything a route needs off it directly (`cfg.api_token`,
+    `cfg.orders_spend_cap_eur`, ...); `data_dir` is `create_app`'s own already-resolved
+    `Path(cfg.data_dir)`.
+
+    Deliberately loosely typed (`Any` / a bare `Callable`) — this keeps the module
+    leaf-level (no Flask, no DB import) precisely so every split module, INCLUDING
+    `httpapi.py` itself, can import `Deps` with zero circular-import risk.
+    """
+    cfg: Any
+    db: Callable[[], Any]
+    db_tx: Callable[[], Any]
+    data_dir: Path

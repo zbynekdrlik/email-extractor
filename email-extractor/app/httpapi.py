@@ -24,17 +24,15 @@ from datetime import timedelta
 from pathlib import Path
 
 import psycopg
-from flask import Flask, abort, jsonify, redirect, request, send_file, session
+from flask import Flask, abort, jsonify, redirect, request, session
 from psycopg.types.json import Json
 from werkzeug.exceptions import HTTPException
 
-from . import __version__, db, linkutil
-from .db import MAX_UID_ATTEMPTS
+from . import __version__, db, httpapi_files, httpapi_fixqueue, httpapi_reports, linkutil
 from .httpapi_common import (
     _EAN_STRIP_RE,
     CATEGORIES,
-    FIX_STATUSES,
-    PROBLEM_TYPES,
+    Deps,
     _escape_like,
     _fold,
     _parse_emails_field,
@@ -59,7 +57,6 @@ from .httpapi_templates import (
     ZNALOSTI_HTML,
 )
 from .orders import dl_snapshot, memory, snapshot
-from .store import message_dir
 
 log = logging.getLogger("email_extractor.httpapi")
 
@@ -84,16 +81,6 @@ def create_app(cfg) -> Flask:
         log.warning("dash_password is unset — the dashboard is CLOSED; "
                     "set dash_password to enable it")
 
-    def _token_ok():
-        tok = request.args.get("token") or request.headers.get("X-Token")
-        return bool(cfg.api_token) and tok == cfg.api_token
-
-    def _auth():
-        # File APIs (/files, /eml): a logged-in human OR a valid machine token.
-        # No open-by-default — if neither is configured the endpoint stays closed.
-        if not (session.get("auth") or _token_ok()):
-            abort(403)
-
     def _db():
         return psycopg.connect(cfg.pg_dsn, autocommit=True)
 
@@ -114,6 +101,10 @@ def create_app(cfg) -> Flask:
                              f"Skús to znova po dokončení, najneskôr za "
                              f"{db.CLAIM_STALE_MINUTES} minút.",
                        claimed_at=held.isoformat()), 409
+
+    # #268 krok 5: what a split-out `register(app, deps)` route module may reach for —
+    # never more. Built once here, passed to every split module unchanged.
+    deps = Deps(cfg=cfg, db=_db, db_tx=_db_tx, data_dir=data_dir)
 
     # ---- request + error logging (#28) ----
 
@@ -242,21 +233,11 @@ def create_app(cfg) -> Flask:
     def version():
         return __version__
 
-    @app.get("/files/<mid>/<int:idx>")
-    def get_file(mid: str, idx: int):
-        _auth()
-        matches = sorted(message_dir(str(data_dir), mid).glob(f"att{idx}__*"))
-        if not matches:
-            abort(404)
-        return send_file(matches[0])
-
-    @app.get("/eml/<mid>")
-    def get_eml(mid: str):
-        _auth()
-        path = message_dir(str(data_dir), mid) / "raw.eml"
-        if not path.exists():
-            abort(404)
-        return send_file(path, mimetype="message/rfc822")
+    # #268 krok 5: /files/<mid>/<idx>, /eml/<mid> + their _token_ok/_auth helpers —
+    # moved verbatim into httpapi_files.py, registered here at the same spot they used
+    # to sit at (route registration order is irrelevant to Flask; before_request hook
+    # order, untouched by this move, is what actually matters — see the design comment).
+    httpapi_files.register(app, deps)
 
     # ---- dashboard data API (session-gated via _gate) ----
 
@@ -461,43 +442,11 @@ def create_app(cfg) -> Flask:
         log.info("reprocess #%s", mid)
         return jsonify(ok=True, id=mid)
 
-    # ---- fix queue ----
-
-    @app.post("/api/message/<int:mid>/fix")
-    def api_fix(mid: int):
-        body = request.get_json(force=True, silent=True) or {}
-        ptype = body.get("problem_type")
-        if ptype not in PROBLEM_TYPES:
-            abort(400)
-        expected = body.get("expected_category")
-        if expected is not None and expected not in CATEGORIES:
-            abort(400)
-        desc = (body.get("description") or "").strip()
-        # One transaction: the fix row and its timeline event commit together, so a
-        # failed second write cannot leave an orphan fix row that a client retry
-        # then duplicates (#25).
-        with _db_tx() as c:
-            m = c.execute(
-                """SELECT message_id, subject, category, proc_status, proc_outcome
-                   FROM messages WHERE id=%s""", (mid,)).fetchone()
-            if not m:
-                abort(404)
-            snapshot = {"subject": m[1], "category": m[2],
-                        "proc_status": m[3], "proc_outcome": m[4]}
-            fid = c.execute(
-                """INSERT INTO fix_requests
-                       (message_id, problem_type, expected_category, description,
-                        snapshot, created_by)
-                   VALUES (%s,%s,%s,%s,%s,%s) RETURNING id""",
-                (m[0], ptype, expected, desc, Json(snapshot), "dashboard")).fetchone()[0]
-            # rollup=False: flagging an email for fixing is a side annotation; it must
-            # not overwrite the message's real proc_status (a done order stays done).
-            db.log_event(c, m[0], "dashboard", "fix_requested", "review",
-                         outcome="na opravu: " + ptype + (f" → {expected}" if expected else ""),
-                         detail={"fix_id": fid, "problem_type": ptype,
-                                 "expected_category": expected}, rollup=False)
-        log.info("fix_requested #%s type=%s -> fix #%s", mid, ptype, fid)
-        return jsonify(ok=True, id=mid, fix_id=fid)
+    # #268 krok 7: the whole fix-queue feature (api_fix + api_fix_queue +
+    # api_fix_resolve) — moved verbatim into httpapi_fixqueue.py and reunited into ONE
+    # module (they used to be split across two regions ~850 lines apart in this file —
+    # see the design comment on #268). Registered here, at api_fix's old position.
+    httpapi_fixqueue.register(app, deps)
 
     @app.get("/api/orders/questions")
     def api_orders_questions():
@@ -1242,131 +1191,11 @@ def create_app(cfg) -> Flask:
                 dl_snapshot.dl_rebuild_from_overrides(c)
         return jsonify(ok=True) if ok else (jsonify(error="nenájdené"), 404)
 
-    @app.get("/api/orders/spend")
-    def api_orders_spend():
-        """What the order engine costs this month, and how much of it needed no model (#89).
-
-        The two numbers belong together: the deterministic share is supposed to RISE as the
-        delivery history fills, so a falling share explains a rising bill.
-        """
-        from .orders import spend as spend_mod
-        with _db() as c:
-            mtd = spend_mod.month_to_date(c)
-            share = spend_mod.deterministic_share(c)
-            top = spend_mod.top_runs(c)
-        return jsonify(month=mtd["month"], runs=mtd["runs"],
-                       cost_eur=round(mtd["cost_eur"], 2),
-                       cost_usd=round(mtd["cost_usd"], 2),
-                       per_email_eur=round(mtd["cost_eur"] / mtd["runs"], 3)
-                       if mtd["runs"] else 0.0,
-                       calls=mtd["calls"], cached_calls=mtd["cached_calls"],
-                       cap_eur=float(getattr(cfg, "orders_spend_cap_eur", 30) or 0),
-                       free_pct=round(share["pct"], 1), free=share["free"],
-                       decisions=share["total"], top_runs=top)
-
-    @app.get("/api/orders/digest")
-    def api_orders_digest():
-        """#196: the same match-provenance stats + 'days since incident' the daily Odoo
-        digest carries — the warehouse's measurable, live basis for trust, on the
-        dashboard too, not only in the Odoo channel."""
-        from .orders import reliability
-        with _db() as c:
-            today = reliability.provenance_stats_for_day(c)
-            yesterday = reliability.provenance_stats_for_day(
-                c, c.execute(
-                    "SELECT to_char(now() - interval '1 day', 'YYYY-MM-DD')").fetchone()[0])
-            since = reliability.days_since_incident(c)
-        return jsonify(today=today, yesterday=yesterday, days_since_incident=since)
-
-    @app.get("/api/orders/dl/stats")
-    def api_orders_dl_stats():
-        """#231: the "stavy" the DL nástenka asks for — today/yesterday's DL run counts
-        (`reliability.dl_provenance_stats_for_day`, built for #204's daily digest — same
-        aggregate-only shape: run/document counts, no mail body, no attachment). Reachable
-        by BOTH the full admin login and the DL-only `sklad_dl` role (it is in
-        `SKLAD_DL_PATHS`); the orders-only `sklad` role has no matching path and gets a
-        plain 401, same as any other endpoint outside its own board."""
-        from .orders import reliability
-        with _db() as c:
-            today = reliability.dl_provenance_stats_for_day(c)
-            # #239 deep-review finding: the three current-health gauges are NOT
-            # day-scoped — the JS badge only ever reads them off `today` (see
-            # ASK_DL_HTML's loadStats()), so recomputing the identical three queries
-            # for "yesterday" would be pure waste.
-            yesterday = reliability.dl_provenance_stats_for_day(
-                c, c.execute(
-                    "SELECT to_char(now() - interval '1 day', 'YYYY-MM-DD')").fetchone()[0],
-                include_current_health=False)
-        return jsonify(today=today, yesterday=yesterday)
-
-    @app.get("/api/imap-failures")
-    def api_imap_failures():
-        """Emails that could not be ingested at all (#20) — they have no messages row,
-        so this is the ONLY place they are visible. Never let them be silent."""
-        with _db() as c:
-            items = db.list_uid_failures(c)
-            pending, skipped = db.count_uid_failures(c)
-        return jsonify(total=pending + skipped, items=items, shown=len(items),
-                       max_attempts=MAX_UID_ATTEMPTS, pending=pending, skipped=skipped)
-
-    @app.get("/api/fix-queue")
-    def api_fix_queue():
-        status = request.args.get("status", "")
-        try:
-            offset = max(0, int(request.args.get("offset", 0)))
-        except ValueError:
-            offset = 0
-        try:
-            limit = min(200, max(1, int(request.args.get("limit", 50))))
-        except ValueError:
-            limit = 50
-        where, params = [], []
-        if status:
-            where.append("f.status = %s")
-            params.append(status)
-        wsql = ("WHERE " + " AND ".join(where)) if where else ""
-        with _db() as c:
-            total = c.execute(
-                f"SELECT count(*) FROM fix_requests f {wsql}", params).fetchone()[0]
-            rows = c.execute(
-                f"""SELECT f.id, f.message_id, f.problem_type, f.expected_category,
-                           f.description, f.status, f.created_at, f.created_by,
-                           f.resolved_at, f.resolution,
-                           m.id, m.subject, m.from_addr, m.category
-                    FROM fix_requests f
-                    LEFT JOIN messages m ON m.message_id = f.message_id
-                    {wsql} ORDER BY f.id DESC LIMIT %s OFFSET %s""",
-                params + [limit, offset]).fetchall()
-        return jsonify(total=total, offset=offset, limit=limit, items=[{
-            "id": r[0], "message_id": r[1], "problem_type": r[2], "expected_category": r[3],
-            "description": r[4], "status": r[5],
-            "created_at": r[6].isoformat() if r[6] else None, "created_by": r[7],
-            "resolved_at": r[8].isoformat() if r[8] else None, "resolution": r[9],
-            "msg_id": r[10], "subject": r[11], "from": r[12], "category": r[13],
-        } for r in rows])
-
-    @app.post("/api/fix/<int:fid>/resolve")
-    def api_fix_resolve(fid: int):
-        body = request.get_json(force=True, silent=True) or {}
-        status = body.get("status", "fixed")
-        if status not in FIX_STATUSES:
-            abort(400)
-        resolution = (body.get("resolution") or "").strip()
-        with _db() as c:
-            row = c.execute("SELECT message_id FROM fix_requests WHERE id=%s",
-                            (fid,)).fetchone()
-            if not row:
-                abort(404)
-            resolved = "now()" if status in ("fixed", "wontfix") else "NULL"
-            c.execute(
-                f"UPDATE fix_requests SET status=%s, resolution=%s, resolved_at={resolved} "
-                f"WHERE id=%s", (status, resolution, fid))
-            db.log_event(c, row[0], "dashboard", "fix_resolved", "ok",
-                         outcome=f"fix #{fid} → {status}" + (f": {resolution}" if resolution else ""),
-                         detail={"fix_id": fid, "status": status, "resolution": resolution},
-                         rollup=False)
-        log.info("fix #%s resolved -> %s", fid, status)
-        return jsonify(ok=True, id=fid, status=status)
+    # #268 krok 8: api_orders_spend / api_orders_digest / api_orders_dl_stats /
+    # api_imap_failures — all four read-only aggregate/reporting endpoints, moved
+    # verbatim into httpapi_reports.py, registered here at api_orders_spend's old
+    # position (see the design comment on #268).
+    httpapi_reports.register(app, deps)
 
     @app.get("/")
     def dashboard():

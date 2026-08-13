@@ -2735,3 +2735,38 @@ LOAN item-matching confirmed live, new HK LOAN multi-message gap found)
   scratch súbor (alebo `rm -f` pred `cat >`), nikdy nespoliehať že blokovaný príkaz
   nezanechal nič.
 - Run card fired for #277 (`v0.9.80`).
+
+## #268 krok 4 z 11 (httpapi_templates) — 2026-08-13
+
+- Verifikačný komentár (čísla riadkov proti aktuálnemu HEAD, blok 1376-2593 =
+  1218 riadkov, presne -92 oproti plánu kvôli krokom 2-3) + design komentár (root
+  cause / zvolený prístup / zamietnutá alternatíva) na #268, oba PRED prvým commitom.
+- Version bump `ebb7687` (0.9.80 -> 0.9.81), presun `71510a4` — `LOGIN_HTML`,
+  `DASH_HTML`, `_ASK_HTML_TEMPLATE`, `ASK_HTML`, `ASK_DL_HTML`, `ZNALOSTI_HTML`
+  doslovne do nového `app/httpapi_templates.py` (leaf modul, žiadny Flask/DB/app.*
+  import); `httpapi.py` re-exportuje 5 skutočne používaných mien.
+- Dôkaz nula zmeny chovania: byte-diff extrahovaného bloku proti novému súboru
+  identický; `ruff check .` čisté; cold-import proof (leaf modul, nepotiahne
+  `app.httpapi` ani `flask`); identity-check (`is`) všetkých 5 re-exportov `True`;
+  3 charakterizačné testy z kroku 1 prešli NEZMENENÉ; celá lokálna suita 1502
+  testov 0 F/E, spustená dvakrát.
+- Gotcha (nová, zapísaná do `.claude/rules/local-testing.md`): plný foreground
+  `pytest tests/ -q` (bez `run_in_background`) môže presiahnuť ~120s a harness ho
+  ticho premiestni na pozadie — ďalší spustený beh potom koliduje s tým prvým
+  presne ako existujúci #164 zápis opisuje, len spustené inak. Zotavené `ps aux |
+  grep pytest` + `kill -9` stray procesov pred čistým behom.
+- PR #280 (dev→main), 2 commity, `Časť #268 (krok 4 z 11)` (bez Closes — #268
+  zostáva otvorený do kroku 11). Nezávislý review (`general-purpose` subagent,
+  čerstvý kontext): 0 🔴 0 🟡 1 🔵 (PR obsahoval aj nesúvisiaci pending docs commit
+  `a1070ff` z dvojvetvového modelu — opravené doplnením poznámky do PR popisu cez
+  REST API, `gh pr edit` má na tomto repe známy Projects Classic bug). CI zelené
+  (test/e2e-orders/e2e-dl/build) na push aj pull_request. Merged `08095aa`.
+- Deploy: `ha addons update e0ac7775_email_extractor` → v0.9.81. Overené: `/health`
+  `{"ok":true,"version":"0.9.81"}`; DOM (Playwright, čerstvé cookies pred každou
+  stránkou) ukazuje `v0.9.81` na VŠETKÝCH štyroch stránkach (`/`, `/otazky`,
+  `/otazky-dl`, `/znalosti`), 0 console chýb na každej. Funkčná verifikácia: každá
+  stránka renderuje reálne živé dáta (dashboard 6802 správ, otázky skladu s
+  reálnou kartou, DL otázky s reálnou položkou, znalosti tabuľka s reálnymi
+  produktmi) — presne to, čo `ASK_HTML`/`ASK_DL_HTML`/`ZNALOSTI_HTML`/`DASH_HTML`
+  mali vyrenderovať pred presunom.
+- Run card fired for #268 (`v0.9.81`) — issue zostáva OTVORENÝ (kroky 5-11 čakajú).
