@@ -383,9 +383,19 @@ def start(cfg) -> None:
     s6-overlay) with zero change to `run.sh`/Dockerfile/`main()`.
     """
     app = create_app(cfg)
-    threading.Thread(
-        target=lambda: waitress.serve(
-            app, host="0.0.0.0", port=cfg.http_port, threads=HTTP_SERVER_THREADS,
-        ),
-        daemon=True,
-    ).start()
+
+    def _serve():
+        try:
+            waitress.serve(
+                app, host="0.0.0.0", port=cfg.http_port, threads=HTTP_SERVER_THREADS,
+            )
+        except Exception:
+            # A bind failure (port already in use) or any other startup error used to
+            # die silently on this same daemon thread under the old `app.run(...)` too
+            # — a pre-existing gap, not a regression from this swap. But since this
+            # diff already touches this exact wrapper, make the failure visible in the
+            # add-on's own logs instead of a bare, easy-to-miss stderr traceback
+            # (review finding on #272).
+            log.exception("waitress failed to start/serve on port %s", cfg.http_port)
+
+    threading.Thread(target=_serve, daemon=True).start()

@@ -17,13 +17,22 @@ Two tests, proving two different things:
    authenticated route, and an unauthenticated 401 come back byte-identical (status +
    JSON body) on both servers, plus checks the `Server` response header genuinely says
    "waitress" (not "Werkzeug") as direct, unambiguous proof the swap took effect.
+
+3. `test_waitress_serves_files_range_requests_identically_to_the_dev_server` — review
+   finding on #272: `/files` (`send_file`, conditional/Range-request support) is the
+   part of the app most likely to behave differently across WSGI servers, and #2 above
+   never exercises it. Pins a full download, a byte-Range download (206 + Content-Range),
+   and an unauthenticated 403 — all byte-identical between waitress and werkzeug.
 """
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 import threading
 import time
 from unittest.mock import patch
+from urllib.parse import quote
 
 import requests
 from werkzeug.serving import make_server
@@ -31,6 +40,7 @@ from werkzeug.serving import make_server
 from app import httpapi
 from app.config import Config
 from app.httpapi import create_app
+from app.store import message_dir
 
 PG_DSN = os.environ.get("PG_TEST_DSN")
 
@@ -138,3 +148,71 @@ def test_waitress_serves_the_app_identically_to_the_dev_server(pg):
         werkzeug_srv.shutdown()
         waitress_thread.join(timeout=5)
         werkzeug_thread.join(timeout=5)
+
+
+# ---- 3. /files (send_file, Range requests) — the part most likely to diverge ---------
+
+
+def test_waitress_serves_files_range_requests_identically_to_the_dev_server(pg):
+    """Review finding on #272: neither test 1 nor test 2 above exercises `/files`
+    (`send_file`, conditional/Range-request handling) — exactly the route most likely to
+    behave differently across WSGI servers. A dedicated, isolated `data_dir` per test
+    run avoids colliding with sibling worktree-fleet workers sharing `/tmp`."""
+    data_dir = tempfile.mkdtemp(prefix="ee-waitress-files-test-")
+    try:
+        cfg = _cfg()
+        cfg.data_dir = data_dir
+        cfg.api_token = "file-test-token"
+
+        mid = "<waitress-range-test-272@example.com>"
+        body = bytes(range(256)) * 40   # 10240 bytes — enough for a real byte-range slice
+        d = message_dir(data_dir, mid)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "att0__payload.bin").write_bytes(body)
+
+        app = create_app(cfg)
+        waitress_srv = _waitress_server(app, threads=4)
+        waitress_thread = threading.Thread(target=waitress_srv.run, daemon=True)
+        waitress_thread.start()
+        waitress_base = f"http://127.0.0.1:{waitress_srv.effective_port}"
+
+        werkzeug_srv = make_server("127.0.0.1", 0, create_app(cfg), threaded=True)
+        werkzeug_srv.daemon_threads = True
+        werkzeug_thread = threading.Thread(target=werkzeug_srv.serve_forever, daemon=True)
+        werkzeug_thread.start()
+        werkzeug_base = f"http://127.0.0.1:{werkzeug_srv.server_port}"
+
+        file_path = f"/files/{quote(mid, safe='')}/0"
+        authed = f"{file_path}?token=file-test-token"
+
+        try:
+            # ---- full download: identical status, bytes, Content-Length ----
+            w_full = requests.get(f"{waitress_base}{authed}", timeout=5)
+            z_full = requests.get(f"{werkzeug_base}{authed}", timeout=5)
+            assert w_full.status_code == z_full.status_code == 200
+            assert w_full.content == z_full.content == body
+            assert (w_full.headers.get("Content-Length")
+                    == z_full.headers.get("Content-Length"))
+
+            # ---- a byte-Range request: identical 206 + Content-Range + sliced bytes ----
+            range_headers = {"Range": "bytes=10-19"}
+            w_range = requests.get(f"{waitress_base}{authed}", headers=range_headers,
+                                    timeout=5)
+            z_range = requests.get(f"{werkzeug_base}{authed}", headers=range_headers,
+                                    timeout=5)
+            assert w_range.status_code == z_range.status_code == 206
+            assert w_range.content == z_range.content == body[10:20]
+            assert (w_range.headers.get("Content-Range")
+                    == z_range.headers.get("Content-Range"))
+
+            # ---- unauthenticated (no token, no session): identical 403 on both ----
+            w_403 = requests.get(f"{waitress_base}{file_path}", timeout=5)
+            z_403 = requests.get(f"{werkzeug_base}{file_path}", timeout=5)
+            assert w_403.status_code == z_403.status_code == 403
+        finally:
+            waitress_srv.close()
+            werkzeug_srv.shutdown()
+            waitress_thread.join(timeout=5)
+            werkzeug_thread.join(timeout=5)
+    finally:
+        shutil.rmtree(data_dir, ignore_errors=True)
