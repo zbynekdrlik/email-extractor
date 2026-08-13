@@ -2531,6 +2531,115 @@ def test_release_for_question_sibling_widening_keys_on_envelope_from_addr(
         "answered question was keyed on a different, document-extracted address"
 
 
+# --- Integration round B: #239 (safe automatic ORION upload retry) and #265
+# --- (correction-mail detection + sibling-release widening) were built in separate
+# --- worktree branches and merged into the SAME PR — this proves the composed safety
+# --- property through the REAL merged code path, not through a hand-built fixture ----
+
+def test_sibling_release_still_excludes_a_message_whose_upload_genuinely_failed_through_the_merged_retry_path(
+        pg, tmp_path):
+    """Composed regression for the exact interaction the integration round B dispatch
+    named explicitly: #265's `_release_stuck_siblings` excludes any same-sender message
+    with a logged `email_events.status='error'` row, specifically so it never re-enables
+    the automatic upload retry #239 deliberately wired in (a released claim + a fresh
+    per-attempt filename would let a genuinely-failed upload's retry re-ship a document
+    that may already be on ORION under an earlier name).
+
+    The existing #265 test proving this exclusion
+    (`test_release_for_question_sibling_widening_never_touches_unrelated_messages`,
+    `failedupload1`) manually `INSERT`s the `email_events` row — it pins the SQL
+    predicate but never actually drives a real upload failure through
+    `_process_document`'s upload except-block, so it cannot prove the exclusion still
+    holds against #239's OWN restructuring of that block into the
+    `_check_landed`/`_finish_shipped`/`_alert_and_release` closures. This test drives a
+    genuine failure through the real merged pipeline instead: the initial upload AND
+    #239's one safe retry both raise a transient `OSError` (`list_dirs` proves the
+    document is genuinely absent from ORION, so `landed is False` and the bounded retry
+    fires — see `test_a_transient_upload_failure_when_the_retry_also_fails_alerts_
+    without_looping`), landing in `_alert_and_release`, the ACTUAL closure that logs
+    `status='error'` post-merge. Only then is a sibling `dl_supplier` question answered
+    and `_release_stuck_siblings` checked against the row that closure produced."""
+    _snapshot(pg)
+    sender = "compose-check@somewhere.sk"
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+
+    _msg(pg, mid="failreal", from_addr=sender, has_attachments=True)
+    _attach(pg, tmp_path, "failreal")
+    tries = []
+
+    def _always_timed_out_upload(c, name, content, dir_override=None):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    def _fake_list_dirs(cfg):
+        return _dirs()
+
+    n = dl_worker.tick(
+        pg, cfg,
+        client=FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                           "dl_item": [ITEM_MATCHED]}),
+        upload=_always_timed_out_upload, list_dirs=_fake_list_dirs)
+    assert n == 1
+    assert len(tries) == 2, \
+        "setup: the original attempt plus exactly one bounded retry, both failed"
+
+    row = pg.execute(
+        "SELECT processed, proc_status FROM messages WHERE message_id='failreal'"
+    ).fetchone()
+    assert row == (True, "review"), \
+        "setup: the real upload failure (through the merged retry path) ends " \
+        "terminal-review, same shape a genuine dl_supplier-orphan review ends in"
+    # #239's own `_run_and_finish` also logs a SEPARATE rollup summary event with
+    # `stage='review', status='review'` right after `_alert_and_release` returns (its
+    # own `status="review"` comes from `_aggregate_status`, not from the failure) — so
+    # the LATEST `stage='review'` row is that rollup, never `_alert_and_release`'s own
+    # `status='error'` row. `_release_stuck_siblings`'s own predicate checks EXISTENCE
+    # of any `status='error'` row, never "the latest one" -- mirror that here.
+    assert pg.execute(
+        "SELECT 1 FROM email_events WHERE message_id='failreal' AND status='error'"
+    ).fetchone() is not None, \
+        "setup: _alert_and_release -- #239's restructured closure -- logged the " \
+        "status='error' event _release_stuck_siblings' exclusion depends on"
+    assert pg.execute(
+        "SELECT count(*) FROM order_questions WHERE message_id='failreal'"
+    ).fetchone()[0] == 0, "setup: an upload failure never raises a question"
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE uploaded_at IS NOT NULL"
+    ).fetchone()[0] == 0, "setup: nothing was ever confirmed shipped"
+
+    # The TIED message: an unmatched supplier from the SAME sender -- answering its
+    # dl_supplier question is what triggers the sibling-release widening.
+    doc = _unknown_supplier_doc(sender)
+    _msg(pg, mid="qmsg-compose", from_addr=sender, has_attachments=True)
+    _attach(pg, tmp_path, "qmsg-compose")
+    n = dl_worker.tick(
+        pg, cfg,
+        client=FakeClient({"dl_documents": [doc],
+                           "dl_supplier": [{"matched": False,
+                                            "matchReason": "nie je v zozname"}]}),
+        upload=lambda *a, **k: None, post=lambda c, h: None)
+    assert n == 1
+    qid = pg.execute(
+        "SELECT id FROM order_questions WHERE kind='dl_supplier'").fetchone()[0]
+
+    dl_supplier_memory.remember(pg, sender, SUPPLIER_EAN, "Pekáreň Lunys")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": SUPPLIER_EAN}), qid))
+    released = dl_worker.release_for_question(
+        pg, cfg, qid, client=FakeClient({"dl_documents": [doc], "dl_item": [ITEM_MATCHED]}),
+        upload=lambda *a, **k: None, post=lambda c, h: None)
+    assert released and released[0]["outcome"] == "ok", "the tied message ships"
+
+    still_stuck = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='failreal'").fetchone()
+    assert still_stuck == (True,), \
+        "the genuinely-failed message -- produced by the REAL merged " \
+        "_alert_and_release path, not a synthetic fixture -- must stay excluded " \
+        "from the sibling release: resetting it would re-enable exactly the " \
+        "automatic retry #239 wired in, via a second, independent-attempt upload " \
+        "with a fresh filename (real duplicate-delivery risk in ORION)"
+
+
 def test_release_stuck_siblings_never_releases_a_message_with_a_logged_upload_failure(
         pg):
     """Deep-review finding on this ticket's own PR (#265) — the PROVEN safety bug: a
