@@ -2648,3 +2648,48 @@ LOAN item-matching confirmed live, new HK LOAN multi-message gap found)
   vrátil reálne živé dáta (days_since_incident=6, dnešné aj včerajšie štatistiky) —
   presne ten endpoint, ktorý nový test teraz chráni.
 - Run card fired for #268 krok 1/11 (`v0.9.78`).
+
+## 2026-08-13 — #268 kroky 2-3/11 — extrakcia `httpapi_common.py` + `httpapi_security.py` (PR #278, v0.9.79)
+
+- Kroky 2 a 3 z 11-krokového plánu (issuecomment na #268). Krok 0: čísla riadkov
+  z plánu znovu overené `grep`om proti HEAD `fa0b4f9` — sedeli presne, žiadna zmena
+  medzi krokom 1 a týmto.
+- Commity: `675f302` (version bump 0.9.79), `4e099d1` (krok 2 —
+  `app/httpapi_common.py`: `CATEGORIES`/`PROBLEM_TYPES`/`FIX_STATUSES`/`_valid_date`/
+  `_escape_like`/`_fold`/`_EAN_STRIP_RE`/`_parse_emails_field`), `e74beae` (krok 3 —
+  `app/httpapi_security.py`: `SKLAD_ROLE`/`SKLAD_PATHS`/`SKLAD_ACTION`/
+  `SKLAD_ZNALOSTI_PAGE`/`SKLAD_ZNALOSTI_API`/`SKLAD_DL_ZNALOSTI_API`/`ORDERS_KINDS`/
+  `DL_KINDS`/`SKLAD_DL_ROLE`/`SKLAD_DL_PATHS`/completeness `assert`/`_role_kinds()`;
+  recommitted once via `git reset --soft HEAD~1` + recommit to add a `[no-test: ...]`
+  bypass tag, per this project's own sanctioned "never --amend" recovery pattern).
+- Čistý presun, žiadny RED→GREEN pár — dôkazom je nezmenená test suita (3× čisto:
+  baseline, po kroku 2, po kroku 3, 0 F/E/s/x) vrátane všetkých troch charakterizačných
+  testov z kroku 1. `httpapi.py` re-exportuje presunuté mená na pôvodnom mieste v texte
+  súboru — externé test-importy aj vnorené route closures vo vnútri `create_app()`
+  nič nemenia (Python module-scope lookup identický, či definované priamo alebo
+  importované). `ORDERS_KINDS`/`DL_KINDS` sa zámerne NEre-exportujú (ruff F401
+  potvrdil, že `httpapi.py` ich sám osebe nepoužíva). Cold-import dôkaz:
+  `import app.httpapi_common; import app.httpapi_security` čisto, obe leaf moduly.
+- Mimochodom objavené (mimo scope, súbor NEDOTKNUTÝ podľa explicitného zadania):
+  `test_httpapi_characterization.py`'s digest happy-path test je pred-existujúca
+  flaky ~2h/noc na non-UTC dev boxe (Python lokálny `date.today()` vs Postgres UTC
+  `now()` v `_seed_todays_run`) — nikdy v CI (UTC). Zdokumentované, filed as #277.
+- Review (fresh-context `general-purpose` subagent, nikdy vstavaný skill): 0 🔴 0 🟡
+  1 🔵 — nezávisle si overil ruff/cold-import/identity-check/repo-wide grep/celú test
+  suitu/`_role_kinds` single-definition/`_stamp`-pred-`_gate` poradie. Nález (PR popis
+  tvrdil "verbatim" bez výnimky, `_parse_emails_field` pritom dostala nový docstring)
+  **opravený v tom istom PR** — popis upravený cez REST API (`gh pr edit` má na tomto
+  repe známy Projects-Classic bug, viď orders-corpus.md playbook poznámka).
+- PR #278 (dev→main), 4 commity (vrátane krok-1's docs-only `fa0b4f9`, ktorý ešte
+  nebol na main), `#268` zámerne nikde s Closes/Fixes/Resolves — issue zostáva
+  otvorený. CI zelené (test/e2e-orders/e2e-dl/build) na push aj pull_request, oba
+  razy. Merged `8144237`.
+- Deploy: `ha addons update e0ac7775_email_extractor` → v0.9.79. Overené: `/health`
+  `{"ok":true,"version":"0.9.79"}`; DOM (Playwright, čerstvé cookies) ukazuje `v0.9.79`
+  na `/`, `/otazky`, `/otazky-dl`, 0 console chýb/varovaní. Funkčná verifikácia
+  bezpečnostnej hranice (presne to, čo krok 3 presunul): orders-role session →
+  `/api/orders/dl/stats` = živý 401 (DL-only endpoint odmietnutý); DL-role session →
+  `/api/znalosti/catalog` = živý 401 (orders-only endpoint odmietnutý); obe role
+  session-y stále vidia vlastné povolené endpointy (200) — `_gate()`/`_role_kinds()`
+  hranica funguje po presune identicky naživo.
+- Run card fired for #268 kroky 2-3/11 (`v0.9.79`).
