@@ -2815,3 +2815,40 @@ LOAN item-matching confirmed live, new HK LOAN multi-message gap found)
   tento mesiac).
 - Run card fired for #268 (`v0.9.82`) — issue zostáva OTVORENÝ (kroky 6, 9, 10, 11
   čakajú).
+
+## 2026-08-13 — #268 krok 6 z 11 (PR #282)
+
+- **Krok 6**: `api_messages`/`api_message` (dashboardova hlavná dátová API) +
+  `api_reclassify`/`api_reprocess` (operátorské akcie) + zdieľaný pomocník `_busy`
+  presunuté doslovne z `app/httpapi.py` do nového `app/httpapi_dashboard_data.py`
+  (`register(app, deps)` vzor, rovnaký ako kroky 5/7/8). `_busy` sa stal obyčajnou
+  modulovou funkciou (nie nested closure) — nemá väzbu na `cfg`/`_db`/`data_dir`.
+- Commity: `0467b75` (bump 0.9.82→0.9.83), `e15769e` (refactor, `[no-test: ...]`).
+- Vedľajšie zistenie: `test_httpapi.py::test_a_failing_endpoint_is_logged_and_returns_a_clean_500`
+  a `test_api.py::test_fix_request_and_its_event_commit_together` monkeypatchujú
+  `httpapi.db` — dovtedy fungovalo len náhodou vďaka `_busy`u. Fix: `db` zostáva
+  importovaný v `httpapi.py` (`# noqa: F401`, zdokumentované v kóde) — je to TEN
+  ISTÝ modulový objekt, ktorý `httpapi_reports.py`/`httpapi_fixqueue.py` skutočne
+  volajú. **Playbook zápis pridaný do `.claude/rules/httpapi-characterization.md`**
+  pre budúce kroky 9-11, keby narazili na podobnú skrytú väzbu.
+- Dôkaz nula zmeny chovania: bajtový diff všetkých 5 presunutých funkcií proti base
+  `0467b75` identický okrem `_db()`→`deps.db()`; `ruff check .` čisté; cold-import
+  leaf; route-table (krok 1) 51/51 nezmenené; celá lokálna suita 1502 testov 0
+  F/E/s/x (dvakrát nezávisle); `git diff -- tests/` prázdny.
+- `app/httpapi.py`: 1217 → 1020 riadkov; nový `httpapi_dashboard_data.py`: 239
+  riadkov.
+- Nezávislý review (`general-purpose` subagent, čerstvý kontext, nikdy vstavaný
+  `Skill({skill:"review"})`, per #363): **0 🔴 0 🟡 0 🔵** — 10 samostatne overených
+  bodov + bonus logger-namespace kontrola.
+- PR #282 (dev→main), 2 commity, "časť #268 (krok 6 z 11)" (bez
+  Closes/Fixes/Resolves — #268 zostáva otvorený do kroku 11). CI zelené
+  (test/e2e-orders/e2e-dl/build, ×2 behy). Merged `9243654a`.
+- Deploy: `ha apps update e0ac7775_email_extractor` → v0.9.83. Overené: `/health`
+  `{"ok":true,"version":"0.9.83"}`; DOM (Playwright) ukazuje `v0.9.83` na `/` a
+  `/otazky`; 0 console chýb na `/`, `/otazky`, `/otazky-dl`, `/znalosti`. Funkčná
+  verifikácia presunutého povrchu naživo: dashboard skutočne načítal 6821
+  správ cez `api_messages`, detail #6954 cez `api_message` (celá časová os,
+  príloha, combined_text); `reclassify`/`reprocess`/`api/messages` bez session
+  → 401 (žiadna reálna správa nezmenená).
+- Run card fired for #268 (`v0.9.83`) — issue zostáva OTVORENÝ (kroky 9, 10, 11
+  čakajú).
