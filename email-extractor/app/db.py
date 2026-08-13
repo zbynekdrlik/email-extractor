@@ -4,7 +4,7 @@ from __future__ import annotations
 import psycopg
 from psycopg.types.json import Json
 
-from . import mailparse
+from . import mailparse, migrate
 
 SCHEMA = [
     """
@@ -1116,13 +1116,29 @@ SCHEMA = [
 ]
 
 
+# SCHEMA above is FROZEN as revision 1 (the baseline). NEVER edit those statements for a
+# schema change — append a NEW numbered migrate.Revision to this list instead
+# (immutable-migrations, #269). run_migrations() applies only the unapplied revisions, in
+# order, each in its own transaction, and records them in the schema_version ledger.
+REVISIONS = [
+    migrate.Revision(migrate.BASELINE_REVISION, "baseline", SCHEMA),
+]
+
+
 def connect(dsn: str):
     return psycopg.connect(dsn, autocommit=True)
 
 
-def init_schema(conn) -> None:
-    for stmt in SCHEMA:
-        conn.execute(stmt)
+def init_schema(conn) -> list[int]:
+    """Bring the DB up to the latest schema revision (see app/migrate.py).
+
+    Returns the revision ids applied on this call (``[]`` when already up-to-date).
+    Every historical caller (main.py boot, backfill.py and the orders CLI tools,
+    conftest) keeps calling this unchanged — they ignore the return value and now get
+    versioning + the O(1) up-to-date fast path for free instead of re-running ~100 DDL
+    statements each time.
+    """
+    return migrate.run_migrations(conn, REVISIONS)
 
 
 def log_event(conn, message_id: str, workflow: str, stage: str, status: str,

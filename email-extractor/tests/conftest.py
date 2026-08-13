@@ -21,6 +21,11 @@ def _schema():
         pytest.fail("PG_TEST_DSN not set — DB tests need a Postgres "
                     "(CI postgres service, or a local docker PG)")
     conn = psycopg.connect(PG_DSN, autocommit=True)
+    # #269: init_schema() is version-gated now — it skips the baseline once recorded, so it
+    # no longer self-heals a persistent local test DB that lags the current SCHEMA. Drop the
+    # ledger first so the session always re-applies the full (idempotent) baseline and starts
+    # from the current schema. The version fast-path itself is covered in test_migrate.py.
+    conn.execute("DROP TABLE IF EXISTS schema_version")
     db.init_schema(conn)
     yield conn
     conn.close()
@@ -40,6 +45,21 @@ def pg(_schema):
         "dl_catalog_overrides, dl_supplier_overrides, pending_alerts "
         "RESTART IDENTITY CASCADE")
     return _schema
+
+
+@pytest.fixture
+def reapply_schema(pg):
+    """Force the frozen baseline DDL to run again (#269).
+
+    `init_schema()` is version-gated now: once the baseline is recorded in
+    `schema_version` it is an O(1) no-op. A migration test that drops a column/index
+    (simulating a DB that PREDATES that migration) and expects `init_schema` to HEAL it
+    must first clear the ledger, so the baseline re-runs — the exact path a real
+    pre-mechanism / lagging DB takes on boot. Returns a callable doing exactly that."""
+    def _reapply():
+        pg.execute("DELETE FROM schema_version")
+        return db.init_schema(pg)
+    return _reapply
 
 
 @pytest.fixture

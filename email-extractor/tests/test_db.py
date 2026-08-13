@@ -39,7 +39,7 @@ def test_desadv_sent_has_import_confirmation_columns(pg):
         assert col in cols
 
 
-def test_desadv_sent_import_migration_backfills_pre_existing_confirmed_rows(pg):
+def test_desadv_sent_import_migration_backfills_pre_existing_confirmed_rows(pg, reapply_schema):
     """Same backfill contract as edi_sent's own #151 migration: any row already
     `uploaded_at IS NOT NULL` when the migration first runs is treated as imported."""
     pg.execute("ALTER TABLE desadv_sent DROP COLUMN IF EXISTS import_status")
@@ -48,7 +48,7 @@ def test_desadv_sent_import_migration_backfills_pre_existing_confirmed_rows(pg):
     pg.execute(
         "INSERT INTO desadv_sent (supplier_ean, doc_number, filename, uploaded_at) "
         "VALUES ('123', 'D1', 'DESADV_x.txt', now())")
-    db.init_schema(pg)
+    reapply_schema()
     row = pg.execute(
         "SELECT import_status FROM desadv_sent WHERE doc_number = 'D1'").fetchone()
     assert row[0] == "imported"
@@ -60,7 +60,7 @@ def test_desadv_sent_import_migration_backfills_pre_existing_confirmed_rows(pg):
 # that found zero duplicates in production today; this proves the migration is safe
 # EVEN IF that ever stops being true). ---
 
-def test_customer_overrides_new_ean_index_migration_tolerates_pre_existing_duplicates(pg):
+def test_customer_overrides_new_ean_index_migration_tolerates_pre_existing_duplicates(pg, reapply_schema):
     """Simulates a box that has NOT yet run the #248 migration and already has two
     ACTIVE hand-added customer rows sharing one EAN (bypassing `upsert_customer`
     entirely, the way a pre-#248 row could have been created). `init_schema` must not
@@ -82,7 +82,7 @@ def test_customer_overrides_new_ean_index_migration_tolerates_pre_existing_dupli
                    'Prešov', 'Nová 2', '08001', false, now())"""
     )
 
-    db.init_schema(pg)   # must not raise — the whole point of #248's guarded de-dup step
+    reapply_schema()     # must not raise — the whole point of #248's guarded de-dup step
 
     # Query by NAME, not by `updated_at` order — the migration's own retiring UPDATE
     # bumps `updated_at` on the row it retires (same convention as `retire_customer`),
@@ -102,7 +102,7 @@ def test_customer_overrides_new_ean_index_migration_tolerates_pre_existing_dupli
     ).fetchone(), "the unique index must exist after the migration runs"
 
 
-def test_dl_supplier_overrides_new_ean_index_migration_tolerates_pre_existing_duplicates(pg):
+def test_dl_supplier_overrides_new_ean_index_migration_tolerates_pre_existing_duplicates(pg, reapply_schema):
     """Mirror of the customer test above for `dl_supplier_overrides`."""
     pg.execute("DROP INDEX IF EXISTS idx_dl_supplier_overrides_new_ean")
     pg.execute(
@@ -118,7 +118,7 @@ def test_dl_supplier_overrides_new_ean_index_migration_tolerates_pre_existing_du
                    'Prešov', false, now())"""
     )
 
-    db.init_schema(pg)
+    reapply_schema()
 
     rows = {name: retired for name, retired in pg.execute(
         "SELECT name, retired FROM dl_supplier_overrides "
@@ -130,7 +130,7 @@ def test_dl_supplier_overrides_new_ean_index_migration_tolerates_pre_existing_du
     assert active == (1,)
 
 
-def test_customer_overrides_new_ean_index_ignores_blank_ean_duplicates(pg):
+def test_customer_overrides_new_ean_index_ignores_blank_ean_duplicates(pg, reapply_schema):
     """#248 review finding: Postgres treats '' as an ORDINARY, EQUAL value for a unique
     index (unlike NULL, which two rows can always share) — so two ACTIVE hand-added
     rows that both happen to carry a blank ean_edi must NOT collide on the new index,
@@ -146,7 +146,7 @@ def test_customer_overrides_new_ean_index_ignores_blank_ean_duplicates(pg):
                        false, now())""",
             (f"Bez EAN {label}", f"Ulica {label}"))
 
-    db.init_schema(pg)   # must not raise
+    reapply_schema()     # must not raise
 
     active = pg.execute(
         "SELECT count(*) FROM customer_overrides "
@@ -156,7 +156,7 @@ def test_customer_overrides_new_ean_index_ignores_blank_ean_duplicates(pg):
         "unique index must not treat '' as a real duplicate")
 
 
-def test_dl_supplier_overrides_new_ean_index_ignores_blank_ean_duplicates(pg):
+def test_dl_supplier_overrides_new_ean_index_ignores_blank_ean_duplicates(pg, reapply_schema):
     """Mirror of the customer test above for dl_supplier_overrides."""
     pg.execute("DROP INDEX IF EXISTS idx_dl_supplier_overrides_new_ean")
     for label in ("A", "B"):
@@ -167,7 +167,7 @@ def test_dl_supplier_overrides_new_ean_index_ignores_blank_ean_duplicates(pg):
                VALUES (NULL, NULL, '', %s, ARRAY['blank@dl.sk'], %s, false, now())""",
             (f"Bez EAN {label}", f"Mesto {label}"))
 
-    db.init_schema(pg)   # must not raise
+    reapply_schema()     # must not raise
 
     active = pg.execute(
         "SELECT count(*) FROM dl_supplier_overrides "
@@ -261,21 +261,21 @@ def test_rollup_noop_when_message_absent(pg):
         "SELECT count(*) FROM email_events WHERE message_id='ghost'").fetchone()[0] == 1
 
 
-def test_init_schema_idempotent(pg):
-    db.init_schema(pg)   # second run must not raise nor duplicate the trigger
+def test_init_schema_idempotent(pg, reapply_schema):
+    reapply_schema()     # #269: force the baseline DDL to run a second time
     n = pg.execute(
         "SELECT count(*) FROM pg_trigger WHERE tgname='trg_email_events_rollup'").fetchone()[0]
     assert n == 1
 
 
-def test_schema_seeds_the_known_match_incidents(pg):
+def test_schema_seeds_the_known_match_incidents(pg, reapply_schema):
     """#196: match_incidents is append-only and self-seeding (idempotent, ON CONFLICT DO
     NOTHING) — 'days since incident' must never depend on a separate manual step a
     future deploy could forget. #289 added a third seeded row (2026-08-13)."""
-    db.init_schema(pg)   # the pg fixture already truncated it — reseed, then check
+    reapply_schema()     # the pg fixture already truncated it — re-run baseline to reseed
     rows = {r[0] for r in pg.execute("SELECT issue_ref FROM match_incidents").fetchall()}
     assert rows == {"#157", "#186", "#289"}
-    db.init_schema(pg)   # idempotent: re-running must not duplicate or error (UNIQUE)
+    reapply_schema()     # idempotent: re-running must not duplicate or error (UNIQUE)
     n = pg.execute("SELECT count(*) FROM match_incidents").fetchone()[0]
     assert n == 3
 
@@ -353,14 +353,14 @@ def test_insert_message_strips_nul_bytes(pg):
     assert "\x00" not in fname and "\x00" not in text
 
 
-def test_migration_strips_tokens_from_stored_file_urls(pg):
+def test_migration_strips_tokens_from_stored_file_urls(pg, reapply_schema):
     """#22: 2685 live rows had ?token=<secret> persisted; a DB dump leaked the token
     and rotating it broke every historical URL."""
     pg.execute("INSERT INTO messages (message_id) VALUES ('tok@t')")
     pg.execute("""INSERT INTO attachments (message_id, idx, file_url) VALUES
                   ('tok@t', 0, 'http://email-extractor:8099/files/tok_t/0?token=SECRET123'),
                   ('tok@t', 1, 'http://email-extractor:8099/files/tok_t/1')""")
-    db.init_schema(pg)          # migrations are idempotent and run on every start
+    reapply_schema()            # #269: re-run the version-gated baseline (heals a lagging DB)
     urls = [r[0] for r in pg.execute(
         "SELECT file_url FROM attachments WHERE message_id='tok@t' ORDER BY idx").fetchall()]
     assert urls == ["http://email-extractor:8099/files/tok_t/0",
