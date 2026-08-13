@@ -552,3 +552,50 @@ def test_editing_two_different_sheet_bound_dl_suppliers_to_share_the_same_ean_is
     names = {r["name"] for r in dl_snapshot.dl_suppliers_for_management(pg)
              if r["ean_edi"] == "7200000000013"}
     assert names == {"Pobočka Signatus A", "Pobočka Jackulík B"}
+
+
+def test_two_concurrent_sheet_bound_dl_supplier_edits_sharing_a_target_ean_do_not_deadlock(pg):
+    """#275 review finding: mirrors `test_two_concurrent_sheet_bound_edits_sharing_a_
+    target_ean_do_not_deadlock` in tests/test_snapshot.py — the customer-side and
+    dl-supplier-side branch-3 guards are byte-for-byte mirrors of each other (same
+    advisory lock, same helper shape), and #248's own branch-2 fix already got a
+    concurrency test mirrored on BOTH sides (see test_two_concurrent_new_dl_supplier_
+    adds_for_the_same_ean_with_different_city_produce_one_row above) — this closes the
+    same asymmetry for branch-3. Two DIFFERENT sheet-bound supplier rows, two real
+    connections/threads, same target EAN, no hand-added row involved at all: proves the
+    new lock does not turn the LEGITIMATE branch-sharing case into a deadlock or
+    spurious failure under real concurrency."""
+    import threading
+
+    import psycopg
+
+    _dl_snap(pg)
+    barrier = threading.Barrier(2)
+    errors = []
+
+    def edit(orig_ean_edi, orig_city, name, city):
+        conn = psycopg.connect(PG_DSN)
+        try:
+            barrier.wait(timeout=5)
+            dl_snapshot.upsert_dl_supplier(
+                conn, override_id=None, orig_ean_edi=orig_ean_edi, orig_city=orig_city,
+                ean_edi="7200000000014", name=name, emails=[], city=city)
+            conn.commit()
+        except Exception as e:  # pragma: no cover - surfaced via `errors` below
+            errors.append(e)
+        finally:
+            conn.close()
+
+    t1 = threading.Thread(target=edit, args=(
+        "8586010000001", "Košice", "Pobočka Signatus súbežne", "Košice"))
+    t2 = threading.Thread(target=edit, args=(
+        "8586010000002", "Prešov", "Pobočka Jackulík súbežne", "Prešov"))
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+
+    assert not errors, f"two legitimate branch-sharing edits must never raise: {errors}"
+    names = {r["name"] for r in dl_snapshot.dl_suppliers_for_management(pg)
+             if r["ean_edi"] == "7200000000014"}
+    assert names == {"Pobočka Signatus súbežne", "Pobočka Jackulík súbežne"}
