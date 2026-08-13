@@ -5,7 +5,33 @@ ships straight to production and can lose a real customer order. These three rul
 incidents, not theory. Read them before touching any of those workflows.
 
 Workflow ids: static orders `O8IYhUESjaWmPMTI`, dodacie `1R4WcUFhpIPwEJX1`, faktúry
-`du2O6YGmGyntXBbV`, reklamácie `LIpkBHdpcYN7YMdM`, dispatcher `TjIzExr4uUs5f4Ci`.
+`du2O6YGmGyntXBbV`, reklamácie `LIpkBHdpcYN7YMdM`, dispatcher `TjIzExr4uUs5f4Ci`,
+ai orders `wlORIhkVZISCdZNmBTM4Z`.
+
+## The n8n-pz MCP is reachable from an isolated worktree dispatch — don't assume otherwise (#271)
+
+A dispatch prompt hedged "the n8n-pz MCP is not available to you" (reasoning that a
+worktree-isolated `autopilot-worker` might not inherit the parent session's MCP
+config) — this was WRONG in practice: `mcp__n8n-pz__get_workflow_details` and
+`search_workflows` worked identically from inside a `.claude/worktrees/agent-*/`
+dispatch as from an interactive session, live-verified 2026-08-13. Try the MCP tool
+directly before assuming it's unavailable and falling back to a weaker method (a
+"pin, not live check" design, a stale-assumption comment, etc.) — a dispatch's own
+hedge about tool availability is a guess, not a fact, and checking costs one call.
+
+**Live status snapshot (2026-08-13, via this MCP): `Email Dispatcher`
+(`TjIzExr4uUs5f4Ci`) has `Trigger AI Orders`/`Trigger Static`/`Trigger Dodacie` all
+`disabled: true` — n8n no longer dispatches `ai_orders`/`static_orders`/
+`dodacie_listy` at all, the Python engines fully own them.** Both `AI auto orders`
+(`wlORIhkVZISCdZNmBTM4Z`) and `Static auto orders` (`O8IYhUESjaWmPMTI`) are
+themselves `active: false`. Their own claim-query nodes still carry a live,
+hardcoded re-claim window worth pinning against (`Get AI Orders`: `interval '30
+minutes'`; `Get Static Orders`: `interval '10 minutes'` — see
+`.claude/rules/orders-corpus.md`'s `CLAIM_STALE_MINUTES` entry for what this backs),
+but there is no LIVE n8n process to race against for either category today — only a
+rollback-time convention worth keeping in sync. Re-verify this snapshot live rather
+than trusting it forever if a ticket's correctness depends on it (workflows can be
+re-enabled).
 
 ## 1. A Postgres / crypto / HTTP node REPLACES the item json — the payload after it is gone
 
