@@ -2998,3 +2998,80 @@ LOAN item-matching confirmed live, new HK LOAN multi-message gap found)
   `httpapi_reports.py` 83.
 - Run card fired for #268 (`v0.9.86`) — issue je CLOSED, celý 11-krokový
   reťazec HOTOVÝ.
+
+## Integration round A — #273, #275, #255 (0.9.86 -> 0.9.87)
+
+Tri nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté do
+`dev` v jednom kole (integračná dispatch, nie nová feature práca):
+
+- **#273** — chýbajúci index na `attachments.message_id`. RED/GREEN test
+  `test_db.py`. Branch `worktree-agent-a09030facf33818c6`, 3 commity, review
+  clean (issues#273#issuecomment-5277051553). Merge `17d8b85` — čistý, žiadny
+  konflikt.
+- **#275** — aplikačná úroveň teraz odmieta kolíziu EAN kódu EDI aj pre
+  sheet-viazané riadky (nielen ručne pridané, #248). `snapshot.py` +
+  `dl_snapshot.py`, RED/GREEN testy vrátane DL-supplier-side concurrency
+  testu. Branch `worktree-agent-a2ed35800d4c18789`, 4 commity, review clean
+  (issues#275#issuecomment-5277695069). Merge `643d17a` — auto-merged
+  (`.claude/rules/local-testing.md` sa iba doplnil).
+- **#255** — nová `evening_check_active()` (mirror `morning_check_active()`)
+  alertuje rovnaký-deň CODEX odmietnutie na základe aktivitného signálu z
+  vlastných ledger timestampov, bez schema migrácie. 6 test scenárov. Branch
+  `worktree-agent-a37892f72216f8428`, 3 commity, review clean
+  (issues#255#issuecomment-5277500907). Merge `ab7e14c` — JEDEN konflikt v
+  `.claude/rules/local-testing.md` (obe branche pridali samostatnú poznámku
+  o rovnakom probléme paralelnej worktree-fleet kontencie na testovacom
+  Postgrese) — vyriešené ponechaním OBOCH poznámok.
+- **Dokončenie #255 zvyšku**: tri nové knoby
+  (`import_evening_check_hour`/`..._skip_saturday`/`..._skip_sunday`) boli v
+  `confirm.py` len cez `getattr()` s in-code defaultmi — teraz deklarované v
+  `config.yaml` (`options:`/`schema:`) a parsované v `Config.load()`,
+  presne podľa vzoru `import_morning_check_*`. Samostatný commit `6ac1896`.
+- Version bump 0.9.86 -> 0.9.87 (`484f28a`), prvý commit kola.
+- **Kritický nález pri PR**: GitHub `mergeable_state` hlásil trvalo
+  "dirty" (skutočný konflikt), hoci LOKÁLNY 3-way merge (overený DVAKRÁT,
+  vrátane úplne čerstvého `git clone`) bol úplne čistý. Príčina: repo má
+  criss-cross merge históriu (`git merge-base --all dev origin/main` vrátil
+  DVA merge-base body: `de0eddd` aj staršie `bf2530f`, z paralelnej
+  worktree-fleet integrácie main<->dev) — `git merge-tree` s force-ovaným
+  starším base-om (`bf2530f`) reálne produkuje konflikt v `app/__init__.py`
+  a `config.yaml` (verzia), zatiaľ čo git-ov vlastný "ort" strategy s
+  virtuálnym ancestor-om (automatický pri normálnom `git merge`) to rieši
+  čisto. GitHub-ov mergeable pre-check zjavne vyberá nesprávnu/staršiu
+  base pri criss-cross histórii. FIX: `git merge origin/main` do `dev`
+  (`6bcd77c`, "sync main back into dev") kolabuje criss-cross na JEDEN
+  jednoznačný base (main-ov tip), po čom `mergeable_state` prešiel na
+  `blocked`→`clean` po dobehnutí CI. Reusable poznámka pre budúce kolá:
+  ak `gh pr create` nahlási CONFLICTING/dirty na PR-ke, ktorá lokálne
+  mergne čisto, over `git merge-base --all <dev> <main>` na viac než jeden
+  base PRED tým, než uveríš GitHub-u.
+- Full local suite: 1519 testov, 0 F/E/s/x (po vyčistení jedného
+  kontenciou-vyvolaného zaseknutého vlákna z PRE-EXISTUJÚCEHO testu
+  `test_orders_hold.py::test_two_concurrent_answers_to_sibling_questions_release_it_exactly_once`
+  — `t1.join(timeout=15)`/`t2.join(timeout=15)` nezabíjajú vlákno, len
+  prestanú čakať; pri extrémnej CPU kontencii od súbežných sibling
+  worktree behov ostalo jedno vlákno "idle in transaction" 27+ minút,
+  blokujúc TRUNCATE pre zvyšok suity. Čistý re-run po vyčistení kontencie
+  prešiel 100% na prvý pokus. Nahlásené ako `#291`, ponechané OPEN — nie
+  je to logická chyba, je to test-infra robustnosť gap.). `ruff check .`
+  čisté. Tri characterization testy (`test_httpapi_characterization.py`)
+  prešli NEZMENENÉ.
+- PR #292 (dev->main), `Closes #273 #275 #255`. CI zelené (test × 2,
+  e2e-orders × 2, e2e-dl × 2, build × 2 — push + pull_request triggery).
+  Merged `be0ccfa9`.
+- Deploy: `ha apps update e0ac7775_email_extractor` -> v0.9.87. Overené:
+  `/health` `{"ok":true,"version":"0.9.87"}`; DOM (Playwright) ukazuje
+  `v0.9.87`; 0 console chýb na `/`, `/otazky`, `/otazky-dl`, `/znalosti`
+  (každá stránka jednotlivo). Funkčne: index `idx_attachments_message`
+  existuje naživo (`pg_indexes`); tri evening-check knoby viditeľné v
+  add-on options schéme AJ v `options.json` (default hodnoty 18/true/true);
+  `Config.load()` vnútri live kontajnera správne resolvuje všetky tri a
+  `confirm.evening_check_active(cfg, now)` vracia `False` (aktuálny čas
+  pred 18:00 lokálne) — read-only dôkaz, že cesta je zapojená bez
+  vynúteného alertu.
+- Tri worktree (`agent-a09030facf33818c6`, `agent-a2ed35800d4c18789`,
+  `agent-a37892f72216f8428`) + ich lokálne branche odstránené po merge.
+  Sibling worktree `agent-a5e4e4091603a8d19` (live hotfix) a round-B pár
+  `agent-a9158237081b4beeb` (#239) / `agent-a7431f2c6f227576a` (#265,
+  konfliktujú navzájom v `dl_worker.py`) ponechané nedotknuté.
+- Run cards fired for #273, #275, #255 (`v0.9.87`) — všetky issues CLOSED.

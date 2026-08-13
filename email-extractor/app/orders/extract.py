@@ -378,7 +378,16 @@ def run(client, email: dict) -> dict:
 # --- the subject and the body must agree about the day (#81.5) -------------
 
 _SUBJ_DAY = re.compile(r"\b(\d{1,2})\s*\.\s*(\d{1,2})\s*\.(\s*(\d{4}|\d{2}))?")
-_RANGE = re.compile(r"\d{1,2}\s*\.\s*\d{1,2}\s*\.?\s*(-|–|do)\s*\d{1,2}\s*\.\s*\d{1,2}")
+# The SECOND endpoint always carries its own day.month; the FIRST endpoint's month is
+# OPTIONAL (`m1`) — a common Slovak shorthand shares one month between both ends of a
+# range ("17. - 22. 08. 2026", #289 incident: PNO Poprad's real subject). Named groups
+# so `_range_days()` can read `d1`/`m1`/`d2`/`m2` directly instead of re-scanning the
+# matched span for exactly two day.month pairs, which silently found only ONE pair (and
+# therefore dropped the whole range) whenever the first endpoint's month was omitted —
+# that gap was the actual root cause of #289, not a #163 regression.
+_RANGE = re.compile(
+    r"(?P<d1>\d{1,2})\s*\.\s*(?:(?P<m1>\d{1,2})\s*\.?\s*)?(?:-|–|do)\s*"
+    r"(?P<d2>\d{1,2})\s*\.\s*(?P<m2>\d{1,2})")
 
 
 _WEEKDAY = re.compile(
@@ -577,22 +586,47 @@ def _range_days(source: str) -> set[tuple[int, int]]:
     """
     days: set[tuple[int, int]] = set()
     for m in _RANGE.finditer(source):
-        # `_RANGE`'s own match may end right at the second date's month digits with no
-        # trailing dot ("11.07" — the range regex does not require one), so `_SUBJ_DAY`
-        # (which DOES require a trailing dot) can miss that endpoint; a plain day.month
-        # pair-finder is used here instead, scoped to just this one matched span.
-        span = re.findall(r"(\d{1,2})\s*\.\s*(\d{1,2})", m.group(0))
-        if len(span) != 2:
+        # #289 review finding: making the first endpoint's month optional also makes
+        # `_RANGE` match plain decimal-range prose with a lone leading digit ("5. - 6.5
+        # kg chleba" -> d1=5, m1=None, d2=6, m2=5) that the OLD (both-endpoints-mandatory)
+        # regex correctly rejected — this is a genuinely NEW false-positive class, not
+        # just more of the pre-existing "3.5 - 4.5" tolerance (both endpoints already had
+        # their own day.month there). Guarded the same way `_ANNOUNCED_DAY_UNIT_AFTER`
+        # already guards `_ANNOUNCED_DAY` (#187/#190): a weight/currency/count unit
+        # immediately after the match means this was never a date range.
+        if _ANNOUNCED_DAY_UNIT_AFTER.match(source[m.end():]):
             continue
+        d1, m1, d2, m2 = m.group("d1"), m.group("m1"), m.group("d2"), m.group("m2")
+        # The first endpoint's month is optional in the regex — when omitted, the
+        # shorthand shares the SECOND endpoint's month ("17. - 22. 08." = 17.08.-22.08.,
+        # #289). Reading the two endpoints straight off the named groups (rather than
+        # re-scanning the matched text for exactly two day.month pairs, the old
+        # approach) is what makes this shorthand recognizable at all: a plain pair-scan
+        # never finds a pair for a month-less first endpoint, so it always found only
+        # ONE pair and dropped the whole range.
+        m1_omitted = m1 is None
+        if m1_omitted:
+            m1 = m2
         # 2000 and 2004 are both leap years, four apart — a placeholder pair that lets a
         # literal "29.02." endpoint construct cleanly in EITHER branch below, instead of
         # raising ValueError and silently dropping the whole range.
         try:
-            start = date(2000, int(span[0][1]), int(span[0][0]))
-            end = date(2000, int(span[1][1]), int(span[1][0]))
+            start = date(2000, int(m1), int(d1))
+            end = date(2000, int(m2), int(d2))
         except ValueError:
             continue
         if end < start:
+            # #289 review finding: a range whose first month was OMITTED (m1 defaulted to
+            # m2) has no reliable month to wrap into — eliding the month only makes sense
+            # when both ends genuinely share it, so a defaulted m1 producing end < start
+            # means the text is malformed/ambiguous ("28. - 3. 01." with no way to tell
+            # whether 28. means December or January), not a real Dec->Jan range. Guessing
+            # a wrap here produced a bogus ~40-day span in the wrong months (verified:
+            # "od 28. - 3. 01. 2026" -> dates scattered across Jan-March). Skip the range
+            # instead of inventing days from an unresolvable ambiguity — an explicit month
+            # on BOTH ends (m1 not omitted) still wraps exactly as before.
+            if m1_omitted:
+                continue
             end = date(2004, end.month, end.day)   # wraps into the next year (Dec -> Jan)
         cur = start
         while cur <= end and (cur - start).days < 40:   # a "week" range, not unbounded
