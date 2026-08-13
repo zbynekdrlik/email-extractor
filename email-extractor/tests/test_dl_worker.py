@@ -1299,6 +1299,61 @@ def test_a_transient_upload_failure_falls_back_when_the_presence_check_is_unavai
     ).fetchone()[0] == 1
 
 
+def test_a_transient_upload_failure_never_trusts_a_stable_prefix_collision(pg, tmp_path):
+    """#239 finding 6, review finding (own commit, RED->GREEN): `desadv_edi.
+    stable_prefix()` truncates `doc_number` to its first 10 alnum characters (R89's
+    on-wire filename budget) — two GENUINELY DIFFERENT doc numbers from the SAME
+    supplier that only differ past position 10 collide onto the IDENTICAL stable
+    prefix. Without a guard, a transient upload failure for document B would see
+    document A's (a different, already-CONFIRMED document) file in the directory
+    listing, `already_landed()` would report `True`, and B would be silently
+    confirmed as shipped without ever actually reaching ORION — the mirror image of
+    the v0.9.70 duplicate-upload incident this whole ticket exists to prevent, just
+    silent LOSS instead of silent DUPLICATION."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    other_doc_number = "01000000011"
+    this_doc_number = "01000000012"
+    assert desadv_edi.stable_prefix(SUPPLIER_EAN, other_doc_number) == \
+        desadv_edi.stable_prefix(SUPPLIER_EAN, this_doc_number), \
+        "the fixture must genuinely collide on the first 10 alnum chars"
+    other_filename = desadv_edi.filename(SUPPLIER_EAN, "01.08.2026", other_doc_number,
+                                         stamp="090000000")
+    pg.execute(
+        """INSERT INTO desadv_sent (supplier_ean, doc_number, filename, uploaded_at)
+           VALUES (%s, %s, %s, now())""",
+        (SUPPLIER_EAN, other_doc_number, other_filename))
+
+    client = FakeClient({"dl_documents": [_doc(doc_number=this_doc_number)],
+                         "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [ITEM_MATCHED]})
+    tries = []
+
+    def _timed_out_upload(c, name, content, dir_override=None):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    def _fake_list_dirs(cfg):
+        # Document A's own file, genuinely sitting on ORION, matches document B's
+        # stable prefix too — the exact collision this test proves is refused.
+        return _dirs(in_dl=[f"Z-{other_filename}"])
+
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, upload=_timed_out_upload,
+                       list_dirs=_fake_list_dirs)
+    assert n == 1
+    assert len(tries) == 1, "a collision must never be trusted as a landed proof"
+    assert pg.execute(
+        "SELECT uploaded_at FROM desadv_sent WHERE doc_number=%s", (this_doc_number,)
+    ).fetchone() is None, "the DIFFERENT document must never be confirmed"
+    assert pg.execute(
+        "SELECT uploaded_at IS NOT NULL FROM desadv_sent WHERE doc_number=%s",
+        (other_doc_number,)).fetchone() == (True,), "the OTHER document stays confirmed"
+    assert pg.execute(
+        "SELECT count(*) FROM pending_alerts WHERE kind='dl_upload_failed'"
+    ).fetchone()[0] == 1
+
+
 # --- #239 class 3: classified as DL but never even attempted -----------------
 
 def test_stuck_classified_sweep_stamps_a_detection_time_alongside_the_received_time(pg):
