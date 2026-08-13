@@ -202,6 +202,47 @@ def test_a_shorthand_range_with_no_month_on_the_first_day_still_grounds_every_da
     assert not extract.date_grounded("23.08.2026", text)   # outside the written range
 
 
+def test_a_lone_digit_before_a_decimal_weight_is_not_read_as_a_shorthand_range():
+    """Review finding on #289: making the range's first-endpoint month OPTIONAL also
+    made `_RANGE` match ordinary decimal-range prose with a lone leading digit
+    ("5. - 6.5 kg chleba" -> d1=5, no month, d2=6, m2=5) that the OLD (both-endpoints-
+    mandatory) regex correctly rejected — a genuinely NEW false-positive class, not
+    just more of the pre-existing "3.5 - 4.5" tolerance (both endpoints already had
+    their own day.month there). Guarded like `_ANNOUNCED_DAY_UNIT_AFTER` already
+    guards `_ANNOUNCED_DAY`: a unit word right after the match means it was never a
+    date range."""
+    assert extract._range_days("chlieb 5. - 6.5 kg chleba poprosím") == set()
+
+
+def test_a_range_conflict_check_still_recognizes_the_shorthand_range():
+    """`date_conflict()` also calls `_RANGE.search()` on subject/body to short-circuit
+    its contradiction checks (#289 review finding) — never tested with the shorthand
+    (no-month-on-the-first-day) range format before, only the full "06.07. - 11.07."
+    shape (see test_a_date_range_in_the_subject_is_not_a_contradiction above).
+
+    None of the ordered days is 22 (the one day the subject spells out in FULL,
+    "22. 08. 2026") — so this genuinely exercises `_RANGE.search()` recognizing the
+    shorthand: without it, the single-stated-day fallback check would find "22.8." as
+    the subject's one explicit day, see it is absent from the ordered days, and wrongly
+    report a conflict (a vacuous pass was the exact pitfall to avoid here).
+    """
+    assert not extract.date_conflict(
+        "Objednávka od 17. - 22. 08. 2026 pre PNO Testov",
+        ["17.08.2026", "18.08.2026", "20.08.2026"])
+
+
+def test_a_shorthand_range_eliding_the_month_never_wraps_into_a_bogus_span():
+    """Review finding on #289: when the first endpoint's month is OMITTED (defaulted to
+    the second endpoint's month) and the resulting end < start, the old wraparound logic
+    ("Dec -> Jan") had no reliable month to wrap into and produced a bogus ~40-day span
+    scattered across the WRONG months. Eliding the month only makes sense when both ends
+    genuinely share it, so this shape is simply skipped rather than guessed at."""
+    assert extract._range_days("od 28. - 3. 01. 2026") == set()
+    # An EXPLICIT month on both ends still wraps exactly as before (unaffected).
+    assert (28, 12) in extract._range_days("od 28.12. - 3.01.2026")
+    assert (2, 1) in extract._range_days("od 28.12. - 3.01.2026")
+
+
 def test_date_grounded_accepts_an_announced_day_with_no_trailing_dot():
     """Real CÉDER incident wording (#190, messages.id=6091): customers routinely write
     'na 10.8 poprosím' with NO trailing dot after the month digits — this must ground the
