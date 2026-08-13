@@ -79,6 +79,34 @@ hang, a truncated capture, or a reason to re-run: verify success from **exit cod
 Counter(ch for ch in open('out.log').read() if ch not in '.\n[] %0123456789'))"` — an empty
 Counter means every test passed) rather than grepping for `"passed in"`.
 
+## Multiple parallel worktree-fleet workers need their OWN dedicated test-Postgres container, not the shared ports (#255, 2026-08-13)
+
+During a multi-worker fleet round (several `.claude/worktrees/agent-<id>/` checkouts
+running concurrently, each an independent `autopilot-worker`), the well-known ports this
+file already documents (`email-extractor-testpg` 15433, `ee-eval-pg` 55434, etc.) can
+ALREADY be busy with a sibling worker's own `pytest` run at the exact moment you need to
+verify — `ps aux | grep pytest` (filter each hit's own `cd .../agent-<id>/...` prefix in
+its command line) is the way to check, not just `docker ps` (a container being UP does
+not mean it's currently idle). Rather than wait/retry against a port a sibling might be
+using, spin up your OWN throwaway container on an unused port and use that exclusively
+for this session's verification:
+
+```
+docker run -d --name ee-agent-<your-worktree-id-prefix> -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=postgres -p <free-port>:5432 postgres:16
+# then, after a few seconds for it to accept connections:
+export PG_TEST_DSN="postgresql://postgres:postgres@localhost:<free-port>/postgres"
+```
+
+`db.init_schema()` runs automatically via `conftest.py`'s session-scoped `_schema`
+fixture on first use — no manual schema setup needed. This costs nothing extra (a fresh
+`postgres:16` container starts in seconds) and completely removes the #164 TRUNCATE-race
+risk this file's own top section warns about, for the price of one `docker run`. Also
+needs its own venv if the worktree checkout doesn't already have one (`python3 -m venv
+.venv && .venv/bin/pip install -q -r requirements.txt -r requirements-dev.txt`) — a
+fresh worktree checkout has no `.venv/` of its own, it is gitignored like everywhere else
+in this repo.
+
 ## `pytest.mark.skipif` in a NEW test line blocks the push, even though `.skip(` is what's actually banned (#224, 2026-08-08)
 
 `hooks/block-test-skips.sh`'s content scanner matches the raw substring `pytest\.mark\.skip`
