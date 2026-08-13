@@ -67,3 +67,4 @@ Load the matching skill BEFORE working on that area (don't re-derive):
 - `git commit -F <scratch-file>` bezpečnosť (stale scratchpad obsah) → `.claude/rules/git-commit-hygiene.md` (auto-loads on `email-extractor/app/**`, `tests/**`, `config.yaml`)
 - rozdelenie `app/httpapi.py` (#268) / charakterizačné testy → `.claude/rules/httpapi-characterization.md` (auto-loads on `app/httpapi*.py` a `test_httpapi_characterization.py`)
 - PR hlási `mergeable_state: "dirty"` hoci lokálny merge je čistý (criss-cross merge-base z fleet integrácie) → `.claude/rules/pr-merge-mechanics.md` (auto-loads on `app/**`, `tests/**`, `config.yaml`, `docs/autopilot-log.md`)
+- typová kontrola (mypy brána v CI, oprava nálezu bez potlačenia, chirurgický per-modulový override) → `.claude/rules/type-checking.md` (auto-loads on `pyproject.toml`, `requirements-dev.txt`)
