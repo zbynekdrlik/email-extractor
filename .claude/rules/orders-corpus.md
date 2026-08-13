@@ -1778,3 +1778,42 @@ intentional there for cards it was tuned against.
   dropped to 0 immediately after deploy — a free, unplanned functional-verification
   signal for both the new row AND its read path, on top of the mandatory DOM/console
   checks.
+- **A reusable "claim this row, OR atomically tell me who already holds it" primitive
+  now exists — `app/orders/claim.py`'s `claim_or_identify()` (#271).** It generalizes
+  the CTE shape the `#216` entry above documents (`desadv.claim_send_or_identify()`)
+  so a NEW two-phase upload ledger doesn't have to hand-write it again — the caller
+  supplies its own `INSERT ... RETURNING`/`SELECT` text, the primitive just joins them
+  atomically. `edi.claim_send_or_identify()` is the second real user (ported
+  `static_worker._ship`'s duplicate-skip logging onto it, closing the "theoretically
+  same gap" the `#216` entry names — `edi.claim_send()` itself is UNCHANGED,
+  `pipeline.py`'s `_ship_one` still calls it directly and has the SAME latent gap,
+  deliberately left for a later ticket per #271's own "apply it FIRST to
+  static_worker.py" scoping). `desadv.claim_send_or_identify()` was ALSO ported onto
+  the shared primitive (byte-identical SQL, just split into two strings) — its full
+  existing test suite (`test_desadv.py`/`test_dl_worker.py`/
+  `test_desadv_upload_integration.py`) passed unmodified, proving the port safe.
+  `claim.py`'s own module docstring maps ALL FIVE of this project's claim/dedup
+  mechanisms and explains which one (only #2, a two-phase external-side-effect
+  ledger) this primitive is actually for — read it before reaching for this module on
+  a `messages` work-queue claim, an `import_alert_incidents`-style stays-open marker,
+  a schema migration, or a plain write-conflict guard, none of which fit.
+- **`worker.CLAIM_STALE_MINUTES = 30` is a PIN against the n8n "AI auto orders"
+  workflow (`wlORIhkVZISCdZNmBTM4Z`, node "Get AI Orders", `interval '30 minutes'`
+  hardcoded there) — `tests/test_orders_worker.py::
+  test_claim_stale_minutes_matches_n8n_ai_orders_window` asserts the Python-side value
+  only, NEVER a live comparison (#271: CI has no n8n API secret configured anywhere in
+  `.github/workflows/ci.yml`, and adding one is its own security/infra decision, out
+  of scope for that ticket).** If you change this constant, also update (or knowingly
+  diverge from) that n8n node — the test catches an accidental Python-side drift, it
+  cannot catch a change made only on the n8n side. **Both "AI auto orders" and
+  "Static auto orders" (`O8IYhUESjaWmPMTI`) are `active: false` today** (verified live
+  via the n8n MCP, 2026-08-13) — the `Email Dispatcher` workflow's own `Trigger AI
+  Orders`/`Trigger Static` nodes are `disabled: true`, so the Python engines fully own
+  both categories' dispatch now; the n8n side is dormant convention, not a live race.
+  **A SEPARATE, known divergence**: `static_worker._claim()` reuses this SAME 30-min
+  constant, but n8n's own (also-inactive) "Static auto orders" workflow's "Get Static
+  Orders" node hardcodes `interval '10 minutes'`, not 30 — filed as its own
+  `needs-decision` ticket (#296) rather than silently "fixed", since changing it is a
+  genuine design call (align to the historical 10 min, keep 30, or give
+  `static_orders` its own explicitly-named constant) with no live safety consequence
+  today.
