@@ -32,6 +32,23 @@ and always wait for its `EXIT=` marker (or `ps aux | grep pytest` to confirm not
 is running) before starting the next one. A background test run and a "quick single-test"
 foreground run in the same turn is exactly how this collides.
 
+**A plain FOREGROUND `pytest tests/ -q` call (no `run_in_background: true` at all) can
+still silently keep running in the background — the harness auto-backgrounds any Bash
+call that exceeds its own ~120s default timeout, even one you never meant to background
+(#268 krok 4, 2026-08-13).** The tool result reads "Command did not complete within its
+120s timeout and was moved to the background (ID: ...)" and hands you an output-file
+path — easy to skim past while composing the next command. If you then start a SECOND
+`pytest tests/ -q` (e.g. because you forgot the first is still alive, or wanted to retry
+with a longer `timeout` parameter), you now have two concurrent full-suite runs against
+the SAME `PG_TEST_DSN` — the exact #164 collision above, just triggered by the harness's
+own timeout instead of a deliberate `run_in_background`. Tell: a run's dot-progress shows
+scattered `F`/`E` with no obvious cause, and `ps aux | grep pytest` (filter by `cwd`,
+`/proc/<pid>/cwd`, since an unrelated project's pytest on the same box is a false
+positive) shows more than one `pytest tests/` process against this repo. Fix: `kill -9`
+every stray one, confirm `ps aux | grep pytest` is clean, THEN run a single fresh pass —
+don't trust a contaminated run's failures as real without first checking for a
+concurrent second process.
+
 If you ever DO get a hang: find the blocking backend with the query above and
 `SELECT pg_terminate_backend(<pid>)` for the one that's `idle in transaction` — it's safe,
 it's always a stray test connection on a throwaway local DB, never anything live.
