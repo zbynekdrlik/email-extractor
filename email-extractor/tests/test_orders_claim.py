@@ -8,19 +8,19 @@ of `edi.claim_send_or_identify`'s own tests in `test_orders_edi.py`.
 from app.orders import claim
 
 
-def _insert_sql(stale_minutes_placeholder="%s"):
+def _insert_sql():
     return (
         "INSERT INTO edi_sent (customer_ean, delivery_date, content_sha256, filename) "
         "VALUES (%s, %s, %s, %s) "
         "ON CONFLICT (customer_ean, delivery_date, content_sha256) "
         "DO UPDATE SET sent_at = now(), filename = EXCLUDED.filename "
         "WHERE edi_sent.uploaded_at IS NULL "
-        f"AND edi_sent.sent_at < now() - make_interval(mins => {stale_minutes_placeholder}) "
+        "AND edi_sent.sent_at < now() - make_interval(mins => %s) "
         "RETURNING filename")
 
 
 _IDENTIFY_SQL = ("SELECT filename FROM edi_sent "
-                  "WHERE customer_ean = %s AND delivery_date = %s AND content_sha256 = %s")
+                 "WHERE customer_ean = %s AND delivery_date = %s AND content_sha256 = %s")
 
 
 def _claim(pg, ean, date, chash, filename, stale_minutes=10):

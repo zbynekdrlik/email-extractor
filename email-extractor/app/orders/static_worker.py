@@ -372,7 +372,7 @@ def _ship(conn, cfg, message: dict, parsed: dict, built, upload=None, post=None,
                         store_ean, delivery)
         else:
             outcome = (f"EDI pre {built.filename} práve spracúva iný beh (zámer ešte "
-                      "nepotvrdený) — preskočené, aby nevzniklo duplicitné odoslanie")
+                       "nepotvrdený) — preskočené, aby nevzniklo duplicitné odoslanie")
             log.warning("static EDI for %s / %s has a fresh, unconfirmed claim held "
                         "elsewhere — not uploading again", store_ean, delivery)
         report.log_event(

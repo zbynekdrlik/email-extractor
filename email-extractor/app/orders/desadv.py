@@ -144,7 +144,7 @@ def claim_send_or_identify(conn, supplier_ean: str, doc_number: str, filename: s
         "AND desadv_sent.sent_at < now() - make_interval(mins => %s) "
         "RETURNING NULL::text")
     identify_sql = ("SELECT d.message_id FROM desadv_sent d "
-                     "WHERE d.supplier_ean = %s AND d.doc_number = %s")
+                    "WHERE d.supplier_ean = %s AND d.doc_number = %s")
     claimed, info = claim_mod.claim_or_identify(
         conn,
         insert_sql=insert_sql,
@@ -152,10 +152,17 @@ def claim_send_or_identify(conn, supplier_ean: str, doc_number: str, filename: s
         identify_sql=identify_sql,
         identify_params=(ean, doc))
     holder = (info[0] or "") if info else ""
-    if not claimed:
+    if not claimed and info:
         log.warning("DESADV already sent (or claimed within %sm) for supplier=%s doc=%s "
                     "— refusing a duplicate upload", CLAIM_STALE_MINUTES, supplier_ean,
                     doc_number)
+    elif not claimed:
+        # claim_or_identify's own defensive "no row at all" case — cannot happen given
+        # ean/doc are non-empty (see its docstring), but this must never be logged as
+        # "already sent" (info == () here, not a real holder) — that would be a false
+        # audit claim in a money-critical log.
+        log.error("desadv.claim_send_or_identify: no row returned for supplier=%s "
+                  "doc=%s — treating as refused", supplier_ean, doc_number)
     return claimed, holder
 
 

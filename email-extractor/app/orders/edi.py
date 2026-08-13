@@ -204,11 +204,12 @@ def content_hash(content: str) -> str:
 # #153: how long a bare (unconfirmed) claim is trusted to mean "another worker may
 # genuinely be mid-upload right now". Plays the SAME role as db.CLAIM_STALE_MINUTES
 # does for the messages.processing_at claim guard — but is a DELIBERATELY SEPARATE
-# constant, not an import of that one: db.CLAIM_STALE_MINUTES exists to match an
-# EXTERNAL n8n dispatcher's own hardcoded re-claim window (n8n owns that number, not
-# this code), while this one is a purely internal Python-owned choice for a completely
-# different table. They currently share a value by coincidence, not by contract —
-# importing one into the other would wrongly couple two independent knobs.
+# constant, not an import of that one: this is a purely internal Python-owned choice
+# for a completely different table (edi_sent, not messages). They currently share a
+# value by coincidence, not by contract — importing one into the other would wrongly
+# couple two independent knobs. (Corrected #271, 2026-08-13: db.CLAIM_STALE_MINUTES
+# is NOT actually provably matched to an n8n dispatcher window — see db.py's own
+# updated comment on that constant for what a live check actually found.)
 CLAIM_STALE_MINUTES = 10
 
 
@@ -297,10 +298,13 @@ def claim_send_or_identify(conn, customer_ean: str, delivery_date: str, content:
         identify_params=(ean, delivery, chash))
     confirmed = bool(info[0]) if (info and info[0] is not None) else False
     if not claimed:
-        log.warning(
-            "EDI %s (or claimed within %sm, unconfirmed) for %s / %s — refusing a "
-            "duplicate upload", "already sent" if confirmed else "claim still fresh",
-            CLAIM_STALE_MINUTES, customer_ean, delivery_date)
+        if confirmed:
+            log.warning("EDI already CONFIRMED-sent for %s / %s — refusing a "
+                        "duplicate upload", customer_ean, delivery_date)
+        else:
+            log.warning("EDI claim still fresh (< %sm) and UNCONFIRMED for %s / %s "
+                        "— refusing a duplicate upload", CLAIM_STALE_MINUTES,
+                        customer_ean, delivery_date)
     return claimed, confirmed
 
 

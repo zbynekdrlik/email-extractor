@@ -55,7 +55,7 @@ log = logging.getLogger("orders.claim")
 
 
 def claim_or_identify(conn, *, insert_sql: str, insert_params: tuple,
-                       identify_sql: str, identify_params: tuple) -> tuple[bool, tuple]:
+                      identify_sql: str, identify_params: tuple) -> tuple[bool, tuple]:
     """Wrap a caller-supplied `INSERT ... ON CONFLICT ... DO UPDATE ... WHERE <staleness
     / eligibility guard> RETURNING <cols>` (`insert_sql`/`insert_params`) together with
     a caller-supplied `SELECT <SAME cols, same order, same types> FROM <table> WHERE
@@ -85,12 +85,27 @@ def claim_or_identify(conn, *, insert_sql: str, insert_params: tuple,
       CURRENT holder/state (empty tuple if, in a genuinely impossible case, no row
       came back at all — never raises).
 
-    **Contract the caller must uphold:** `insert_sql`'s `RETURNING` clause and
-    `identify_sql`'s `SELECT` list must return the SAME NUMBER of columns, in
-    compatible types, in the SAME order — `UNION ALL` requires it, and a mismatch
-    fails loudly at execution time (a Postgres type/arity error), never silently.
-    Neither string may itself already end in `NOT EXISTS (...)`; this wrapper appends
-    that condition for `identify_sql` automatically.
+    **Contract the caller must uphold:**
+    - `insert_sql`'s `RETURNING` clause and `identify_sql`'s `SELECT` list must
+      return the SAME NUMBER of columns, in COMPATIBLE TYPES — `UNION ALL` requires
+      it, and a mismatch on either of those two fails LOUDLY at execution time (a
+      Postgres type/arity error), never silently.
+    - They must ALSO return columns in the SAME ORDER — but this half of the
+      contract is NOT enforced by Postgres: a same-arity, compatible-type column
+      SWAP (e.g. `RETURNING a, b` vs `SELECT b, a`) is accepted silently and returns
+      TRANSPOSED values. Get the order right; nothing will catch it for you if you
+      don't.
+    - `identify_sql` must match AT MOST ONE ROW for the identity it was given —
+      this wrapper calls `fetchone()` (never a loop), so any extra matching row is
+      silently discarded, not an error. (`insert_sql`'s own `ON CONFLICT` target
+      already guarantees this for the claimed branch; the caller is responsible for
+      giving `identify_sql` an equally-unique `WHERE`.)
+    - Neither string needs to (or should) end in `NOT EXISTS (...)`, a trailing
+      `;`, or a trailing SQL comment — this wrapper parenthesizes each one as its
+      own derived table/CTE and adds `NOT EXISTS (SELECT 1 FROM ins)` in the OUTER
+      `WHERE` around `identify_sql` itself (see the composed SQL shape above), so
+      `identify_sql` is otherwise free to carry its own `ORDER BY`/`LIMIT` if ever
+      needed.
 
     Table/column names are never interpolated here — both SQL strings are written
     entirely by the caller (as `edi.py`/`desadv.py` already do for their own ledgers),
