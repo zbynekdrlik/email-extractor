@@ -20,6 +20,8 @@ from datetime import UTC, datetime
 
 import psycopg
 
+from . import claim as claim_mod
+
 log = logging.getLogger("orders.edi")
 
 SUPPLIER_EAN = "8586013743063"
@@ -202,11 +204,12 @@ def content_hash(content: str) -> str:
 # #153: how long a bare (unconfirmed) claim is trusted to mean "another worker may
 # genuinely be mid-upload right now". Plays the SAME role as db.CLAIM_STALE_MINUTES
 # does for the messages.processing_at claim guard — but is a DELIBERATELY SEPARATE
-# constant, not an import of that one: db.CLAIM_STALE_MINUTES exists to match an
-# EXTERNAL n8n dispatcher's own hardcoded re-claim window (n8n owns that number, not
-# this code), while this one is a purely internal Python-owned choice for a completely
-# different table. They currently share a value by coincidence, not by contract —
-# importing one into the other would wrongly couple two independent knobs.
+# constant, not an import of that one: this is a purely internal Python-owned choice
+# for a completely different table (edi_sent, not messages). They currently share a
+# value by coincidence, not by contract — importing one into the other would wrongly
+# couple two independent knobs. (Corrected #271, 2026-08-13: db.CLAIM_STALE_MINUTES
+# is NOT actually provably matched to an n8n dispatcher window — see db.py's own
+# updated comment on that constant for what a live check actually found.)
 CLAIM_STALE_MINUTES = 10
 
 
@@ -245,6 +248,64 @@ def claim_send(conn, customer_ean: str, delivery_date: str, content: str,
         log.warning("EDI already sent (or claimed within %sm) for %s / %s — refusing "
                     "a duplicate upload", CLAIM_STALE_MINUTES, customer_ean, delivery_date)
     return row is not None
+
+
+def claim_send_or_identify(conn, customer_ean: str, delivery_date: str, content: str,
+                           name: str) -> tuple[bool, bool]:
+    """`claim_send()` PLUS an atomic answer to "is the row that refused me a genuinely
+    CONFIRMED upload, or just someone else's fresh/unconfirmed claim?" (#271) — built on
+    the shared `claim.claim_or_identify()` primitive (the same CTE shape #216 proved for
+    `desadv.claim_send_or_identify()`), so this closes the identical TOCTOU class a
+    `claim_send()` call followed by a SEPARATE `uploaded_at` read would leave open.
+
+    `claim_send()` itself is UNCHANGED and stays the entry point for `pipeline.py`
+    (`ai_orders`'s live engine) — this is a NEW function, added alongside it, for a
+    caller (`static_worker._ship`) that needs to tell the two refusal reasons apart
+    to report them honestly (#271's own finding: today `static_worker._ship` reports
+    BOTH as "already sent", which is simply false for the unconfirmed case — it can
+    only mis-report which stage an event belongs to, never cause a double-upload,
+    since the underlying claim is still the same atomic `ON CONFLICT ... WHERE`).
+
+    Returns `(claimed, confirmed)`:
+    - `claimed=True` — the claim was taken (a fresh insert or an eligible stale
+      reclaim); `confirmed` is always `False` (nothing to report — proceed to upload).
+    - `claimed=False, confirmed=True` — a CONFIRMED upload already exists for this
+      EXACT document (same customer + delivery date + content hash) — a genuine
+      duplicate, safe to skip silently and report as "already sent".
+    - `claimed=False, confirmed=False` — another claim is merely fresh/UNCONFIRMED —
+      someone else may be mid-upload RIGHT NOW; nothing has necessarily reached ORION
+      yet, so this must NOT be reported as "already sent".
+    """
+    ean = str(customer_ean or "")
+    delivery = str(delivery_date or "")
+    chash = content_hash(content)
+    insert_sql = (
+        "INSERT INTO edi_sent (customer_ean, delivery_date, content_sha256, filename) "
+        "VALUES (%s, %s, %s, %s) "
+        "ON CONFLICT (customer_ean, delivery_date, content_sha256) "
+        "DO UPDATE SET sent_at = now(), filename = EXCLUDED.filename "
+        "WHERE edi_sent.uploaded_at IS NULL "
+        "AND edi_sent.sent_at < now() - make_interval(mins => %s) "
+        "RETURNING NULL::boolean")
+    identify_sql = (
+        "SELECT (uploaded_at IS NOT NULL) FROM edi_sent "
+        "WHERE customer_ean = %s AND delivery_date = %s AND content_sha256 = %s")
+    claimed, info = claim_mod.claim_or_identify(
+        conn,
+        insert_sql=insert_sql,
+        insert_params=(ean, delivery, chash, name, CLAIM_STALE_MINUTES),
+        identify_sql=identify_sql,
+        identify_params=(ean, delivery, chash))
+    confirmed = bool(info[0]) if (info and info[0] is not None) else False
+    if not claimed:
+        if confirmed:
+            log.warning("EDI already CONFIRMED-sent for %s / %s — refusing a "
+                        "duplicate upload", customer_ean, delivery_date)
+        else:
+            log.warning("EDI claim still fresh (< %sm) and UNCONFIRMED for %s / %s "
+                        "— refusing a duplicate upload", CLAIM_STALE_MINUTES,
+                        customer_ean, delivery_date)
+    return claimed, confirmed
 
 
 def confirm_sent(conn, customer_ean: str, delivery_date: str, content: str,

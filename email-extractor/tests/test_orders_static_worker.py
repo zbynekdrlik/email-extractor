@@ -332,6 +332,50 @@ def test_python_engine_duplicate_edi_sent_is_skipped_never_reuploaded(pg):
     assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 1
 
 
+def test_python_engine_concurrent_unconfirmed_claim_is_not_reported_as_already_sent(pg):
+    """#271: precise code-path demonstration of the "theoretically same gap"
+    `.claude/rules/orders-corpus.md` documents for `static_worker.py`'s duplicate-skip
+    logging (mirrors the #216 TOCTOU fix `desadv.claim_send_or_identify()` made for the
+    DL ledger). `edi.claim_send()` only ever returns a bool — it cannot tell `_ship`
+    apart "a CONFIRMED upload already exists" (a genuine duplicate, safe to skip
+    silently) from "another claim is merely fresh/UNCONFIRMED" (someone else may be
+    mid-upload RIGHT NOW; nothing has actually reached ORION yet). Today `_ship` reports
+    BOTH the same way: "EDI už bolo odoslané skôr" ("EDI was already sent before") —
+    which is simply FALSE for the second case.
+
+    Simulates the race directly (no threads needed — `edi.claim_send`'s own atomicity
+    is already covered by `test_orders_edi.py`; this test is about what `_ship` REPORTS
+    once it loses the race, not about the race itself): seed a fresh, UNCONFIRMED claim
+    for the exact same document (as a concurrent in-flight run would hold, seconds
+    before its own `confirm_sent()`), then let `static_worker.tick` process a message
+    that resolves to the SAME document and observe how the resulting skip is logged.
+    """
+    sid = _snapshot(pg)
+    parsed, built = _static_built(pg, sid)
+    assert edi.claim_send(pg, built.store_ean, parsed["deliveryDate"], built.content,
+                          built.filename)
+    assert pg.execute("SELECT uploaded_at FROM edi_sent").fetchone()[0] is None, \
+        "the seeded claim must be UNCONFIRMED — this test is the in-flight race, not " \
+        "the already-covered confirmed-duplicate case"
+    _msg(pg)
+
+    calls = []
+    assert static_worker.tick(
+        pg, _python_cfg(), upload=lambda c, n, ct: calls.append(n) or True) == 1
+    assert calls == [], "must never double-upload while another claim is fresh"
+
+    ev = pg.execute(
+        "SELECT stage, outcome, detail FROM email_events WHERE message_id='m1'").fetchone()
+    stage, outcome, detail = ev
+    assert stage == "duplicate_skip"
+    assert "už bolo odoslané" not in outcome, (
+        "a fresh, UNCONFIRMED claim held by someone else must never be reported as "
+        f"'already sent' when nothing has actually reached ORION yet — got: {outcome!r}")
+    assert detail.get("confirmed") is False, (
+        "the event must record this was an unconfirmed in-flight claim, not a "
+        "genuinely confirmed duplicate")
+
+
 def test_python_engine_missing_ean_falls_back_to_ai_pipeline(pg):
     text = (
         "Vyšlá objednávka č.: 1/2026\n"

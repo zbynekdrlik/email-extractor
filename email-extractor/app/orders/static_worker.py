@@ -352,16 +352,33 @@ def _ship(conn, cfg, message: dict, parsed: dict, built, upload=None, post=None,
     order_no = parsed.get("fullOrderNumber", "")
     partner = parsed.get("partner", "")
 
-    if not edi.claim_send(conn, store_ean, delivery, built.content, built.filename):
+    claimed, confirmed = edi.claim_send_or_identify(
+        conn, store_ean, delivery, built.content, built.filename)
+    if not claimed:
         # #133: a duplicate/already-sent skip must never look, in the timeline, like a
         # fresh genuine upload — its own stage, never "uploaded_orion" — and it is NOT a
         # fresh upload, so it never enters the digest count either.
-        log.warning("static EDI for %s / %s already sent — not uploading again",
-                    store_ean, delivery)
+        #
+        # #271: `confirmed` tells apart a GENUINE duplicate (someone already uploaded
+        # this exact document) from a merely fresh/UNCONFIRMED claim held by another
+        # concurrent run (which may be mid-upload right now — nothing has necessarily
+        # reached ORION yet). Reporting both the same way ("already sent") was the
+        # documented "theoretically same gap" as #216's own desadv fix — never a
+        # double-upload risk (the underlying claim stays atomic either way), but a
+        # false claim in the event log/digest for the unconfirmed case.
+        if confirmed:
+            outcome = f"EDI už bolo odoslané skôr: {built.filename} — preskočené"
+            log.warning("static EDI for %s / %s already sent — not uploading again",
+                        store_ean, delivery)
+        else:
+            outcome = (f"EDI pre {built.filename} práve spracúva iný beh (zámer ešte "
+                       "nepotvrdený) — preskočené, aby nevzniklo duplicitné odoslanie")
+            log.warning("static EDI for %s / %s has a fresh, unconfirmed claim held "
+                        "elsewhere — not uploading again", store_ean, delivery)
         report.log_event(
             conn, message["message_id"], stage="duplicate_skip", status="ok",
-            outcome=f"EDI už bolo odoslané skôr: {built.filename} — preskočené",
-            detail={"filename": built.filename}, workflow=WORKFLOW)
+            outcome=outcome, detail={"filename": built.filename, "confirmed": confirmed},
+            workflow=WORKFLOW)
         return {"status": "ok", "items": [], "shipped": True, "edi_filename": built.filename,
                 "partner": partner, "order_number": order_no, "delivery_date": delivery}
 
