@@ -302,3 +302,57 @@ re-check sibling same-sender stuck messages) since there are several valid desig
 real automation-vs-safety tradeoffs. Any FUTURE mail-body-sourced-document engine
 (should this pattern extend to another supplier) should assume the SAME two gaps exist
 until `#265` actually ships a fix.
+
+## #265 shipped: correction-mail detection + sibling-release widening — two reusable
+## gotchas a deep-review pass caught, both worth checking on ANY future similar feature
+
+`#265` shipped both gaps above: `dl_worker._looks_like_correction`/
+`_correction_review_reason` route a mail-body-sourced (#258) correction/amendment mail
+straight to manual review (never extraction, never a model call, never a claim/upload)
+with wording that tells the warehouse to fix an already-imported document manually in
+CODEX; `dl_worker._release_stuck_siblings` (called from `release_for_question` only for
+a `dl_supplier` answer) resets other orphaned same-sender stuck messages back into the
+normal `_claim()` pool. A fresh-context adversarial review of the diff (per
+`agents/autopilot-worker.md`'s CYCLE step 6 shape) caught 2 real, proven safety bugs
+before merge — both are reusable lessons for ANY future feature in this codebase, not
+just this one:
+
+**A plain-ASCII regex stem for a Slovak word family structurally cannot match that
+word's OWN diacritic-inflected forms — don't assume it does, PROVE it with a real
+`re` probe against the literal cited forms.** The first cut of the "dopln" detection
+stem (`r"\bdopln\w*"`) was written because the ticket's own issue text named the risk
+class as "DOPLŇUJÚCE/OPRAVNÉ maily" — but "DOPLŇUJÚCE"/"doplňujúce"/"dopĺňame"/
+"doplňte" all replace the plain ASCII `l`/`n` with the Slovak diacritic letters
+`ľ`/`ĺ`/`ň` (different Unicode codepoints, NOT case variants — `re.IGNORECASE` does
+correctly case-fold `Ň`↔`ň`, but a fixed ASCII `n` in the pattern will never match `ň`
+regardless of case flags). This was a genuine false-NEGATIVE that would have silently
+auto-shipped exactly the incomplete-delivery mail the whole ticket exists to catch —
+caught only because a review pass ran `dl_worker._looks_like_correction(form, "")` for
+each of the four forms the ticket itself quoted, rather than trusting the regex "looked
+right". **Any future Slovak-word-stem regex in this codebase (or similar diacritic-rich
+language matching) needs the SAME empirical check**: list every inflected form the
+motivating text actually cites, then run the candidate pattern against each one in a
+throwaway Python probe (`re.compile(pattern, re.IGNORECASE).search(form)`) BEFORE
+trusting it — never assume a stem "obviously" covers its own word family.
+
+**"No question was ever raised for this message" is NOT proof it is safe to auto-
+recover — a message can also be `processed=true`/`proc_status='review'` with no
+`order_questions` row because a REAL external side effect (an ORION upload) already
+FAILED, not because nothing was ever attempted.** `_release_stuck_siblings`'s first
+cut reset any same-sender message matching `processed=true AND proc_status='review'
+AND no order_questions row` — which also matches a message whose upload genuinely
+timed out (`_process_document`'s upload-except branch calls `desadv.release_send()`,
+deleting the claim, and returns a plain `review` outcome with NO question, since an
+upload failure isn't a "which card is this?" ambiguity). Resetting that message would
+have re-enabled exactly the automatic upload-retry `#239` deliberately removed (a
+released claim + a fresh per-attempt filename can genuinely re-upload a document that
+already landed — see this file's own "Never auto-retry an upload" section above).
+Fixed by requiring a THIRD, POSITIVE exclusion: `AND NOT EXISTS (SELECT 1 FROM
+email_events e WHERE e.message_id = messages.message_id AND e.status = 'error')` —
+every genuine processing exception in `dl_worker.py` (a supplier-match exception, an
+upload exception, an attachment-extraction error) logs `status='error'`, while a plain
+"nothing matched" outcome logs `status='review'`. **Any FUTURE feature in this
+codebase that auto-recovers/re-releases a stuck message based on its CURRENT state
+columns must apply the same check**: absence of a positive signal (a question, a
+claim) is not the same as absence of a NEGATIVE one (a logged failure) — query for
+both before deciding something is safe to retry.
