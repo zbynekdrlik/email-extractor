@@ -30,6 +30,7 @@ multi-minute hang and intervene by hand.
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
@@ -44,16 +45,27 @@ def run_racers(pg, threads: list[threading.Thread], timeout: float = 15,
     the stall-cleanup query, never touched by the racers themselves (each racer must
     open its OWN connection; a single psycopg connection is not safe for concurrent use
     across threads).
+
+    `timeout` is the TOTAL budget across every racer (review finding on #291's own PR):
+    joins share one deadline via `time.monotonic()`, so N stalled racers still time out
+    in ~`timeout` seconds total, not `N * timeout` — the sequential-join idiom every
+    hand-rolled predecessor used.
     """
+    before = _other_backend_pids(pg)   # #291 review: snapshot BEFORE starting, so the
+                                        # cleanup below can never touch a backend that
+                                        # already existed — safe even if this suite ever
+                                        # stops being strictly serial, not only today.
     for t in threads:
         t.daemon = True
         t.start()
+
+    deadline = time.monotonic() + timeout
     for t in threads:
-        t.join(timeout=timeout)
+        t.join(timeout=max(0.0, deadline - time.monotonic()))
 
     stuck = [t.name for t in threads if t.is_alive()]
     if stuck:
-        killed = _kill_stray_backends(pg)
+        killed = _kill_stray_backends(pg, before)
         prefix = f"race {label!r}: " if label else "race: "
         pytest.fail(
             f"{prefix}thread(s) {stuck} did not finish within {timeout}s — a genuine "
@@ -63,19 +75,32 @@ def run_racers(pg, threads: list[threading.Thread], timeout: float = 15,
             "treated as a failure, not silently trusted.")
 
 
-def _kill_stray_backends(pg) -> int:
-    """Terminate every OTHER backend on the test database (excluding `pg`'s own),
-    releasing whatever lock/open transaction a genuinely-stalled racer's connection may
-    still be holding. Safe: pytest runs this suite's tests serially, so during any
-    given test the only OTHER backends that can legitimately exist are the ones this
-    same test's own racer threads opened — there is no other concurrent legitimate
-    session to accidentally kill. Returns how many backends were terminated.
-    """
+def _other_backend_pids(pg) -> set[int]:
+    """Every backend pid on the test database EXCEPT `pg`'s own, right now."""
     mine = pg.execute("SELECT pg_backend_pid()").fetchone()[0]
+    rows = pg.execute(
+        "SELECT pid FROM pg_stat_activity WHERE datname = current_database() "
+        "AND pid <> %s", (mine,)).fetchall()
+    return {pid for (pid,) in rows}
+
+
+def _kill_stray_backends(pg, before: set[int]) -> int:
+    """Terminate every backend on the test database that (a) did NOT exist when
+    `run_racers` started (i.e. was opened BY this race, whether by a racer's own
+    connection or by whatever internal connection the code under test opened) and (b)
+    is not `state = 'idle'` — releasing whatever lock/open transaction it may still be
+    holding. Scoping to `before` (rather than "every other backend, period") means this
+    can never kill a backend that existed before this race began, regardless of whether
+    the suite stays strictly serial — a genuine hardening, not just a today-only
+    assumption. Returns how many backends were terminated.
+    """
+    now = _other_backend_pids(pg)
+    candidates = now - before
+    if not candidates:
+        return 0
     victims = pg.execute(
-        "SELECT pid FROM pg_stat_activity "
-        "WHERE datname = current_database() AND pid <> %s AND state <> 'idle'",
-        (mine,)).fetchall()
+        "SELECT pid FROM pg_stat_activity WHERE pid = ANY(%s) AND state <> 'idle'",
+        (list(candidates),)).fetchall()
     for (pid,) in victims:
         pg.execute("SELECT pg_terminate_backend(%s)", (pid,))
     return len(victims)

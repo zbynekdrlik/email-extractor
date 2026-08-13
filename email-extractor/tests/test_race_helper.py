@@ -68,7 +68,17 @@ def test_run_racers_detects_a_stalled_thread_kills_its_backend_and_fails_loudly(
         finally:
             victim.close()
     finally:
-        pg.execute("DROP TABLE IF EXISTS race_helper_demo")
+        # #291 review: bound this cleanup too, on its OWN throwaway connection — never
+        # the shared session-scoped `pg`, since a `SET statement_timeout` on `pg` would
+        # leak into every LATER test in this session. If `pg_terminate_backend` were
+        # ever slow to actually release the lock, an unbounded DROP here (in the one
+        # test whose entire purpose is proving hangs get caught) could itself hang.
+        cleanup = psycopg.connect(PG_DSN, autocommit=True)
+        try:
+            cleanup.execute("SET statement_timeout = '3000'")
+            cleanup.execute("DROP TABLE IF EXISTS race_helper_demo")
+        finally:
+            cleanup.close()
 
 
 def test_run_racers_passes_through_cleanly_when_every_thread_finishes_in_time(pg):
