@@ -268,16 +268,16 @@ def test_init_schema_idempotent(pg):
     assert n == 1
 
 
-def test_schema_seeds_the_two_known_match_incidents(pg):
+def test_schema_seeds_the_known_match_incidents(pg):
     """#196: match_incidents is append-only and self-seeding (idempotent, ON CONFLICT DO
     NOTHING) — 'days since incident' must never depend on a separate manual step a
-    future deploy could forget."""
+    future deploy could forget. #289 added a third seeded row (2026-08-13)."""
     db.init_schema(pg)   # the pg fixture already truncated it — reseed, then check
     rows = {r[0] for r in pg.execute("SELECT issue_ref FROM match_incidents").fetchall()}
-    assert rows == {"#157", "#186"}
+    assert rows == {"#157", "#186", "#289"}
     db.init_schema(pg)   # idempotent: re-running must not duplicate or error (UNIQUE)
     n = pg.execute("SELECT count(*) FROM match_incidents").fetchone()[0]
-    assert n == 2
+    assert n == 3
 
 
 def test_classified_trigger_logs_on_category_change(pg):

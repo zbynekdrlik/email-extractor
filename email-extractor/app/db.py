@@ -722,6 +722,16 @@ SCHEMA = [
                        'alias-bias príčinou — oprava #186/#189', '#186')
     ON CONFLICT (issue_ref) DO NOTHING
     """,
+    # #289 (2026-08-13): PNO Poprad's shorthand date-range subject ("17. - 22. 08. 2026")
+    # silently dropped 5 of 6 delivery days — a real wrong-shipment incident, remediated
+    # live via a one-off shadow-verified re-ship, root-caused and fixed in the SAME PR
+    # that adds this row (`.claude/rules/orders-corpus.md`'s #188/#196 standing rules).
+    """
+    INSERT INTO match_incidents (occurred_on, description, issue_ref) VALUES
+        ('2026-08-13', 'PNO Poprad: skrátený rozsah dátumu v predmete („17. - 22. 08. '
+                       '2026“) stratil 5 z 6 dní objednávky — oprava #289', '#289')
+    ON CONFLICT (issue_ref) DO NOTHING
+    """,
     # One post per calendar day, never once per worker tick — same "claim, don't
     # spam" pattern order_spend_alerts already uses for the monthly cap.
     """
