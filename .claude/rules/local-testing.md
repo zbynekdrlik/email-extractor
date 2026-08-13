@@ -263,3 +263,65 @@ path works fine in isolation. Before trusting ANY single-test-alone failure as r
 run `ps aux | grep pytest` FIRST — this class of failure looks exactly like a genuine
 regression (a clean, reproducible assertion failure, not flakiness) and can easily
 mislead a fix attempt if taken at face value.
+
+## Waiting for a full local suite that genuinely takes 15-25 minutes on a contended box
+## — a `sleep && check` loop gets HARD-BLOCKED; use `Monitor` with a real until-loop
+## (#285, 2026-08-13)
+
+A `run_in_background` full-suite invocation on a box with 2-3 sibling worktree workers
+(load average 10-14 on 8 cores is normal during a fleet round, per this file's own
+"3 sibling workers" section above) genuinely runs 15-25 minutes wall-clock, not the
+"seconds for a scoped file" number that section quotes — that number is for ONE file,
+not the full suite. Waiting this out correctly, as a worktree-isolated worker, hits a
+harness-level trap that has nothing to do with this repo's own code:
+
+- **A single `sleep N && <check>` (or `sleep N; <check>`) Bash call is BLOCKED** by a
+  PreToolUse hook the moment it looks like a repeat of an earlier wait attempt — the
+  block message says to use `Monitor` with an until-loop, or `run_in_background: true`.
+  Trying to work around it with a shorter sleep, a `timeout N cat` substitute, or any
+  other sleep-shaped primitive is explicitly against the hook's own instruction and
+  will just re-trigger it.
+- **The correct mechanism is the `Monitor` tool**, armed with a real shell until-loop
+  polling the target PID and printing a marker line on exit — e.g. `until ! ps -p
+  <pid> > /dev/null 2>&1; do sleep 10; done; echo DONE`. This delivers a genuine
+  `<task-notification>` back into the SAME conversation once the condition is met —
+  confirmed working end-to-end this session (armed at pytest's ~13-min mark, notified
+  cleanly at 100%). Do NOT then also manually re-poll the PID via repeated bare `ps -p
+  <pid>` calls while the Monitor is armed — each individual bare `ps` call is not
+  itself blocked, but it is redundant with what the Monitor is already doing and just
+  burns turns for no benefit; better to do OTHER useful work (dispatching the review
+  subagent, re-reading the diff, drafting commit/report text) between checks, or none
+  at all, and trust the notification.
+- **A `SubagentStop` hook BLOCKS ending your turn while ANY `Monitor` task you armed is
+  still outstanding** — as a worktree-isolated worker (a subagent from the supervisor's
+  point of view), simply going quiet with an `⏳ WORKING` marker while a Monitor task is
+  pending does NOT safely hand off; the hook explicitly warns the notification would
+  fire to your PARENT instead of back into your own session. So: never try to "just
+  stop and wait for the notification" while a Monitor is armed — keep taking (even
+  trivial) actions until the notification actually lands in-line.
+- **If a Monitor task's own until-loop needs adjusting (e.g. you want to also print
+  progress, or you started one with the wrong PID) and the Stop hook is blocking you
+  citing that task id, `TaskStop` it first** — this does NOT kill the underlying
+  process/command being watched (a `Monitor`'s target PID is independent of the
+  Monitor's own polling shell), only the polling wrapper. Re-arm a fresh `Monitor`
+  immediately after with the corrected command; the Stop hook's block clears once no
+  outstanding task id remains.
+- **A dispatched review subagent (per `agents/autopilot-worker.md` CYCLE step 6) can
+  run for 15+ minutes on its own** on a contended box, since it typically re-runs the
+  same scoped tests itself as part of verifying the diff. Its own completion
+  `task-notification` fires only ONCE, at the very end (no incremental progress
+  events) — watching its `output_file`'s mtime/size via `stat` is USELESS as a
+  progress signal (observed: stayed at a constant small size for the agent's entire
+  ~17-minute run, only useful as evidence "it exists", not "it's progressing"). A
+  better proxy, when genuinely needed: `ps aux | grep '<a literal, unique substring of
+  its own worktree path>'` shows whatever shell/test command the subagent is currently
+  running (the exact command line, including its own `PG_TEST_DSN`), which changes as
+  the subagent moves through its own review steps — armed as its own `Monitor`
+  until-loop, the SAME way as the main suite wait above.
+- **Never start a SECOND pytest invocation against the same isolated container while a
+  review subagent might reuse it** — a dispatched review subagent that is told "there
+  is already a dedicated container on port N for this worktree, use it, don't start a
+  new one" will correctly wait for an in-flight run against that port rather than
+  colliding with it (confirmed working this session) — but only if the dispatch prompt
+  says so explicitly, per this file's own "never two invocations at once" rule at the
+  top.
