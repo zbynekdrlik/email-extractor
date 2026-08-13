@@ -4,12 +4,22 @@ paths:
   - "email-extractor/tests/conftest.py"
 ---
 
-# Running pytest locally against the dev1 test Postgres — never two invocations at once
+# Running pytest locally against the test Postgres — never two invocations at once
 
-There are several throwaway `postgres:16` docker containers on dev1 (`docker ps | grep
-postgres`) exposed on different host ports (`email-extractor-testpg` on 15433 is the one
-used most, `ee-eval-pg`/`ee-test-pg`/others exist too — check which is actually up before
-picking a port). Point `PG_TEST_DSN` at one of them:
+**This project's checkout + test containers live on dev2, not dev1 (#289, 2026-08-13
+— corrected; the global `machine-identities.md` default "most projects live on dev1"
+does NOT hold for email-extractor).** Verified live: `hostname` in a session working
+this repo returns `dev2`, and `ssh dev2` from inside such a session is a SELF-LOOP
+(MagicDNS resolves a node's own name to `127.0.1.1` locally, per
+`machine-identities.md`'s own quirk note) — landing back on the same box, same
+filesystem, same git state. Don't assume dev1 from the global convention; run
+`hostname` once if genuinely unsure which box a session is on before reaching for
+`ssh dev1`/`ssh dev2` to "get to" this repo's checkout — you may already be there.
+
+There are several throwaway `postgres:16` docker containers on THIS box (`docker ps |
+grep postgres`) exposed on different host ports (`email-extractor-testpg` on 15433 is
+the one used most, `ee-eval-pg`/`ee-test-pg`/others exist too — check which is actually
+up before picking a port). Point `PG_TEST_DSN` at one of them:
 
 **In WORKTREE-mode dispatch (parallel `autopilot-worker` fleet rounds, #317), also check
 what OTHER SIBLING WORKTREE WORKERS are already using — not just your own history

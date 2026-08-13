@@ -74,6 +74,34 @@ docstring explicitly leaves worker/claim wiring to this phase): only attachments
 of those two; anything else (a signature image, a `.docx`, ...) is skipped rather than fed
 to Vision, which n8n's own `Get Attachment Meta ... LIMIT 1` query implicitly also
 preferred (R16) before F2 widened it to every PDF-shaped attachment (W1a).
+
+**A mail-body-sourced (#258) document whose OWN mail reads as a CORRECTION/AMENDMENT
+never auto-ships (#265).** HK LOAN (`gnip@hkloan.eu`) writes delivery notes directly
+into the mail body and routinely follows up with a short mail that only restates ONE
+changed line of an earlier, separately-sent full delivery ("Zvyšok dodania bez zmien" —
+"rest unchanged"). This worker has zero cross-message memory — extracting such a
+follow-up ALONE would silently produce a document missing every item the follow-up
+never repeats. Per the owner's binding decision on #265 (2026-08-13, "možnosť 1"):
+`_looks_like_correction` detects this from the subject/body (gated `not shadow` — a
+shadow run still extracts a correction mail for comparison, per this module's own
+"shadow runs the FULL pipeline" contract; it never claims/uploads/teaches regardless,
+via `_process_document`'s own shadow branch) BEFORE `dl_extract.extract_email` is ever
+called for a LIVE run, and routes straight to `review` — no model call, no
+supplier/item matching, no `dl_item`/`dl_supplier` question, no claim, no upload, ever.
+The review text explicitly tells the warehouse that if the original document was
+already imported into CODEX, the fix has to happen there BY HAND — this engine cannot
+amend an already-imported document and must never try (there is currently no
+system-side way to do it). See the #265 design comment (`gh issue comment`) for the
+full rejected-alternative reasoning behind the exact trigger-word set.
+
+**`release_for_question` also releases orphaned same-sender siblings for a `dl_
+supplier` answer (#265 gap 2).** `teach.ask_dl_supplier`'s per-sender dedupe means only
+the FIRST stuck message from a still-unregistered sender ever gets its own `order_
+questions` row — every later message from that sender is left `processed=true`/`proc_
+status='review'` forever, tied to nothing. Once the sender is finally taught, `_release_
+stuck_siblings` resets every OTHER orphaned same-sender message back into the normal
+`_claim()` pool (bounded, never a synchronous storm) instead of leaving them stuck.
+Deliberately scoped to `dl_supplier` only — see that function's own docstring for why.
 """
 from __future__ import annotations
 
@@ -159,6 +187,91 @@ def _mail_body_only(combined_text: str) -> str:
 # Spec §4: the documented Lunys "IS KARAT" DL-number shape inside a subject line.
 _SUBJECT_DOC_RE = re.compile(r"\d{2,}LT\d{4,}", re.IGNORECASE)
 
+# #265: Slovak correction/amendment word stems — see the module docstring's own #265
+# paragraph and the design comment on the ticket (`gh issue comment`) for the full
+# evidence + rejected-alternative reasoning. "oprav"/"korek" are strong, low-ambiguity
+# signals in a delivery-note mailbox (both real HK LOAN incidents quoted on the ticket
+# trip on "oprav" alone — mail 6389 "OPRAVA HMOTNOSTI", mail 4417 "... + oprava v
+# dátume dodania"), checked in BOTH subject and body. "zmena" was considered and
+# deliberately EXCLUDED — too common in unrelated administrative mail ("zmena adresy",
+# "zmena banky") to be a safe standalone trigger; see `test_innocent_zmena_wording_
+# does_not_trip_the_correction_detector` for the negative case this is verified against.
+#
+# Deep-review finding on this ticket's own PR (#265): the FIRST cut of `_CORRECTION_
+# STRONG_RE` used the plain ASCII stem "korekci" only, which misses "korektúra"/
+# "korektúru" (a genuine Slovak synonym for "correction") — `korek(?:ci|t[uú]r)` covers
+# both. The Slovak alphabet's own case-folding correctly matches diacritic forms of
+# "oprav"/"korek" with plain `re.IGNORECASE` (verified: no combining-mark stripping
+# needed for THIS word family — unlike "dopln" below, neither stem's own letters carry
+# a diacritic in their base ASCII form).
+_CORRECTION_STRONG_RE = re.compile(r"\b(?:oprav|korek(?:ci|t[uú]r))\w*", re.IGNORECASE)
+
+# Deep-review finding on this ticket's own PR (#265): the FIRST cut of this stem was
+# the plain ASCII "dopln" — which structurally CANNOT match its own most natural
+# Slovak forms ("DOPLŇUJÚCE", "doplňujúce", "dopĺňame", "doplňte" all replace the
+# plain "l"/"n" with the diacritic letters ľ/ĺ/ň) even though the ticket's own
+# description explicitly frames the risk class as "DOPLŇUJÚCE/OPRAVNÉ maily" — a real
+# false-NEGATIVE bug that would have silently auto-shipped exactly the incomplete-
+# delivery mail this whole ticket exists to catch. `dop(?:ln|lň|ĺň)` covers the plain
+# form plus both diacritic variants (verified against all four cited forms).
+#
+# Deliberately checked ONLY in the SUBJECT, never the body — "dopln"/"doplnok" is
+# ordinary Slovak vocabulary ("doplnok stravy" = dietary supplement, a real product
+# category) that can legitimately appear as a delivered ITEM's own name inside a
+# mail-body-sourced (#258) delivery note's body text; scanning the body too would
+# risk permanently misrouting a genuine supplier who happens to sell such products.
+# The subject alone is where BOTH real HK LOAN incidents' own signal actually lives —
+# no live evidence needs "dopln" in the body specifically.
+_CORRECTION_DOPLN_SUBJECT_RE = re.compile(r"\bdop(?:ln|lň|ĺň)\w*", re.IGNORECASE)
+
+_CORRECTION_EXCERPT_LIMIT = 500
+
+
+def _looks_like_correction(subject: str, body_text: str) -> bool:
+    """#265: true when the subject OR the mail's own body text (Subject+From+Body, via
+    `_mail_body_only` — never an attachment's own text) carries a correction/amendment
+    stem. ONLY ever consulted for the #258 mail-body-sourced path (a real PDF/image
+    attachment is out of scope — see the module docstring). See the two regexes above
+    for why "dopln" is subject-only while "oprav"/"korek" cover subject AND body."""
+    subject, body_text = subject or "", body_text or ""
+    if _CORRECTION_STRONG_RE.search(subject) or _CORRECTION_STRONG_RE.search(body_text):
+        return True
+    return bool(_CORRECTION_DOPLN_SUBJECT_RE.search(subject))
+
+
+def _correction_review_reason(body_text: str) -> str:
+    """The mandated wording (owner's binding #265 decision, 2026-08-13): NEVER auto-
+    ship, always manual review, and — because there is currently no way to amend a
+    document already imported into CODEX — explicitly say the fix may have to happen
+    there BY HAND. One honest wording deliberately covers BOTH "not yet imported" and
+    "already imported": a best-effort `desadv_sent` lookup was considered and rejected
+    (see the design comment) — a correction mail almost never carries its own doc
+    number, so there is no reliable key to look the earlier document up by, and a wrong
+    "not yet imported" claim would be worse than no claim at all. The mail's own text is
+    quoted verbatim (never an AI interpretation of it) so the warehouse reads exactly
+    what the supplier wrote.
+
+    Deep-review finding on this ticket's own PR (#265): `build_review` wraps `reason`
+    in a single `<p>` with no `nl2br` — a multi-line excerpt embedded with its own raw
+    newlines rendered as one visually run-together paragraph in Odoo. Collapsing
+    whitespace here (never truncating meaning, just normalizing layout) keeps the
+    quoted text readable without needing any HTML change downstream."""
+    excerpt = " ".join((body_text or "").split())
+    if len(excerpt) > _CORRECTION_EXCERPT_LIMIT:
+        excerpt = excerpt[:_CORRECTION_EXCERPT_LIMIT].rstrip() + " (...)"
+    return (
+        "Tento e-mail vyzerá ako OPRAVA/DOPLNOK k dodaciemu listu poslanému skôr "
+        "samostatným mailom, nie je to kompletný nový doklad — preto sa NESPRACOVAL "
+        "automaticky. Skontroluj ho ručne oproti pôvodnému mailu od rovnakého "
+        "dodávateľa — táto správa môže meniť len jednu položku, ostatné položky "
+        "pôvodného dodania v nej môžu úplne chýbať. Ak bol pôvodný dodací list už "
+        "nahratý/naimportovaný do systému ORION (priečinok archCodex v CODEXe), "
+        "TÚTO OPRAVU TREBA UROBIŤ RUČNE PRIAMO V CODEXe — systém naimportovaný "
+        "doklad upraviť nevie, nesmie sa o to ani pokúšať a nikdy ho nenahráva do "
+        f"ORIONu znova. Text e-mailu: {excerpt}"
+    )
+
+
 resolve_engine = worker.resolve_engine
 
 
@@ -179,6 +292,46 @@ def _check_retry(attempts: int, error: str) -> None:
     `Retry transient?` operates on the whole claimed message, not a sub-document)."""
     if _is_transient(error) and int(attempts or 0) < TRANSIENT_RETRY_LIMIT:
         raise _RetryLater(error)
+
+
+def _check_landed(conn, cfg, list_dirs, ean_edi: str, doc_number: str) -> bool | None:
+    """#239 finding 6 (remainder): after a TRANSIENT upload failure, is the document
+    already on ORION under an EARLIER attempt's name — the "bytes landed, only the
+    reply was lost" case `upload.put()`'s temp-write+rename makes provable
+    (`desadv_edi.already_landed()`, keyed on the document's STABLE identity, never a
+    filename)? Returns `True`/`False` when the check itself succeeded AND (review
+    finding on this ticket's own PR) is genuinely trustworthy, `None` when it could not
+    even be attempted — most likely the SAME SFTP connection that just failed the
+    upload is down too, right after failing on it — OR when a presence match was found
+    but is NOT trustworthy (`desadv.has_confirmed_collision`: a different, already-
+    confirmed document from the same supplier shares the same truncated stable prefix,
+    see that function's own docstring). The caller treats `None` exactly like the
+    pre-finding-6 behaviour: no retry, straight to the durable alert — a blind retry
+    (or a blindly-trusted false-positive presence match) is exactly the v0.9.70
+    duplicate-delivery incident this whole ticket exists to prevent, just possibly in
+    the opposite direction (silent loss instead of silent duplication).
+
+    Review finding on this ticket's own PR: `already_landed()` itself must be inside
+    the SAME try/except as `list_dirs(cfg)` — an earlier draft only guarded the SFTP
+    listing call, so an exception from `already_landed()` (e.g. a malformed `dirs`
+    shape) would propagate uncaught out of the whole upload except-block in
+    `_process_document`, skipping `_alert_and_release` entirely and leaving the claim
+    held with no alert ever raised."""
+    try:
+        dirs = list_dirs(cfg)
+        landed = desadv_edi.already_landed(dirs, ean_edi, doc_number)
+    except Exception:
+        log.warning("DL upload retry: could not check ORION presence for supplier=%s "
+                   "doc=%s — no safe retry possible", ean_edi, doc_number, exc_info=True)
+        return None
+    if landed and desadv.has_confirmed_collision(conn, ean_edi, doc_number):
+        log.warning(
+            "DL upload retry: stable-identity presence match for supplier=%s doc=%s "
+            "collided with a DIFFERENT already-confirmed document sharing the same "
+            "10-char prefix — refusing to trust it, falling back to the safe alert "
+            "path instead of confirming the wrong document", ean_edi, doc_number)
+        return None
+    return landed
 
 
 # --- catalog refresh (mirrors worker.refresh_due) ---------------------------
@@ -438,7 +591,7 @@ def _shipped_items(decisions: list[tuple[dict, dl_match.Decision]]) -> list[dict
 
 def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list[dict],
                       suppliers: list[dict], shadow: bool, all_items: list[dict],
-                      upload=None, post=None) -> dict:
+                      upload=None, post=None, list_dirs=None) -> dict:
     subject, from_addr = message.get("subject", ""), message.get("from_addr", "")
     doc_number = doc.get("docNumber") or ""
     delivery_date = doc.get("deliveryDate", "")
@@ -600,53 +753,103 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         return {"outcome": "duplicate", "doc_number": built.doc_number,
                "supplier_name": supplier_decision.name}
 
-    try:
-        upload(cfg, desadv_edi.upload_name(built.filename), built.content,
-              dir_override=getattr(cfg, "orion_dl_dir", upload_mod.DL_DIR))
-    except Exception as e:
+    upload_name = desadv_edi.upload_name(built.filename)
+    upload_dir = getattr(cfg, "orion_dl_dir", upload_mod.DL_DIR)
+    list_dirs = list_dirs or upload_mod.list_dirs
+
+    def _finish_shipped() -> dict:
+        """The shared "document is CONFIRMED on ORION" tail — called after a normal
+        upload success, AND (finding 6, #239) after a transient upload failure whose
+        stable-identity presence check proved the bytes already landed (reply lost,
+        not the upload itself), or whose single safe retry succeeded. A previous design
+        comment on #239 explicitly deferred wiring retry INTO this function's inline
+        body to avoid duplicating this ~30-line tail into a second, driftable copy —
+        this closure is that extraction: every success path shares EXACTLY one shape,
+        never two independently-maintained ones. Captures `conn`/`cfg`/`shadow`/
+        `message`/`subject`/`from_addr`/`delivery_date`/`link`/`supplier_decision`/
+        `built`/`decisions`/`post` from the enclosing scope — the same free variables
+        the pre-finding-6 inline code already used directly."""
+        desadv.confirm_sent(conn, supplier_decision.ean_edi, built.doc_number,
+                            pg_dsn=getattr(cfg, "pg_dsn", ""))
+
+        today = message.get("today") or datetime.now(UTC).date().isoformat()
+        for _item, decision in decisions:
+            if not desadv_edi._is_unmatched(decision.gtin):
+                # R91: item-history write, ONLY for what actually shipped.
+                dl_memory.remember(conn, supplier_decision.ean_edi, decision.item_name,
+                                  decision.gtin, decision.card, today, source="ship")
+
+        shipped, unmatched_notes, borderline_notes, history_notes = [], [], [], []
+        for item, decision in decisions:
+            if (not desadv_edi._is_unmatched(decision.gtin)
+                    and _num(item.get("quantity")) != 0):
+                shipped.append({"name": decision.card or decision.item_name,
+                               "quantity": item.get("quantity"),
+                               "unit": item.get("unit")})
+                if decision.rule == "llm_borderline":
+                    borderline_notes.append(
+                        f"{decision.item_name} ({decision.card}, istota "
+                        f"{round(decision.confidence * 100)} %)")
+                elif decision.rule == "weight_override":
+                    history_notes.append(f"{decision.item_name} -> {decision.card} "
+                                         f"({decision.note})")
+            elif not decision.gtin:
+                # Same fix as the nástenka gate above: any decision with no real gtin
+                # was excluded from the EDI, regardless of which rule produced it.
+                unmatched_notes.append(f"{decision.item_name} ({decision.note})")
+
+        outcome = "partial" if built.partial else "ok"
+        _post(cfg, shadow, lambda: dl_report.build_success(
+            supplier_decision.name, built.doc_number, delivery_date, from_addr, subject,
+            shipped, unmatched_items=unmatched_notes, borderline_notes=borderline_notes,
+            history_notes=history_notes, price_substitutions=built.price_substitutions,
+            filename=built.filename, partial=built.partial, link=link),
+            post=post)
+        _event(conn, shadow, message["message_id"], stage="uploaded_orion", status="ok",
+              outcome=f"EDI vytvorené: {built.filename}",
+              detail={"doc_number": built.doc_number, "edi_file": built.filename},
+              rollup=False, workflow=dl_report.WORKFLOW)
+        return {"outcome": outcome, "doc_number": built.doc_number,
+               "supplier_name": supplier_decision.name,
+               "supplier_ean": supplier_decision.ean_edi, "filename": built.filename,
+               "line_count": built.line_count,
+               "items_skipped_no_match": built.items_skipped_no_match,
+               "items_skipped_zero_qty": built.items_skipped_zero_qty,
+               "price_substitutions": built.price_substitutions,
+               # #229 follow-up 2, review finding: `outcome`/`built.partial` alone is
+               # NOT a precise "did this raise a real dl_item board question" signal --
+               # desadv_edi.build() excludes a zero-quantity item from its own
+               # no_match/partial computation even when unmatched, but dl_worker's own
+               # teach.ask_dl_item call above fires for ANY unmatched item regardless
+               # of quantity. `unmatched_notes` is that exact, precise signal (same
+               # list build_success's own link condition already reads) -- carry it
+               # through so dl_report._outcome_needs_link can check it directly
+               # instead of re-deriving an imprecise proxy from `outcome`.
+               "unmatched_items": unmatched_notes,
+               "items": _shipped_items(decisions)}
+
+    def _alert_and_release(err: Exception) -> dict:
+        """The pre-finding-6 "upload genuinely failed" tail, unchanged: release the
+        claim so the document can be retried by a LATER independent attempt (a human
+        reprocess, or R17's own message-level retry), and durably enqueue the alert so
+        the failure stays visible instead of silent (#239 class 2, requirement 3) --
+        never a fire-and-forget best-effort post (Odoo being down at this exact moment
+        would otherwise lose the alert with no trace, ever). Reached whenever a safe
+        retry was not possible: a NON-transient failure, a transient one whose presence
+        check proved the document is genuinely absent AND whose single retry also
+        failed, or a transient one whose presence check itself could not be attempted
+        (finding 6, #239)."""
         desadv.release_send(conn, supplier_decision.ean_edi, built.doc_number)
-        # #239: an upload failure is NEVER auto-retried here. The removed code called
-        # `_check_retry(...)` at this point, reasoning that "the claim was just released
-        # above, so a retry can safely re-claim and re-upload without ever risking a
-        # duplicate" — backwards: releasing the claim is exactly what REMOVES the
-        # protection. `upload_mod.put()` writes straight to the FINAL `in_DL\<name>` with
-        # no temp-write + rename, `desadv_edi.filename()` stamps a retry with a fresh
-        # `HHMMSSmmm` (so it cannot collide), `release_send()` above DELETED the ledger
-        # row (so `claim_send_or_identify()`, the one atomic anti-double-upload backstop,
-        # has nothing left to guard and `confirm.py` never sees the orphan), and
-        # `TRANSIENT_RE` matches `timed out` — the exact shape of "the bytes DID land,
-        # only the reply was lost". Composed: two copies of one document in `in_DL`, both
-        # taken in at the warehouse's next manual morning import. R17's retry semantics
-        # for LLM/vision failures are untouched; only this upload call site is affected.
-        # Re-enabling a retry needs an absence proof (by doc_number + supplier, never by
-        # filename, which changes between attempts) plus a temp-write+rename upload —
-        # tracked on #239. The durable alert below is kept: that half is correct, and is
-        # what makes this failure visible instead of silent.
         log.exception("DL upload of %s failed", built.filename)
         note = ("Odoslanie dodacieho listu do ORIONu zlyhalo — skús znova alebo "
                "nahlás administrátorovi")
-        # `e` is captured into a plain string BEFORE any closure, never referenced
-        # inside one — `except ... as e` implicitly deletes `e` at the end of this
-        # block, which would otherwise make a closure over it fragile (it happens to
-        # run early enough today, but a later failure here would silently swallow a
-        # future NameError and degrade the alert to a bare generic message — the
-        # exact silent-loss failure mode fix #5 exists to prevent).
-        detail_text = f"{note} ({built.filename}): {e}"
-        # #239 class 2, requirement 3: NEVER a fire-and-forget best-effort post here —
-        # a lost upload-failure alert is exactly the "invisible one layer up" failure
-        # this ticket exists to close (Odoo is down right now — a bare `_post()` at
-        # this exact moment would vanish with no trace, ever). Durably enqueued
-        # instead; `dl_alerts.flush_pending` (run on the same ~15s tick as
-        # confirm.sweep, see worker.run_forever) retries delivery until Odoo genuinely
-        # confirms it, grouped with any other pending alert of the same kind. A
-        # builder exception (dl_report.build_review) must not blow up processing
-        # either — same discipline `_post`'s own docstring already established.
+        detail_text = f"{note} ({built.filename}): {err}"
         # Deep-review finding on this ticket's own PR: `stuck_classified_sweep` below
         # already bails out when `delivery_notes_channel_id` resolves to 0 (unset) —
-        # this call site lacked the same guard, so an unset channel would enqueue a
+        # this call site needs the SAME guard, or an unset channel would enqueue a
         # `pending_alerts` row that can NEVER be delivered (nothing posts to channel 0)
         # and would sit pending forever, growing the "stuck backlog" gauge with no way
-        # to resolve it. Match the same guard here.
+        # to resolve it.
         channel = int(getattr(cfg, "delivery_notes_channel_id", 0) or 0)
         if channel:
             try:
@@ -662,67 +865,54 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             log.warning("delivery_notes_channel_id is unset — the upload-failure "
                        "alert for %s could not be enqueued", built.filename)
         _event(conn, shadow, message["message_id"], stage="review", status="error",
-              outcome=note, detail={"error": repr(e), "filename": built.filename},
+              outcome=note, detail={"error": repr(err), "filename": built.filename},
               rollup=False, workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": built.doc_number,
                "supplier_name": supplier_decision.name, "reason": note}
 
-    desadv.confirm_sent(conn, supplier_decision.ean_edi, built.doc_number,
-                        pg_dsn=getattr(cfg, "pg_dsn", ""))
+    try:
+        upload(cfg, upload_name, built.content, dir_override=upload_dir)
+    except Exception as e:
+        # #239 finding 6 (remainder): a TRANSIENT failure now gets a stable-identity
+        # presence check BEFORE deciding what to do — the safety this ticket's earlier
+        # increments built (temp-write+rename upload, `desadv_edi.stable_prefix()`/
+        # `already_landed()`) but never wired into a decision. A NON-transient failure
+        # (`_is_transient(str(e))` False) skips the check entirely and keeps exactly
+        # the pre-finding-6 behaviour — `landed` stays `None`.
+        landed = _check_landed(conn, cfg, list_dirs, supplier_decision.ean_edi,
+                               built.doc_number) if _is_transient(str(e)) else None
+        if landed is True:
+            # The reply was lost, but the bytes are already on ORION under an earlier
+            # attempt's name — confirming, never re-uploading, is what actually
+            # prevents the v0.9.70 duplicate-delivery incident (a blind retry here
+            # would be the exact bug this whole ticket exists to fix).
+            log.warning(
+                "DL upload of %s: the reply was lost but the document is already on "
+                "ORION under an earlier attempt's name (stable identity match) — "
+                "confirming instead of re-uploading (%s)", built.filename, e)
+            return _finish_shipped()
+        if landed is False:
+            # Genuinely absent everywhere a document could legitimately be sitting —
+            # exactly ONE retry is safe here, bounded (never a loop), with the SAME
+            # claim held throughout (never release-then-reclaim, which is precisely
+            # what removed the anti-duplicate protection in the v0.9.70 incident).
+            log.info(
+                "DL upload of %s: transient failure (%s), document not yet on ORION "
+                "— retrying exactly once with the same claim", built.filename, e)
+            try:
+                upload(cfg, upload_name, built.content, dir_override=upload_dir)
+            except Exception as e2:
+                log.exception("DL upload retry of %s also failed (original: %s)",
+                              built.filename, e)
+                return _alert_and_release(e2)
+            return _finish_shipped()
+        # `landed is None`: either non-transient, or the presence check itself could
+        # not be attempted (the SFTP connection that just failed the upload is very
+        # likely down for a follow-up listdir too) — no safe retry is possible either
+        # way, so this keeps the pre-finding-6 behaviour exactly.
+        return _alert_and_release(e)
 
-    today = message.get("today") or datetime.now(UTC).date().isoformat()
-    for _item, decision in decisions:
-        if not desadv_edi._is_unmatched(decision.gtin):
-            # R91: item-history write, ONLY for what actually shipped.
-            dl_memory.remember(conn, supplier_decision.ean_edi, decision.item_name,
-                              decision.gtin, decision.card, today, source="ship")
-
-    shipped, unmatched_notes, borderline_notes, history_notes = [], [], [], []
-    for item, decision in decisions:
-        if not desadv_edi._is_unmatched(decision.gtin) and _num(item.get("quantity")) != 0:
-            shipped.append({"name": decision.card or decision.item_name,
-                           "quantity": item.get("quantity"), "unit": item.get("unit")})
-            if decision.rule == "llm_borderline":
-                borderline_notes.append(
-                    f"{decision.item_name} ({decision.card}, istota "
-                    f"{round(decision.confidence * 100)} %)")
-            elif decision.rule == "weight_override":
-                history_notes.append(f"{decision.item_name} -> {decision.card} "
-                                     f"({decision.note})")
-        elif not decision.gtin:
-            # Same fix as the nástenka gate above: any decision with no real gtin was
-            # excluded from the EDI, regardless of which rule produced it.
-            unmatched_notes.append(f"{decision.item_name} ({decision.note})")
-
-    outcome = "partial" if built.partial else "ok"
-    _post(cfg, shadow, lambda: dl_report.build_success(
-        supplier_decision.name, built.doc_number, delivery_date, from_addr, subject,
-        shipped, unmatched_items=unmatched_notes, borderline_notes=borderline_notes,
-        history_notes=history_notes, price_substitutions=built.price_substitutions,
-        filename=built.filename, partial=built.partial, link=link),
-        post=post)
-    _event(conn, shadow, message["message_id"], stage="uploaded_orion", status="ok",
-          outcome=f"EDI vytvorené: {built.filename}",
-          detail={"doc_number": built.doc_number, "edi_file": built.filename},
-          rollup=False, workflow=dl_report.WORKFLOW)
-    return {"outcome": outcome, "doc_number": built.doc_number,
-           "supplier_name": supplier_decision.name,
-           "supplier_ean": supplier_decision.ean_edi, "filename": built.filename,
-           "line_count": built.line_count,
-           "items_skipped_no_match": built.items_skipped_no_match,
-           "items_skipped_zero_qty": built.items_skipped_zero_qty,
-           "price_substitutions": built.price_substitutions,
-           # #229 follow-up 2, review finding: `outcome`/`built.partial` alone is NOT a
-           # precise "did this raise a real dl_item board question" signal --
-           # desadv_edi.build() excludes a zero-quantity item from its own no_match/
-           # partial computation even when unmatched, but dl_worker's own teach.ask_
-           # dl_item call above fires for ANY unmatched item regardless of quantity.
-           # `unmatched_notes` is that exact, precise signal (same list build_success's
-           # own link condition already reads) -- carry it through so
-           # dl_report._outcome_needs_link can check it directly instead of
-           # re-deriving an imprecise proxy from `outcome`.
-           "unmatched_items": unmatched_notes,
-           "items": _shipped_items(decisions)}
+    return _finish_shipped()
 
 
 # --- one message (R1-R17) ---------------------------------------------------
@@ -762,7 +952,8 @@ def _summary_outcome(result: dict) -> str:
 
 def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                      catalog: list[dict], suppliers: list[dict], shadow: bool,
-                     upload=None, post=None, attachments: list[dict] | None = None) -> dict:
+                     upload=None, post=None, attachments: list[dict] | None = None,
+                     list_dirs=None) -> dict:
     # `attachments` injection (#205, DL migration F6 eval harness): mirrors the existing
     # `upload=`/`post=` DI seam. `None` (every real call site, incl. `tick()` below) keeps
     # reading `messages`/`attachments`/disk exactly as before; the eval harness passes a
@@ -804,6 +995,13 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     # cannot tell whether it came from an attachment or the mail body.
     sources = usable_attachments
     used_body_text = False
+    # Deep-review finding on this ticket's own PR (#265): initialised here, not just
+    # inside the `if not sources:` branch below — `body_text` is read again further
+    # down (the #265 correction-detection gate), and correctness there depends
+    # entirely on `used_body_text and ...`'s short-circuit never evaluating `body_text`
+    # while it's unbound. Defining it unconditionally means a future reorder of that
+    # gate can never turn this into a `NameError` on the normal attachment path.
+    body_text = ""
     if not sources:
         body_text = _mail_body_only(message.get("combined_text", "")).strip()
         if body_text:
@@ -834,6 +1032,34 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
         return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
                "documents": [{"outcome": "review", "reason": reason}], "items": []}
 
+    # #265: a mail-body-sourced (#258) document whose OWN mail reads as a correction/
+    # amendment NEVER auto-ships — see the module docstring's own #265 paragraph.
+    # Checked BEFORE extraction (never after): the model is not even called, so there
+    # is no world in which this could accidentally match/claim/upload anything.
+    #
+    # Deep-review finding on this ticket's own PR (#265): gated `not shadow`, matching
+    # this project's own documented rule (`.claude/rules/orders-corpus.md`: "Any
+    # FUTURE short-circuit that skips calling the model needs the same `not shadow`
+    # gate", precedent `pipeline._mail_rule`). The module's own docstring promises
+    # shadow "runs the FULL pipeline (extraction, matching, EDI build) for comparison
+    # only" — a correction mail skipping extraction even in shadow would silently
+    # narrow what shadow actually measures. `_post`/`_event` are already gated on
+    # `not shadow` independently (no observable effect either way); this is ONLY about
+    # whether extraction itself runs, never about claiming/uploading/teaching (those
+    # stay impossible in shadow regardless, via `_process_document`'s own `if shadow:`
+    # branch).
+    if (used_body_text and not shadow
+            and _looks_like_correction(message.get("subject", ""), body_text)):
+        reason = _correction_review_reason(body_text)
+        _post(cfg, shadow, lambda: dl_report.build_review(
+            reason, from_addr=message.get("from_addr", ""),
+            subject=message.get("subject", ""), link=link), post=post)
+        _event(conn, shadow, message["message_id"], stage="review", status="review",
+              outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
+        return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
+               "documents": [{"outcome": "review", "reason": reason,
+                             "correction_detected": True}], "items": []}
+
     extraction = dl_extract.extract_email(client, sources)
 
     documents_out: list[dict] = []
@@ -858,7 +1084,8 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
         extracted_doc_numbers.append(doc.get("docNumber") or "")
         documents_out.append(_process_document(conn, cfg, client, message, doc, catalog,
                                                 suppliers, shadow, all_items,
-                                                upload=upload, post=post))
+                                                upload=upload, post=post,
+                                                list_dirs=list_dirs))
 
     if not documents_out:
         # #258: the text of the failure must say where it actually looked — a text-
@@ -939,7 +1166,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
 
 def _run_and_finish(conn, cfg, client, message: dict, snapshot_id: int | None,
                     catalog: list[dict], suppliers: list[dict], upload=None,
-                    post=None) -> dict | None:
+                    post=None, list_dirs=None) -> dict | None:
     """One full `_process_message` pass for `message`, finished off exactly like the
     live `engine=python` claim branch of `tick()` always has: an `order_runs` row,
     `messages` marked processed, and the rollup summary event. Returns the result dict
@@ -954,7 +1181,8 @@ def _run_and_finish(conn, cfg, client, message: dict, snapshot_id: int | None,
     run_id = worker._start_run(conn, message["message_id"], None, shadow=False)
     try:
         result = _process_message(conn, cfg, client, message, snapshot_id, catalog,
-                                  suppliers, shadow=False, upload=upload, post=post)
+                                  suppliers, shadow=False, upload=upload, post=post,
+                                  list_dirs=list_dirs)
     except _RetryLater as e:
         log.info("DL message %s: transient failure (attempts=%s) — leaving for the "
                  "30-min stale reclaim: %s", message["message_id"],
@@ -1024,7 +1252,7 @@ def _run_and_finish(conn, cfg, client, message: dict, snapshot_id: int | None,
 # --- #240: an answered dl_item/dl_supplier question gives its document another chance --
 
 def release_for_question(conn, cfg, qid: int, client=None, upload=None,
-                         post=None) -> list[dict]:
+                         post=None, list_dirs=None) -> list[dict]:
     """Once every `dl_item`/`dl_supplier` nástenka question raised for ONE message has
     been answered, that message is given a genuine second chance to finish — the exact
     thing that was missing before this ticket (`teach._apply_dl_item`/`_apply_dl_supplier`
@@ -1086,12 +1314,28 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
     instant (no TOCTOU on the claim check itself), and it keeps the SQL cheap
     (no genuinely parallel Postgres work on the same message) — it does not, by itself,
     prevent the wasted second LLM call and `order_runs` row this docstring already
-    called out above as the acceptable cost."""
+    called out above as the acceptable cost.
+
+    #265 gap 2: when the just-answered question is `dl_supplier`, this ALSO releases
+    every OTHER same-sender `dodacie_listy` message stuck in `review` with no `order_
+    questions` row of its own — see `_release_stuck_siblings`'s own docstring for the
+    full evidence and why this is scoped to `dl_supplier` only.
+
+    Deep-review finding on this ticket's own PR (#265): the sibling widening keys on
+    the TIED message's own `messages.from_addr` (the raw envelope address, read below
+    via `message = _as_message(msg_row)`), NOT `order_questions.payload['sender_
+    email']` — `_process_document` sets that payload field to `doc.get('supplierEmail')
+    or from_addr`, the DOCUMENT-extracted address, which can genuinely differ from the
+    envelope address (a 3PL/warehouse operator's own contact email inside the mail
+    body, for example). `_release_stuck_siblings`'s own query matches candidate
+    siblings by `messages.from_addr` — using anything else as the search key here would
+    silently no-op (or worse, match a DIFFERENT sender's messages) whenever the two
+    addresses diverge."""
     qrow = conn.execute(
-        "SELECT message_id FROM order_questions WHERE id = %s", (qid,)).fetchone()
+        "SELECT message_id, kind FROM order_questions WHERE id = %s", (qid,)).fetchone()
     if not qrow:
         return []
-    message_id = qrow[0]
+    message_id, kind = qrow[0], qrow[1]
     with psycopg.connect(cfg.pg_dsn) as lock_tx:
         lock_tx.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (message_id,))
         still_open = conn.execute(
@@ -1117,8 +1361,107 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
         if client is None:
             client = llm.from_config(cfg)
         result = _run_and_finish(conn, cfg, client, message, snapshot_id, catalog,
-                                 suppliers, upload=upload, post=post)
+                                 suppliers, upload=upload, post=post,
+                                 list_dirs=list_dirs)
+        if kind == "dl_supplier":
+            _release_stuck_siblings(conn, message_id, message.get("from_addr", ""))
         return (result or {}).get("documents", [])
+
+
+# #265 gap 2: `ask_dl_supplier`'s per-sender dedupe (`ON CONFLICT ... DO NOTHING`, the
+# SAME `order_questions(customer_ean, item_key) WHERE status='open'` index every other
+# kind shares) means only the FIRST `dodacie_listy` message from a still-unregistered
+# sender ever gets a row of its OWN — every LATER message from that sender is left
+# `processed=true`/`proc_status='review'` forever, with NO `order_questions` row
+# referencing it at all (live evidence on #265: HK LOAN had 5 such messages against
+# exactly 1 tied question). Answering the one open question only ever gave that FIRST
+# message a second chance (`release_for_question` above) — the other 4 stayed stuck.
+#
+# This closes the gap WITHOUT reprocessing every sibling synchronously inside the
+# request that just answered the nástenka question (unbounded cost for a sender with
+# many stuck messages, and this whole function runs under the advisory lock the caller
+# already holds) — it just resets them back into the SAME pool `_claim()` already
+# rate-limits to one message per ~15s tick; the actual reprocessing reuses that
+# existing, already-tested machinery unchanged. `_STUCK_SIBLING_LIMIT` bounds how many
+# rows get flipped per call — a sender with more than that many still gets the rest on
+# the NEXT answered question for it (or the existing `stuck_classified_sweep`/hourly
+# n8n watchdog eventually surfaces anything that never gets picked up).
+#
+# Deliberately scoped to `dl_supplier` only (see the #265 design comment for the full
+# rejected-alternative reasoning) — the only identity that can correlate an
+# UNPROCESSED sibling message with the just-answered question, without extracting it
+# first, is the raw envelope `from_addr`, and that matches `ask_dl_supplier`'s own
+# dedupe key exactly (keyed on the sender ADDRESS). A `dl_item` question's dedupe key is
+# (supplier_ean, wording) instead — by the time one exists the supplier is already
+# matched, but there is no similarly reliable way to find OTHER not-yet-extracted
+# messages sharing that exact wording without extracting them first. No live evidence
+# of the `dl_item` version of this gap has been observed; it needs its own design if it
+# ever is, not a copy of this one.
+#
+# Deep-review finding on this ticket's own PR (#265) — a REAL, proven safety bug in
+# the first cut: `processed=true AND proc_status='review' AND no order_questions row`
+# ALSO matches a message whose upload to ORION genuinely FAILED (a timeout, a network
+# error) — `_process_document`'s upload-except branch calls `desadv.release_send()`
+# (deleting the claim) and never raises a `dl_item`/`dl_supplier` question, so that
+# message is indistinguishable from a genuine unmatched-supplier orphan by THAT
+# predicate alone. Resetting it here would re-enable exactly the automatic upload
+# retry #239 deliberately REMOVED (a released claim + a fresh per-attempt filename
+# means a second attempt can upload a genuine SECOND copy of an already-landed
+# document — see `.claude/rules/n8n-workflow-edits.md`'s "#239" section). Every
+# upload-failure AND every other genuine processing exception in this module logs its
+# own review event with `status="error"` (`_event(..., status="error", ...)` at the
+# supplier-match-exception, upload-exception, and attachment-extraction-error call
+# sites) — `status="review"` is reserved for the plain "nothing matched, nothing
+# failed" outcomes (an unmatched supplier, an unmatched item, a correction mail). The
+# `NOT EXISTS ... status = 'error'` clause below is what makes that distinction real:
+# it excludes ANY message with so much as one logged failure from ever being reset by
+# this widening, at the cost of leaving a message that BOTH failed AND is a genuine
+# orphan stuck (safe default — `stuck_classified_sweep`/the hourly n8n watchdog still
+# surface it).
+_STUCK_SIBLING_LIMIT = 20
+
+
+def _release_stuck_siblings(conn, exclude_message_id: str, sender_email: str) -> int:
+    """Resets up to `_STUCK_SIBLING_LIMIT` orphaned same-sender `dodacie_listy`
+    messages (`processed=true`, `proc_status='review'`, no `order_questions` row of
+    their own, and no `status='error'` event ever logged for it — see the section
+    comment above for why that last exclusion is load-bearing, not decorative) back
+    into the normal claim pool. Returns how many were reset — `0` when `sender_email`
+    is blank or nothing matched, never raises.
+
+    Known, accepted residual (deep-review finding on this ticket's own PR, #265): a
+    released sibling that reprocesses back to a permanent, question-less `review` (a
+    #265 correction mail, or a mail with no usable source) stays eligible for a
+    SECOND widening if the SAME sender's `dl_supplier` question is ever reopened and
+    re-answered — bounded in practice: once taught, `dl_supplier_memory`'s
+    memory-rescue rung means no NEW `dl_supplier` question is ever raised for that
+    sender again unless its taught card is later retired from the catalog (rare). A
+    `released_once` tracking column would close this fully but needs a schema
+    migration — deferred as a documented, low-frequency, non-safety limitation rather
+    than blocking this fix on it."""
+    sender_email = (sender_email or "").strip()
+    if not sender_email:
+        return 0
+    rows = conn.execute(
+        """SELECT message_id FROM messages
+            WHERE category = %s AND processed = true AND proc_status = 'review'
+              AND message_id <> %s AND lower(from_addr) = lower(%s)
+              AND NOT EXISTS (SELECT 1 FROM order_questions oq
+                              WHERE oq.message_id = messages.message_id)
+              AND NOT EXISTS (SELECT 1 FROM email_events e
+                              WHERE e.message_id = messages.message_id
+                                AND e.status = 'error')
+            ORDER BY created_at ASC LIMIT %s""",
+        (CATEGORY, exclude_message_id, sender_email, _STUCK_SIBLING_LIMIT)).fetchall()
+    if not rows:
+        return 0
+    ids = [r[0] for r in rows]
+    conn.execute(
+        """UPDATE messages SET processed = false, processing_at = NULL, attempts = 0
+            WHERE message_id = ANY(%s)""", (ids,))
+    log.info("dl release_for_question: released %d orphaned same-sender sibling "
+             "message(s) for %r back into the claim pool", len(ids), sender_email)
+    return len(ids)
 
 
 # --- #239 class 3: classified as DL but never even attempted ----------------
@@ -1186,16 +1529,19 @@ def stuck_classified_sweep(conn, cfg, threshold_minutes: int = STUCK_CLASSIFIED_
 
 # --- one tick ----------------------------------------------------------------
 
-def tick(conn, cfg, client=None, upload=None, post=None) -> int:
+def tick(conn, cfg, client=None, upload=None, post=None, list_dirs=None) -> int:
     """Process at most one `dodacie_listy` message. Returns 0 or 1 (whether a MESSAGE
     reached a terminal outcome this tick — a transient retry, per R17, returns 0: nothing
     was actually completed).
 
-    `client`/`upload`/`post` are injected so the worker's claim/shadow/retry/upload
-    guarantees can be tested without the LLM stack, a real ORION host, or Odoo — same
-    convention `static_worker.tick` already uses. Production passes the real
-    `llm.from_config(cfg)` and leaves `upload`/`post` at their defaults
-    (`upload_mod.put`/`dl_report.post`).
+    `client`/`upload`/`post`/`list_dirs` are injected so the worker's claim/shadow/
+    retry/upload guarantees can be tested without the LLM stack, a real ORION host, or
+    Odoo — same convention `static_worker.tick` already uses. Production passes the
+    real `llm.from_config(cfg)` and leaves `upload`/`post`/`list_dirs` at their
+    defaults (`upload_mod.put`/`dl_report.post`/`upload_mod.list_dirs`). `list_dirs`
+    (finding 6, #239) is the stable-identity presence check a transient upload failure
+    consults before deciding whether a single safe retry is possible — see
+    `_check_landed()`.
     """
     engine = resolve_engine(getattr(cfg, "delivery_notes_engine", "n8n"))
     shadow = bool(getattr(cfg, "delivery_notes_shadow", False))
@@ -1216,7 +1562,8 @@ def tick(conn, cfg, client=None, upload=None, post=None) -> int:
         if not message:
             return 0
         result = _run_and_finish(conn, cfg, client, message, snapshot_id, catalog,
-                                 suppliers, upload=upload, post=post)
+                                 suppliers, upload=upload, post=post,
+                                 list_dirs=list_dirs)
         return 1 if result is not None else 0
 
     message = _peek_for_shadow(conn, getattr(cfg, "delivery_notes_shadow_days",

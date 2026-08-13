@@ -23,6 +23,7 @@ from app.orders import (
     dl_supplier_memory,
     dl_worker,
     reliability,
+    teach,
 )
 
 DL_CATALOG_CSV = ("GTIN,Názov,doplnok,hmotnost,Sklad,Cena\n"
@@ -404,6 +405,172 @@ def test_a_non_pdf_attachments_own_extracted_text_never_leaks_into_the_body_text
     assert "dodaci_list.docx" not in sent
     assert "Rožok 50g" not in sent
     assert "v prílohe posielame dodací list" in sent
+
+
+# --- #265: a mail-body-sourced correction/amendment mail never auto-ships -----------
+
+# SYNTHETIC — paraphrased from the ticket's own quoted wording (mail 6389 "OPRAVA
+# HMOTNOSTI"), never the real customer mail verbatim (this repo is public).
+CORRECTION_BODY_TEXT = (
+    "Dobrý deň,\n\n"
+    "z dôvodu chýbajúceho miesta v sile nevyložil včera šofér všetku múku, "
+    "posielam Vám novú hmotnosť na múku pšeničnú T650 = 15,88 ton (nie 17,74 ton).\n"
+    "Zvyšok dodania bez zmien.\n\n"
+    "S pozdravom"
+)
+
+
+def test_correction_mail_never_auto_ships_goes_to_review_with_manual_codex_wording(
+        pg, tmp_path):
+    """#265 live incident (HK LOAN, mail 6389 "OPRAVA HMOTNOSTI"): a short follow-up
+    mail that only restates ONE changed line of an earlier, separately-sent full
+    delivery ("Zvyšok dodania bez zmien") must NEVER be auto-shipped — the engine has
+    no cross-message memory (#236) and extracting it alone would silently produce a
+    document missing the delivery's other items. Per the owner's binding #265 decision
+    this ALWAYS goes to manual review, with wording that plainly says a document
+    already imported into CODEX must be corrected there BY HAND — never a new ORION
+    upload. The model is never even called (`_NeverCalledClient` proves it — defined
+    further down this file, used the same way `test_release_for_question_waits_for_
+    every_sibling_dl_item_question_before_reprocessing` already does)."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", subject="OPRAVA HMOTNOSTI", has_attachments=False,
+        combined_text=CORRECTION_BODY_TEXT)
+    uploaded, posted = [], []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(
+        pg, cfg, client=_NeverCalledClient(),
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+        post=lambda c, h: posted.append(h))
+    assert n == 1
+    assert uploaded == [], "a correction mail must NEVER auto-ship"
+    assert len(posted) == 1
+    html = posted[0]
+    assert "RUČNE" in html and "CODEX" in html, \
+        "must explicitly say an already-imported document needs a MANUAL CODEX fix"
+    assert "naimportovaný" in html
+    assert "múku pšeničnú T650" in html, "quotes the mail's own text, not an AI summary"
+    row = pg.execute(
+        "SELECT processed, proc_status FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True, "review")
+    assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0
+    assert pg.execute("SELECT count(*) FROM order_questions").fetchone()[0] == 0
+
+
+def test_an_ordinary_body_text_delivery_note_still_ships_normally_265(pg, tmp_path):
+    """#265: the correction detector must not swallow an ORDINARY full delivery written
+    directly into the mail body (#258/#262, unrelated to any earlier mail) — it must
+    still extract and ship exactly as before this ticket (regression guard for the
+    detector's own false-positive risk)."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", subject="Avizácia dodania", has_attachments=False,
+        combined_text=BODY_TEXT_DL)
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    uploaded = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(
+        pg, cfg, client=client,
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name))
+    assert n == 1
+    assert len(uploaded) == 1, "an ordinary body-text delivery must still ship"
+
+
+def test_innocent_zmena_wording_does_not_trip_the_correction_detector(pg, tmp_path):
+    """#265: 'zmena' alone is deliberately NOT a trigger word (too common in unrelated
+    administrative mail — see the design comment on #265) — a full, ordinary delivery
+    mail that happens to mention an innocent 'zmena' (a change of BILLING address, not
+    a correction of an already-sent document) must still ship normally, not be
+    diverted to manual review."""
+    _snapshot(pg)
+    body = (
+        "Dobrý deň,\n\n"
+        "upozorňujeme na zmenu fakturačnej adresy od budúceho mesiaca.\n\n"
+        "Dodávateľ: Pekáreň Lunys, Prešov, dodavatel@lunys.sk\n"
+        "Dodací list č. 0100000001, dátum dodania 01.08.2026\n"
+        "Rožok 50g / 10 ks / 0,50 €/ks / 5,00 €\n\n"
+        "S pozdravom")
+    _msg(pg, mid="dl1", subject="Zmena fakturačných údajov", has_attachments=False,
+        combined_text=body)
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    uploaded = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(
+        pg, cfg, client=client,
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name))
+    assert n == 1
+    assert len(uploaded) == 1, \
+        "a bare 'zmena' mention must not trip the correction detector"
+
+
+def test_looks_like_correction_matches_both_real_265_incidents():
+    assert dl_worker._looks_like_correction("OPRAVA HMOTNOSTI", "")
+    assert dl_worker._looks_like_correction(
+        "Fw:Avizacia/24.7.2026/ + oprava v dátume dodania", "")
+
+
+def test_looks_like_correction_matches_dopln_stem_in_subject():
+    assert dl_worker._looks_like_correction("Doplnenie k dodávke", "")
+
+
+def test_looks_like_correction_matches_dopln_diacritic_forms():
+    """Deep-review finding (#265): the FIRST cut's plain-ASCII "dopln" stem missed its
+    own most natural Slovak forms — every one of these replaces the plain l/n with the
+    diacritic letters ľ/ĺ/ň, and this ticket's OWN issue text names exactly this shape
+    ("DOPLŇUJÚCE/OPRAVNÉ maily") as the risk class. All four must match."""
+    assert dl_worker._looks_like_correction("DOPLŇUJÚCE informácie", "")
+    assert dl_worker._looks_like_correction("doplňujúce údaje k dodávke", "")
+    assert dl_worker._looks_like_correction("dopĺňame hmotnosť", "")
+    assert dl_worker._looks_like_correction("doplňte prosím", "")
+
+
+def test_looks_like_correction_ignores_dopln_in_body_only():
+    """Deep-review finding (#265): "dopln"/"doplnok" is ordinary Slovak vocabulary
+    ("doplnok stravy" = dietary supplement, a real product category) that can
+    legitimately appear as a delivered ITEM's own name inside a mail-body-sourced
+    delivery note's body text — checking it only in the SUBJECT (never the body)
+    avoids permanently misrouting a supplier who happens to sell such products. Both
+    real #265 incidents' own signal lives entirely in the subject anyway."""
+    assert not dl_worker._looks_like_correction(
+        "Avizácia dodania", "Doplnok stravy horčík 60 tbl / 5 ks")
+
+
+def test_looks_like_correction_matches_korekcia_stem():
+    assert dl_worker._looks_like_correction("Korekcia dodávky", "")
+
+
+def test_looks_like_correction_matches_korektura_synonym():
+    """Deep-review finding (#265): "korektúra"/"korektúru" is a genuine Slovak
+    synonym for "correction" that the first cut's bare "korekci" stem missed."""
+    assert dl_worker._looks_like_correction("Korektúra dodacieho listu", "")
+    assert dl_worker._looks_like_correction("posielame korektúru množstva", "")
+
+
+def test_looks_like_correction_ignores_a_bare_zmena_mention():
+    assert not dl_worker._looks_like_correction(
+        "Zmena fakturačných údajov", "upozorňujeme na zmenu adresy")
+
+
+def test_looks_like_correction_ignores_ordinary_prose_with_no_stems():
+    assert not dl_worker._looks_like_correction(
+        "Avizácia dodania", BODY_TEXT_DL)
+
+
+def test_correction_review_reason_truncates_a_very_long_excerpt():
+    long_text = "Dobrý deň. " + ("x" * 1000)
+    reason = dl_worker._correction_review_reason(long_text)
+    assert len(reason) < 1000 + 400, "must not embed the whole excerpt unbounded"
+    assert reason.rstrip().endswith("(...)")
+
+
+def test_correction_review_reason_collapses_multiline_whitespace():
+    """Deep-review finding (#265): `build_review` wraps the reason in a single `<p>`
+    with no `nl2br` — a raw multi-line excerpt would render as one visually
+    run-together paragraph. The excerpt is collapsed to single spaces before being
+    embedded, without dropping any of its actual words."""
+    reason = dl_worker._correction_review_reason("Riadok jeden\n\nRiadok   dva\ttab")
+    assert "\n" not in reason and "\t" not in reason
+    assert "Riadok jeden Riadok dva tab" in reason
 
 
 # --- live engine: the happy path --------------------------------------------
@@ -798,6 +965,30 @@ def test_shadow_reports_duplicate_via_a_read_only_check(pg, tmp_path):
     assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 1
 
 
+def test_shadow_mode_still_extracts_a_correction_mail_for_comparison(pg, tmp_path):
+    """Deep-review finding on this ticket's own PR (#265): the correction-detection
+    gate is `not shadow`-gated, matching this project's own documented rule
+    (`.claude/rules/orders-corpus.md`: a short-circuit that skips calling the model
+    needs the same `not shadow` gate, precedent `pipeline._mail_rule`) and this
+    module's own "shadow runs the FULL pipeline... for comparison" contract. In shadow
+    the message still goes through extraction (proven here — the model IS called),
+    even though it would never auto-ship live; nothing is claimed/uploaded/taught
+    either way (the pre-existing shadow guarantees, unaffected)."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", subject="OPRAVA HMOTNOSTI", has_attachments=False,
+        combined_text=CORRECTION_BODY_TEXT)
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    cfg = _cfg(delivery_notes_engine="n8n", delivery_notes_shadow=True,
+              data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client)
+    assert n == 1
+    assert "dl_documents" in client.calls, \
+        "shadow must still extract a correction mail for comparison, never skip it"
+    assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0
+    assert pg.execute("SELECT count(*) FROM order_questions").fetchone()[0] == 0
+
+
 # --- spec §4: announced-vs-attached ------------------------------------------
 
 def test_subject_doc_numbers_extracts_the_lunys_shape():
@@ -966,25 +1157,34 @@ def test_attempts_3_or_more_goes_to_review_even_for_a_transient_reason(pg, tmp_p
 # --- #239 class 2: upload-failure durable alert (never fire-and-forget, never a
 # --- silent automatic re-upload) -----------------------------------------------------
 
-def test_a_timed_out_upload_is_never_auto_retried_so_orion_can_never_get_two_copies(
+def test_a_timed_out_upload_falls_back_to_no_retry_when_orion_host_is_unconfigured(
         pg, tmp_path):
-    """#239, found by independent verification of this ticket's own PR: an upload
-    failure must never be re-uploaded automatically.
+    """Renamed + docstring corrected in the SAME commit as #239 finding 6's remainder
+    (own commit, justified — the test's own assertions are unchanged, only the
+    explanation of WHY they hold was stale): the original text claimed `upload.put()`
+    "writes straight to the FINAL ... with no temp-write + rename" — that infrastructure
+    has since shipped (see `upload.py`'s own module docstring) and is no longer true.
+    It also framed "an upload failure must never be re-uploaded automatically" as an
+    unconditional rule — finding 6's remainder makes that conditional: a TRANSIENT
+    failure whose stable-identity presence check proves ABSENCE now gets exactly one
+    safe retry (see the `test_a_transient_upload_failure_*` tests above).
 
-    `upload.put()` writes straight to the FINAL `in_DL\\<name>` with no temp-write +
-    rename, so a transfer that lands its bytes and only loses the reply (`timed out` --
-    which `TRANSIENT_RE` matches) leaves a complete, validly-named file on ORION.
-    `desadv_edi.filename()` then stamps a retry with a fresh `HHMMSSmmm`, so the second
-    attempt cannot collide with the first, and `desadv.release_send()` has already
-    DELETED the ledger row -- so `claim_send_or_identify()`, the one atomic
-    anti-double-upload backstop, has nothing left to guard and `confirm.py` never sees
-    the orphan either. The warehouse's next manual morning import would take in BOTH
-    copies: a real duplicate delivery.
+    This test's own scenario still correctly pins the NO-retry outcome, but for the
+    real reason: `cfg` here has NO `orion_host` configured (`_cfg()`'s default), and no
+    `list_dirs` fake is injected either — so `_check_landed()` calls the REAL
+    `upload_mod.list_dirs(cfg)`, which fails immediately (`_connect()` raises before any
+    network I/O) exactly like a genuinely misconfigured add-on would. That is the
+    "presence check unavailable" branch (see also
+    `test_a_transient_upload_failure_falls_back_when_the_presence_check_is_unavailable`,
+    which pins the SAME branch via an explicit raising `list_dirs` fake instead — kept
+    as two separate regression pins because "orion_host was never configured" and "the
+    SFTP connection is down right now" are two distinct real operational causes for the
+    identical safe fallback).
 
-    So exactly ONE upload attempt must be made, the message must end terminal (not
-    re-armed for the 30-minute stale reclaim), and the durable alert -- the half of
-    #239 that is correct -- must still be enqueued so the failure stays visible.
-    """
+    So: exactly ONE upload attempt must be made, the message must end terminal (not
+    re-armed for the 30-minute stale reclaim), and the durable alert must still be
+    enqueued so the failure stays visible — the v0.9.70 duplicate-delivery incident
+    this whole ticket exists to prevent never gets a chance to recur here."""
     _snapshot(pg)
     _msg(pg, mid="dl1")
     _attach(pg, tmp_path, "dl1")
@@ -1120,6 +1320,229 @@ def test_upload_failure_with_no_channel_configured_never_enqueues_a_stuck_alert(
     n = dl_worker.tick(pg, cfg, client=client, upload=_raise_upload)
     assert n == 1
     assert pg.execute("SELECT count(*) FROM pending_alerts").fetchone()[0] == 0
+
+
+# --- #239 finding 6 (remainder): safe automatic retry, built on the already-shipped
+# --- temp-write+rename upload + stable-identity presence-check primitives -----------
+
+def _stable_prefix():
+    return desadv_edi.stable_prefix(SUPPLIER_EAN, "0100000001")
+
+
+def _dirs(*, in_dl=(), arch=(), unconfirmed=()):
+    return {"in": set(), "in_DL": set(in_dl), "archCodex": set(arch),
+           "unconfirmed": set(unconfirmed)}
+
+
+def test_a_transient_upload_failure_confirms_instead_of_reuploading_when_already_landed(
+        pg, tmp_path):
+    """#239 finding 6, branch 1 (bytes-landed-reply-lost): a TRANSIENT upload failure
+    (`timed out`) whose stable-identity presence check proves the document is ALREADY on
+    ORION under an earlier attempt's name (the exact ambiguity `upload.put()`'s
+    temp-write+rename makes provable) must NEVER trigger a second upload — that would be
+    the live v0.9.70 duplicate-delivery incident all over again. The claim must be kept
+    (confirmed, never released) and the document must finish as a genuine success."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    tries = []
+
+    def _timed_out_upload(c, name, content, dir_override=None):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    list_dirs_calls = []
+
+    def _fake_list_dirs(cfg):
+        list_dirs_calls.append(cfg)
+        return _dirs(in_dl=[f"Z-{_stable_prefix()}20260801_120000000.txt"])
+
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, upload=_timed_out_upload,
+                       list_dirs=_fake_list_dirs)
+    assert n == 1
+    assert len(tries) == 1, "a landed document must never be re-uploaded"
+    assert len(list_dirs_calls) == 1
+    row = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True,)
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE uploaded_at IS NOT NULL"
+    ).fetchone()[0] == 1, "the claim must be CONFIRMED, never released"
+    assert pg.execute(
+        "SELECT count(*) FROM pending_alerts").fetchone()[0] == 0, \
+        "a genuine success must never enqueue an upload-failure alert"
+    event = pg.execute(
+        "SELECT stage, status FROM email_events WHERE message_id='dl1' "
+        "AND stage='uploaded_orion'").fetchone()
+    assert event == ("uploaded_orion", "ok")
+
+
+def test_a_transient_upload_failure_retries_exactly_once_with_the_same_claim_when_absent(
+        pg, tmp_path):
+    """#239 finding 6, branch 2 (absent, safe retry): when the presence check proves the
+    document is genuinely NOT on ORION yet, exactly ONE retry is safe — same claim held
+    throughout (never release-then-reclaim, which is what removed the protection in the
+    v0.9.70 incident this whole ticket exists to fix)."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    tries = []
+
+    def _flaky_upload(c, name, content, dir_override=None):
+        tries.append(name)
+        if len(tries) == 1:
+            raise OSError("connection timed out")
+        return True
+
+    list_dirs_calls = []
+
+    def _fake_list_dirs(cfg):
+        list_dirs_calls.append(cfg)
+        return _dirs()
+
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, upload=_flaky_upload,
+                       list_dirs=_fake_list_dirs)
+    assert n == 1
+    assert len(tries) == 2, "exactly one retry, never a loop"
+    assert len(list_dirs_calls) == 1, "the presence check runs once, before the retry"
+    row = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True,)
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE uploaded_at IS NOT NULL"
+    ).fetchone()[0] == 1, "the SAME claim survived (never released) and got confirmed"
+    assert pg.execute(
+        "SELECT count(*) FROM pending_alerts").fetchone()[0] == 0
+
+
+def test_a_transient_upload_failure_when_the_retry_also_fails_alerts_without_looping(
+        pg, tmp_path):
+    """#239 finding 6, branch 3 (retry-fails): the single retry is BOUNDED, never a
+    loop — when it also fails, this falls back to the existing durable-alert path
+    (release the claim, enqueue durably), unchanged from before finding 6."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    tries = []
+
+    def _always_timed_out_upload(c, name, content, dir_override=None):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    def _fake_list_dirs(cfg):
+        return _dirs()
+
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, upload=_always_timed_out_upload,
+                       list_dirs=_fake_list_dirs)
+    assert n == 1
+    assert len(tries) == 2, "the original attempt plus exactly one bounded retry"
+    row = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True,)
+    assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0, \
+        "a genuinely failed retry releases the claim, same as today's no-retry path"
+    assert pg.execute(
+        "SELECT count(*) FROM pending_alerts WHERE kind='dl_upload_failed'"
+    ).fetchone()[0] == 1
+
+
+def test_a_transient_upload_failure_falls_back_when_the_presence_check_is_unavailable(
+        pg, tmp_path):
+    """#239 finding 6, branch 4 (check-unavailable): the SFTP connection that just
+    failed the upload is very likely down for the presence check too — when the check
+    itself raises, NO retry is attempted (a blind retry with no absence proof is exactly
+    the v0.9.70 duplicate-delivery bug), falling back to today's alert-and-release
+    path."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    tries = []
+
+    def _timed_out_upload(c, name, content, dir_override=None):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    def _broken_list_dirs(cfg):
+        raise OSError("SFTP unavailable")
+
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, upload=_timed_out_upload,
+                       list_dirs=_broken_list_dirs)
+    assert n == 1
+    assert len(tries) == 1, "no retry without an absence proof"
+    row = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True,)
+    assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0
+    assert pg.execute(
+        "SELECT count(*) FROM pending_alerts WHERE kind='dl_upload_failed'"
+    ).fetchone()[0] == 1
+
+
+def test_a_transient_upload_failure_never_trusts_a_stable_prefix_collision(pg, tmp_path):
+    """#239 finding 6, review finding (own commit, RED->GREEN): `desadv_edi.
+    stable_prefix()` truncates `doc_number` to its first 10 alnum characters (R89's
+    on-wire filename budget) — two GENUINELY DIFFERENT doc numbers from the SAME
+    supplier that only differ past position 10 collide onto the IDENTICAL stable
+    prefix. Without a guard, a transient upload failure for document B would see
+    document A's (a different, already-CONFIRMED document) file in the directory
+    listing, `already_landed()` would report `True`, and B would be silently
+    confirmed as shipped without ever actually reaching ORION — the mirror image of
+    the v0.9.70 duplicate-upload incident this whole ticket exists to prevent, just
+    silent LOSS instead of silent DUPLICATION."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    other_doc_number = "01000000011"
+    this_doc_number = "01000000012"
+    assert desadv_edi.stable_prefix(SUPPLIER_EAN, other_doc_number) == \
+        desadv_edi.stable_prefix(SUPPLIER_EAN, this_doc_number), \
+        "the fixture must genuinely collide on the first 10 alnum chars"
+    other_filename = desadv_edi.filename(SUPPLIER_EAN, "01.08.2026", other_doc_number,
+                                         stamp="090000000")
+    pg.execute(
+        """INSERT INTO desadv_sent (supplier_ean, doc_number, filename, uploaded_at)
+           VALUES (%s, %s, %s, now())""",
+        (SUPPLIER_EAN, other_doc_number, other_filename))
+
+    client = FakeClient({"dl_documents": [_doc(doc_number=this_doc_number)],
+                         "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [ITEM_MATCHED]})
+    tries = []
+
+    def _timed_out_upload(c, name, content, dir_override=None):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    def _fake_list_dirs(cfg):
+        # Document A's own file, genuinely sitting on ORION, matches document B's
+        # stable prefix too — the exact collision this test proves is refused.
+        return _dirs(in_dl=[f"Z-{other_filename}"])
+
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, upload=_timed_out_upload,
+                       list_dirs=_fake_list_dirs)
+    assert n == 1
+    assert len(tries) == 1, "a collision must never be trusted as a landed proof"
+    assert pg.execute(
+        "SELECT uploaded_at FROM desadv_sent WHERE doc_number=%s", (this_doc_number,)
+    ).fetchone() is None, "the DIFFERENT document must never be confirmed"
+    assert pg.execute(
+        "SELECT uploaded_at IS NOT NULL FROM desadv_sent WHERE doc_number=%s",
+        (other_doc_number,)).fetchone() == (True,), "the OTHER document stays confirmed"
+    assert pg.execute(
+        "SELECT count(*) FROM pending_alerts WHERE kind='dl_upload_failed'"
+    ).fetchone()[0] == 1
 
 
 # --- #239 class 3: classified as DL but never even attempted -----------------
@@ -1879,3 +2302,432 @@ def test_release_for_question_is_a_safe_no_op_when_the_message_row_is_gone(pg):
                             candidates=[{"gtin": "G1", "name": "Karta"}])
     pg.execute("UPDATE order_questions SET status='answered' WHERE id=%s", (qid,))
     assert dl_worker.release_for_question(pg, _cfg(), qid) == []
+
+
+# --- #265 gap 2: release_for_question also releases orphaned same-sender siblings ---
+
+def _unknown_supplier_doc(sender_email, name="Neznáma pekáreň s.r.o."):
+    """A document with NO printed doc number — mirrors the real HK LOAN shape (an
+    informal mail-body announcement), so `desadv_edi.generate_stable_doc_number`
+    synthesizes a DIFFERENT stable identity per message_id (#262) and several sibling
+    messages can each ship without colliding on the same (supplier_ean, doc_number)."""
+    return {"documents": [{
+        "supplierName": name, "supplierCity": "", "supplierEmail": sender_email,
+        "docNumber": "", "deliveryDate": "01.08.2026", "documentTotalWithoutVAT": 5.0,
+        "items": [{"name": "Rožok 50g", "quantity": 10, "unit": "ks", "unitPrice": 0.5,
+                  "totalPrice": 5.0}]}]}
+
+
+def test_release_for_question_also_ships_orphaned_same_sender_sibling_messages(
+        pg, tmp_path):
+    """#265 gap 2 (live evidence: HK LOAN had 5 `dodacie_listy` messages from the same
+    still-unregistered sender, but `ask_dl_supplier`'s per-sender dedupe means only the
+    FIRST ever gets its own `order_questions` row — the other 4 sat `processed=true`
+    forever, with nothing tied to answer). Answering the ONE open `dl_supplier` question
+    must now also give every OTHER orphaned same-sender message a fresh chance — proven
+    end-to-end here via two more `tick()` calls after the release."""
+    _snapshot(pg)
+    sender = "neznamy@somewhere.sk"
+    doc = _unknown_supplier_doc(sender)
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    for mid in ("sib1", "sib2", "sib3"):
+        _msg(pg, mid=mid, from_addr=sender, has_attachments=True)
+        _attach(pg, tmp_path, mid)
+        n = dl_worker.tick(
+            pg, cfg,
+            client=FakeClient({"dl_documents": [doc],
+                               "dl_supplier": [{"matched": False,
+                                                "matchReason": "nie je v zozname"}]}),
+            upload=lambda *a, **k: None, post=lambda c, h: None)
+        assert n == 1
+
+    qids = pg.execute(
+        "SELECT id FROM order_questions WHERE kind='dl_supplier'").fetchall()
+    assert len(qids) == 1, "the per-sender dedupe means only ONE question exists"
+    qid = qids[0][0]
+
+    rows = pg.execute(
+        "SELECT processed, proc_status FROM messages WHERE from_addr=%s "
+        "ORDER BY message_id", (sender,)).fetchall()
+    assert rows == [(True, "review")] * 3, \
+        "setup: all three sibling messages are stuck in review"
+    assert pg.execute(
+        "SELECT count(*) FROM order_questions oq WHERE oq.message_id IN "
+        "('sib1', 'sib2', 'sib3')").fetchone()[0] == 1, \
+        "setup: only ONE of the three is actually tied to a question"
+
+    tied_message_id = pg.execute(
+        "SELECT message_id FROM order_questions WHERE id=%s", (qid,)).fetchone()[0]
+
+    dl_supplier_memory.remember(pg, sender, SUPPLIER_EAN, "Pekáreň Lunys")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": SUPPLIER_EAN}), qid))
+
+    released = dl_worker.release_for_question(
+        pg, cfg, qid, client=FakeClient({"dl_documents": [doc], "dl_item": [ITEM_MATCHED]}),
+        upload=lambda *a, **k: None, post=lambda c, h: None)
+    assert released and released[0]["outcome"] == "ok", "the tied message ships"
+
+    stuck = pg.execute(
+        "SELECT message_id, processing_at, attempts FROM messages WHERE from_addr=%s "
+        "AND processed=false ORDER BY message_id", (sender,)).fetchall()
+    stuck_ids = sorted(r[0] for r in stuck)
+    expected_orphans = sorted({"sib1", "sib2", "sib3"} - {tied_message_id})
+    assert stuck_ids == expected_orphans, \
+        "exactly the two orphaned siblings (never the already-finished tied one) " \
+        "are released back into the claim pool"
+    assert all(r[1] is None and r[2] == 0 for r in stuck), \
+        "reset rows must have a clean processing_at/attempts, ready for a fresh claim"
+
+    for _ in range(2):
+        n = dl_worker.tick(
+            pg, cfg,
+            client=FakeClient({"dl_documents": [doc], "dl_item": [ITEM_MATCHED]}),
+            upload=lambda *a, **k: None, post=lambda c, h: None)
+        assert n == 1
+    assert pg.execute(
+        "SELECT count(*) FROM messages WHERE from_addr=%s AND processed=true "
+        "AND proc_status='ok'", (sender,)).fetchone()[0] == 3, \
+        "all three sibling messages eventually ship, none lost"
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE supplier_ean=%s "
+        "AND uploaded_at IS NOT NULL", (SUPPLIER_EAN,)).fetchone()[0] == 3, \
+        "three distinct stable doc numbers -- no collision, no duplicate skip"
+
+
+def test_release_for_question_sibling_widening_never_touches_unrelated_messages(
+        pg, tmp_path):
+    """The widening proven above must be precisely scoped: a DIFFERENT sender's own
+    stuck message, an ALREADY-SHIPPED message from the SAME sender, a message from the
+    SAME sender that already has its OWN tied `dl_item` question, and a message from
+    the SAME sender whose upload genuinely FAILED (#265 deep-review 🔴 finding — must
+    never be silently reset into an automatic retry, see `.claude/rules/
+    n8n-workflow-edits.md`'s "#239" section) must all be left completely untouched.
+
+    Deep-review finding on this ticket's own PR (#265): the FIRST cut of this test
+    proved only "nothing bad happens" — every assertion here would ALSO hold if
+    `_release_stuck_siblings` were a complete no-op (a blank key, a wrong column, an
+    early return). A POSITIVE control (`orphan1`, a genuinely clean same-sender orphan
+    with none of the disqualifying properties) proves the widening actually DOES
+    something, not just that it stays out of the way."""
+    _snapshot(pg)
+    sender = "neznamy3@somewhere.sk"
+    other_sender = "inysender@example.sk"
+    _msg(pg, mid="other1", from_addr=other_sender)
+    pg.execute(
+        "UPDATE messages SET processed=true, proc_status='review' WHERE message_id=%s",
+        ("other1",))
+    _msg(pg, mid="shipped1", from_addr=sender)
+    pg.execute(
+        "UPDATE messages SET processed=true, proc_status='ok' WHERE message_id=%s",
+        ("shipped1",))
+    _msg(pg, mid="tied1", from_addr=sender)
+    pg.execute(
+        "UPDATE messages SET processed=true, proc_status='review' WHERE message_id=%s",
+        ("tied1",))
+    teach.ask_dl_item(
+        pg, message_id="tied1", supplier_ean=SUPPLIER_EAN, supplier_name="Pekáreň Lunys",
+        wording="Iný nespárovaný tovar", quantity=1, unit="ks",
+        candidates=[{"gtin": ITEM_GTIN, "name": "Rožok 50g"}])
+    _msg(pg, mid="failedupload1", from_addr=sender)
+    pg.execute(
+        "UPDATE messages SET processed=true, proc_status='review' WHERE message_id=%s",
+        ("failedupload1",))
+    pg.execute(
+        """INSERT INTO email_events (message_id, workflow, stage, status, outcome)
+           VALUES ('failedupload1', 'delivery_notes', 'review', 'error',
+                   'Odoslanie dodacieho listu do ORIONu zlyhalo')""")
+    _msg(pg, mid="orphan1", from_addr=sender)
+    pg.execute(
+        "UPDATE messages SET processed=true, proc_status='review' WHERE message_id=%s",
+        ("orphan1",))
+
+    _msg(pg, mid="qmsg", from_addr=sender, has_attachments=True)
+    _attach(pg, tmp_path, "qmsg")
+    doc = _unknown_supplier_doc(sender)
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(
+        pg, cfg,
+        client=FakeClient({"dl_documents": [doc],
+                           "dl_supplier": [{"matched": False,
+                                            "matchReason": "nie je v zozname"}]}),
+        upload=lambda *a, **k: None, post=lambda c, h: None)
+    assert n == 1
+    qid = pg.execute(
+        "SELECT id FROM order_questions WHERE kind='dl_supplier'").fetchone()[0]
+
+    dl_supplier_memory.remember(pg, sender, SUPPLIER_EAN, "Pekáreň Lunys")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": SUPPLIER_EAN}), qid))
+    released = dl_worker.release_for_question(
+        pg, cfg, qid, client=FakeClient({"dl_documents": [doc], "dl_item": [ITEM_MATCHED]}),
+        upload=lambda *a, **k: None, post=lambda c, h: None)
+    assert released and released[0]["outcome"] == "ok"
+
+    untouched = pg.execute(
+        "SELECT message_id, processed FROM messages WHERE message_id IN "
+        "('other1', 'shipped1', 'tied1', 'failedupload1') "
+        "ORDER BY message_id").fetchall()
+    assert untouched == [("failedupload1", True), ("other1", True), ("shipped1", True),
+                         ("tied1", True)], \
+        "none of the four unrelated/already-linked/failed messages may be reset"
+    positive = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='orphan1'").fetchone()
+    assert positive == (False,), \
+        "the genuinely clean orphan (positive control) MUST be released"
+
+
+def test_release_for_question_sibling_widening_keys_on_envelope_from_addr(
+        pg, tmp_path):
+    """Deep-review finding on this ticket's own PR (#265) — a REAL, proven scoping
+    bug: `_process_document` sets `order_questions.payload['sender_email']` to
+    `doc.get('supplierEmail') or from_addr` — the DOCUMENT-EXTRACTED address, which
+    can genuinely differ from the raw envelope `messages.from_addr` (e.g. a 3PL/
+    warehouse operator's own contact email printed inside the mail body). The sibling
+    widening must key on the TIED message's own envelope `from_addr` (what `_release_
+    stuck_siblings` actually searches by), never the payload's extracted address, or
+    it would silently no-op — or worse, match the WRONG sender — whenever the two
+    diverge."""
+    _snapshot(pg)
+    envelope_addr = "raw-envelope@somewhere.sk"
+    extracted_addr = "different-contact@elsewhere.sk"
+    doc = {"documents": [{
+        "supplierName": "Neznáma pekáreň s.r.o.", "supplierCity": "",
+        "supplierEmail": extracted_addr, "docNumber": "",
+        "deliveryDate": "01.08.2026", "documentTotalWithoutVAT": 5.0,
+        "items": [{"name": "Rožok 50g", "quantity": 10, "unit": "ks", "unitPrice": 0.5,
+                  "totalPrice": 5.0}]}]}
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    for mid in ("tiedmsg", "siborphan"):
+        _msg(pg, mid=mid, from_addr=envelope_addr, has_attachments=True)
+        _attach(pg, tmp_path, mid)
+        n = dl_worker.tick(
+            pg, cfg,
+            client=FakeClient({"dl_documents": [doc],
+                               "dl_supplier": [{"matched": False,
+                                                "matchReason": "nie je v zozname"}]}),
+            upload=lambda *a, **k: None, post=lambda c, h: None)
+        assert n == 1
+    qid = pg.execute(
+        "SELECT id FROM order_questions WHERE kind='dl_supplier'").fetchone()[0]
+    payload = pg.execute(
+        "SELECT payload FROM order_questions WHERE id=%s", (qid,)).fetchone()[0]
+    assert payload["sender_email"] == extracted_addr, \
+        "setup: the question is keyed on the DOCUMENT-extracted address, not the " \
+        "envelope one"
+
+    dl_supplier_memory.remember(pg, extracted_addr, SUPPLIER_EAN, "Pekáreň Lunys")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": SUPPLIER_EAN}), qid))
+    released = dl_worker.release_for_question(
+        pg, cfg, qid, client=FakeClient({"dl_documents": [doc], "dl_item": [ITEM_MATCHED]}),
+        upload=lambda *a, **k: None, post=lambda c, h: None)
+    assert released and released[0]["outcome"] == "ok"
+
+    sibling = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='siborphan'").fetchone()
+    assert sibling == (False,), \
+        "the sibling (same ENVELOPE address) must be released even though the " \
+        "answered question was keyed on a different, document-extracted address"
+
+
+# --- Integration round B: #239 (safe automatic ORION upload retry) and #265
+# --- (correction-mail detection + sibling-release widening) were built in separate
+# --- worktree branches and merged into the SAME PR — this proves the composed safety
+# --- property through the REAL merged code path, not through a hand-built fixture ----
+
+def test_sibling_release_still_excludes_a_message_whose_upload_genuinely_failed_through_the_merged_retry_path(
+        pg, tmp_path):
+    """Composed regression for the exact interaction the integration round B dispatch
+    named explicitly: #265's `_release_stuck_siblings` excludes any same-sender message
+    with a logged `email_events.status='error'` row, specifically so it never re-enables
+    the automatic upload retry #239 deliberately wired in (a released claim + a fresh
+    per-attempt filename would let a genuinely-failed upload's retry re-ship a document
+    that may already be on ORION under an earlier name).
+
+    The existing #265 test proving this exclusion
+    (`test_release_for_question_sibling_widening_never_touches_unrelated_messages`,
+    `failedupload1`) manually `INSERT`s the `email_events` row — it pins the SQL
+    predicate but never actually drives a real upload failure through
+    `_process_document`'s upload except-block, so it cannot prove the exclusion still
+    holds against #239's OWN restructuring of that block into the
+    `_check_landed`/`_finish_shipped`/`_alert_and_release` closures. This test drives a
+    genuine failure through the real merged pipeline instead: the initial upload AND
+    #239's one safe retry both raise a transient `OSError` (`list_dirs` proves the
+    document is genuinely absent from ORION, so `landed is False` and the bounded retry
+    fires — see `test_a_transient_upload_failure_when_the_retry_also_fails_alerts_
+    without_looping`), landing in `_alert_and_release`, the ACTUAL closure that logs
+    `status='error'` post-merge. Only then is a sibling `dl_supplier` question answered
+    and `_release_stuck_siblings` checked against the row that closure produced."""
+    _snapshot(pg)
+    sender = "compose-check@somewhere.sk"
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+
+    _msg(pg, mid="failreal", from_addr=sender, has_attachments=True)
+    _attach(pg, tmp_path, "failreal")
+    tries = []
+
+    def _always_timed_out_upload(c, name, content, dir_override=None):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    def _fake_list_dirs(cfg):
+        return _dirs()
+
+    n = dl_worker.tick(
+        pg, cfg,
+        client=FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                           "dl_item": [ITEM_MATCHED]}),
+        upload=_always_timed_out_upload, list_dirs=_fake_list_dirs)
+    assert n == 1
+    assert len(tries) == 2, \
+        "setup: the original attempt plus exactly one bounded retry, both failed"
+
+    row = pg.execute(
+        "SELECT processed, proc_status FROM messages WHERE message_id='failreal'"
+    ).fetchone()
+    assert row == (True, "review"), \
+        "setup: the real upload failure (through the merged retry path) ends " \
+        "terminal-review, same shape a genuine dl_supplier-orphan review ends in"
+    # #239's own `_run_and_finish` also logs a SEPARATE rollup summary event with
+    # `stage='review', status='review'` right after `_alert_and_release` returns (its
+    # own `status="review"` comes from `_aggregate_status`, not from the failure) — so
+    # the LATEST `stage='review'` row is that rollup, never `_alert_and_release`'s own
+    # `status='error'` row. `_release_stuck_siblings`'s own predicate checks EXISTENCE
+    # of any `status='error'` row, never "the latest one" -- mirror that here.
+    assert pg.execute(
+        "SELECT 1 FROM email_events WHERE message_id='failreal' AND status='error'"
+    ).fetchone() is not None, \
+        "setup: _alert_and_release -- #239's restructured closure -- logged the " \
+        "status='error' event _release_stuck_siblings' exclusion depends on"
+    assert pg.execute(
+        "SELECT count(*) FROM order_questions WHERE message_id='failreal'"
+    ).fetchone()[0] == 0, "setup: an upload failure never raises a question"
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE uploaded_at IS NOT NULL"
+    ).fetchone()[0] == 0, "setup: nothing was ever confirmed shipped"
+
+    # The TIED message: an unmatched supplier from the SAME sender -- answering its
+    # dl_supplier question is what triggers the sibling-release widening.
+    doc = _unknown_supplier_doc(sender)
+    _msg(pg, mid="qmsg-compose", from_addr=sender, has_attachments=True)
+    _attach(pg, tmp_path, "qmsg-compose")
+    n = dl_worker.tick(
+        pg, cfg,
+        client=FakeClient({"dl_documents": [doc],
+                           "dl_supplier": [{"matched": False,
+                                            "matchReason": "nie je v zozname"}]}),
+        upload=lambda *a, **k: None, post=lambda c, h: None)
+    assert n == 1
+    qid = pg.execute(
+        "SELECT id FROM order_questions WHERE kind='dl_supplier'").fetchone()[0]
+
+    dl_supplier_memory.remember(pg, sender, SUPPLIER_EAN, "Pekáreň Lunys")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": SUPPLIER_EAN}), qid))
+    released = dl_worker.release_for_question(
+        pg, cfg, qid, client=FakeClient({"dl_documents": [doc], "dl_item": [ITEM_MATCHED]}),
+        upload=lambda *a, **k: None, post=lambda c, h: None)
+    assert released and released[0]["outcome"] == "ok", "the tied message ships"
+
+    still_stuck = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='failreal'").fetchone()
+    assert still_stuck == (True,), \
+        "the genuinely-failed message -- produced by the REAL merged " \
+        "_alert_and_release path, not a synthetic fixture -- must stay excluded " \
+        "from the sibling release: resetting it would re-enable exactly the " \
+        "automatic retry #239 wired in, via a second, independent-attempt upload " \
+        "with a fresh filename (real duplicate-delivery risk in ORION)"
+
+
+def test_release_stuck_siblings_never_releases_a_message_with_a_logged_upload_failure(
+        pg):
+    """Deep-review finding on this ticket's own PR (#265) — the PROVEN safety bug: a
+    message whose ORION upload genuinely failed (`_process_document`'s upload-except
+    branch logs `status='error'` and calls `desadv.release_send()`, deleting its
+    claim) is otherwise INDISTINGUISHABLE from a genuine unmatched-supplier orphan by
+    `processed=true AND proc_status='review' AND no order_questions row` alone.
+    Resetting it here would re-enable exactly the automatic upload retry #239
+    deliberately removed — a released claim + a fresh per-attempt filename means a
+    second attempt can genuinely re-upload a document that already landed (two copies
+    in ORION, both taken in at the next manual import)."""
+    sender = "failed-upload@somewhere.sk"
+    pg.execute(
+        """INSERT INTO messages (message_id, category, subject, from_addr,
+                                 combined_text, has_attachments, processed,
+                                 proc_status)
+           VALUES ('failed1', 'dodacie_listy', 'x', %s, '', false, true, 'review')""",
+        (sender,))
+    pg.execute(
+        """INSERT INTO email_events (message_id, workflow, stage, status, outcome)
+           VALUES ('failed1', 'delivery_notes', 'review', 'error',
+                   'Odoslanie dodacieho listu do ORIONu zlyhalo')""")
+    n = dl_worker._release_stuck_siblings(pg, "exclude-me", sender)
+    assert n == 0, "a message with a logged upload failure must NEVER be reset"
+    row = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='failed1'").fetchone()
+    assert row == (True,), "stays exactly as it was — never reclaimed for a retry"
+
+
+def test_release_stuck_siblings_still_releases_a_clean_orphan_alongside_a_failed_one(
+        pg):
+    """The exclusion proven above must be PRECISE — a genuinely clean orphan (never
+    failed, just never got its own question) from the SAME sender must still be
+    released even when a failed sibling exists too."""
+    sender = "mixed-siblings@somewhere.sk"
+    pg.execute(
+        """INSERT INTO messages (message_id, category, subject, from_addr,
+                                 combined_text, has_attachments, processed,
+                                 proc_status)
+           VALUES ('failed2', 'dodacie_listy', 'x', %s, '', false, true, 'review')""",
+        (sender,))
+    pg.execute(
+        """INSERT INTO email_events (message_id, workflow, stage, status, outcome)
+           VALUES ('failed2', 'delivery_notes', 'review', 'error', 'zlyhalo')""")
+    pg.execute(
+        """INSERT INTO messages (message_id, category, subject, from_addr,
+                                 combined_text, has_attachments, processed,
+                                 proc_status)
+           VALUES ('clean1', 'dodacie_listy', 'x', %s, '', false, true, 'review')""",
+        (sender,))
+    n = dl_worker._release_stuck_siblings(pg, "exclude-me", sender)
+    assert n == 1
+    rows = pg.execute(
+        "SELECT message_id, processed FROM messages WHERE from_addr=%s "
+        "ORDER BY message_id", (sender,)).fetchall()
+    assert rows == [("clean1", False), ("failed2", True)]
+
+
+def test_release_stuck_siblings_is_bounded_so_a_large_backlog_never_storms(pg):
+    """#265 gap 2: a sender with dozens of orphaned stuck messages must not have them
+    ALL reset in one shot inside the request answering the nástenka question — only up
+    to `_STUCK_SIBLING_LIMIT` rows get flipped per call; the rest wait for a LATER
+    answered question for the same sender (or the existing `stuck_classified_sweep`/
+    hourly n8n watchdog). The real reprocessing work always stays rate-limited by the
+    normal `_claim()` one-message-per-tick loop regardless — this bound only caps how
+    many rows get flipped per call, closing off any "storm" risk structurally."""
+    sender = "veela@somewhere.sk"
+    total = dl_worker._STUCK_SIBLING_LIMIT + 5
+    for i in range(total):
+        mid = f"bulk{i}"
+        pg.execute(
+            """INSERT INTO messages (message_id, category, subject, from_addr,
+                                     combined_text, has_attachments, processed,
+                                     proc_status)
+               VALUES (%s, 'dodacie_listy', 'x', %s, '', false, true, 'review')""",
+            (mid, sender))
+    n = dl_worker._release_stuck_siblings(pg, "exclude-me", sender)
+    assert n == dl_worker._STUCK_SIBLING_LIMIT
+    reset = pg.execute(
+        "SELECT count(*) FROM messages WHERE from_addr=%s AND processed=false",
+        (sender,)).fetchone()[0]
+    assert reset == dl_worker._STUCK_SIBLING_LIMIT
+    still_stuck = pg.execute(
+        "SELECT count(*) FROM messages WHERE from_addr=%s AND processed=true",
+        (sender,)).fetchone()[0]
+    assert still_stuck == 5, "the overflow waits for a later call, never dropped"
+
+
+def test_release_stuck_siblings_does_nothing_when_sender_is_blank(pg):
+    assert dl_worker._release_stuck_siblings(pg, "exclude-me", "") == 0
+    assert dl_worker._release_stuck_siblings(pg, "exclude-me", "   ") == 0

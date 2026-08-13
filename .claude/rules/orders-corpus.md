@@ -1737,3 +1737,44 @@ intentional there for cards it was tuned against.
   THEN `docker cp` that real host path into the container. Same fix, and same root cause,
   as `gh-cli-recipes.md`'s "write the scratch file in its own call" guidance — a
   redirection composed across an ssh+sudo wrapper does not behave like a local one.
+- **Building a brand-new corpus case from a REAL production incident (not a synthetic
+  mail) — the full working recipe (#289, 2026-08-13).** (1) Fetch the exact row
+  (`combined_text`, `header_message_id`, `subject`, `from_addr`, `from_name`,
+  `created_at::date`) from the live production Postgres, SELECT-only, via
+  `docker exec <addon> sh -c 'PGPASSWORD=... psql -h 127.0.0.1 -U email -d email -Atc
+  "..."'`. **Fetch `combined_text` as base64** (`encode(convert_to(combined_text,
+  'UTF8'), 'base64')`), not plain `-Atc` text — a value with Slovak diacritics survives
+  two SSH hops (dev-box session -> HA box) intact only through base64; plain text
+  round-tripped through this session's earlier plain fetch matched byte-for-byte once
+  decoded, but don't rely on that holding for every terminal/locale combination, base64
+  is the safe default. (2) Build a SCRATCH manifest (`{"cases": [<one case>]}`) with a
+  fresh `id` (`<sender-local-part>-<YYYY-MM-DD>-<6 hex>`, `secrets.token_hex(3)`),
+  `today` = the message's own received date, and an `expected.orders` list asserting
+  only what the incident is actually ABOUT (here: `customer_ean` + all N
+  `delivery_date`s — the bug was about which DAYS got created, not item-matching, so no
+  `items` list is asserted, matching "assert only what you can prove" above). (3) Run
+  `eval_run.py --live` against that scratch manifest with `LLM_CACHE_DIR` pointed
+  DIRECTLY at the shared `~/eval-corpus/email-extractor/llm-cache/` (skips the
+  documented "record in a separate cache dir, then copy files over" step entirely —
+  content-addressed by hash, so writing straight into the shared dir is safe and one
+  step fewer) and a SEPARATE eval-only Postgres container (`ee-eval-pg`, port 55434 —
+  distinct from the `test`-job containers in `local-testing.md`, avoids any risk of
+  colliding with a concurrent pytest run). (4) Hand-verify via `--dump`, THEN merge the
+  case dict into `manifest.json` with a small Python script (never hand-edit the JSON),
+  re-run the FULL corpus offline with `--require-all` (must stay EXIT 0, pre-existing
+  `known_defect` failures unchanged), THEN `--update-baseline`.
+- **`match_incidents` (#196 extension) rows are code (a `db.SCHEMA` migration
+  statement), never a manual production INSERT — this is what makes "production
+  Postgres SELECT-only" compatible with the #196 mandate (#289).** Add a NEW
+  `INSERT ... ON CONFLICT (issue_ref) DO NOTHING` statement to `app/db.py`'s `SCHEMA`
+  list (don't edit the existing seed statement's VALUES — a separate statement per
+  incident keeps history append-only and diff-reviewable); the row lands for real only
+  once the deploy runs `db.init_schema()` on startup. **`test_db.py`'s
+  `test_schema_seeds_the_known_match_incidents` hardcodes the exact expected
+  `issue_ref` set and row count** — bumping that assertion is a mandatory same-commit
+  edit every time a new row is added, or the test fails immediately (caught this way on
+  #289, not by surprise). Live bonus confirmation of the whole path working: the
+  dashboard's own "dní od posledného incidentu" (`reliability.days_since_incident()`)
+  dropped to 0 immediately after deploy — a free, unplanned functional-verification
+  signal for both the new row AND its read path, on top of the mandatory DOM/console
+  checks.

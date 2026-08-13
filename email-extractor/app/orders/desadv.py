@@ -34,6 +34,8 @@ import time
 
 import psycopg
 
+from . import desadv_edi
+
 log = logging.getLogger("orders.desadv")
 
 # Same role as edi.py's own CLAIM_STALE_MINUTES: how long a bare (unconfirmed) claim is
@@ -246,3 +248,42 @@ def release_send(conn, supplier_ean: str, doc_number: str) -> None:
     conn.execute(
         "DELETE FROM desadv_sent WHERE supplier_ean = %s AND doc_number = %s",
         (str(supplier_ean or ""), str(doc_number or "")))
+
+
+def has_confirmed_collision(conn, supplier_ean: str, doc_number: str) -> bool:
+    """#239 finding 6 review finding: `desadv_edi.stable_prefix()` truncates
+    `doc_number` to its first `MAX_DOC_NUMBER_IN_FILENAME` (10) alnum characters for
+    the on-wire SFTP filename (R89) — a collision risk that function's OWN docstring
+    already flagged: "two genuinely different doc numbers that happen to share their
+    first 10 alnum characters would collide onto the same stable prefix... this
+    collision risk MUST be re-examined before either function becomes load-bearing for
+    an actual safe-retry decision." `desadv_edi.already_landed()` is now exactly that
+    load-bearing decision (`dl_worker._check_landed`, finding 6's remainder) — a
+    collision there would silently CONFIRM a claim for a document that was never
+    actually uploaded (a different, unrelated, already-confirmed document's file was
+    matched instead) — the mirror image of the v0.9.70 double-upload incident this
+    whole ticket exists to prevent, just silent LOSS instead of silent DUPLICATION.
+
+    READ-ONLY, same guarantee as `already_sent()`/`claimed_by()`: cross-checks the
+    LOCAL ledger — does any OTHER already-CONFIRMED `desadv_sent` row for this SAME
+    supplier carry a filename that also matches `doc_number`'s own stable prefix? If
+    so, THAT row's document is what a presence check actually found, never this one —
+    the caller must not trust the match.
+
+    NOT a complete fix for the underlying truncation risk — a collision against a file
+    uploaded before this ledger started recording (2026-08-09), or against a genuinely
+    DIFFERENT supplier whose EAN happens to share the same last-6-digit suffix
+    (`stable_prefix()`'s own `ean_short = ean_edi[-6:]`), would still slip through.
+    Left as an acknowledged residual scope, not this function's job to solve — see the
+    design comment on #239 for why a full fix (widening the on-wire filename budget, or
+    verifying uploaded CONTENT) is a separate, larger, `needs-user-decision`-class
+    change."""
+    ean, doc = str(supplier_ean or ""), str(doc_number or "")
+    if not ean or not doc:
+        return False
+    prefix = desadv_edi.stable_prefix(ean, doc)
+    rows = conn.execute(
+        "SELECT filename FROM desadv_sent WHERE supplier_ean = %s "
+        "AND uploaded_at IS NOT NULL AND doc_number != %s", (ean, doc)).fetchall()
+    return any(desadv_edi._matches_stable_prefix(filename or "", prefix)
+              for (filename,) in rows)

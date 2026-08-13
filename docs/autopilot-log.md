@@ -3075,3 +3075,49 @@ Tri nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
   `agent-a9158237081b4beeb` (#239) / `agent-a7431f2c6f227576a` (#265,
   konfliktujú navzájom v `dl_worker.py`) ponechané nedotknuté.
 - Run cards fired for #273, #275, #255 (`v0.9.87`) — všetky issues CLOSED.
+
+## 2026-08-13 — #289 integration (PR #293)
+
+- **#289** (AI objednávky: skrátený rozsah dátumu v predmete stratil 5 z 6 dní
+  objednávky PNO Poprad): integrácia hotového worktree branchu
+  `worktree-agent-a5e4e4091603a8d19` do `dev`. Živá náprava (5 chýbajúcich dní
+  ručne doručených, shadow-preview pred každým live odoslaním, overené v
+  ORIONe) bola už predtým hotová priamo na produkcii (viď komentáre #289) —
+  tento PR je durabilná oprava kódu.
+- Verzia 0.9.87 → 0.9.88 (`faa99e5`), potom merge branchu (`5d0c20a`, jediný
+  konflikt v `.claude/rules/orders-corpus.md` — append-only playbook, oba
+  zápisy ponechané). `_RANGE` regex (`app/orders/extract.py`) rozšírený na
+  pomenované skupiny (`d1`/voliteľný `m1`/`d2`/`m2`) — mesiac prvého konca
+  rozsahu je voliteľný. RED→GREEN `97e579d`→`d15a8ff`, tri ďalšie review-pass
+  testy v `2fc747f` (decimal-weight false-positive guard, `date_conflict()`
+  shorthand coverage, month-wrap guard).
+- Korpusový prípad (`orders-corpus.md` #188 standing rule):
+  `kcrealpoprad-2026-08-13-c0076d` na dev2 (`~/eval-corpus/email-extractor/`),
+  postavený na REÁLNEJ produkčnej správe `messages.id=7057`. `--live`
+  re-record: 1/1 pass, 6/6 `order_results` status `ok` (17.-22.08.2026),
+  presne zodpovedá reálnej náprave. Plný 36-prípadový offline gate
+  `--require-all`: 31/36 priamo + 5 known-defect (#120, nezmenené) = EXIT 0,
+  `baseline.json` aktualizovaný.
+- `match_incidents` extension (#196): nový seedovaný riadok pre #289
+  (`c0cd827`, idempotentné `ON CONFLICT DO NOTHING`). `test_db.py`'s
+  hardcoded 2-row assert aktualizovaný na 3 (`#157`/`#186`/`#289`).
+- Full local suite (1500+ testov) zelené na `email-extractor-testpg`
+  (port 15433), `ruff check .` čisté.
+- PR #293 (dev->main), `Closes #289`. CI zelené (test × 2, e2e-orders × 2 —
+  vrátane nového korpusového prípadu, e2e-dl × 2, build × 2). Merged
+  `f8c804b5`.
+- Deploy: `ha apps update e0ac7775_email_extractor` -> v0.9.88. Overené:
+  `/health` `{"ok":true,"version":"0.9.88"}`; DOM (Playwright) ukazuje
+  `v0.9.88` AJ `0 dní bez incidentu` (živý dôkaz, že `match_incidents`
+  riadok pre #289 sa naozaj počíta); 0 console chýb na `/`, `/otazky`,
+  `/otazky-dl`, `/znalosti` (každá stránka jednotlivo). Funkčne: shadow
+  `_range_days()` volanie priamo v živom kontajneri (`docker cp` reálneho
+  súboru na hoste, nikdy nie `/dev/stdin` — pozri `orders-corpus.md`'s
+  gotcha) potvrdilo predmet „17. - 22. 08. 2026" sa teraz zgroundoval na
+  presne 6 dní (17.-22.08.), a že decimal-weight guard drží. Žiadna reálna
+  správa sa nedotkla.
+- Worktree `agent-a5e4e4091603a8d19` + jeho lokálny branch odstránené po
+  merge. Sibling worktree pár `agent-a9158237081b4beeb` (#239) /
+  `agent-a7431f2c6f227576a` (#265, konfliktujú navzájom v `dl_worker.py`)
+  ponechané nedotknuté.
+- Run card fired for #289 (`v0.9.88`) — issue CLOSED.
