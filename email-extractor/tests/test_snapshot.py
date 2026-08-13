@@ -246,6 +246,7 @@ def test_two_concurrent_brand_new_customer_adds_for_the_same_ean_produce_one_row
     import threading
 
     import psycopg
+    from _race import run_racers
 
     barrier = threading.Barrier(2)
     errors = []
@@ -264,12 +265,11 @@ def test_two_concurrent_brand_new_customer_adds_for_the_same_ean_produce_one_row
         finally:
             conn.close()
 
-    t1 = threading.Thread(target=add, args=("Pretekár A",))
-    t2 = threading.Thread(target=add, args=("Pretekár B",))
-    t1.start()
-    t2.start()
-    t1.join(timeout=15)
-    t2.join(timeout=15)
+    t1 = threading.Thread(target=add, args=("Pretekár A",), name="add-a")
+    t2 = threading.Thread(target=add, args=("Pretekár B",), name="add-b")
+    # #291: bounded join() alone never kills a genuinely-stalled thread — run_racers
+    # fails loudly + cleans up any stray backend instead of wedging later tests.
+    run_racers(pg, [t1, t2], timeout=15, label="brand_new_customer")
 
     assert not errors, f"a racing upsert_customer call must never raise: {errors}"
     assert pg.execute(
@@ -293,6 +293,7 @@ def test_two_concurrent_new_customer_adds_for_the_same_ean_with_different_street
     import threading
 
     import psycopg
+    from _race import run_racers
 
     barrier = threading.Barrier(2)
     errors = []
@@ -311,12 +312,11 @@ def test_two_concurrent_new_customer_adds_for_the_same_ean_with_different_street
         finally:
             conn.close()
 
-    t1 = threading.Thread(target=add, args=("Pretekár Košice", "Ulica A 1"))
-    t2 = threading.Thread(target=add, args=("Pretekár Prešov", "Ulica B 2"))
-    t1.start()
-    t2.start()
-    t1.join(timeout=15)
-    t2.join(timeout=15)
+    t1 = threading.Thread(target=add, args=("Pretekár Košice", "Ulica A 1"), name="add-a")
+    t2 = threading.Thread(target=add, args=("Pretekár Prešov", "Ulica B 2"), name="add-b")
+    # #291: bounded join() alone never kills a genuinely-stalled thread — run_racers
+    # fails loudly + cleans up any stray backend instead of wedging later tests.
+    run_racers(pg, [t1, t2], timeout=15, label="different_street")
 
     assert pg.execute(
         "SELECT count(*) FROM customer_overrides WHERE ean_edi='7000000000901'"
@@ -635,6 +635,7 @@ def test_two_concurrent_sheet_bound_edits_sharing_a_target_ean_do_not_deadlock(p
     import threading
 
     import psycopg
+    from _race import run_racers
 
     snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
     barrier = threading.Barrier(2)
@@ -655,13 +656,14 @@ def test_two_concurrent_sheet_bound_edits_sharing_a_target_ean_do_not_deadlock(p
             conn.close()
 
     t1 = threading.Thread(target=edit, args=(
-        "2000000000864", "Košútka 1", "Pobočka A súbežne", "Martin", "Košútka 1"))
+        "2000000000864", "Košútka 1", "Pobočka A súbežne", "Martin", "Košútka 1"),
+        name="edit-a")
     t2 = threading.Thread(target=edit, args=(
-        "2000000000871", "Hlavná 2", "Pobočka B súbežne", "Poprad", "Hlavná 2"))
-    t1.start()
-    t2.start()
-    t1.join(timeout=15)
-    t2.join(timeout=15)
+        "2000000000871", "Hlavná 2", "Pobočka B súbežne", "Poprad", "Hlavná 2"),
+        name="edit-b")
+    # #291: bounded join() alone never kills a genuinely-stalled thread — run_racers
+    # fails loudly + cleans up any stray backend instead of wedging later tests.
+    run_racers(pg, [t1, t2], timeout=15, label="sheet_bound_no_deadlock")
 
     assert not errors, f"two legitimate branch-sharing edits must never raise: {errors}"
     names = {r["name"] for r in snapshot.customers_for_management(pg)
