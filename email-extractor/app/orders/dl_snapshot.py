@@ -424,8 +424,31 @@ def upsert_dl_supplier(conn, *, override_id: int | None, orig_ean_edi: str | Non
         # /znalosti admin dashboard) had no uniqueness check of its own; the new partial
         # unique index (db.py) now turns a collision into `UniqueViolation` instead of a
         # silent duplicate, caught here and raised as the same clean `DuplicateEan`.
+        # This backstop only ever fires for a genuinely HAND-ADDED supplier row
+        # (`orig_ean_edi IS NULL`) — the only partition the partial index actually
+        # covers; see the #285 guard immediately below for the sibling SHEET-BOUND
+        # case, which this backstop structurally cannot catch.
+        #
+        # #285: mirrors `snapshot.upsert_customer`'s own #285 fix byte-for-byte, `city`
+        # standing in for `street` — a supplier row that FIRST became sheet-bound (this
+        # same `id` was created by the fallthrough branch further down,
+        # `orig_ean_edi IS NOT NULL`) and is now being edited a SECOND time via its own
+        # `override_id` has the IDENTICAL gap #275 already fixed for the fallthrough
+        # branch. See `upsert_customer`'s own #285 comment for the full reasoning
+        # (why `orig_ean_edi` is safe to read outside the lock, why an empty string is
+        # still treated as sheet-bound, the self-collision safety argument, and what
+        # race direction this deliberately does NOT close).
+        current = conn.execute(
+            "SELECT orig_ean_edi FROM dl_supplier_overrides WHERE id=%s", (override_id,)
+        ).fetchone()
+        sheet_bound = current is not None and current[0] is not None
         try:
             with conn.transaction():
+                if sheet_bound:
+                    conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (ean_edi,))
+                    conflict = _active_dl_supplier_conflict(conn, ean_edi)
+                    if conflict:
+                        raise snapshot.DuplicateEan(ean_edi, conflict)
                 row = conn.execute(
                     """UPDATE dl_supplier_overrides
                           SET ean_edi=%s, name=%s, emails=%s, city=%s, retired=false,
