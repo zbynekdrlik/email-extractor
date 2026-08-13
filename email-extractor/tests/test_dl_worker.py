@@ -65,17 +65,22 @@ def _msg(pg, mid="dl1", subject="Dodací list", from_addr="dodavatel@lunys.sk",
 
 
 def _attach(pg, tmp_path, mid, idx=0, filename="dl.pdf", text="dodaci list text",
-           mime="application/pdf", method=""):
+           mime="application/pdf", method="", raw_bytes: bytes | None = None):
     # #247: `method` mirrors `app/extract.py`'s own ingest-time classification stored
     # on the real `attachments.method` column (e.g. `'skipped'` for a decorative/tiny
     # image, `flag='skipped_tiny_image'`) — default "" matches every PRE-#247 caller
     # unchanged (NULL/"" both read back as "" via `_read_attachments`'s `method or ""`).
+    # #297: `raw_bytes` lets a test control exactly what sits on disk for this
+    # attachment (default unchanged from every pre-#297 caller) — used to prove a
+    # spreadsheet's ON-DISK bytes are never read as `pdf_bytes` even when they
+    # coincidentally look like a real embedded JPEG.
     pg.execute(
         """INSERT INTO attachments (message_id, idx, filename, mime, extracted_text, method)
            VALUES (%s, %s, %s, %s, %s, %s)""", (mid, idx, filename, mime, text, method))
     d = store.message_dir(str(tmp_path), mid)
     d.mkdir(parents=True, exist_ok=True)
-    (d / f"att{idx}__{filename}").write_bytes(b"%PDF-1.4 no embedded jpeg here\n")
+    (d / f"att{idx}__{filename}").write_bytes(
+        raw_bytes if raw_bytes is not None else b"%PDF-1.4 no embedded jpeg here\n")
 
 
 def _doc(doc_number="0100000001", total=5.0, items=None):
@@ -91,6 +96,24 @@ SUPPLIER_MATCHED = {"matched": True, "ean_edi": SUPPLIER_EAN, "name": "Pekáreň
                     "matchConfidence": 0.95, "matchReason": "presná zhoda"}
 ITEM_MATCHED = {"gtin": ITEM_GTIN, "matchedCatalogName": "Rožok 50g",
                 "matchConfidence": 0.97, "matchReason": "presná zhoda", "mass": 0.05}
+
+# #297 — SYNTHETIC paraphrase of the real Bardusch (#241/#297) .xls machine_text SHAPE
+# (grid-style, tab-joined columns, per extraction-formats.md's own testing rules) — NEVER
+# the real customer file. Bardusch's actual delivery notes are work-clothing ISSUANCE
+# records (Hungarian headers), not classic goods lines; this fixture only proves the
+# WORKER now hands a text-bearing .xls to extraction at all — matching/EDI viability for
+# that real document shape is a separate, already-tracked question (see #297's own
+# comment thread), out of scope for this fix.
+XLS_MACHINE_TEXT = (
+    "[Sheet: Munka1]\n"
+    "Dodavatel Vzor Kft.\t\tTelefon: 00/000-000\t\t\n"
+    "9000 Vzorove Mesto\t\twww.example.test\t\t\n"
+    "Ulica 8\t\tservis@example.test\t\t\n"
+    "Datum : 2026.07.06\t\t\t\t\n"
+    "SLOVNORMAL, s.r.o.\t\t\t\t\n"
+    "MENO\tCISLO\tPOLOZKA\tPOZNAMKA\t\n"
+    "Vzorovy Zamestnanec\t100\tPracovny odev vzor\tOk\t\n"
+)
 
 
 class FakeClient:
@@ -262,6 +285,145 @@ def test_a_real_attachment_still_passes_alongside_a_decorative_one(pg, tmp_path)
     assert "dl_documents" in client.calls
     row = pg.execute("SELECT processed FROM messages WHERE message_id='dl1'").fetchone()
     assert row[0] is True
+
+
+# --- #297: a spreadsheet (.xls/.xlsx) delivery note attachment ---------------
+
+def test_read_attachments_recognizes_xls_with_machine_text_and_forces_pdf_bytes_empty(
+        pg, tmp_path):
+    """#297: an .xls attachment must now be RECOGNIZED by `_read_attachments` (unlike
+    before, where the PDF/image-only filter silently dropped it entirely — proven live
+    on Bardusch's real message 2183, 0/4 usable attachments, STEP 0 evidence on the
+    ticket) — but its raw on-disk bytes must NEVER reach `dl_extract` as `pdf_bytes`: a
+    spreadsheet is never a scan and is never sent to Vision (owner's binding #297
+    decision). Proven adversarially: the file on disk here is deliberately POISONED
+    with a byte sequence that LOOKS like a real embedded JPEG over the scan threshold
+    (a coincidental match inside the real OLE2/xlsx container is exactly the risk this
+    guards against) — `_read_attachments` must force `pdf_bytes` empty for it
+    regardless of what actually sits on disk."""
+    mid = _msg(pg, mid="dl1")
+    poisoned = b"\xff\xd8" + (b"\x00" * 25_000) + b"\xff\xd9"
+    _attach(pg, tmp_path, mid, idx=0, filename="Slovnormal_630935.xls",
+           mime="application/vnd.ms-excel", text=XLS_MACHINE_TEXT, method="xls",
+           raw_bytes=poisoned)
+    cfg = _cfg(data_dir=str(tmp_path))
+    out = dl_worker._read_attachments(cfg, mid, pg)
+    assert len(out) == 1
+    assert out[0]["pdf_bytes"] == b""
+    assert out[0]["machine_text"] == XLS_MACHINE_TEXT
+    assert out[0]["is_spreadsheet"] is True
+
+
+def test_an_xls_attachment_with_machine_text_flows_through_the_dl_pipeline(pg, tmp_path):
+    """#297 (ROZHODNUTÉ 2026-08-13): a spreadsheet delivery note now reaches extraction
+    like any PDF/image — matching, EDI build and upload stay exactly the SAME pipeline.
+    RED on pre-fix code: `_read_attachments` drops the .xls entirely (0 usable
+    attachments), `client.calls` stays empty and nothing is ever uploaded."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1", idx=0, filename="dodaci.xls",
+           mime="application/vnd.ms-excel", text=XLS_MACHINE_TEXT, method="xls")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    uploaded, posted = [], []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(
+        pg, cfg, client=client,
+        upload=lambda c, name, content, dir_override=None:
+            uploaded.append((name, content, dir_override)),
+        post=lambda c, html: posted.append(html))
+    assert n == 1
+    assert "dl_documents" in client.calls
+    assert len(uploaded) == 1
+    assert uploaded[0][0].startswith("Z-DESADV_")
+    row = pg.execute("SELECT processed FROM messages WHERE message_id='dl1'").fetchone()
+    assert row[0] is True
+
+
+def test_an_xls_attachment_with_no_machine_text_reviews_honestly_without_calling_the_model(
+        pg, tmp_path):
+    """#297: an .xls whose native extraction produced NO text at all (a genuinely
+    unreadable file, or a blank sheet) must never reach `dl_extract` — there is no PDF
+    fallback to send it to Vision with (`pdf_bytes` is always forced empty for a
+    spreadsheet). Must review honestly, with ZERO model/vision calls — `FakeClient({})`'s
+    `vision_call` raises `AssertionError` if the worker ever tried it (mirrors the #247
+    crash-detector pattern)."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1", idx=0, filename="prazdny.xls",
+           mime="application/vnd.ms-excel", text="", method="")
+    posted = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=FakeClient({}),
+                       post=lambda c, h: posted.append(h))
+    assert n == 1
+    row = pg.execute(
+        "SELECT processed, processed_by FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True, "dodacie_listy")
+    assert len(posted) == 1
+    assert "prazdny.xls" in posted[0]
+    # the crash symptom must be GONE -- no leaked vision-must-not-be-called assertion,
+    # and this is NOT the generic per-attachment extraction-error wording either (this
+    # attachment was never even sent to dl_extract).
+    assert "vision must not be called" not in posted[0]
+    assert "sa nepodarilo spracovať" not in posted[0]
+
+
+def test_an_xls_attachment_that_yields_no_document_is_flagged_consistently_with_pdf(
+        pg, tmp_path):
+    """#297: the #238 universal completeness check must treat a text-bearing .xls
+    EXACTLY like a PDF/image attachment — processed, but contributed zero documents ->
+    flagged individually, `proc_status` must never roll up as a clean 'ok'. Mirrors
+    `test_an_attachment_that_yields_no_document_is_flagged_not_silently_lost` with the
+    second attachment as an .xls instead of a PDF."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1", idx=0, filename="prvy.pdf")
+    _attach(pg, tmp_path, "dl1", idx=1, filename="druhy.xls",
+           mime="application/vnd.ms-excel", text=XLS_MACHINE_TEXT, method="xls")
+    client = FakeClient({
+        "dl_documents": [_doc(doc_number="0100000001"), {"documents": []}],
+        "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [ITEM_MATCHED]})
+    posted = []
+    dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client,
+        upload=lambda *a, **k: None, post=lambda c, h: posted.append(h))
+
+    row = pg.execute(
+        "SELECT proc_status FROM messages WHERE message_id='dl1'").fetchone()
+    assert row[0] == "partial", \
+        "one processed .pdf must never make the WHOLE run 'ok' when the .xls " \
+        "sibling silently yielded no document"
+    flagged = [h for h in posted
+              if "druhy.xls" in h and "nenašiel sa v nej žiadny dodací list" in h]
+    assert len(flagged) == 1, "the empty .xls result must be flagged EXACTLY once"
+    ev = pg.execute(
+        "SELECT detail FROM email_events WHERE message_id='dl1' "
+        "AND status='review' AND outcome LIKE '%druhy.xls%'").fetchone()
+    assert ev is not None and ev[0]["idx"] == 1
+
+
+def test_decorative_image_and_text_bearing_xls_coexist_without_interference(pg, tmp_path):
+    """#297: the #247 decorative-attachment filter (image `method='skipped'`) must stay
+    completely untouched by the new .xls handling — a signature logo sitting alongside a
+    real .xls delivery note must not affect either path."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1", idx=0, filename="podpis.jpeg", mime="image/jpeg",
+           text="", method="skipped")
+    _attach(pg, tmp_path, "dl1", idx=1, filename="dodaci.xls",
+           mime="application/vnd.ms-excel", text=XLS_MACHINE_TEXT, method="xls")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    uploaded = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(
+        pg, cfg, client=client,
+        upload=lambda c, name, content, dir_override=None:
+            uploaded.append((name, content, dir_override)))
+    assert n == 1
+    assert len(uploaded) == 1
+    assert "dl_documents" in client.calls
 
 
 # --- #258: no usable attachment, but a delivery note in the mail's own BODY TEXT --
@@ -455,6 +617,39 @@ def test_correction_mail_never_auto_ships_goes_to_review_with_manual_codex_wordi
     assert row == (True, "review")
     assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0
     assert pg.execute("SELECT count(*) FROM order_questions").fetchone()[0] == 0
+
+
+def test_empty_spreadsheet_flag_survives_a_correction_mail_early_return(pg, tmp_path):
+    """#297 review finding: the #265 correction-detection early return used to build a
+    brand-new `documents` list, discarding any entries `documents_out` already held from
+    the #297 empty-spreadsheet flagging earlier in this function — reachable whenever a
+    message has an unreadable/empty .xls attachment AND falls back to mail-body text
+    that itself reads as a correction/amendment. The Odoo post for the spreadsheet flag
+    already fires independently (this test also confirms exactly 2 posts happen) — this
+    proves `order_runs.result['documents']` (the project's own persisted source of
+    truth, see `.claude/rules/n8n-workflow-edits.md`'s #145 pattern) also reflects BOTH
+    entries, not just the correction one."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", subject="OPRAVA HMOTNOSTI", combined_text=CORRECTION_BODY_TEXT)
+    _attach(pg, tmp_path, "dl1", idx=0, filename="prazdny.xls",
+           mime="application/vnd.ms-excel", text="", method="")
+    uploaded, posted = [], []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(
+        pg, cfg, client=_NeverCalledClient(),
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+        post=lambda c, h: posted.append(h))
+    assert n == 1
+    assert uploaded == [], "a correction mail must NEVER auto-ship"
+    assert len(posted) == 2, "one post for the empty .xls flag, one for the correction"
+    result = pg.execute("SELECT result FROM order_runs").fetchone()[0]
+    docs = result["documents"]
+    assert len(docs) == 2, \
+        "the empty-spreadsheet flag must survive the #265 early return, not be discarded"
+    assert any(d.get("synthetic") and "prazdny.xls" in (d.get("reason") or "")
+              for d in docs), "the .xls flag entry must still be present"
+    assert any(d.get("correction_detected") for d in docs), \
+        "the correction entry must still be present"
 
 
 def test_an_ordinary_body_text_delivery_note_still_ships_normally_265(pg, tmp_path):
