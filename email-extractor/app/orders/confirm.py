@@ -278,12 +278,16 @@ def _activity_today_at(conn, now_utc: datetime) -> datetime | None:
     today_start_local = _local(now_utc).replace(
         hour=0, minute=0, second=0, microsecond=0)
     today_start_utc = today_start_local.astimezone(UTC)
+    # #255 review finding: name the two tables via the SAME `_Ledger.table` the rest of
+    # this file already uses (`due_rows`, `sweep`), never a hardcoded literal — an f-string
+    # is the only way to parameterize a table name at all (psycopg %s is value-only), same
+    # pattern `due_rows`'s own `f"...FROM {ledger.table}..."` already establishes.
     row = conn.execute(
-        """SELECT max(t) FROM (
-               SELECT import_confirmed_at AS t FROM edi_sent
+        f"""SELECT max(t) FROM (
+               SELECT import_confirmed_at AS t FROM {EDI_LEDGER.table}
                 WHERE import_confirmed_at >= %s
                UNION ALL
-               SELECT import_confirmed_at AS t FROM desadv_sent
+               SELECT import_confirmed_at AS t FROM {DESADV_LEDGER.table}
                 WHERE import_confirmed_at >= %s
            ) activity""",
         (today_start_utc, today_start_utc)).fetchone()
@@ -338,7 +342,11 @@ def _group_html(kind: str, rows: list[dict], source: str = "edi") -> str:
     n = len(rows)
     noun = _plural(n, source)
     if kind == "carryover":
-        return (f"<p>&#9888;&#65039; {n} {noun} z predošlého dňa je "
+        # #255 review finding: "z predošlého dňa" ("from the previous day") is now
+        # inaccurate for a same-day-stuck row (or a group mixing both triggers) — this
+        # text must stay TRIGGER-NEUTRAL, matching `_reminder_html`'s own wording below,
+        # which already never made this claim.
+        return (f"<p>&#9888;&#65039; {n} {noun} je "
                "stále neprevzatých v ORIONe — treba ich prijať v Codexe.</p>")
     if kind == "failed":
         return (f"<p>&#9888;&#65039; {n} {noun} skončilo v priečinku "
