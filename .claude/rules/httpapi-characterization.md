@@ -128,3 +128,28 @@ Passed raw into a `curl`/browser URL it breaks the path segment. `python3 -c
 `idx` to test against: fetch `/api/messages?limit=50` (session-authenticated) for an
 item with `has_attachments: true`, then `/api/message/<id>` for its own
 `message_id`/`attachments[].idx`.
+
+## Removing a moved helper's LAST use of a module import can silently break an
+## existing test that monkeypatches `httpapi.<module>` (krok 6, `db`)
+
+Krok 6 moved `_busy` (and with it, `httpapi.py`'s ONLY remaining use of the `db`
+module — `db.active_claim`/`db.CLAIM_STALE_MINUTES`) into `httpapi_dashboard_data.py`.
+Two EXISTING tests (`test_httpapi.py::test_a_failing_endpoint_is_logged_and_returns_a_
+clean_500`, `test_api.py::test_fix_request_and_its_event_commit_together`) do
+`from app import httpapi; monkeypatch.setattr(httpapi.db, "...", broken)` — they
+reach the route they actually want to break (`api_imap_failures` in
+`httpapi_reports.py`, `api_fix` in `httpapi_fixqueue.py`) only because `httpapi.db`
+happens to be the SAME module OBJECT as `httpapi_reports.db`/`httpapi_fixqueue.db`
+(Python module singletons — `monkeypatch.setattr` on the shared object patches it
+everywhere it's imported). Dropping `from . import db` from `httpapi.py` once its
+own last caller moves away makes `httpapi.db` raise `AttributeError` and breaks both
+tests — a real behavior-preservation requirement, not a false positive.
+
+**Before removing ANY module-level import in `httpapi.py` that a split step makes
+locally unused, grep the test suite for `httpapi\.<name>` (e.g. `grep -rn
+"httpapi\.db\|httpapi\.<other>" tests/`)** — a hit means some test reaches a DIFFERENT
+module's code through `httpapi.py`'s own namespace as a monkeypatch handle. If a hit
+exists, keep the import with `# noqa: F401` and a comment explaining which tests need
+it and why patching it still reaches the real code (same module object). Kroky 9-11
+(`znalosti`, `orders_questions`, cleanup) should run this same grep before dropping
+`_role_kinds`'s or any other still-referenced-only-in-tests import.
