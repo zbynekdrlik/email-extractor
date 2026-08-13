@@ -2770,3 +2770,48 @@ LOAN item-matching confirmed live, new HK LOAN multi-message gap found)
   produktmi) — presne to, čo `ASK_HTML`/`ASK_DL_HTML`/`ZNALOSTI_HTML`/`DASH_HTML`
   mali vyrenderovať pred presunom.
 - Run card fired for #268 (`v0.9.81`) — issue zostáva OTVORENÝ (kroky 5-11 čakajú).
+
+## #268 kroky 5, 7, 8 z 11 (httpapi_files, httpapi_fixqueue, httpapi_reports) — 2026-08-13
+
+- STEP 0 overenie (čísla riadkov proti aktuálnemu HEAD `82eda0a`) + design komentár
+  (root cause / zvolený prístup / zamietnutá alternatíva / `Triage: trivial` /
+  `Architektúra:` register(app, deps) vs Flask Blueprint) na #268, oba PRED prvým
+  commitom.
+- Version bump `6d0094b` (0.9.81 -> 0.9.82).
+- Krok 5 `f658069`: `/files/<mid>/<idx>`, `/eml/<mid>` + `_token_ok`/`_auth` doslovne
+  do nového `app/httpapi_files.py`.
+- Krok 7 `70c4bbb`: `api_fix` + `api_fix_queue` + `api_fix_resolve` (predtým ~850
+  riadkov od seba) prvýkrát zjednotené do `app/httpapi_fixqueue.py`.
+- Krok 8 `aba3379`: `api_orders_spend`/`api_orders_digest`/`api_orders_dl_stats`/
+  `api_imap_failures` doslovne do `app/httpapi_reports.py`. `[no-test: ...]` tag na
+  poslednom commite (Gate 1, čistý presun).
+- Nová `Deps` dataclass (`httpapi_common.py`) — cfg/db/db_tx/data_dir, zdieľané `_db`/
+  `_db_tx` closures naprieč všetkými troma novými modulmi (identity-check `True`,
+  nezávisle potvrdené aj recenziou).
+- Dôkaz nula zmeny chovania: `ruff check .` čisté po každom kroku; cold-import
+  (leaf moduly, nepotiahnu `app.httpapi`); 3/3 charakterizačné testy (krok 1)
+  NEZMENENÉ po každom kroku; celá lokálna suita zelená (0 F/E/s/x) po každom kroku;
+  `git diff -- tests/` prázdny za celý PR.
+- `app/httpapi.py`: 1388 -> 1217 riadkov.
+- Nezávislý review (`general-purpose` subagent, čerstvý kontext, nikdy vstavaný
+  `Skill({skill:"review"})`, per #363): **0 🔴 0 🟡 0 🔵** — 10 samostatne overených
+  bodov (bajtový diff všetkých 7 presunutých funkcií proti pôvodnému súboru, 45/45
+  rout zhoda, hook poradie nedotknuté, `ast.parse` potvrdil nulu module-level DB
+  spojení, mŕtve importy preč, bezpečnostná hranica nedotknutá, commit správy sedia,
+  cold-import `False`, celá suita 1502 testov 0 F/E, `ruff check .` čisté).
+- PR #281 (dev→main), 4 commity, "časť #268 (kroky 5, 7, 8 z 11)" (bez
+  Closes/Fixes/Resolves — #268 zostáva otvorený do kroku 11). CI zelené
+  (test/e2e-orders/e2e-dl/build, ×2 behy). Merged `f2f15ce6`.
+- Deploy: `ha addons update e0ac7775_email_extractor` → v0.9.82. Overené: `/health`
+  `{"ok":true,"version":"0.9.82"}`; DOM (Playwright, čerstvé cookies pred prvou
+  stránkou) ukazuje `v0.9.82` na VŠETKÝCH štyroch stránkach (`/`, `/otazky`,
+  `/otazky-dl`, `/znalosti`), 0 console chýb na každej. Funkčná verifikácia
+  presunutých povrchov naživo: `/files/<mid>/<idx>` s platným tokenom → 200,
+  bez tokenu → 403; `/eml/<mid>` rovnako 200/403; `/api/fix-queue` → 200 (reálny
+  tvar); `/api/orders/digest` → 200 reálne dáta (`yesterday`: 35 behov, 16
+  položiek, 13 deterministických, 3 LLM, `days_since_incident: 7`);
+  `/api/orders/dl/stats` → 200; `/api/imap-failures` → 200 (`max_attempts: 5`,
+  `MAX_UID_ATTEMPTS` správne prenesený); `/api/orders/spend` → 200 (515 behov
+  tento mesiac).
+- Run card fired for #268 (`v0.9.82`) — issue zostáva OTVORENÝ (kroky 6, 9, 10, 11
+  čakajú).

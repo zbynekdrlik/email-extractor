@@ -96,3 +96,35 @@ pre-existing test suite ... passing UNMODIFIED before and after]`. If a commit's
 message needs fixing AFTER `git commit` (to add the tag, or for any other reason),
 `git reset --soft HEAD~1` + recommit is this project's sanctioned recovery — never
 `--amend` (commit-conventions.md).
+
+## `Deps` (cfg/db/db_tx/data_dir) already exists since krok 5 — reuse it, never
+## redefine `_db`/`_db_tx` in a new split module
+
+Krok 5 added a small `Deps` dataclass to `app/httpapi_common.py` (leaf module — no
+Flask/DB import, so every `register(app, deps)` module, INCLUDING `httpapi.py`
+itself, can import it with zero circular-import risk). `create_app()` builds it ONCE
+(`deps = Deps(cfg=cfg, db=_db, db_tx=_db_tx, data_dir=data_dir)`) right after `_busy`
+is defined, and passes the SAME object to every `register()` call. Every future split
+step (6 `dashboard_data`, 9 `znalosti`, 10 `orders_questions`, 11 cleanup) that moves
+routes needing `_db()`/`_db_tx()`/`cfg`/`data_dir` should import this EXISTING `Deps`
+and call `deps.db()`/`deps.db_tx()` — never define a second `_db`/`_db_tx` pair, and
+never invent a second carrier class. Register each new module's routes at the exact
+call-site position the original routes occupied in `create_app()` (route registration
+order itself is irrelevant to Flask — only `before_request`/`after_request`/
+`errorhandler` ORDER matters, and that section is untouched by every step so far).
+Verify the shared-object claim isn't just assumed: build a stub `cfg`
+(`types.SimpleNamespace` with the fields `create_app` reads) and wrap each
+`register()` to capture the `deps` argument — `all(d is captured[0] for d in
+captured)` proves identity without needing a live Postgres connection.
+
+## Verifying `/files/<mid>/<idx>` or `/eml/<mid>` live needs the message_id
+## URL-ENCODED — it routinely contains `<`, `>`, `@`
+
+A real email Message-ID (what n8n passes as `mid`, and what `store.message_dir`
+resolves against — see its own docstring) looks like `<20260812155446@manaroots.com>`.
+Passed raw into a `curl`/browser URL it breaks the path segment. `python3 -c
+"import urllib.parse; print(urllib.parse.quote(mid))"` first, then build the URL:
+`curl ".../files/$ENC/0?token=$TOKEN"`. A quick way to get a real `mid` + attachment
+`idx` to test against: fetch `/api/messages?limit=50` (session-authenticated) for an
+item with `has_attachments: true`, then `/api/message/<id>` for its own
+`message_id`/`attachments[].idx`.
