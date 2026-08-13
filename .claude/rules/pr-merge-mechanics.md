@@ -71,3 +71,34 @@ that also fixes the ambiguous ancestry for the NEXT integration round.
 (before opening the PR at all), the same `git merge --no-ff origin/main` sync-back done
 FIRST (right after `git fetch origin` / `git checkout dev`, before the version bump)
 avoids ever hitting the false-positive in the first place.
+
+## Sibling worktree branches touching the SAME rule/log file almost always conflict
+## textually only, at the tail — AND a NEW cross-cutting test helper introduced by
+## one sibling needs porting onto tests a DIFFERENT sibling wrote (integration round
+## C1, 2026-08-13)
+
+When several worktree-isolated branches are all built against roughly the same `dev`
+snapshot, each independently APPENDING a new `##`-headed section to a shared
+`.claude/rules/*.md` or `docs/autopilot-log.md` (the standard "record what I learned"
+mandate every branch follows), git's 3-way merge sees each later sibling's append as
+"insert after the same context line" and reports a real `CONFLICT (content)` even
+though there is **zero semantic overlap** — every section from every sibling is meant
+to survive. Resolve by keeping ALL sections, in commit order (earliest-merged
+branch's section first): delete only the `<<<<<<<`/`=======`/`>>>>>>>` markers
+themselves, never any branch's actual content. This is the DEFAULT expectation for
+this kind of file across a multi-branch round, not a surprise to investigate.
+
+**A SEPARATE, non-textual integration step can be needed when one sibling branch
+introduces a shared TEST HELPER that supersedes a hand-rolled pattern, and ANOTHER
+sibling — built independently, at roughly the same time, against the OLD pattern —
+added NEW test cases using that old pattern in the SAME test file.** Two branches
+touching the same file with NO line-level overlap merge silently clean (git sees
+disjoint edits) — but the result is semantically stale: the new sibling's new tests
+still use the idiom the OTHER sibling's ticket existed specifically to retire. This
+is invisible to `git diff --check` / conflict markers; only a targeted grep catches
+it (`grep -n "t1\.join\|threading\.Thread(target" <file>` after merging both, looking
+for the OLD idiom re-appearing in code added by the LATER-authored branch). Port the
+new sibling's tests onto the shared helper as its OWN small, explicitly-justified
+integration commit (never silently folded into either branch's own merge commit) —
+this is genuine integration work, not scope creep, and the commit message should say
+exactly why (which ticket's helper, which tests, why they still used the old idiom).
