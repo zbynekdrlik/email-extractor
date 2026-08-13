@@ -182,6 +182,26 @@ def test_a_weekly_range_broken_down_by_weekday_still_grounds_every_day():
     assert not extract.date_grounded("15.07.2026", text)   # outside the written range
 
 
+def test_a_shorthand_range_with_no_month_on_the_first_day_still_grounds_every_day():
+    """Real incident (#289, 2026-08-13, PNO Poprad): the subject wrote the week as
+    "od 17. - 22. 08. 2026" — the FIRST day has no month of its own, it shares the
+    second day's month (a common Slovak shorthand). The old `_RANGE` regex required
+    BOTH endpoints to carry their own day.month, so it found no match at all on this
+    text; `_range_days()` then returned an empty set, and every weekday-derived date
+    outside the one single day the subject spelled out in full ("22. 08. 2026") was
+    wrongly rejected by `date_grounded()` — 5 of 6 days of a real order were silently
+    dropped ("Dátum dodania sa nenašiel v texte e-mailu, objednávka nebola vytvorená:
+    17.08.2026, 18.08.2026, 19.08.2026, 20.08.2026, 21.08.2026", confirmed live in
+    `order_runs.result->>'notes'`). Synthetic paraphrase of the real mail's shape
+    (public repo — no real customer data)."""
+    text = ("Subject: Objednávka od 17. - 22. 08. 2026 pre PNO Testov\n\n"
+            "Body: Pondelok:\nUtorok:\nStreda:\nŠtvrtok:\nPiatok:\nSobota:\n")
+    for d in ("17.08.2026", "18.08.2026", "19.08.2026", "20.08.2026", "21.08.2026",
+             "22.08.2026"):
+        assert extract.date_grounded(d, text), d
+    assert not extract.date_grounded("23.08.2026", text)   # outside the written range
+
+
 def test_date_grounded_accepts_an_announced_day_with_no_trailing_dot():
     """Real CÉDER incident wording (#190, messages.id=6091): customers routinely write
     'na 10.8 poprosím' with NO trailing dot after the month digits — this must ground the
