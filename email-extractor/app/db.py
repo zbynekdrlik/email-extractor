@@ -1164,9 +1164,18 @@ def set_folder_state(conn, folder: str, uidvalidity: int, last_uid: int) -> None
 # (#20). Lives here so both the ingest loop and the dashboard API can state it.
 MAX_UID_ATTEMPTS = 5
 
-# A claim (messages.processing_at) younger than this means an n8n worker is really
-# working on that email; the same window the n8n dispatcher uses to re-claim stale
-# rows. Operator actions must not clear a claim inside it (#25).
+# A claim (messages.processing_at) younger than this means a worker is really
+# working on that email — a guard so operator actions never clear a claim inside it
+# (#25). This value (10) is NOT provably matched to any one worker's own re-claim
+# window any more (#271, review finding, 2026-08-13): a live check of the n8n side
+# found the "AI auto orders" workflow's own re-claim window is 30 minutes (matching
+# `worker.CLAIM_STALE_MINUTES`, pinned by `tests/test_orders_worker.py::
+# test_claim_stale_minutes_matches_n8n_ai_orders_window`), not 10 — so this constant
+# guards ALL categories' claims with one number that does not actually equal any
+# single category's real re-claim window. Whether this operator-guard value should
+# be revisited is tracked as part of the SAME open follow-up as the related
+# static_orders divergence (`.claude/rules/orders-corpus.md`'s CLAIM_STALE_MINUTES
+# entry, needs-user-decision) — not changed here.
 CLAIM_STALE_MINUTES = 10
 
 

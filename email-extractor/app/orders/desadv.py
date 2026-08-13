@@ -34,6 +34,7 @@ import time
 
 import psycopg
 
+from . import claim as claim_mod
 from . import desadv_edi
 
 log = logging.getLogger("orders.desadv")
@@ -120,43 +121,48 @@ def claim_send_or_identify(conn, supplier_ean: str, doc_number: str, filename: s
     statement, so reading it back directly is exactly the pre-existing claimant.
     `claim_send()`/`claimed_by()` stay as their own tested primitives (other callers,
     and directness for tests) — this is the race-free combination `dl_worker.py`
-    actually uses in production."""
+    actually uses in production.
+
+    #271: built on the shared `claim.claim_or_identify()` primitive — the SQL text
+    below is byte-identical to this function's own pre-#271 hand-written CTE (just
+    split into an `insert_sql`/`identify_sql` pair the primitive re-joins the same
+    way), proven equivalent by this module's FULL existing test suite passing
+    unmodified against the ported version (see #271's own completion evidence)."""
     ean, doc = str(supplier_ean or ""), str(doc_number or "")
     mid = str(message_id or "") or None
     if not ean or not doc:
         log.warning("desadv.claim_send_or_identify refused — missing "
                     "supplier_ean/doc_number (supplier_ean=%r doc_number=%r)", ean, doc)
         return False, ""
-    row = conn.execute(
-        """WITH ins AS (
-               INSERT INTO desadv_sent (supplier_ean, doc_number, filename, message_id)
-               VALUES (%s, %s, %s, %s)
-               ON CONFLICT (supplier_ean, doc_number)
-               DO UPDATE SET sent_at = now(), filename = EXCLUDED.filename,
-                             message_id = EXCLUDED.message_id
-               WHERE desadv_sent.uploaded_at IS NULL
-                 AND desadv_sent.sent_at < now() - make_interval(mins => %s)
-               RETURNING message_id
-           )
-           SELECT true, NULL FROM ins
-           UNION ALL
-           SELECT false, d.message_id FROM desadv_sent d
-            WHERE d.supplier_ean = %s AND d.doc_number = %s
-              AND NOT EXISTS (SELECT 1 FROM ins)""",
-        (ean, doc, filename, mid, CLAIM_STALE_MINUTES, ean, doc),
-    ).fetchone()
-    if row is None:
-        # Cannot happen given ean/doc are non-empty (the INSERT itself has no WHERE of
-        # its own — only the ON CONFLICT DO UPDATE branch does), but never unpack a
-        # None into the caller.
-        log.error("desadv.claim_send_or_identify: no row returned for supplier=%s "
-                  "doc=%s — treating as refused", supplier_ean, doc_number)
-        return False, ""
-    claimed, holder = bool(row[0]), (row[1] or "")
-    if not claimed:
+    insert_sql = (
+        "INSERT INTO desadv_sent (supplier_ean, doc_number, filename, message_id) "
+        "VALUES (%s, %s, %s, %s) "
+        "ON CONFLICT (supplier_ean, doc_number) "
+        "DO UPDATE SET sent_at = now(), filename = EXCLUDED.filename, "
+        "              message_id = EXCLUDED.message_id "
+        "WHERE desadv_sent.uploaded_at IS NULL "
+        "AND desadv_sent.sent_at < now() - make_interval(mins => %s) "
+        "RETURNING NULL::text")
+    identify_sql = ("SELECT d.message_id FROM desadv_sent d "
+                    "WHERE d.supplier_ean = %s AND d.doc_number = %s")
+    claimed, info = claim_mod.claim_or_identify(
+        conn,
+        insert_sql=insert_sql,
+        insert_params=(ean, doc, filename, mid, CLAIM_STALE_MINUTES),
+        identify_sql=identify_sql,
+        identify_params=(ean, doc))
+    holder = (info[0] or "") if info else ""
+    if not claimed and info:
         log.warning("DESADV already sent (or claimed within %sm) for supplier=%s doc=%s "
                     "— refusing a duplicate upload", CLAIM_STALE_MINUTES, supplier_ean,
                     doc_number)
+    elif not claimed:
+        # claim_or_identify's own defensive "no row at all" case — cannot happen given
+        # ean/doc are non-empty (see its docstring), but this must never be logged as
+        # "already sent" (info == () here, not a real holder) — that would be a false
+        # audit claim in a money-critical log.
+        log.error("desadv.claim_send_or_identify: no row returned for supplier=%s "
+                  "doc=%s — treating as refused", supplier_ean, doc_number)
     return claimed, holder
 
 

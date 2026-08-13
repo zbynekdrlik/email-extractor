@@ -418,3 +418,25 @@ the working recovery sequence:
 Verify a completed run succeeded the same way `local-testing.md` already documents
 above (exit code 0 + the `#160` zero-`F`/`E`/`s`/`x` Counter technique on the
 dot-progress output) — do not trust "the wait finished" alone as proof of a clean run.
+
+## Early in a worktree dispatch, VERIFY your reads are actually hitting the worktree, not the shared main tree (#271)
+
+`Read`/`Bash` absolute paths given as `/home/newlevel/devel/n8n/email_extract/
+email-extractor/...` (no `.claude/worktrees/agent-*/` segment) resolve to the SHARED
+MAIN TREE, not your isolated worktree — both exist simultaneously on disk and, right
+after a fleet round lands, are usually byte-identical (only `.git`/`.venv`/cache
+dirs differ), so reading the WRONG one during investigation produces no visible
+error and no wrong answer at first. The risk shows up later: if you start EDITING
+under the assumption you're in your worktree while you were actually reading from
+(or, worse, about to write into) the main tree, you violate the hard "never touch
+the shared main tree" rule with no immediate symptom. Catch this EARLY, before your
+first edit: `pwd` (should show `.claude/worktrees/agent-<id>/...`), then
+`diff -rq <main-tree-path> <worktree-path>` once, ignoring `.git`/`.venv`/cache dirs
+— confirms both what you've already read is accurate AND exactly what to watch out
+for going forward. `.venv/` is NOT shared between the main tree and any worktree
+(worktrees share only `.git`) — if `.venv/bin/python` "exists" in an early check but
+then "goes missing" moments later with no edits in between, you were almost
+certainly checking the main tree first and the worktree second (or vice versa); set
+up (`python3 -m venv .venv && pip install ...`) and run every subsequent command
+from an explicit, confirmed worktree `cd`, never a bare relative path assumed to
+already be there.

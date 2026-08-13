@@ -23,8 +23,17 @@ log = logging.getLogger("orders.worker")
 
 CATEGORY = "ai_orders"
 ENGINES = ("n8n", "python")
-# Same window the n8n dispatcher re-claims on: a message claimed longer than this is
-# assumed dead (container restart mid-run) and may be picked up again.
+# #271: must equal the SAME hardcoded value in the n8n workflow "AI auto orders"
+# (id `wlORIhkVZISCdZNmBTM4Z`, node "Get AI Orders" — `interval '30 minutes'`,
+# verified live via the n8n MCP `get_workflow_details`, 2026-08-13). That workflow
+# is `active: false` today (the Python engine fully owns `ai_orders` dispatch — see
+# this module's own docstring), so the two numbers cannot currently RACE each other
+# — but the convention is what a rollback to n8n would depend on, and CI has no n8n
+# API access to verify it live (no secret configured in ci.yml), so
+# `tests/test_orders_worker.py::test_claim_stale_minutes_matches_n8n_ai_orders_window`
+# PINS this value rather than comparing it live. If you change this constant, you
+# MUST also update (or knowingly diverge from) that n8n node — the test only catches
+# an accidental drift on THIS side, never a change made on the n8n side.
 CLAIM_STALE_MINUTES = 30
 MAX_ATTEMPTS = 5
 # How far back shadow mode looks. Shadow calls the real model, so this is a cost bound

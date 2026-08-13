@@ -154,6 +154,17 @@ TRANSIENT_RE = re.compile(
 _ATTACHMENT_MIME_RE = re.compile(r"pdf|image", re.IGNORECASE)
 _ATTACHMENT_EXT_RE = re.compile(r"\.(pdf|jpe?g|png|tiff?|bmp)$", re.IGNORECASE)
 
+# #297 (ROZHODNUTÉ 2026-08-13): a spreadsheet delivery note (.xls/.xlsx/.xlsm) — the
+# extractor already produces `machine_text` for these (app/extract.py), this worker
+# previously never looked at them at all (Bardusch, application/vnd.ms-excel, sends
+# nothing else). Checked only when the PDF/image filter above did NOT already match
+# (see `_read_attachments`), so a file is never both. A spreadsheet is never a "scan"
+# and its raw bytes are NEVER handed to `dl_extract` as `pdf_bytes` (forced empty in
+# `_read_attachments`, below) — is_scanned()/Vision routing must never see them.
+_ATTACHMENT_SPREADSHEET_EXT_RE = re.compile(r"\.(xlsx|xlsm|xls)$", re.IGNORECASE)
+_ATTACHMENT_SPREADSHEET_MIME_RE = re.compile(
+    r"spreadsheetml|ms-excel|x-msexcel|application/excel", re.IGNORECASE)
+
 # #258: the synthetic "attachment" idx used for the mail's own body text when there is
 # no usable real attachment — a real `attachments.idx` is always a non-negative 0-based
 # index assigned at ingest (`app/db.py`'s `enumerate()` insert), so -1 can never collide
@@ -397,13 +408,25 @@ def _read_attachments(cfg, message_id: str, conn) -> list[dict]:
     data_dir = getattr(cfg, "data_dir", "") or "/data/store"
     out = []
     for idx, filename, mime, extracted_text, method in rows:
-        if not (_ATTACHMENT_MIME_RE.search(mime or "")
-               or _ATTACHMENT_EXT_RE.search(filename or "")):
+        is_pdf_or_image = bool(_ATTACHMENT_MIME_RE.search(mime or "")
+                               or _ATTACHMENT_EXT_RE.search(filename or ""))
+        is_spreadsheet = bool(not is_pdf_or_image and (
+            _ATTACHMENT_SPREADSHEET_MIME_RE.search(mime or "")
+            or _ATTACHMENT_SPREADSHEET_EXT_RE.search(filename or "")))
+        if not (is_pdf_or_image or is_spreadsheet):
             continue
-        matches = sorted(store.message_dir(data_dir, message_id).glob(f"att{idx}__*"))
-        pdf_bytes = matches[0].read_bytes() if matches else b""
+        if is_spreadsheet:
+            # #297: never read a spreadsheet's real on-disk bytes into `pdf_bytes` —
+            # dl_extract's scan-detection/vision routing must never see them, even if
+            # they happen to contain a byte sequence that looks like an embedded JPEG
+            # (a real risk inside an OLE2/xlsx container, not just theoretical).
+            pdf_bytes = b""
+        else:
+            matches = sorted(store.message_dir(data_dir, message_id).glob(f"att{idx}__*"))
+            pdf_bytes = matches[0].read_bytes() if matches else b""
         out.append({"idx": idx, "filename": filename or "", "pdf_bytes": pdf_bytes,
-                   "machine_text": extracted_text or "", "method": method or ""})
+                   "machine_text": extracted_text or "", "method": method or "",
+                   "is_spreadsheet": is_spreadsheet})
     return out
 
 
@@ -980,6 +1003,37 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     # usable — unaffected by this filter.
     usable_attachments = [a for a in attachments if (a.get("method") or "") != "skipped"]
 
+    documents_out: list[dict] = []
+
+    # #297: a spreadsheet attachment (.xls/.xlsx) whose `machine_text` came back
+    # genuinely empty (native extraction failed outright, or the sheet itself has no
+    # text) must NEVER reach `dl_extract` — a spreadsheet is never a scan and its
+    # `pdf_bytes` are ALWAYS forced empty (see `_read_attachments`), so the "digital
+    # source, no text -> Vision fallback" branch would call Vision with nothing to look
+    # at, either erroring outright or wasting a call for a guaranteed-empty answer.
+    # Flag it directly with an honest, spreadsheet-specific reason instead — mirrors
+    # the existing decorative-attachment (#247) and "processed but nothing found"
+    # (#238) flagging shape. Excluded from `sources` below, so it can never ALSO be
+    # flagged a second time by the #238 completeness loop further down (that loop only
+    # sees what was actually sent to `dl_extract`).
+    empty_spreadsheets = [a for a in usable_attachments
+                          if a.get("is_spreadsheet")
+                          and not (a.get("machine_text") or "").strip()]
+    for att in empty_spreadsheets:
+        reason = (f"Príloha {att.get('filename') or att.get('idx')} (Excel/xls) sa "
+                  f"nepodarilo prečítať alebo neobsahuje žiadny text — over ručne, "
+                  f"či neobsahuje dodací list")
+        documents_out.append(_flag_attachment(
+            conn, cfg, shadow, message, link, att, reason, status="review",
+            synthetic=True, post=post))
+    # Review finding: exclude by `idx` (a real `attachments.idx` is always a unique,
+    # non-negative 0-based index per message, see the `_BODY_TEXT_IDX` comment above)
+    # rather than by dict-value equality — safety here should never depend on two
+    # attachment dicts happening to differ in content.
+    empty_spreadsheet_idxs = {a.get("idx") for a in empty_spreadsheets}
+    extractable_attachments = [a for a in usable_attachments
+                               if a.get("idx") not in empty_spreadsheet_idxs]
+
     # #258: some suppliers (HK LOAN, gnip@hkloan.eu — verified live, STEP 0 evidence on
     # the ticket) never attach a real document at all; the delivery note is written
     # directly in the mail's own BODY TEXT. When there is no usable attachment, try the
@@ -993,7 +1047,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     # matching, EDI build, ORION upload, the desadv_sent ledger, board questions) is the
     # SAME pipeline every attachment-sourced document already goes through — a document
     # cannot tell whether it came from an attachment or the mail body.
-    sources = usable_attachments
+    sources = extractable_attachments
     used_body_text = False
     # Deep-review finding on this ticket's own PR (#265): initialised here, not just
     # inside the `if not sources:` branch below — `body_text` is read again further
@@ -1013,6 +1067,14 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
             used_body_text = True
 
     if not sources:
+        if documents_out:
+            # #297: every attachment was either decorative or an unreadable
+            # spreadsheet, already individually flagged above — nothing further to
+            # add, and the generic "no attachment" wording below would be dishonest
+            # here (there WAS an attachment, it just had nothing to read).
+            return {"kind": "dl", "dl_snapshot_id": snapshot_id,
+                   "status": _aggregate_status(documents_out),
+                   "documents": documents_out, "items": []}
         if attachments:
             # Attachment(s) existed but were ALL decorative/junk, and the mail's own
             # body text is empty too — distinct, more actionable wording than "no
@@ -1056,13 +1118,21 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
             subject=message.get("subject", ""), link=link), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
-        return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
-               "documents": [{"outcome": "review", "reason": reason,
-                             "correction_detected": True}], "items": []}
+        # #297 review finding: merge with `documents_out` (never overwrite it) — it
+        # may already hold empty-spreadsheet review flags from earlier in this
+        # function (reachable when a message has an unreadable/empty .xls attachment
+        # AND falls back to mail-body text that itself reads as a correction). Losing
+        # those entries here would undercount `order_runs.result["documents"]` even
+        # though their own Odoo post/event already fired via `_flag_attachment`.
+        this_doc = {"outcome": "review", "reason": reason, "correction_detected": True}
+        return {"kind": "dl", "dl_snapshot_id": snapshot_id,
+               "status": _aggregate_status(documents_out + [this_doc]),
+               "documents": documents_out + [this_doc], "items": []}
 
     extraction = dl_extract.extract_email(client, sources)
 
-    documents_out: list[dict] = []
+    # #297: `documents_out` may already carry entries from the empty-spreadsheet
+    # flagging above — accumulate into the SAME list, never reset it here.
     all_items: list[dict] = []
     extracted_doc_numbers: list[str] = []
 
