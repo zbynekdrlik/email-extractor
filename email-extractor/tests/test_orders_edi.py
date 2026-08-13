@@ -169,6 +169,71 @@ def test_a_fresh_unconfirmed_claim_still_blocks_a_concurrent_duplicate(pg):
         "a fresh, still-unconfirmed claim must not be reclaimed"
 
 
+# --- claim_send_or_identify (#271: built on the shared `claim.claim_or_identify()`
+# primitive, mirrors desadv.py's own #216 test coverage for the identical CTE shape) --
+
+def test_claim_send_or_identify_claims_a_fresh_document(pg):
+    built = edi.build(**FIXTURE[0]["input"])
+    claimed, confirmed = edi.claim_send_or_identify(
+        pg, "220", "04.08.2026", built.content, "f1.txt")
+    assert (claimed, confirmed) == (True, False)
+    assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 1
+
+
+def test_claim_send_or_identify_reports_confirmed_for_a_genuine_duplicate(pg):
+    built = edi.build(**FIXTURE[0]["input"])
+    edi.claim_send_or_identify(pg, "221", "04.08.2026", built.content, "f1.txt")
+    edi.confirm_sent(pg, "221", "04.08.2026", built.content)
+    claimed, confirmed = edi.claim_send_or_identify(
+        pg, "221", "04.08.2026", built.content, "f2.txt")
+    assert (claimed, confirmed) == (False, True), \
+        "a CONFIRMED upload must be reported as a genuine duplicate"
+
+
+def test_claim_send_or_identify_reports_unconfirmed_for_a_fresh_concurrent_claim(pg):
+    """#271: the whole point of this function — a fresh, UNCONFIRMED claim held by
+    another concurrent run is NOT the same situation as a confirmed duplicate, and the
+    caller must be told apart which one it is."""
+    built = edi.build(**FIXTURE[0]["input"])
+    edi.claim_send_or_identify(pg, "222", "04.08.2026", built.content, "f1.txt")
+    claimed, confirmed = edi.claim_send_or_identify(
+        pg, "222", "04.08.2026", built.content, "f2.txt")
+    assert (claimed, confirmed) == (False, False), \
+        "an unconfirmed claim must be reported as such, never as 'already sent'"
+
+
+def test_claim_send_or_identify_reclaims_a_stale_unconfirmed_claim(pg):
+    built = edi.build(**FIXTURE[0]["input"])
+    edi.claim_send_or_identify(pg, "223", "04.08.2026", built.content, "f1.txt")
+    pg.execute("UPDATE edi_sent SET sent_at = now() - interval '11 minutes' "
+              "WHERE customer_ean = '223'")
+    claimed, confirmed = edi.claim_send_or_identify(
+        pg, "223", "04.08.2026", built.content, "f2.txt")
+    assert (claimed, confirmed) == (True, False)
+    row = pg.execute(
+        "SELECT filename, count(*) OVER () FROM edi_sent WHERE customer_ean = '223'"
+    ).fetchone()
+    assert row == ("f2.txt", 1), "reclaim updates the SAME row — never inserts a duplicate"
+
+
+def test_claim_send_or_identify_behaves_like_claim_send_for_a_blank_identity(pg):
+    """`edi.claim_send()` has no empty-identity guard (unlike `desadv.claim_send`) —
+    `edi_sent`'s uniqueness includes the content hash, so a blank customer_ean/
+    delivery_date does not collapse distinct documents onto one row the way an
+    empty `desadv_sent.doc_number` would. `claim_send_or_identify` must behave the
+    SAME way (a new, deliberately consistent sibling), not add its own guard."""
+    claimed, confirmed = edi.claim_send_or_identify(pg, "", "", "content-a", "f1.txt")
+    assert (claimed, confirmed) == (True, False)
+    assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 1
+
+
+def test_claim_send_or_identify_never_double_inserts(pg):
+    built = edi.build(**FIXTURE[0]["input"])
+    edi.claim_send_or_identify(pg, "224", "04.08.2026", built.content, "f1.txt")
+    edi.claim_send_or_identify(pg, "224", "04.08.2026", built.content, "f2.txt")
+    assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 1
+
+
 def test_confirm_sent_stamps_the_upload_so_it_is_never_reclaimed(pg):
     built = edi.build(**FIXTURE[0]["input"])
     edi.claim_send(pg, "156", "04.08.2026", built.content, "f1.txt")
