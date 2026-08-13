@@ -88,3 +88,23 @@ paragraph is still sufficient, per `autonomous-batch-issue-development.md`'s own
 the FIRST time by drafting the `Approach N (CHOSEN/REJECTED):` headers and the
 `Architektúra:` section from the start, rather than writing normal prose and
 discovering the mechanical requirement only after a rejection.
+
+## ANY PreToolUse hook — not just the design gate — can block a compound
+## `cat > msg.txt <<'EOF' ... EOF && git commit -F msg.txt` atomically (integration
+## round C1, 2026-08-13)
+
+The design-gate section above documents this failure mode specifically for
+`block-commit-without-design.sh`, but it is a property of PreToolUse hooks in
+general, not that one hook. Live incident: a merge commit's `cat > msg.txt <<'EOF'
+... EOF && git commit -F msg.txt` compound got blocked in ONE call by
+`block-sensitive-staging.sh` (a real-looking-but-synthetic test-token literal
+staged in `tests/test_httpapi_waitress.py`) — the heredoc write never ran, so the
+retry's bare `git commit -F msg.txt` (with the bypass comment appended) failed with
+`fatal: could not read log file ... No such file or directory`, because the file
+genuinely never existed yet. The fix is the SAME discipline `gh-cli-recipes.md`
+already states generally: write the scratch file in its OWN Bash call, THEN commit
+in a SEPARATE call — this makes the failure mode impossible regardless of WHICH
+hook (if any) blocks the write, not just the design gate. If a compound command
+that combines a heredoc write with its consuming command ever errors, do not assume
+the write happened — check the file exists (`ls`/`cat`) before retrying the bare
+consuming command.

@@ -263,3 +263,24 @@ actually redirects to `/login` first as proof the session is genuinely clean.
   dict shape. Check membership via `[s.get("name") for s in schema]`. `options` (the
   SAME response's sibling field, live `/data/options.json` content) IS a plain
   `{key: value}` dict as expected — only `schema` has this list-of-dicts shape.
+- **Deriving the live `/sklad/<key>` and `/sklad-dl/<key>` signed warehouse-link keys
+  for post-deploy role-boundary verification** (integration round C1, 2026-08-13) —
+  both keys are computed from `app.secret_key` (`app.linkutil.sklad_key`/`dl_key`),
+  never stored in `/data/options.json`, so don't guess or reuse an old value from
+  memory without re-deriving live (the key changes if `secret_key`/the persisted
+  `.session_secret` ever changes):
+  ```
+  sudo docker exec app_e0ac7775_email_extractor python3 -c "
+  from app.config import Config
+  from app.httpapi import create_app
+  from app.linkutil import sklad_key, dl_key
+  cfg = Config.load(); app = create_app(cfg)
+  print('sklad:', sklad_key(app.secret_key))
+  print('dl:', dl_key(app.secret_key))"
+  ```
+  Then, per role, in Playwright: `clearCookies()` → navigate to
+  `/sklad/<key>`/`/sklad-dl/<key>` (redirects to `/otazky`/`/otazky-dl`) →
+  `fetch('/api/orders/questions', {credentials:'include'})` and check the returned
+  `kind` values are the expected subset (`customer`/`mail` for orders,
+  `dl_item`/`dl_supplier` for DL) — proves the role-boundary filter, not just a 200
+  status, per this file's own existing "role/kind security boundary" note above.
