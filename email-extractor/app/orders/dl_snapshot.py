@@ -78,7 +78,7 @@ def parse_number(value: str | None) -> float | None:
     return _num(value)
 
 
-def _num(value: str) -> float | None:
+def _num(value: str | None) -> float | None:
     """Slovak Sheets exports commonly carry: a comma decimal separator ('9,90'), a
     NBSP/narrow-NBSP thousands separator from a formatted-number export ('1\xa0133,00'),
     a trailing currency symbol ('12,50 €'), or a dot thousands + comma decimal

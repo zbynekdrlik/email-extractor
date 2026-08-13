@@ -495,7 +495,7 @@ def _handle_group(conn, cfg, post, channel_id: int, kind: str, rows: list[dict],
     if due_for_reminder:
         # Re-read AFTER adding members so the reminder text's count is accurate.
         current = _open_incident(conn, channel_id, kind, ledger)
-        html = _reminder_html(kind, current, ledger.source)
+        html = _reminder_html(kind, current or incident, ledger.source)
         try:
             result = post(cfg, html, channel_id=channel_id)
             delivered = result is not None

@@ -156,7 +156,7 @@ def flush_pending(conn, cfg, post=None, limit: int = 50,
             ORDER BY id LIMIT %s""", (MAX_FLUSH_ATTEMPTS, limit)).fetchall()
     if not rows:
         return 0
-    groups: dict[tuple[int, str], list[tuple[int, str, object]]] = {}
+    groups: dict[tuple[int, str], list[tuple[int, str, datetime]]] = {}
     for rid, channel_id, kind, body_html, created_at in rows:
         groups.setdefault((int(channel_id), kind), []).append(
             (int(rid), body_html, created_at))

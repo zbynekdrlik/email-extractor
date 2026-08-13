@@ -281,8 +281,10 @@ def decide_supplier(llm: dict, suppliers: list[dict]) -> SupplierDecision:
     `ean_edi` the model invented that is not in OUR OWN supplier whitelist (a hallucinated EAN
     must never look like a real match). `matched=False` here is R61's "supplier not matched ->
     no EDI, whole document to review"."""
-    conf = float(llm.get("matchConfidence") if llm.get("matchConfidence") is not None
-                else llm.get("confidence") or 0)
+    raw_conf = llm.get("matchConfidence")
+    if raw_conf is None:
+        raw_conf = llm.get("confidence") or 0
+    conf = float(raw_conf)
     if conf > 1:
         conf /= 100
     ean = str(llm.get("ean_edi") or "")
@@ -371,8 +373,10 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
     "PARTNER ON THIS DOCUMENT" — R72's alias rescue checks the card's alias against tokens of
     THIS name, mirroring `match.py`'s customer-naming alias rung)."""
     item_name = apply_ocr_fix(item_name)
-    conf = float(llm.get("matchConfidence") if llm.get("matchConfidence") is not None
-                else llm.get("confidence") or 0)
+    raw_conf = llm.get("matchConfidence")
+    if raw_conf is None:
+        raw_conf = llm.get("confidence") or 0
+    conf = float(raw_conf)
     if conf > 1:
         conf /= 100
     raw_gtin = llm.get("gtin")
@@ -393,7 +397,7 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
     # explicit `is not None` is kept only so `llm_card["name"]` below can never be reached
     # on a None card, even if that invariant ever changes upstream (review finding, #245).
     gtin_overflow_card = None
-    if llm_card is not None and _gtin_edi_overflow(llm_gtin):
+    if llm_card is not None and llm_gtin is not None and _gtin_edi_overflow(llm_gtin):
         gtin_overflow_card = llm_card["name"]
         log.warning("dl gtin edi overflow: %r card %r gtin %s is %d chars, DESADV LIN "
                    "field is %d — cannot ship, routing to review", item_name,
@@ -429,6 +433,7 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
     # the degenerate case of a `gtin` the model returned alongside a literal 0 confidence,
     # never a realistic proposal.
     if llm_gtin and conf > 0 and alias_names_partner:
+        assert llm_card is not None  # llm_gtin truthy ⟹ card resolved (unknown_gtin/overflow above)
         log.info("dl alias rescue: %r -> %s (partner %r, raw conf %.2f)",
                  item_name, llm_gtin, partner_name, conf)
         return done("alias_rescue", llm_gtin, llm_card["name"],
@@ -457,6 +462,7 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
 
     # R74 — WEIGHT-CONFLICT guard, with the memWeightOverride escape.
     if llm_gtin and weight_conflict:
+        assert llm_card is not None  # llm_gtin truthy ⟹ card resolved
         if recalled and recalled.weight_override and str(recalled.gtin) == str(llm_gtin):
             log.info("dl weight override: %r -> %s despite weight conflict (%s)",
                      item_name, llm_gtin, recalled.note)
@@ -481,7 +487,9 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
         return done("unmatched", None, "", 0.0, conf,
                     str(llm.get("matchReason") or "Model nenašiel zhodu (NO_MATCH)."))
 
-    # R70/R71 — confidence bands.
+    # R70/R71 — confidence bands. Past the `if not llm_gtin` return above, llm_gtin is
+    # truthy ⟹ llm_card resolved.
+    assert llm_card is not None
     if conf >= GATE_SURE:
         item_words = _distinctive_words(item_name)
         card_words = _distinctive_words(llm_card.get("name", "")) | _distinctive_words(alias)

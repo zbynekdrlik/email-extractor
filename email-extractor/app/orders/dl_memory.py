@@ -70,8 +70,8 @@ class Recalled:
         return f"{self.strength}x, naposledy {self.last_day}"
 
 
-def remember(conn, supplier_ean: str, item: str, gtin: str, card: str,
-             delivered_on, cnt: int = 1, source: str = "ship") -> bool:
+def remember(conn, supplier_ean: str, item: str, gtin: str | None, card: str,
+             delivered_on, cnt: int | None = 1, source: str = "ship") -> bool:
     """Record one delivery (or one imported n8n history row). Returns False when this
     exact (supplier, wording, gtin, day, cnt) is already known.
 
@@ -85,7 +85,7 @@ def remember(conn, supplier_ean: str, item: str, gtin: str, card: str,
     if not (supplier_ean and key and gtin):
         return False
     try:
-        cnt_val = max(1, int(cnt))
+        cnt_val = 1 if cnt is None else max(1, int(cnt))
     except (TypeError, ValueError):
         cnt_val = 1
     row = conn.execute(

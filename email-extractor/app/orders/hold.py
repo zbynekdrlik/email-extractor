@@ -139,7 +139,7 @@ def list_held(conn, limit: int = 200) -> list[dict]:
     rows = conn.execute(
         f"""SELECT {_COLS} FROM held_orders WHERE status = 'held'
             ORDER BY delivery_date, created_at LIMIT %s""", (limit,)).fetchall()
-    return [_row(r) for r in rows]
+    return [d for r in rows if (d := _row(r)) is not None]
 
 
 # --- releasing ---------------------------------------------------------------
@@ -457,9 +457,10 @@ def _release_locked(conn, cfg, hid: int, upload, post) -> dict | None:
             (hid,)).fetchone()
         if not locked or locked[1] != "held":
             return None  # already released by a sibling answer that won the race, or gone
-        remaining = tx.execute(
+        remaining_row = tx.execute(
             "SELECT count(*) FROM order_questions WHERE id = ANY(%s) AND status <> 'answered'",
-            (locked[0],)).fetchone()[0]
+            (locked[0],)).fetchone()
+        remaining = remaining_row[0] if remaining_row else 0
         if remaining:
             return None
         row = get(conn, hid)

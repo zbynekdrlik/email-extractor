@@ -1270,7 +1270,7 @@ def insert_message(conn, rec: dict, folder: str, uid: int, uidvalidity: int,
     """Insert one email + its attachments. Returns False if already present (dedup)."""
     h = rec["headers"]
     content_sig = mailparse.content_signature(
-        h.get("from_addr"), h.get("subject"), rec.get("combined_text"))
+        h.get("from_addr"), h.get("subject"), rec.get("combined_text") or "")
     row = conn.execute(
         """
         INSERT INTO messages (message_id, header_message_id, folder, imap_uid,
