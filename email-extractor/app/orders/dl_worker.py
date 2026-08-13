@@ -82,8 +82,11 @@ changed line of an earlier, separately-sent full delivery ("Zvyšok dodania bez 
 "rest unchanged"). This worker has zero cross-message memory — extracting such a
 follow-up ALONE would silently produce a document missing every item the follow-up
 never repeats. Per the owner's binding decision on #265 (2026-08-13, "možnosť 1"):
-`_looks_like_correction` detects this from the subject/body BEFORE `dl_extract.
-extract_email` is ever called, and routes straight to `review` — no model call, no
+`_looks_like_correction` detects this from the subject/body (gated `not shadow` — a
+shadow run still extracts a correction mail for comparison, per this module's own
+"shadow runs the FULL pipeline" contract; it never claims/uploads/teaches regardless,
+via `_process_document`'s own shadow branch) BEFORE `dl_extract.extract_email` is ever
+called for a LIVE run, and routes straight to `review` — no model call, no
 supplier/item matching, no `dl_item`/`dl_supplier` question, no claim, no upload, ever.
 The review text explicitly tells the warehouse that if the original document was
 already imported into CODEX, the fix has to happen there BY HAND — this engine cannot
@@ -186,15 +189,40 @@ _SUBJECT_DOC_RE = re.compile(r"\d{2,}LT\d{4,}", re.IGNORECASE)
 
 # #265: Slovak correction/amendment word stems — see the module docstring's own #265
 # paragraph and the design comment on the ticket (`gh issue comment`) for the full
-# evidence + rejected-alternative reasoning. Deliberately narrow: "oprav"/"korekci" are
-# strong, low-ambiguity signals in a delivery-note mailbox (both real HK LOAN incidents
-# quoted on the ticket trip on "oprav" alone — mail 6389 "OPRAVA HMOTNOSTI", mail 4417
-# "... + oprava v dátume dodania"); "dopln" mirrors the ticket's own framing of the risk
-# class ("DOPLŇUJÚCE/OPRAVNÉ maily"). "zmena" was considered and deliberately EXCLUDED —
-# too common in unrelated administrative mail ("zmena adresy", "zmena banky") to be a
-# safe standalone trigger; see `test_innocent_zmena_wording_does_not_trip_the_
-# correction_detector` for the negative case this is verified against.
-_CORRECTION_RE = re.compile(r"\b(?:oprav|korekci|dopln)\w*", re.IGNORECASE)
+# evidence + rejected-alternative reasoning. "oprav"/"korek" are strong, low-ambiguity
+# signals in a delivery-note mailbox (both real HK LOAN incidents quoted on the ticket
+# trip on "oprav" alone — mail 6389 "OPRAVA HMOTNOSTI", mail 4417 "... + oprava v
+# dátume dodania"), checked in BOTH subject and body. "zmena" was considered and
+# deliberately EXCLUDED — too common in unrelated administrative mail ("zmena adresy",
+# "zmena banky") to be a safe standalone trigger; see `test_innocent_zmena_wording_
+# does_not_trip_the_correction_detector` for the negative case this is verified against.
+#
+# Deep-review finding on this ticket's own PR (#265): the FIRST cut of `_CORRECTION_
+# STRONG_RE` used the plain ASCII stem "korekci" only, which misses "korektúra"/
+# "korektúru" (a genuine Slovak synonym for "correction") — `korek(?:ci|t[uú]r)` covers
+# both. The Slovak alphabet's own case-folding correctly matches diacritic forms of
+# "oprav"/"korek" with plain `re.IGNORECASE` (verified: no combining-mark stripping
+# needed for THIS word family — unlike "dopln" below, neither stem's own letters carry
+# a diacritic in their base ASCII form).
+_CORRECTION_STRONG_RE = re.compile(r"\b(?:oprav|korek(?:ci|t[uú]r))\w*", re.IGNORECASE)
+
+# Deep-review finding on this ticket's own PR (#265): the FIRST cut of this stem was
+# the plain ASCII "dopln" — which structurally CANNOT match its own most natural
+# Slovak forms ("DOPLŇUJÚCE", "doplňujúce", "dopĺňame", "doplňte" all replace the
+# plain "l"/"n" with the diacritic letters ľ/ĺ/ň) even though the ticket's own
+# description explicitly frames the risk class as "DOPLŇUJÚCE/OPRAVNÉ maily" — a real
+# false-NEGATIVE bug that would have silently auto-shipped exactly the incomplete-
+# delivery mail this whole ticket exists to catch. `dop(?:ln|lň|ĺň)` covers the plain
+# form plus both diacritic variants (verified against all four cited forms).
+#
+# Deliberately checked ONLY in the SUBJECT, never the body — "dopln"/"doplnok" is
+# ordinary Slovak vocabulary ("doplnok stravy" = dietary supplement, a real product
+# category) that can legitimately appear as a delivered ITEM's own name inside a
+# mail-body-sourced (#258) delivery note's body text; scanning the body too would
+# risk permanently misrouting a genuine supplier who happens to sell such products.
+# The subject alone is where BOTH real HK LOAN incidents' own signal actually lives —
+# no live evidence needs "dopln" in the body specifically.
+_CORRECTION_DOPLN_SUBJECT_RE = re.compile(r"\bdop(?:ln|lň|ĺň)\w*", re.IGNORECASE)
 
 _CORRECTION_EXCERPT_LIMIT = 500
 
@@ -203,8 +231,12 @@ def _looks_like_correction(subject: str, body_text: str) -> bool:
     """#265: true when the subject OR the mail's own body text (Subject+From+Body, via
     `_mail_body_only` — never an attachment's own text) carries a correction/amendment
     stem. ONLY ever consulted for the #258 mail-body-sourced path (a real PDF/image
-    attachment is out of scope — see the module docstring)."""
-    return bool(_CORRECTION_RE.search(subject or "") or _CORRECTION_RE.search(body_text or ""))
+    attachment is out of scope — see the module docstring). See the two regexes above
+    for why "dopln" is subject-only while "oprav"/"korek" cover subject AND body."""
+    subject, body_text = subject or "", body_text or ""
+    if _CORRECTION_STRONG_RE.search(subject) or _CORRECTION_STRONG_RE.search(body_text):
+        return True
+    return bool(_CORRECTION_DOPLN_SUBJECT_RE.search(subject))
 
 
 def _correction_review_reason(body_text: str) -> str:
@@ -217,8 +249,14 @@ def _correction_review_reason(body_text: str) -> str:
     number, so there is no reliable key to look the earlier document up by, and a wrong
     "not yet imported" claim would be worse than no claim at all. The mail's own text is
     quoted verbatim (never an AI interpretation of it) so the warehouse reads exactly
-    what the supplier wrote."""
-    excerpt = (body_text or "").strip()
+    what the supplier wrote.
+
+    Deep-review finding on this ticket's own PR (#265): `build_review` wraps `reason`
+    in a single `<p>` with no `nl2br` — a multi-line excerpt embedded with its own raw
+    newlines rendered as one visually run-together paragraph in Odoo. Collapsing
+    whitespace here (never truncating meaning, just normalizing layout) keeps the
+    quoted text readable without needing any HTML change downstream."""
+    excerpt = " ".join((body_text or "").split())
     if len(excerpt) > _CORRECTION_EXCERPT_LIMIT:
         excerpt = excerpt[:_CORRECTION_EXCERPT_LIMIT].rstrip() + " (...)"
     return (
@@ -879,6 +917,13 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     # cannot tell whether it came from an attachment or the mail body.
     sources = usable_attachments
     used_body_text = False
+    # Deep-review finding on this ticket's own PR (#265): initialised here, not just
+    # inside the `if not sources:` branch below — `body_text` is read again further
+    # down (the #265 correction-detection gate), and correctness there depends
+    # entirely on `used_body_text and ...`'s short-circuit never evaluating `body_text`
+    # while it's unbound. Defining it unconditionally means a future reorder of that
+    # gate can never turn this into a `NameError` on the normal attachment path.
+    body_text = ""
     if not sources:
         body_text = _mail_body_only(message.get("combined_text", "")).strip()
         if body_text:
@@ -913,7 +958,20 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     # amendment NEVER auto-ships — see the module docstring's own #265 paragraph.
     # Checked BEFORE extraction (never after): the model is not even called, so there
     # is no world in which this could accidentally match/claim/upload anything.
-    if used_body_text and _looks_like_correction(message.get("subject", ""), body_text):
+    #
+    # Deep-review finding on this ticket's own PR (#265): gated `not shadow`, matching
+    # this project's own documented rule (`.claude/rules/orders-corpus.md`: "Any
+    # FUTURE short-circuit that skips calling the model needs the same `not shadow`
+    # gate", precedent `pipeline._mail_rule`). The module's own docstring promises
+    # shadow "runs the FULL pipeline (extraction, matching, EDI build) for comparison
+    # only" — a correction mail skipping extraction even in shadow would silently
+    # narrow what shadow actually measures. `_post`/`_event` are already gated on
+    # `not shadow` independently (no observable effect either way); this is ONLY about
+    # whether extraction itself runs, never about claiming/uploading/teaching (those
+    # stay impossible in shadow regardless, via `_process_document`'s own `if shadow:`
+    # branch).
+    if (used_body_text and not shadow
+            and _looks_like_correction(message.get("subject", ""), body_text)):
         reason = _correction_review_reason(body_text)
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, from_addr=message.get("from_addr", ""),
@@ -1181,13 +1239,23 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
     #265 gap 2: when the just-answered question is `dl_supplier`, this ALSO releases
     every OTHER same-sender `dodacie_listy` message stuck in `review` with no `order_
     questions` row of its own — see `_release_stuck_siblings`'s own docstring for the
-    full evidence and why this is scoped to `dl_supplier` only."""
+    full evidence and why this is scoped to `dl_supplier` only.
+
+    Deep-review finding on this ticket's own PR (#265): the sibling widening keys on
+    the TIED message's own `messages.from_addr` (the raw envelope address, read below
+    via `message = _as_message(msg_row)`), NOT `order_questions.payload['sender_
+    email']` — `_process_document` sets that payload field to `doc.get('supplierEmail')
+    or from_addr`, the DOCUMENT-extracted address, which can genuinely differ from the
+    envelope address (a 3PL/warehouse operator's own contact email inside the mail
+    body, for example). `_release_stuck_siblings`'s own query matches candidate
+    siblings by `messages.from_addr` — using anything else as the search key here would
+    silently no-op (or worse, match a DIFFERENT sender's messages) whenever the two
+    addresses diverge."""
     qrow = conn.execute(
-        "SELECT message_id, kind, payload FROM order_questions WHERE id = %s",
-        (qid,)).fetchone()
+        "SELECT message_id, kind FROM order_questions WHERE id = %s", (qid,)).fetchone()
     if not qrow:
         return []
-    message_id, kind, payload = qrow[0], qrow[1], qrow[2] or {}
+    message_id, kind = qrow[0], qrow[1]
     with psycopg.connect(cfg.pg_dsn) as lock_tx:
         lock_tx.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (message_id,))
         still_open = conn.execute(
@@ -1215,8 +1283,7 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
         result = _run_and_finish(conn, cfg, client, message, snapshot_id, catalog,
                                  suppliers, upload=upload, post=post)
         if kind == "dl_supplier":
-            _release_stuck_siblings(
-                conn, message_id, str((payload or {}).get("sender_email") or ""))
+            _release_stuck_siblings(conn, message_id, message.get("from_addr", ""))
         return (result or {}).get("documents", [])
 
 
@@ -1249,14 +1316,48 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
 # messages sharing that exact wording without extracting them first. No live evidence
 # of the `dl_item` version of this gap has been observed; it needs its own design if it
 # ever is, not a copy of this one.
+#
+# Deep-review finding on this ticket's own PR (#265) — a REAL, proven safety bug in
+# the first cut: `processed=true AND proc_status='review' AND no order_questions row`
+# ALSO matches a message whose upload to ORION genuinely FAILED (a timeout, a network
+# error) — `_process_document`'s upload-except branch calls `desadv.release_send()`
+# (deleting the claim) and never raises a `dl_item`/`dl_supplier` question, so that
+# message is indistinguishable from a genuine unmatched-supplier orphan by THAT
+# predicate alone. Resetting it here would re-enable exactly the automatic upload
+# retry #239 deliberately REMOVED (a released claim + a fresh per-attempt filename
+# means a second attempt can upload a genuine SECOND copy of an already-landed
+# document — see `.claude/rules/n8n-workflow-edits.md`'s "#239" section). Every
+# upload-failure AND every other genuine processing exception in this module logs its
+# own review event with `status="error"` (`_event(..., status="error", ...)` at the
+# supplier-match-exception, upload-exception, and attachment-extraction-error call
+# sites) — `status="review"` is reserved for the plain "nothing matched, nothing
+# failed" outcomes (an unmatched supplier, an unmatched item, a correction mail). The
+# `NOT EXISTS ... status = 'error'` clause below is what makes that distinction real:
+# it excludes ANY message with so much as one logged failure from ever being reset by
+# this widening, at the cost of leaving a message that BOTH failed AND is a genuine
+# orphan stuck (safe default — `stuck_classified_sweep`/the hourly n8n watchdog still
+# surface it).
 _STUCK_SIBLING_LIMIT = 20
 
 
 def _release_stuck_siblings(conn, exclude_message_id: str, sender_email: str) -> int:
     """Resets up to `_STUCK_SIBLING_LIMIT` orphaned same-sender `dodacie_listy`
     messages (`processed=true`, `proc_status='review'`, no `order_questions` row of
-    their own) back into the normal claim pool. Returns how many were reset — `0` when
-    `sender_email` is blank or nothing matched, never raises."""
+    their own, and no `status='error'` event ever logged for it — see the section
+    comment above for why that last exclusion is load-bearing, not decorative) back
+    into the normal claim pool. Returns how many were reset — `0` when `sender_email`
+    is blank or nothing matched, never raises.
+
+    Known, accepted residual (deep-review finding on this ticket's own PR, #265): a
+    released sibling that reprocesses back to a permanent, question-less `review` (a
+    #265 correction mail, or a mail with no usable source) stays eligible for a
+    SECOND widening if the SAME sender's `dl_supplier` question is ever reopened and
+    re-answered — bounded in practice: once taught, `dl_supplier_memory`'s
+    memory-rescue rung means no NEW `dl_supplier` question is ever raised for that
+    sender again unless its taught card is later retired from the catalog (rare). A
+    `released_once` tracking column would close this fully but needs a schema
+    migration — deferred as a documented, low-frequency, non-safety limitation rather
+    than blocking this fix on it."""
     sender_email = (sender_email or "").strip()
     if not sender_email:
         return 0
@@ -1266,6 +1367,9 @@ def _release_stuck_siblings(conn, exclude_message_id: str, sender_email: str) ->
               AND message_id <> %s AND lower(from_addr) = lower(%s)
               AND NOT EXISTS (SELECT 1 FROM order_questions oq
                               WHERE oq.message_id = messages.message_id)
+              AND NOT EXISTS (SELECT 1 FROM email_events e
+                              WHERE e.message_id = messages.message_id
+                                AND e.status = 'error')
             ORDER BY created_at ASC LIMIT %s""",
         (CATEGORY, exclude_message_id, sender_email, _STUCK_SIBLING_LIMIT)).fetchall()
     if not rows:

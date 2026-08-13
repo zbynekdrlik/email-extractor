@@ -509,13 +509,41 @@ def test_looks_like_correction_matches_both_real_265_incidents():
         "Fw:Avizacia/24.7.2026/ + oprava v dátume dodania", "")
 
 
-def test_looks_like_correction_matches_dopln_stem_too():
+def test_looks_like_correction_matches_dopln_stem_in_subject():
     assert dl_worker._looks_like_correction("Doplnenie k dodávke", "")
-    assert dl_worker._looks_like_correction("", "posielame doplnenie k avizácii")
+
+
+def test_looks_like_correction_matches_dopln_diacritic_forms():
+    """Deep-review finding (#265): the FIRST cut's plain-ASCII "dopln" stem missed its
+    own most natural Slovak forms — every one of these replaces the plain l/n with the
+    diacritic letters ľ/ĺ/ň, and this ticket's OWN issue text names exactly this shape
+    ("DOPLŇUJÚCE/OPRAVNÉ maily") as the risk class. All four must match."""
+    assert dl_worker._looks_like_correction("DOPLŇUJÚCE informácie", "")
+    assert dl_worker._looks_like_correction("doplňujúce údaje k dodávke", "")
+    assert dl_worker._looks_like_correction("dopĺňame hmotnosť", "")
+    assert dl_worker._looks_like_correction("doplňte prosím", "")
+
+
+def test_looks_like_correction_ignores_dopln_in_body_only():
+    """Deep-review finding (#265): "dopln"/"doplnok" is ordinary Slovak vocabulary
+    ("doplnok stravy" = dietary supplement, a real product category) that can
+    legitimately appear as a delivered ITEM's own name inside a mail-body-sourced
+    delivery note's body text — checking it only in the SUBJECT (never the body)
+    avoids permanently misrouting a supplier who happens to sell such products. Both
+    real #265 incidents' own signal lives entirely in the subject anyway."""
+    assert not dl_worker._looks_like_correction(
+        "Avizácia dodania", "Doplnok stravy horčík 60 tbl / 5 ks")
 
 
 def test_looks_like_correction_matches_korekcia_stem():
     assert dl_worker._looks_like_correction("Korekcia dodávky", "")
+
+
+def test_looks_like_correction_matches_korektura_synonym():
+    """Deep-review finding (#265): "korektúra"/"korektúru" is a genuine Slovak
+    synonym for "correction" that the first cut's bare "korekci" stem missed."""
+    assert dl_worker._looks_like_correction("Korektúra dodacieho listu", "")
+    assert dl_worker._looks_like_correction("posielame korektúru množstva", "")
 
 
 def test_looks_like_correction_ignores_a_bare_zmena_mention():
@@ -533,6 +561,16 @@ def test_correction_review_reason_truncates_a_very_long_excerpt():
     reason = dl_worker._correction_review_reason(long_text)
     assert len(reason) < 1000 + 400, "must not embed the whole excerpt unbounded"
     assert reason.rstrip().endswith("(...)")
+
+
+def test_correction_review_reason_collapses_multiline_whitespace():
+    """Deep-review finding (#265): `build_review` wraps the reason in a single `<p>`
+    with no `nl2br` — a raw multi-line excerpt would render as one visually
+    run-together paragraph. The excerpt is collapsed to single spaces before being
+    embedded, without dropping any of its actual words."""
+    reason = dl_worker._correction_review_reason("Riadok jeden\n\nRiadok   dva\ttab")
+    assert "\n" not in reason and "\t" not in reason
+    assert "Riadok jeden Riadok dva tab" in reason
 
 
 # --- live engine: the happy path --------------------------------------------
@@ -925,6 +963,30 @@ def test_shadow_reports_duplicate_via_a_read_only_check(pg, tmp_path):
     assert result["documents"][0]["outcome"] == "duplicate"
     # still exactly ONE ledger row (the pre-seeded one) — shadow never inserted a claim.
     assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 1
+
+
+def test_shadow_mode_still_extracts_a_correction_mail_for_comparison(pg, tmp_path):
+    """Deep-review finding on this ticket's own PR (#265): the correction-detection
+    gate is `not shadow`-gated, matching this project's own documented rule
+    (`.claude/rules/orders-corpus.md`: a short-circuit that skips calling the model
+    needs the same `not shadow` gate, precedent `pipeline._mail_rule`) and this
+    module's own "shadow runs the FULL pipeline... for comparison" contract. In shadow
+    the message still goes through extraction (proven here — the model IS called),
+    even though it would never auto-ship live; nothing is claimed/uploaded/taught
+    either way (the pre-existing shadow guarantees, unaffected)."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", subject="OPRAVA HMOTNOSTI", has_attachments=False,
+        combined_text=CORRECTION_BODY_TEXT)
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    cfg = _cfg(delivery_notes_engine="n8n", delivery_notes_shadow=True,
+              data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client)
+    assert n == 1
+    assert "dl_documents" in client.calls, \
+        "shadow must still extract a correction mail for comparison, never skip it"
+    assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0
+    assert pg.execute("SELECT count(*) FROM order_questions").fetchone()[0] == 0
 
 
 # --- spec §4: announced-vs-attached ------------------------------------------
@@ -2104,9 +2166,18 @@ def test_release_for_question_also_ships_orphaned_same_sender_sibling_messages(
 def test_release_for_question_sibling_widening_never_touches_unrelated_messages(
         pg, tmp_path):
     """The widening proven above must be precisely scoped: a DIFFERENT sender's own
-    stuck message, an ALREADY-SHIPPED message from the SAME sender, and a message from
-    the SAME sender that already has its OWN tied `dl_item` question must all be left
-    completely untouched."""
+    stuck message, an ALREADY-SHIPPED message from the SAME sender, a message from the
+    SAME sender that already has its OWN tied `dl_item` question, and a message from
+    the SAME sender whose upload genuinely FAILED (#265 deep-review 🔴 finding — must
+    never be silently reset into an automatic retry, see `.claude/rules/
+    n8n-workflow-edits.md`'s "#239" section) must all be left completely untouched.
+
+    Deep-review finding on this ticket's own PR (#265): the FIRST cut of this test
+    proved only "nothing bad happens" — every assertion here would ALSO hold if
+    `_release_stuck_siblings` were a complete no-op (a blank key, a wrong column, an
+    early return). A POSITIVE control (`orphan1`, a genuinely clean same-sender orphan
+    with none of the disqualifying properties) proves the widening actually DOES
+    something, not just that it stays out of the way."""
     _snapshot(pg)
     sender = "neznamy3@somewhere.sk"
     other_sender = "inysender@example.sk"
@@ -2126,6 +2197,18 @@ def test_release_for_question_sibling_widening_never_touches_unrelated_messages(
         pg, message_id="tied1", supplier_ean=SUPPLIER_EAN, supplier_name="Pekáreň Lunys",
         wording="Iný nespárovaný tovar", quantity=1, unit="ks",
         candidates=[{"gtin": ITEM_GTIN, "name": "Rožok 50g"}])
+    _msg(pg, mid="failedupload1", from_addr=sender)
+    pg.execute(
+        "UPDATE messages SET processed=true, proc_status='review' WHERE message_id=%s",
+        ("failedupload1",))
+    pg.execute(
+        """INSERT INTO email_events (message_id, workflow, stage, status, outcome)
+           VALUES ('failedupload1', 'delivery_notes', 'review', 'error',
+                   'Odoslanie dodacieho listu do ORIONu zlyhalo')""")
+    _msg(pg, mid="orphan1", from_addr=sender)
+    pg.execute(
+        "UPDATE messages SET processed=true, proc_status='review' WHERE message_id=%s",
+        ("orphan1",))
 
     _msg(pg, mid="qmsg", from_addr=sender, has_attachments=True)
     _attach(pg, tmp_path, "qmsg")
@@ -2151,9 +2234,127 @@ def test_release_for_question_sibling_widening_never_touches_unrelated_messages(
 
     untouched = pg.execute(
         "SELECT message_id, processed FROM messages WHERE message_id IN "
-        "('other1', 'shipped1', 'tied1') ORDER BY message_id").fetchall()
-    assert untouched == [("other1", True), ("shipped1", True), ("tied1", True)], \
-        "none of the three unrelated/already-linked messages may be reset"
+        "('other1', 'shipped1', 'tied1', 'failedupload1') "
+        "ORDER BY message_id").fetchall()
+    assert untouched == [("failedupload1", True), ("other1", True), ("shipped1", True),
+                         ("tied1", True)], \
+        "none of the four unrelated/already-linked/failed messages may be reset"
+    positive = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='orphan1'").fetchone()
+    assert positive == (False,), \
+        "the genuinely clean orphan (positive control) MUST be released"
+
+
+def test_release_for_question_sibling_widening_keys_on_envelope_from_addr(
+        pg, tmp_path):
+    """Deep-review finding on this ticket's own PR (#265) — a REAL, proven scoping
+    bug: `_process_document` sets `order_questions.payload['sender_email']` to
+    `doc.get('supplierEmail') or from_addr` — the DOCUMENT-EXTRACTED address, which
+    can genuinely differ from the raw envelope `messages.from_addr` (e.g. a 3PL/
+    warehouse operator's own contact email printed inside the mail body). The sibling
+    widening must key on the TIED message's own envelope `from_addr` (what `_release_
+    stuck_siblings` actually searches by), never the payload's extracted address, or
+    it would silently no-op — or worse, match the WRONG sender — whenever the two
+    diverge."""
+    _snapshot(pg)
+    envelope_addr = "raw-envelope@somewhere.sk"
+    extracted_addr = "different-contact@elsewhere.sk"
+    doc = {"documents": [{
+        "supplierName": "Neznáma pekáreň s.r.o.", "supplierCity": "",
+        "supplierEmail": extracted_addr, "docNumber": "",
+        "deliveryDate": "01.08.2026", "documentTotalWithoutVAT": 5.0,
+        "items": [{"name": "Rožok 50g", "quantity": 10, "unit": "ks", "unitPrice": 0.5,
+                  "totalPrice": 5.0}]}]}
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    for mid in ("tiedmsg", "siborphan"):
+        _msg(pg, mid=mid, from_addr=envelope_addr, has_attachments=True)
+        _attach(pg, tmp_path, mid)
+        n = dl_worker.tick(
+            pg, cfg,
+            client=FakeClient({"dl_documents": [doc],
+                               "dl_supplier": [{"matched": False,
+                                                "matchReason": "nie je v zozname"}]}),
+            upload=lambda *a, **k: None, post=lambda c, h: None)
+        assert n == 1
+    qid = pg.execute(
+        "SELECT id FROM order_questions WHERE kind='dl_supplier'").fetchone()[0]
+    payload = pg.execute(
+        "SELECT payload FROM order_questions WHERE id=%s", (qid,)).fetchone()[0]
+    assert payload["sender_email"] == extracted_addr, \
+        "setup: the question is keyed on the DOCUMENT-extracted address, not the " \
+        "envelope one"
+
+    dl_supplier_memory.remember(pg, extracted_addr, SUPPLIER_EAN, "Pekáreň Lunys")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": SUPPLIER_EAN}), qid))
+    released = dl_worker.release_for_question(
+        pg, cfg, qid, client=FakeClient({"dl_documents": [doc], "dl_item": [ITEM_MATCHED]}),
+        upload=lambda *a, **k: None, post=lambda c, h: None)
+    assert released and released[0]["outcome"] == "ok"
+
+    sibling = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='siborphan'").fetchone()
+    assert sibling == (False,), \
+        "the sibling (same ENVELOPE address) must be released even though the " \
+        "answered question was keyed on a different, document-extracted address"
+
+
+def test_release_stuck_siblings_never_releases_a_message_with_a_logged_upload_failure(
+        pg):
+    """Deep-review finding on this ticket's own PR (#265) — the PROVEN safety bug: a
+    message whose ORION upload genuinely failed (`_process_document`'s upload-except
+    branch logs `status='error'` and calls `desadv.release_send()`, deleting its
+    claim) is otherwise INDISTINGUISHABLE from a genuine unmatched-supplier orphan by
+    `processed=true AND proc_status='review' AND no order_questions row` alone.
+    Resetting it here would re-enable exactly the automatic upload retry #239
+    deliberately removed — a released claim + a fresh per-attempt filename means a
+    second attempt can genuinely re-upload a document that already landed (two copies
+    in ORION, both taken in at the next manual import)."""
+    sender = "failed-upload@somewhere.sk"
+    pg.execute(
+        """INSERT INTO messages (message_id, category, subject, from_addr,
+                                 combined_text, has_attachments, processed,
+                                 proc_status)
+           VALUES ('failed1', 'dodacie_listy', 'x', %s, '', false, true, 'review')""",
+        (sender,))
+    pg.execute(
+        """INSERT INTO email_events (message_id, workflow, stage, status, outcome)
+           VALUES ('failed1', 'delivery_notes', 'review', 'error',
+                   'Odoslanie dodacieho listu do ORIONu zlyhalo')""")
+    n = dl_worker._release_stuck_siblings(pg, "exclude-me", sender)
+    assert n == 0, "a message with a logged upload failure must NEVER be reset"
+    row = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='failed1'").fetchone()
+    assert row == (True,), "stays exactly as it was — never reclaimed for a retry"
+
+
+def test_release_stuck_siblings_still_releases_a_clean_orphan_alongside_a_failed_one(
+        pg):
+    """The exclusion proven above must be PRECISE — a genuinely clean orphan (never
+    failed, just never got its own question) from the SAME sender must still be
+    released even when a failed sibling exists too."""
+    sender = "mixed-siblings@somewhere.sk"
+    pg.execute(
+        """INSERT INTO messages (message_id, category, subject, from_addr,
+                                 combined_text, has_attachments, processed,
+                                 proc_status)
+           VALUES ('failed2', 'dodacie_listy', 'x', %s, '', false, true, 'review')""",
+        (sender,))
+    pg.execute(
+        """INSERT INTO email_events (message_id, workflow, stage, status, outcome)
+           VALUES ('failed2', 'delivery_notes', 'review', 'error', 'zlyhalo')""")
+    pg.execute(
+        """INSERT INTO messages (message_id, category, subject, from_addr,
+                                 combined_text, has_attachments, processed,
+                                 proc_status)
+           VALUES ('clean1', 'dodacie_listy', 'x', %s, '', false, true, 'review')""",
+        (sender,))
+    n = dl_worker._release_stuck_siblings(pg, "exclude-me", sender)
+    assert n == 1
+    rows = pg.execute(
+        "SELECT message_id, processed FROM messages WHERE from_addr=%s "
+        "ORDER BY message_id", (sender,)).fetchall()
+    assert rows == [("clean1", False), ("failed2", True)]
 
 
 def test_release_stuck_siblings_is_bounded_so_a_large_backlog_never_storms(pg):
