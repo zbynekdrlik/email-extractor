@@ -750,3 +750,39 @@ def test_the_dl_alert_banner_stays_hidden_on_a_quiet_day(live_server, pg, page):
     page.wait_for_selector("#dlAlertBanner", state="attached")
     assert page.locator("#dlAlertBanner").is_hidden()
     assert console == [], f"browser console not clean: {console}"
+
+
+def test_dl_new_product_form_survives_the_5s_auto_refresh(live_server, pg, page):
+    """#306: the board runs `setInterval(load, 5000)` and `load()` wipes `#wrap`
+    (`textContent=''`) to rebuild every card from scratch. While the skladníčka is
+    typing into the "➕ Nový produkt" form, that periodic rebuild destroys her
+    half-filled form mid-entry — the reported "stále ma to vyhodí, vôbec nejde
+    doplniť". This proves the in-progress form + typed value survive one full
+    auto-refresh cycle. RED before the fix (wiped), GREEN after (skipped while busy)."""
+    from app.httpapi import dl_key
+    from app.orders import teach
+
+    qid = teach.ask_dl_item(
+        pg, message_id="e-dl306", supplier_ean="S1", supplier_name="HK LOAN",
+        wording="Soľ jedlá", quantity=1, unit="ks",
+        candidates=[{"gtin": "G1", "name": "Múka pšeničná"}])
+    assert qid
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/otazky-dl")
+
+    page.wait_for_selector("text=Soľ jedlá")
+    page.click('button:has-text("Nový produkt")')
+    gtin = page.locator('input[placeholder^="GTIN"]')
+    gtin.fill("8588888888882")
+    assert gtin.input_value() == "8588888888882"      # sanity: typed before the refresh
+
+    # wait past ONE full 5s auto-refresh cycle (its own two fetches finish well within)
+    page.wait_for_timeout(6000)
+
+    # the form must still be OPEN and the typed GTIN must still be there
+    assert gtin.is_visible(), "the '➕ Nový produkt' form was wiped by the 5s auto-refresh"
+    assert gtin.input_value() == "8588888888882", \
+        "the typed GTIN was wiped by the 5s auto-refresh"
+    assert console == [], f"browser console not clean: {console}"
