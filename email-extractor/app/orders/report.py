@@ -266,34 +266,31 @@ def build_dl_digest(dl_stats: dict | None, link: str = "") -> str:
     (243, the warehouse's own channel) instead of `orders_channel_id` (152, sales) —
     the two audiences must never be mixed into one post again.
 
-    `dl_stats` is `reliability.dl_provenance_stats_for_day`'s return shape (same fields
-    as `provenance_stats_for_day`, plus `duplicates`/`announced_mismatch` and the three
-    #239 current-state gauges: `quarantined`/`pending_alerts`/`open_import_incidents`).
+    `dl_stats` is `reliability.dl_provenance_stats_for_day`'s return shape.
 
-    Returns `""` on a genuinely quiet day (no runs, no duplicates/mismatch, and none of
-    the three current-state gauges nonzero) — a day with zero NEW activity but an
-    EXISTING stuck backlog must still render something (that is exactly the silent-
-    backlog failure #239 exists to prevent), so the trigger checks all six fields, not
-    just `runs`. The caller decides what an empty result means (skip posting) — this
-    function's only job is deciding whether there is anything to say.
+    #312: this is a WAREHOUSE-facing message (channel 243), so it renders ONLY what the
+    warehouse can act on — the day's runs/items, duplicate skips, announced-vs-attached
+    mismatches, and #305 „Neviem"-deferred notes. The three #239 current-state OPERATOR
+    gauges (`quarantined`/`pending_alerts`/`open_import_incidents`) are DELIBERATELY NOT
+    rendered here any more: they are admin diagnostics that already live on
+    `/api/orders/dl/stats` (`reliability.dl_current_health`) and have their own operator
+    alert paths (the n8n stuck-message watchdog, `confirm.py`'s import sweep) — showing
+    them to the warehouse leaked operator detail onto a user surface with nothing they
+    could do about it. `dl_stats` may still carry those three keys (the dashboard reads
+    the same dict); they are simply ignored here.
+
+    Returns `""` on a genuinely quiet WAREHOUSE day (no runs, no duplicates/mismatch, no
+    „Neviem"-deferred notes) — an operator-only backlog no longer forces a warehouse post.
+    The caller decides what an empty result means (skip posting).
     """
     dl = dl_stats or {}
     dl_runs = int(dl.get("runs") or 0)
     dl_dups = int(dl.get("duplicates") or 0)
     dl_mismatch = int(dl.get("announced_mismatch") or 0)
     dl_sklad_unknown = int(dl.get("sklad_unknown") or 0)
-    dl_quarantined = int(dl.get("quarantined") or 0)
-    dl_pending_alerts = int(dl.get("pending_alerts") or 0)
-    dl_open_import = int(dl.get("open_import_incidents") or 0)
-    if not (dl_runs or dl_dups or dl_mismatch or dl_sklad_unknown or dl_quarantined
-           or dl_pending_alerts or dl_open_import):
+    if not (dl_runs or dl_dups or dl_mismatch or dl_sklad_unknown):
         return ""
 
-    # The "5 attempts" number is read from the stats dict (`reliability.
-    # dl_current_health` carries it as `quarantine_threshold`) rather than hardcoded a
-    # fourth time here — falls back to 5 only for an old caller/test that predates the
-    # field (never diverges from the real constant in production).
-    dl_quarantine_threshold = int(dl.get("quarantine_threshold") or 5)
     dl_items = int(dl.get("items") or 0)
     dl_errors = int(dl.get("errors") or 0)
     dl_day = escape(str(dl.get("day", "")))
@@ -326,28 +323,9 @@ def build_dl_digest(dl_stats: dict | None, link: str = "") -> str:
                              "treba doriešiť ručne",
                              "dodacích listov odložených (sklad nevie identifikovať) "
                              "&mdash; treba doriešiť ručne") + "</p>")
-    if dl_quarantined:
-        parts.append(f"<p>&#128683; {dl_quarantined} " +
-                     _plural(dl_quarantined,
-                             f"dodací list sa po {dl_quarantine_threshold} pokusoch "
-                             "vzdal spracovania",
-                             f"dodacie listy sa po {dl_quarantine_threshold} "
-                             "pokusoch vzdali spracovania",
-                             f"dodacích listov sa po {dl_quarantine_threshold} "
-                             "pokusoch vzdalo spracovania") +
-                     " &mdash; skontroluj v dashboarde.</p>")
-    if dl_pending_alerts:
-        parts.append(f"<p>&#128276; {dl_pending_alerts} " +
-                     _plural(dl_pending_alerts, "upozornenie stále čaká na odoslanie",
-                             "upozornenia stále čakajú na odoslanie",
-                             "upozornení stále čaká na odoslanie") + ".</p>")
-    if dl_open_import:
-        parts.append(f"<p>&#128230; {dl_open_import} " +
-                     _plural(dl_open_import,
-                             "otvorený problém s importom dodacieho listu do ORIONu",
-                             "otvorené problémy s importom dodacích listov do ORIONu",
-                             "otvorených problémov s importom dodacích listov do "
-                             "ORIONu") + ".</p>")
+    # #312: the three #239 operator gauges (quarantined / pending_alerts /
+    # open_import_incidents) are intentionally NOT rendered here — see this function's
+    # docstring. They stay on the admin dashboard (/api/orders/dl/stats).
     if link:
         parts.append(f'<p>&#128203; Nástenka: '
                      f'<a href="{escape(link)}">{escape(link)}</a></p>')

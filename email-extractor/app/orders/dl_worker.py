@@ -645,13 +645,18 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         supplier_decision = _match_supplier(conn, client, doc, suppliers, sender_email)
     except Exception as e:
         _check_retry(message.get("attempts", 0), str(e))
-        reason = f"Zlyhalo párovanie dodávateľa: {e}"
+        # #312: the raw exception repr must NOT reach the warehouse channel (243) — a
+        # clean, actionable sentence goes there; the technical detail stays in the log
+        # and in `email_events.detail` (internal), never on the user surface.
+        log.warning("DL supplier match failed for message %s doc %s: %s",
+                    message["message_id"], doc_number, e)
+        reason = "Nepodarilo sa priradiť dodávateľa — over dodací list ručne."
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, "", doc_number, delivery_date, from_addr, subject, link=link),
             post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="error",
-              outcome=reason, detail={"doc_number": doc_number}, rollup=False,
-              workflow=dl_report.WORKFLOW)
+              outcome=reason, detail={"doc_number": doc_number, "error": str(e)},
+              rollup=False, workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": doc_number, "supplier_name": "",
                "reason": reason}
 
@@ -682,10 +687,15 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             decision = _match_item(client, item, catalog, recalled, supplier_decision.name)
         except Exception as e:
             _check_retry(message.get("attempts", 0), str(e))
+            # #312: the item note is warehouse-facing (it becomes the dl_item board
+            # question's reason) — a clean sentence, raw exception only to the log.
+            log.warning("DL item match failed for message %s item %r: %s",
+                        message["message_id"], item.get("name", ""), e)
             decision = dl_match.Decision(
                 item_name=item.get("name", ""), gtin=None, card="", mass=0.0,
                 confidence=0.0, rule="match_failed",
-                note=f"Zlyhalo párovanie položky: {e}", review=True)
+                note="Položku sa nepodarilo priradiť ku karte — over ju ručne.",
+                review=True)
         decisions.append((item, decision))
         matched_items.append({
             "gtin": decision.gtin, "name": decision.item_name,
@@ -1139,14 +1149,19 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     for att in extraction["attachments"]:
         if att.get("error"):
             _check_retry(message.get("attempts", 0), att["error"])
+            # #312: the raw extraction error (str(e) from dl_extract) must NOT reach the
+            # warehouse channel (243) — a clean sentence goes there, the technical detail
+            # only to the log.
+            log.warning("DL extraction failed for message %s idx %s: %s",
+                        message["message_id"], att.get("idx"), att["error"])
             # #258 deep-review finding: the body-text pseudo-source is NOT a "príloha"
             # (attachment) — calling it one in a message a human reads is exactly the
             # category confusion this ticket exists to eliminate.
             if att.get("idx") == _BODY_TEXT_IDX:
-                reason = f"Text e-mailu sa nepodarilo spracovať: {att['error']}"
+                reason = "Text e-mailu sa nepodarilo spracovať — over ho ručne."
             else:
-                reason = (f"Príloha {att.get('filename') or att.get('idx')} sa nepodarilo "
-                          f"spracovať: {att['error']}")
+                reason = (f"Prílohu {att.get('filename') or att.get('idx')} sa nepodarilo "
+                          f"spracovať — over ju ručne.")
             documents_out.append(_flag_attachment(
                 conn, cfg, shadow, message, link, att, reason, status="error", post=post))
 

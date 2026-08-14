@@ -462,33 +462,19 @@ def test_dl_duplicates_alone_still_render_the_message():
     assert "1" in html
 
 
-# --- #239: three current-state gauges — a silent backlog must never hide -----------
-
-def test_quarantined_alone_triggers_the_message_even_with_zero_runs():
-    """A day with no NEW DL activity but an EXISTING quarantined backlog must still be
-    mentioned — the whole point of #239 is that a silent backlog is invisible."""
-    html = report.build_dl_digest(_dl_stats(quarantined=2))
-    assert html != ""
-    assert "2" in html
-    assert "vzdal" in html.lower()
-
-
-def test_pending_alerts_alone_triggers_the_message():
-    html = report.build_dl_digest(_dl_stats(pending_alerts=3))
-    assert html != ""
-    assert "3" in html
-    assert "čaká na odoslanie" in html.lower() or "čakajú na odoslanie" in html.lower()
+# --- #312: the three #239 operator gauges were REMOVED from the warehouse digest -----
+#
+# The pre-#312 tests here asserted that `quarantined`/`pending_alerts`/
+# `open_import_incidents` alone TRIGGER the warehouse digest. #312 deliberately reverses
+# that — those gauges are operator diagnostics (admin dashboard only) and must never land
+# on channel 243. The replacement tests live above
+# (`test_operator_gauges_never_appear_in_the_warehouse_digest` /
+# `test_a_day_with_only_operator_gauges_renders_nothing_for_the_warehouse`).
 
 
-def test_open_import_incidents_alone_triggers_the_message():
-    html = report.build_dl_digest(_dl_stats(open_import_incidents=1))
-    assert html != ""
-    assert "problém s importom" in html.lower()
-
-
-def test_a_genuinely_quiet_dl_day_still_renders_nothing_with_gauges_present():
-    """The three new gauges default to 0 via `_dl_stats()` — a quiet day must stay
-    quiet even though the digest now checks three more fields."""
+def test_a_genuinely_quiet_dl_day_still_renders_nothing():
+    """A day with no warehouse activity renders nothing (gauge keys default to 0 and are
+    ignored either way)."""
     assert report.build_dl_digest(_dl_stats()) == ""
 
 
