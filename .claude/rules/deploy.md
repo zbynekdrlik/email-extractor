@@ -284,3 +284,47 @@ actually redirects to `/login` first as proof the session is genuinely clean.
   `kind` values are the expected subset (`customer`/`mail` for orders,
   `dl_item`/`dl_supplier` for DL) — proves the role-boundary filter, not just a 200
   status, per this file's own existing "role/kind security boundary" note above.
+
+## Functionally verifying a board-ENDPOINT fix on prod WITHOUT touching a real customer
+## DL — the synthetic-question pattern (#305, 2026-08-14)
+
+To prove a deployed `/api/orders/question/<qid>/answer` behaviour end-to-end on the live
+box, do NOT click the button on a REAL open question (that defers/mutates a real
+customer's delivery note — e.g. #305's board showed only the live HK LOAN #236 question,
+which must not be deferred as a "test"). Instead drive a SYNTHETIC question through the
+real deployed code, then clean up:
+
+1. **Create** via the app's OWN code path in the container (a clearly-synthetic
+   `message_id` like `VERIFY-305-<ts>`):
+   `cat script.py | sshpass -p "$PW" ssh <ha-host> 'sudo docker exec -i -e PYTHONPATH=/app
+   app_e0ac7775_email_extractor python3 -'` where script.py does
+   `db.connect(cfg.pg_dsn)` + an `INSERT INTO messages (...VERIFY...)` + `teach.ask_dl_item
+   (...)`, printing the new `qid`. (`from app import config, db` — `db` is `app.db`, NOT
+   `app.orders.db`; that import error is the first thing to fix.)
+2. **Exercise the REAL HTTP endpoint** from the Playwright MCP session that already holds
+   the `/sklad-dl/<key>` cookie — `browser_evaluate` a
+   `fetch('/api/orders/question/<qid>/answer', {method:'POST', credentials:'include',
+   headers:{'Content-Type':'application/json'}, body: JSON.stringify({choice:'unknown'})})`
+   and read the JSON (e.g. `{closed:1, ok:true, sklad_unknown:true}` for a working #305
+   defer; the pre-fix code returned a no-op `{ok:true, question:<open>}`).
+3. **Verify + clean up** in one more container script: `SELECT` the question status,
+   message `processed`, latest `email_events` row, then `DELETE` all three synthetic rows
+   and confirm `(0,0,0)` remaining.
+
+This exercises the exact deployed code path with concrete observed values, uses only the
+app's own functions + the real HTTP endpoint, and leaves zero residue in prod. Passwordless
+`sudo docker` works for `newlevelmedia`; `/run/s6/container_environment/HASSIO_TOKEN` is
+readable WITHOUT sudo (`-rw-r--r--`) so the deploy needs no sudo/password for the token —
+only the `cat` of it over ssh needs `# airuleset:secret-read-ok` (captured into
+`SUPERVISOR_TOKEN` for `ha`, never printed).
+
+**Building the `build_dl_digest` from LIVE data to check its CONTENT (#312) is the same
+container-python shape, but fully READ-ONLY** — `reliability.dl_provenance_stats_for_day
+(conn, yesterday, include_current_health=False)` + `report.build_dl_digest(stats)`, then
+assert the HTML lacks the phrases you removed and `include_current_health=True` still
+carries them (the admin-stats path). Never POST it.
+
+**Shell-quoting the run-card:** `notify --run-card --goal '…„Neviem"…'` — the ASCII `"`
+inside a Slovak `„…"` quote pair breaks a DOUBLE-quoted `--goal`/`--achieved` arg (the `"`
+closes the shell quote, argparse then errors "unrecognized arguments" and NO card fires,
+though a piped `| tail` masks the real exit code). Single-quote the whole value.

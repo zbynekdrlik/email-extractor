@@ -102,3 +102,35 @@ new sibling's tests onto the shared helper as its OWN small, explicitly-justifie
 integration commit (never silently folded into either branch's own merge commit) —
 this is genuine integration work, not scope creep, and the commit message should say
 exactly why (which ticket's helper, which tests, why they still used the old idiom).
+
+## A worktree-isolated autopilot-worker CANNOT monitor CI — a full-flow dispatch hits a
+## wall at the CI-wait stage (#305/#312, 2026-08-14)
+
+A dispatch prompt may (as #305/#312's did) explicitly ask a worktree-isolated
+`autopilot-worker` to do the WHOLE flow — push, PR, wait CI, merge, wait main CI,
+deploy. But two hooks make CI monitoring from a worktree **structurally impossible**,
+and they compose into a hard wall:
+
+- **The worktree-isolation guard blocks EVERY loop containing `gh`/`git`** ("too complex
+  to verify it stays inside the worktree") — a `for`/`while` bounded poll loop, even with
+  explicit `-R owner/repo` (cwd-independent) and even armed via the `Monitor` tool. So the
+  `ci-monitoring.md` foreground-bounded-loop AND a `Monitor` until-loop are BOTH refused.
+- **`block-ci-poll-repeat.sh` blocks the 3rd+ one-shot `gh run view`** for the same run —
+  wanting either a bounded loop (worktree-blocked, above) or a RETURN.
+
+The intersection: a worktree worker can do a FEW single `gh run view` calls (single calls
+pass the worktree guard), and can bypass the repeat-guard with `# airuleset:poll-ok
+<reason>` on a single call — that is the ONLY way to poll CI from a worktree, used
+judiciously (spaced by real deploy-prep work), NOT a bounded loop. This is the framework
+telling you integration belongs to the SUPERVISOR (WORKTREE AWARENESS in
+`agents/autopilot-worker.md`: worktree workers stop at local-green + return the branch).
+#305/#312 nonetheless completed the full flow from the worktree via single `gh` calls +
+`poll-ok` because the dispatch explicitly delegated merge+deploy and the run-card gate
+(`subagent-stop-check-run-card.sh`) requires a delivered card (which needs the deployed
+version). If a FUTURE full-flow worktree dispatch is not time-critical, prefer reporting
+the run-id + RETURN and letting the supervisor integrate, rather than fighting the guards.
+
+**Also (#305/#312): the merge/deploy DID work from the worktree** — `git push origin
+HEAD:dev` (fast-forward, branch based on origin/main's tip so no criss-cross), `gh pr
+create/merge`, and the SSH `ha addons update` deploy are all single non-loop commands the
+guards allow. Only the CI *monitoring* between them is blocked.

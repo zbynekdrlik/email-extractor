@@ -1116,12 +1116,42 @@ SCHEMA = [
 ]
 
 
+# --- #314 (revision 2): non-warehouse supplier memory ------------------------------
+# The suppliers the warehouse marked "Netýka sa skladu" (#307), remembered so their LATER
+# mails stop generating board questions (see app/orders/dl_nonwarehouse.py). Keyed on the
+# supplier's OWN identity from the document — registry EAN ∪ normalized name — with the
+# email a stored fallback only. The UNIQUE (supplier_ean, name_key, sender_email) index is
+# the dedup contract remember()'s ON CONFLICT relies on; empty strings collide as equal,
+# which is DELIBERATE here (that IS the dedup — one row per identity), the opposite of the
+# #248 case where a blank collision was a bug.
+DL_NONWAREHOUSE_SUPPLIER = [
+    """
+    CREATE TABLE IF NOT EXISTS dl_nonwarehouse_supplier (
+        id           BIGSERIAL PRIMARY KEY,
+        supplier_ean TEXT NOT NULL DEFAULT '',
+        name_key     TEXT NOT NULL DEFAULT '',
+        sender_email TEXT NOT NULL DEFAULT '',
+        name         TEXT NOT NULL DEFAULT '',
+        marked_by    TEXT NOT NULL DEFAULT 'sklad',
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_dl_nonwarehouse_supplier_identity "
+    "ON dl_nonwarehouse_supplier (supplier_ean, name_key, sender_email)",
+    "CREATE INDEX IF NOT EXISTS idx_dl_nonwarehouse_supplier_ean "
+    "ON dl_nonwarehouse_supplier (supplier_ean) WHERE supplier_ean <> ''",
+    "CREATE INDEX IF NOT EXISTS idx_dl_nonwarehouse_supplier_name "
+    "ON dl_nonwarehouse_supplier (name_key) WHERE name_key <> ''",
+]
+
+
 # SCHEMA above is FROZEN as revision 1 (the baseline). NEVER edit those statements for a
 # schema change — append a NEW numbered migrate.Revision to this list instead
 # (immutable-migrations, #269). run_migrations() applies only the unapplied revisions, in
 # order, each in its own transaction, and records them in the schema_version ledger.
 REVISIONS = [
     migrate.Revision(migrate.BASELINE_REVISION, "baseline", SCHEMA),
+    migrate.Revision(2, "add_dl_nonwarehouse_supplier", DL_NONWAREHOUSE_SUPPLIER),
 ]
 
 

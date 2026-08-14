@@ -98,6 +98,17 @@ def main() -> None:
              __version__, cfg.folders, cfg.poll_interval)
     conn = db.connect(cfg.pg_dsn)
     db.init_schema(conn)          # run migrations BEFORE the dashboard serves requests
+    try:
+        # #314: one-time-ish idempotent seed of the non-warehouse supplier memory from
+        # historical "Netýka sa skladu" closures + a sweep of any still-open question whose
+        # supplier is already remembered. Gated on the python DL engine (same condition
+        # tick()'s live branch uses) so a config rollback to n8n-owned DL never lets the
+        # sweep auto-close questions / mark messages processed (review finding). Never fatal.
+        if getattr(cfg, "delivery_notes_engine", "") == "python":
+            from .orders import dl_nonwarehouse
+            dl_nonwarehouse.bootstrap(conn, cfg)
+    except Exception:
+        log.exception("dl_nonwarehouse bootstrap failed (non-fatal)")
     httpapi.start(cfg)
     start_order_worker(cfg)
     while True:

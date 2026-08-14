@@ -787,13 +787,20 @@ def _undo_dl_item(conn, q: dict) -> dict:
 
 
 def ask_dl_supplier(conn, message_id: str, sender_email: str, candidates: list[dict],
-                    delivery_date: str = "", on_new=None) -> int | None:
+                    delivery_date: str = "", supplier_name: str = "",
+                    supplier_city: str = "", on_new=None) -> int | None:
     """Raise ONE 'ktorý dodávateľ?' question — one per sender address, mirrors
     `ask_customer`'s own address-keyed dedupe exactly (R61's own supplier-whitelist miss).
 
     `candidates` takes the natural supplier shape (`{"ean_edi": ..., "name": ...}`, same as
     `dl_match.supplier_candidates()` returns) — translated to `{value, label}` before
     storage, same reasoning as `ask_dl_item` above.
+
+    #314: `supplier_name`/`supplier_city` are the EXTRACTED document identity (the caller has
+    them on hand as `doc.supplierName`/`doc.supplierCity`). Stored in the payload so a later
+    'Netýka sa skladu' close (`dl_nonwarehouse.record_for_message`) can remember an
+    UNREGISTERED non-warehouse supplier by its document name, not only its email address
+    (req 3) — additive, defaulting to "" for every pre-#314 caller.
 
     Skips (returns `None`, asks nothing) when this exact address is ALREADY taught — same
     `ask_dl_item` reasoning above, using `dl_supplier_memory.resolve()` instead of
@@ -808,7 +815,9 @@ def ask_dl_supplier(conn, message_id: str, sender_email: str, candidates: list[d
     return ask_generic(
         conn, "dl_supplier", message_id, f"dlsupplier:{key}", sender_email,
         options, "Dodávateľ nebol nájdený v databáze dodávateľov",
-        {"sender_email": sender_email or ""}, delivery_date=delivery_date, on_new=on_new)
+        {"sender_email": sender_email or "", "supplier_name": supplier_name or "",
+         "supplier_city": supplier_city or ""},
+        delivery_date=delivery_date, on_new=on_new)
 
 
 def _present_dl_supplier(q: dict) -> dict:

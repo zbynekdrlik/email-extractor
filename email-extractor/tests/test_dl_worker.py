@@ -20,6 +20,7 @@ from app.orders import (
     desadv,
     desadv_edi,
     dl_memory,
+    dl_nonwarehouse,
     dl_snapshot,
     dl_supplier_memory,
     dl_worker,
@@ -3058,3 +3059,153 @@ def test_upload_failure_alert_never_leaks_the_raw_error_to_243(pg, tmp_path):
     ev = pg.execute("SELECT detail::text FROM email_events WHERE message_id='dl1' "
                     "AND status='error' ORDER BY id DESC LIMIT 1").fetchone()
     assert ev and "__RAW_UP__" in ev[0]
+
+
+# --- #314: non-warehouse supplier memory — stop generating questions forever ----------
+
+def test_remembered_nonwarehouse_supplier_stops_generating_questions(pg, tmp_path):
+    """#314 (RED->GREEN): once the warehouse marks a DL question 'Netyka sa skladu'
+    (#307's `close_message_not_warehouse`), the SUPPLIER is remembered — a LATER mail
+    from the same supplier produces ZERO new board questions and is handled terminally
+    (`not_warehouse`, no upload), instead of re-asking the same non-warehouse item forever.
+    Before the fix the second mail re-raised an identical dl_item question."""
+    _snapshot(pg)
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    nw_item = [{"name": "Pracovny odev vzor", "quantity": 1, "unit": "ks",
+                "unitPrice": 9.0, "totalPrice": 9.0}]
+    nw_answer = {"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                 "matchReason": "ziadna zhoda — nie skladovy tovar"}
+
+    # 1) a registered supplier whose item does NOT match the bakery catalog -> dl_item Q
+    _msg(pg, mid="nw1")
+    _attach(pg, tmp_path, "nw1")
+    dl_worker.tick(pg, cfg, client=FakeClient({
+        "dl_documents": [_doc(total=9.0, items=nw_item)],
+        "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [nw_answer]}),
+        post=lambda c, h: None)
+    qid = pg.execute("SELECT id FROM order_questions WHERE kind='dl_item' "
+                     "AND status='open'").fetchone()[0]
+
+    # 2) the warehouse marks it 'Netyka sa skladu' (#307) -> MUST remember the supplier
+    dl_worker.close_message_not_warehouse(pg, qid)
+
+    # 3) a SECOND mail from the SAME supplier, same non-warehouse item
+    _msg(pg, mid="nw2")
+    _attach(pg, tmp_path, "nw2")
+    uploaded: list = []
+    dl_worker.tick(pg, cfg, client=FakeClient({
+        "dl_documents": [_doc(total=9.0, items=nw_item)],
+        "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [nw_answer]}),
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+        post=lambda c, h: None)
+
+    # ZERO new questions, nothing uploaded, message handled terminally as not_warehouse
+    assert pg.execute("SELECT count(*) FROM order_questions WHERE status='open'"
+                      ).fetchone()[0] == 0
+    assert uploaded == []
+    row = pg.execute("SELECT processed, proc_status FROM messages "
+                     "WHERE message_id='nw2'").fetchone()
+    assert row[0] is True
+    assert row[1] == "not_warehouse"
+
+
+def test_remembered_nonwarehouse_supplier_with_catalog_match_still_ships(pg, tmp_path):
+    """#314 req 4 (GTIN-match SAFETY OVERRIDE): a mail from a remembered non-warehouse
+    supplier that DOES carry a catalog item is NEVER silently dropped — it goes through
+    normal processing (builds + uploads the EDI), not the not_warehouse short-circuit. This
+    is what keeps a mixed supplier (EKVIA/Messer send BOTH režíjne faktúry AND real
+    deliveries) safe: only their non-warehouse mail is skipped, never a real delivery."""
+    _snapshot(pg)
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    # the supplier is remembered non-warehouse (by its registry ean + name)
+    dl_nonwarehouse.remember(pg, SUPPLIER_EAN, "Pekáreň Lunys", "")
+    _msg(pg, mid="ov1")
+    _attach(pg, tmp_path, "ov1")
+    uploaded: list = []
+    dl_worker.tick(pg, cfg, client=FakeClient({
+        "dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+        "dl_item": [ITEM_MATCHED]}),
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+        post=lambda c, h: None)
+
+    # the real catalog item shipped despite the supplier being remembered non-warehouse
+    assert len(uploaded) == 1
+    assert pg.execute("SELECT proc_status FROM messages WHERE message_id='ov1'"
+                      ).fetchone()[0] != "not_warehouse"
+
+
+def test_a_non_remembered_supplier_still_asks_its_dl_item_question(pg, tmp_path):
+    """#314 must not change the behaviour for a supplier that was NEVER marked
+    not_warehouse: an unmatched item still raises its dl_item board question exactly as
+    before (the deferred-ask refactor is behaviour-preserving)."""
+    _snapshot(pg)
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    nw_item = [{"name": "Pracovny odev vzor", "quantity": 1, "unit": "ks",
+                "unitPrice": 9.0, "totalPrice": 9.0}]
+    _msg(pg, mid="reg1")
+    _attach(pg, tmp_path, "reg1")
+    dl_worker.tick(pg, cfg, client=FakeClient({
+        "dl_documents": [_doc(total=9.0, items=nw_item)],
+        "dl_supplier": [SUPPLIER_MATCHED],
+        "dl_item": [{"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                     "matchReason": "ziadna zhoda"}]}),
+        post=lambda c, h: None)
+    assert pg.execute("SELECT count(*) FROM order_questions WHERE kind='dl_item' "
+                      "AND status='open'").fetchone()[0] == 1
+
+
+SUPPLIER_UNMATCHED = {"matched": False, "matchReason": "dodávateľ nenájdený v databáze"}
+
+
+def test_aggregate_status_mixed_not_warehouse_and_review_is_review():
+    """#314 review 🟡: a mixed message (one auto-skipped not_warehouse doc + one doc that
+    needs a human) must NOT roll up to 'ok'."""
+    assert dl_worker._aggregate_status(
+        [{"outcome": "not_warehouse"}, {"outcome": "review"}]) == "review"
+    assert dl_worker._aggregate_status([{"outcome": "not_warehouse"}]) == "not_warehouse"
+    assert dl_worker._aggregate_status(
+        [{"outcome": "not_warehouse"}, {"outcome": "duplicate"}]) == "not_warehouse"
+
+
+def test_remembered_unmatched_supplier_with_no_catalog_match_is_skipped(pg, tmp_path):
+    """#314 review 🟡 (case B coverage): an UNREGISTERED (unmatched) supplier remembered as
+    non-warehouse, whose document has no catalog match, is terminally skipped — no
+    dl_supplier question, no upload."""
+    _snapshot(pg)
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    dl_nonwarehouse.remember(pg, "", "Pekáreň Lunys", "")   # remembered by extracted name
+    nw_item = [{"name": "Pracovny odev", "quantity": 1, "unit": "ks",
+                "unitPrice": 9.0, "totalPrice": 9.0}]
+    _msg(pg, mid="cb1")
+    _attach(pg, tmp_path, "cb1")
+    uploaded: list = []
+    dl_worker.tick(pg, cfg, client=FakeClient({
+        "dl_documents": [_doc(total=9.0, items=nw_item)],
+        "dl_supplier": [SUPPLIER_UNMATCHED],
+        "dl_item": [{"gtin": "NO_MATCH", "matchConfidence": 0.0, "matchReason": "nič"}]}),
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+        post=lambda c, h: None)
+    assert pg.execute("SELECT count(*) FROM order_questions WHERE status='open'"
+                      ).fetchone()[0] == 0
+    assert uploaded == []
+    assert pg.execute("SELECT proc_status FROM messages WHERE message_id='cb1'"
+                      ).fetchone()[0] == "not_warehouse"
+
+
+def test_remembered_unmatched_supplier_with_a_catalog_match_still_asks(pg, tmp_path):
+    """#314 review 🔴/🟡 (case B safety override): an UNREGISTERED remembered supplier whose
+    document DOES carry a catalog item is NOT dropped — it still raises the dl_supplier
+    question so a human can identify the supplier and ship the genuine goods."""
+    _snapshot(pg)
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    dl_nonwarehouse.remember(pg, "", "Pekáreň Lunys", "")
+    _msg(pg, mid="cb2")
+    _attach(pg, tmp_path, "cb2")
+    dl_worker.tick(pg, cfg, client=FakeClient({
+        "dl_documents": [_doc()], "dl_supplier": [SUPPLIER_UNMATCHED],
+        "dl_item": [ITEM_MATCHED]}),
+        post=lambda c, h: None)
+    assert pg.execute("SELECT count(*) FROM order_questions WHERE kind='dl_supplier' "
+                      "AND status='open'").fetchone()[0] == 1
+    assert pg.execute("SELECT proc_status FROM messages WHERE message_id='cb2'"
+                      ).fetchone()[0] != "not_warehouse"
