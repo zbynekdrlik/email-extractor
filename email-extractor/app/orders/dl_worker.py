@@ -1488,6 +1488,60 @@ def close_message_not_warehouse(conn, qid: int) -> dict:
     return {"closed": len(closed), "message_id": message_id}
 
 
+def close_message_sklad_unknown(conn, qid: int) -> dict:
+    """#305 (variant A): the skladníčka clicked „Neviem" on a DL question — she cannot
+    identify which card/supplier a line belongs to. Marek's decision (14.8.): ODLOŽ the
+    whole delivery note. The sibling of `close_message_not_warehouse` (#307), terminal and
+    MESSAGE-level:
+
+    (1) close EVERY still-open `dl_item`/`dl_supplier` question of the SAME message with
+        the terminal status 'sklad_unknown' — the whole DL is deferred, not just the one
+        line she clicked (she cannot complete the note without every card resolved);
+    (2) mark the message HANDLED WITHOUT EDI — `processed=true`, plus a rollup skip
+        `email_events` entry with `status='review'` (the REVIEW flavour, so Marek sees it
+        as "needs attention" in the daily digest — vs #307's terminal 'done' flavour), and
+        deliberately NOT the OK/EDI logger (the skip-branch rule in
+        `.claude/rules/n8n-workflow-edits.md`);
+    (3) upload NOTHING to ORION.
+
+    Marking the message `processed` is load-bearing, not cosmetic: the ask-dedup index is
+    only `WHERE status='open'`, so leaving the message unprocessed would let the
+    stale-reclaim / reprocess path re-raise the identical question (`_claim`'s own
+    `WHERE processed = false`). The `email_events` row is what the daily digest counts as
+    "odložené (sklad nevie)" (`reliability.dl_provenance_stats_for_day`), so a deferred DL
+    is never silently lost — Marek resolves it by hand.
+
+    A message deferred this way keeps its `sklad_unknown` question rows, so
+    `_release_stuck_siblings` (which requires ZERO `order_questions` rows) never re-picks
+    it. Everything runs in one `deps.db_tx()` transaction (safe — no external side effect).
+    """
+    qrow = conn.execute(
+        "SELECT message_id FROM order_questions WHERE id = %s", (qid,)).fetchone()
+    if not qrow:
+        return {"closed": 0, "message_id": None}
+    message_id = qrow[0]
+    closed = conn.execute(
+        """UPDATE order_questions
+              SET status = 'sklad_unknown', answer = '{"sklad_unknown": true}'::jsonb,
+                  answered_by = %s, answered_at = now()
+            WHERE message_id = %s AND kind IN ('dl_item', 'dl_supplier')
+              AND status = 'open'
+            RETURNING id""", ("sklad", message_id)).fetchall()
+    conn.execute(
+        """UPDATE messages
+              SET processed = true, processed_at = now(), processed_by = %s,
+                  processing_at = NULL
+            WHERE message_id = %s""", (CATEGORY, message_id))
+    report.log_event(conn, message_id, stage="sklad_unknown", status="review",
+                     outcome="Sklad nevie identifikovať dodací list — odložený na ručné "
+                             "doriešenie (nájdeš ho v dennom súhrne).",
+                     detail={"closed_questions": len(closed)},
+                     rollup=True, workflow=dl_report.WORKFLOW)
+    log.info("DL message %s deferred (sklad Neviem); %s question(s) closed, no EDI",
+             message_id, len(closed))
+    return {"closed": len(closed), "message_id": message_id}
+
+
 # #265 gap 2: `ask_dl_supplier`'s per-sender dedupe (`ON CONFLICT ... DO NOTHING`, the
 # SAME `order_questions(customer_ean, item_key) WHERE status='open'` index every other
 # kind shares) means only the FIRST `dodacie_listy` message from a still-unregistered

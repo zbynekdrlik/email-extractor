@@ -281,11 +281,12 @@ def build_dl_digest(dl_stats: dict | None, link: str = "") -> str:
     dl_runs = int(dl.get("runs") or 0)
     dl_dups = int(dl.get("duplicates") or 0)
     dl_mismatch = int(dl.get("announced_mismatch") or 0)
+    dl_sklad_unknown = int(dl.get("sklad_unknown") or 0)
     dl_quarantined = int(dl.get("quarantined") or 0)
     dl_pending_alerts = int(dl.get("pending_alerts") or 0)
     dl_open_import = int(dl.get("open_import_incidents") or 0)
-    if not (dl_runs or dl_dups or dl_mismatch or dl_quarantined or dl_pending_alerts
-           or dl_open_import):
+    if not (dl_runs or dl_dups or dl_mismatch or dl_sklad_unknown or dl_quarantined
+           or dl_pending_alerts or dl_open_import):
         return ""
 
     # The "5 attempts" number is read from the stats dict (`reliability.
@@ -316,6 +317,15 @@ def build_dl_digest(dl_stats: dict | None, link: str = "") -> str:
                      _plural(dl_mismatch, "e-mail ohlásil dodací list, ktorý neprišiel",
                              "e-maily ohlásili dodací list, ktorý neprišiel",
                              "e-mailov ohlásilo dodací list, ktorý neprišiel") + "</p>")
+    if dl_sklad_unknown:
+        parts.append(f"<p>&#128204; {dl_sklad_unknown} " +
+                     _plural(dl_sklad_unknown,
+                             "dodací list odložený (sklad nevie identifikovať) &mdash; "
+                             "treba doriešiť ručne",
+                             "dodacie listy odložené (sklad nevie identifikovať) &mdash; "
+                             "treba doriešiť ručne",
+                             "dodacích listov odložených (sklad nevie identifikovať) "
+                             "&mdash; treba doriešiť ručne") + "</p>")
     if dl_quarantined:
         parts.append(f"<p>&#128683; {dl_quarantined} " +
                      _plural(dl_quarantined,

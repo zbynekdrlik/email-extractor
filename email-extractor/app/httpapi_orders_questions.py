@@ -346,6 +346,16 @@ def register(app: Flask, deps: Deps) -> None:
         except teach.NotACandidate as e:
             return jsonify(error=str(e)), 400
         if not choice:
+            # #305 (variant A): „Neviem" on a DL question is NOT the #164 stays-open escape
+            # it is for mail/date/line — it ODLOŽ (defers) the whole delivery note. Terminal
+            # + message-level, one transaction, nothing to ORION
+            # (`dl_worker.close_message_sklad_unknown`), the sibling of #307's not_warehouse.
+            # Every other kind keeps the universal escape (the question stays open + visible).
+            if q.get("kind") in ("dl_item", "dl_supplier"):
+                from .orders import dl_worker
+                with deps.db_tx() as c:
+                    res = dl_worker.close_message_sklad_unknown(c, qid)
+                return jsonify(ok=True, sklad_unknown=True, closed=res.get("closed", 0))
             return jsonify(ok=True, question=q, released=[])
         # Same split as the item/customer branches above (review finding on PR #116,
         # reused here): the answer itself commits in its own transaction; `apply` (which
