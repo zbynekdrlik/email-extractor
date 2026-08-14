@@ -2933,3 +2933,128 @@ def test_release_stuck_siblings_is_bounded_so_a_large_backlog_never_storms(pg):
 def test_release_stuck_siblings_does_nothing_when_sender_is_blank(pg):
     assert dl_worker._release_stuck_siblings(pg, "exclude-me", "") == 0
     assert dl_worker._release_stuck_siblings(pg, "exclude-me", "   ") == 0
+
+
+# --- #312: raw exception text must never leak into the warehouse channel/board -------
+#
+# Channel 243 (delivery_notes_channel_id) and the /sklad-dl board are USER (warehouse)
+# surfaces. A raw Python exception repr (`f"...: {e}"`, or an attachment's own `str(e)`)
+# tells the skladníčka nothing and leaks internal class/path detail across the app→user
+# boundary. After the fix the technical detail lives ONLY in the log + email_events.detail,
+# and the warehouse sees a clean, actionable sentence. These assert the raw token is gone
+# from every warehouse surface — they FAIL on the pre-fix `{e}` interpolation ([red]).
+
+_RAW_EXC = "SecretInternalBoom KeyError AEDIEAN at dl_match.py:412"
+
+
+class _ItemRaisingClient:
+    """Extraction + supplier match succeed; the ITEM match call raises (dl_worker:688)."""
+
+    def __init__(self, message):
+        self.message = message
+        self.last_prompt_hash = ""
+
+    def json_call(self, system, user, schema, name="result"):
+        self.last_prompt_hash = name
+        if name == "dl_documents":
+            return _doc()
+        if name == "dl_supplier":
+            return SUPPLIER_MATCHED
+        raise Exception(self.message)
+
+    def vision_call(self, *a, **kw):
+        raise AssertionError
+
+
+class _ExtractRaisingClient:
+    """Every extraction call raises → the attachment gets an `error` (dl_worker:1146/1148)."""
+
+    def __init__(self, message):
+        self.message = message
+        self.last_prompt_hash = ""
+
+    def json_call(self, system, user, schema, name="result"):
+        self.last_prompt_hash = name
+        raise Exception(self.message)
+
+    def vision_call(self, *a, **kw):
+        raise Exception(self.message)
+
+
+def test_supplier_match_failure_never_leaks_the_raw_exception_to_243(pg, tmp_path):
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    posted = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    # RaisingClient: extraction succeeds, the SUPPLIER match call raises
+    n = dl_worker.tick(pg, cfg, client=RaisingClient(_RAW_EXC),
+                       post=lambda c, h: posted.append(h))
+    assert n == 1 and len(posted) == 1
+    # the raw exception repr must be GONE from the warehouse channel
+    assert _RAW_EXC not in posted[0]
+    assert "SecretInternalBoom" not in posted[0] and "dl_match.py" not in posted[0]
+    # the specific clean, warehouse-actionable sentence (not merely the meta label)
+    assert "nepodarilo sa priradiť dodávateľa" in posted[0].lower()
+    # ...but the technical detail is preserved internally in email_events.detail (never 243)
+    ev = pg.execute("SELECT detail::text FROM email_events WHERE message_id='dl1' "
+                    "AND status='error' ORDER BY id DESC LIMIT 1").fetchone()
+    assert ev and _RAW_EXC in ev[0]
+
+
+def test_item_match_failure_never_leaks_the_raw_exception_to_the_board(pg, tmp_path):
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    posted = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=_ItemRaisingClient(_RAW_EXC),
+                       post=lambda c, h: posted.append(h))
+    assert n == 1
+    # the dl_item question raised for the unmatched line must not carry the raw exception
+    reason = pg.execute("SELECT reason FROM order_questions WHERE message_id='dl1' "
+                        "AND kind='dl_item' ORDER BY id DESC LIMIT 1").fetchone()
+    assert reason is not None
+    assert _RAW_EXC not in (reason[0] or "") and "SecretInternalBoom" not in (reason[0] or "")
+    # and it never leaks into the channel post either
+    assert all(_RAW_EXC not in h for h in posted)
+
+
+def test_attachment_extraction_error_never_leaks_the_raw_error_to_243(pg, tmp_path):
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    posted = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=_ExtractRaisingClient(_RAW_EXC),
+                       post=lambda c, h: posted.append(h))
+    assert n == 1 and posted
+    assert all(_RAW_EXC not in h and "SecretInternalBoom" not in h for h in posted)
+
+
+def test_upload_failure_alert_never_leaks_the_raw_error_to_243(pg, tmp_path):
+    """#312 (4th boundary site, review finding): the durable upload-failure alert
+    (`_alert_and_release` → `dl_alerts.enqueue`, channel 243) must not carry the raw
+    SFTP/ORION exception either — a clean sentence only, raw error to the log."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+
+    def _raise_upload(c, name, content, dir_override=None):
+        raise OSError("paramiko auth failed for user granc at 10.9.9.9:22 __RAW_UP__")
+
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, upload=_raise_upload)
+    assert n == 1
+    body = pg.execute(
+        "SELECT body_html FROM pending_alerts WHERE kind='dl_upload_failed'").fetchone()
+    assert body is not None
+    # the clean, warehouse-facing sentence is there; the raw exception is NOT
+    assert "Odoslanie dodacieho listu do ORIONu zlyhalo" in body[0]
+    assert "__RAW_UP__" not in body[0] and "paramiko" not in body[0] and "10.9.9.9" not in body[0]
+    # ...but preserved internally in email_events.detail (never on the channel)
+    ev = pg.execute("SELECT detail::text FROM email_events WHERE message_id='dl1' "
+                    "AND status='error' ORDER BY id DESC LIMIT 1").fetchone()
+    assert ev and "__RAW_UP__" in ev[0]

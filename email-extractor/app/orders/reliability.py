@@ -136,17 +136,22 @@ def dl_provenance_stats_for_day(conn, day: str = "",
 
     events_row = conn.execute(
         """SELECT count(*) FILTER (WHERE stage = 'duplicate_skip'),
-                  count(*) FILTER (WHERE stage = 'announced_mismatch')
+                  count(*) FILTER (WHERE stage = 'announced_mismatch'),
+                  count(*) FILTER (WHERE stage = 'sklad_unknown')
              FROM email_events
             WHERE workflow = 'delivery_notes'
               AND to_char(ts, 'YYYY-MM-DD')
                   = coalesce(nullif(%s, ''), to_char(now(), 'YYYY-MM-DD'))""",
         (day,)).fetchone()
-    dup_n, mismatch_n = (int(x or 0) for x in events_row)
+    dup_n, mismatch_n, sklad_unknown_n = (int(x or 0) for x in events_row)
 
+    # #305: each „Neviem"-deferred DL logs one rollup `stage='sklad_unknown'` event, so
+    # this is the count of delivery notes the warehouse set aside that day for Marek's
+    # manual resolution — rendered as its own line in the warehouse-facing digest.
     stats = {"day": day or _today(conn), "runs": runs_n, "errors": errors_n,
             "items": items_n, "deterministic": det_n, "llm": llm_n, "review": review_n,
-            "duplicates": dup_n, "announced_mismatch": mismatch_n}
+            "duplicates": dup_n, "announced_mismatch": mismatch_n,
+            "sklad_unknown": sklad_unknown_n}
     if include_current_health:
         stats.update(dl_current_health(conn))
     return stats
@@ -235,7 +240,9 @@ def maybe_post_daily_digest(conn, cfg, post=None, shadow: bool = False) -> bool:
     except Exception:
         log.exception("posting the daily provenance digest failed")
 
-    dl_stats = dl_provenance_stats_for_day(conn, yesterday)
+    # #312: `build_dl_digest` no longer renders the three `dl_current_health` gauges, so
+    # skip computing them on the digest path — they stay on `/api/orders/dl/stats`.
+    dl_stats = dl_provenance_stats_for_day(conn, yesterday, include_current_health=False)
     dl_html = report.build_dl_digest(dl_stats, link=report.dl_sklad_link(cfg))
     if dl_html:
         dl_channel = int(getattr(cfg, "delivery_notes_channel_id", 0) or 0)

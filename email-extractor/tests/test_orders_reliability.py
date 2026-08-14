@@ -130,6 +130,22 @@ def test_dl_duplicate_and_mismatch_events_are_counted(pg):
     assert stats["announced_mismatch"] == 1
 
 
+def test_dl_provenance_stats_counts_sklad_unknown_deferred_notes(pg):
+    """#305: each „Neviem"-deferred DL logs one rollup stage='sklad_unknown' event —
+    dl_provenance_stats counts them so the daily digest can show „odložené (sklad nevie)"
+    for Marek. This pins the count layer of that promise (the digest render is pinned in
+    test_orders_report.py)."""
+    from app.orders import report
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('su1', 'dodacie_listy')")
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('su2', 'dodacie_listy')")
+    report.log_event(pg, "su1", stage="sklad_unknown", status="review",
+                     outcome="odložené", rollup=True, workflow="delivery_notes")
+    report.log_event(pg, "su2", stage="sklad_unknown", status="review",
+                     outcome="odložené", rollup=True, workflow="delivery_notes")
+    stats = reliability.dl_provenance_stats_for_day(pg)   # today, default
+    assert stats["sklad_unknown"] == 2
+
+
 ## --- #239: three current-state gauges, dashboard/digest half of requirement 1 -------
 
 def test_dl_provenance_stats_includes_the_quarantined_count(pg):

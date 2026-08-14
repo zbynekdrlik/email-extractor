@@ -645,13 +645,18 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         supplier_decision = _match_supplier(conn, client, doc, suppliers, sender_email)
     except Exception as e:
         _check_retry(message.get("attempts", 0), str(e))
-        reason = f"Zlyhalo párovanie dodávateľa: {e}"
+        # #312: the raw exception repr must NOT reach the warehouse channel (243) — a
+        # clean, actionable sentence goes there; the technical detail stays in the log
+        # and in `email_events.detail` (internal), never on the user surface.
+        log.warning("DL supplier match failed for message %s doc %s: %s",
+                    message["message_id"], doc_number, e)
+        reason = "Nepodarilo sa priradiť dodávateľa — over dodací list ručne."
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, "", doc_number, delivery_date, from_addr, subject, link=link),
             post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="error",
-              outcome=reason, detail={"doc_number": doc_number}, rollup=False,
-              workflow=dl_report.WORKFLOW)
+              outcome=reason, detail={"doc_number": doc_number, "error": str(e)},
+              rollup=False, workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": doc_number, "supplier_name": "",
                "reason": reason}
 
@@ -682,10 +687,15 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             decision = _match_item(client, item, catalog, recalled, supplier_decision.name)
         except Exception as e:
             _check_retry(message.get("attempts", 0), str(e))
+            # #312: the item note is warehouse-facing (it becomes the dl_item board
+            # question's reason) — a clean sentence, raw exception only to the log.
+            log.warning("DL item match failed for message %s item %r: %s",
+                        message["message_id"], item.get("name", ""), e)
             decision = dl_match.Decision(
                 item_name=item.get("name", ""), gtin=None, card="", mass=0.0,
                 confidence=0.0, rule="match_failed",
-                note=f"Zlyhalo párovanie položky: {e}", review=True)
+                note="Položku sa nepodarilo priradiť ku karte — over ju ručne.",
+                review=True)
         decisions.append((item, decision))
         matched_items.append({
             "gtin": decision.gtin, "name": decision.item_name,
@@ -866,7 +876,11 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         log.exception("DL upload of %s failed", built.filename)
         note = ("Odoslanie dodacieho listu do ORIONu zlyhalo — skús znova alebo "
                "nahlás administrátorovi")
-        detail_text = f"{note} ({built.filename}): {err}"
+        # #312: the raw upload exception must NOT reach the warehouse channel (243) — a
+        # clean sentence (with the delivery-note filename, which IS warehouse-relevant)
+        # goes into the alert; the raw error stays in the log (`log.exception` above) and
+        # in `email_events.detail` (below), never on the user surface.
+        detail_text = f"{note} ({built.filename})."
         # Deep-review finding on this ticket's own PR: `stuck_classified_sweep` below
         # already bails out when `delivery_notes_channel_id` resolves to 0 (unset) —
         # this call site needs the SAME guard, or an unset channel would enqueue a
@@ -1139,14 +1153,19 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     for att in extraction["attachments"]:
         if att.get("error"):
             _check_retry(message.get("attempts", 0), att["error"])
+            # #312: the raw extraction error (str(e) from dl_extract) must NOT reach the
+            # warehouse channel (243) — a clean sentence goes there, the technical detail
+            # only to the log.
+            log.warning("DL extraction failed for message %s idx %s: %s",
+                        message["message_id"], att.get("idx"), att["error"])
             # #258 deep-review finding: the body-text pseudo-source is NOT a "príloha"
             # (attachment) — calling it one in a message a human reads is exactly the
             # category confusion this ticket exists to eliminate.
             if att.get("idx") == _BODY_TEXT_IDX:
-                reason = f"Text e-mailu sa nepodarilo spracovať: {att['error']}"
+                reason = "Text e-mailu sa nepodarilo spracovať — over ho ručne."
             else:
-                reason = (f"Príloha {att.get('filename') or att.get('idx')} sa nepodarilo "
-                          f"spracovať: {att['error']}")
+                reason = (f"Prílohu {att.get('filename') or att.get('idx')} sa nepodarilo "
+                          f"spracovať — over ju ručne.")
             documents_out.append(_flag_attachment(
                 conn, cfg, shadow, message, link, att, reason, status="error", post=post))
 
@@ -1484,6 +1503,60 @@ def close_message_not_warehouse(conn, qid: int) -> dict:
                      detail={"closed_questions": len(closed)},
                      rollup=True, workflow=dl_report.WORKFLOW)
     log.info("DL message %s marked not_warehouse (sklad); %s question(s) closed, no EDI",
+             message_id, len(closed))
+    return {"closed": len(closed), "message_id": message_id}
+
+
+def close_message_sklad_unknown(conn, qid: int) -> dict:
+    """#305 (variant A): the skladníčka clicked „Neviem" on a DL question — she cannot
+    identify which card/supplier a line belongs to. Marek's decision (14.8.): ODLOŽ the
+    whole delivery note. The sibling of `close_message_not_warehouse` (#307), terminal and
+    MESSAGE-level:
+
+    (1) close EVERY still-open `dl_item`/`dl_supplier` question of the SAME message with
+        the terminal status 'sklad_unknown' — the whole DL is deferred, not just the one
+        line she clicked (she cannot complete the note without every card resolved);
+    (2) mark the message HANDLED WITHOUT EDI — `processed=true`, plus a rollup skip
+        `email_events` entry with `status='review'` (the REVIEW flavour, so Marek sees it
+        as "needs attention" in the daily digest — vs #307's terminal 'done' flavour), and
+        deliberately NOT the OK/EDI logger (the skip-branch rule in
+        `.claude/rules/n8n-workflow-edits.md`);
+    (3) upload NOTHING to ORION.
+
+    Marking the message `processed` is load-bearing, not cosmetic: the ask-dedup index is
+    only `WHERE status='open'`, so leaving the message unprocessed would let the
+    stale-reclaim / reprocess path re-raise the identical question (`_claim`'s own
+    `WHERE processed = false`). The `email_events` row is what the daily digest counts as
+    "odložené (sklad nevie)" (`reliability.dl_provenance_stats_for_day`), so a deferred DL
+    is never silently lost — Marek resolves it by hand.
+
+    A message deferred this way keeps its `sklad_unknown` question rows, so
+    `_release_stuck_siblings` (which requires ZERO `order_questions` rows) never re-picks
+    it. Everything runs in one `deps.db_tx()` transaction (safe — no external side effect).
+    """
+    qrow = conn.execute(
+        "SELECT message_id FROM order_questions WHERE id = %s", (qid,)).fetchone()
+    if not qrow:
+        return {"closed": 0, "message_id": None}
+    message_id = qrow[0]
+    closed = conn.execute(
+        """UPDATE order_questions
+              SET status = 'sklad_unknown', answer = '{"sklad_unknown": true}'::jsonb,
+                  answered_by = %s, answered_at = now()
+            WHERE message_id = %s AND kind IN ('dl_item', 'dl_supplier')
+              AND status = 'open'
+            RETURNING id""", ("sklad", message_id)).fetchall()
+    conn.execute(
+        """UPDATE messages
+              SET processed = true, processed_at = now(), processed_by = %s,
+                  processing_at = NULL
+            WHERE message_id = %s""", (CATEGORY, message_id))
+    report.log_event(conn, message_id, stage="sklad_unknown", status="review",
+                     outcome="Sklad nevie identifikovať dodací list — odložený na ručné "
+                             "doriešenie (nájdeš ho v dennom súhrne).",
+                     detail={"closed_questions": len(closed)},
+                     rollup=True, workflow=dl_report.WORKFLOW)
+    log.info("DL message %s deferred (sklad Neviem); %s question(s) closed, no EDI",
              message_id, len(closed))
     return {"closed": len(closed), "message_id": message_id}
 

@@ -462,33 +462,19 @@ def test_dl_duplicates_alone_still_render_the_message():
     assert "1" in html
 
 
-# --- #239: three current-state gauges — a silent backlog must never hide -----------
-
-def test_quarantined_alone_triggers_the_message_even_with_zero_runs():
-    """A day with no NEW DL activity but an EXISTING quarantined backlog must still be
-    mentioned — the whole point of #239 is that a silent backlog is invisible."""
-    html = report.build_dl_digest(_dl_stats(quarantined=2))
-    assert html != ""
-    assert "2" in html
-    assert "vzdal" in html.lower()
-
-
-def test_pending_alerts_alone_triggers_the_message():
-    html = report.build_dl_digest(_dl_stats(pending_alerts=3))
-    assert html != ""
-    assert "3" in html
-    assert "čaká na odoslanie" in html.lower() or "čakajú na odoslanie" in html.lower()
+# --- #312: the three #239 operator gauges were REMOVED from the warehouse digest -----
+#
+# The pre-#312 tests here asserted that `quarantined`/`pending_alerts`/
+# `open_import_incidents` alone TRIGGER the warehouse digest. #312 deliberately reverses
+# that — those gauges are operator diagnostics (admin dashboard only) and must never land
+# on channel 243. The replacement tests live above
+# (`test_operator_gauges_never_appear_in_the_warehouse_digest` /
+# `test_a_day_with_only_operator_gauges_renders_nothing_for_the_warehouse`).
 
 
-def test_open_import_incidents_alone_triggers_the_message():
-    html = report.build_dl_digest(_dl_stats(open_import_incidents=1))
-    assert html != ""
-    assert "problém s importom" in html.lower()
-
-
-def test_a_genuinely_quiet_dl_day_still_renders_nothing_with_gauges_present():
-    """The three new gauges default to 0 via `_dl_stats()` — a quiet day must stay
-    quiet even though the digest now checks three more fields."""
+def test_a_genuinely_quiet_dl_day_still_renders_nothing():
+    """A day with no warehouse activity renders nothing (gauge keys default to 0 and are
+    ignored either way)."""
     assert report.build_dl_digest(_dl_stats()) == ""
 
 
@@ -497,3 +483,47 @@ def test_dl_digest_link_is_only_rendered_when_given():
     assert "<a href" not in no_link
     with_link = report.build_dl_digest(_dl_stats(runs=1), link="http://x/sklad-dl/k")
     assert 'href="http://x/sklad-dl/k"' in with_link
+
+
+# --- #305: „Neviem"-deferred delivery notes get their own warehouse-digest line -------
+
+def test_sklad_unknown_deferred_notes_render_in_the_warehouse_digest():
+    html = report.build_dl_digest(_dl_stats(runs=4, sklad_unknown=3))
+    assert html != ""
+    assert "3" in html
+    assert "odložené" in html.lower() and "sklad nevie" in html.lower()
+
+
+def test_a_day_with_only_sklad_unknown_deferrals_still_renders():
+    """A day with no other DL activity but „Neviem"-deferred notes must still surface for
+    Marek — the trigger fires on sklad_unknown alone (singular 'odložený' for one)."""
+    html = report.build_dl_digest(_dl_stats(sklad_unknown=1))
+    assert html != ""
+    assert "odložen" in html.lower() and "sklad nevie" in html.lower()
+
+
+# --- #312: operator gauges must never appear in the WAREHOUSE digest ---------------
+#
+# quarantined / pending_alerts / open_import_incidents are current-STATE OPERATOR gauges —
+# they live on the admin /api/orders/dl/stats (dl_current_health) and have their own operator
+# alert paths (the n8n stuck-message watchdog, confirm.py's import sweep). They must NOT land
+# in the warehouse-facing daily digest on channel 243: the skladníčka can't act on them and
+# it leaks operator diagnostics onto a user surface. These FAIL on the pre-fix digest that
+# still renders them ([red]); they REPLACE the pre-#312 "gauge triggers the digest" tests,
+# whose asserted behavior this ticket deliberately reverses.
+
+def test_operator_gauges_never_appear_in_the_warehouse_digest():
+    html = report.build_dl_digest(_dl_stats(
+        runs=5, items=8, quarantined=2, pending_alerts=3, open_import_incidents=1))
+    assert html != ""
+    assert "5" in html and "8" in html   # real warehouse content still shown
+    assert "vzdal" not in html.lower()               # quarantined phrase gone
+    assert "čaká na odoslanie" not in html.lower()   # pending_alerts phrase gone
+    assert "čakajú na odoslanie" not in html.lower()
+    assert "problém s importom" not in html.lower()  # open_import_incidents phrase gone
+
+
+def test_a_day_with_only_operator_gauges_renders_nothing_for_the_warehouse():
+    assert report.build_dl_digest(_dl_stats(quarantined=2)) == ""
+    assert report.build_dl_digest(_dl_stats(pending_alerts=3)) == ""
+    assert report.build_dl_digest(_dl_stats(open_import_incidents=1)) == ""
