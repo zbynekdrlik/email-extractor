@@ -443,3 +443,77 @@ def test_not_warehouse_needs_the_dl_role(pg):
     r = c.post(f"/api/orders/question/{qid}/answer", json={"not_warehouse": True})
     assert r.status_code == 403
     assert teach.get(pg, qid)["status"] == "open"
+
+
+# --- #305: „Neviem" terminally defers the whole DL (variant A) -----------------------
+#
+# The skladníčka doesn't know which card/supplier a DL item is. Marek told her to answer
+# „Neviem" so the board doesn't pile up — but „Neviem" was a 200 no-op (the question stayed
+# open, nothing was marked), so from her side it „nereagovalo". Variant A (Marek, 14.8.):
+# „Neviem" ODLOŽÍ the whole delivery note — every open DL question of the message closes
+# terminally, the message is marked processed (nothing to ORION), and a review-flavoured
+# skip event lands so Marek sees it in the daily digest. The sibling of #307's not_warehouse.
+# These assert the CORRECT behavior — they FAIL on the pre-fix no-op ([red] commit) and pass
+# with the fix.
+
+
+def test_neviem_terminally_defers_the_whole_dl_message_without_edi(pg):
+    pg.execute("INSERT INTO messages (message_id) VALUES ('m305')")
+    qid_sup = teach.ask_dl_supplier(pg, message_id="m305",
+                                    sender_email="dodavatel@x.sk", candidates=[])
+    qid_item = teach.ask_dl_item(pg, message_id="m305", supplier_ean="S1",
+                                 supplier_name="X", wording="Neznáma položka",
+                                 quantity=1, unit="ks",
+                                 candidates=[{"gtin": "G1", "name": "Y"}])
+    assert qid_sup and qid_item
+
+    c = _dl_client()
+    # the „Neviem" button posts {"choice":"unknown"} through the generic dispatch
+    r = c.post(f"/api/orders/question/{qid_item}/answer", json={"choice": "unknown"})
+    assert r.status_code == 200 and r.get_json()["ok"] is True
+
+    # BOTH open DL questions of the message are terminally closed together — the whole
+    # delivery note is deferred, not just the one line she clicked on
+    assert teach.get(pg, qid_sup)["status"] == "sklad_unknown"
+    assert teach.get(pg, qid_item)["status"] == "sklad_unknown"
+
+    # the message is marked HANDLED (processed) — so it never re-claims / re-asks
+    assert pg.execute(
+        "SELECT processed FROM messages WHERE message_id='m305'").fetchone()[0] is True
+
+    # a review-flavoured skip event (stage='sklad_unknown', status='review') so Marek sees
+    # it needs attention in the digest — NOT the OK/EDI logger
+    ev = pg.execute("SELECT stage, status FROM email_events WHERE message_id='m305' "
+                    "ORDER BY id DESC LIMIT 1").fetchone()
+    assert ev == ("sklad_unknown", "review")
+
+    # nothing was uploaded to ORION — no EDI ledger row
+    assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0
+
+
+def test_neviem_on_dl_supplier_also_defers_the_whole_message(pg):
+    """„Neviem" works identically when clicked on a dl_supplier question (not just item)."""
+    pg.execute("INSERT INTO messages (message_id) VALUES ('m305s')")
+    qid_sup = teach.ask_dl_supplier(pg, message_id="m305s",
+                                    sender_email="iny@x.sk", candidates=[])
+    c = _dl_client()
+    r = c.post(f"/api/orders/question/{qid_sup}/answer", json={"choice": "unknown"})
+    assert r.status_code == 200 and r.get_json()["ok"] is True
+    assert teach.get(pg, qid_sup)["status"] == "sklad_unknown"
+    assert pg.execute(
+        "SELECT processed FROM messages WHERE message_id='m305s'").fetchone()[0] is True
+
+
+def test_neviem_on_a_non_dl_kind_still_stays_open_no_op(pg):
+    """The universal „Neviem" escape for mail/date/line kinds is UNCHANGED — only the two
+    DL kinds get the terminal defer, everything else keeps the #164 stays-open escape."""
+    pg.execute("INSERT INTO messages (message_id) VALUES ('m305m')")
+    qid = teach.ask_mail(pg, message_id="m305m", sender_email="z@x.sk",
+                         subject="čokoľvek", reason="AI nič nenašla")
+    c = _sklad_client()
+    r = c.post(f"/api/orders/question/{qid}/answer", json={"choice": "unknown"})
+    assert r.status_code == 200 and r.get_json()["ok"] is True
+    # a mail „Neviem" stays open (not terminally closed) and never marks the message
+    assert teach.get(pg, qid)["status"] == "open"
+    assert pg.execute(
+        "SELECT processed FROM messages WHERE message_id='m305m'").fetchone()[0] is False
