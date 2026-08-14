@@ -263,3 +263,59 @@ conditional-response parity, which `app.test_client()`-only tests structurally c
 check). See `tests/test_httpapi_waitress.py` for the full worked pattern (three tests:
 wiring via a monkeypatched `waitress.serve`, full request/response equivalence on
 `/health`+an authenticated route+a 401, and `/files` Range-request parity).
+
+## Re-pinning ASK_HTML/ASK_DL_HTML checksums trips `block-sensitive-staging.sh` as a
+## false-positive "secret" — bypass with `# airuleset:secret-ok` (#306/#307, 2026-08-14)
+
+Any legitimate change to `_ASK_HTML_TEMPLATE` (both `ASK_HTML` and `ASK_DL_HTML` derive
+from it, so BOTH hashes change) requires updating the two 64-char SHA256 values in
+`EXPECTED_TEMPLATE_SHA256`. Staging that edit is BLOCKED by
+`hooks/block-sensitive-staging.sh` — it flags a 40+ char hex blob as a "possible
+key/token". It is NOT a secret (it's a content hash of the template), so bypass it:
+append `# airuleset:secret-ok SHA256 template-checksum re-pin, not a credential` to the
+`git add`/`git commit` command (logged, not silent). Recompute the new hashes with
+`.venv/bin/python -c "import hashlib; from app.httpapi import ASK_HTML, ASK_DL_HTML;
+print(hashlib.sha256(ASK_HTML.encode()).hexdigest()); print(hashlib.sha256(
+ASK_DL_HTML.encode()).hexdigest())"`, never by hand. **Two-hit compound trap
+(git-commit-hygiene.md, hit again here):** a `cat > msg.txt <<'EOF' ... EOF && git commit
+-F msg.txt # airuleset:secret-ok` compound gets blocked ATOMICALLY on the FIRST staging
+attempt, so the heredoc never runs and `msg.txt` is never created — the retry's bare
+`git commit -F msg.txt` then dies with "could not read log file". Write the message file
+in its OWN call, `git add` (with the bypass) in a second call, `git commit` in a third.
+
+## The `/sklad`+`/sklad-dl` board (`_ASK_HTML_TEMPLATE`) periodic refresh must NEVER wipe
+## an in-progress form — `maybeRefresh`/`boardBusy`/`data-open` (#306, 2026-08-14)
+
+The board runs `setInterval(maybeRefresh,5000)` and `load()` rebuilds the whole card list
+(`wrap.textContent=''`). Before #306 it ran `setInterval(load,5000)` directly, which wiped
+a skladníčka's half-filled "➕ Nový produkt"/search box every 5 s ("stále ma to vyhodí").
+`maybeRefresh()` now skips the rebuild while `boardBusy()` is true — a focused
+`input`/`textarea` inside `#wrap`, OR an open collapsible form (its toggle sets
+`form.dataset.open='1'`/`''`). **Any future board feature that adds a form/input inside a
+card, OR a new periodic poll, must not reintroduce an unguarded full rebuild** — route
+periodic refreshes through `maybeRefresh`, not `load`, and mark any new collapsible form
+with `data-open` on its toggle so `boardBusy` sees it. The EXPLICIT `load()` after a real
+answer still rebuilds (the answered card must vanish) — never guard that one. A prefilled
+input inside a COLLAPSED form (e.g. `newDlProductForm`'s name = q.wording) does NOT freeze
+the board, because `boardBusy` only checks FOCUS + `data-open`, never a mere non-empty
+value. Live-verify a board-template fix by typing into a real form and waiting >5 s WITHOUT
+saving (client-side only, no answer submitted) — see the #306 E2E test for the shape.
+
+## Terminal, message-level "close a board question without processing it" — mark the
+## message `processed=true` or it re-asks forever (#307, 2026-08-14)
+
+`dl_worker.close_message_not_warehouse(conn, qid)` ("Netýka sa skladu") is the reusable
+shape for any future terminal board action that must get a question OFF the board WITHOUT
+running the pipeline: (1) close EVERY open `dl_item`/`dl_supplier` question of the message
+with a NEW terminal status (`order_questions.status` is free TEXT, no CHECK → no schema
+migration for a new value); (2) `UPDATE messages SET processed=true, processed_at=now(),
+processing_at=NULL` — this is LOAD-BEARING, not cosmetic: the ask-dedup index is only
+`WHERE status='open'`, so a terminal-but-still-`processed=false` message would be
+re-claimed (`_claim`'s `WHERE processed=false`) and re-raise the identical question
+(whack-a-mole); (3) a rollup `email_events` skip event via `report.log_event(status=<new>,
+outcome=...)` — NEVER the OK/EDI logger (n8n-workflow-edits.md skip-branch rule), so it
+stays visible in the digest without claiming an upload; (4) upload nothing. Run the three
+writes in `deps.db_tx()` (atomic — safe because there is no external side effect), not
+autocommit `deps.db()`. The "Neviem" follow-up will ship its own sibling terminal close —
+reuse this exact shape (a distinct status + a `proc_status='review'`-flavoured event so
+Marek sees it needs attention, vs the "done" flavour here).
