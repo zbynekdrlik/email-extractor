@@ -442,3 +442,32 @@ def test_mass_zero_when_nothing_available():
     d = dl_match.decide_item("Neznáma položka", {"gtin": "NO_MATCH", "confidence": 0.1},
                              catalog)
     assert d.mass == 0.0
+
+
+# --- #246: the DL overflow review note surfaces a SAFE computed 13-digit sibling hint ------
+
+def test_gtin14_overflow_note_surfaces_the_computed_13digit_sibling_as_a_verify_hint():
+    """A valid GTIN-14 catalog card still cannot ship (13-char DESADV field, #245), but the
+    review note now hands the warehouse the computed 13-digit sibling to verify in CODEX — the
+    same manual step the owner did for #246's 9 confirmed products. The card NEVER ships.
+    Synthetic GTIN-14 (repo is public)."""
+    catalog = [{"gtin": "20001112223336", "name": "Synteticky napoj 330ml", "doplnok": "",
+               "mass": None, "sklad": "100", "cena": 1.0}]
+    d = dl_match.decide_item("Synteticky napoj 330ml",
+                             {"gtin": "20001112223336", "confidence": 0.96}, catalog)
+    assert d.gtin is None and d.rule == "unmatched"   # still never ships
+    assert "0001112223332" in d.note                  # computed 13-digit sibling surfaced
+    assert "over" in d.note.lower()                    # framed as a verify-in-CODEX hint
+
+
+def test_gtin14_overflow_note_shows_no_false_sibling_for_an_invalid_gtin14_korenie_class():
+    """The Korenie class (#246, warehouse-confirmed 14-digit-only): a 14-char code whose own
+    check digit does not validate. Its naive prefix-strip validates but is a FALSE code — the
+    note must NEVER surface it, only the generic 'fix the card in CODEX' wording. Synthetic."""
+    catalog = [{"gtin": "88590000123455", "name": "Korenie synteticke", "doplnok": "",
+               "mass": None, "sklad": "100", "cena": 5.0}]
+    d = dl_match.decide_item("Korenie synteticke",
+                             {"gtin": "88590000123455", "confidence": 0.97}, catalog)
+    assert d.gtin is None and d.rule == "unmatched"   # still never ships
+    assert "8590000123455" not in d.note              # the false naive strip is NEVER shown
+    assert str(dl_match.GTIN_FIELD_WIDTH) in d.note    # generic overflow wording preserved
