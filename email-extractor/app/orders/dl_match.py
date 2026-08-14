@@ -33,7 +33,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
-from .desadv_edi import GTIN_FIELD_WIDTH
+from .desadv_edi import GTIN_FIELD_WIDTH, gtin14_to_gtin13
 
 log = logging.getLogger("orders.dl_match")
 
@@ -397,8 +397,10 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
     # explicit `is not None` is kept only so `llm_card["name"]` below can never be reached
     # on a None card, even if that invariant ever changes upstream (review finding, #245).
     gtin_overflow_card = None
+    gtin_overflow_gtin = None
     if llm_card is not None and llm_gtin is not None and _gtin_edi_overflow(llm_gtin):
         gtin_overflow_card = llm_card["name"]
+        gtin_overflow_gtin = llm_gtin
         log.warning("dl gtin edi overflow: %r card %r gtin %s is %d chars, DESADV LIN "
                    "field is %d — cannot ship, routing to review", item_name,
                    llm_card["name"], llm_gtin, len(llm_gtin), GTIN_FIELD_WIDTH)
@@ -479,11 +481,21 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
 
     if not llm_gtin:
         if gtin_overflow_card:
+            # #246: if the overflowing code is a VALID GTIN-14, hand the warehouse its
+            # computed 13-digit GS1 sibling to verify in CODEX — the exact manual step the
+            # owner did for the 9 confirmed Mana Roots products. `gtin14_to_gtin13` returns
+            # None for a 14-char code that is NOT a valid GTIN-14 (the warehouse-confirmed
+            # 14-only "Korenie" case), so a plausible-but-false naive strip is never shown.
+            # This only enriches the note; the decision stays `unmatched` and never ships.
+            sibling = gtin14_to_gtin13(gtin_overflow_gtin)
+            hint = (f" Vypočítaný 13-miestny variant je {sibling} — over v CODEXe, či karta "
+                    f"existuje pod týmto kratším kódom; ak áno, doplň ho do katalógu namiesto "
+                    f"14-miestneho." if sibling else "")
             return done("unmatched", None, "", 0.0, conf,
                         f"Karta „{gtin_overflow_card}“ má v CODEXe EAN dlhší ako "
                         f"{GTIN_FIELD_WIDTH} znakov — do DESADV takto poslať nemožno "
                         "(skrátenie by kód poškodilo). Treba doplniť/opraviť skladovú "
-                        "kartu v CODEXe alebo označiť správny kód.")
+                        "kartu v CODEXe alebo označiť správny kód." + hint)
         return done("unmatched", None, "", 0.0, conf,
                     str(llm.get("matchReason") or "Model nenašiel zhodu (NO_MATCH)."))
 

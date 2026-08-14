@@ -551,3 +551,32 @@ def test_build_computes_items_total_from_non_zero_quantity_items_only():
     result = desadv_edi.build(_header(), _extraction(), items, [])
     assert result.items_total == 1
 
+
+# --- #246: GTIN-14 -> GTIN-13 sibling (GS1 check-digit recompute) for the DL overflow hint
+
+def test_gtin14_to_gtin13_recomputes_the_nested_gtin13_check_digit():
+    """A valid GTIN-14's nested GTIN-13 is its middle 12 digits + a RECOMPUTED check digit —
+    never the GTIN-14's own check, never a naive strip. Synthetic code (repo is public)."""
+    assert desadv_edi.gtin14_to_gtin13("20001112223336") == "0001112223332"
+    sib = desadv_edi.gtin14_to_gtin13("20001112223336")
+    assert desadv_edi._gs1_check_digit(sib[:-1]) == sib[-1]  # result is a valid GTIN-13
+
+
+def test_gtin14_to_gtin13_returns_none_for_a_14char_code_that_is_not_a_valid_gtin14():
+    """The Korenie class (#246): 88590000123455 is 14 chars but its own GS1 check digit does
+    NOT validate — an internal identifier, not a real GTIN-14. Its naive prefix-strip
+    (8590000123455) happens to be a valid GTIN-13, but the warehouse confirmed no such shorter
+    CODEX card exists, so it is a FALSE code. The helper must refuse it (None), never hand back
+    the plausible-but-false naive strip."""
+    assert desadv_edi.gtin14_to_gtin13("88590000123455") is None
+    naive = "88590000123455"[1:]  # the trap: the naive strip really does validate
+    assert desadv_edi._gs1_check_digit(naive[:-1]) == naive[-1]
+
+
+def test_gtin14_to_gtin13_returns_none_for_a_13char_or_non_numeric_input():
+    assert desadv_edi.gtin14_to_gtin13("2000111222333") is None   # already 13 chars (synthetic)
+    assert desadv_edi.gtin14_to_gtin13("") is None
+    assert desadv_edi.gtin14_to_gtin13(None) is None
+    assert desadv_edi.gtin14_to_gtin13("1234567890ABCD") is None  # non-numeric
+    assert desadv_edi.gtin14_to_gtin13("²²²²²²²²²²²²²²") is None   # Unicode digit look-alikes
+

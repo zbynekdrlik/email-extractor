@@ -1423,6 +1423,28 @@ intentional there for cards it was tuned against.
   incident time, 10 OTHER untested catalog cards shared the same 14-digit shape
   (Kombucha/limonáda/Mystery Cola/Korenie line — grep `length(gtin) > 13` on
   `dl_catalog_snapshot` to re-check after any catalog refresh).
+- **#246 resolved the follow-up above — the canonical, SAFE GTIN-14 -> GTIN-13 transform is
+  now `desadv_edi.gtin14_to_gtin13()`; NEVER hand-roll a naive strip.** It validates the
+  GTIN-14's OWN check digit FIRST, then drops the indicator digit and RECOMPUTES the 13-digit
+  check (`_gs1_check_digit`); returns `None` for anything that is not a check-digit-valid
+  14-digit GTIN (also guards `.isascii()` so a Unicode digit look-alike can't blow up `int()`).
+  **The trap it exists to prevent (proven live on #246):** a 14-char catalog code can be a FAKE
+  GTIN-14 whose OWN check digit fails — the warehouse-confirmed 14-digit-only "Korenie čierne
+  mleté" `85880001005021` is exactly this, yet its NAIVE prefix-strip `5880001005021` IS a
+  check-digit-valid GTIN-13. That naive strip is a FALSE code (no such CODEX card exists), so
+  surfacing or shipping it would recreate the #245 import-rejection. The helper refuses it.
+  The 9 Mana Roots products, by contrast, ARE valid GTIN-14s and the recompute reproduces
+  their real CODEX 13-digit siblings exactly (verified vs `codex_ceny`) — those were remediated
+  as DATA (register the 13-digit card, retire the 14-digit one via `/api/znalosti/dl-products`).
+  **Auto-normalize-and-SHIP is banned** (Korenie proves it ships a false code); **auto-rescue
+  (normalize + require exact catalog hit) is effectively DEAD CODE** given that retire+add data
+  model — the 14- and 13-digit cards never coexist, so it would never fire. So #246 only uses
+  the helper to ENRICH the `_gtin_edi_overflow` review note: for a valid GTIN-14 it appends the
+  computed 13-sibling as a labelled "Vypočítaný 13-miestny variant je X — over v CODEXe" hint
+  (a hypothesis to verify, the exact manual step the owner did), NEVER changing the ship/
+  no-ship decision (the item still returns `unmatched`, `gtin=None`). Any FUTURE 14-digit
+  overflow work must reuse `gtin14_to_gtin13()` and this "never ship a normalized code, only
+  hint" posture.
 - **`desadv_sent` (the two-phase claim/confirm upload ledger) only started being
   WRITTEN from 2026-08-09 — any DESADV document processed before that date has NO row
   at all, which is expected, not a sign of data loss.** Don't treat an empty
