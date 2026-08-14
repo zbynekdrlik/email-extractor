@@ -489,6 +489,14 @@ function genericQuestionCard(q){
 async function answerGeneric(qid,choice){try{await api('/api/orders/question/'+qid+'/answer',
   {method:'POST',body:JSON.stringify({choice:choice})});await load()}
   catch(e){alert(e.message||'chyba')}}
+// #307: "netýka sa skladu" — terminal, message-level. Confirm first (it closes the whole
+// mail and never sends it to ORION), then POST {not_warehouse:true}.
+async function answerNotWarehouse(qid){
+  if(!confirm('Označiť, že tento mail sa netýka skladu? Otázka sa zavrie, dodací list sa '
+    +'NEPOŠLE do ORIONu.'))return;
+  try{await api('/api/orders/question/'+qid+'/answer',
+    {method:'POST',body:JSON.stringify({not_warehouse:true})});await load()}
+  catch(e){alert(e.message||'chyba')}}
 // #235: dl_supplier/dl_item get their OWN card (mirrors #234's customerQuestionCard
 // below) — a live search over the CURRENT DL suppliers/catalog (not just the frozen
 // candidates the question was asked with), plus a collapsed "this is genuinely new"
@@ -618,6 +626,9 @@ function dlSupplierQuestionCard(q){
   const nb=el('button',null,'Neviem');
   nb.style.borderColor='#d0d7de';nb.style.background='#f6f8fa';nb.style.color='#57606a';
   nb.onclick=()=>answerGeneric(q.id,'unknown');c.appendChild(nb);
+  const nw=el('button',null,'Netýka sa skladu');
+  nw.style.borderColor='#eac54f';nw.style.background='#fff8c5';nw.style.color='#7d4e00';
+  nw.onclick=()=>answerNotWarehouse(q.id);c.appendChild(nw);
   return c}
 function dlItemQuestionCard(q){
   const c=el('div','q');
@@ -633,6 +644,9 @@ function dlItemQuestionCard(q){
   const nb=el('button',null,'Neviem');
   nb.style.borderColor='#d0d7de';nb.style.background='#f6f8fa';nb.style.color='#57606a';
   nb.onclick=()=>answerGeneric(q.id,'unknown');c.appendChild(nb);
+  const nw=el('button',null,'Netýka sa skladu');
+  nw.style.borderColor='#eac54f';nw.style.background='#fff8c5';nw.style.color='#7d4e00';
+  nw.onclick=()=>answerNotWarehouse(q.id);c.appendChild(nw);
   return c}
 // #234: a live search over ALL current customers — not just the frozen candidates the
 // question was asked with. Mirrors searchBox() above, one input, debounced.

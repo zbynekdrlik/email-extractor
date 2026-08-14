@@ -786,3 +786,32 @@ def test_dl_new_product_form_survives_the_5s_auto_refresh(live_server, pg, page)
     assert gtin.input_value() == "8588888888882", \
         "the typed GTIN was wiped by the 5s auto-refresh"
     assert console == [], f"browser console not clean: {console}"
+
+
+def test_the_warehouse_marks_a_dl_question_not_warehouse_from_the_card(live_server, pg, page):
+    """#307: the "Netýka sa skladu" button on the DL card — the KLEŠČ (režíjna faktúra)
+    case. A real browser click (through its confirm dialog) terminally closes the whole
+    message, marks it handled without EDI, and the card leaves her board."""
+    from app.httpapi import dl_key
+    from app.orders import teach
+
+    pg.execute("INSERT INTO messages (message_id) VALUES ('e-dl307')")
+    qid = teach.ask_dl_supplier(
+        pg, message_id="e-dl307", sender_email="faktura@klesc.sk", candidates=[])
+    assert qid
+
+    console = _collect_console(page)
+    page.on("dialog", lambda d: d.accept())        # accept the "naozaj?" confirm
+    page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/otazky-dl")
+
+    page.wait_for_selector("text=faktura@klesc.sk")
+    page.click('button:has-text("Netýka sa skladu")')
+
+    # the card is gone (the board empties) — proof it left her board
+    page.wait_for_selector("text=faktura@klesc.sk", state="detached")
+    q = teach.get(pg, qid)
+    assert q["status"] == "not_warehouse"
+    assert pg.execute(
+        "SELECT processed FROM messages WHERE message_id='e-dl307'").fetchone()[0] is True
+    assert console == [], f"browser console not clean: {console}"
