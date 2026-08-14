@@ -67,3 +67,21 @@ assert it comes back" (init_schema is now an O(1) no-op once the baseline is rec
   to `local-testing.md`'s "a new table must go in the TRUNCATE list" rule.
 - The version fast-path / concurrent-start / partial-failure paths are tested in `test_migrate.py`
   on throwaway `CREATE DATABASE` DBs (a `fresh_db()` helper), fully isolated from the shared DB.
+
+## Adding the FIRST real revision (rev 2) breaks ~8 `test_migrate.py` assertions — expected, generalize them (#314)
+
+Until #314 `db.REVISIONS` had ONLY the baseline, so many `test_migrate.py` tests hardcoded
+"baseline is the only revision" (`done == [migrate.BASELINE_REVISION]`, ledger `== [(1,
+"baseline")]`, `"up-to-date at r0001"`, `count == 1`, `applied == [0,0,0,1]`) AND reused
+revision **ids 2/3** for their own synthetic in-test revisions. Appending the first real
+`Revision(2, ...)` breaks BOTH classes at once (8 tests on #314):
+- **The "baseline-only" assertions** — generalize them to `db.REVISIONS` so they never
+  break again on a rev 3+: `done == [r.revision for r in db.REVISIONS]`, ledger `== [(r.revision,
+  r.name) for r in db.REVISIONS]`, `f"up-to-date at r{max(r.revision for r in db.REVISIONS):04d}"`,
+  `count == len(db.REVISIONS)`, `applied == [0,0,0,len(db.REVISIONS)]`.
+- **The synthetic in-test revision ids** (`test_partial_migration`, `test_revision_failure`,
+  `test_pending_revisions`) — bump 2/3 to HIGH unused ids (90/91), because those tests call
+  `db.init_schema(conn)` FIRST (now applying the real rev 2), so a local `Revision(2, ...)`
+  collides (already-applied id 2 → skipped/no-error, breaking the "applies 2 then 3" / "raises
+  DuplicateTable" intent). This is legitimate mechanism-test maintenance, not weakening — do
+  it in the same commit as the new revision, with a clear note.

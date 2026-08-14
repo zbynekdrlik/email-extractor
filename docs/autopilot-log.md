@@ -2,6 +2,37 @@
 
 Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions, shared PR #.
 
+## 2026-08-14 — #314 Pamäť ne-skladových dodávateľov (pokračovanie #307) — v0.9.98
+
+- **Čo:** „Netýka sa skladu" (#307) si teraz zapamätá DODÁVATEĽA (nová tabuľka
+  `dl_nonwarehouse_supplier`, modul `app/orders/dl_nonwarehouse.py`); ďalší mail od neho už
+  negeneruje nástenkové otázky (dl_item aj dl_supplier), ide do tichého terminálneho
+  `not_warehouse` skip (viditeľné v dennom prehľade).
+- **Kľúč:** identita z dokumentu (registrový EAN ∪ normalizovaný názov), email len fallback
+  (req 3 — jeden `tlaciaren@` posiela aj skladové aj neskladové). **GTIN safety override**
+  (req 4): mail s katalógovou položkou sa nikdy ticho nezahodí (EKVIA/Messer posielajú aj
+  reálne dodávky). Schéma revízia 2 cez `migrate.py` (baseline zamrznutý). Seed z histórie
+  + sweep pri štarte (gated na python engine).
+- **Commity:** `e0114be` bump 0.9.98, `e4e122f` test[red], `50a95d3` fix[green], `e1365c6`
+  review-fixy (data-loss v seed/sweep), `217f54d` ruff UP037. PR #318 → merge `23f0c21`.
+- **RED→GREEN:** `test_dl_worker.py::test_remembered_nonwarehouse_supplier_stops_generating_questions`
+  (2. mail = 0 otázok). + GTIN override + case-B skip/override + modul unit testy
+  (`test_dl_nonwarehouse.py`).
+- **Adversariálny review (Fable, gate OPEN):** 2 🔴 (email-only seed potláčal reálne
+  dodávky — query-side blankness fix; sweep prepisoval odoslané dodávky — proc_status +
+  error-event + all-remembered brána) + 3 🟡 (mixed aggregate; matcher fail-open→skip;
+  case-B pokrytie), všetko opravené v `e1365c6`.
+- **Deploy verify (v0.9.98):** health `{"ok":true,"version":"0.9.98"}`, DOM `v0.9.98`,
+  `schema_version=2`, bootstrap log `seeded=6, swept_messages=0` (6 dodávateľov: KLEŠČ /
+  Messer / EKVIA / Bardusch / ZIGO podľa ean+názov, david@grena.sk len email; HK LOAN
+  správne NEzapamätaný → ostáva na nástenke). Read-only resolve probe na živých dátach:
+  všetkých 5 kontrol OK vrátane req-3 safety.
+- **Gotchy:** (1) kvótovaná forward-ref anotácia prešla mypy ale ruff UP037 v CI
+  (`ruff check .`) padla — po mypy oprave VŽDY znova `ruff check .` z `email-extractor/`.
+  (2) Worktree dispatch: full flow (push/PR/merge/deploy) OK cez single `gh` + `poll-ok`;
+  CI-wait cez single-`while <script>; do sleep; done` (gh skrytý v skripte).
+  Follow-up split `dl_worker.py` = #309.
+
 ## 2026-08-14 — #308 + #310 (kanál-243 incidenty, jeden PR)
 
 - **#308** (nečitateľný scan končí ticho v `human_processing`): n8n klasifikátor zaradí
