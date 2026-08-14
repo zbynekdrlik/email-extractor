@@ -3518,3 +3518,20 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
   Jeden potvrdzovací post do kanála 243 (Odoo msg 40957626). #309 (split dl_worker.py 1789r)
   ostáva tracked, nie blocker. Worktree dispatch: CI monitoring z worktree bol blokovaný
   (loop-guard + poll-repeat), plný flow dokončený cez single polls + poll-ok.
+
+## 2026-08-14 — #246 (DL GTIN-14 → 13-miestny sibling hint v overflow otázke) — v0.9.99, PR #TBD
+- Validácia (SELECT-only, snapshot 28): mechanizmus „14-only, ako margarín" UŽ existoval
+  (`_gtin_edi_overflow`, #245) a Korenie (`85880001005021`) bezpečne rieši (reprodukované:
+  `unmatched`, `gtin=None`, neposiela sa). 9/10 produktov už remediované ako DÁTA (13-miestne
+  kódy živé v efektívnom katalógu), Korenie potvrdene 14-only skladom (8/14) — a nie je ani
+  validný GTIN-14, jeho naivný strip `5880001005021` je validný GTIN-13, ale FALOŠNÝ kód.
+- Implementácia: `desadv_edi.gtin14_to_gtin13()` (GS1: validuj 14-kontrolnú → drop indikátora
+  → prepočítaj 13-kontrolnú; `None` pre nevalidný GTIN-14). V `dl_match.decide_item` overflow
+  vetve sa pri validnom GTIN-14 pripojí vypočítaný 13-kandidát do otázky ako „over v CODEXe".
+  Rozhodnutie posielať/neposielať NEZMENENÉ — len obohatený text otázky.
+- RED `a94dcbf` → GREEN `c49aa7a`; review-opravy `f5d4d83` (🟡 reálny test EAN → syntetický;
+  🔵 `.isascii()` guard proti Unicode náhradám číslic). Fresh-context general-purpose review
+  (0🔴 1🟡 1🔵 → po oprave 0/0/0), NIE built-in skill. Bump `065f51a`.
+- Testy: helper (GS1 math, None pre Korenie-triedu) + overflow-note (validný GTIN-14 ukáže
+  sibling, Korenie-trieda neukáže falošný). 386 testov DL/desadv/matcher blast-radius zelené,
+  ruff + mypy čisté. Syntetické EAN only (verejný repo).
