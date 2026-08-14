@@ -24,6 +24,7 @@ from app.orders import (
     dl_supplier_memory,
     dl_worker,
     reliability,
+    report,
     teach,
 )
 
@@ -1769,7 +1770,11 @@ def test_stuck_classified_sweep_alerts_a_message_with_no_order_runs_row(pg):
     alert = pg.execute(
         "SELECT channel_id, kind, message_id, delivered_at FROM pending_alerts"
     ).fetchone()
-    assert alert == (_cfg().delivery_notes_channel_id, "dl_stuck_classified", "dl1", None)
+    # #310: an engine-liveness/staleness alert is OPERATOR-facing, so it routes to the
+    # ops channel (report.ops_channel), NEVER delivery_notes_channel_id (243, warehouse).
+    # Default cfg leaves ops unset (0) — the row is still recorded durably, just never on
+    # a warehouse channel. Full "never 243/152" guarantee: test_operator_alert_routing.py.
+    assert alert == (report.ops_channel(_cfg()), "dl_stuck_classified", "dl1", None)
 
 
 def test_stuck_classified_sweep_ignores_a_message_within_the_threshold(pg):

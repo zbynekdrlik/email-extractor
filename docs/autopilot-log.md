@@ -2,6 +2,31 @@
 
 Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions, shared PR #.
 
+## 2026-08-14 — #308 + #310 (kanál-243 incidenty, jeden PR)
+
+- **#308** (nečitateľný scan končí ticho v `human_processing`): n8n klasifikátor zaradí
+  near-empty scan (needs_vision) do terminálnej `human_processing`, ktorú žiaden engine ani
+  sweep nesleduje → `processed=false` navždy, bez notifikácie (7178/DL 26041774). Nový
+  `app/orders/human_processing.sweep` (zapojený do `worker.run_forever`, live-engine gate),
+  dve vrstvy: (1) vision záchrana pre near-empty-scan signatúru cez `llm.Client.vision_call`
+  → pri istote ≥0.6 a spracovateľskej kategórii auto-preklasifikuje; (2) povinná sieť —
+  nezachránené → durable `dl_alerts` outbox (kanál 243), kind `human_processing_review`,
+  dedup. Reuse `dl_worker._read_attachments`, `dl_extract.render_pdf_pages`, `dl_alerts`,
+  `db.log_event`. Žiadna nová tabuľka. RED (`5b58e35`, stub + `tests/test_human_processing.py`
+  7 testov) → GREEN (`a8fc7f1`).
+- **#310** (operátorské alerty nesmú chodiť do skladu): `stuck_classified_sweep` (engine-
+  liveness) posielal na 243, `_check_spend_cap` (spend-cap) na 152 — obe operátorské (živý
+  incident Odoo msg 40622486). Nová config `ops_channel_id` (default 0) + `report.ops_channel`.
+  RED (`5987bef`) → GREEN (`59778fb`). **Review 🔴 KOREKCIA (`85004cd`):** `post_from_config
+  (channel_id=0)` NEvráti None — 0 je falsy → fallback na `orders_channel_id` (152)! Oprava:
+  `dl_alerts.flush_pending` HOLD skupinu s channel_id==0 (nikdy nedoručí, ostáva v
+  `pending_count`); spend-cap cez durable outbox; `ops_channel_id` v config.yaml options+schema;
+  delivery-path testy cez fake transport (RED overený neutralizáciou guardu → delivered=[152]).
+- **#312** filed (Scope-gate: security-boundary): surové `{e}` texty výnimiek presakujú do
+  kanála 243 v `dl_worker.py:648/688` — samostatná info-hygiene chyba z auditu #310.
+- Commity: `a9515fc` bump 0.9.95, RED/GREEN per issue, `85004cd` review-fix. Design+validated+
+  reviewed markery pre obe. Full local suite green (0 FAILED), ruff clean.
+
 ## 2026-08-13 — Integration round C2 (#271, #297)
 
 - **#271** (reusable claim-or-identify primitive): merged `worktree-agent-
@@ -3389,3 +3414,45 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
   ROVNAKÉ pred aj po; DOM `v0.9.93`, 0 console errors; schema_version `1|baseline`. Run card (v0.9.93).
 - Nový playbook: `.claude/rules/schema-migrations.md` (pridanie revízie, self-healing baseline vs
   zakázané record-without-running, `reapply_schema` fixture, schema_version mimo TRUNCATE).
+
+## 2026-08-14 — #306 + #307 (nástenka dodacích listov: form-wipe + „Netýka sa skladu", PR #311, 0.9.93 -> 0.9.94)
+
+- Batch dispatch #305 #306 #307 (URGENT, hlásené z Odoo kanála 243, 14.8.). #305 ODLOŽENÝ
+  z tejto PR — visí na genuine produktovom rozhodnutí (čo s DL, ktorý sklad nevie
+  identifikovať), spýtané používateľa (needs-answer label), ide samostatne po odpovedi.
+- **STEP 0 vyvrátil regresnú hypotézu (#305/#306):** `git diff` `httpapi_templates.py`
+  aj answer endpointu medzi 0.9.91 a 0.9.93 — mypy oprava (#270) sa dotkla len defenzívnych
+  404 vetiev, migračný engine (#269) nič z nástenky. Obe chyby sú REÁLNE ale
+  PRED-existujúce, len sa naplno prejavili keď Marek 13.8. skladu kázal nástenku aktívne
+  používať. Reprodukované na test-Postgres: neviem=200 no-op (otázka ostane open), zadanie
+  produktu backend funguje (200 answered).
+- **#306 (form-wipe):** nástenka bežala `setInterval(load,5000)`, `load()` robí
+  `wrap.textContent=''` — každých 5 s zmazala rozrobený „➕ Nový produkt" formulár uprostred
+  písania. Fix: `maybeRefresh()` preskočí prekreslenie kým je používateľka mid-entry (fokus
+  na input/textarea vnútri #wrap, alebo otvorený formulár = nová značka `data-open`).
+  EXPLICITNÝ `load()` po odpovedi beží ďalej. Fix v zdieľanom `_ASK_HTML_TEMPLATE` → chráni
+  obe nástenky. Playwright E2E RED (`f8fe9ad`, formulár zmazaný po 5s) → GREEN (`c4d401e`).
+- **#307 („Netýka sa skladu"):** DL nástenka nemala terminálnu akciu pre ne-skladový mail
+  (KLEŠČ = režíjna faktúra). Nové tlačidlo na dl_item + dl_supplier karte →
+  `{not_warehouse:true}` → `dl_worker.close_message_not_warehouse` (message-level): uzavrie
+  VŠETKY otvorené DL otázky správy statusom `not_warehouse`, správu `processed=true` bez EDI,
+  rollup skip `email_events` udalosť „netýka sa skladu — vybavené bez EDI" (NIE OK logger),
+  nič do ORIONu. Odosielateľ sa NEZAPAMÄTÁ (zmiešaný odosielateľ). `order_questions.status`
+  je voľný TEXT → žiadna migrácia. `processed=true` (WHERE processed=false v _claim) drží
+  otázku zavretú (dedup index je len WHERE status='open'). AI/orders nástenka už má vlastné
+  „Toto nie je objednávka" (mail `not_order`) — #307 je DL-specific. Playwright E2E cez
+  reálny klik + confirm dialog. RED (`013ec9f`) → GREEN (`6f1a286`).
+- Commity: `87c00c2` bump, `f8fe9ad`/`c4d401e` #306, `013ec9f`/`6f1a286` #307, `3b4d20b`
+  sync main. Charakterizačné checksumy ASK_HTML/ASK_DL_HTML preverzované 2× (legitímne
+  zmeny šablóny). Full local suite green (exit 0, 0 FAILED), ruff clean, PR+push CI zelené
+  (test/typecheck/e2e-orders/e2e-dl/build).
+- Review pass (fresh-context general-purpose, NIE built-in skill): 0🔴 0🟡 2🔵, oba 🔵
+  opravené v `9bc1d4d` (odstránený nepoužitý `cfg` param; tri zápisy close_message do
+  `deps.db_tx()` — atomické, bezpečné lebo žiadny externý side effect). PR #311 merged
+  `20e6ec96`; main CI + GHCR build green. Deploy 0.9.93→0.9.94 na `e0ac7775_email_extractor`
+  (`ha addons update`); /health 0.9.94, addon started, DOM `v0.9.94`. Funkčné live overenie:
+  „Netýka sa skladu" na všetkých 9 DL kartách; #306 form-survives naživo (napísaný GTIN
+  `8588888888882` prežil plný 5s auto-refresh cyklus, nič neodoslané); 0 console errors.
+  Run cards #306 + #307 (v0.9.94). #305 (neviem) ostáva OPEN — čaká na produktové rozhodnutie
+  používateľa (needs-answer), ide samostatne. #236 (blocker=#305) NEotvorené — #305 ešte
+  nenasadené, komentár na #236 až po jeho nasadení.

@@ -382,6 +382,20 @@ def post_from_config(cfg, html: str, transport=None, channel_id: int | None = No
                 channel, html, transport=transport)
 
 
+def ops_channel(cfg) -> int:
+    """#310: the Odoo channel an OPERATOR/diagnostic alert (engine-liveness/staleness,
+    the monthly spend-cap tripwire, internal watchdogs) must route to — NEVER the
+    warehouse (243) / sales (152) channels a real person reads and cannot act on.
+
+    Returns `ops_channel_id` (0 when unset). A caller passing 0 to `post_from_config`
+    resolves to "Odoo not configured" -> the alert stays in the app log (+ a durable
+    outbox row where the caller uses one), never on a warehouse channel. Deliberately
+    NOT a fallback to `orders_channel_id`: an operator alert on the sales desk is the
+    exact bug this ticket fixes.
+    """
+    return int(getattr(cfg, "ops_channel_id", 0) or 0)
+
+
 # --- timeline ------------------------------------------------------------
 
 def log_event(conn, message_id: str, stage: str, status: str, outcome: str = "",

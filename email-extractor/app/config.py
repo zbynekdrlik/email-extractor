@@ -95,6 +95,13 @@ class Config:
     # desk), routing every DL review/success/announced-mismatch message to the wrong
     # audience. Still fully overridable per-install; this only fixes the DEFAULT.
     delivery_notes_channel_id: int = 243
+    # #310: the OPERATOR/admin Odoo channel — engine-liveness/staleness alerts, the
+    # monthly spend-cap tripwire and any other diagnostic hlásenie route HERE, never to
+    # the warehouse (243) / sales (152) channels a real person reads and cannot act on.
+    # Default UNSET (0): no such channel exists in prod today, so when unset an operator
+    # alert stays in the app log + durable `pending_alerts` (dashboard gauge) — never
+    # lost, never on 243/152. Set it to an admin channel id to also deliver in Odoo.
+    ops_channel_id: int = 0
     orion_host: str = ""
     orion_port: int = 22
     orion_user: str = ""
@@ -228,6 +235,9 @@ class Config:
             delivery_notes_channel_id=int(
                 _get(o, "delivery_notes_channel_id", "DELIVERY_NOTES_CHANNEL_ID", 243)
                 or 243),
+            # #310: operator/admin channel — 0 (unset) is a REAL value here, not a
+            # "fall back to a warehouse channel" sentinel, so NO trailing `or N`.
+            ops_channel_id=int(_get(o, "ops_channel_id", "OPS_CHANNEL_ID", 0) or 0),
             orion_host=_get(o, "orion_host", "ORION_HOST", "") or "",
             orion_port=int(_get(o, "orion_port", "ORION_PORT", 22) or 22),
             orion_user=_get(o, "orion_user", "ORION_USER", "") or "",

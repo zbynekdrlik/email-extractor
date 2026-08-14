@@ -155,10 +155,18 @@ def _check_spend_cap(conn, cfg, shadow: bool) -> None:
         if not spend.cap_tripped(conn, cap_eur=cap):
             return
         text = spend.trip_message(conn, cap_eur=cap)
+        # #310: the spend-cap tripwire is OPERATOR/diagnostic (only a system operator can
+        # act on the monthly LLM bill). Route it through the durable dl_alerts outbox to
+        # the OPS channel — NEVER a direct post_from_config, which with an unset ops
+        # channel (0) would fall back to the sales channel 152 (the misroute #310 fixes).
+        # When ops is unset the channel_id=0 row is HELD by flush_pending (never
+        # delivered, still counted on the dashboard) — a durable trace on top of this
+        # WARNING log, and never on 152/243.
         log.warning("%s", text.replace("\n", " | "))
         if not shadow:
-            from . import report
-            report.post_from_config(cfg, "<p>" + text.replace("\n", "<br>") + "</p>")
+            from . import dl_alerts, report
+            dl_alerts.enqueue(conn, report.ops_channel(cfg), "spend_cap",
+                              "<p>" + text.replace("\n", "<br>") + "</p>")
     except Exception:
         # Reporting the bill must never take an order down with it.
         log.exception("the spend-cap check failed")
@@ -308,6 +316,15 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pra
                 # there is never anything for this to find there either.
                 from . import question_alerts
                 question_alerts.sweep(conn, cfg)
+                # #308: no message may sit SILENTLY in the terminal `human_processing`
+                # pit (a scan the classifier could not place, needs_vision, no processor
+                # watching it). Vision rescues the near-empty-scan case into its real
+                # category; anything unrescued raises a warehouse-actionable alert through
+                # the SAME durable outbox flushed just below. Runs on the live-engine
+                # gate like the sweeps above — the app is "live" whenever an engine owns
+                # its category, and a rescue can route to either the DL or orders side.
+                from . import human_processing
+                human_processing.sweep(conn, cfg)
                 # #239 finding 4 / #237: deliver every durably-queued alert (DL
                 # processing-health AND, since #237, stale-question reminders) —
                 # `quiet_seconds=FLUSH_QUIET_SECONDS` (#239 reopened, finding 1) makes a
