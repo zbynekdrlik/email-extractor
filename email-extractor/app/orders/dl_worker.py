@@ -744,7 +744,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # #314: (item, recalled, note) per unmatched item — the dl_item asks are DEFERRED to
     # after the loop, so a remembered non-warehouse supplier with no catalog match can be
     # short-circuited (terminal skip, zero questions) before any question is raised.
-    unmatched_asks: list[tuple[dict, "dl_memory.Recalled | None", str]] = []
+    unmatched_asks: list[tuple[dict, dl_memory.Recalled | None, str]] = []
     catalog_gtins = {str(c.get("gtin")) for c in catalog}
     for item in doc.get("items") or []:
         recalled = dl_memory.resolve(conn, supplier_decision.ean_edi, item.get("name", ""),
