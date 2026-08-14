@@ -76,23 +76,34 @@ def remember(conn, supplier_ean: str = "", name: str = "", sender_email: str = "
         email = ""
     if not (ean or name_key or email):
         return False
-    conn.execute(
+    # RETURNING id → a real insert returns a row, an ON CONFLICT no-op returns None
+    # (adversarial-review finding, #314): so `seed_from_history`/`record_for_message` count
+    # only rows they ACTUALLY added, and the every-boot bootstrap log reports 0 seeded once
+    # the memory is populated, instead of the full historical count every time.
+    row = conn.execute(
         """INSERT INTO dl_nonwarehouse_supplier (supplier_ean, name_key, sender_email, name)
                VALUES (%s, %s, %s, %s)
-           ON CONFLICT (supplier_ean, name_key, sender_email) DO NOTHING""",
-        (ean, name_key, email, str(name or "")))
-    log.info("dl non-warehouse supplier remembered: ean=%r name_key=%r email=%r",
-             ean, name_key, email)
-    return True
+           ON CONFLICT (supplier_ean, name_key, sender_email) DO NOTHING
+           RETURNING id""",
+        (ean, name_key, email, str(name or ""))).fetchone()
+    if row is not None:
+        log.info("dl non-warehouse supplier remembered: ean=%r name_key=%r email=%r",
+                 ean, name_key, email)
+    return row is not None
 
 
 def resolve(conn, supplier_ean: str = "", name: str = "", sender_email: str = "") -> dict | None:
     """Is this supplier remembered non-warehouse? Matches on the supplier's OWN identity
-    first — registry EAN OR normalized name — and only falls back to the sender email for a
-    memory row that has NO other identity (an unregistered supplier we could key only by
-    address). Req 3 is encoded directly in the SQL: the email clause fires ONLY for a row
-    whose `supplier_ean` AND `name_key` are both empty, so a real supplier identity is never
-    overridden by a bare address match. Returns the matched row (dict) or None."""
+    first — registry EAN OR normalized name — and falls back to the sender email ONLY when
+    BOTH sides carry no better identity: the ROW is email-only (no ean, no name — an
+    unregistered supplier we could key only by address, e.g. david@grena.sk) AND the QUERY
+    itself extracted no ean and no name. Req 3 is encoded directly in the SQL, on BOTH sides
+    (adversarial-review finding, #314): without the query-side blankness a bare email-only
+    memory row (which `seed_from_history` GUARANTEES exists, since every pre-#314 dl_supplier
+    closure payload had no `supplier_name`) would suppress EVERY later mail from that shared
+    address — even one whose document extracts a different, real supplier identity — which is
+    exactly the tlaciaren@-forwards-everything loss this ticket exists to prevent. Returns
+    the matched row (dict) or None."""
     ean = str(supplier_ean or "").strip()
     name_key = _name_key(name)
     email = _email_key(sender_email)
@@ -102,7 +113,8 @@ def resolve(conn, supplier_ean: str = "", name: str = "", sender_email: str = ""
             WHERE (supplier_ean <> '' AND supplier_ean = %(ean)s)
                OR (name_key <> '' AND name_key = %(name_key)s)
                OR (supplier_ean = '' AND name_key = '' AND sender_email <> ''
-                   AND sender_email = %(email)s)
+                   AND sender_email = %(email)s
+                   AND %(ean)s = '' AND %(name_key)s = '')
             LIMIT 1""",
         {"ean": ean, "name_key": name_key, "email": email}).fetchone()
     if not row:
@@ -167,29 +179,45 @@ def sweep_open_questions(conn, cfg=None) -> int:
     already remembered non-warehouse. Reuses #307's terminal close path
     (`dl_worker.close_message_not_warehouse`) — never a parallel mechanism — so each such
     message is marked processed with a rollup `not_warehouse` event, exactly like a real
-    warehouse click. Returns the number of MESSAGES closed (close is message-level, so one
-    close per distinct message)."""
+    warehouse click. Returns the number of MESSAGES closed.
+
+    Two SAFETY gates (adversarial-review findings, #314) — close is message-level, so it
+    must never destroy a genuine delivery:
+
+      * only messages that SHIPPED NOTHING are eligible — `proc_status NOT IN
+        ('ok','partial','duplicate')` (a partial ship of a remembered mixed supplier, e.g.
+        EKVIA/Messer, whose unmatched line the req-4 override deliberately kept as an open
+        question, must NOT be swept — that would overwrite `partial`→`not_warehouse` and
+        misreport a real delivery as "netýka sa skladu") AND no `email_events` error row
+        (the `_release_stuck_siblings`/#265 lesson: an upload failure is not a skip);
+      * a message is closed ONLY when EVERY one of its open dl_item/dl_supplier questions
+        resolves to a remembered supplier — so a multi-supplier mail (one remembered, one
+        not) is never wholly closed on the strength of a single remembered document."""
     from . import dl_worker  # lazy: dl_worker imports teach which imports this module
     rows = conn.execute(
-        """SELECT id, payload, message_id FROM order_questions
-            WHERE status = 'open' AND kind IN ('dl_item', 'dl_supplier')
-            ORDER BY id""").fetchall()
-    closed: set[str] = set()
-    for qid, payload, message_id in rows:
-        if message_id in closed:
-            continue
-        payload = payload or {}
-        ean = payload.get("supplier_ean", "") or ""
-        name = payload.get("supplier_name", "") or ""
-        email = payload.get("sender_email", "") or ""
-        if not email:
-            mrow = conn.execute("SELECT from_addr FROM messages WHERE message_id = %s",
-                               (message_id,)).fetchone()
-            email = (mrow[0] if mrow else "") or ""
-        if resolve(conn, ean, name, email) is not None:
-            dl_worker.close_message_not_warehouse(conn, qid)
-            closed.add(message_id)
-    return len(closed)
+        """SELECT q.id, q.payload, q.message_id, m.from_addr
+             FROM order_questions q
+             JOIN messages m ON m.message_id = q.message_id
+            WHERE q.status = 'open' AND q.kind IN ('dl_item', 'dl_supplier')
+              AND COALESCE(m.proc_status, '') NOT IN ('ok', 'partial', 'duplicate')
+              AND NOT EXISTS (SELECT 1 FROM email_events e
+                               WHERE e.message_id = q.message_id AND e.status = 'error')
+            ORDER BY q.id""").fetchall()
+    by_msg: dict[str, list[tuple]] = {}
+    for qid, payload, message_id, from_addr in rows:
+        by_msg.setdefault(message_id, []).append((qid, payload or {}, from_addr or ""))
+    closed = 0
+    for qs in by_msg.values():
+        all_remembered = all(
+            resolve(conn,
+                    payload.get("supplier_ean", "") or "",
+                    payload.get("supplier_name", "") or "",
+                    (payload.get("sender_email", "") or from_addr)) is not None
+            for _qid, payload, from_addr in qs)
+        if all_remembered and qs:
+            dl_worker.close_message_not_warehouse(conn, qs[0][0])
+            closed += 1
+    return closed
 
 
 def bootstrap(conn, cfg=None) -> dict:

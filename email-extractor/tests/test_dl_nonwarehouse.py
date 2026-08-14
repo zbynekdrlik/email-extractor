@@ -159,3 +159,77 @@ def test_bootstrap_seeds_then_sweeps(pg):
     assert result["swept"] == 1
     assert pg.execute("SELECT status FROM order_questions WHERE id=%s",
                       (q_open,)).fetchone()[0] == "not_warehouse"
+
+
+# --- adversarial-review regression tests (#314) -------------------------------------
+
+def test_email_only_row_never_suppresses_a_mail_that_extracted_a_real_identity(pg):
+    """Review 🔴: a bare email-only seed row (every pre-#314 dl_supplier closure had no
+    name) must NOT suppress a later mail from the SAME shared address whose document
+    extracts a real, DIFFERENT supplier identity — the tlaciaren@-forwards-everything loss
+    (req 3). The email fallback fires only when NEITHER side has a better identity."""
+    dl_nonwarehouse.remember(pg, "", "", "shared@forward.sk")
+    # a later mail from the SAME address that extracted a real identity is NOT suppressed
+    assert dl_nonwarehouse.resolve(pg, "2000000000999", "", "shared@forward.sk") is None
+    assert dl_nonwarehouse.resolve(pg, "", "Iný Dodávateľ", "shared@forward.sk") is None
+    # but a mail from that address that extracted NO identity still matches (the david case)
+    assert dl_nonwarehouse.resolve(pg, "", "", "shared@forward.sk") is not None
+
+
+def test_seed_from_history_reports_only_new_inserts(pg):
+    """Review 🔵: remember() (hence seed/bootstrap) counts only rows it ACTUALLY inserts, so
+    a re-run reports 0 seeded instead of the full historical count."""
+    pg.execute("INSERT INTO messages (message_id, category, from_addr) "
+               "VALUES ('sh1', 'dodacie_listy', 'z@z.sk')")
+    qid = teach.ask_dl_item(pg, "sh1", "2000000000264", "EKVIA s.r.o.", "X", 1, "ks", [])
+    pg.execute("UPDATE order_questions SET status='not_warehouse' WHERE id=%s", (qid,))
+    assert dl_nonwarehouse.seed_from_history(pg) >= 1
+    assert dl_nonwarehouse.seed_from_history(pg) == 0     # nothing new the second time
+
+
+def test_sweep_never_closes_a_message_that_already_shipped(pg):
+    """Review 🔴: a remembered MIXED supplier (EKVIA/Messer) can ship a partial delivery AND
+    keep an open dl_item question for its unmatched line (the req-4 override's own output) —
+    the sweep must NOT close it (would overwrite partial->not_warehouse and misreport a real
+    delivery as 'netýka sa skladu')."""
+    dl_nonwarehouse.remember(pg, "2000000000264", "EKVIA s.r.o.", "")
+    pg.execute("INSERT INTO messages (message_id, category, from_addr, processed, proc_status) "
+               "VALUES ('ship1', 'dodacie_listy', 'e@e.sk', true, 'partial')")
+    qid = teach.ask_dl_item(pg, "ship1", "2000000000264", "EKVIA s.r.o.",
+                            "Neznáma položka", 1, "ks", [])
+    assert dl_nonwarehouse.sweep_open_questions(pg, None) == 0
+    assert pg.execute("SELECT status FROM order_questions WHERE id=%s",
+                      (qid,)).fetchone()[0] == "open"
+
+
+def test_sweep_never_closes_a_message_with_an_error_event(pg):
+    """Review 🔴: an upload failure logs email_events status='error' (the #265/
+    _release_stuck_siblings lesson) — it is not a skip, so the sweep must leave it open."""
+    dl_nonwarehouse.remember(pg, "2000000000207", "Messer Tatragas, spol. s r.o.", "")
+    pg.execute("INSERT INTO messages (message_id, category, from_addr, processed, proc_status) "
+               "VALUES ('err1', 'dodacie_listy', 'm@m.sk', false, 'review')")
+    qid = teach.ask_dl_item(pg, "err1", "2000000000207", "Messer Tatragas, spol. s r.o.",
+                            "Plyn", 1, "ks", [])
+    pg.execute("INSERT INTO email_events (message_id, status, stage) "
+               "VALUES ('err1', 'error', 'review')")
+    assert dl_nonwarehouse.sweep_open_questions(pg, None) == 0
+    assert pg.execute("SELECT status FROM order_questions WHERE id=%s",
+                      (qid,)).fetchone()[0] == "open"
+
+
+def test_sweep_skips_a_multisupplier_message_with_one_unremembered_supplier(pg):
+    """Review 🔴: close is message-level — a mail whose questions include even ONE
+    unremembered supplier must be left entirely alone, or that supplier's legit question is
+    wrongly auto-closed."""
+    dl_nonwarehouse.remember(pg, "2000000000441", "Stavebniny KLEŠČ, s.r.o.", "")
+    pg.execute("INSERT INTO messages (message_id, category, from_addr, processed, proc_status) "
+               "VALUES ('mix1', 'dodacie_listy', 'x@x.sk', false, 'review')")
+    q_remembered = teach.ask_dl_item(pg, "mix1", "2000000000441", "Stavebniny KLEŠČ, s.r.o.",
+                                     "Cement", 1, "ks", [])
+    q_other = teach.ask_dl_item(pg, "mix1", "2000000000111", "Iný Skutočný Dodávateľ",
+                               "Múka", 1, "kg", [])
+    assert dl_nonwarehouse.sweep_open_questions(pg, None) == 0
+    assert pg.execute("SELECT status FROM order_questions WHERE id=%s",
+                      (q_remembered,)).fetchone()[0] == "open"
+    assert pg.execute("SELECT status FROM order_questions WHERE id=%s",
+                      (q_other,)).fetchone()[0] == "open"

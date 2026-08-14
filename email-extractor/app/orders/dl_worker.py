@@ -621,15 +621,19 @@ def _document_has_catalog_match(client, message: dict, doc: dict,
     so a remembered non-warehouse supplier that DOES send a real warehouse delivery is
     never silently dropped (live evidence: EKVIA/Messer, both marked not_warehouse, also
     ship real catalog goods). Short-circuits on the first match. A transient matcher error
-    re-raises via `_check_retry` (the message retries later) rather than being mistaken for
-    'no match'; a non-transient error is treated as no match (the normal flow's own review
-    handling is unaffected — this is only the skip-vs-keep gate)."""
+    re-raises via `_check_retry` (the message retries later); a NON-transient (or budget-
+    exhausted) matcher error FAILS SAFE — returns True (keep the mail = the pre-#314 ask/
+    review path), never False (adversarial-review finding, #314): treating a model outage
+    as 'no catalog match' is exactly what would flip skip-vs-keep to a silent skip with no
+    evidence about the document's content. Returns True on the first real match OR on any
+    matcher error, False only when the matcher genuinely ran on every item and matched
+    none."""
     for item in doc.get("items") or []:
         try:
             decision = _match_item(client, item, catalog, None, "")
         except Exception as e:
             _check_retry(message.get("attempts", 0), str(e))
-            continue
+            return True   # fail SAFE: an error is not evidence of "no match" — keep the mail
         if not desadv_edi._is_unmatched(decision.gtin):
             return True
     return False
@@ -740,7 +744,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # #314: (item, recalled, note) per unmatched item — the dl_item asks are DEFERRED to
     # after the loop, so a remembered non-warehouse supplier with no catalog match can be
     # short-circuited (terminal skip, zero questions) before any question is raised.
-    unmatched_asks: list[tuple[dict, object, str]] = []
+    unmatched_asks: list[tuple[dict, "dl_memory.Recalled | None", str]] = []
     catalog_gtins = {str(c.get("gtin")) for c in catalog}
     for item in doc.get("items") or []:
         recalled = dl_memory.resolve(conn, supplier_decision.ean_edi, item.get("name", ""),
@@ -792,7 +796,12 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # at least one real match falls straight through to the normal build/claim/ship path
     # below (req 4, safety override), and its unmatched items still raise their questions.
     has_catalog_match = any(not desadv_edi._is_unmatched(d.gtin) for _, d in decisions)
-    if nw_remembered and not has_catalog_match:
+    # #314 adversarial-review finding: a `match_failed` decision is a matcher EXCEPTION (the
+    # `except` branch in the loop above), NOT a genuine "no match" — never skip on it, or a
+    # model outage on a remembered supplier's mail would become a silent drop. Fall through
+    # to the normal review+ask path (mirrors case B's now-fail-safe _document_has_catalog_match).
+    has_match_failure = any(d.rule == "match_failed" for _, d in decisions)
+    if nw_remembered and not has_catalog_match and not has_match_failure:
         return _skip_not_warehouse(conn, shadow, message, doc_number,
                                    supplier_decision.name)
 
@@ -1059,7 +1068,13 @@ def _aggregate_status(documents_out: list[dict]) -> str:
     if (all(o in ("not_warehouse", "duplicate") for o in outcomes)
             and "not_warehouse" in outcomes):
         return "not_warehouse"
-    if all(o in ("review", "duplicate") for o in outcomes) and "review" in outcomes:
+    # #314 adversarial-review finding: a mixed message (an auto-skipped not_warehouse doc
+    # ALONGSIDE a doc that genuinely needs a human) must NOT roll up to "ok" — "review"
+    # wins so the digest and every proc_status='review'-keyed sweep still see the human
+    # work. `not_warehouse` is added to the review branch's tuple (the all-nw branch above
+    # still fires first for a purely non-warehouse message).
+    if (all(o in ("review", "duplicate", "not_warehouse") for o in outcomes)
+            and "review" in outcomes):
         return "review"
     if any(o == "partial" for o in outcomes) or ("review" in outcomes and
                                                   any(o in ("ok", "partial")

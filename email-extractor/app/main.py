@@ -101,9 +101,12 @@ def main() -> None:
     try:
         # #314: one-time-ish idempotent seed of the non-warehouse supplier memory from
         # historical "Netýka sa skladu" closures + a sweep of any still-open question whose
-        # supplier is already remembered. Never fatal — a failure here must not block boot.
-        from .orders import dl_nonwarehouse
-        dl_nonwarehouse.bootstrap(conn, cfg)
+        # supplier is already remembered. Gated on the python DL engine (same condition
+        # tick()'s live branch uses) so a config rollback to n8n-owned DL never lets the
+        # sweep auto-close questions / mark messages processed (review finding). Never fatal.
+        if getattr(cfg, "delivery_notes_engine", "") == "python":
+            from .orders import dl_nonwarehouse
+            dl_nonwarehouse.bootstrap(conn, cfg)
     except Exception:
         log.exception("dl_nonwarehouse bootstrap failed (non-fatal)")
     httpapi.start(cfg)
