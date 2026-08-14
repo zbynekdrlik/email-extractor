@@ -72,6 +72,8 @@ EXPECTED_CALLABLES = [
     "_check_landed",
     # sibling release (#265)
     "_release_stuck_siblings",
+    # CODEX-card retro-release (#322)
+    "release_for_supplier_card",
 ]
 
 # Non-callable module-level symbols reached through `dl_worker.X` (constants, schemas,

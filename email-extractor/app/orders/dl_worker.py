@@ -176,6 +176,7 @@ from .dl_questions import (  # noqa: F401 (re-export: public dl_worker API)
     close_message_not_warehouse,
     close_message_sklad_unknown,
     release_for_question,
+    release_for_supplier_card,
 )
 from .dl_retry import (  # noqa: F401 (re-export: public dl_worker API)
     TRANSIENT_RE,

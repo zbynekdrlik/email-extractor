@@ -307,6 +307,90 @@ def decide_supplier(llm: dict, suppliers: list[dict]) -> SupplierDecision:
                             note=str(llm.get("matchReason") or "Spárované modelom."))
 
 
+# --- #322: deterministic CODEX-card supplier resolution ---------------------
+
+def _supplier_name_key(name: str) -> str:
+    """A CONSERVATIVE exact-match key for a supplier name: fold diacritics + lowercase,
+    every non-alphanumeric run -> ONE space, whitespace collapsed. Legal-form tokens
+    (`s.r.o.`, `a.s.`, ...) are DELIBERATELY kept (never dropped, unlike `_score_supplier`'s
+    R60 word-overlap tier) — a deterministic auto-match must not silently equate two distinct
+    legal entities that share a core name ('ABC s.r.o.' vs 'ABC a.s.'). If two forms differ
+    they simply don't match here (safe); if they collide they are AMBIGUOUS and fall through
+    to the board question. 'Forbak, s. r. o.'/'FORBAK s.r.o.' both fold to 'forbak s r o'."""
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", _fold(name)).split())
+
+
+def resolve_supplier_from_cards(doc: dict, cards: list[dict],
+                                sender_email: str = "") -> SupplierDecision | None:
+    """#322: a CONSERVATIVE, model-free identity match of the document's supplier against the
+    effective CODEX supplier list (`dl_snapshot.dl_suppliers_for_management` — frozen snapshot
+    ∪ /znalosti overrides). Returns a matched `SupplierDecision` ONLY on an UNAMBIGUOUS
+    identity match (exactly one distinct EAN), else `None` (the caller keeps the existing
+    ask/review path). NEVER guesses on ambiguity — a false supplier match ships a
+    wrongly-addressed EDI to ORION.
+
+    Used to rescue a MODEL MISS before firing a `dl_supplier` board question (Marek's #322
+    decision: a card in CODEX must stand on its own, no nástenka question). Priority:
+      1. EAN, when the document carries one (`supplierEanEdi`) — DORMANT today (the extraction
+         schema has no supplier EAN), but ready for a future field, and the strongest key;
+      2. an email the document (`supplierEmail`) or the envelope (`sender_email`) carries,
+         appearing in exactly one card's `emails` — an address is a unique identifier;
+      3. the document's normalized supplier NAME equal to exactly one card's normalized name;
+         when 2+ cards share the name, the document's city breaks a genuine tie, else ambiguous.
+
+    Ambiguity is measured across DISTINCT `ean_edi` values: two branch cards sharing one EAN
+    are ONE delivery target, never an ambiguity. A card with a blank `ean_edi` is skipped
+    entirely — an EDI cannot be built without one, so such a card can never be a real match."""
+    usable = [c for c in cards if str(c.get("ean_edi") or "").strip()]
+    if not usable:
+        return None
+
+    def _one(hits: dict, note: str) -> SupplierDecision | None:
+        if len(hits) != 1:
+            return None
+        card = next(iter(hits.values()))
+        return SupplierDecision(matched=True, ean_edi=str(card["ean_edi"]),
+                                name=card.get("name", ""), confidence=1.0, note=note)
+
+    # (1) EAN — dormant (no supplier EAN in today's extraction schema), but ready.
+    doc_ean = str(doc.get("supplierEanEdi") or doc.get("supplierEan") or "").strip()
+    if doc_ean:
+        m = _one({str(c["ean_edi"]): c for c in usable if str(c["ean_edi"]) == doc_ean},
+                 "Priradené podľa EAN dodávateľa z dokumentu (CODEX karta).")
+        if m:
+            return m
+
+    # (2) email — the strongest name-free signal (a unique identifier).
+    wanted = {e for e in (str(doc.get("supplierEmail") or "").strip().lower(),
+                          str(sender_email or "").strip().lower()) if e}
+    if wanted:
+        m = _one({str(c["ean_edi"]): c for c in usable
+                  if wanted & {str(e).strip().lower() for e in (c.get("emails") or [])}},
+                 "Priradené podľa e-mailu dodávateľa (CODEX karta).")
+        if m:
+            return m
+
+    # (3) normalized name, unambiguous — the document's city breaks a genuine tie.
+    name_key = _supplier_name_key(doc.get("supplierName", ""))
+    if name_key:
+        name_hits = {str(c["ean_edi"]): c for c in usable
+                     if _supplier_name_key(c.get("name", "")) == name_key}
+        m = _one(name_hits, "Priradené podľa názvu dodávateľa (CODEX karta).")
+        if m:
+            return m
+        if len(name_hits) > 1:
+            city_key = _supplier_name_key(doc.get("supplierCity", ""))
+            if city_key:
+                m = _one({ean: c for ean, c in name_hits.items()
+                          if _supplier_name_key(c.get("city", "")) == city_key},
+                         "Priradené podľa názvu + mesta dodávateľa (CODEX karta).")
+                if m:
+                    return m
+        # 2+ distinct EANs share the name and no unique city -> AMBIGUOUS, never guess.
+
+    return None
+
+
 # --- item decision ladder (R70-R76) -----------------------------------------
 
 @dataclass

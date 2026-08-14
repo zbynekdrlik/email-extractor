@@ -1014,11 +1014,14 @@ def test_a_genuine_cross_message_duplicate_still_counts_with_a_known_different_c
 # --- supplier / item not matched: nástenka questions, never silent ----------
 
 def test_unmatched_supplier_raises_a_nastenka_question_and_reviews(pg, tmp_path):
+    # #322: a supplier genuinely NOT in the effective CODEX list, so the new deterministic
+    # rung cannot rescue it — the whole point of #322 is that a KNOWN card no longer fires
+    # this question, so this test must exercise a truly-unknown supplier.
     _snapshot(pg)
-    _msg(pg, mid="dl1")
+    _msg(pg, mid="dl1", from_addr="neznamy@nowhere.sk")
     _attach(pg, tmp_path, "dl1")
     client = FakeClient({
-        "dl_documents": [_doc()],
+        "dl_documents": [_unknown_supplier_doc("neznamy@nowhere.sk")],
         "dl_supplier": [{"matched": False, "matchReason": "nie je v zozname"}]})
     posted = []
     n = dl_worker.tick(
@@ -1052,11 +1055,13 @@ def test_a_clean_ok_run_carries_no_dashboard_link(pg, tmp_path):
 
 
 def test_an_unmatched_supplier_review_run_carries_the_dashboard_link(pg, tmp_path):
+    # #322: unknown supplier (not in the effective CODEX list) so the deterministic rung
+    # cannot rescue it and the review path is genuinely exercised.
     _snapshot(pg)
-    _msg(pg, mid="dl1")
+    _msg(pg, mid="dl1", from_addr="neznamy@nowhere.sk")
     _attach(pg, tmp_path, "dl1")
     client = FakeClient({
-        "dl_documents": [_doc()],
+        "dl_documents": [_unknown_supplier_doc("neznamy@nowhere.sk")],
         "dl_supplier": [{"matched": False, "matchReason": "nie je v zozname"}]})
     posted = []
     dl_worker.tick(
@@ -1072,11 +1077,13 @@ def test_the_dashboard_link_is_the_dl_only_nastenka_never_the_orders_one(pg, tmp
     """#231: DL Odoo review messages must point at `/sklad-dl/<key>` (the DELIVERY-NOTES-
     only board) — never `/sklad/<key>` (the AI-orders board, `report.sklad_link`), which
     is exactly what a DL message linked to before this ticket."""
+    # #322: unknown supplier (not in the effective CODEX list) so the deterministic rung
+    # cannot rescue it and the review path is genuinely exercised.
     _snapshot(pg)
-    _msg(pg, mid="dl1")
+    _msg(pg, mid="dl1", from_addr="neznamy@nowhere.sk")
     _attach(pg, tmp_path, "dl1")
     client = FakeClient({
-        "dl_documents": [_doc()],
+        "dl_documents": [_unknown_supplier_doc("neznamy@nowhere.sk")],
         "dl_supplier": [{"matched": False, "matchReason": "nie je v zozname"}]})
     posted = []
     dl_worker.tick(
@@ -3198,12 +3205,15 @@ def test_remembered_unmatched_supplier_with_a_catalog_match_still_asks(pg, tmp_p
     question so a human can identify the supplier and ship the genuine goods."""
     _snapshot(pg)
     cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
-    dl_nonwarehouse.remember(pg, "", "Pekáreň Lunys", "")
-    _msg(pg, mid="cb2")
+    # #322: a genuinely UNREGISTERED supplier (not in the effective CODEX list), matching
+    # this test's own docstring — so the new deterministic rung cannot resolve it and the
+    # #314 safety override (a catalog-matching item still asks) is what's under test.
+    dl_nonwarehouse.remember(pg, "", "Neznáma pekáreň s.r.o.", "")
+    _msg(pg, mid="cb2", from_addr="neznamy@nowhere.sk")
     _attach(pg, tmp_path, "cb2")
     dl_worker.tick(pg, cfg, client=FakeClient({
-        "dl_documents": [_doc()], "dl_supplier": [SUPPLIER_UNMATCHED],
-        "dl_item": [ITEM_MATCHED]}),
+        "dl_documents": [_unknown_supplier_doc("neznamy@nowhere.sk")],
+        "dl_supplier": [SUPPLIER_UNMATCHED], "dl_item": [ITEM_MATCHED]}),
         post=lambda c, h: None)
     assert pg.execute("SELECT count(*) FROM order_questions WHERE kind='dl_supplier' "
                       "AND status='open'").fetchone()[0] == 1

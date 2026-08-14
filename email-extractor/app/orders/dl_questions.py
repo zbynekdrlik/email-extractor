@@ -335,3 +335,33 @@ def _release_stuck_siblings(conn, exclude_message_id: str, sender_email: str) ->
     log.info("dl release_for_question: released %d orphaned same-sender sibling "
              "message(s) for %r back into the claim pool", len(ids), sender_email)
     return len(ids)
+
+
+def release_for_supplier_card(conn, emails) -> int:
+    """#322: retro-release triggered when a CODEX supplier card is ADDED or EDITED via
+    `/znalosti` (not by answering a nástenka question). For each of the card's email
+    addresses, reset orphaned same-sender stuck DL messages back into the claim pool so the
+    worker reprocesses them — where the new deterministic CODEX-card rung (`_match_supplier`)
+    now resolves the supplier. REUSES the #265 `_release_stuck_siblings` machinery verbatim
+    (never a parallel release path), so ALL its safety exclusions hold unchanged: only
+    `processed=true`/`proc_status='review'` messages with NO `order_questions` row of their
+    own AND no `status='error'` event ever logged are reset (the `#239` double-upload
+    exclusion), and a correction mail simply re-hits `_looks_like_correction` on reprocess
+    and returns to review — never ships.
+
+    Passing `exclude_message_id=""` excludes nothing (every real `messages.message_id` is
+    non-empty, so `message_id <> ''` is always true) — there is no "current" message to skip
+    here, unlike the answer-triggered `release_for_question` path. Returns the total number
+    of sibling messages reset. The ONE message that raised the still-open `dl_supplier`
+    question (if any) is deliberately left to the normal nástenka-answer release path
+    (`release_for_question`) — `_release_stuck_siblings` excludes any message with an
+    `order_questions` row by design."""
+    seen: set[str] = set()
+    released = 0
+    for email in emails or []:
+        key = str(email or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        released += _release_stuck_siblings(conn, "", key)
+    return released

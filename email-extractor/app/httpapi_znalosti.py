@@ -22,7 +22,7 @@ from flask import Flask, jsonify, request, session
 from . import __version__
 from .httpapi_common import _EAN_STRIP_RE, Deps, _fold, _parse_emails_field
 from .httpapi_templates import ZNALOSTI_HTML
-from .orders import dl_snapshot, memory, snapshot
+from .orders import dl_snapshot, dl_worker, memory, snapshot
 
 
 def register(app: Flask, deps: Deps) -> None:
@@ -293,15 +293,20 @@ def register(app: Flask, deps: Deps) -> None:
                                  "v CODEXe pri dodávateľovi."), 400
         if not ean.isdigit():
             return jsonify(error="EAN kód EDI musí byť len číslice."), 400
+        emails = _parse_emails_field(body.get("emails"))
         try:
             with deps.db() as c:
                 rid = dl_snapshot.upsert_dl_supplier(
                     c, override_id=body.get("override_id"),
                     orig_ean_edi=body.get("orig_ean_edi"), orig_city=body.get("orig_city"),
-                    ean_edi=ean, name=name,
-                    emails=_parse_emails_field(body.get("emails")),
+                    ean_edi=ean, name=name, emails=emails,
                     city=str(body.get("city") or "").strip())
                 dl_snapshot.dl_rebuild_from_overrides(c)
+                # #322: a newly-added/edited CODEX card retro-releases orphaned same-sender
+                # stuck DL messages (no nástenka answer needed) — the worker reprocesses them
+                # and the new deterministic CODEX-card rung resolves the supplier. Reuses the
+                # #265 sibling-release machinery with all its safety exclusions unchanged.
+                dl_worker.release_for_supplier_card(c, emails)
         except snapshot.DuplicateEan as e:
             # #248 review finding: mirrors the customer endpoint's own fix above — this
             # admin dashboard save funnels through the SAME `upsert_dl_supplier` as the

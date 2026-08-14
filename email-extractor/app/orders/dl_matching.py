@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from . import dl_match, dl_supplier_memory
+from . import dl_match, dl_snapshot, dl_supplier_memory
 
 log = logging.getLogger("orders.dl_worker")
 
@@ -95,7 +95,24 @@ def _match_supplier(conn, client, doc: dict, suppliers: list[dict],
                                          doc.get("supplierCity", ""), suppliers)
     answer = client.json_call(_supplier_prompt(), _supplier_input(doc, cands),
                               SUPPLIER_SCHEMA, name="dl_supplier")
-    return dl_match.decide_supplier(answer, suppliers)
+    decision = dl_match.decide_supplier(answer, suppliers)
+    if decision.matched:
+        return decision
+    # #322: the model MISSED. Before firing a `dl_supplier` board question, re-check the
+    # document's supplier against the FRESHEST effective CODEX list — `dl_suppliers_for_
+    # management` (frozen snapshot ∪ /znalosti overrides), not the possibly-staler
+    # `suppliers` snapshot the model was shown — so a card added in CODEX yesterday is found
+    # today (Marek's #322 decision: a CODEX card must stand on its own, no nástenka question).
+    # ONLY an UNAMBIGUOUS deterministic identity match rescues; ambiguity / nothing keeps the
+    # existing ask path — a false supplier match ships a wrongly-addressed EDI to ORION, so
+    # this never guesses and never overrides a model MATCH (it runs only on a miss).
+    codex = dl_match.resolve_supplier_from_cards(
+        doc, dl_snapshot.dl_suppliers_for_management(conn), sender_email)
+    if codex is not None:
+        log.info("dl supplier CODEX-card rescue: model missed but an unambiguous card "
+                 "exists -> %s (%s)", codex.ean_edi, codex.name)
+        return codex
+    return decision
 
 
 def _match_item(client, item: dict, catalog: list[dict], recalled,
