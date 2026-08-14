@@ -3359,3 +3359,33 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
   errors; typecheck CI „Success: no issues found in 64 source files". Run card (v0.9.92).
 - Nový playbook: `.claude/rules/type-checking.md` (chirurgický override, fix bez potlačenia,
   backfill-rot `autospec` RED→GREEN technika).
+
+## 2026-08-14 — #269 (verzovaný migračný engine + schema_version ledger, PR #304, 0.9.92 -> 0.9.93)
+
+- SOLO dispatch. `init_schema()` spúšťal ~100 idempotentných DDL príkazov pri KAŽDOM starte;
+  žiaden záznam verzie schémy. Nový `app/migrate.py` engine (bez novej závislosti):
+  `Revision`/`run_migrations`/`pending_revisions` + `schema_version` ledger; `db.SCHEMA` zmrazený
+  ako revízia 1 (baseline), `init_schema` = tenký wrapper (6 volajúcich + conftest bez zmeny).
+  Baseline beží per-statement (self-healing, ako prod), nová revízia v jednej transakcii; up-to-date
+  DB → O(1). Session advisory lock pre concurrent-start. Immutable-baseline (zmena = nová revízia).
+- KĽÚČOVÝ DIZAJNOVÝ OBRAT B1→B2 (durable v komentároch #269): pôvodný „zaznamenaj baseline BEZ
+  spustenia" (B1) NIE JE self-healing — zaznamenal `(1,'baseline')` kým chýbal `edi_sent.uploaded_at`
+  (#153) → 35 testov padlo na `UndefinedColumn`. Prepnuté na B2 (spusti idempotentný baseline, potom
+  zaznamenaj). Dôvod: refine-don't-blindly-follow; dôkaz z testov.
+- Test-infra dopad: `init_schema` už nie je vždy-re-run → 11 migračných testov (test_db/orders_edi/
+  orders_confirm), ktoré dropnú stĺpec/index a čakajú obnovu, prepnuté na nový `reapply_schema`
+  fixture (vyčistí ledger); `_schema` session fixture dropne ledger + re-aplikuje baseline (self-heal
+  lokálneho stale kontajnera); `schema_version` zámerne MIMO `pg` TRUNCATE listu. Concurrency test
+  cez `tests/_race.run_racers` (#291), nie hand-rolled join.
+- Adverzný self-review (fresh-context general-purpose subagent, NIE built-in skill): 0🔴 1🟡 3🔵,
+  všetko opravené v tej istej vetve (`96a21b5`): 🟡 code-enforce ascending/unique revision ids;
+  🔵 dokumentovaný transaction-safe constraint novej revízie; 🔵 `pending_revisions` except zúžený na
+  `UndefinedTable`; 🔵 posilnený `test_data_untouched` o genuine baseline re-run.
+- Commity: `5725eba` bump, `044ebda` feat (Closes #269), `96a21b5` fix (review), `3989bef` sync main.
+  PR #304 merged `7e253077`. Push+PR+main CI všetko green (test/typecheck/e2e-orders/e2e-dl/build).
+  Coverage 94.2 %, `app/migrate.py` 100 %. Deploy 0.9.92→0.9.93; /health 0.9.93 + waitress; boot log
+  „applied schema baseline r0001 (101 idempotent statement(s))", 2. reštart „schema up-to-date at
+  r0001"; row counts messages/attachments/desadv_sent/order_questions/edi_sent 7001/3624/23/30/430
+  ROVNAKÉ pred aj po; DOM `v0.9.93`, 0 console errors; schema_version `1|baseline`. Run card (v0.9.93).
+- Nový playbook: `.claude/rules/schema-migrations.md` (pridanie revízie, self-healing baseline vs
+  zakázané record-without-running, `reapply_schema` fixture, schema_version mimo TRUNCATE).

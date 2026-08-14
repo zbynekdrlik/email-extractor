@@ -68,3 +68,4 @@ Load the matching skill BEFORE working on that area (don't re-derive):
 - rozdelenie `app/httpapi.py` (#268) / charakterizačné testy → `.claude/rules/httpapi-characterization.md` (auto-loads on `app/httpapi*.py` a `test_httpapi_characterization.py`)
 - PR hlási `mergeable_state: "dirty"` hoci lokálny merge je čistý (criss-cross merge-base z fleet integrácie) → `.claude/rules/pr-merge-mechanics.md` (auto-loads on `app/**`, `tests/**`, `config.yaml`, `docs/autopilot-log.md`)
 - typová kontrola (mypy brána v CI, oprava nálezu bez potlačenia, chirurgický per-modulový override) → `.claude/rules/type-checking.md` (auto-loads on `pyproject.toml`, `requirements-dev.txt`)
+- schéma / migrácie (verzovaný `migrate.py` engine, `schema_version` ledger, pridanie novej revízie, self-healing baseline, `reapply_schema` test fixture) → `.claude/rules/schema-migrations.md` (auto-loads on `app/migrate.py`, `app/db.py`, `test_migrate.py`)
