@@ -155,15 +155,18 @@ def _check_spend_cap(conn, cfg, shadow: bool) -> None:
         if not spend.cap_tripped(conn, cap_eur=cap):
             return
         text = spend.trip_message(conn, cap_eur=cap)
-        # #310: the spend-cap tripwire is an OPERATOR/diagnostic alert (only a system
-        # operator can act on the monthly LLM bill) — it routes to the ops channel, never
-        # the sales channel (152) it used to default to. The WARNING log is the guaranteed
-        # operator surface when the ops channel is unset (post_from_config returns None).
+        # #310: the spend-cap tripwire is OPERATOR/diagnostic (only a system operator can
+        # act on the monthly LLM bill). Route it through the durable dl_alerts outbox to
+        # the OPS channel — NEVER a direct post_from_config, which with an unset ops
+        # channel (0) would fall back to the sales channel 152 (the misroute #310 fixes).
+        # When ops is unset the channel_id=0 row is HELD by flush_pending (never
+        # delivered, still counted on the dashboard) — a durable trace on top of this
+        # WARNING log, and never on 152/243.
         log.warning("%s", text.replace("\n", " | "))
         if not shadow:
-            from . import report
-            report.post_from_config(cfg, "<p>" + text.replace("\n", "<br>") + "</p>",
-                                    channel_id=report.ops_channel(cfg))
+            from . import dl_alerts, report
+            dl_alerts.enqueue(conn, report.ops_channel(cfg), "spend_cap",
+                              "<p>" + text.replace("\n", "<br>") + "</p>")
     except Exception:
         # Reporting the bill must never take an order down with it.
         log.exception("the spend-cap check failed")

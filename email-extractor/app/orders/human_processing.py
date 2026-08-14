@@ -38,9 +38,14 @@ log = logging.getLogger("orders.human_processing")
 # a classifier re-run) settle before we spend a vision call / raise a warehouse alert.
 STUCK_MINUTES = 15
 
-# The categories that actually have a processor (app engine or a live n8n workflow) — the
-# only targets a rescue may route to. `human_processing`/`no_processing` are terminal by
-# definition and are NEVER a rescue target.
+# The categories that actually have a processor — the ONLY targets a rescue may route to.
+# `dodacie_listy`/`ai_orders`/`static_orders` are owned by the Python engines here;
+# `invoices`/`reklamacie` are handled by live n8n workflows ("Invoices Forward v2",
+# "Reklamacie"). INVARIANT: every category in this set must have a live processor — a
+# rescue moves the message OUT of human_processing (past the Layer-2 net), so routing to a
+# category whose processor is gone would silently recreate the exact pit this closes. If a
+# processor is ever retired, drop its category here. `human_processing`/`no_processing` are
+# terminal by definition and are NEVER a rescue target.
 PROCESSOR_CATEGORIES = {
     "dodacie_listy", "invoices", "reklamacie", "ai_orders", "static_orders",
 }
@@ -106,7 +111,7 @@ def _vision_classify(cfg, attachments: list[dict]) -> dict | None:
         return None
     try:
         texts = llm.from_config(cfg).vision_call(_CLASSIFY_PROMPT, images=images, n=1)
-    except (llm.LlmError, llm.CacheMiss, Exception):  # noqa: BLE001 - never crash the sweep
+    except Exception:  # noqa: BLE001 - any failure (LlmError/CacheMiss/network) degrades to notify
         log.warning("human_processing vision classify failed for a message — "
                     "falling back to notification")
         return None
@@ -117,6 +122,9 @@ def _rescue(conn, cfg, message: dict, classify) -> bool:
     """Try Layer 1 on ONE message. Returns True iff it was reclassified (rescued)."""
     if not (message["needs_vision"] and message["has_attachments"]):
         return False
+    # Deliberate reuse of dl_worker's own attachment reader (a `_`-private helper): it
+    # already encodes the #297 spreadsheet-exclusion + on-disk byte loading correctly, and
+    # duplicating that here would be a second copy to keep in sync. Read-only, no DL state.
     attachments = dl_worker._read_attachments(cfg, message["message_id"], conn)
     verdict = classify(cfg, attachments)
     if not verdict:
@@ -169,13 +177,17 @@ def sweep(conn, cfg, classify=None) -> int:
     or newly notified) this pass. Never raises — a per-message failure is logged and the
     pass continues, mirroring `worker.run_forever`'s other sweeps."""
     classify = classify or _vision_classify
+    # LIMIT paces the per-tick work: a first exposure to a backlog does at most this many
+    # vision calls per ~15s tick, the rest drain over the next ticks. Total cost is
+    # bounded by the dedup regardless (each message gets ONE vision attempt per 4h
+    # window), so a small limit just smooths the burst — it never skips a message.
     rows = conn.execute(
         """SELECT message_id, subject, from_addr, has_attachments, needs_vision,
                   created_at
              FROM messages
             WHERE category = 'human_processing' AND processed = false
               AND created_at < now() - make_interval(mins => %s)
-            ORDER BY created_at ASC LIMIT 20""", (STUCK_MINUTES,)).fetchall()
+            ORDER BY created_at ASC LIMIT 10""", (STUCK_MINUTES,)).fetchall()
     handled = 0
     for message_id, subject, from_addr, has_attachments, needs_vision, created_at in rows:
         # Already handled within the dedup window (notified last pass, or reprocessed and

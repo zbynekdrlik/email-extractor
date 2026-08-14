@@ -163,6 +163,15 @@ def flush_pending(conn, cfg, post=None, limit: int = 50,
     now = datetime.now(UTC)
     delivered = 0
     for (channel_id, kind), items in groups.items():
+        # #310: a channel_id of 0 means "operator alert, but no ops channel configured"
+        # (`report.ops_channel` returned 0). It must be HELD, never delivered — passing 0
+        # to `post_from_config` would fall back to `orders_channel_id` (152, the sales
+        # channel), the exact misroute #310 exists to fix. The row stays undelivered and
+        # counted in `pending_count()` (visible on the dashboard), attempts untouched so
+        # it delivers as soon as an ops channel is set. Only an operator-kind alert ever
+        # enqueues channel 0; every warehouse caller passes a real channel.
+        if not channel_id:
+            continue
         newest = max(created_at for _rid, _body, created_at in items)
         if quiet_seconds and (now - newest).total_seconds() < quiet_seconds:
             # Still receiving new alerts of this exact (channel, kind) — wait for the
