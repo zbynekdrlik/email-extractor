@@ -8,8 +8,9 @@
 """
 import os
 
+from app import db
 from app.config import Config
-from app.orders import human_processing, report
+from app.orders import human_processing
 
 
 def _cfg(**kw):
@@ -121,6 +122,25 @@ def test_a_message_before_the_backlog_cutoff_is_never_rescued_or_notified(pg):
     assert cat == "human_processing"             # never reclassified into a live pipeline
     assert pg.execute(
         "SELECT count(*) FROM pending_alerts WHERE message_id='old1'").fetchone()[0] == 0
+
+
+def test_a_recently_rescued_message_is_never_re_rescued(pg):
+    """Belt-and-suspenders against a re-rescue loop (observed live 2026-08-14): a message
+    rescued once, then RETURNED to human_processing (a manual reclassify / an incident
+    revert), must NOT be rescued again within the dedup window — otherwise the sweep
+    fights the reclassify and re-raises the same downstream question."""
+    _hp_msg(pg, "resc1")
+    db.log_event(pg, "resc1", "human_processing", "rescued", "ok", rollup=False)
+    called = []
+    human_processing.sweep(
+        pg, _cfg(ops_channel_id=888),
+        classify=lambda cfg, atts: called.append(1) or {"category": "dodacie_listy",
+                                                         "confidence": 0.99})
+    assert not called, "recently-rescued message must not trigger another vision call"
+    assert pg.execute(
+        "SELECT category FROM messages WHERE message_id='resc1'").fetchone()[0] == "human_processing"
+    assert pg.execute(
+        "SELECT count(*) FROM pending_alerts WHERE message_id='resc1'").fetchone()[0] == 0
 
 
 def test_a_message_after_the_cutoff_is_still_handled(pg):

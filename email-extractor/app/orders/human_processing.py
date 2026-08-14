@@ -166,6 +166,22 @@ def _rescue(conn, cfg, message: dict, classify) -> bool:
     return True
 
 
+def _recently_rescued(conn, message_id: str) -> bool:
+    """True when this message was already rescued within the dedup window. A rescue
+    changes the message's category, so it normally leaves this sweep's candidate set for
+    good — but if it is ever RETURNED to human_processing (a manual dashboard reclassify,
+    an incident revert), the sweep would re-rescue it and re-raise the same downstream
+    question, a re-ask loop (observed live 2026-08-14: an incident revert fed a message
+    straight back to the sweep, raising a duplicate dl_supplier question 10s later). This
+    guard makes a rescue idempotent per message: rescued once, never fought again within
+    the window."""
+    row = conn.execute(
+        "SELECT 1 FROM email_events WHERE message_id = %s AND workflow = 'human_processing' "
+        "AND stage = 'rescued' AND ts > now() - make_interval(hours => %s) LIMIT 1",
+        (message_id, dl_alerts.DEDUP_WINDOW_HOURS)).fetchone()
+    return row is not None
+
+
 def _notify(conn, cfg, message: dict) -> None:
     """Layer 2: a durable OPERATOR/triage alert. #308 incident correction — "the system
     could not classify this" is an operator concern, NOT a warehouse one (human_processing
@@ -210,8 +226,11 @@ def sweep(conn, cfg, classify=None) -> int:
     handled = 0
     for message_id, subject, from_addr, has_attachments, needs_vision, created_at in rows:
         # Already handled within the dedup window (notified last pass, or reprocessed and
-        # still stuck) — never re-spend a vision call or re-notify.
-        if dl_alerts.already_pending(conn, ALERT_KIND, message_id):
+        # still stuck) — never re-spend a vision call or re-notify. `_recently_rescued`
+        # additionally blocks a re-rescue loop for a message that was returned to
+        # human_processing after an earlier rescue (see its docstring).
+        if (dl_alerts.already_pending(conn, ALERT_KIND, message_id)
+                or _recently_rescued(conn, message_id)):
             continue
         message = {"message_id": message_id, "subject": subject, "from_addr": from_addr,
                    "has_attachments": bool(has_attachments),
