@@ -74,6 +74,40 @@ MAX_DOC_NUMBER_IN_FILENAME = 10
 # hardcoding its own "13".
 GTIN_FIELD_WIDTH = 13
 
+
+def _gs1_check_digit(body: str) -> str:
+    """The standard GS1 mod-10 check digit for a numeric code BODY (every digit except the
+    trailing check digit). Weights alternate 3, 1, 3, 1 … applied from the RIGHTMOST body
+    digit leftward — the one algorithm shared by GTIN-8/12/13/14 (only the body length
+    differs). `body` must be all-digits; the caller guarantees that."""
+    total = sum(int(ch) * (3 if i % 2 == 0 else 1) for i, ch in enumerate(reversed(body)))
+    return str((10 - (total % 10)) % 10)
+
+
+def gtin14_to_gtin13(gtin) -> str | None:
+    """The GTIN-13 nested inside a *valid* GTIN-14, or None (#246).
+
+    A GTIN-14 is ``[indicator digit][12-digit item reference][check digit]``. Its nested
+    GTIN-13 is those middle 12 digits followed by a **recomputed** check digit — never the
+    GTIN-14's own check digit (a different body length yields a different check), and never a
+    naive prefix/suffix strip. Returns None unless `gtin` is exactly 14 numeric chars AND is
+    itself a check-digit-valid GTIN-14 — so a 14-char code that only LOOKS like a GTIN-14
+    (e.g. an internal CODEX identifier whose own check digit does not validate, like the
+    warehouse-confirmed 14-digit-only "Korenie čierne mleté") yields None, never a
+    plausible-but-false 13-digit code. Deliberately conservative: the result is only ever used
+    as a labelled hint for the warehouse to verify against CODEX, never to ship. A returned
+    value is always a check-digit-valid GTIN-13, but its EXISTENCE as a real stock card must
+    still be confirmed in CODEX before use — the same manual step the owner did for #246's 9
+    confirmed products (`.claude/rules/n8n-workflow-edits.md`)."""
+    s = str(gtin or "")
+    if len(s) != 14 or not s.isdigit():
+        return None
+    if _gs1_check_digit(s[:13]) != s[13]:  # not a valid GTIN-14 -> no honest sibling
+        return None
+    middle12 = s[1:13]
+    return middle12 + _gs1_check_digit(middle12)
+
+
 # toWin1250, byte-exact port of the JS map — deliberately includes Czech 'ě'/'Ě' (the
 # orders-side edi.py's own table lacks it; real DL supplier/product names do carry
 # Czech spelling). Unlike edi.py's `_strip_diacritics`, this does NOT fall back to an
