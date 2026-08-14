@@ -3456,3 +3456,34 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
   Run cards #306 + #307 (v0.9.94). #305 (neviem) ostáva OPEN — čaká na produktové rozhodnutie
   používateľa (needs-answer), ide samostatne. #236 (blocker=#305) NEotvorené — #305 ešte
   nenasadené, komentár na #236 až po jeho nasadení.
+
+## 2026-08-14 — #305 (Neviem odloženie DL) + #312 (info-hygiena kanál 243) — v0.9.97, PR #317
+
+- **#305** (bug): „Neviem" na `/sklad-dl` bol 200 no-op (`_api_orders_answer_generic`,
+  `if not choice: return` bez zmeny). Variant A (Marek 14.8.): „Neviem" TERMINÁLNE odloží
+  celý dodací list. Nový `dl_worker.close_message_sklad_unknown` (súrodenec
+  `close_message_not_warehouse` #307): zavrie všetky open dl_item/dl_supplier otázky správy
+  (`status='sklad_unknown'`), `processed=true` (nič do ORIONu), rollup event
+  `stage='sklad_unknown' status='review'`. Denný súhrn `build_dl_digest` + počet v
+  `dl_provenance_stats_for_day` → riadok „odložené (sklad nevie): N". Wiring len na EXPLICITNÝ
+  `choice=="unknown"` (review finding). Bez frontendu. RED `17687f4` → GREEN `5217b29`.
+- **#312** (bug, security-boundary): (1) 4 miesta v dl_worker.py (supplier 648, item 688,
+  attachment 1146/1148, + `_alert_and_release` upload-fail nájdený review) prestali sypať
+  surový `{e}`/`att['error']` na 243/nástenku — čistá SK veta do kanála, surová chyba len do
+  logu (+ email_events.detail pri supplier/upload). (2) `build_dl_digest` prestal renderovať
+  3 operátorské meradlá (quarantined/pending_alerts/open_import) — ostávajú na admin dashboarde
+  (/api/orders/dl/stats); smerovanie do ops kanála zamietnuté (double-alert riziko #239).
+  RED `b054d5b` → GREEN `9995d82`.
+- Commity: `ac5362e` bump, `17687f4`/`5217b29` #305, `b054d5b`/`9995d82` #312, `9ace4b5`
+  review-opravy (0🔴 2🟡 4🔵, fresh-context general-purpose, NIE built-in skill). Full suite
+  green (exit 0), ruff + mypy clean, coverage 94 %. PR #317 → main `1c1e8f8`, main CI + GHCR
+  build zelené.
+- Deploy 0.9.96→0.9.97 (`ha addons update e0ac7775_email_extractor`); /health 0.9.97, DOM
+  `v0.9.97`, addon started. Funkčné live overenie (syntetická otázka, nedotkol som reálny HK
+  LOAN DL): POST „Neviem" → 200 `{closed:1, sklad_unknown:true}`, otázka `sklad_unknown`,
+  message `processed=true`, event `('sklad_unknown','review')`, synt. dáta upratané (0,0,0).
+  #312 live digest (2026-08-13): „1 spracovaná správa, 13 položiek" — 0 gauge fráz; admin
+  stats path stále má `pending_alerts=11`. 0 console errors. Run cards #305 + #312 (v0.9.97).
+  Jeden potvrdzovací post do kanála 243 (Odoo msg 40957626). #309 (split dl_worker.py 1789r)
+  ostáva tracked, nie blocker. Worktree dispatch: CI monitoring z worktree bol blokovaný
+  (loop-guard + poll-repeat), plný flow dokončený cez single polls + poll-ok.
