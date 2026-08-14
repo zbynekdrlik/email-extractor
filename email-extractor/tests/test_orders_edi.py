@@ -12,7 +12,6 @@ order in ORION (#51), so it is made impossible rather than unlikely.
 import json
 from pathlib import Path
 
-from app import db
 from app.orders import edi
 
 FIXTURE = json.loads(
@@ -246,7 +245,7 @@ def test_confirm_sent_stamps_the_upload_so_it_is_never_reclaimed(pg):
     assert row[0] is not None
 
 
-def test_pre_migration_rows_are_backfilled_as_confirmed_not_left_as_orphans(pg):
+def test_pre_migration_rows_are_backfilled_as_confirmed_not_left_as_orphans(pg, reapply_schema):
     """Every row that existed before `uploaded_at` was added was written by the OLD
     one-phase code (claim immediately followed by upload) — it must become CONFIRMED
     the moment the column is added, never a 'reclaimable orphan' that would trigger a
@@ -257,7 +256,7 @@ def test_pre_migration_rows_are_backfilled_as_confirmed_not_left_as_orphans(pg):
                                  sent_at)
            VALUES ('157', '04.08.2026', 'deadbeef', 'historical.txt',
                    now() - interval '30 days')""")
-    db.init_schema(pg)   # re-run the migration: the column comes back, and so does the backfill
+    reapply_schema()     # re-run the migration: the column comes back, and so does the backfill
     row = pg.execute(
         "SELECT uploaded_at, sent_at FROM edi_sent WHERE customer_ean = '157'").fetchone()
     assert row[0] is not None and row[0] == row[1], \

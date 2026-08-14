@@ -3338,3 +3338,24 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
   (`agent-adf1578cd02de68bf`, `agent-a42e17d765e54f227`, `agent-ac9825acecd43702a`);
   the 2 unrelated sibling worktrees (`agent-a0337f6056951e4d0`,
   `agent-aa92342dc627b9554`) left untouched.
+
+## 2026-08-13 — #270 (mypy CI gate + oprava 53 nálezov, PR #303, 0.9.91 -> 0.9.92)
+
+- SOLO dispatch. Pridaná blokujúca `typecheck` CI úloha (`mypy==2.3.0`), config v
+  `pyproject.toml` `[tool.mypy]` — pragmatické gradual-typing, chirurgický per-modulový
+  `ignore_missing_imports` override pre 8 stub-less knižníc (NIE globálne).
+- Prvý beh mypy: 53 nálezov. Triáž: 1 reálny latentný bug (`backfill.py` volal
+  `store.save_message` so 6 arg namiesto 5 — TypeError zožral vlastný try/except, backfill
+  ticho spracoval 0 správ) → RED→GREEN (`tests/test_backfill.py`, `autospec=True` pinuje
+  5-arg signatúru; RED `ff43633`, GREEN `f45949a`). Zvyšok: stratené narrowing (asserty
+  dokumentujúce invariant „llm_gtin truthy ⟹ karta vyriešená" v match/dl_match/dl_worker)
+  + priveľmi prísne anotácie (`_start_run` snapshot_id `int|None`, `remember` cnt/gtin,
+  `_num` `str|None`, `dl_alerts` groups `object`→`datetime`) + mŕtva write-only
+  `pipeline.asked` odstránená. Žiadne `type: ignore`, žiadny globálny ignore.
+- Commity: `db3bc28` bump, `ff43633` [red], `f45949a` [green], `f5b40f0` CI gate. PR #303
+  (`Closes #270`) merged `66506a6`. Oba CI behy (push+PR) + main CI všetko green
+  (test/typecheck/e2e-orders/e2e-dl/build). Deploy 0.9.91→0.9.92 na
+  `e0ac7775_email_extractor`; /health 0.9.92, Server: waitress, DOM `v0.9.92`, 0 console
+  errors; typecheck CI „Success: no issues found in 64 source files". Run card (v0.9.92).
+- Nový playbook: `.claude/rules/type-checking.md` (chirurgický override, fix bez potlačenia,
+  backfill-rot `autospec` RED→GREEN technika).

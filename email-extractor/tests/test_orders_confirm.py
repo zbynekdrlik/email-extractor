@@ -16,7 +16,6 @@ import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app import db
 from app.config import Config
 from app.orders import confirm
 
@@ -713,7 +712,7 @@ def test_orders_and_delivery_notes_incidents_are_tracked_independently(pg):
 
 # --- migration: never retroactively alert on pre-existing history --------------------
 
-def test_pre_migration_rows_are_backfilled_as_already_imported_never_swept(pg):
+def test_pre_migration_rows_are_backfilled_as_already_imported_never_swept(pg, reapply_schema):
     """Every row confirmed-uploaded before this feature shipped predates import
     confirmation entirely — backfilling it straight to 'imported' (not NULL/pending)
     stops the first sweep after deploy from flooding Odoo with alerts for old, already-
@@ -725,7 +724,7 @@ def test_pre_migration_rows_are_backfilled_as_already_imported_never_swept(pg):
                                  sent_at, uploaded_at)
            VALUES ('11', '04.08.2026', 'deadbeef', 'historical.txt',
                    now() - interval '30 days', now() - interval '30 days')""")
-    db.init_schema(pg)   # re-run the migration: columns come back, so does the backfill
+    reapply_schema()     # re-run the migration: columns come back, so does the backfill
     row = pg.execute(
         """SELECT import_status, import_confirmed_at, uploaded_at FROM edi_sent
             WHERE customer_ean = '11'""").fetchone()
@@ -843,7 +842,7 @@ def test_plural_uses_delivery_note_nouns_for_desadv_source():
     assert confirm._plural(1, "edi") == "objednávka"
 
 
-def test_desadv_pre_migration_rows_are_backfilled_as_already_imported(pg):
+def test_desadv_pre_migration_rows_are_backfilled_as_already_imported(pg, reapply_schema):
     """Same backfill contract desadv_sent's own #203 migration carries — mirrors the
     edi_sent test above."""
     pg.execute("ALTER TABLE desadv_sent DROP COLUMN import_status, "
@@ -853,7 +852,7 @@ def test_desadv_pre_migration_rows_are_backfilled_as_already_imported(pg):
                                     uploaded_at)
            VALUES ('12', 'HIST1', 'DESADV_historical.txt',
                    now() - interval '30 days', now() - interval '30 days')""")
-    db.init_schema(pg)
+    reapply_schema()
     row = pg.execute(
         """SELECT import_status, import_confirmed_at, uploaded_at FROM desadv_sent
             WHERE supplier_ean = '12'""").fetchone()
