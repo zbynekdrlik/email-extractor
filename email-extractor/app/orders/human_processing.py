@@ -15,9 +15,12 @@ This sweep closes that pit in two layers (see the #308 design comment):
   category; a confident processor category auto-reclassifies the message so the right
   engine picks it up — no human burden for the common case.
 - **Layer 2 — mandatory net.** Anything NOT rescued (vision unsure, no signature, no key,
-  render/API failure) raises a warehouse-actionable Odoo alert through the durable
-  `dl_alerts` outbox, deduped per message. Runs unconditionally — defence in depth even
-  when Layer 1 is wrong or the API is down. NO `human_processing` message ends silently.
+  render/API failure) raises a durable OPERATOR/triage alert through the `dl_alerts`
+  outbox to the OPS channel (#308 incident correction — human_processing is a catch-all
+  dominated by non-warehouse mail, so "couldn't classify" is an operator concern, never a
+  warehouse one; held when the ops channel is unset, NEVER on 243/152). Deduped per
+  message, runs unconditionally. Only messages received on/after `BACKLOG_CUTOFF` are ever
+  touched — the pre-existing historical backlog must never auto-enter a pipeline/channel.
 
 Injection seams (`classify=`) mirror `dl_worker.tick`/`worker.tick` so the whole sweep is
 testable offline with a scripted fake — no network, no poppler in the unit path.
@@ -29,14 +32,25 @@ import logging
 from html import escape
 
 from .. import db
-from . import dl_alerts, dl_extract, dl_worker, llm
+from . import dl_alerts, dl_extract, dl_worker, llm, report
 
 log = logging.getLogger("orders.human_processing")
 
 # Deliberately generous: a message the classifier put in human_processing is a FINAL
 # decision (not a transient stage), but a small delay lets a quick manual reclassify (or
-# a classifier re-run) settle before we spend a vision call / raise a warehouse alert.
+# a classifier re-run) settle before we spend a vision call / raise an ops alert.
 STUCK_MINUTES = 15
+
+# #308 incident (2026-08-14): human_processing turned out to be a large CATCH-ALL (846
+# messages accumulated since June — payslips, job-board replies, HR mail, NOT stuck
+# warehouse documents), not the small "a human must handle this" bucket the ticket
+# assumed. The first live sweep began back-filling that whole historical backlog into a
+# channel + (via vision rescue) into live pipelines. This HARD cutoff is the guard: only
+# messages received on/after the day the sweep first went live are ever rescued OR
+# notified — the pre-existing backlog must NEVER auto-enter a pipeline or channel; it
+# belongs at most in a future ops digest / dashboard listing, reviewed deliberately.
+# A fixed date (not a rolling window) is deliberate: the backlog stays excluded forever.
+BACKLOG_CUTOFF = "2026-08-14"
 
 # The categories that actually have a processor — the ONLY targets a rescue may route to.
 # `dodacie_listy`/`ai_orders`/`static_orders` are owned by the Python engines here;
@@ -153,15 +167,19 @@ def _rescue(conn, cfg, message: dict, classify) -> bool:
 
 
 def _notify(conn, cfg, message: dict) -> None:
-    """Layer 2: a durable, warehouse-actionable alert. Routes to the warehouse
-    delivery-notes channel (staff who handle incoming documents can act — check it,
-    reclassify it on the dashboard) — this is NOT an operator/diagnostic alert, so it
-    correctly stays on the warehouse channel (see #310)."""
-    channel = int(getattr(cfg, "delivery_notes_channel_id", 0) or 0)
+    """Layer 2: a durable OPERATOR/triage alert. #308 incident correction — "the system
+    could not classify this" is an operator concern, NOT a warehouse one (human_processing
+    is a catch-all dominated by non-warehouse mail), so it routes to the OPS channel via
+    the same hold #310 built: `report.ops_channel` returns 0 when unset, and
+    `dl_alerts.flush_pending` HOLDS a channel-0 group (counted on the dashboard, never
+    delivered) — NEVER the warehouse (243) / sales (152) channels. A genuine document is
+    already routed to its engine by the Layer-1 vision rescue; this net catches only the
+    residual an operator must triage."""
+    channel = report.ops_channel(cfg)
     html = (
-        "<p>&#128194; Prišiel doklad, ktorý systém nevedel automaticky zaradiť "
-        "(nečitateľný / prázdny scan) &mdash; treba ho skontrolovať a prípadne ručne "
-        "preklasifikovať na dashboarde.</p>"
+        "<p>&#128194; Prišiel e-mail, ktorý systém nevedel automaticky zaradiť "
+        "(nečitateľný / prázdny scan) &mdash; operátor nech ho skontroluje a prípadne "
+        "ručne preklasifikuje na dashboarde.</p>"
         f"<p>Od: {escape(message['from_addr'] or '-')} / "
         f"Predmet: {escape(message['subject'] or '-')} / "
         f"prijaté: {escape(str(message['created_at']))}</p>")
@@ -186,8 +204,9 @@ def sweep(conn, cfg, classify=None) -> int:
                   created_at
              FROM messages
             WHERE category = 'human_processing' AND processed = false
+              AND created_at >= %s
               AND created_at < now() - make_interval(mins => %s)
-            ORDER BY created_at ASC LIMIT 10""", (STUCK_MINUTES,)).fetchall()
+            ORDER BY created_at ASC LIMIT 10""", (BACKLOG_CUTOFF, STUCK_MINUTES)).fetchall()
     handled = 0
     for message_id, subject, from_addr, has_attachments, needs_vision, created_at in rows:
         # Already handled within the dedup window (notified last pass, or reprocessed and
