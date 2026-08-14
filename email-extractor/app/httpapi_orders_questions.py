@@ -416,8 +416,12 @@ def register(app: Flask, deps: Deps) -> None:
         if (q0.get("kind") in ("dl_item", "dl_supplier")
                 and body.get("not_warehouse") is True):
             from .orders import dl_worker
-            with deps.db() as c:
-                res = dl_worker.close_message_not_warehouse(c, deps.cfg, qid)
+            # No external side effect (no upload) — so the three writes (close questions,
+            # mark message handled, log the skip event) run in ONE transaction, the
+            # project's "must-land-together, autocommit only for external side effects"
+            # pattern. A rollback here is safe precisely because nothing was shipped.
+            with deps.db_tx() as c:
+                res = dl_worker.close_message_not_warehouse(c, qid)
             return jsonify(ok=True, not_warehouse=True, closed=res.get("closed", 0))
         if q0.get("kind") == "customer":
             return _api_orders_answer_customer(qid, q0, body)

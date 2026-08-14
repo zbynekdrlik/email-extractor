@@ -1439,7 +1439,7 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
         return (result or {}).get("documents", [])
 
 
-def close_message_not_warehouse(conn, cfg, qid: int) -> dict:
+def close_message_not_warehouse(conn, qid: int) -> dict:
     """#307: the skladníčka marks a DL question "netýka sa skladu / nie je to dodací list
     pre sklad" — the whole mail is NOT a warehouse delivery note (a režíjna faktúra, a
     promo, ...). Terminal and MESSAGE-level:
