@@ -1607,10 +1607,16 @@ def stuck_classified_sweep(conn, cfg, threshold_minutes: int = STUCK_CLASSIFIED_
     to the n8n watchdog's own dedup, and setting it here would silently suppress that
     watchdog's own future alert if the message later starts retrying and crosses
     `attempts>=3`). Returns how many NEW messages were enqueued this pass (0 on a clean
-    sweep, or when every candidate was already alerted)."""
-    channel = int(getattr(cfg, "delivery_notes_channel_id", 0) or 0)
-    if not channel:
-        return 0
+    sweep, or when every candidate was already alerted).
+
+    #310: this is an OPERATOR/engine-liveness alert ("processing never started — check
+    the DL engine"), NOT something the warehouse can act on — it routes to
+    `report.ops_channel(cfg)`, never `delivery_notes_channel_id` (243). When the ops
+    channel is unset (0) the alert is STILL detected, enqueued durably (channel_id=0 =>
+    `flush_pending` treats it as "Odoo not configured", the row stays counted in
+    `pending_count`/on the dashboard, retry is a no-op) and logged at WARNING below —
+    never silently dropped, never on a warehouse channel."""
+    channel = report.ops_channel(cfg)
     rows = conn.execute(
         """SELECT m.message_id, m.subject, m.from_addr, m.created_at
              FROM messages m
