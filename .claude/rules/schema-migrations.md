@@ -1,0 +1,69 @@
+---
+paths:
+  - "email-extractor/app/migrate.py"
+  - "email-extractor/app/db.py"
+  - "email-extractor/tests/test_migrate.py"
+---
+
+# Schema migrations — the versioned `app/migrate.py` engine (#269)
+
+Since 0.9.93 `db.init_schema()` is NOT "run the whole `SCHEMA` list every start" any more.
+It calls `migrate.run_migrations(conn, db.REVISIONS)`: a numbered-revision runner backed by a
+`schema_version` ledger table. An up-to-date DB does an O(1) version check and applies nothing;
+an outdated DB applies only the missing revisions.
+
+## How to add a schema change — a NEW revision, NEVER edit the baseline
+
+`db.SCHEMA` is **frozen** as revision 1 (`db.REVISIONS = [migrate.Revision(1,"baseline",SCHEMA)]`).
+Immutable-migrations rule (Alembic/yoyo/Rails): a schema change is a NEW numbered `Revision`
+appended to `db.REVISIONS`, e.g.
+
+```python
+REVISIONS = [
+    migrate.Revision(migrate.BASELINE_REVISION, "baseline", SCHEMA),
+    migrate.Revision(2, "add_foo_index", ["CREATE INDEX IF NOT EXISTS ... "]),
+]
+```
+
+- Revision ids MUST be strictly ascending + unique — `run_migrations` code-enforces this and
+  raises `ValueError` before touching the DB (a mis-appended entry fails fast in CI).
+- A NEW revision's statements run inside ONE transaction (statements + ledger stamp commit
+  atomically → exactly-once, and its statements need NOT be idempotent). **Because of that
+  transaction they must be transaction-safe: no `CREATE INDEX CONCURRENTLY`, no `VACUUM`.** A
+  migration that genuinely needs a non-transactional statement must grow its own per-statement
+  path like the baseline does.
+- NEVER edit the baseline's statements to make a schema change — that is exactly the #269 risk
+  (a non-idempotent statement silently re-run against prod on every boot) the mechanism removes.
+
+## The baseline is SELF-HEALING (run-then-record), never record-without-running
+
+On a DB with no `schema_version` row yet (a live prod DB from before this mechanism, OR a dev DB
+that lags), `run_migrations` RUNS the idempotent baseline (`SCHEMA`, per-statement autocommit —
+exactly what prod ran every boot for months) and THEN records it. This heals a lagging schema
+(adds any missing table/column) and is non-destructive.
+
+**BANNED design: "detect existing schema → record baseline WITHOUT running it" (the original #269
+proposal, B1).** It is NOT self-healing: a DB missing a later-added column gets recorded as
+"baseline done" without the column. Proven live during #269 — B1 recorded `(1,'baseline')` while
+`edi_sent.uploaded_at` (#153) was absent → 35 tests failed on `UndefinedColumn`. The fix (B2)
+always runs the idempotent baseline before recording; that is what shipped.
+
+Deploy proof (0.9.93, live): first boot logged `applied schema baseline r0001 (101 idempotent
+statement(s))`, second boot logged `schema up-to-date at r0001`, row counts unchanged before/after.
+
+## Testing migrations — `reapply_schema`, and `schema_version` is NOT truncated
+
+`init_schema` being version-gated broke the old test idiom "drop a column, call `db.init_schema`,
+assert it comes back" (init_schema is now an O(1) no-op once the baseline is recorded).
+
+- A migration test that drops a column/index and expects init_schema to HEAL it must use the
+  **`reapply_schema` fixture** (conftest) — it `DELETE`s the ledger then runs init_schema, so the
+  baseline re-runs (simulating a pre-mechanism/lagging DB, the real prod heal path). Do NOT call
+  `db.init_schema(pg)` directly for a re-run — it will skip.
+- The session `_schema` fixture `DROP`s the ledger + re-applies the baseline once per session, so a
+  persistent local test DB self-heals to the current schema at session start.
+- `schema_version` is deliberately EXCLUDED from the `pg` fixture's `TRUNCATE` list (it is META,
+  managed by the runner — truncating it per-test would fight the mechanism). This is the exception
+  to `local-testing.md`'s "a new table must go in the TRUNCATE list" rule.
+- The version fast-path / concurrent-start / partial-failure paths are tested in `test_migrate.py`
+  on throwaway `CREATE DATABASE` DBs (a `fresh_db()` helper), fully isolated from the shared DB.

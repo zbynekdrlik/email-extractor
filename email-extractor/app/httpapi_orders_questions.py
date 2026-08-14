@@ -408,6 +408,21 @@ def register(app: Flask, deps: Deps) -> None:
         allowed = _role_kinds(session.get("role"))
         if allowed is not None and q0.get("kind", "item") not in allowed:
             abort(403)
+        # #307: "netýka sa skladu" — the whole mail is not a warehouse delivery note
+        # (a režíjna faktúra / promo, the KLEŠČ case). Terminal + message-level: close
+        # every open DL question of the message, mark it handled WITHOUT EDI, upload
+        # nothing (see dl_worker.close_message_not_warehouse). DL kinds only — the AI/
+        # orders board already has its own "Toto nie je objednávka" (mail `not_order`).
+        if (q0.get("kind") in ("dl_item", "dl_supplier")
+                and body.get("not_warehouse") is True):
+            from .orders import dl_worker
+            # No external side effect (no upload) — so the three writes (close questions,
+            # mark message handled, log the skip event) run in ONE transaction, the
+            # project's "must-land-together, autocommit only for external side effects"
+            # pattern. A rollback here is safe precisely because nothing was shipped.
+            with deps.db_tx() as c:
+                res = dl_worker.close_message_not_warehouse(c, qid)
+            return jsonify(ok=True, not_warehouse=True, closed=res.get("closed", 0))
         if q0.get("kind") == "customer":
             return _api_orders_answer_customer(qid, q0, body)
         if q0.get("kind") in ("mail", "date", "line", "dl_item", "dl_supplier"):

@@ -388,3 +388,58 @@ def test_the_sklad_role_cannot_add_a_dl_supplier(pg):
     r = c.post(f"/api/orders/question/{qid}/answer", json={"new_supplier": {
         "ean_edi": "2000000000901", "name": "X s.r.o."}})
     assert r.status_code == 403
+
+
+# --- #307: "netýka sa skladu" — terminal, message-level close on the DL board -----------
+#
+# Stavebniny KLEŠČ (režíjna faktúra) is the concrete case: a mail that is not a warehouse
+# delivery note at all. The skladníčka needs to close such a question so it leaves her
+# board and stops escalating — the message is marked handled WITHOUT any EDI/ORION upload,
+# and the sender is deliberately NOT remembered (one sender sends both warehouse and
+# non-warehouse mail). Every open DL question of the SAME message is closed together.
+
+
+def test_not_warehouse_terminally_closes_the_whole_dl_message_without_edi(pg):
+    pg.execute("INSERT INTO messages (message_id) VALUES ('m307')")
+    qid_sup = teach.ask_dl_supplier(pg, message_id="m307",
+                                    sender_email="faktura@klesc.sk", candidates=[])
+    qid_item = teach.ask_dl_item(pg, message_id="m307", supplier_ean="S1",
+                                 supplier_name="KLEŠČ", wording="Režijná položka",
+                                 quantity=1, unit="ks",
+                                 candidates=[{"gtin": "G1", "name": "X"}])
+    assert qid_sup and qid_item
+
+    c = _dl_client()
+    r = c.post(f"/api/orders/question/{qid_sup}/answer", json={"not_warehouse": True})
+    assert r.status_code == 200 and r.get_json()["ok"] is True
+
+    # BOTH open DL questions of the message are terminally closed together
+    assert teach.get(pg, qid_sup)["status"] == "not_warehouse"
+    assert teach.get(pg, qid_item)["status"] == "not_warehouse"
+
+    # the message is marked HANDLED (processed) — so it never re-claims / re-asks
+    assert pg.execute(
+        "SELECT processed FROM messages WHERE message_id='m307'").fetchone()[0] is True
+
+    # a VISIBLE skip event (not the OK/EDI logger), so Marek sees it in the digest
+    ev = pg.execute("SELECT status, outcome FROM email_events WHERE message_id='m307' "
+                    "ORDER BY id DESC LIMIT 1").fetchone()
+    assert ev[0] == "not_warehouse"
+    assert "netýka sa skladu" in ev[1]
+
+    # nothing was uploaded to ORION — no EDI ledger row
+    assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0
+    # and the sender is NOT remembered (a future real DL from them must still be processed)
+    from app.orders import dl_supplier_memory
+    assert dl_supplier_memory.resolve(pg, "faktura@klesc.sk") is None
+
+
+def test_not_warehouse_needs_the_dl_role(pg):
+    """The orders (sklad) role must not be able to not-warehouse a DL question."""
+    pg.execute("INSERT INTO messages (message_id) VALUES ('m307b')")
+    qid = teach.ask_dl_supplier(pg, message_id="m307b", sender_email="x@z.sk",
+                                candidates=[])
+    c = _sklad_client()
+    r = c.post(f"/api/orders/question/{qid}/answer", json={"not_warehouse": True})
+    assert r.status_code == 403
+    assert teach.get(pg, qid)["status"] == "open"

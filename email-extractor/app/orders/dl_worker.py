@@ -1439,6 +1439,55 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
         return (result or {}).get("documents", [])
 
 
+def close_message_not_warehouse(conn, qid: int) -> dict:
+    """#307: the skladníčka marks a DL question "netýka sa skladu / nie je to dodací list
+    pre sklad" — the whole mail is NOT a warehouse delivery note (a režíjna faktúra, a
+    promo, ...). Terminal and MESSAGE-level:
+
+    (1) close EVERY still-open `dl_item`/`dl_supplier` question of the SAME message with
+        the terminal status 'not_warehouse' (they all belong to one misrouted mail — the
+        reported KLEŠČ case is a whole režíjna faktúra, not one stray line);
+    (2) mark the message HANDLED WITHOUT EDI — `processed=true`, plus a rollup skip
+        `email_events` entry (deliberately NOT the OK/EDI logger — the skip-branch rule in
+        `.claude/rules/n8n-workflow-edits.md`), so the dashboard/daily digest still SHOWS
+        it ("netýka sa skladu — vybavené bez EDI") for Marek, nothing is silently lost;
+    (3) upload NOTHING to ORION.
+
+    The sender is deliberately NOT remembered (one sender sends both warehouse and
+    non-warehouse mail — auto-suppressing would silently drop a future REAL delivery note;
+    the ticket itself flags this). So a later real DL from the same sender is still asked.
+
+    Marking the message `processed` is what keeps the question from coming back: the dedup
+    index (`WHERE status='open'`) does not suppress a fresh question once this one is
+    terminal, so leaving the message unprocessed would let the stale-reclaim / reprocess
+    path re-raise the identical question. A `processed` message is never re-claimed
+    (`_claim`'s own `WHERE processed = false`)."""
+    qrow = conn.execute(
+        "SELECT message_id FROM order_questions WHERE id = %s", (qid,)).fetchone()
+    if not qrow:
+        return {"closed": 0, "message_id": None}
+    message_id = qrow[0]
+    closed = conn.execute(
+        """UPDATE order_questions
+              SET status = 'not_warehouse', answer = '{"not_warehouse": true}'::jsonb,
+                  answered_by = %s, answered_at = now()
+            WHERE message_id = %s AND kind IN ('dl_item', 'dl_supplier')
+              AND status = 'open'
+            RETURNING id""", ("sklad", message_id)).fetchall()
+    conn.execute(
+        """UPDATE messages
+              SET processed = true, processed_at = now(), processed_by = %s,
+                  processing_at = NULL
+            WHERE message_id = %s""", (CATEGORY, message_id))
+    report.log_event(conn, message_id, stage="not_warehouse", status="not_warehouse",
+                     outcome="netýka sa skladu — vybavené bez EDI (sklad)",
+                     detail={"closed_questions": len(closed)},
+                     rollup=True, workflow=dl_report.WORKFLOW)
+    log.info("DL message %s marked not_warehouse (sklad); %s question(s) closed, no EDI",
+             message_id, len(closed))
+    return {"closed": len(closed), "message_id": message_id}
+
+
 # #265 gap 2: `ask_dl_supplier`'s per-sender dedupe (`ON CONFLICT ... DO NOTHING`, the
 # SAME `order_questions(customer_ean, item_key) WHERE status='open'` index every other
 # kind shares) means only the FIRST `dodacie_listy` message from a still-unregistered

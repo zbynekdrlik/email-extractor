@@ -489,6 +489,14 @@ function genericQuestionCard(q){
 async function answerGeneric(qid,choice){try{await api('/api/orders/question/'+qid+'/answer',
   {method:'POST',body:JSON.stringify({choice:choice})});await load()}
   catch(e){alert(e.message||'chyba')}}
+// #307: "netýka sa skladu" — terminal, message-level. Confirm first (it closes the whole
+// mail and never sends it to ORION), then POST {not_warehouse:true}.
+async function answerNotWarehouse(qid){
+  if(!confirm('Označiť, že tento mail sa netýka skladu? Otázka sa zavrie, dodací list sa '
+    +'NEPOŠLE do ORIONu.'))return;
+  try{await api('/api/orders/question/'+qid+'/answer',
+    {method:'POST',body:JSON.stringify({not_warehouse:true})});await load()}
+  catch(e){alert(e.message||'chyba')}}
 // #235: dl_supplier/dl_item get their OWN card (mirrors #234's customerQuestionCard
 // below) — a live search over the CURRENT DL suppliers/catalog (not just the frozen
 // candidates the question was asked with), plus a collapsed "this is genuinely new"
@@ -574,7 +582,7 @@ function newDlSupplierForm(q){
     }
   };
   form.appendChild(save);
-  toggle.onclick=()=>{form.style.display=form.style.display==='none'?'block':'none'};
+  toggle.onclick=()=>{const open=form.style.display==='none';form.style.display=open?'block':'none';form.dataset.open=open?'1':'';};
   box.appendChild(toggle);box.appendChild(form);
   return box}
 function newDlProductForm(q){
@@ -601,7 +609,7 @@ function newDlProductForm(q){
     }catch(err){save.disabled=false;status.textContent=err.message||'chyba'}
   };
   form.appendChild(save);
-  toggle.onclick=()=>{form.style.display=form.style.display==='none'?'block':'none'};
+  toggle.onclick=()=>{const open=form.style.display==='none';form.style.display=open?'block':'none';form.dataset.open=open?'1':'';};
   box.appendChild(toggle);box.appendChild(form);
   return box}
 function dlSupplierQuestionCard(q){
@@ -618,6 +626,9 @@ function dlSupplierQuestionCard(q){
   const nb=el('button',null,'Neviem');
   nb.style.borderColor='#d0d7de';nb.style.background='#f6f8fa';nb.style.color='#57606a';
   nb.onclick=()=>answerGeneric(q.id,'unknown');c.appendChild(nb);
+  const nw=el('button',null,'Netýka sa skladu');
+  nw.style.borderColor='#eac54f';nw.style.background='#fff8c5';nw.style.color='#7d4e00';
+  nw.onclick=()=>answerNotWarehouse(q.id);c.appendChild(nw);
   return c}
 function dlItemQuestionCard(q){
   const c=el('div','q');
@@ -633,6 +644,9 @@ function dlItemQuestionCard(q){
   const nb=el('button',null,'Neviem');
   nb.style.borderColor='#d0d7de';nb.style.background='#f6f8fa';nb.style.color='#57606a';
   nb.onclick=()=>answerGeneric(q.id,'unknown');c.appendChild(nb);
+  const nw=el('button',null,'Netýka sa skladu');
+  nw.style.borderColor='#eac54f';nw.style.background='#fff8c5';nw.style.color='#7d4e00';
+  nw.onclick=()=>answerNotWarehouse(q.id);c.appendChild(nw);
   return c}
 // #234: a live search over ALL current customers — not just the frozen candidates the
 // question was asked with. Mirrors searchBox() above, one input, debounced.
@@ -704,7 +718,7 @@ function newCustomerForm(q){
     }
   };
   form.appendChild(save);
-  toggle.onclick=()=>{form.style.display=form.style.display==='none'?'block':'none'};
+  toggle.onclick=()=>{const open=form.style.display==='none';form.style.display=open?'block':'none';form.dataset.open=open?'1':'';};
   box.appendChild(toggle);box.appendChild(form);
   return box}
 // #159: "who is this customer?" candidates render as name + address (+ a ✓ badge when
@@ -773,7 +787,20 @@ async function teach(qid,gtin,card){try{await api('/api/orders/question/'+qid+'/
 async function undo(qid){try{await api('/api/orders/question/'+qid+'/undo',{method:'POST'});
   await load()}catch(e){alert(e.message||'chyba')}}
 __STATS_SCRIPT__
-load();setInterval(load,5000);
+// #306: the periodic refresh must NEVER wipe an in-progress entry. load() rebuilds the
+// whole board (wrap.textContent=''), so while the skladníčka is typing into a search box
+// or has a "➕ Nový…" form open, a 5s rebuild would destroy her half-filled form mid-entry
+// ("stále ma to vyhodí"). maybeRefresh() skips the rebuild whenever she is mid-interaction
+// (a focused input/textarea, or an open collapsible form marked data-open="1"); an
+// EXPLICIT load() after a real answer still rebuilds so the answered card vanishes.
+function boardBusy(){
+  const w=document.getElementById('wrap');if(!w)return false;
+  const a=document.activeElement;
+  if(a&&w.contains(a)&&(a.tagName==='INPUT'||a.tagName==='TEXTAREA'))return true;
+  if(w.querySelector('[data-open="1"]'))return true;
+  return false}
+function maybeRefresh(){if(!boardBusy())load()}
+load();setInterval(maybeRefresh,5000);
 </script></body></html>"""
 
 ASK_HTML = (_ASK_HTML_TEMPLATE
