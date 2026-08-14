@@ -497,3 +497,30 @@ def test_dl_digest_link_is_only_rendered_when_given():
     assert "<a href" not in no_link
     with_link = report.build_dl_digest(_dl_stats(runs=1), link="http://x/sklad-dl/k")
     assert 'href="http://x/sklad-dl/k"' in with_link
+
+
+# --- #312: operator gauges must never appear in the WAREHOUSE digest ---------------
+#
+# quarantined / pending_alerts / open_import_incidents are current-STATE OPERATOR gauges —
+# they live on the admin /api/orders/dl/stats (dl_current_health) and have their own operator
+# alert paths (the n8n stuck-message watchdog, confirm.py's import sweep). They must NOT land
+# in the warehouse-facing daily digest on channel 243: the skladníčka can't act on them and
+# it leaks operator diagnostics onto a user surface. These FAIL on the pre-fix digest that
+# still renders them ([red]); they REPLACE the pre-#312 "gauge triggers the digest" tests,
+# whose asserted behavior this ticket deliberately reverses.
+
+def test_operator_gauges_never_appear_in_the_warehouse_digest():
+    html = report.build_dl_digest(_dl_stats(
+        runs=5, items=8, quarantined=2, pending_alerts=3, open_import_incidents=1))
+    assert html != ""
+    assert "5" in html and "8" in html   # real warehouse content still shown
+    assert "vzdal" not in html.lower()               # quarantined phrase gone
+    assert "čaká na odoslanie" not in html.lower()   # pending_alerts phrase gone
+    assert "čakajú na odoslanie" not in html.lower()
+    assert "problém s importom" not in html.lower()  # open_import_incidents phrase gone
+
+
+def test_a_day_with_only_operator_gauges_renders_nothing_for_the_warehouse():
+    assert report.build_dl_digest(_dl_stats(quarantined=2)) == ""
+    assert report.build_dl_digest(_dl_stats(pending_alerts=3)) == ""
+    assert report.build_dl_digest(_dl_stats(open_import_incidents=1)) == ""
