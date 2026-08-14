@@ -64,3 +64,20 @@ coverage). mypy now catches this class. When fixing such a script, a genuine RED
 still possible without a live IMAP/DB: `mock.patch("...save_message", autospec=True)` pins the
 REAL signature (a wrong-arity call raises `TypeError`), mock the rest of `main()`, and assert a
 downstream call (`db.insert_message`) is reached — it fails at the buggy commit, passes fixed.
+
+## A mypy fix can INTRODUCE a ruff error — always re-run `ruff check .` after the mypy fix (#314)
+
+Fixing a mypy "expression has type object" on a reused loop variable by QUOTING a forward-ref
+annotation (`unmatched_asks: list[tuple[dict, "dl_memory.Recalled | None", str]]`) satisfies
+mypy but trips ruff **UP037** ("Remove quotes from type annotation") — because the module has
+`from __future__ import annotations` and imports `dl_memory` at top, so the quotes are
+unnecessary (the unquoted `dl_memory.Recalled | None` is the correct form). This slipped
+through a LOCAL `ruff check app/ tests/` that ran BEFORE the mypy fix and was never repeated,
+then failed CI (CI runs `ruff check .` from `email-extractor/`, the whole tree). Two lessons:
+(1) after ANY mypy-driven annotation change, re-run `ruff check .` (the CI form, from
+`email-extractor/`) — not just the per-file lint you ran earlier; (2) a reused loop variable
+across two loops that mypy types as `object` from a `tuple[..., object, ...]` is better fixed
+by the CORRECT element type (`tuple[dict, dl_memory.Recalled | None, str]`, unquoted) than by
+`object` + a quote, which fixes mypy but fails ruff. The `test` CI job runs ruff FIRST (before
+pytest), so a ruff slip fails the whole job before any test runs — cheap to catch locally,
+one wasted CI cycle if not.
