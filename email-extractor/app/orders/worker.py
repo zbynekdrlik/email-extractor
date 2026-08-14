@@ -313,6 +313,15 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pra
                 # there is never anything for this to find there either.
                 from . import question_alerts
                 question_alerts.sweep(conn, cfg)
+                # #308: no message may sit SILENTLY in the terminal `human_processing`
+                # pit (a scan the classifier could not place, needs_vision, no processor
+                # watching it). Vision rescues the near-empty-scan case into its real
+                # category; anything unrescued raises a warehouse-actionable alert through
+                # the SAME durable outbox flushed just below. Runs on the live-engine
+                # gate like the sweeps above — the app is "live" whenever an engine owns
+                # its category, and a rescue can route to either the DL or orders side.
+                from . import human_processing
+                human_processing.sweep(conn, cfg)
                 # #239 finding 4 / #237: deliver every durably-queued alert (DL
                 # processing-health AND, since #237, stale-question reminders) —
                 # `quiet_seconds=FLUSH_QUIET_SECONDS` (#239 reopened, finding 1) makes a
