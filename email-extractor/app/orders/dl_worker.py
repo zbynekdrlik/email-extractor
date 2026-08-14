@@ -876,7 +876,11 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         log.exception("DL upload of %s failed", built.filename)
         note = ("Odoslanie dodacieho listu do ORIONu zlyhalo — skús znova alebo "
                "nahlás administrátorovi")
-        detail_text = f"{note} ({built.filename}): {err}"
+        # #312: the raw upload exception must NOT reach the warehouse channel (243) — a
+        # clean sentence (with the delivery-note filename, which IS warehouse-relevant)
+        # goes into the alert; the raw error stays in the log (`log.exception` above) and
+        # in `email_events.detail` (below), never on the user surface.
+        detail_text = f"{note} ({built.filename})."
         # Deep-review finding on this ticket's own PR: `stuck_classified_sweep` below
         # already bails out when `delivery_notes_channel_id` resolves to 0 (unset) —
         # this call site needs the SAME guard, or an unset channel would enqueue a

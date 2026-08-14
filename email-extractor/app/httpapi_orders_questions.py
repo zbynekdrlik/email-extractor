@@ -346,12 +346,15 @@ def register(app: Flask, deps: Deps) -> None:
         except teach.NotACandidate as e:
             return jsonify(error=str(e)), 400
         if not choice:
-            # #305 (variant A): „Neviem" on a DL question is NOT the #164 stays-open escape
-            # it is for mail/date/line — it ODLOŽ (defers) the whole delivery note. Terminal
-            # + message-level, one transaction, nothing to ORION
-            # (`dl_worker.close_message_sklad_unknown`), the sibling of #307's not_warehouse.
-            # Every other kind keeps the universal escape (the question stays open + visible).
-            if q.get("kind") in ("dl_item", "dl_supplier"):
+            # #305 (variant A): the EXPLICIT „Neviem" payload ({"choice":"unknown"}) on a
+            # DL question is NOT the #164 stays-open escape it is for mail/date/line — it
+            # ODLOŽ (defers) the whole delivery note. Terminal + message-level, one
+            # transaction, nothing to ORION (`dl_worker.close_message_sklad_unknown`), the
+            # sibling of #307's not_warehouse. We key on the explicit `unknown` value, not
+            # merely an absent choice, so a stray empty body stays a harmless no-op and can
+            # never trigger an accidental terminal defer (review finding). Every other kind
+            # keeps the universal escape (the question stays open + visible).
+            if raw == "unknown" and q.get("kind") in ("dl_item", "dl_supplier"):
                 from .orders import dl_worker
                 with deps.db_tx() as c:
                     res = dl_worker.close_message_sklad_unknown(c, qid)

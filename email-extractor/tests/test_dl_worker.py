@@ -2994,8 +2994,8 @@ def test_supplier_match_failure_never_leaks_the_raw_exception_to_243(pg, tmp_pat
     # the raw exception repr must be GONE from the warehouse channel
     assert _RAW_EXC not in posted[0]
     assert "SecretInternalBoom" not in posted[0] and "dl_match.py" not in posted[0]
-    # a clean, warehouse-actionable sentence instead
-    assert "dodávateľ" in posted[0].lower()
+    # the specific clean, warehouse-actionable sentence (not merely the meta label)
+    assert "nepodarilo sa priradiť dodávateľa" in posted[0].lower()
     # ...but the technical detail is preserved internally in email_events.detail (never 243)
     ev = pg.execute("SELECT detail::text FROM email_events WHERE message_id='dl1' "
                     "AND status='error' ORDER BY id DESC LIMIT 1").fetchone()
@@ -3030,3 +3030,31 @@ def test_attachment_extraction_error_never_leaks_the_raw_error_to_243(pg, tmp_pa
                        post=lambda c, h: posted.append(h))
     assert n == 1 and posted
     assert all(_RAW_EXC not in h and "SecretInternalBoom" not in h for h in posted)
+
+
+def test_upload_failure_alert_never_leaks_the_raw_error_to_243(pg, tmp_path):
+    """#312 (4th boundary site, review finding): the durable upload-failure alert
+    (`_alert_and_release` → `dl_alerts.enqueue`, channel 243) must not carry the raw
+    SFTP/ORION exception either — a clean sentence only, raw error to the log."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+
+    def _raise_upload(c, name, content, dir_override=None):
+        raise OSError("paramiko auth failed for user granc at 10.9.9.9:22 __RAW_UP__")
+
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, upload=_raise_upload)
+    assert n == 1
+    body = pg.execute(
+        "SELECT body_html FROM pending_alerts WHERE kind='dl_upload_failed'").fetchone()
+    assert body is not None
+    # the clean, warehouse-facing sentence is there; the raw exception is NOT
+    assert "Odoslanie dodacieho listu do ORIONu zlyhalo" in body[0]
+    assert "__RAW_UP__" not in body[0] and "paramiko" not in body[0] and "10.9.9.9" not in body[0]
+    # ...but preserved internally in email_events.detail (never on the channel)
+    ev = pg.execute("SELECT detail::text FROM email_events WHERE message_id='dl1' "
+                    "AND status='error' ORDER BY id DESC LIMIT 1").fetchone()
+    assert ev and "__RAW_UP__" in ev[0]

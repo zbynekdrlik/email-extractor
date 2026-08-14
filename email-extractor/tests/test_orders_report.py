@@ -485,6 +485,23 @@ def test_dl_digest_link_is_only_rendered_when_given():
     assert 'href="http://x/sklad-dl/k"' in with_link
 
 
+# --- #305: „Neviem"-deferred delivery notes get their own warehouse-digest line -------
+
+def test_sklad_unknown_deferred_notes_render_in_the_warehouse_digest():
+    html = report.build_dl_digest(_dl_stats(runs=4, sklad_unknown=3))
+    assert html != ""
+    assert "3" in html
+    assert "odložené" in html.lower() and "sklad nevie" in html.lower()
+
+
+def test_a_day_with_only_sklad_unknown_deferrals_still_renders():
+    """A day with no other DL activity but „Neviem"-deferred notes must still surface for
+    Marek — the trigger fires on sklad_unknown alone (singular 'odložený' for one)."""
+    html = report.build_dl_digest(_dl_stats(sklad_unknown=1))
+    assert html != ""
+    assert "odložen" in html.lower() and "sklad nevie" in html.lower()
+
+
 # --- #312: operator gauges must never appear in the WAREHOUSE digest ---------------
 #
 # quarantined / pending_alerts / open_import_incidents are current-STATE OPERATOR gauges —

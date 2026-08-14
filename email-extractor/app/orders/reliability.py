@@ -240,7 +240,9 @@ def maybe_post_daily_digest(conn, cfg, post=None, shadow: bool = False) -> bool:
     except Exception:
         log.exception("posting the daily provenance digest failed")
 
-    dl_stats = dl_provenance_stats_for_day(conn, yesterday)
+    # #312: `build_dl_digest` no longer renders the three `dl_current_health` gauges, so
+    # skip computing them on the digest path — they stay on `/api/orders/dl/stats`.
+    dl_stats = dl_provenance_stats_for_day(conn, yesterday, include_current_health=False)
     dl_html = report.build_dl_digest(dl_stats, link=report.dl_sklad_link(cfg))
     if dl_html:
         dl_channel = int(getattr(cfg, "delivery_notes_channel_id", 0) or 0)
