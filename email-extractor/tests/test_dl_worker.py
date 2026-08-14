@@ -3058,3 +3058,51 @@ def test_upload_failure_alert_never_leaks_the_raw_error_to_243(pg, tmp_path):
     ev = pg.execute("SELECT detail::text FROM email_events WHERE message_id='dl1' "
                     "AND status='error' ORDER BY id DESC LIMIT 1").fetchone()
     assert ev and "__RAW_UP__" in ev[0]
+
+
+# --- #314: non-warehouse supplier memory — stop generating questions forever ----------
+
+def test_remembered_nonwarehouse_supplier_stops_generating_questions(pg, tmp_path):
+    """#314 (RED->GREEN): once the warehouse marks a DL question 'Netyka sa skladu'
+    (#307's `close_message_not_warehouse`), the SUPPLIER is remembered — a LATER mail
+    from the same supplier produces ZERO new board questions and is handled terminally
+    (`not_warehouse`, no upload), instead of re-asking the same non-warehouse item forever.
+    Before the fix the second mail re-raised an identical dl_item question."""
+    _snapshot(pg)
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    nw_item = [{"name": "Pracovny odev vzor", "quantity": 1, "unit": "ks",
+                "unitPrice": 9.0, "totalPrice": 9.0}]
+    nw_answer = {"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                 "matchReason": "ziadna zhoda — nie skladovy tovar"}
+
+    # 1) a registered supplier whose item does NOT match the bakery catalog -> dl_item Q
+    _msg(pg, mid="nw1")
+    _attach(pg, tmp_path, "nw1")
+    dl_worker.tick(pg, cfg, client=FakeClient({
+        "dl_documents": [_doc(total=9.0, items=nw_item)],
+        "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [nw_answer]}),
+        post=lambda c, h: None)
+    qid = pg.execute("SELECT id FROM order_questions WHERE kind='dl_item' "
+                     "AND status='open'").fetchone()[0]
+
+    # 2) the warehouse marks it 'Netyka sa skladu' (#307) -> MUST remember the supplier
+    dl_worker.close_message_not_warehouse(pg, qid)
+
+    # 3) a SECOND mail from the SAME supplier, same non-warehouse item
+    _msg(pg, mid="nw2")
+    _attach(pg, tmp_path, "nw2")
+    uploaded: list = []
+    dl_worker.tick(pg, cfg, client=FakeClient({
+        "dl_documents": [_doc(total=9.0, items=nw_item)],
+        "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [nw_answer]}),
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+        post=lambda c, h: None)
+
+    # ZERO new questions, nothing uploaded, message handled terminally as not_warehouse
+    assert pg.execute("SELECT count(*) FROM order_questions WHERE status='open'"
+                      ).fetchone()[0] == 0
+    assert uploaded == []
+    row = pg.execute("SELECT processed, proc_status FROM messages "
+                     "WHERE message_id='nw2'").fetchone()
+    assert row[0] is True
+    assert row[1] == "not_warehouse"
