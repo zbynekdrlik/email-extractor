@@ -2,6 +2,31 @@
 
 Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions, shared PR #.
 
+## 2026-08-14 — #308 + #310 (kanál-243 incidenty, jeden PR)
+
+- **#308** (nečitateľný scan končí ticho v `human_processing`): n8n klasifikátor zaradí
+  near-empty scan (needs_vision) do terminálnej `human_processing`, ktorú žiaden engine ani
+  sweep nesleduje → `processed=false` navždy, bez notifikácie (7178/DL 26041774). Nový
+  `app/orders/human_processing.sweep` (zapojený do `worker.run_forever`, live-engine gate),
+  dve vrstvy: (1) vision záchrana pre near-empty-scan signatúru cez `llm.Client.vision_call`
+  → pri istote ≥0.6 a spracovateľskej kategórii auto-preklasifikuje; (2) povinná sieť —
+  nezachránené → durable `dl_alerts` outbox (kanál 243), kind `human_processing_review`,
+  dedup. Reuse `dl_worker._read_attachments`, `dl_extract.render_pdf_pages`, `dl_alerts`,
+  `db.log_event`. Žiadna nová tabuľka. RED (`5b58e35`, stub + `tests/test_human_processing.py`
+  7 testov) → GREEN (`a8fc7f1`).
+- **#310** (operátorské alerty nesmú chodiť do skladu): `stuck_classified_sweep` (engine-
+  liveness) posielal na 243, `_check_spend_cap` (spend-cap) na 152 — obe operátorské (živý
+  incident Odoo msg 40622486). Nová config `ops_channel_id` (default 0) + `report.ops_channel`.
+  RED (`5987bef`) → GREEN (`59778fb`). **Review 🔴 KOREKCIA (`85004cd`):** `post_from_config
+  (channel_id=0)` NEvráti None — 0 je falsy → fallback na `orders_channel_id` (152)! Oprava:
+  `dl_alerts.flush_pending` HOLD skupinu s channel_id==0 (nikdy nedoručí, ostáva v
+  `pending_count`); spend-cap cez durable outbox; `ops_channel_id` v config.yaml options+schema;
+  delivery-path testy cez fake transport (RED overený neutralizáciou guardu → delivered=[152]).
+- **#312** filed (Scope-gate: security-boundary): surové `{e}` texty výnimiek presakujú do
+  kanála 243 v `dl_worker.py:648/688` — samostatná info-hygiene chyba z auditu #310.
+- Commity: `a9515fc` bump 0.9.95, RED/GREEN per issue, `85004cd` review-fix. Design+validated+
+  reviewed markery pre obe. Full local suite green (0 FAILED), ruff clean.
+
 ## 2026-08-13 — Integration round C2 (#271, #297)
 
 - **#271** (reusable claim-or-identify primitive): merged `worktree-agent-
