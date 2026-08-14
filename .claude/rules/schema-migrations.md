@@ -2,6 +2,7 @@
 paths:
   - "email-extractor/app/migrate.py"
   - "email-extractor/app/db.py"
+  - "email-extractor/app/db_schema.py"
   - "email-extractor/tests/test_migrate.py"
 ---
 
@@ -85,3 +86,22 @@ revision **ids 2/3** for their own synthetic in-test revisions. Appending the fi
   collides (already-applied id 2 → skipped/no-error, breaking the "applies 2 then 3" / "raises
   DuplicateTable" intent). This is legitimate mechanism-test maintenance, not weakening — do
   it in the same commit as the new revision, with a clear note.
+
+## `SCHEMA` now lives in `app/db_schema.py`, and its statement ORDER is chronological, not per-domain (#309)
+
+Since #309 the baseline DDL list is `app/db_schema.py`'s `SCHEMA` (101 statements),
+re-exported by `db.py` (`from .db_schema import SCHEMA`); `db.REVISIONS[0]` still wraps
+it as revision 1. `db.SCHEMA` / `from app.db import SCHEMA` still resolve (test_migrate's
+`for stmt in db.SCHEMA` is unaffected — same object).
+
+**Never reorder `SCHEMA`, and never split it into per-domain sub-lists.** It reads like
+it *could* be grouped by domain (messages → attachments → orders → desadv → questions),
+but statements ~82–100 are LATE in-baseline migrations appended chronologically —
+`ALTER import_alert_incidents`, a `DROP INDEX ... open` + `CREATE ... open_v2` swap (must
+stay in that order), `ALTER order_questions`, `ALTER desadv_sent`, `DO $$` blocks — that
+reference tables defined far EARLIER in the list. The migrate baseline runs the list in
+sequence (self-healing, per-statement autocommit), so the order is load-bearing (FK/column
+dependencies, the index swap). A per-domain sub-list split would move statement 82 up into
+its table's domain cluster and change execution order. Keeping `SCHEMA` as ONE ordered
+verbatim data list is deliberate (see #309's design comment) — a NEW schema change is still
+a new `Revision` appended to `db.REVISIONS` (top of this file), NEVER an edit to `SCHEMA`.

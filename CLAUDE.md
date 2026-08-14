@@ -66,6 +66,7 @@ Load the matching skill BEFORE working on that area (don't re-derive):
 - lokálne spúšťanie pytest proti dev1 test-Postgres → `.claude/rules/local-testing.md` (auto-loads on `email-extractor/tests/**`)
 - `git commit -F <scratch-file>` bezpečnosť (stale scratchpad obsah) → `.claude/rules/git-commit-hygiene.md` (auto-loads on `email-extractor/app/**`, `tests/**`, `config.yaml`)
 - rozdelenie `app/httpapi.py` (#268) / charakterizačné testy → `.claude/rules/httpapi-characterization.md` (auto-loads on `app/httpapi*.py` a `test_httpapi_characterization.py`)
+- rozdelenie veľkého modulu po zodpovednostiach — facade + re-export, byte-exact AST presun, charakterizačný test (#309: dl_worker.py, db_schema.py) → `.claude/rules/module-split-refactor.md` (auto-loads on `app/orders/dl_*.py`, `app/db_schema.py`, `test_dl_worker_public_api.py`)
 - PR hlási `mergeable_state: "dirty"` hoci lokálny merge je čistý (criss-cross merge-base z fleet integrácie) → `.claude/rules/pr-merge-mechanics.md` (auto-loads on `app/**`, `tests/**`, `config.yaml`, `docs/autopilot-log.md`)
 - typová kontrola (mypy brána v CI, oprava nálezu bez potlačenia, chirurgický per-modulový override) → `.claude/rules/type-checking.md` (auto-loads on `pyproject.toml`, `requirements-dev.txt`)
 - schéma / migrácie (verzovaný `migrate.py` engine, `schema_version` ledger, pridanie novej revízie, self-healing baseline, `reapply_schema` test fixture) → `.claude/rules/schema-migrations.md` (auto-loads on `app/migrate.py`, `app/db.py`, `test_migrate.py`)

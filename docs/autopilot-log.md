@@ -3535,3 +3535,27 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
 - Testy: helper (GS1 math, None pre Korenie-triedu) + overflow-note (validný GTIN-14 ukáže
   sibling, Korenie-trieda neukáže falošný). 386 testov DL/desadv/matcher blast-radius zelené,
   ruff + mypy čisté. Syntetické EAN only (verejný repo).
+
+## 2026-08-14 — #309 (štruktúra: rozdelenie dl_worker.py + db.py po zodpovednostiach) — v0.9.100, PR #TBD
+- Čistý štrukturálny refaktor, NULA zmien správania. Validácia (STEP 0): dl_worker.py = 1911 r.,
+  db.py = 1364 r. na aktuálnom dev (dl_worker narástol z 1665 pri založení ticketu) — stále nad
+  ~800 stropom, nikdy predtým nerozdelené.
+- Metóda: byte-exact presuny cez `ast.get_source_segment` (nie prepisovanie). Overené: všetkých
+  37 tiel funkcií/tried BYTE-IDENTICKÝCH voči pôvodine; `db.SCHEMA` runtime-identická (101
+  príkazov, list-equality), `REVISIONS[0].statements is db.SCHEMA`.
+- dl_worker.py → facade + 7 concern modulov (acyklický DAG): dl_retry (78) #239, dl_correction
+  (112) #265, dl_matching (108), dl_events (61), dl_document (469), dl_message (539), dl_questions
+  (336), dl_worker facade (274, re-export celého povrchu). Len 1 test monkeypatchuje atribút
+  (`dl_worker.dl_extract` — modul singleton, re-export ho zachová); facade tak bezpečná.
+- db.py 1364 → 255 r.: `SCHEMA` (1108 r. DDL) verbatim do `db_schema.py` (byte-identická, poradie
+  = migrate-baseline invariant, NErozdelené per-doména lebo príkazy 82–100 sú neskoré in-baseline
+  migrácie preložené chronologicky — reorder by rozbil baseline).
+- Nový charakterizačný test `test_dl_worker_public_api.py` pinne celý `dl_worker.X` povrch +
+  `dl_worker.dl_extract` identitu; dokázateľne padá pri zahodenom symbole (perturb test).
+- Bezpečnostné invarianty (#239 `_check_landed` tri-state + `_finish_shipped` tail, #262 stable
+  doc-number, #265 sibling `status='error'` exclusion, #314 nonwarehouse+GTIN override,
+  `desadv.claim_send_or_identify`) presunuté verbatim.
+- Commits: bump `f2b51bc` (0.9.100), char test `de91f49`, dl_worker split `47e599e`, db split
+  `9fc8c57`. ruff `.` čisté, import smoke bez cyklov, celý test suite zelený bez úpravy testov.
+  Fresh-context general-purpose review (NIE built-in skill). Worktree dispatch (isolated), vlastný
+  test-pg kontajner port 15478.
