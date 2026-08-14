@@ -121,6 +121,7 @@ from . import (
     dl_extract,
     dl_match,
     dl_memory,
+    dl_nonwarehouse,
     dl_report,
     dl_snapshot,
     dl_supplier_memory,
@@ -610,6 +611,47 @@ def _shipped_items(decisions: list[tuple[dict, dl_match.Decision]]) -> list[dict
            if not desadv_edi._is_unmatched(d.gtin) and _num(item.get("quantity")) != 0]
 
 
+# --- #314: non-warehouse supplier short-circuit helpers ---------------------
+
+def _document_has_catalog_match(client, message: dict, doc: dict,
+                                catalog: list[dict]) -> bool:
+    """#314 GTIN-match SAFETY OVERRIDE (req 4): does this document carry AT LEAST ONE item
+    that matches a catalog GTIN? Uses the SAME item matcher (`_match_item` +
+    `desadv_edi._is_unmatched`) as normal processing — never a cheap divergent pre-scan —
+    so a remembered non-warehouse supplier that DOES send a real warehouse delivery is
+    never silently dropped (live evidence: EKVIA/Messer, both marked not_warehouse, also
+    ship real catalog goods). Short-circuits on the first match. A transient matcher error
+    re-raises via `_check_retry` (the message retries later) rather than being mistaken for
+    'no match'; a non-transient error is treated as no match (the normal flow's own review
+    handling is unaffected — this is only the skip-vs-keep gate)."""
+    for item in doc.get("items") or []:
+        try:
+            decision = _match_item(client, item, catalog, None, "")
+        except Exception as e:
+            _check_retry(message.get("attempts", 0), str(e))
+            continue
+        if not desadv_edi._is_unmatched(decision.gtin):
+            return True
+    return False
+
+
+def _skip_not_warehouse(conn, shadow: bool, message: dict, doc_number: str,
+                        supplier_name: str) -> dict:
+    """#314: terminal handling for a document from a REMEMBERED non-warehouse supplier with
+    NO catalog match — no board question, no upload. The `not_warehouse` outcome flows into
+    `_aggregate_status` → `_run_and_finish`'s rollup event (`stage/status='not_warehouse'`),
+    the SAME event shape #307's manual `close_message_not_warehouse` produces, so it stays
+    visible in the daily digest for Marek (req 2) — never a silent drop. `_run_and_finish`
+    marks the message processed as usual."""
+    _event(conn, shadow, message["message_id"], stage="not_warehouse",
+          status="not_warehouse",
+          outcome="netýka sa skladu — automaticky (zapamätaný dodávateľ), bez EDI",
+          detail={"doc_number": doc_number, "supplier_name": supplier_name},
+          rollup=False, workflow=dl_report.WORKFLOW)
+    return {"outcome": "not_warehouse", "doc_number": doc_number,
+           "supplier_name": supplier_name}
+
+
 # --- one document (R60-R97) -------------------------------------------------
 
 def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list[dict],
@@ -660,13 +702,30 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         return {"outcome": "review", "doc_number": doc_number, "supplier_name": "",
                "reason": reason}
 
+    # #314: is this supplier remembered as non-warehouse (the warehouse marked an earlier
+    # mail "Netýka sa skladu")? Keyed on the supplier's own identity — registry EAN (when
+    # matched) ∪ the extracted name — never blindly the email (see dl_nonwarehouse.resolve).
+    nw_remembered = dl_nonwarehouse.resolve(
+        conn, supplier_decision.ean_edi,
+        supplier_decision.name or doc.get("supplierName", ""), sender_email) is not None
+
     if not supplier_decision.matched:
+        # #314: a remembered non-warehouse supplier whose document has NO catalog match is
+        # handled terminally, with no dl_supplier question (req 2). But a document that DOES
+        # carry a catalog item is NEVER silently dropped (req 4, safety override) — it keeps
+        # the existing ask+review path so a human can still identify the unregistered
+        # supplier and ship the genuine goods.
+        if nw_remembered and not _document_has_catalog_match(client, message, doc, catalog):
+            return _skip_not_warehouse(conn, shadow, message, doc_number,
+                                       doc.get("supplierName", ""))
         if not shadow:
             cands = dl_match.supplier_candidates(
                 doc.get("supplierName", ""), doc.get("supplierEmail", ""),
                 doc.get("supplierCity", ""), suppliers)
             teach.ask_dl_supplier(conn, message["message_id"], sender_email, cands,
-                                  delivery_date=delivery_date)
+                                  delivery_date=delivery_date,
+                                  supplier_name=doc.get("supplierName", ""),
+                                  supplier_city=doc.get("supplierCity", ""))
         _post(cfg, shadow, lambda: dl_report.build_review(
             supplier_decision.note, "", doc_number, delivery_date, from_addr, subject,
             link=link), post=post)
@@ -678,6 +737,10 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
 
     matched_items: list[dict] = []
     decisions: list[tuple[dict, dl_match.Decision]] = []
+    # #314: (item, recalled, note) per unmatched item — the dl_item asks are DEFERRED to
+    # after the loop, so a remembered non-warehouse supplier with no catalog match can be
+    # short-circuited (terminal skip, zero questions) before any question is raised.
+    unmatched_asks: list[tuple[dict, object, str]] = []
     catalog_gtins = {str(c.get("gtin")) for c in catalog}
     for item in doc.get("items") or []:
         recalled = dl_memory.resolve(conn, supplier_decision.ean_edi, item.get("name", ""),
@@ -716,13 +779,34 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         # exclusion left those other two rules silently invisible: no nástenka
         # question, no line in the Odoo message, nothing — exactly the loss class
         # this migration exists to remove.
-        if not decision.gtin and not shadow:
+        # #314: DEFER the ask (was inline `if not decision.gtin and not shadow`) — see the
+        # `unmatched_asks` declaration above. The EDI-exclusion gate `not decision.gtin` is
+        # the #204 deep-review finding, unchanged (every rule with no real card — `unmatched`,
+        # the R75 `llm_sure_lexical_gap` tripwire, `match_failed` — is captured, not just the
+        # literal `"unmatched"` rule name).
+        if not decision.gtin:
+            unmatched_asks.append((item, recalled, decision.note))
+
+    # #314: a remembered non-warehouse supplier whose document produced NO catalog GTIN
+    # match is handled terminally — no dl_item questions, no upload (req 2). A document WITH
+    # at least one real match falls straight through to the normal build/claim/ship path
+    # below (req 4, safety override), and its unmatched items still raise their questions.
+    has_catalog_match = any(not desadv_edi._is_unmatched(d.gtin) for _, d in decisions)
+    if nw_remembered and not has_catalog_match:
+        return _skip_not_warehouse(conn, shadow, message, doc_number,
+                                   supplier_decision.name)
+
+    # Fire the deferred dl_item questions. For a non-remembered supplier this is byte-for-
+    # byte the pre-#314 behaviour (the asks simply moved out of the loop); for a remembered
+    # supplier reached here (it HAS a catalog match) it is the safety-override path.
+    if not shadow:
+        for item, recalled, note in unmatched_asks:
             cands = dl_match.candidates(item.get("name", ""), catalog,
                                         memory_gtin=(recalled.gtin if recalled else ""))
             teach.ask_dl_item(conn, message["message_id"], supplier_decision.ean_edi,
                               supplier_decision.name, item.get("name", ""),
                               item.get("quantity"), item.get("unit", ""), cands,
-                              delivery_date=delivery_date, reason=decision.note,
+                              delivery_date=delivery_date, reason=note,
                               catalog_gtins=catalog_gtins)
 
     header = {"customerName": supplier_decision.name,
@@ -964,6 +1048,17 @@ def _aggregate_status(documents_out: list[dict]) -> str:
         # see the retry/idempotency note above) is not a clean "ok" — nothing was
         # actually sent this run.
         return "duplicate"
+    # #314: a message whose documents are all terminally non-warehouse (a remembered
+    # non-warehouse supplier, short-circuited before any question/upload) is a CLEAN
+    # terminal skip — never "review" (nothing needs a human) and never "ok" (nothing
+    # shipped). It flows into _run_and_finish's rollup event as stage/status=
+    # 'not_warehouse', the SAME shape #307's manual close produces, so the daily digest
+    # counts it exactly like a hand-marked "netýka sa skladu". A mixed message (a real
+    # shipment alongside a skip — only possible for a multi-supplier mail, not the single-
+    # supplier norm) falls through to the ok/partial branches so the shipment still counts.
+    if (all(o in ("not_warehouse", "duplicate") for o in outcomes)
+            and "not_warehouse" in outcomes):
+        return "not_warehouse"
     if all(o in ("review", "duplicate") for o in outcomes) and "review" in outcomes:
         return "review"
     if any(o == "partial" for o in outcomes) or ("review" in outcomes and
@@ -1472,9 +1567,13 @@ def close_message_not_warehouse(conn, qid: int) -> dict:
         it ("netýka sa skladu — vybavené bez EDI") for Marek, nothing is silently lost;
     (3) upload NOTHING to ORION.
 
-    The sender is deliberately NOT remembered (one sender sends both warehouse and
-    non-warehouse mail — auto-suppressing would silently drop a future REAL delivery note;
-    the ticket itself flags this). So a later real DL from the same sender is still asked.
+    #314 (supersedes #307's "sender deliberately NOT remembered"): the SUPPLIER is now
+    remembered (`dl_nonwarehouse.record_for_message`), keyed on the supplier's OWN identity
+    from the document (registry EAN ∪ normalized name), NOT blindly the email address — so
+    the tlaciaren@-forwards-everything risk #307 flagged is avoided, and a GTIN-match safety
+    override in `_process_document` (req 4) means a later mail that DOES carry a catalog item
+    is never silently dropped. A later NON-warehouse mail from the same supplier is now
+    short-circuited (terminal skip, zero questions) instead of re-asking forever.
 
     Marking the message `processed` is what keeps the question from coming back: the dedup
     index (`WHERE status='open'`) does not suppress a fresh question once this one is
@@ -1486,6 +1585,10 @@ def close_message_not_warehouse(conn, qid: int) -> dict:
     if not qrow:
         return {"closed": 0, "message_id": None}
     message_id = qrow[0]
+    # #314 req 1: remember this supplier as non-warehouse BEFORE the close UPDATE (the
+    # payloads it reads are the same either way, but recording first keeps the intent clear)
+    # so a LATER mail from the same supplier is short-circuited in _process_document.
+    dl_nonwarehouse.record_for_message(conn, message_id)
     closed = conn.execute(
         """UPDATE order_questions
               SET status = 'not_warehouse', answer = '{"not_warehouse": true}'::jsonb,

@@ -20,6 +20,7 @@ from app.orders import (
     desadv,
     desadv_edi,
     dl_memory,
+    dl_nonwarehouse,
     dl_snapshot,
     dl_supplier_memory,
     dl_worker,
@@ -3106,3 +3107,48 @@ def test_remembered_nonwarehouse_supplier_stops_generating_questions(pg, tmp_pat
                      "WHERE message_id='nw2'").fetchone()
     assert row[0] is True
     assert row[1] == "not_warehouse"
+
+
+def test_remembered_nonwarehouse_supplier_with_catalog_match_still_ships(pg, tmp_path):
+    """#314 req 4 (GTIN-match SAFETY OVERRIDE): a mail from a remembered non-warehouse
+    supplier that DOES carry a catalog item is NEVER silently dropped — it goes through
+    normal processing (builds + uploads the EDI), not the not_warehouse short-circuit. This
+    is what keeps a mixed supplier (EKVIA/Messer send BOTH režíjne faktúry AND real
+    deliveries) safe: only their non-warehouse mail is skipped, never a real delivery."""
+    _snapshot(pg)
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    # the supplier is remembered non-warehouse (by its registry ean + name)
+    dl_nonwarehouse.remember(pg, SUPPLIER_EAN, "Pekáreň Lunys", "")
+    _msg(pg, mid="ov1")
+    _attach(pg, tmp_path, "ov1")
+    uploaded: list = []
+    dl_worker.tick(pg, cfg, client=FakeClient({
+        "dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+        "dl_item": [ITEM_MATCHED]}),
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+        post=lambda c, h: None)
+
+    # the real catalog item shipped despite the supplier being remembered non-warehouse
+    assert len(uploaded) == 1
+    assert pg.execute("SELECT proc_status FROM messages WHERE message_id='ov1'"
+                      ).fetchone()[0] != "not_warehouse"
+
+
+def test_a_non_remembered_supplier_still_asks_its_dl_item_question(pg, tmp_path):
+    """#314 must not change the behaviour for a supplier that was NEVER marked
+    not_warehouse: an unmatched item still raises its dl_item board question exactly as
+    before (the deferred-ask refactor is behaviour-preserving)."""
+    _snapshot(pg)
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    nw_item = [{"name": "Pracovny odev vzor", "quantity": 1, "unit": "ks",
+                "unitPrice": 9.0, "totalPrice": 9.0}]
+    _msg(pg, mid="reg1")
+    _attach(pg, tmp_path, "reg1")
+    dl_worker.tick(pg, cfg, client=FakeClient({
+        "dl_documents": [_doc(total=9.0, items=nw_item)],
+        "dl_supplier": [SUPPLIER_MATCHED],
+        "dl_item": [{"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                     "matchReason": "ziadna zhoda"}]}),
+        post=lambda c, h: None)
+    assert pg.execute("SELECT count(*) FROM order_questions WHERE kind='dl_item' "
+                      "AND status='open'").fetchone()[0] == 1

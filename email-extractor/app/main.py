@@ -98,6 +98,14 @@ def main() -> None:
              __version__, cfg.folders, cfg.poll_interval)
     conn = db.connect(cfg.pg_dsn)
     db.init_schema(conn)          # run migrations BEFORE the dashboard serves requests
+    try:
+        # #314: one-time-ish idempotent seed of the non-warehouse supplier memory from
+        # historical "Netýka sa skladu" closures + a sweep of any still-open question whose
+        # supplier is already remembered. Never fatal — a failure here must not block boot.
+        from .orders import dl_nonwarehouse
+        dl_nonwarehouse.bootstrap(conn, cfg)
+    except Exception:
+        log.exception("dl_nonwarehouse bootstrap failed (non-fatal)")
     httpapi.start(cfg)
     start_order_worker(cfg)
     while True:

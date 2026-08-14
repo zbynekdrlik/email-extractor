@@ -52,14 +52,18 @@ def test_fresh_db_creates_full_schema_and_records_baseline():
     with fresh_db() as (conn, _dsn):
         assert _regclass(conn, "messages") is None          # genuinely empty to start
         done = db.init_schema(conn)
-        assert done == [migrate.BASELINE_REVISION]
-        # ledger table + a spread of real tables (core + a late-added one) all exist
+        # #314: every declared revision runs on a fresh DB (baseline + any later ones) —
+        # revision-agnostic so this never needs touching again when a rev 3+ is added.
+        assert done == [r.revision for r in db.REVISIONS]
+        # ledger table + a spread of real tables (core, a late-added one, and rev-2's own
+        # dl_nonwarehouse_supplier) all exist
         for t in ("schema_version", "messages", "attachments", "email_events",
-                  "desadv_sent", "order_questions", "dl_supplier_overrides"):
+                  "desadv_sent", "order_questions", "dl_supplier_overrides",
+                  "dl_nonwarehouse_supplier"):
             assert _regclass(conn, t) is not None, f"{t} missing after fresh create"
         rows = conn.execute(
             "SELECT revision, name FROM schema_version ORDER BY revision").fetchall()
-        assert rows == [(1, "baseline")]
+        assert rows == [(r.revision, r.name) for r in db.REVISIONS]
         # the rollup trigger (proof the baseline really ran, not just the table shells)
         assert conn.execute(
             "SELECT 1 FROM pg_trigger WHERE tgname='trg_email_events_rollup'").fetchone()
@@ -82,7 +86,7 @@ def test_existing_db_baseline_is_rerun_idempotently_and_heals_lag(caplog):
         with caplog.at_level(logging.INFO, logger="email_extractor.migrate"):
             done = db.init_schema(conn)
 
-        assert done == [migrate.BASELINE_REVISION]
+        assert done == [r.revision for r in db.REVISIONS]   # #314: baseline + rev 2 both ran
         assert any("applied schema baseline r0001" in m for m in caplog.messages)
         # the lagging column was HEALED (idempotent ADD COLUMN re-ran), not skipped
         assert conn.execute(
@@ -90,7 +94,8 @@ def test_existing_db_baseline_is_rerun_idempotently_and_heals_lag(caplog):
             "WHERE table_name='edi_sent' AND column_name='uploaded_at'").fetchone()
         # baseline recorded, and live data left untouched (non-destructive)
         assert conn.execute(
-            "SELECT revision, name FROM schema_version").fetchall() == [(1, "baseline")]
+            "SELECT revision, name FROM schema_version ORDER BY revision").fetchall() \
+            == [(r.revision, r.name) for r in db.REVISIONS]
         assert conn.execute("SELECT count(*) FROM messages").fetchone()[0] == 1
 
 
@@ -102,41 +107,48 @@ def test_second_call_is_noop_fast_path(caplog):
         with caplog.at_level(logging.INFO, logger="email_extractor.migrate"):
             done = db.init_schema(conn)            # second: up-to-date
         assert done == []
-        assert any("up-to-date at r0001" in m for m in caplog.messages)
-        assert conn.execute("SELECT count(*) FROM schema_version").fetchone()[0] == 1
+        _top = max(r.revision for r in db.REVISIONS)      # #314: 'up-to-date at r<max>'
+        assert any(f"up-to-date at r{_top:04d}" in m for m in caplog.messages)
+        assert conn.execute("SELECT count(*) FROM schema_version").fetchone()[0] \
+            == len(db.REVISIONS)
 
 
 # --- outdated DB: only the missing revisions run, in order ---
 
 def test_partial_migration_applies_only_missing_in_order():
     with fresh_db() as (conn, _dsn):
-        db.init_schema(conn)                       # baseline (rev 1) applied
-        rev2 = migrate.Revision(2, "test_add_a", ["CREATE TABLE mig_test_a (id INT)"])
-        rev3 = migrate.Revision(3, "test_add_b", ["CREATE TABLE mig_test_b (id INT)"])
-        done = migrate.run_migrations(conn, [db.REVISIONS[0], rev2, rev3])
-        assert done == [2, 3]                       # rev 1 skipped, 2 then 3 in order
+        db.init_schema(conn)                       # every real revision applied
+        # #314: use HIGH synthetic ids (90/91) so they never collide with a real appended
+        # revision (id 2 is now taken by add_dl_nonwarehouse_supplier).
+        rev90 = migrate.Revision(90, "test_add_a", ["CREATE TABLE mig_test_a (id INT)"])
+        rev91 = migrate.Revision(91, "test_add_b", ["CREATE TABLE mig_test_b (id INT)"])
+        done = migrate.run_migrations(conn, [db.REVISIONS[0], rev90, rev91])
+        assert done == [90, 91]                     # rev 1 skipped, 90 then 91 in order
         assert _regclass(conn, "mig_test_a") is not None
         assert _regclass(conn, "mig_test_b") is not None
         assert conn.execute(
             "SELECT revision FROM schema_version ORDER BY revision").fetchall() \
-            == [(1,), (2,), (3,)]
-        # applied_at ordering matches revision ordering (2 recorded before 3)
-        assert migrate.run_migrations(conn, [db.REVISIONS[0], rev2, rev3]) == []
+            == [(r.revision,) for r in db.REVISIONS] + [(90,), (91,)]
+        # applied_at ordering matches revision ordering (90 recorded before 91)
+        assert migrate.run_migrations(conn, [db.REVISIONS[0], rev90, rev91]) == []
 
 
 def test_revision_failure_rolls_back_and_records_nothing():
     with fresh_db() as (conn, _dsn):
         db.init_schema(conn)
-        bad = migrate.Revision(2, "bad", [
+        # #314: HIGH synthetic id (90) — id 2 is now a real revision.
+        bad = migrate.Revision(90, "bad", [
             "CREATE TABLE mig_ok (id INT)",
             "CREATE TABLE mig_ok (id INT)",   # duplicate → error mid-revision
         ])
         with pytest.raises(psycopg.errors.DuplicateTable):
             migrate.run_migrations(conn, [db.REVISIONS[0], bad])
-        # atomic: neither the table nor the ledger row survived the failed revision
+        # atomic: neither the table nor the failed revision's ledger row survived — only the
+        # real revisions applied by init_schema remain.
         assert _regclass(conn, "mig_ok") is None
         assert conn.execute(
-            "SELECT revision FROM schema_version ORDER BY revision").fetchall() == [(1,)]
+            "SELECT revision FROM schema_version ORDER BY revision").fetchall() \
+            == [(r.revision,) for r in db.REVISIONS]
         # advisory lock was released in finally → a retry can proceed
         assert migrate.pending_revisions(conn, [db.REVISIONS[0]]) == []
 
@@ -163,11 +175,13 @@ def test_pending_revisions_reports_without_applying():
     with fresh_db() as (conn, _dsn):
         # before any migration the ledger table is absent → everything pending
         assert _regclass(conn, "schema_version") is None
-        assert migrate.pending_revisions(conn, db.REVISIONS) == [migrate.BASELINE_REVISION]
+        assert migrate.pending_revisions(conn, db.REVISIONS) \
+            == [r.revision for r in db.REVISIONS]
 
-        db.init_schema(conn)                       # applies rev 1
-        rev2 = migrate.Revision(2, "future", ["CREATE TABLE mig_dry (id INT)"])
-        assert migrate.pending_revisions(conn, [db.REVISIONS[0], rev2]) == [2]
+        db.init_schema(conn)                       # applies every real revision
+        # #314: HIGH synthetic id (90) — id 2 is now a real, already-applied revision.
+        rev90 = migrate.Revision(90, "future", ["CREATE TABLE mig_dry (id INT)"])
+        assert migrate.pending_revisions(conn, [db.REVISIONS[0], rev90]) == [90]
         assert _regclass(conn, "mig_dry") is None  # dry-run applied nothing
         assert migrate.pending_revisions(conn, db.REVISIONS) == []
 
@@ -200,9 +214,10 @@ def test_concurrent_start_no_duplicate_baseline():
         # exactly one baseline row regardless of who won the race
         assert conn.execute(
             "SELECT count(*) FROM schema_version WHERE revision=1").fetchone()[0] == 1
-        # exactly one worker applied it; the rest saw it already done
+        # exactly one worker applied it; the rest saw it already done (#314: the winner
+        # applies every declared revision, not just the baseline)
         applied = sorted(len(v) for v in results.values())
-        assert applied == [0, 0, 0, 1]
+        assert applied == [0, 0, 0, len(db.REVISIONS)]
         assert _regclass(conn, "messages") is not None   # schema really was built
 
 
@@ -219,7 +234,7 @@ def test_data_untouched_across_reruns():
         # AND a GENUINE baseline re-run (clear the ledger first, like a pre-mechanism DB):
         # the ~100 idempotent statements run again against the live row and must not touch it
         conn.execute("DELETE FROM schema_version")
-        assert db.init_schema(conn) == [migrate.BASELINE_REVISION]
+        assert db.init_schema(conn) == [r.revision for r in db.REVISIONS]  # #314
         after = conn.execute("SELECT count(*) FROM messages").fetchone()[0]
         assert before == after == 1
         assert conn.execute(
