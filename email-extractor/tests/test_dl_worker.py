@@ -3209,3 +3209,122 @@ def test_remembered_unmatched_supplier_with_a_catalog_match_still_asks(pg, tmp_p
                       "AND status='open'").fetchone()[0] == 1
     assert pg.execute("SELECT proc_status FROM messages WHERE message_id='cb2'"
                       ).fetchone()[0] != "not_warehouse"
+
+
+# --- #322: CODEX-first supplier resolution (deterministic rung rescues a model miss) -----
+
+def test_a_model_miss_resolves_from_an_existing_codex_card_without_a_question(pg, tmp_path):
+    """#322: the supplier's card IS in the effective CODEX list (the snapshot seeds
+    'Pekáreň Lunys'), but the MODEL misses (matched=False). The deterministic identity
+    rung must rescue it — no dl_supplier board question, the document ships normally."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({
+        "dl_documents": [_doc()],          # supplier 'Pekáreň Lunys' IS in the snapshot
+        "dl_supplier": [{"matched": False, "matchReason": "nie som si istý"}],
+        "dl_item": [ITEM_MATCHED]})
+    uploaded, posted = [], []
+    n = dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client,
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+        post=lambda c, h: posted.append(h))
+    assert n == 1
+    assert pg.execute(
+        "SELECT count(*) FROM order_questions WHERE kind='dl_supplier'").fetchone()[0] == 0, \
+        "an existing CODEX card must NOT fire a dl_supplier question"
+    assert len(uploaded) == 1, "the document ships — supplier resolved deterministically"
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE supplier_ean=%s AND uploaded_at IS NOT NULL",
+        (SUPPLIER_EAN,)).fetchone()[0] == 1
+
+
+def test_a_model_miss_with_no_codex_card_still_raises_the_question(pg, tmp_path):
+    """#322: model miss AND no matching CODEX card -> the dl_supplier board question still
+    fires (acceptance criterion 2 — the question stays for a genuinely-unknown supplier)."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", from_addr="anon@nowhere.sk")
+    _attach(pg, tmp_path, "dl1")
+    doc = _unknown_supplier_doc("neznamy@nowhere.sk")   # supplier NOT in the snapshot
+    client = FakeClient({
+        "dl_documents": [doc],
+        "dl_supplier": [{"matched": False, "matchReason": "nie je v zozname"}]})
+    n = dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client,
+        post=lambda c, h: None)
+    assert n == 1
+    assert pg.execute(
+        "SELECT count(*) FROM order_questions WHERE kind='dl_supplier'").fetchone()[0] == 1
+
+
+def test_an_ambiguous_codex_name_match_still_raises_the_question(pg, tmp_path):
+    """#322 safety: two effective CODEX cards share the document's supplier name (different
+    EANs, no unique city, no email link) — the deterministic rung must NOT guess (a false
+    supplier match ships a wrongly-addressed EDI); the dl_supplier question still fires."""
+    _snapshot(pg)   # seeds 'Pekáreň Lunys' (2000000000864)
+    dl_snapshot.upsert_dl_supplier(
+        pg, override_id=None, orig_ean_edi=None, orig_city=None,
+        ean_edi="2000000000111", name="Pekáreň Lunys", emails=[], city="Bratislava")
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    # a doc whose email/sender match NEITHER card, so the ambiguous NAME is what decides.
+    _msg(pg, mid="dl1", from_addr="anon@nowhere.sk")
+    _attach(pg, tmp_path, "dl1")
+    doc = {"documents": [{
+        "supplierName": "Pekáreň Lunys", "supplierCity": "", "supplierEmail": "",
+        "docNumber": "0100000001", "deliveryDate": "01.08.2026",
+        "documentTotalWithoutVAT": 5.0,
+        "items": [{"name": "Rožok 50g", "quantity": 10, "unit": "ks", "unitPrice": 0.5,
+                  "totalPrice": 5.0}]}]}
+    client = FakeClient({
+        "dl_documents": [doc],
+        "dl_supplier": [{"matched": False, "matchReason": "nejednoznačné"}]})
+    n = dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client,
+        post=lambda c, h: None)
+    assert n == 1
+    assert pg.execute(
+        "SELECT count(*) FROM order_questions WHERE kind='dl_supplier'").fetchone()[0] == 1, \
+        "ambiguous name (2 cards, no unique city) must still ask — never guess"
+
+
+def test_release_for_supplier_card_releases_orphaned_stuck_siblings(pg, tmp_path):
+    """#322 retro-release: adding/editing a CODEX supplier card releases orphaned same-
+    sender stuck messages (no order_questions row) via the reused #265 machinery, without
+    needing a nástenka answer."""
+    _snapshot(pg)
+    sender = "dodavatel@lunys.sk"
+    for mid in ("orph1", "orph2"):
+        _msg(pg, mid=mid, from_addr=sender)
+        pg.execute("UPDATE messages SET processed=true, proc_status='review' "
+                   "WHERE message_id=%s", (mid,))
+    released = dl_worker.release_for_supplier_card(pg, [sender])
+    assert released == 2
+    rows = pg.execute(
+        "SELECT processed, processing_at, attempts FROM messages "
+        "WHERE message_id IN ('orph1','orph2')").fetchall()
+    assert all(r == (False, None, 0) for r in rows), \
+        "both orphaned siblings reset cleanly into the claim pool"
+
+
+def test_release_for_supplier_card_honors_the_error_event_exclusion(pg, tmp_path):
+    """#322: the reused #265 error-event exclusion must survive — a message whose ORION
+    upload genuinely FAILED (a status='error' event) must NEVER be reset into an automatic
+    retry (the #239 double-upload risk)."""
+    _snapshot(pg)
+    sender = "dodavatel@lunys.sk"
+    _msg(pg, mid="orph1", from_addr=sender)
+    pg.execute("UPDATE messages SET processed=true, proc_status='review' "
+               "WHERE message_id='orph1'")
+    _msg(pg, mid="failed1", from_addr=sender)
+    pg.execute("UPDATE messages SET processed=true, proc_status='review' "
+               "WHERE message_id='failed1'")
+    pg.execute(
+        "INSERT INTO email_events (message_id, workflow, stage, status, outcome) "
+        "VALUES ('failed1','delivery_notes','review','error','ORION zlyhalo')")
+    released = dl_worker.release_for_supplier_card(pg, [sender])
+    assert released == 1
+    assert pg.execute("SELECT processed FROM messages WHERE message_id='orph1'"
+                      ).fetchone()[0] is False
+    assert pg.execute("SELECT processed FROM messages WHERE message_id='failed1'"
+                      ).fetchone()[0] is True, \
+        "a genuinely-failed upload must never be reset into an auto-retry"

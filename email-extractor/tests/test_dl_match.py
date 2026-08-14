@@ -471,3 +471,93 @@ def test_gtin14_overflow_note_shows_no_false_sibling_for_an_invalid_gtin14_koren
     assert d.gtin is None and d.rule == "unmatched"   # still never ships
     assert "8590000123455" not in d.note              # the false naive strip is NEVER shown
     assert str(dl_match.GTIN_FIELD_WIDTH) in d.note    # generic overflow wording preserved
+
+
+# --- #322: deterministic CODEX-card supplier resolution (model-free identity match) -------
+# A conservative, model-free identity match against the effective CODEX supplier list, used
+# to rescue a MODEL MISS before firing a dl_supplier board question. Matches ONLY on an
+# UNAMBIGUOUS identity (exactly one card), never guesses — a false supplier match ships a
+# wrongly-addressed EDI to ORION. Synthetic fixtures only.
+
+_CODEX_CARDS = [
+    {"ean_edi": "2000000000864", "name": "Pekáreň Lunys, s.r.o.",
+     "emails": ["dodavatel@lunys.sk"], "city": "Prešov"},
+    {"ean_edi": "2000000000999", "name": "Mlyn Vrbovce s.r.o.",
+     "emails": [], "city": "Vrbovce"},
+]
+
+
+def _sdoc(name="", email="", city=""):
+    return {"supplierName": name, "supplierEmail": email, "supplierCity": city}
+
+
+def test_resolve_supplier_from_cards_matches_by_document_email_unambiguously():
+    d = dl_match.resolve_supplier_from_cards(
+        _sdoc(name="čokoľvek", email="dodavatel@lunys.sk"), _CODEX_CARDS)
+    assert d is not None and d.matched and d.ean_edi == "2000000000864"
+
+
+def test_resolve_supplier_from_cards_matches_by_sender_email_when_doc_email_blank():
+    d = dl_match.resolve_supplier_from_cards(
+        _sdoc(name="čokoľvek"), _CODEX_CARDS, sender_email="Dodavatel@Lunys.SK")
+    assert d is not None and d.matched and d.ean_edi == "2000000000864"
+
+
+def test_resolve_supplier_from_cards_matches_by_normalized_name_even_with_empty_emails():
+    # Mlyn Vrbovce's card has emails=[] (the HK LOAN/Duopack "no email link" root cause) —
+    # the normalized-name rung must still resolve it. Legal-form/diacritic/punctuation
+    # variance folds to the same key.
+    d = dl_match.resolve_supplier_from_cards(
+        _sdoc(name="MLYN VRBOVCE  S.R.O."), _CODEX_CARDS)
+    assert d is not None and d.matched and d.ean_edi == "2000000000999"
+
+
+def test_resolve_supplier_from_cards_ambiguous_name_returns_none():
+    cards = [
+        {"ean_edi": "111", "name": "ABC s.r.o.", "emails": [], "city": "Nitra"},
+        {"ean_edi": "222", "name": "ABC s.r.o.", "emails": [], "city": "Košice"},
+    ]
+    d = dl_match.resolve_supplier_from_cards(_sdoc(name="ABC s.r.o."), cards)
+    assert d is None, "two cards share the name and no city disambiguates — never guess"
+
+
+def test_resolve_supplier_from_cards_ambiguous_name_broken_by_city():
+    cards = [
+        {"ean_edi": "111", "name": "ABC s.r.o.", "emails": [], "city": "Nitra"},
+        {"ean_edi": "222", "name": "ABC s.r.o.", "emails": [], "city": "Košice"},
+    ]
+    d = dl_match.resolve_supplier_from_cards(_sdoc(name="ABC s.r.o.", city="Košice"), cards)
+    assert d is not None and d.matched and d.ean_edi == "222"
+
+
+def test_resolve_supplier_from_cards_no_match_returns_none():
+    d = dl_match.resolve_supplier_from_cards(
+        _sdoc(name="Úplne iný dodávateľ a.s.", email="x@nikde.sk"), _CODEX_CARDS)
+    assert d is None
+
+
+def test_resolve_supplier_from_cards_never_resolves_to_a_blank_ean_card():
+    # A card with a blank EAN cannot build an EDI — it must never be a real match, even
+    # when its name matches exactly.
+    cards = [{"ean_edi": "", "name": "Pekáreň Lunys, s.r.o.", "emails": [], "city": "Prešov"}]
+    d = dl_match.resolve_supplier_from_cards(_sdoc(name="Pekáreň Lunys, s.r.o."), cards)
+    assert d is None
+
+
+def test_resolve_supplier_from_cards_matches_by_document_ean_when_present():
+    # The dormant/future EAN rung: no extraction produces a supplier EAN today, but when a
+    # document carries one, an exact match resolves.
+    d = dl_match.resolve_supplier_from_cards(
+        {"supplierName": "nezhodný názov", "supplierEanEdi": "2000000000999"}, _CODEX_CARDS)
+    assert d is not None and d.matched and d.ean_edi == "2000000000999"
+
+
+def test_resolve_supplier_from_cards_two_cards_one_ean_is_not_ambiguous():
+    # Two cards (branches) sharing the SAME ean_edi match the name — that is ONE delivery
+    # target (same EAN), never an ambiguity, so it resolves.
+    cards = [
+        {"ean_edi": "333", "name": "Pekáreň X", "emails": [], "city": "Nitra"},
+        {"ean_edi": "333", "name": "Pekáreň X", "emails": [], "city": "Košice"},
+    ]
+    d = dl_match.resolve_supplier_from_cards(_sdoc(name="Pekáreň X"), cards)
+    assert d is not None and d.matched and d.ean_edi == "333"
