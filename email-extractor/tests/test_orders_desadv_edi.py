@@ -574,8 +574,9 @@ def test_gtin14_to_gtin13_returns_none_for_a_14char_code_that_is_not_a_valid_gti
 
 
 def test_gtin14_to_gtin13_returns_none_for_a_13char_or_non_numeric_input():
-    assert desadv_edi.gtin14_to_gtin13("8588006634037") is None   # already 13 chars
+    assert desadv_edi.gtin14_to_gtin13("2000111222333") is None   # already 13 chars (synthetic)
     assert desadv_edi.gtin14_to_gtin13("") is None
     assert desadv_edi.gtin14_to_gtin13(None) is None
     assert desadv_edi.gtin14_to_gtin13("1234567890ABCD") is None  # non-numeric
+    assert desadv_edi.gtin14_to_gtin13("²²²²²²²²²²²²²²") is None   # Unicode digit look-alikes
 

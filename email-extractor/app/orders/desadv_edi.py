@@ -100,7 +100,10 @@ def gtin14_to_gtin13(gtin) -> str | None:
     still be confirmed in CODEX before use — the same manual step the owner did for #246's 9
     confirmed products (`.claude/rules/n8n-workflow-edits.md`)."""
     s = str(gtin or "")
-    if len(s) != 14 or not s.isdigit():
+    # `.isascii()` guards against Unicode digit look-alikes (superscripts etc.) that pass
+    # `.isdigit()` but blow up `int()` in `_gs1_check_digit` — that helper's docstring
+    # promises its caller only ever hands it plain ASCII digits.
+    if len(s) != 14 or not s.isascii() or not s.isdigit():
         return None
     if _gs1_check_digit(s[:13]) != s[13]:  # not a valid GTIN-14 -> no honest sibling
         return None
