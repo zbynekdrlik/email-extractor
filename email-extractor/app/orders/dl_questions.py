@@ -332,8 +332,8 @@ def _release_stuck_siblings(conn, exclude_message_id: str, sender_email: str) ->
     conn.execute(
         """UPDATE messages SET processed = false, processing_at = NULL, attempts = 0
             WHERE message_id = ANY(%s)""", (ids,))
-    log.info("dl release_for_question: released %d orphaned same-sender sibling "
-             "message(s) for %r back into the claim pool", len(ids), sender_email)
+    log.info("dl sibling release: reset %d orphaned same-sender sibling message(s) for "
+             "%r back into the claim pool", len(ids), sender_email)
     return len(ids)
 
 

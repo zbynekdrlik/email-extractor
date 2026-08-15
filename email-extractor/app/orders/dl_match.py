@@ -338,54 +338,69 @@ def resolve_supplier_from_cards(doc: dict, cards: list[dict],
       3. the document's normalized supplier NAME equal to exactly one card's normalized name;
          when 2+ cards share the name, the document's city breaks a genuine tie, else ambiguous.
 
-    Ambiguity is measured across DISTINCT `ean_edi` values: two branch cards sharing one EAN
-    are ONE delivery target, never an ambiguity. A card with a blank `ean_edi` is skipped
-    entirely — an EDI cannot be built without one, so such a card can never be a real match."""
+    Ambiguity is ALWAYS measured across DISTINCT `ean_edi` values over the FULL card list at
+    every stage (never a per-EAN-collapsed dict — that would discard a same-EAN branch's city
+    and let a genuinely city-ambiguous identity resolve, #322 review 🔴): two branch cards
+    sharing one EAN are ONE delivery target, never an ambiguity. A card with a blank `ean_edi`
+    is skipped entirely — an EDI cannot be built without one, so such a card can never be a
+    real match."""
     usable = [c for c in cards if str(c.get("ean_edi") or "").strip()]
     if not usable:
         return None
 
-    def _one(hits: dict, note: str) -> SupplierDecision | None:
-        if len(hits) != 1:
-            return None
-        card = next(iter(hits.values()))
+    def _make(card: dict, note: str) -> SupplierDecision:
         return SupplierDecision(matched=True, ean_edi=str(card["ean_edi"]),
                                 name=card.get("name", ""), confidence=1.0, note=note)
 
-    # (1) EAN — dormant (no supplier EAN in today's extraction schema), but ready.
+    def _eans(cs: list[dict]) -> set[str]:
+        return {str(c["ean_edi"]) for c in cs}
+
+    # The document's own printed name, matched across ALL cards (never collapsed per EAN —
+    # the city tiebreak in rung 3 needs every branch's city; #322 review 🔴). Reused by the
+    # rung-2 contradiction guard too.
+    name_key = _supplier_name_key(doc.get("supplierName", ""))
+    name_cards = ([c for c in usable
+                   if _supplier_name_key(c.get("name", "")) == name_key] if name_key else [])
+    name_eans = _eans(name_cards)
+
+    # (1) EAN — dormant (no supplier EAN in today's extraction schema), but ready. Every card
+    # sharing this EAN is one delivery target, so any of them is a safe, unambiguous match.
     doc_ean = str(doc.get("supplierEanEdi") or doc.get("supplierEan") or "").strip()
     if doc_ean:
-        m = _one({str(c["ean_edi"]): c for c in usable if str(c["ean_edi"]) == doc_ean},
-                 "Priradené podľa EAN dodávateľa z dokumentu (CODEX karta).")
-        if m:
-            return m
+        ean_cards = [c for c in usable if str(c["ean_edi"]) == doc_ean]
+        if ean_cards:
+            return _make(ean_cards[0],
+                         "Priradené podľa EAN dodávateľa z dokumentu (CODEX karta).")
 
-    # (2) email — the strongest name-free signal (a unique identifier).
+    # (2) email — a unique identifier — UNLESS the document's own printed name unambiguously
+    # name-keys to a DIFFERENT card: a shared forwarding/3PL address registered on one card
+    # must not silently route another NAMED supplier's document to that card's EAN (the
+    # #307/#314 "tlaciaren@ forwards everything" risk; #322 review 🔵). On such a name-vs-email
+    # contradiction, defer to the name rung below, which matches the printed name.
     wanted = {e for e in (str(doc.get("supplierEmail") or "").strip().lower(),
                           str(sender_email or "").strip().lower()) if e}
     if wanted:
-        m = _one({str(c["ean_edi"]): c for c in usable
-                  if wanted & {str(e).strip().lower() for e in (c.get("emails") or [])}},
-                 "Priradené podľa e-mailu dodávateľa (CODEX karta).")
-        if m:
-            return m
+        email_cards = [c for c in usable
+                       if wanted & {str(e).strip().lower() for e in (c.get("emails") or [])}]
+        email_eans = _eans(email_cards)
+        contradicts = (len(name_eans) == 1 and len(email_eans) == 1
+                       and name_eans != email_eans)
+        if len(email_eans) == 1 and not contradicts:
+            return _make(email_cards[0],
+                         "Priradené podľa e-mailu dodávateľa (CODEX karta).")
 
-    # (3) normalized name, unambiguous — the document's city breaks a genuine tie.
-    name_key = _supplier_name_key(doc.get("supplierName", ""))
-    if name_key:
-        name_hits = {str(c["ean_edi"]): c for c in usable
-                     if _supplier_name_key(c.get("name", "")) == name_key}
-        m = _one(name_hits, "Priradené podľa názvu dodávateľa (CODEX karta).")
-        if m:
-            return m
-        if len(name_hits) > 1:
-            city_key = _supplier_name_key(doc.get("supplierCity", ""))
-            if city_key:
-                m = _one({ean: c for ean, c in name_hits.items()
-                          if _supplier_name_key(c.get("city", "")) == city_key},
-                         "Priradené podľa názvu + mesta dodávateľa (CODEX karta).")
-                if m:
-                    return m
+    # (3) normalized name, unambiguous — the document's city breaks a genuine tie, counted by
+    # DISTINCT ean_edi over the FULL name-matching card list (#322 review 🔴).
+    if name_eans:
+        if len(name_eans) == 1:
+            return _make(name_cards[0], "Priradené podľa názvu dodávateľa (CODEX karta).")
+        city_key = _supplier_name_key(doc.get("supplierCity", ""))
+        if city_key:
+            city_cards = [c for c in name_cards
+                          if _supplier_name_key(c.get("city", "")) == city_key]
+            if len(_eans(city_cards)) == 1:
+                return _make(city_cards[0],
+                             "Priradené podľa názvu + mesta dodávateľa (CODEX karta).")
         # 2+ distinct EANs share the name and no unique city -> AMBIGUOUS, never guess.
 
     return None

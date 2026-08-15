@@ -561,3 +561,48 @@ def test_resolve_supplier_from_cards_two_cards_one_ean_is_not_ambiguous():
     ]
     d = dl_match.resolve_supplier_from_cards(_sdoc(name="Pekáreň X"), cards)
     assert d is not None and d.matched and d.ean_edi == "333"
+
+
+def test_resolve_supplier_from_cards_city_tiebreak_never_collapses_a_same_ean_branch():
+    # #322 review 🔴: EAN 111 has BOTH a Košice and a Nitra branch; EAN 222 has a Košice
+    # branch. The document's city Košice is genuinely AMBIGUOUS (both 111 and 222 ship from
+    # Košice) — the city tiebreak must count distinct EANs over the FULL card list, never a
+    # per-EAN-collapsed subset that would discard 111's Košice branch and wrongly pick 222.
+    cards = [
+        {"ean_edi": "111", "name": "Pekáreň X", "emails": [], "city": "Košice"},
+        {"ean_edi": "111", "name": "Pekáreň X", "emails": [], "city": "Nitra"},
+        {"ean_edi": "222", "name": "Pekáreň X", "emails": [], "city": "Košice"},
+    ]
+    d = dl_match.resolve_supplier_from_cards(_sdoc(name="Pekáreň X", city="Košice"), cards)
+    assert d is None, \
+        "two DISTINCT EANs both ship from Košice — genuinely ambiguous, never guess"
+    # the OTHER city (Nitra) is unambiguous — only EAN 111 has a Nitra branch — so it resolves.
+    d2 = dl_match.resolve_supplier_from_cards(_sdoc(name="Pekáreň X", city="Nitra"), cards)
+    assert d2 is not None and d2.matched and d2.ean_edi == "111"
+
+
+def test_resolve_supplier_from_cards_printed_name_wins_over_a_shared_forwarding_email():
+    # #322 review 🔵: a shared 3PL/forwarding address sits on card Alpha, but the document's
+    # PRINTED name is Beta — the email rung must not route Beta's document to Alpha's EAN.
+    # The name-vs-email contradiction defers to the name rung, which resolves Beta.
+    cards = [
+        {"ean_edi": "111", "name": "Alpha s.r.o.", "emails": ["podatelna@shared.sk"],
+         "city": "Nitra"},
+        {"ean_edi": "222", "name": "Beta s.r.o.", "emails": [], "city": "Košice"},
+    ]
+    doc = {"supplierName": "Beta s.r.o.", "supplierEmail": "podatelna@shared.sk",
+           "supplierCity": ""}
+    d = dl_match.resolve_supplier_from_cards(doc, cards)
+    assert d is not None and d.matched and d.ean_edi == "222", \
+        "the printed name (Beta) wins over a shared forwarding email registered on Alpha"
+
+
+def test_resolve_supplier_from_cards_email_still_matches_when_name_agrees_or_is_absent():
+    # The contradiction guard must NOT suppress a legitimate email match: when the doc name
+    # is absent (or keys to the SAME card as the email), the email rung resolves as before.
+    cards = [{"ean_edi": "111", "name": "Alpha s.r.o.", "emails": ["a@alpha.sk"],
+              "city": "Nitra"}]
+    assert dl_match.resolve_supplier_from_cards(
+        {"supplierName": "", "supplierEmail": "a@alpha.sk"}, cards).ean_edi == "111"
+    assert dl_match.resolve_supplier_from_cards(
+        {"supplierName": "Alpha s.r.o.", "supplierEmail": "a@alpha.sk"}, cards).ean_edi == "111"

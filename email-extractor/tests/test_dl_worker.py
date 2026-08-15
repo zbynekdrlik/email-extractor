@@ -3319,7 +3319,15 @@ def test_release_for_supplier_card_releases_orphaned_stuck_siblings(pg, tmp_path
 def test_release_for_supplier_card_honors_the_error_event_exclusion(pg, tmp_path):
     """#322: the reused #265 error-event exclusion must survive — a message whose ORION
     upload genuinely FAILED (a status='error' event) must NEVER be reset into an automatic
-    retry (the #239 double-upload risk)."""
+    retry (the #239 double-upload risk).
+
+    NOTE (#322 review 🔵): this pins the SQL predicate via a hand-inserted email_events row.
+    The producer<->consumer agreement (that a genuine upload failure really logs
+    status='error' into this SAME reused `_release_stuck_siblings` path) is already covered
+    end-to-end by `test_release_for_question_sibling_widening_never_touches_unrelated_messages`
+    and `test_sibling_release_still_excludes_a_message_whose_upload_genuinely_failed_through_the_merged_retry_path`,
+    which drive a real failure through the merged code — this card-add-triggered test only
+    needs to prove the SAME predicate is honored from the new entry point."""
     _snapshot(pg)
     sender = "dodavatel@lunys.sk"
     _msg(pg, mid="orph1", from_addr=sender)
