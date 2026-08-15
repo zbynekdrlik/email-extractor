@@ -36,6 +36,34 @@ DL_NONWAREHOUSE_SUPPLIER = [
 ]
 
 
+# --- #327 (revision 3): one-time cleanup of duplicate HELD operator alerts -----------
+# Before #327, dl_alerts.already_pending() deduped every pending_alerts row (delivered or
+# not) only WITHIN DEDUP_WINDOW_HOURS — so a HELD channel-0 alert (no ops channel configured
+# yet, the #310 hold) that never resolves had its dedup window expire and the #308 sweep
+# re-enqueued the same message every ~4h, piling up duplicate held rows (live #319: 65 held
+# rows for only 10 distinct messages). The predicate fix (dl_alerts.already_pending, now
+# delivered_at-aware) stops NEW duplicates; this one-time revision removes the ALREADY-
+# accumulated ones — keeping the OLDEST row (min(id)) per (kind, message_id), deleting the
+# newer duplicates. Deliberately NARROW, mirroring dl_alerts.purge_held (#319): only
+# channel_id=0 AND delivered_at IS NULL AND a non-NULL message_id. A REAL-channel undelivered
+# row (a genuine Odoo delivery failure) is NEVER touched; a NULL-message_id alert (e.g.
+# spend_cap) is legitimately never deduped and left alone. Runs exactly once (schema_version
+# ledger); after the fix no new held duplicates form, so this stays a one-shot cleanup.
+DEDUP_HELD_ALERTS = [
+    """
+    DELETE FROM pending_alerts
+    WHERE channel_id = 0
+      AND delivered_at IS NULL
+      AND message_id IS NOT NULL
+      AND id NOT IN (
+          SELECT min(id) FROM pending_alerts
+          WHERE channel_id = 0 AND delivered_at IS NULL AND message_id IS NOT NULL
+          GROUP BY kind, message_id
+      )
+    """,
+]
+
+
 # SCHEMA above is FROZEN as revision 1 (the baseline). NEVER edit those statements for a
 # schema change — append a NEW numbered migrate.Revision to this list instead
 # (immutable-migrations, #269). run_migrations() applies only the unapplied revisions, in
@@ -43,6 +71,7 @@ DL_NONWAREHOUSE_SUPPLIER = [
 REVISIONS = [
     migrate.Revision(migrate.BASELINE_REVISION, "baseline", SCHEMA),
     migrate.Revision(2, "add_dl_nonwarehouse_supplier", DL_NONWAREHOUSE_SUPPLIER),
+    migrate.Revision(3, "dedup_held_channel0_alerts", DEDUP_HELD_ALERTS),
 ]
 
 

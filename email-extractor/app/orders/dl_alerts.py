@@ -53,7 +53,14 @@ permanent dedup would silently suppress the fresh alert. Reworked to a bounded R
 window (`DEDUP_WINDOW_HOURS`, 4h — the same value `confirm.py`'s own
 `DEFAULT_REMINDER_HOURS` uses for its "still a problem, remind again" semantics, not a
 second invented policy) — a genuinely new occurrence, whether reprocess-triggered or
-just a message that stayed stuck past the window, gets alerted again.
+just a message that stayed stuck past the window, gets alerted again. **#327 refined
+this: the recency window applies ONLY to DELIVERED rows.** An UNDELIVERED alert — a HELD
+channel-0 operator alert with no ops channel configured yet (#310) never resolves, so
+the window expired and the #308 sweep re-enqueued the same message every ~4h, piling up
+duplicate held rows (live #319: 65 held rows for 10 distinct messages) — now dedupes
+regardless of age: there is nothing to remind about while the first alert has not even
+gone out, and the held row itself still delivers once an ops channel is set. See
+`already_pending`'s own docstring; `db.py` revision 3 cleaned up the pre-fix duplicates.
 
 **#239 reopened, finding 4 — unbounded growth.** No delivered row was ever removed
 (the table only ever grows), and a permanently-broken Odoo config retried every single
@@ -118,25 +125,39 @@ def enqueue(conn, channel_id: int, kind: str, body_html: str,
 
 def already_pending(conn, kind: str, message_id: str,
                     window_hours: int = DEDUP_WINDOW_HOURS) -> bool:
-    """True when THIS message already has an alert of this kind on record WITHIN THE
-    LAST `window_hours` (delivered or not) — the dedup a persistently-stuck message
-    needs so a sweep that keeps rediscovering it does not enqueue (and eventually post)
-    a fresh copy every ~15s.
+    """True when THIS message already has an alert of this kind that should suppress a
+    fresh enqueue — the dedup a persistently-stuck message needs so a sweep that keeps
+    rediscovering it does not enqueue (and eventually post) a fresh copy every ~15s.
+
+    Two states, deliberately asymmetric (#327):
+
+    * an UNDELIVERED row (`delivered_at IS NULL`) dedupes REGARDLESS of age — while the
+      very first alert has not even gone out there is nothing to remind about, and the
+      already-held row will still deliver once it can (e.g. a held channel-0 operator
+      alert delivers as soon as an ops channel is configured, per `flush_pending`);
+    * a DELIVERED row dedupes only WITHIN `window_hours` — the recency protection against
+      an immediate re-ask right after delivery.
 
     **#239 reopened, finding 3: this dedup used to be PERMANENT (never expires) — that
     was wrong.** The original design assumed the two kinds this guards
     (`dl_upload_failed`/`dl_stuck_classified`) can never structurally re-enter their own
     sweep's candidate set without an "unusual manual reset" — but the dashboard's
-    one-click `POST /api/message/<id>/reprocess` IS exactly that reset, and it needs no
-    special-casing to make the permanent assumption wrong: any message that stays stuck
-    (reprocessed or not) past a bounded window deserves a fresh alert, not permanent
-    silence. Bounded to `window_hours` instead — same 4h value `confirm.py`'s own
-    `DEFAULT_REMINDER_HOURS` uses for its own "still a problem, remind again" semantics."""
+    one-click `POST /api/message/<id>/reprocess` IS exactly that reset: any message that
+    stays stuck past a bounded window deserves a fresh alert, not permanent silence.
+
+    **#327: bounding EVERY row by the window was ALSO wrong.** A HELD/undelivered alert
+    (channel 0, no ops channel configured yet — the #310 hold) is never resolved, so the
+    window expired and the #308 sweep re-enqueued the same message every ~4h, piling up
+    duplicate held rows (live #319: 65 held rows for only 10 distinct messages). The
+    window now applies ONLY to delivered rows; an undelivered row suppresses a re-enqueue
+    forever (until it is finally delivered, after which the 4h `DEFAULT_REMINDER_HOURS`
+    recency window — the same value `confirm.py` uses — governs a genuine re-alert)."""
     if not message_id:
         return False
     row = conn.execute(
         "SELECT 1 FROM pending_alerts WHERE kind = %s AND message_id = %s "
-        "AND created_at > now() - make_interval(hours => %s) LIMIT 1",
+        "AND (delivered_at IS NULL OR created_at > now() - make_interval(hours => %s)) "
+        "LIMIT 1",
         (kind, message_id, max(1, int(window_hours)))).fetchone()
     return row is not None
 

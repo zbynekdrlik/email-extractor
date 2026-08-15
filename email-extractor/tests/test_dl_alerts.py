@@ -2,6 +2,7 @@
 """
 from __future__ import annotations
 
+from app import db
 from app.orders import dl_alerts
 
 
@@ -187,12 +188,19 @@ def test_quiet_seconds_zero_is_the_unchanged_immediate_behaviour(pg):
 
 # --- #239 reopened, finding 3: the dedup must not be permanent -------------
 
-def test_already_pending_expires_after_the_window_so_a_reprocessed_message_can_realert(pg):
+def test_already_pending_a_delivered_row_expires_after_the_window_so_a_reprocess_can_realert(pg):
     """The old permanent dedup assumed a stuck-classified message can never
     structurally re-enter its own sweep's candidate set without an 'unusual manual
-    reset' — the dashboard's one-click reprocess IS exactly that reset. A dedup entry
-    older than the window must stop suppressing a genuinely fresh occurrence."""
+    reset' — the dashboard's one-click reprocess IS exactly that reset. Once the first
+    alert has been DELIVERED, a dedup entry older than the window must stop suppressing
+    a genuinely fresh occurrence.
+
+    #327: this test (and the default-window one below) used to enqueue an UNDELIVERED row
+    and assert it stops deduping past the window — that encoded the exact bug #327 fixes.
+    The window now governs DELIVERED rows only, so both are re-scoped to deliver first;
+    an UNDELIVERED row deduping regardless of age has its own dedicated test above."""
     dl_alerts.enqueue(pg, 243, "dl_stuck_classified", "<p>x</p>", message_id="m1")
+    dl_alerts.flush_pending(pg, cfg=None, post=lambda c, h, **kw: {"id": 1})  # delivered
     assert dl_alerts.already_pending(pg, "dl_stuck_classified", "m1",
                                      window_hours=4) is True
     pg.execute("UPDATE pending_alerts SET created_at = created_at - interval '5 hours'")
@@ -200,8 +208,9 @@ def test_already_pending_expires_after_the_window_so_a_reprocessed_message_can_r
                                      window_hours=4) is False
 
 
-def test_already_pending_default_window_is_four_hours(pg):
+def test_already_pending_default_window_is_four_hours_for_a_delivered_row(pg):
     dl_alerts.enqueue(pg, 243, "dl_stuck_classified", "<p>x</p>", message_id="m1")
+    dl_alerts.flush_pending(pg, cfg=None, post=lambda c, h, **kw: {"id": 1})  # delivered
     assert dl_alerts.already_pending(pg, "dl_stuck_classified", "m1") is True
     pg.execute("UPDATE pending_alerts SET created_at = created_at - interval '4 hours "
               "1 minute'")
@@ -335,3 +344,44 @@ def test_a_held_channel_0_row_delivers_to_the_ops_channel_once_it_is_configured(
     assert pg.execute(
         "SELECT delivered_at IS NOT NULL FROM pending_alerts WHERE message_id='held1'"
     ).fetchone()[0] is True
+
+
+# --- #327 revision 3: one-time cleanup of the accumulated duplicate held alerts -------
+
+def test_dedup_held_alerts_migration_keeps_oldest_and_deletes_newer_held_duplicates(pg):
+    """`db.DEDUP_HELD_ALERTS` (revision 3): the one-time cleanup of the duplicate held
+    channel-0 rows #327's pre-fix bug accumulated (live #319: 65 rows for 10 messages).
+    Keeps the OLDEST row (min id) per (kind, message_id); deletes the newer held
+    duplicates. NARROW like purge_held (#319): a real-channel undelivered row, a delivered
+    row, and a NULL-message_id row (never deduped in the first place) are all untouched."""
+    # (a) three held channel-0 duplicates of the SAME message → keep the oldest, delete 2
+    dl_alerts.enqueue(pg, 0, "human_processing_review", "<p>dup1</p>", message_id="m1")
+    dl_alerts.enqueue(pg, 0, "human_processing_review", "<p>dup2</p>", message_id="m1")
+    dl_alerts.enqueue(pg, 0, "human_processing_review", "<p>dup3</p>", message_id="m1")
+    # (b) a held channel-0 row of a DIFFERENT message → its own group, survives
+    dl_alerts.enqueue(pg, 0, "human_processing_review", "<p>other</p>", message_id="m2")
+    # (c) two NULL-message_id held rows (e.g. spend_cap) → never deduped, untouched
+    dl_alerts.enqueue(pg, 0, "spend_cap", "<p>spend1</p>")
+    dl_alerts.enqueue(pg, 0, "spend_cap", "<p>spend2</p>")
+    # (d) two REAL-channel undelivered rows (genuine delivery failures) → never touched
+    dl_alerts.enqueue(pg, 243, "dl_upload_failed", "<p>real1</p>", message_id="m1")
+    dl_alerts.enqueue(pg, 243, "dl_upload_failed", "<p>real2</p>", message_id="m1")
+    # (e) two DELIVERED channel-0 duplicates → prune_delivered's domain, not this cleanup's
+    dl_alerts.enqueue(pg, 0, "human_processing_review", "<p>del1</p>", message_id="m3")
+    dl_alerts.enqueue(pg, 0, "human_processing_review", "<p>del2</p>", message_id="m3")
+    pg.execute("UPDATE pending_alerts SET delivered_at = now() WHERE message_id = 'm3'")
+
+    before = pg.execute("SELECT count(*) FROM pending_alerts").fetchone()[0]
+    for stmt in db.DEDUP_HELD_ALERTS:
+        pg.execute(stmt)
+    kept = {r[0] for r in pg.execute(
+        "SELECT body_html FROM pending_alerts ORDER BY id").fetchall()}
+    after = pg.execute("SELECT count(*) FROM pending_alerts").fetchone()[0]
+
+    assert "<p>dup1</p>" in kept                                   # oldest held m1 kept
+    assert "<p>dup2</p>" not in kept and "<p>dup3</p>" not in kept  # newer held m1 duplicates gone
+    assert "<p>other</p>" in kept                                  # different message survives
+    assert "<p>spend1</p>" in kept and "<p>spend2</p>" in kept     # NULL message_id untouched
+    assert "<p>real1</p>" in kept and "<p>real2</p>" in kept       # real-channel undelivered untouched
+    assert "<p>del1</p>" in kept and "<p>del2</p>" in kept         # delivered rows untouched
+    assert before - after == 2, "exactly the 2 newer held m1 duplicates removed"
