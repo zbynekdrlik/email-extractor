@@ -71,3 +71,4 @@ Load the matching skill BEFORE working on that area (don't re-derive):
 - typová kontrola (mypy brána v CI, oprava nálezu bez potlačenia, chirurgický per-modulový override) → `.claude/rules/type-checking.md` (auto-loads on `pyproject.toml`, `requirements-dev.txt`)
 - schéma / migrácie (verzovaný `migrate.py` engine, `schema_version` ledger, pridanie novej revízie, self-healing baseline, `reapply_schema` test fixture) → `.claude/rules/schema-migrations.md` (auto-loads on `app/migrate.py`, `app/db.py`, `test_migrate.py`)
 - `human_processing` sweep (#308 tichá jama — catch-all reality, BACKLOG_CUTOFF, ops routing, re-ask loop) → `.claude/rules/human-processing-sweep.md` (auto-loads on `app/orders/human_processing.py`)
+- `pending_alerts` outbox — retencia po stavoch (`prune_delivered`/`purge_held` vzor), re-derive frozen `channel_id=0` na aktuálny ops kanál pri flush (#239/#319) → `.claude/rules/dl-alerts.md` (auto-loads on `app/orders/dl_alerts.py`)
