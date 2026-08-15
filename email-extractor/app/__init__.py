@@ -1,2 +1,2 @@
 """Email OCR extractor — Home Assistant add-on."""
-__version__ = "0.9.102"
+__version__ = "0.9.103"
