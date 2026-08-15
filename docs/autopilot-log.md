@@ -3559,3 +3559,26 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
   `9fc8c57`. ruff `.` čisté, import smoke bez cyklov, celý test suite zelený bez úpravy testov.
   Fresh-context general-purpose review (NIE built-in skill). Worktree dispatch (isolated), vlastný
   test-pg kontajner port 15478.
+
+## 2026-08-15 — #322 (CODEX-first párovanie dodávateľa — karta stačí, nástenka len keď chýba, PR #324, 0.9.100 -> 0.9.101)
+- Príčina: párovanie dodávateľa bolo VÝHRADNE modelové (`dl_match.decide_supplier` verí modelu,
+  žiadny deterministický rung), takže dodávateľ s existujúcou kartou dostal `dl_supplier` otázku
+  vždy keď model minul (karta `emails=[]`, odchýlka mena). `tick`/`release_for_question` čítali
+  zmrazený `load_suppliers`, nie najčerstvejší efektívny zoznam.
+- `dl_match.resolve_supplier_from_cards` (+ `_supplier_name_key`): konzervatívny model-free
+  identitný match, LEN jednoznačná zhoda (distinct EAN) podľa e-mailu / normalizovaného mena
+  (+ mesto tiebreak) / EAN (dormant, extrakcia dnes EAN neprodukuje); nikdy nehádže, nikdy
+  nerieši na kartu s prázdnym EAN. `_match_supplier`: pri modelovom MISS re-check voči
+  `dl_suppliers_for_management` (snapshot ∪ /znalosti overrides) pred otázkou — čisto aditívne.
+- Retro-release: `dl_questions.release_for_supplier_card` zapojený do `/znalosti` dl-suppliers
+  POST (po `dl_rebuild_from_overrides`), reuse #265 `_release_stuck_siblings` verbatim (výluky
+  status='error', bez order_questions riadku, correction-mail routing na reprocess).
+- RED→GREEN TDD; 4 existujúce testy prešli z registrovaného `_doc()` na `_unknown_supplier_doc`
+  (premisa sa featurou zmenila — registrovaná karta už nepýta; žiadny assert neoslabený, sedí
+  s ich vlastnými docstringmi „unregistered").
+- Adversariálny fresh-context review (gate OPEN → fable): 1 🔴 city-tiebreak per-EAN kolaps
+  (falošná zhoda pri city-ambiguous identite → zle adresovaný EDI) OPRAVENÝ (`358a274`, počítanie
+  distinct EAN cez celý zoznam) + 4 🔵 (email-vs-name guard, log wording, docstring). 🔵 retro-
+  release úplnosť (otvorená otázka / `emails=[]`) → follow-up #323 (needs-user-decision).
+- Commits: bump `9bd552a`, red `08f2f7b`, green `5a59df4`, review-fix `358a274`. ruff+mypy čisté,
+  celý test suite zelený. Worktree dispatch (isolated), vlastný test-pg port 15490.

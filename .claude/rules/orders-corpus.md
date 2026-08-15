@@ -1839,3 +1839,29 @@ intentional there for cards it was tuned against.
   genuine design call (align to the historical 10 min, keep 30, or give
   `static_orders` its own explicitly-named constant) with no live safety consequence
   today.
+- **A deterministic identity matcher with a SECONDARY tiebreak filter must count
+  ambiguity by DISTINCT key over the FULL candidate list at EVERY stage — never a
+  per-key-collapsed dict BEFORE the tiebreak (#322, adversarial-review 🔴).**
+  `dl_match.resolve_supplier_from_cards` (the CODEX-first supplier rung) resolves a
+  document's supplier ONLY on an unambiguous match (exactly one distinct `ean_edi`),
+  falling back to a CITY tiebreak when several cards share the normalized name. The first
+  cut built `name_hits = {str(c["ean_edi"]): c for c in ...}` (a dict keyed by EAN) and
+  THEN ran the city filter over that dict. Two branch cards legitimately share ONE
+  `ean_edi` (`db_schema.py`: branches share an EAN — and the code's own
+  `test_..._two_cards_one_ean_is_not_ambiguous` endorses this), so the dict collapse kept
+  only the LAST branch per EAN and DISCARDED the earlier branch's city. Live-proven false
+  POSITIVE: cards `[111/Košice, 111/Nitra, 222/Košice]` + doc city Košice → resolved to
+  222 even though EAN 111 ALSO ships from Košice — a genuinely city-ambiguous identity
+  resolved and would ship a wrongly-addressed EDI to ORION, violating the matcher's own
+  "never guess on ambiguity" contract. Fix: keep the FULL name-matching card LIST, run the
+  tiebreak filter over EVERY card, THEN count DISTINCT primary keys among the survivors.
+  Any FUTURE matcher in this package that layers a secondary tiebreak (city, mass, date)
+  on a primary-key match must count ambiguity by distinct primary key over the full list
+  at each stage, never a dict keyed by that primary key before the secondary filter — the
+  collapse silently hides a real ambiguity. PROVE it with a 3-card fixture where two
+  DISTINCT keys share the tiebreak value; a single-card-per-key fixture never exercises the
+  collapse. (Companion #322 guard: an email/address rung must defer to the printed-name
+  rung when the document's own name unambiguously keys to a DIFFERENT card than a matched
+  shared/forwarding email — otherwise a 3PL/forwarding address on one card routes another
+  named supplier's document to that card's EAN, the #307/#314 "tlaciaren@ forwards
+  everything" risk.)
