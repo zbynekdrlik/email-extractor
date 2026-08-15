@@ -338,6 +338,11 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pra
                 from . import dl_alerts
                 dl_alerts.flush_pending(conn, cfg, quiet_seconds=dl_alerts.FLUSH_QUIET_SECONDS)
                 dl_alerts.prune_delivered(conn)
+                # #319: bound the growth of HELD operator alerts (channel_id=0,
+                # undelivered — the #310 "no ops channel configured yet" rows), which
+                # `prune_delivered` deliberately leaves alone. Same maintenance tick,
+                # same cheap/idempotent discipline — no parallel timer or path.
+                dl_alerts.purge_held(conn)
             if dl_python:
                 # #239 classes 2/3: a message classified `dodacie_listy` that never got
                 # a first attempt at all — gated on the live DL python engine, same

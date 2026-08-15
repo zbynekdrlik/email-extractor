@@ -3614,3 +3614,26 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
   verejné `supplier_name_key`.
 - Commits: bump `3bbe2c3`, red `036b144`, green `9266ffe`, review-fix `5fd00ad`. ruff čisté, celý
   suite zelený (94% coverage, dl_questions.py 93%). Worktree dispatch (isolated), test-pg 15433.
+
+## 2026-08-15 — #319 Retencia držaných operátorských upozornení — v0.9.103
+
+- **Čo:** Držané operátorské upozornenia (`pending_alerts`, `channel_id=0`, nedoručené —
+  mechanizmus #310) rástli bez hranice (naživo 21 → 45 za deň). Cesta 2 z tiketu
+  (issuecomment-5300265640) — bezpečná pod oboma budúcimi odpoveďami Mareka: retencia + re-route.
+- **Zmena:** `HELD_RETENTION_DAYS=30` + `purge_held(conn)` — maže IBA `channel_id=0 AND
+  delivered_at IS NULL AND created_at > 30 dní`; reálny nedoručený riadok (iný kanál = skutočné
+  zlyhanie do Odoo) sa NIKDY nemaže, doručený ostáva `prune_delivered`-u. Zapojené do tej istej
+  `worker.run_forever` maintenance slučky za `prune_delivered(conn)`. `flush_pending()` re-route:
+  `target = channel_id or report.ops_channel(cfg)` — už držané riadky sa doručia keď je
+  `ops_channel_id` nastavený, kým je 0 drží (žiadny #310 misroute na 152).
+- **RED→GREEN:** `test_dl_alerts.py` — RED `a8a1bcb`, GREEN `eea9085`; 3 testy (purge len staré
+  held ch0 / default okno 30d / held→ops kanál po konfigurácii). Celý lokálny suite zelený.
+- **Review (fresh-context, gate CLOSED → opus 4.8):** 0 🔴 0 🟡 1 🔵 — 🔵 (zastaraný „the ONE
+  state" docstring v hlavičke modulu) opravený `cb9dde2`.
+- **Marekova otázka (názov ops kanála):** ostáva stojaca konfiguračná ponuka — odpoveď =
+  nastaviť `ops_channel_id`, žiadny kód.
+- **Commity:** bump `ffcabc1`, red `a8a1bcb`, green `eea9085`, review-fix `cb9dde2`. PR #326 → main.
+- **Deploy + verify (v0.9.103):** potvrdené v tickete #319. Prod PRED: 45 held ch0, 0 nad 30 dní
+  (najstarší ~16h47m) → purge=0 očakávané (nič ešte nie je staršie ako 30 dní).
+- **Playbook:** nový `.claude/rules/dl-alerts.md` (retencia po stavoch + re-derive frozen ch0).
+- Worktree dispatch (isolated), test-pg 15433.

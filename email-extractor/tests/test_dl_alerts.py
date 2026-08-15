@@ -250,3 +250,72 @@ def test_prune_delivered_never_touches_an_undelivered_row_however_old(pg):
     n = dl_alerts.prune_delivered(pg, older_than_days=30)
     assert n == 0
     assert dl_alerts.pending_count(pg) == 1
+
+
+# --- #319: retention of HELD (channel_id=0) operator alerts + re-route on config ------
+
+def test_purge_held_removes_only_old_held_channel_0_undelivered_rows(pg):
+    """#319: a held operator alert (channel_id=0, #310 hold mechanism) older than the
+    retention window is purged; a fresh held row survives (so a later-configured ops
+    channel still gets recent history); a REAL-channel undelivered row (a genuine Odoo
+    delivery failure) is NEVER purged, however old; a DELIVERED row (prune_delivered's
+    job) is left alone."""
+    # (a) old held channel-0 row → purged
+    dl_alerts.enqueue(pg, 0, "spend_cap", "<p>old held</p>", message_id="old_held")
+    pg.execute("UPDATE pending_alerts SET created_at = now() - interval '31 days' "
+               "WHERE message_id = 'old_held'")
+    # (b) fresh held channel-0 row (5 days) → survives
+    dl_alerts.enqueue(pg, 0, "spend_cap", "<p>fresh held</p>", message_id="fresh_held")
+    pg.execute("UPDATE pending_alerts SET created_at = now() - interval '5 days' "
+               "WHERE message_id = 'fresh_held'")
+    # (c) old UNDELIVERED real-channel row → never purged (genuine delivery failure)
+    dl_alerts.enqueue(pg, 243, "dl_upload_failed", "<p>real fail</p>", message_id="real_fail")
+    pg.execute("UPDATE pending_alerts SET created_at = now() - interval '90 days' "
+               "WHERE message_id = 'real_fail'")
+    # (d) old DELIVERED channel-0 row → prune_delivered owns it, purge_held leaves it
+    dl_alerts.enqueue(pg, 0, "spend_cap", "<p>delivered held</p>", message_id="delivered_held")
+    pg.execute("UPDATE pending_alerts SET created_at = now() - interval '40 days', "
+               "delivered_at = now() - interval '39 days' WHERE message_id = 'delivered_held'")
+
+    n = dl_alerts.purge_held(pg, older_than_days=30)
+    assert n == 1
+    survivors = {row[0] for row in pg.execute(
+        "SELECT message_id FROM pending_alerts").fetchall()}
+    assert survivors == {"fresh_held", "real_fail", "delivered_held"}
+
+
+def test_purge_held_default_window_is_thirty_days(pg):
+    assert dl_alerts.HELD_RETENTION_DAYS == 30
+    dl_alerts.enqueue(pg, 0, "spend_cap", "<p>x</p>", message_id="m1")
+    pg.execute("UPDATE pending_alerts SET created_at = now() - interval '31 days'")
+    assert dl_alerts.purge_held(pg) == 1  # default older_than_days = HELD_RETENTION_DAYS
+
+
+def test_a_held_channel_0_row_delivers_to_the_ops_channel_once_it_is_configured(pg):
+    """#319: the other half of 'nothing foreclosed'. A row held on channel 0 (no ops
+    channel configured yet) must actually reach the ops channel once `ops_channel_id`
+    is set — flush_pending re-derives the CURRENT ops channel for a channel-0 group,
+    rather than reading the frozen 0 off the row and skipping it forever."""
+    import types
+    dl_alerts.enqueue(pg, 0, "spend_cap", "<p>ops alert</p>", message_id="held1")
+    posted = []
+
+    def _post(c, h, **kw):
+        posted.append(kw.get("channel_id"))
+        return {"id": 1}
+
+    # ops channel still unset → held, never delivered (unchanged pre-#319 behaviour)
+    cfg_unset = types.SimpleNamespace(ops_channel_id=0)
+    assert dl_alerts.flush_pending(pg, cfg=cfg_unset, post=_post) == 0
+    assert posted == []
+    assert pg.execute(
+        "SELECT delivered_at IS NULL FROM pending_alerts WHERE message_id='held1'"
+    ).fetchone()[0] is True
+
+    # ops channel configured later → the ALREADY-held row delivers to it
+    cfg_set = types.SimpleNamespace(ops_channel_id=555)
+    assert dl_alerts.flush_pending(pg, cfg=cfg_set, post=_post) == 1
+    assert posted == [555]
+    assert pg.execute(
+        "SELECT delivered_at IS NOT NULL FROM pending_alerts WHERE message_id='held1'"
+    ).fetchone()[0] is True
