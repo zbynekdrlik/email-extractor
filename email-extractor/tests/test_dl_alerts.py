@@ -208,6 +208,22 @@ def test_already_pending_default_window_is_four_hours(pg):
     assert dl_alerts.already_pending(pg, "dl_stuck_classified", "m1") is False
 
 
+# --- #327: an UNDELIVERED row dedupes regardless of age (the 4h window is delivered-only) --
+
+def test_already_pending_dedupes_an_undelivered_alert_regardless_of_age(pg):
+    """#327: a HELD/undelivered alert older than DEDUP_WINDOW_HOURS must STILL dedupe —
+    there is nothing to remind about while the very first alert has not even gone out.
+    Before this fix the window expired and the #308 sweep re-enqueued the same message
+    every ~4h, accumulating ~6 duplicate held channel-0 rows/day per message (live #319
+    finding: 65 held rows for only 10 distinct messages). The 4h window survives ONLY for
+    DELIVERED rows (see the delivered-row tests above)."""
+    dl_alerts.enqueue(pg, 0, "human_processing_review", "<p>held</p>", message_id="m1")
+    # age it well past the dedup window; STILL undelivered (channel-0 hold, no ops channel)
+    pg.execute("UPDATE pending_alerts SET created_at = now() - interval '9 hours' "
+               "WHERE message_id = 'm1'")
+    assert dl_alerts.already_pending(pg, "human_processing_review", "m1") is True
+
+
 # --- #239 reopened, finding 4: bounded growth -------------------------------
 
 def test_flush_stops_retrying_a_row_past_the_attempt_cap(pg, monkeypatch):
