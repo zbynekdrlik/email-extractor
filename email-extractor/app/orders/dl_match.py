@@ -309,7 +309,7 @@ def decide_supplier(llm: dict, suppliers: list[dict]) -> SupplierDecision:
 
 # --- #322: deterministic CODEX-card supplier resolution ---------------------
 
-def _supplier_name_key(name: str) -> str:
+def supplier_name_key(name: str) -> str:
     """A CONSERVATIVE exact-match key for a supplier name: fold diacritics + lowercase,
     every non-alphanumeric run -> ONE space, whitespace collapsed. Legal-form tokens
     (`s.r.o.`, `a.s.`, ...) are DELIBERATELY kept (never dropped, unlike `_score_supplier`'s
@@ -358,9 +358,9 @@ def resolve_supplier_from_cards(doc: dict, cards: list[dict],
     # The document's own printed name, matched across ALL cards (never collapsed per EAN —
     # the city tiebreak in rung 3 needs every branch's city; #322 review 🔴). Reused by the
     # rung-2 contradiction guard too.
-    name_key = _supplier_name_key(doc.get("supplierName", ""))
+    name_key = supplier_name_key(doc.get("supplierName", ""))
     name_cards = ([c for c in usable
-                   if _supplier_name_key(c.get("name", "")) == name_key] if name_key else [])
+                   if supplier_name_key(c.get("name", "")) == name_key] if name_key else [])
     name_eans = _eans(name_cards)
 
     # (1) EAN — dormant (no supplier EAN in today's extraction schema), but ready. Every card
@@ -394,10 +394,10 @@ def resolve_supplier_from_cards(doc: dict, cards: list[dict],
     if name_eans:
         if len(name_eans) == 1:
             return _make(name_cards[0], "Priradené podľa názvu dodávateľa (CODEX karta).")
-        city_key = _supplier_name_key(doc.get("supplierCity", ""))
+        city_key = supplier_name_key(doc.get("supplierCity", ""))
         if city_key:
             city_cards = [c for c in name_cards
-                          if _supplier_name_key(c.get("city", "")) == city_key]
+                          if supplier_name_key(c.get("city", "")) == city_key]
             if len(_eans(city_cards)) == 1:
                 return _make(city_cards[0],
                              "Priradené podľa názvu + mesta dodávateľa (CODEX karta).")

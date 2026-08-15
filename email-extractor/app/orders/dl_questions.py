@@ -294,7 +294,7 @@ def close_message_sklad_unknown(conn, qid: int) -> dict:
 # surface it).
 _STUCK_SIBLING_LIMIT = 20
 # #323 residual 2: how many orphan-review candidate rows the name-rung SCANS per call to
-# find up to `_STUCK_SIBLING_LIMIT` name matches — normalization (`_supplier_name_key`) is
+# find up to `_STUCK_SIBLING_LIMIT` name matches — normalization (`supplier_name_key`) is
 # done in Python, so the SQL can only pre-filter loosely. Deliberately generous: the #265
 # orphan-review set (`processed=true`/`proc_status='review'`/no question/no error) is a
 # handful per supplier in practice, so this bound is never reached; a genuinely larger
@@ -345,7 +345,7 @@ def _release_stuck_siblings(conn, exclude_message_id: str, sender_email: str) ->
     return len(ids)
 
 
-def release_for_supplier_card(conn, cfg, ean_edi, name, emails, city="") -> int:
+def release_for_supplier_card(conn, cfg, ean_edi, name, emails) -> int:
     """#322 + #323: retro-release triggered when a CODEX supplier card is ADDED or EDITED
     via `/znalosti` (not by answering a nástenka question). Runs THREE rungs, all REUSING
     already-tested, safe machinery — never a parallel release path (the #322 constraint),
@@ -419,8 +419,20 @@ def _auto_close_matching_supplier_questions(conn, cfg, card_ean: str) -> int:
         dec = dl_match.resolve_supplier_from_cards(doc, cards, sender_email)
         if not (dec and dec.matched and str(dec.ean_edi) == card_ean):
             continue
-        if _auto_answer_supplier_question(conn, cfg, q, card_ean, dec.name):
-            closed += 1
+        # Per-question isolation: this runs INSIDE the /znalosti card-save HTTP request and
+        # `_auto_answer_supplier_question`'s `release_for_question` reprocess can make a real
+        # LLM/ORION call — a transient failure on ONE question must not abort the whole
+        # retro-release (the remaining questions AND the email/name rungs below), nor 500 a
+        # card that was already saved. Everything is autocommit + idempotent (the guarded
+        # `status='open'` UPDATE makes a later retry a no-op on already-answered ones), so
+        # log-and-continue is safe; the worker's own claim/tick stays the backstop.
+        try:
+            if _auto_answer_supplier_question(conn, cfg, q, card_ean, dec.name):
+                closed += 1
+        except Exception:
+            log.exception("dl codex-card auto-answer: failed on dl_supplier question %s "
+                          "(card ean %s) — left for the nástenka/worker path",
+                          q.get("id"), card_ean)
     return closed
 
 
@@ -456,7 +468,7 @@ def _auto_answer_supplier_question(conn, cfg, q: dict, card_ean: str, card_name:
 def _release_stuck_siblings_by_name(conn, card_ean: str, card_name: str) -> int:
     """#323 residual 2 — the `emails=[]` case: reset orphaned same-supplier stuck messages
     whose normalized ENVELOPE `from_name` equals this card's UNAMBIGUOUS normalized name
-    (`dl_match._supplier_name_key`). Returns how many were reset; `0` on a blank/ambiguous
+    (`dl_match.supplier_name_key`). Returns how many were reset; `0` on a blank/ambiguous
     name or no match, never raises.
 
     Conservative by construction — releases NOTHING unless the card's normalized name maps
@@ -473,13 +485,13 @@ def _release_stuck_siblings_by_name(conn, card_ean: str, card_name: str) -> int:
     exclusion of the by-address rung holds identically (`processed=true`,
     `proc_status='review'`, no `order_questions` row, no `status='error'` event)."""
     card_ean = str(card_ean or "").strip()
-    name_key = dl_match._supplier_name_key(card_name or "")
+    name_key = dl_match.supplier_name_key(card_name or "")
     if not card_ean or not name_key:
         return 0
     cards = dl_snapshot.dl_suppliers_for_management(conn)
     name_eans = {str(c.get("ean_edi") or "").strip() for c in cards
                  if str(c.get("ean_edi") or "").strip()
-                 and dl_match._supplier_name_key(c.get("name", "")) == name_key}
+                 and dl_match.supplier_name_key(c.get("name", "")) == name_key}
     if name_eans != {card_ean}:
         return 0  # blank name, or the normalized name is shared by another card -> ambiguous
     rows = conn.execute(
@@ -494,7 +506,7 @@ def _release_stuck_siblings_by_name(conn, card_ean: str, card_name: str) -> int:
             ORDER BY created_at ASC LIMIT %s""",
         (CATEGORY, _STUCK_SIBLING_CANDIDATE_LIMIT)).fetchall()
     ids = [mid for (mid, fname) in rows
-           if dl_match._supplier_name_key(fname or "") == name_key][:_STUCK_SIBLING_LIMIT]
+           if dl_match.supplier_name_key(fname or "") == name_key][:_STUCK_SIBLING_LIMIT]
     if not ids:
         return 0
     conn.execute(

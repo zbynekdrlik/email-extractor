@@ -3309,7 +3309,7 @@ def test_release_for_supplier_card_releases_orphaned_stuck_siblings(pg, tmp_path
                    "WHERE message_id=%s", (mid,))
     released = dl_worker.release_for_supplier_card(
         pg, _cfg(delivery_notes_engine="python"), SUPPLIER_EAN, "Pekáreň Lunys",
-        [sender], "Prešov")
+        [sender])
     assert released == 2
     rows = pg.execute(
         "SELECT processed, processing_at, attempts FROM messages "
@@ -3343,7 +3343,7 @@ def test_release_for_supplier_card_honors_the_error_event_exclusion(pg, tmp_path
         "VALUES ('failed1','delivery_notes','review','error','ORION zlyhalo')")
     released = dl_worker.release_for_supplier_card(
         pg, _cfg(delivery_notes_engine="python"), SUPPLIER_EAN, "Pekáreň Lunys",
-        [sender], "Prešov")
+        [sender])
     assert released == 1
     assert pg.execute("SELECT processed FROM messages WHERE message_id='orph1'"
                       ).fetchone()[0] is False
@@ -3397,7 +3397,7 @@ def test_release_for_supplier_card_auto_closes_a_matching_open_dl_supplier_quest
     _add_dl_supplier_card(pg, "1111111111111", "Duopack s.r.o.", emails=[], city="Bratislava")
     released = dl_worker.release_for_supplier_card(
         pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)),
-        "1111111111111", "Duopack s.r.o.", [], "Bratislava")
+        "1111111111111", "Duopack s.r.o.", [])
 
     assert released == 1, "exactly one open dl_supplier question was auto-closed"
     assert pg.execute("SELECT status, answered_by FROM order_questions WHERE id=%s",
@@ -3427,7 +3427,7 @@ def test_release_for_supplier_card_leaves_an_ambiguous_supplier_question_open(pg
 
     released = dl_worker.release_for_supplier_card(
         pg, _cfg(delivery_notes_engine="python"), "2222222222222", "ABC obchod s.r.o.",
-        [], "Košice")
+        [])
 
     assert released == 0
     assert pg.execute("SELECT status, answered_by FROM order_questions WHERE id=%s",
@@ -3447,7 +3447,7 @@ def test_release_for_supplier_card_name_rung_releases_an_emails_empty_orphan(pg,
 
     released = dl_worker.release_for_supplier_card(
         pg, _cfg(delivery_notes_engine="python"), "1111111111111", "Duopack s.r.o.",
-        [], "Bratislava")
+        [])
 
     assert released == 1
     assert pg.execute("SELECT processed FROM messages WHERE message_id='orphname'"
@@ -3470,7 +3470,7 @@ def test_release_for_supplier_card_name_rung_honors_the_error_event_exclusion(pg
 
     released = dl_worker.release_for_supplier_card(
         pg, _cfg(delivery_notes_engine="python"), "1111111111111", "Duopack s.r.o.",
-        [], "Bratislava")
+        [])
 
     assert released == 1
     assert pg.execute("SELECT processed FROM messages WHERE message_id='clean1'"
@@ -3495,7 +3495,7 @@ def test_release_for_supplier_card_release_does_not_bypass_correction_routing(pg
 
     released = dl_worker.release_for_supplier_card(
         pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)),
-        "1111111111111", "Duopack s.r.o.", [], "Bratislava")
+        "1111111111111", "Duopack s.r.o.", [])
     assert released == 1
     assert pg.execute("SELECT processed FROM messages WHERE message_id='corr1'"
                       ).fetchone()[0] is False, "the correction orphan was released by name"
