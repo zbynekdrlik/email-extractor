@@ -406,3 +406,14 @@ def log_event(conn, message_id: str, stage: str, status: str, outcome: str = "",
                (message_id, workflow, stage, status, outcome, detail, rollup)
            VALUES (%s, %s, %s, %s, %s, %s, %s)""",
         (message_id, workflow or WORKFLOW, stage, status, outcome, Json(detail or {}), rollup))
+
+
+def crash_outcome(exc: BaseException, stage: str) -> str:
+    """A human-visible outcome line for an UNEXPECTED crash (#330) — always carries the
+    exception TYPE + MESSAGE + the stage it happened in, so a message that a worker's
+    catch-all `except` leaves stranded is never an undiagnosable "neznáma". Even an
+    exception with an empty message still names its type, so the "neznáma"/empty result
+    the n8n "Static auto orders" workflow used to produce is structurally impossible.
+    Truncated to keep `proc_outcome` short."""
+    msg = str(exc).strip() or "(bez textu)"
+    return f"Spracovanie zlyhalo v kroku {stage}: {type(exc).__name__}: {msg}"[:300]
