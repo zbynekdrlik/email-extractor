@@ -3307,7 +3307,9 @@ def test_release_for_supplier_card_releases_orphaned_stuck_siblings(pg, tmp_path
         _msg(pg, mid=mid, from_addr=sender)
         pg.execute("UPDATE messages SET processed=true, proc_status='review' "
                    "WHERE message_id=%s", (mid,))
-    released = dl_worker.release_for_supplier_card(pg, [sender])
+    released = dl_worker.release_for_supplier_card(
+        pg, _cfg(delivery_notes_engine="python"), SUPPLIER_EAN, "Pekáreň Lunys",
+        [sender], "Prešov")
     assert released == 2
     rows = pg.execute(
         "SELECT processed, processing_at, attempts FROM messages "
@@ -3339,10 +3341,172 @@ def test_release_for_supplier_card_honors_the_error_event_exclusion(pg, tmp_path
     pg.execute(
         "INSERT INTO email_events (message_id, workflow, stage, status, outcome) "
         "VALUES ('failed1','delivery_notes','review','error','ORION zlyhalo')")
-    released = dl_worker.release_for_supplier_card(pg, [sender])
+    released = dl_worker.release_for_supplier_card(
+        pg, _cfg(delivery_notes_engine="python"), SUPPLIER_EAN, "Pekáreň Lunys",
+        [sender], "Prešov")
     assert released == 1
     assert pg.execute("SELECT processed FROM messages WHERE message_id='orph1'"
                       ).fetchone()[0] is False
     assert pg.execute("SELECT processed FROM messages WHERE message_id='failed1'"
                       ).fetchone()[0] is True, \
         "a genuinely-failed upload must never be reset into an auto-retry"
+
+
+# --- #323: adding a CODEX card also (1) auto-closes an OPEN dl_supplier question of that
+# supplier and releases its message, and (2) releases orphaned stuck siblings by an
+# UNAMBIGUOUS normalized from_name for an emails=[] card. All #265 exclusions unchanged. ---
+
+def _add_dl_supplier_card(pg, ean_edi, name, emails=None, city=""):
+    dl_snapshot.upsert_dl_supplier(
+        pg, override_id=None, orig_ean_edi=None, orig_city=None,
+        ean_edi=ean_edi, name=name, emails=emails or [], city=city)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+
+
+def _stuck(pg, mid, from_addr, from_name=None):
+    """A message stuck in review with no order_questions row of its own (the #265 orphan
+    shape) — optionally carrying an envelope display `from_name` for the #323 name rung."""
+    _msg(pg, mid=mid, from_addr=from_addr)
+    pg.execute("UPDATE messages SET processed=true, proc_status='review', from_name=%s "
+               "WHERE message_id=%s", (from_name, mid))
+
+
+def test_release_for_supplier_card_auto_closes_a_matching_open_dl_supplier_question(
+        pg, tmp_path, monkeypatch):
+    """#323 residual 1: an OPEN dl_supplier question whose extracted identity the newly-added
+    card UNAMBIGUOUSLY resolves (here by normalized NAME — the card carries emails=[]) is
+    auto-answered through the SAME app path a human answer takes: answered_by
+    'codex-card-auto', dl_supplier_memory learned, and release_for_question reprocesses the
+    tied message AND releases its orphaned same-sender sibling — no nástenka click needed."""
+    from app.orders import llm
+    monkeypatch.setattr(llm, "from_config", lambda *a, **k: FakeClient({}))
+    _snapshot(pg)
+    sender = "office@duopack.sk"
+    # the message that raised the still-open dl_supplier question (a skipped attachment so
+    # the reprocess needs no model call — residual 1's own additions are what's under test).
+    _msg(pg, mid="tied", from_addr=sender)
+    _attach(pg, tmp_path, "tied", method="skipped")
+    pg.execute("UPDATE messages SET processed=true, proc_status='review' "
+               "WHERE message_id='tied'")
+    qid = teach.ask_dl_supplier(pg, "tied", sender, candidates=[],
+                                supplier_name="Duopack s.r.o.", supplier_city="Bratislava")
+    assert qid is not None
+    # an orphaned same-sender sibling with no question of its own (#265 shape).
+    _stuck(pg, "orph", sender)
+
+    _add_dl_supplier_card(pg, "1111111111111", "Duopack s.r.o.", emails=[], city="Bratislava")
+    released = dl_worker.release_for_supplier_card(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)),
+        "1111111111111", "Duopack s.r.o.", [], "Bratislava")
+
+    assert released == 1, "exactly one open dl_supplier question was auto-closed"
+    assert pg.execute("SELECT status, answered_by FROM order_questions WHERE id=%s",
+                      (qid,)).fetchone() == ("answered", "codex-card-auto")
+    taught = dl_supplier_memory.resolve(pg, sender)
+    assert taught is not None and taught["ean_edi"] == "1111111111111", \
+        "the auto-answer went through the real app path -> dl_supplier_memory learned it"
+    assert pg.execute("SELECT processed FROM messages WHERE message_id='orph'"
+                      ).fetchone()[0] is False, \
+        "release_for_question released the orphaned same-sender sibling by from_addr"
+
+
+def test_release_for_supplier_card_leaves_an_ambiguous_supplier_question_open(pg, tmp_path):
+    """#323 residual 1 safety: when the card's normalized name is shared by 2+ distinct-ean
+    cards and no city breaks the tie, the deterministic rung refuses to resolve — the open
+    dl_supplier question STAYS open (the system never answers for the warehouse on a guess)."""
+    _snapshot(pg)
+    _add_dl_supplier_card(pg, "1111111111111", "ABC obchod s.r.o.", emails=[],
+                          city="Bratislava")
+    _add_dl_supplier_card(pg, "2222222222222", "ABC obchod s.r.o.", emails=[], city="Košice")
+    _msg(pg, mid="tied", from_addr="x@abc.sk")
+    pg.execute("UPDATE messages SET processed=true, proc_status='review' "
+               "WHERE message_id='tied'")
+    qid = teach.ask_dl_supplier(pg, "tied", "x@abc.sk", candidates=[],
+                                supplier_name="ABC obchod s.r.o.", supplier_city="")
+    assert qid is not None
+
+    released = dl_worker.release_for_supplier_card(
+        pg, _cfg(delivery_notes_engine="python"), "2222222222222", "ABC obchod s.r.o.",
+        [], "Košice")
+
+    assert released == 0
+    assert pg.execute("SELECT status, answered_by FROM order_questions WHERE id=%s",
+                      (qid,)).fetchone() == ("open", None), \
+        "an ambiguous (2 cards, one name, no unique city) match must leave the question open"
+
+
+def test_release_for_supplier_card_name_rung_releases_an_emails_empty_orphan(pg, tmp_path):
+    """#323 residual 2: an emails=[] card releases an orphaned stuck message whose normalized
+    envelope from_name matches the card's UNAMBIGUOUS normalized name — the root-cause
+    HK LOAN/Duopack case where no card email exists to match from_addr. A differently-named
+    orphan is left untouched."""
+    _snapshot(pg)
+    _add_dl_supplier_card(pg, "1111111111111", "Duopack s.r.o.", emails=[], city="Bratislava")
+    _stuck(pg, "orphname", "whatever@x.sk", from_name="Duopack s.r.o.")
+    _stuck(pg, "other", "y@y.sk", from_name="Iná firma s.r.o.")
+
+    released = dl_worker.release_for_supplier_card(
+        pg, _cfg(delivery_notes_engine="python"), "1111111111111", "Duopack s.r.o.",
+        [], "Bratislava")
+
+    assert released == 1
+    assert pg.execute("SELECT processed FROM messages WHERE message_id='orphname'"
+                      ).fetchone()[0] is False, "matched-by-name orphan released"
+    assert pg.execute("SELECT processed FROM messages WHERE message_id='other'"
+                      ).fetchone()[0] is True, "a differently-named orphan is never touched"
+
+
+def test_release_for_supplier_card_name_rung_honors_the_error_event_exclusion(pg, tmp_path):
+    """#323 residual 2: the #265 error-event exclusion survives on the name rung too — an
+    orphan whose ORION upload genuinely FAILED (a status='error' event) must NEVER be reset
+    into an automatic retry (the #239 double-upload risk), even when its from_name matches."""
+    _snapshot(pg)
+    _add_dl_supplier_card(pg, "1111111111111", "Duopack s.r.o.", emails=[], city="Bratislava")
+    _stuck(pg, "clean1", "a@x.sk", from_name="Duopack s.r.o.")
+    _stuck(pg, "failed1", "b@x.sk", from_name="Duopack s.r.o.")
+    pg.execute(
+        "INSERT INTO email_events (message_id, workflow, stage, status, outcome) "
+        "VALUES ('failed1','delivery_notes','review','error','ORION zlyhalo')")
+
+    released = dl_worker.release_for_supplier_card(
+        pg, _cfg(delivery_notes_engine="python"), "1111111111111", "Duopack s.r.o.",
+        [], "Bratislava")
+
+    assert released == 1
+    assert pg.execute("SELECT processed FROM messages WHERE message_id='clean1'"
+                      ).fetchone()[0] is False
+    assert pg.execute("SELECT processed FROM messages WHERE message_id='failed1'"
+                      ).fetchone()[0] is True, \
+        "a genuinely-failed upload must never be name-rung-reset into an auto-retry"
+
+
+def test_release_for_supplier_card_release_does_not_bypass_correction_routing(pg, tmp_path):
+    """#323: a released orphan that is a mail-body-sourced CORRECTION mail still lands in
+    review when the worker reprocesses it — the #265 correction routing is unchanged and the
+    release never causes a correction to auto-ship (no model call, nothing to ORION)."""
+    _snapshot(pg)
+    _add_dl_supplier_card(pg, "1111111111111", "Duopack s.r.o.", emails=[], city="Bratislava")
+    _msg(pg, mid="corr1", from_addr="c@x.sk", subject="OPRAVA HMOTNOSTI",
+         has_attachments=False,
+         combined_text="Dobrý deň, OPRAVA HMOTNOSTI: Múka T650 = 15,88 t (nie 17,74 t). "
+                       "Zvyšok bez zmien. S pozdravom, Duopack")
+    pg.execute("UPDATE messages SET processed=true, proc_status='review', "
+               "from_name='Duopack s.r.o.' WHERE message_id='corr1'")
+
+    released = dl_worker.release_for_supplier_card(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)),
+        "1111111111111", "Duopack s.r.o.", [], "Bratislava")
+    assert released == 1
+    assert pg.execute("SELECT processed FROM messages WHERE message_id='corr1'"
+                      ).fetchone()[0] is False, "the correction orphan was released by name"
+
+    client = FakeClient({})
+    n = dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client,
+        upload=lambda *a, **k: None, post=lambda c, h: None)
+    assert n == 1
+    assert client.calls == [], "a correction mail is routed to review BEFORE any model call"
+    assert pg.execute("SELECT proc_status FROM messages WHERE message_id='corr1'"
+                      ).fetchone()[0] == "review", "the reprocessed correction stays in review"
+    assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0, \
+        "a released correction mail must never ship to ORION"
