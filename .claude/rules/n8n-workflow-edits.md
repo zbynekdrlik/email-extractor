@@ -539,3 +539,51 @@ genuinely the same document (in which case skipping the second is correct) or tw
 distinct deliveries the extraction merely mislabeled the same way (in which case widen
 the investigation — a docNumber collision this ticket's own remediation never needed to
 resolve, since neither doc ever reached the claim stage).
+
+## Making the system ANSWER a nástenka board question on the user's behalf — go through
+## the SAME app path a human answer takes, never a bespoke close (#323)
+
+When a feature must auto-answer an open `dl_supplier`/`dl_item` (or any `teach.KINDS`)
+question — e.g. #323's "adding a CODEX card auto-closes that supplier's open question so
+the sklad nemusí na nástenke" — do NOT hand-write a bespoke close. Replicate
+`_api_orders_answer_generic`'s own tail exactly, so every side effect the human path fires
+(memory write, `release_for_question` reprocess, `_release_stuck_siblings`) happens
+naturally:
+1. `teach.add_candidate(conn, qid, {"value": <pick>, "label": <name>})` to legitimize the
+   pick (so `apply` records the display name; `add_candidate` is a `status='open'` no-op if
+   already closed).
+2. Guarded `UPDATE order_questions SET status='answered', answer=%s, answered_by=%s,
+   answered_at=now() WHERE id=%s AND status='open' RETURNING id` — the `WHERE status='open'`
+   is load-bearing (a concurrent human answer must win; on 0 rows, DO NOT call apply).
+3. `teach.KINDS[q["kind"]].apply(conn, cfg, q2, <pick>, <by>)` with a DISTINCT `answered_by`
+   marker for auditability (`'codex-card-auto'`) — this is what fires `dl_supplier_memory.
+   remember` + `release_for_question`.
+`deps.db()` is autocommit, so step 2 lands before step 3's real ORION upload (the #116
+answer-commits-before-upload separation holds via autocommit, no explicit tx needed).
+
+## A retro-release / auto-answer that runs INSIDE an HTTP request AND can trigger a real
+## LLM/ORION reprocess needs PER-ITEM error isolation (#323)
+
+`release_for_supplier_card` runs synchronously inside the `/znalosti` card-save POST, and
+each auto-answered question's `release_for_question` reprocess can make a real model/ORION
+call. Wrap each per-item auto-answer in `try/except Exception: log.exception(...)` so one
+transient failure never aborts the whole batch (remaining questions + the other rungs) nor
+500s an already-saved card. Safe because everything is autocommit + idempotent (the guarded
+`status='open'` UPDATE makes a retry a no-op on already-answered ones) and the worker's own
+`_claim`/`tick` stays the backstop.
+
+## A not-yet-extracted stuck message's ONLY queryable supplier-identity signal is envelope
+## `from_name` — use it as a conservative SELECTOR, never as the final supplier decision (#323)
+
+For the `emails=[]` retro-release case (`_release_stuck_siblings_by_name`), a stuck DL
+message has no extracted supplier name in a column — only `messages.from_name`
+(envelope display name) and `from_addr`. Match `dl_match.supplier_name_key(from_name)` ==
+the card's UNAMBIGUOUS normalized name (only when no other distinct-ean card shares that
+normalized name — same DISTINCT-ean ambiguity measure `resolve_supplier_from_cards` uses).
+This is SAFE despite `from_name` being a weak signal because releasing only RE-QUEUES the
+message: the reprocess re-extracts and re-runs the deterministic rung on the REAL document,
+so a false-positive `from_name` match never ships a wrong EDI — it either resolves correctly
+or raises a fresh question. Apply ALL the #265 exclusions in the SQL (`processed=true`,
+`proc_status='review'`, no `order_questions` row, no `status='error'` event). Normalization
+(`dl_match.supplier_name_key`, promoted from private in #323) is the reusable public helper —
+never re-derive the diacritic-folding (Slovak-stem-drift risk, see orders-corpus.md).

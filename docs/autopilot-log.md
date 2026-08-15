@@ -3582,3 +3582,35 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
   release úplnosť (otvorená otázka / `emails=[]`) → follow-up #323 (needs-user-decision).
 - Commits: bump `9bd552a`, red `08f2f7b`, green `5a59df4`, review-fix `358a274`. ruff+mypy čisté,
   celý test suite zelený. Worktree dispatch (isolated), vlastný test-pg port 15490.
+
+## 2026-08-15 — #323 (retro-release: CODEX karta zavrie otvorenú dl_supplier otázku + emails=[] name-rung, PR #TBD, 0.9.101 -> 0.9.102)
+- Príčina: #322 nechalo dva zvyšky (adversariálny review): `_release_stuck_siblings` zámerne
+  vynecháva správu s `order_questions` riadkom (otvorená `dl_supplier` otázka sa pri pridaní
+  karty neuvoľní), a `release_for_supplier_card` kľúčovala LEN na e-maily karty (karta `emails=[]`
+  neuvoľní nič). Marekova direktíva (#236, issuecomment na #323): „stačí pridať v CODEXe, nemusia
+  na nástenke" — obidva zvyšky sa implementujú, len pri JEDNOZNAČNEJ deterministickej zhode.
+- `dl_questions.release_for_supplier_card(conn, cfg, ean, name, emails)` rozšírené o 3 rungy, VŠETKY
+  reuse existujúcej mašinérie (nikdy paralelná cesta): (1) reziduum 1 —
+  `_auto_close_matching_supplier_questions`/`_auto_answer_supplier_question`: pre každú otvorenú
+  `dl_supplier` otázku spustí ROVNAKÝ rung `dl_match.resolve_supplier_from_cards` (ambiguita cez
+  DISTINCT ean cez celý zoznam), a len keď rieši na TÚTO kartu, auto-odpovie ROVNAKOU app-cestou
+  ako človek — `answered_by='codex-card-auto'`, guardnutý `status='open'` UPDATE, potom
+  `teach.KINDS['dl_supplier'].apply` → `dl_supplier_memory` + `release_for_question` (reprocess +
+  sibling release by from_addr); (2) e-mail rung #322; (3) reziduum 2 —
+  `_release_stuck_siblings_by_name`: `emails=[]` prípad, reset osirelých správ podľa jednoznačného
+  normalizovaného `from_name` == meno karty (`dl_match.supplier_name_key`), len keď žiadna iná
+  karta nezdieľa normalizované meno; #265 výluky (processed/review, bez order_questions, bez
+  status='error' event) identické.
+- Bezpečnosť: auto-answer/release len RE-QUEUE — reprocess re-extrahuje a rung re-overí na reálnom
+  dokumente; false-positive from_name nikdy nepošle zlý EDI (buď vyrieši, alebo znova otázka).
+  `desadv.claim_send_or_identify` ostáva atomický backstop. Correction-mail routing (#265) nezmenené.
+- RED→GREEN TDD, 5 nových testov (a auto-close+memory+sibling, b ambiguita → otázka open, c
+  emails=[] name-rung, d error-event výluka, e correction stále review) + 2 existujúce testy
+  na novú signatúru. Test (e) cez REÁLNY tick (`client.calls==[]`, `desadv_sent==0`).
+- Adversariálny fresh-context review (gate CLOSED → opus 4.8): 0 🔴 0 🟡 3 🔵 — bezpečnostné jadro
+  zdravé, žiadna cesta na zlý/nejednoznačný auto-ship. Všetky 3 🔵 opravené v tej istej vetve
+  (`5fd00ad`): mŕtvy `city` param odstránený, per-question error isolation (HTTP request nesmie
+  spadnúť na 500 pri transientnom LLM/ORION zlyhaní jednej otázky), `_supplier_name_key` →
+  verejné `supplier_name_key`.
+- Commits: bump `3bbe2c3`, red `036b144`, green `9266ffe`, review-fix `5fd00ad`. ruff čisté, celý
+  suite zelený (94% coverage, dl_questions.py 93%). Worktree dispatch (isolated), test-pg 15433.
