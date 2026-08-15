@@ -58,7 +58,8 @@ just a message that stayed stuck past the window, gets alerted again.
 **#239 reopened, finding 4 — unbounded growth.** No delivered row was ever removed
 (the table only ever grows), and a permanently-broken Odoo config retried every single
 worker tick forever with no ceiling. `prune_delivered()` removes delivered rows past a
-retention window (the ONE state nothing needs kept indefinitely); `flush_pending()`
+retention window; `purge_held()` (#319) does the same for the separate held channel-0
+state (an undelivered row with a REAL channel is still never removed); `flush_pending()`
 only selects rows under `MAX_FLUSH_ATTEMPTS` — a row past the cap simply stops being
 actively retried (no more hammering a dead endpoint) but stays on record and still
 counts in `pending_count()`/`dl_current_health`, so it is never silently dropped, only
