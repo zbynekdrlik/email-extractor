@@ -294,19 +294,23 @@ def register(app: Flask, deps: Deps) -> None:
         if not ean.isdigit():
             return jsonify(error="EAN kód EDI musí byť len číslice."), 400
         emails = _parse_emails_field(body.get("emails"))
+        city = str(body.get("city") or "").strip()
         try:
             with deps.db() as c:
                 rid = dl_snapshot.upsert_dl_supplier(
                     c, override_id=body.get("override_id"),
                     orig_ean_edi=body.get("orig_ean_edi"), orig_city=body.get("orig_city"),
-                    ean_edi=ean, name=name, emails=emails,
-                    city=str(body.get("city") or "").strip())
+                    ean_edi=ean, name=name, emails=emails, city=city)
                 dl_snapshot.dl_rebuild_from_overrides(c)
-                # #322: a newly-added/edited CODEX card retro-releases orphaned same-sender
-                # stuck DL messages (no nástenka answer needed) — the worker reprocesses them
-                # and the new deterministic CODEX-card rung resolves the supplier. Reuses the
-                # #265 sibling-release machinery with all its safety exclusions unchanged.
-                dl_worker.release_for_supplier_card(c, emails)
+                # #322 + #323: a newly-added/edited CODEX card retro-releases stuck DL
+                # messages (no nástenka answer needed). Three rungs, all reusing the #265
+                # sibling-release/answer machinery with every safety exclusion intact:
+                # (#323 res.1) auto-close an OPEN dl_supplier question this card
+                # unambiguously resolves (same deterministic rung, answered_by
+                # 'codex-card-auto'); (#322) release orphaned same-sender siblings by
+                # from_addr; (#323 res.2) the emails=[] case — release orphans whose
+                # unambiguous normalized from_name matches this card's name.
+                dl_worker.release_for_supplier_card(c, deps.cfg, ean, name, emails, city)
         except snapshot.DuplicateEan as e:
             # #248 review finding: mirrors the customer endpoint's own fix above — this
             # admin dashboard save funnels through the SAME `upsert_dl_supplier` as the

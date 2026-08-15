@@ -4,8 +4,9 @@ from __future__ import annotations
 import logging
 
 import psycopg
+from psycopg.types.json import Json
 
-from . import dl_nonwarehouse, dl_report, dl_snapshot, llm, report
+from . import dl_match, dl_nonwarehouse, dl_report, dl_snapshot, llm, report
 from .dl_message import CATEGORY, _as_message, _run_and_finish
 
 log = logging.getLogger("orders.dl_worker")
@@ -292,6 +293,13 @@ def close_message_sklad_unknown(conn, qid: int) -> dict:
 # orphan stuck (safe default — `stuck_classified_sweep`/the hourly n8n watchdog still
 # surface it).
 _STUCK_SIBLING_LIMIT = 20
+# #323 residual 2: how many orphan-review candidate rows the name-rung SCANS per call to
+# find up to `_STUCK_SIBLING_LIMIT` name matches — normalization (`_supplier_name_key`) is
+# done in Python, so the SQL can only pre-filter loosely. Deliberately generous: the #265
+# orphan-review set (`processed=true`/`proc_status='review'`/no question/no error) is a
+# handful per supplier in practice, so this bound is never reached; a genuinely larger
+# backlog gets its stragglers on the NEXT card-add/answer, exactly like the by-addr rung.
+_STUCK_SIBLING_CANDIDATE_LIMIT = 500
 
 
 def _release_stuck_siblings(conn, exclude_message_id: str, sender_email: str) -> int:
@@ -337,31 +345,162 @@ def _release_stuck_siblings(conn, exclude_message_id: str, sender_email: str) ->
     return len(ids)
 
 
-def release_for_supplier_card(conn, emails) -> int:
-    """#322: retro-release triggered when a CODEX supplier card is ADDED or EDITED via
-    `/znalosti` (not by answering a nástenka question). For each of the card's email
-    addresses, reset orphaned same-sender stuck DL messages back into the claim pool so the
-    worker reprocesses them — where the new deterministic CODEX-card rung (`_match_supplier`)
-    now resolves the supplier. REUSES the #265 `_release_stuck_siblings` machinery verbatim
-    (never a parallel release path), so ALL its safety exclusions hold unchanged: only
-    `processed=true`/`proc_status='review'` messages with NO `order_questions` row of their
-    own AND no `status='error'` event ever logged are reset (the `#239` double-upload
-    exclusion), and a correction mail simply re-hits `_looks_like_correction` on reprocess
-    and returns to review — never ships.
+def release_for_supplier_card(conn, cfg, ean_edi, name, emails, city="") -> int:
+    """#322 + #323: retro-release triggered when a CODEX supplier card is ADDED or EDITED
+    via `/znalosti` (not by answering a nástenka question). Runs THREE rungs, all REUSING
+    already-tested, safe machinery — never a parallel release path (the #322 constraint),
+    so ALL the #265 safety exclusions hold unchanged everywhere: only `processed=true`/
+    `proc_status='review'` messages with NO `order_questions` row of their own AND no
+    `status='error'` event ever logged are reset (the `#239` double-upload exclusion), and a
+    correction mail simply re-hits `_looks_like_correction` on reprocess and returns to
+    review — never ships.
 
-    Passing `exclude_message_id=""` excludes nothing (every real `messages.message_id` is
-    non-empty, so `message_id <> ''` is always true) — there is no "current" message to skip
-    here, unlike the answer-triggered `release_for_question` path. Returns the total number
-    of sibling messages reset. The ONE message that raised the still-open `dl_supplier`
-    question (if any) is deliberately left to the normal nástenka-answer release path
-    (`release_for_question`) — `_release_stuck_siblings` excludes any message with an
-    `order_questions` row by design."""
-    seen: set[str] = set()
+    (1) #323 residual 1 — auto-close any OPEN `dl_supplier` nástenka question this card
+        UNAMBIGUOUSLY resolves, exactly as Marek's #236 directive requires ("stačí pridať v
+        CODEXe, nemusia na nástenke"). The match uses the SAME deterministic rung the live
+        pipeline uses (`dl_match.resolve_supplier_from_cards`, ambiguity measured across
+        DISTINCT ean over the full current card list); only when it resolves to THIS card's
+        ean is the question auto-answered — through the SAME app path a HUMAN answer takes
+        (`answered_by='codex-card-auto'`, then `teach.KINDS['dl_supplier'].apply` →
+        `dl_supplier_memory.remember` + `release_for_question` → reprocess the tied message +
+        `_release_stuck_siblings` by its from_addr). Ambiguity → the question stays open.
+    (2) #322 email rung — reset orphaned same-sender stuck messages by `from_addr` for each
+        of the card's email addresses (`_release_stuck_siblings`, `exclude_message_id=""`
+        excludes nothing — there is no "current" message to skip here).
+    (3) #323 residual 2 — the `emails=[]` case: reset orphaned stuck messages whose
+        normalized envelope `from_name` equals this card's UNAMBIGUOUS normalized name
+        (only when no other card shares that normalized name), same #265 exclusions.
+
+    Returns the total number of messages the retro-release affected (auto-closed questions
+    plus reset sibling messages). Passing an `emails=[]` card is fully supported: rungs (1)
+    and (3) still fire, so the email having been the ONLY key before #323 no longer strands
+    an emailless supplier's stuck messages."""
     released = 0
+    card_ean = str(ean_edi or "").strip()
+    # (1) residual 1 — open dl_supplier questions this card unambiguously resolves.
+    released += _auto_close_matching_supplier_questions(conn, cfg, card_ean)
+    # (2) #322 email rung — orphaned same-sender siblings by from_addr.
+    seen: set[str] = set()
     for email in emails or []:
         key = str(email or "").strip().lower()
         if not key or key in seen:
             continue
         seen.add(key)
         released += _release_stuck_siblings(conn, "", key)
+    # (3) residual 2 — emails=[] name rung (unambiguous normalized name).
+    released += _release_stuck_siblings_by_name(conn, card_ean, str(name or ""))
     return released
+
+
+def _auto_close_matching_supplier_questions(conn, cfg, card_ean: str) -> int:
+    """#323 residual 1: auto-answer every OPEN `dl_supplier` question that THIS just-added
+    card unambiguously resolves via the SAME deterministic rung the live pipeline uses
+    (`dl_match.resolve_supplier_from_cards`), then let the ordinary answer path
+    (`release_for_question`) reprocess the tied message and release its siblings. Returns
+    how many questions were auto-closed.
+
+    The rung is passed the FULL current effective card list (so ambiguity is measured across
+    every card, exactly as #322 does) and the question's own EXTRACTED identity from its
+    payload (`supplier_name`/`supplier_city`/`sender_email`, stored by `ask_dl_supplier`).
+    Only a match resolving to THIS card's ean triggers an auto-answer — any ambiguity (the
+    rung returns `None`, or resolves to a DIFFERENT card) leaves the question OPEN, so the
+    system never answers on the warehouse's behalf on a guess."""
+    if not card_ean:
+        return 0
+    from . import teach
+    cards = dl_snapshot.dl_suppliers_for_management(conn)
+    closed = 0
+    for q in teach.open_questions(conn, limit=_STUCK_SIBLING_CANDIDATE_LIMIT,
+                                  kinds=("dl_supplier",)):
+        payload = q.get("payload") or {}
+        sender_email = str(payload.get("sender_email") or "")
+        doc = {"supplierName": str(payload.get("supplier_name") or ""),
+               "supplierCity": str(payload.get("supplier_city") or "")}
+        dec = dl_match.resolve_supplier_from_cards(doc, cards, sender_email)
+        if not (dec and dec.matched and str(dec.ean_edi) == card_ean):
+            continue
+        if _auto_answer_supplier_question(conn, cfg, q, card_ean, dec.name):
+            closed += 1
+    return closed
+
+
+def _auto_answer_supplier_question(conn, cfg, q: dict, card_ean: str, card_name: str) -> bool:
+    """Answer ONE open `dl_supplier` question EXACTLY as the human /otazky flow does
+    (`_api_orders_answer_generic`'s tail): legitimize the card as a candidate
+    (`teach.add_candidate`, so `_apply_dl_supplier` records the supplier NAME too), mark the
+    row answered — guarded on `status='open'` so a concurrent human answer can never be
+    double-applied — with the distinct audit marker `answered_by='codex-card-auto'`, then
+    fire the registered apply (`teach.KINDS['dl_supplier'].apply` → `dl_supplier_memory.
+    remember` + `release_for_question`). Returns True when the row was genuinely
+    transitioned. Lazy `teach` import mirrors `_apply_dl_supplier`'s own lazy `dl_worker`
+    import — the two modules form a cycle only at their tops."""
+    from . import teach
+    cand = {"value": card_ean, "label": card_name or card_ean}
+    teach.add_candidate(conn, q["id"], cand)
+    q2 = dict(q, candidates=[*(q.get("candidates") or []), cand])
+    row = conn.execute(
+        """UPDATE order_questions
+              SET status = 'answered', answer = %s,
+                  answered_by = %s, answered_at = now()
+            WHERE id = %s AND status = 'open'
+            RETURNING id""",
+        (Json({"choice": card_ean}), "codex-card-auto", q["id"])).fetchone()
+    if not row:
+        return False
+    teach.KINDS["dl_supplier"].apply(conn, cfg, q2, card_ean, "codex-card-auto")
+    log.info("dl codex-card auto-answer: closed dl_supplier question %s with ean %s "
+             "(card added/edited in /znalosti), message reprocessed", q["id"], card_ean)
+    return True
+
+
+def _release_stuck_siblings_by_name(conn, card_ean: str, card_name: str) -> int:
+    """#323 residual 2 — the `emails=[]` case: reset orphaned same-supplier stuck messages
+    whose normalized ENVELOPE `from_name` equals this card's UNAMBIGUOUS normalized name
+    (`dl_match._supplier_name_key`). Returns how many were reset; `0` on a blank/ambiguous
+    name or no match, never raises.
+
+    Conservative by construction — releases NOTHING unless the card's normalized name maps
+    to exactly ONE distinct ean across every current card (the same distinct-ean ambiguity
+    measure `resolve_supplier_from_cards` uses); if another card shares the normalized name
+    the identity is ambiguous and those messages stay a nástenka question.
+
+    A released message is only put BACK into the claim pool — the reprocess re-extracts and
+    re-runs the deterministic rung on the ACTUAL document, so a false-positive `from_name`
+    match never ships a wrong EDI: it either resolves correctly or raises a fresh question.
+    `from_name` is the only supplier-identity signal a NOT-yet-extracted stuck message
+    carries in a queryable column, so it is used only as a conservative SELECTOR of which
+    messages are worth reprocessing, never as the final supplier decision. Every #265 safety
+    exclusion of the by-address rung holds identically (`processed=true`,
+    `proc_status='review'`, no `order_questions` row, no `status='error'` event)."""
+    card_ean = str(card_ean or "").strip()
+    name_key = dl_match._supplier_name_key(card_name or "")
+    if not card_ean or not name_key:
+        return 0
+    cards = dl_snapshot.dl_suppliers_for_management(conn)
+    name_eans = {str(c.get("ean_edi") or "").strip() for c in cards
+                 if str(c.get("ean_edi") or "").strip()
+                 and dl_match._supplier_name_key(c.get("name", "")) == name_key}
+    if name_eans != {card_ean}:
+        return 0  # blank name, or the normalized name is shared by another card -> ambiguous
+    rows = conn.execute(
+        """SELECT message_id, from_name FROM messages
+            WHERE category = %s AND processed = true AND proc_status = 'review'
+              AND from_name IS NOT NULL AND btrim(from_name) <> ''
+              AND NOT EXISTS (SELECT 1 FROM order_questions oq
+                              WHERE oq.message_id = messages.message_id)
+              AND NOT EXISTS (SELECT 1 FROM email_events e
+                              WHERE e.message_id = messages.message_id
+                                AND e.status = 'error')
+            ORDER BY created_at ASC LIMIT %s""",
+        (CATEGORY, _STUCK_SIBLING_CANDIDATE_LIMIT)).fetchall()
+    ids = [mid for (mid, fname) in rows
+           if dl_match._supplier_name_key(fname or "") == name_key][:_STUCK_SIBLING_LIMIT]
+    if not ids:
+        return 0
+    conn.execute(
+        """UPDATE messages SET processed = false, processing_at = NULL, attempts = 0
+            WHERE message_id = ANY(%s)""", (ids,))
+    log.info("dl codex-card name-rung release: reset %d orphaned stuck message(s) whose "
+             "from_name matches unambiguous card name %r back into the claim pool",
+             len(ids), card_name)
+    return len(ids)
