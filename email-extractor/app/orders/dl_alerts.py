@@ -89,8 +89,18 @@ DEDUP_WINDOW_HOURS = 4
 MAX_FLUSH_ATTEMPTS = 200
 
 # #239 finding 4 (reopened): how long a DELIVERED row is kept before prune_delivered()
-# removes it. Undelivered rows are NEVER pruned, however old.
+# removes it. An undelivered row with a REAL channel is NEVER pruned, however old (a
+# genuine delivery failure must never be silently dropped); a HELD channel-0 row has its
+# own, separate retention below (#319).
 DELIVERED_RETENTION_DAYS = 30
+
+# #319: how long a HELD operator alert (channel_id = 0, still undelivered — the #310
+# "no ops channel configured yet" mechanism) is kept before purge_held() removes it. These
+# rows have no delivery target, so without retention they grow unbounded (~1-2/day).
+# Conservative — a fresh held row survives, so if an ops channel is configured later,
+# recent history still reaches it (flush_pending re-routes a still-held channel-0 row to
+# the current ops channel). A REAL-channel undelivered row is never touched by this.
+HELD_RETENTION_DAYS = 30
 
 
 def enqueue(conn, channel_id: int, kind: str, body_html: str,
@@ -163,14 +173,20 @@ def flush_pending(conn, cfg, post=None, limit: int = 50,
     now = datetime.now(UTC)
     delivered = 0
     for (channel_id, kind), items in groups.items():
-        # #310: a channel_id of 0 means "operator alert, but no ops channel configured"
-        # (`report.ops_channel` returned 0). It must be HELD, never delivered — passing 0
-        # to `post_from_config` would fall back to `orders_channel_id` (152, the sales
-        # channel), the exact misroute #310 exists to fix. The row stays undelivered and
-        # counted in `pending_count()` (visible on the dashboard), attempts untouched so
-        # it delivers as soon as an ops channel is set. Only an operator-kind alert ever
-        # enqueues channel 0; every warehouse caller passes a real channel.
-        if not channel_id:
+        # #310: a channel_id of 0 means "operator alert, but no ops channel configured
+        # yet" (`report.ops_channel` returned 0 at enqueue time). #319: re-derive the
+        # CURRENT ops channel here (`target`) instead of reading the frozen 0 off the row
+        # and skipping it forever — so once `ops_channel_id` IS configured, an already-held
+        # row finally DELIVERS to it (the "nothing foreclosed" half of #319's retention: a
+        # held row exists precisely to reach the ops channel once one is set). While the
+        # ops channel is still unset (`target` == 0) the row STAYS HELD — passing 0 to
+        # `post_from_config` would fall back to `orders_channel_id` (152, the sales
+        # channel), the exact misroute #310 exists to fix — undelivered and counted in
+        # `pending_count()` (visible on the dashboard), attempts untouched. Only an
+        # operator-kind alert ever enqueues channel 0; every warehouse caller passes a real
+        # channel, so `target` == `channel_id` for those.
+        target = channel_id or report.ops_channel(cfg)
+        if not target:
             continue
         newest = max(created_at for _rid, _body, created_at in items)
         if quiet_seconds and (now - newest).total_seconds() < quiet_seconds:
@@ -180,7 +196,7 @@ def flush_pending(conn, cfg, post=None, limit: int = 50,
         html = "".join(body for _rid, body, _created_at in items)
         ids = [rid for rid, _body, _created_at in items]
         try:
-            result = post(cfg, html, channel_id=channel_id)
+            result = post(cfg, html, channel_id=target)
         except Exception:
             log.exception("delivering %d pending %s alert(s) failed — will retry next "
                           "sweep", len(items), kind)
@@ -199,7 +215,7 @@ def flush_pending(conn, cfg, post=None, limit: int = 50,
             "UPDATE pending_alerts SET delivered_at = now() WHERE id = ANY(%s)", (ids,))
         delivered += len(items)
         log.info("delivered %d pending %s alert(s) to channel %s", len(items), kind,
-                 channel_id)
+                 target)
     return delivered
 
 
@@ -224,5 +240,28 @@ def prune_delivered(conn, older_than_days: int = DELIVERED_RETENTION_DAYS) -> in
     rows = conn.execute(
         "DELETE FROM pending_alerts WHERE delivered_at IS NOT NULL "
         "AND delivered_at < now() - make_interval(days => %s) RETURNING id",
+        (max(1, int(older_than_days)),)).fetchall()
+    return len(rows)
+
+
+def purge_held(conn, older_than_days: int = HELD_RETENTION_DAYS) -> int:
+    """#319: delete HELD operator alerts (channel_id = 0, still undelivered — the #310
+    "no ops channel configured yet" mechanism) past the retention window. These rows
+    have no delivery target, so without retention they grow unbounded (~1-2/day, live
+    verified). Deliberately NARROW, unlike a "delete every old undelivered row" sweep:
+
+    - `channel_id = 0` only — a REAL-channel undelivered row (a genuine Odoo delivery
+      failure) is NEVER touched, however old; deleting one would be exactly the silent
+      loss this whole outbox exists to prevent (`prune_delivered`'s docstring makes the
+      same promise for its own scope).
+    - `delivered_at IS NULL` only — a delivered channel-0 row belongs to
+      `prune_delivered()`, not here.
+
+    Conservative window (`HELD_RETENTION_DAYS`): a fresh held row survives, so if an ops
+    channel is configured later, `flush_pending()` re-routes recent history into it
+    before retention would ever remove it. Returns how many rows were removed."""
+    rows = conn.execute(
+        "DELETE FROM pending_alerts WHERE channel_id = 0 AND delivered_at IS NULL "
+        "AND created_at < now() - make_interval(days => %s) RETURNING id",
         (max(1, int(older_than_days)),)).fetchall()
     return len(rows)
