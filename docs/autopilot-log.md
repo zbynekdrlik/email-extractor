@@ -3637,3 +3637,31 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
   (najstarší ~16h47m) → purge=0 očakávané (nič ešte nie je staršie ako 30 dní).
 - **Playbook:** nový `.claude/rules/dl-alerts.md` (retencia po stavoch + re-derive frozen ch0).
 - Worktree dispatch (isolated), test-pg 15433.
+
+## #327 — Držané upozornenie sa po 4h dedup okne enqueue-uje znova (dedup ignoroval delivered_at)
+
+- **Príčina:** `dl_alerts.already_pending` deduplikoval každý riadok len v okne `DEDUP_WINDOW_HOURS=4`
+  (`created_at > now()-window`), bez ohľadu na `delivered_at`. Držané channel-0 upozornenie
+  (nedoručené, #310 hold) sa nikdy nevyrieši → okno vyprší → sweep #308 (`human_processing.sweep`)
+  enqueue-ne tú istú správu každé ~4h. Živý nález #319: 65 held riadkov pre len 10 unikátnych správ.
+- **Zmena:** predikát `(delivered_at IS NULL OR created_at > now() - make_interval(hours => %s))` —
+  nedoručený riadok deduplikuje bez ohľadu na vek; okno ostáva len pre DORUČENÉ riadky (finding-3
+  recency zachovaná). Jednorazové vyčistenie existujúcich duplikátov = nová migračná revízia
+  `Revision(3, "dedup_held_channel0_alerts", DEDUP_HELD_ALERTS)` v `db.py`: `DELETE ... WHERE
+  channel_id=0 AND delivered_at IS NULL AND message_id IS NOT NULL AND id NOT IN (SELECT min(id) ...
+  GROUP BY kind, message_id)` — ponechá najstarší riadok na (kind,message_id). Úzko scope-nuté ako
+  `purge_held`: reálno-kanálový nedoručený, doručený, aj NULL-message_id (spend_cap) riadok netknuté.
+- **RED→GREEN:** `test_dl_alerts.py` — RED `518e505` (undelivered starší ako okno → already_pending
+  musí byť True, dnes False), GREEN `da7a2a0`. Migračný test (min(id) survivor set, before-after==2)
+  + 2 existujúce okno-testy re-scope-nuté na DORUČENÉ riadky (kódovali odstránené buggy správanie).
+  Sweep-caller testy (human_processing/dl_worker) zelené — sweep drží správu preskočenú, neháže.
+  Celý lokálny suite zelený (exit 0, 0 fail).
+- **Review (fresh-context general-purpose, routine → opus 4.8):** CLEAN 0 🔴 0 🟡 0 🔵. 1 informačná
+  poznámka (real-kanálový alert po MAX_FLUSH_ATTEMPTS sa už nezaenqueue-uje — súlad s finding-4,
+  žiadna zmena).
+- **Commity:** bump `dd00ca3`, red `518e505`, green `da7a2a0`, docs/playbook (tento). Worktree
+  dispatch (isolated, sole worker), vlastný test-pg :15499. Odovzdané supervízorovi na integráciu
+  (branch `worktree-agent-a9d16926d15553d20`); deploy (v0.9.104, ha addons update) + prod verify
+  (held ch0 PRED ~65/~10 správ → PO cleanup ≈15, potom stabilné) + run-card = supervízor.
+- **Playbook:** doplnok do `.claude/rules/dl-alerts.md` (dedup po delivered_at, nie len po veku;
+  jednorazové data-cleanup = migračná revízia, nie perpetuálna maintenance funkcia).

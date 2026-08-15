@@ -51,3 +51,44 @@ should satisfy must be recomputed against live config at consume time, not trust
 column (age / channel / delivered) asserting the exact survivor set — a wrong predicate on
 any one condition fails it. The re-route is proven by asserting held-then-delivered across
 two `flush_pending` calls with `cfg.ops_channel_id` unset then set.
+
+## A dedup guard over this outbox must key on DELIVERED state, not just age — an
+## UNDELIVERED row dedupes regardless of age; the recency window is DELIVERED-only (#327)
+
+`already_pending(kind, message_id)` originally bounded EVERY row by `DEDUP_WINDOW_HOURS`
+(4h) — correct for a DELIVERED alert (recency protection against an immediate re-ask after
+delivery), but WRONG for a HELD channel-0 operator alert (`delivered_at IS NULL`, no ops
+channel configured yet — the #310 hold): it never resolves, so the window expired and the
+#308 `human_processing.sweep` (and the `dl_stuck_classified` sweep) re-enqueued the same
+message every ~4h, piling up duplicate held rows (live #319: 65 held rows for only 10
+distinct messages). Fix: the window applies ONLY to delivered rows —
+`WHERE kind=%s AND message_id=%s AND (delivered_at IS NULL OR created_at > now() -
+make_interval(hours => %s))`. An undelivered row suppresses a re-enqueue forever (there is
+nothing to remind about while the first alert hasn't even gone out; the held row itself
+still delivers once an ops channel is set, per `flush_pending`'s re-derive). **Any FUTURE
+dedup guard over a durable outbox that can HOLD a row undelivered must make the same split
+— bounding an unresolvable held row by a recency window silently re-duplicates it every
+window.** (This supersedes the earlier "permanent per-message dedup" tradeoff note the
+`n8n-workflow-edits.md` #239 entry recorded: the dedup is neither permanent nor
+window-only, it is delivered-aware.)
+
+## A ONE-TIME cleanup of accumulated garbage = a numbered migration REVISION (a DELETE),
+## never a perpetual `worker.run_forever` maintenance-tick function (#327)
+
+The pre-#327 bug left ~60 duplicate held rows. The cleanup shipped as a NEW
+`Revision(3, "dedup_held_channel0_alerts", db.DEDUP_HELD_ALERTS)` in `db.REVISIONS`
+(`db.py`) — a plain `DELETE FROM pending_alerts WHERE channel_id=0 AND delivered_at IS NULL
+AND message_id IS NOT NULL AND id NOT IN (SELECT min(id) ... GROUP BY kind, message_id)`
+keeping the OLDEST row per (kind, message_id). Chosen OVER a `dedup_held()` maintenance
+function wired next to `prune_delivered`/`purge_held`: dedup is NOT a retention class (no
+age threshold) — it is a ONE-TIME cleanup, and after the predicate fix no new held
+duplicates form, so a perpetual GROUP-BY dedup query on the ~15s hot loop is pure waste. A
+migration revision runs exactly once, atomically, tracked in `schema_version` — the honest
+"jednorazové zmazanie". **Scope it as narrowly as `purge_held`** (`channel_id=0 AND
+delivered_at IS NULL AND message_id IS NOT NULL`): a NULL-`message_id` alert (`spend_cap`,
+`question_*`) is never deduped, so it MUST be excluded from the GROUP-BY survivor query or
+distinct alerts collapse to one; a real-channel (≠0) or delivered row is never touched.
+The subquery's `WHERE` must be byte-identical to the outer `WHERE` so every `min(id)` is
+itself a delete-candidate (a wider subquery population could let a delivered/real-channel
+row own the `min` and orphan-delete a whole group). A data-cleanup DELETE is a legitimate
+migration revision (transaction-safe, idempotent on re-run) — see `schema-migrations.md`.
