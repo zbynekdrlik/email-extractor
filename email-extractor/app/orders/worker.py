@@ -76,7 +76,8 @@ def _claim(conn) -> dict | None:
                                  WHERE q.message_id = messages.message_id
                                    AND q.kind = 'mail' AND q.status = 'open')
                           ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
-         RETURNING message_id, subject, from_addr, from_name, combined_text, body_text""",
+         RETURNING message_id, subject, from_addr, from_name, combined_text, body_text,
+                   attempts""",
         (CATEGORY, MAX_ATTEMPTS)).fetchone()
     return _as_message(row)
 
@@ -109,9 +110,15 @@ def _as_message(row) -> dict | None:
     # "today" — without it, a claimed message's date fence in production was always a
     # silent no-op (as_of=""). Both _claim (real engine=python path) and _peek_for_shadow
     # build their message dict through this one function, so this covers both.
-    return {"message_id": row[0], "subject": row[1] or "", "from_addr": row[2] or "",
-            "from_name": row[3] or "", "combined_text": row[4] or row[5] or "",
-            "today": datetime.now(UTC).date().isoformat()}
+    msg = {"message_id": row[0], "subject": row[1] or "", "from_addr": row[2] or "",
+           "from_name": row[3] or "", "combined_text": row[4] or row[5] or "",
+           "today": datetime.now(UTC).date().isoformat()}
+    # #330: only `_claim` (engine=python) selects `attempts` — `_peek_for_shadow` (shadow
+    # mode) never increments/claims and has no need for it, so its row stays 6 columns.
+    # `tick`'s crash handler below only reads this for the python engine.
+    if len(row) > 6:
+        msg["attempts"] = int(row[6] or 0)
+    return msg
 
 
 # --- run bookkeeping -----------------------------------------------------
@@ -233,6 +240,23 @@ def tick(conn, cfg, pipeline=None) -> int:
             conn.execute(
                 "UPDATE messages SET processing_at = NULL WHERE message_id = %s",
                 (message["message_id"],))
+            # #330: `_claim` already incremented `attempts`; once it reaches MAX_ATTEMPTS
+            # the `_claim` guard (`attempts < MAX_ATTEMPTS`) stops reprocessing this
+            # message, so it would otherwise vanish with NO human-visible diagnostic —
+            # exactly the undiagnosable "Chyba: neznáma [line 150]" class the n8n engine
+            # produced. On that FINAL attempt, surface a REAL error (rollup=True ->
+            # proc_status='error') carrying the exception type + message + stage. The
+            # first MAX_ATTEMPTS-1 crashes stay silent-and-retryable (a transient crash
+            # must still auto-recover), so this fires at most once per message — never a
+            # per-tick email_events flood on a deterministic crash. Mirrors
+            # static_worker.tick's identical #330 fix.
+            if int(message.get("attempts") or 0) >= MAX_ATTEMPTS:
+                from . import report
+                report.log_event(
+                    conn, message["message_id"], stage="error", status="error",
+                    outcome=report.crash_outcome(e, "run_live"),
+                    detail={"error": repr(e), "stage": "run_live",
+                            "attempts": int(message.get("attempts") or 0)})
         return 0
 
     _finish_run(conn, run_id, result.get("status", "ok"), result)
