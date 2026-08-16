@@ -527,3 +527,54 @@ def test_a_day_with_only_operator_gauges_renders_nothing_for_the_warehouse():
     assert report.build_dl_digest(_dl_stats(quarantined=2)) == ""
     assert report.build_dl_digest(_dl_stats(pending_alerts=3)) == ""
     assert report.build_dl_digest(_dl_stats(open_import_incidents=1)) == ""
+
+
+# --- #329: aging review-backlog section in both digests -----------------------
+
+def _aging(count=3, oldest_days=9, n=3):
+    return {"count": count, "oldest_days": oldest_days, "min_working_days": 2,
+            "items": [{"subject": f"Objednávka {i}",
+                       "outcome": "Odoo kontrola (AI orders)",
+                       "age_days": oldest_days - i} for i in range(n)]}
+
+
+def test_daily_digest_renders_aging_backlog_when_present():
+    html = report.build_daily_digest(_stats(), days_since_incident=3, aging=_aging())
+    assert "Starnúci review backlog" in html
+    assert "3 objednávky" in html          # count, Slovak few-form
+    assert "9 dní" in html                  # oldest age
+    assert "2 pracovné dni" in html         # threshold, working-days plural
+    assert "Objednávka 0" in html           # the oldest sample line rendered
+
+
+def test_daily_digest_omits_aging_section_on_a_quiet_day():
+    quiet = report.build_daily_digest(
+        _stats(), days_since_incident=3,
+        aging={"count": 0, "oldest_days": 0, "items": [], "min_working_days": 2})
+    assert "Starnúci" not in quiet
+    # the default (no aging arg at all) is silent too
+    assert "Starnúci" not in report.build_daily_digest(_stats(), days_since_incident=3)
+
+
+def test_daily_digest_aging_uses_order_words_not_delivery_notes():
+    """The orders branch's aging section must not leak DL wording — keeps
+    test_build_daily_digest_never_mentions_delivery_notes above true."""
+    html = report.build_daily_digest(_stats(), days_since_incident=3, aging=_aging())
+    assert "objednáv" in html.lower()
+    assert "dodac" not in html.lower()
+
+
+def test_dl_digest_aging_backlog_posts_on_an_otherwise_quiet_day():
+    """A DL day with no runs/dups/mismatch but a real aging backlog must still produce a
+    message — the whole point of #329 is that silently-aging review items get surfaced."""
+    html = report.build_dl_digest(_dl_stats(), aging=_aging(count=5, oldest_days=12))
+    assert html != ""
+    assert "Starnúci review backlog" in html
+    assert "5 dodacích listov" in html      # count, DL wording, Slovak many-form
+    assert "12 dní" in html
+
+
+def test_dl_digest_stays_quiet_when_both_activity_and_backlog_are_empty():
+    assert report.build_dl_digest(
+        _dl_stats(),
+        aging={"count": 0, "oldest_days": 0, "items": [], "min_working_days": 2}) == ""
