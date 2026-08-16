@@ -197,7 +197,37 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
     return "".join(parts)
 
 
-def build_daily_digest(stats: dict, days_since_incident: int | None, link: str = "") -> str:
+def _aging_review_html(aging: dict | None, one: str, few: str, many: str) -> str:
+    """#329: the aging-review-backlog section shared by the orders + DL digests. Renders
+    an empty string on a quiet day (`count == 0`), so the caller can just append it
+    unconditionally. The summary stays compact (a headline + up to N oldest samples)
+    however large the real backlog is."""
+    a = aging or {}
+    count = int(a.get("count") or 0)
+    if not count:
+        return ""
+    oldest = int(a.get("oldest_days") or 0)
+    threshold = int(a.get("min_working_days") or 2)
+    parts = [
+        "<p>&#8987; <b>Starnúci review backlog</b>: "
+        f"{count} " + _plural(count, one, few, many) +
+        f" čaká na ručné spracovanie dlhšie ako {threshold} " +
+        _plural(threshold, "pracovný deň", "pracovné dni", "pracovných dní") +
+        f" (najstaršia {oldest} " + _plural(oldest, "deň", "dni", "dní") + ").</p>"]
+    for it in a.get("items", []):
+        subj = escape((it.get("subject") or "(bez predmetu)")[:60])
+        out = escape((it.get("outcome") or "")[:40])
+        age = int(it.get("age_days") or 0)
+        line = f"&#8226; {subj}"
+        if out:
+            line += f" &mdash; {out}"
+        line += f" ({age} " + _plural(age, "deň", "dni", "dní") + ")"
+        parts.append(f"<p>{line}</p>")
+    return "".join(parts)
+
+
+def build_daily_digest(stats: dict, days_since_incident: int | None, link: str = "",
+                       aging: dict | None = None) -> str:
     """The daily AI-ORDERS match-provenance digest (#196) — the warehouse's measurable
     basis for trust, posted through `orders_channel_id` (the sales channel).
 
@@ -253,13 +283,15 @@ def build_daily_digest(stats: dict, days_since_incident: int | None, link: str =
                      _plural(days_since_incident, "deň", "dni", "dní") +
                      " od posledného potvrdeného incidentu.</p>")
 
+    parts.append(_aging_review_html(aging, "objednávka", "objednávky", "objednávok"))
+
     if link:
         parts.append(f'<p>&#128203; Nástenka: '
                      f'<a href="{escape(link)}">{escape(link)}</a></p>')
     return "".join(parts)
 
 
-def build_dl_digest(dl_stats: dict | None, link: str = "") -> str:
+def build_dl_digest(dl_stats: dict | None, link: str = "", aging: dict | None = None) -> str:
     """The daily DELIVERY-NOTES digest — #239 finding 2 (reopened): a STANDALONE
     message, separate from `build_daily_digest()` above, so the caller
     (`reliability.maybe_post_daily_digest`) can post it to `delivery_notes_channel_id`
@@ -288,7 +320,10 @@ def build_dl_digest(dl_stats: dict | None, link: str = "") -> str:
     dl_dups = int(dl.get("duplicates") or 0)
     dl_mismatch = int(dl.get("announced_mismatch") or 0)
     dl_sklad_unknown = int(dl.get("sklad_unknown") or 0)
-    if not (dl_runs or dl_dups or dl_mismatch or dl_sklad_unknown):
+    # #329: an aging backlog alone is warehouse-actionable, so it must be able to trigger
+    # a DL digest even on an otherwise-quiet day.
+    aging_html = _aging_review_html(aging, "dodací list", "dodacie listy", "dodacích listov")
+    if not (dl_runs or dl_dups or dl_mismatch or dl_sklad_unknown or aging_html):
         return ""
 
     dl_items = int(dl.get("items") or 0)
@@ -326,6 +361,7 @@ def build_dl_digest(dl_stats: dict | None, link: str = "") -> str:
     # #312: the three #239 operator gauges (quarantined / pending_alerts /
     # open_import_incidents) are intentionally NOT rendered here — see this function's
     # docstring. They stay on the admin dashboard (/api/orders/dl/stats).
+    parts.append(aging_html)
     if link:
         parts.append(f'<p>&#128203; Nástenka: '
                      f'<a href="{escape(link)}">{escape(link)}</a></p>')
@@ -406,3 +442,14 @@ def log_event(conn, message_id: str, stage: str, status: str, outcome: str = "",
                (message_id, workflow, stage, status, outcome, detail, rollup)
            VALUES (%s, %s, %s, %s, %s, %s, %s)""",
         (message_id, workflow or WORKFLOW, stage, status, outcome, Json(detail or {}), rollup))
+
+
+def crash_outcome(exc: BaseException, stage: str) -> str:
+    """A human-visible outcome line for an UNEXPECTED crash (#330) — always carries the
+    exception TYPE + MESSAGE + the stage it happened in, so a message that a worker's
+    catch-all `except` leaves stranded is never an undiagnosable "neznáma". Even an
+    exception with an empty message still names its type, so the "neznáma"/empty result
+    the n8n "Static auto orders" workflow used to produce is structurally impossible.
+    Truncated to keep `proc_outcome` short."""
+    msg = str(exc).strip() or "(bez textu)"
+    return f"Spracovanie zlyhalo v kroku {stage}: {type(exc).__name__}: {msg}"[:300]

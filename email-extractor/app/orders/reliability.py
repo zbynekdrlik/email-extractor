@@ -48,11 +48,19 @@ run[s go] into the daily reliability digest", per the design comment on #204.
 from __future__ import annotations
 
 import logging
+from datetime import date, timedelta
 
 from . import dl_alerts, dl_worker, report
 from .pipeline import ASK_THE_WAREHOUSE
 
 log = logging.getLogger("orders.reliability")
+
+# #329: a review/partial message is "aging" once it has waited longer than this many
+# WORKING days (Sat/Sun skipped) without anything nudging it. The proposed default.
+AGING_REVIEW_WORKING_DAYS = 2
+# The order-side digest covers both order engines; the DL-side digest covers dodacie listy.
+ORDER_CATEGORIES = ("ai_orders", "static_orders")
+DL_CATEGORIES = (dl_worker.CATEGORY,)
 
 
 def provenance_stats_for_day(conn, day: str = "") -> dict:
@@ -209,6 +217,56 @@ def days_since_incident(conn) -> int | None:
     return int(delta[0])
 
 
+def _working_days_before(today: date, n: int) -> date:
+    """The date that is `n` working days (Mon–Fri) before `today` — Saturday/Sunday are
+    skipped, mirroring `confirm.py`'s carryover logic. A message created before this date
+    has been waiting longer than `n` working days."""
+    d = today
+    counted = 0
+    while counted < n:
+        d -= timedelta(days=1)
+        if d.weekday() < 5:  # Mon–Fri
+            counted += 1
+    return d
+
+
+def aging_review_backlog(conn, categories, min_working_days: int = AGING_REVIEW_WORKING_DAYS,
+                         sample: int = 5) -> dict:
+    """#329: review/partial messages in `categories` that have been waiting for manual
+    handling longer than `min_working_days` working days AND have NO open board question
+    (nothing is nudging them). Terminal `review`/`partial` gets a single Odoo post when
+    it is processed and is then never reminded again — this surfaces the whole aging pile.
+
+    Returns `{"count", "oldest_days", "items": [{"subject", "outcome", "age_days"}]}`.
+    `count == 0` means a genuinely quiet day, and the caller renders nothing (silence,
+    consistent with #312) — the compact summary (count + oldest age + up to `sample`
+    oldest lines) stays short even when the backlog is large."""
+    today = conn.execute("SELECT CURRENT_DATE").fetchone()[0]
+    cutoff = _working_days_before(today, min_working_days)
+    cats = list(categories)
+    where = (
+        "FROM messages m "
+        "WHERE m.category = ANY(%s) "
+        "  AND m.proc_status IN ('review', 'partial') "
+        "  AND m.created_at::date < %s "
+        "  AND NOT EXISTS (SELECT 1 FROM order_questions q "
+        "                   WHERE q.message_id = m.message_id AND q.status = 'open')")
+    head = conn.execute(
+        "SELECT count(*), (CURRENT_DATE - min(m.created_at)::date) " + where,
+        (cats, cutoff)).fetchone()
+    count = int(head[0] or 0)
+    if not count:
+        return {"count": 0, "oldest_days": 0, "items": [],
+                "min_working_days": min_working_days}
+    rows = conn.execute(
+        "SELECT m.subject, m.proc_outcome, (CURRENT_DATE - m.created_at::date) " + where +
+        " ORDER BY m.created_at ASC LIMIT %s", (cats, cutoff, sample)).fetchall()
+    items = [{"subject": r[0] or "", "outcome": r[1] or "", "age_days": int(r[2] or 0)}
+             for r in rows]
+    return {"count": count, "oldest_days": int(head[1] or 0), "items": items,
+            "min_working_days": min_working_days}
+
+
 def maybe_post_daily_digest(conn, cfg, post=None, shadow: bool = False) -> bool:
     """Post the digest(s) for the day that JUST finished — claimed once per calendar
     day, safe to call on every tick. Never in shadow mode: shadow's whole guarantee is
@@ -233,8 +291,9 @@ def maybe_post_daily_digest(conn, cfg, post=None, shadow: bool = False) -> bool:
     if not claimed:
         return False
     stats = provenance_stats_for_day(conn, yesterday)
+    aging_orders = aging_review_backlog(conn, ORDER_CATEGORIES)
     html = report.build_daily_digest(stats, days_since_incident(conn),
-                                     link=report.sklad_link(cfg))
+                                     link=report.sklad_link(cfg), aging=aging_orders)
     try:
         post(cfg, html)
     except Exception:
@@ -243,7 +302,8 @@ def maybe_post_daily_digest(conn, cfg, post=None, shadow: bool = False) -> bool:
     # #312: `build_dl_digest` no longer renders the three `dl_current_health` gauges, so
     # skip computing them on the digest path — they stay on `/api/orders/dl/stats`.
     dl_stats = dl_provenance_stats_for_day(conn, yesterday, include_current_health=False)
-    dl_html = report.build_dl_digest(dl_stats, link=report.dl_sklad_link(cfg))
+    aging_dl = aging_review_backlog(conn, DL_CATEGORIES)
+    dl_html = report.build_dl_digest(dl_stats, link=report.dl_sklad_link(cfg), aging=aging_dl)
     if dl_html:
         dl_channel = int(getattr(cfg, "delivery_notes_channel_id", 0) or 0)
         if dl_channel:

@@ -391,3 +391,72 @@ def test_the_worker_tick_never_posts_the_digest_while_shadowing(pg, monkeypatch)
     worker.tick(pg, cfg, pipeline=lambda conn, cfg, message, snapshot_id: {"status": "ok"})
     assert posted == []
     assert pg.execute("SELECT count(*) FROM order_digest_sent").fetchone()[0] == 0
+
+
+# --- #329: aging review-backlog query -----------------------------------------
+
+def _aging_msg(pg, mid, category, proc_status, days_ago, subject="Objednávka X",
+               outcome="Odoo kontrola"):
+    pg.execute(
+        "INSERT INTO messages (message_id, category, subject, proc_status, proc_outcome, "
+        "created_at, processed) "
+        "VALUES (%s, %s, %s, %s, %s, now() - make_interval(days => %s), true)",
+        (mid, category, subject, proc_status, outcome, days_ago))
+
+
+def _open_q(pg, mid):
+    pg.execute(
+        "INSERT INTO order_questions (message_id, customer_ean, wording, item_key, status) "
+        "VALUES (%s, '111', 'x', 'x', 'open')", (mid,))
+
+
+def test_working_days_before_skips_weekends():
+    from datetime import date, timedelta
+    d = date(2026, 8, 12)
+    r = reliability._working_days_before(d, 2)
+    assert r < d
+    assert r.weekday() < 5, "must land on a weekday"
+    # exactly 2 weekdays counted stepping back from d to r
+    wd = sum(1 for i in range((d - r).days) if (r + timedelta(days=i + 1)).weekday() < 5)
+    assert wd == 2
+
+
+def test_aging_review_backlog_empty_is_quiet(pg):
+    assert reliability.aging_review_backlog(pg, reliability.ORDER_CATEGORIES) == {
+        "count": 0, "oldest_days": 0, "items": [], "min_working_days": 2}
+
+
+def test_aging_review_backlog_counts_only_aged_review_without_open_question(pg):
+    # aged review/partial orders → counted
+    _aging_msg(pg, "o-old1", "ai_orders", "review", 10, subject="Stará A")
+    _aging_msg(pg, "o-old2", "static_orders", "partial", 5, subject="Stará B")
+    # recent review order (created today) → too young, not aged
+    _aging_msg(pg, "o-new", "ai_orders", "review", 0)
+    # aged review order that already has an OPEN board question → already nudged, excluded
+    _aging_msg(pg, "o-q", "ai_orders", "review", 8)
+    _open_q(pg, "o-q")
+    # aged but a non-review terminal state → excluded
+    _aging_msg(pg, "o-ok", "ai_orders", "ok", 9)
+    # aged review delivery note → counted only on the DL side, never in the orders count
+    _aging_msg(pg, "dl-old", "dodacie_listy", "review", 7, subject="DL stará")
+
+    orders = reliability.aging_review_backlog(pg, reliability.ORDER_CATEGORIES)
+    assert orders["count"] == 2, "only the two aged, question-free review/partial orders"
+    assert orders["oldest_days"] == 10
+    assert orders["min_working_days"] == 2
+    subjects = [it["subject"] for it in orders["items"]]
+    assert subjects[0] == "Stará A", "oldest first"
+    assert set(subjects) == {"Stará A", "Stará B"}
+
+    dl = reliability.aging_review_backlog(pg, reliability.DL_CATEGORIES)
+    assert dl["count"] == 1
+    assert dl["items"][0]["subject"] == "DL stará"
+
+
+def test_aging_review_backlog_sample_is_capped_and_oldest_first(pg):
+    for i in range(8):
+        _aging_msg(pg, f"o{i}", "ai_orders", "review", 10 + i, subject=f"S{i}")
+    res = reliability.aging_review_backlog(pg, reliability.ORDER_CATEGORIES, sample=3)
+    assert res["count"] == 8, "count is the full backlog, not the sample size"
+    assert len(res["items"]) == 3, "sample is capped"
+    assert [it["subject"] for it in res["items"]] == ["S7", "S6", "S5"], "oldest first"

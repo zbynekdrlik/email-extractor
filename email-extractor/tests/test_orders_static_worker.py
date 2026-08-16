@@ -6,7 +6,7 @@ SYNTHETIC — constructed to match the documented template shapes, never real cu
 import pytest
 
 from app.config import Config
-from app.orders import edi, static_edi, static_parse, static_worker
+from app.orders import edi, static_edi, static_parse, static_worker, worker
 from app.orders import snapshot as snapshot_mod
 
 KARMEN_TEXT = (
@@ -865,3 +865,39 @@ def test_shadow_never_claims_even_when_a_real_n8n_row_already_exists(pg):
     assert state == (None, False, None)
     assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 1, \
         "shadow must not add a second edi_sent row of its own"
+
+
+def test_python_engine_crash_on_final_attempt_surfaces_a_real_diagnostic(pg, monkeypatch):
+    """#330: a static order whose live run crashes with an UNEXPECTED exception on its
+    FINAL allowed attempt must surface a real, diagnosable error carrying the exception
+    TYPE + MESSAGE + stage — never vanish silently the way the pre-fix engine did (it
+    only wrote `order_runs.error` + a log line, then `_claim`'s `attempts < MAX_ATTEMPTS`
+    guard quietly stopped reprocessing it, with nothing on `proc_status`/`email_events`).
+    This is the Python-engine analog of the n8n "Chyba: neznáma [line 150]" class of
+    undiagnosable stuck error the ticket is about."""
+    _msg(pg)
+    _snapshot(pg)
+    # attempts 4 -> `_claim` increments to 5 == MAX_ATTEMPTS, so after this crash the
+    # message can never be re-claimed; it must NOT disappear with no human diagnostic.
+    pg.execute("UPDATE messages SET attempts = %s WHERE message_id = 'm1'",
+               (worker.MAX_ATTEMPTS - 1,))
+
+    def boom(*a, **k):
+        raise RuntimeError("catalog snapshot vanished mid-run")
+
+    monkeypatch.setattr(static_parse, "parse_static_order", boom)
+
+    assert static_worker.tick(pg, _python_cfg()) == 0
+    ev = pg.execute(
+        "SELECT status, outcome, detail FROM email_events "
+        "WHERE message_id = 'm1' AND status = 'error'").fetchone()
+    assert ev is not None, (
+        "a static order crashing on its final attempt must surface a real error event, "
+        "not vanish silently")
+    status, outcome, detail = ev
+    assert "RuntimeError" in outcome, outcome
+    assert "catalog snapshot vanished mid-run" in outcome, outcome
+    assert "neznáma" not in outcome.lower(), outcome
+    assert "RuntimeError" in (detail.get("error") or ""), detail
+    assert pg.execute(
+        "SELECT proc_status FROM messages WHERE message_id = 'm1'").fetchone()[0] == "error"

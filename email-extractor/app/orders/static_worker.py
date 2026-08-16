@@ -217,7 +217,7 @@ def _claim(conn) -> dict | None:
                                    AND q.kind = 'mail' AND q.status = 'open')
                           ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
          RETURNING message_id, subject, from_addr, from_name, combined_text, body_text,
-                   has_attachments""",
+                   has_attachments, attempts""",
         (CATEGORY, worker.MAX_ATTEMPTS)).fetchone()
     return _as_message(row)
 
@@ -230,7 +230,7 @@ def _as_message(row) -> dict | None:
     # fallback — without it those silently no-op.
     return {"message_id": row[0], "subject": row[1] or "", "from_addr": row[2] or "",
             "from_name": row[3] or "", "combined_text": row[4] or row[5] or "",
-            "has_attachments": bool(row[6]),
+            "has_attachments": bool(row[6]), "attempts": int(row[7] or 0),
             "today": datetime.now(UTC).date().isoformat()}
 
 
@@ -520,6 +520,22 @@ def tick(conn, cfg, pipeline=None, upload=None, post=None, llm_client=None) -> i
             conn.execute(
                 "UPDATE messages SET processing_at = NULL WHERE message_id = %s",
                 (message["message_id"],))
+            # #330: `_claim` already incremented `attempts`; once it reaches MAX_ATTEMPTS
+            # the `_claim` guard (`attempts < MAX_ATTEMPTS`) stops reprocessing this
+            # message, so it would otherwise vanish with NO human-visible diagnostic —
+            # exactly the undiagnosable "Chyba: neznáma [line 150]" class the n8n engine
+            # produced. On that FINAL attempt, surface a REAL error (rollup=True ->
+            # proc_status='error') carrying the exception type + message + stage. The
+            # first MAX_ATTEMPTS-1 crashes stay silent-and-retryable (a transient crash
+            # must still auto-recover), so this fires at most once per message — never a
+            # per-tick email_events flood on a deterministic crash.
+            if int(message.get("attempts") or 0) >= worker.MAX_ATTEMPTS:
+                report.log_event(
+                    conn, message["message_id"], stage="error", status="error",
+                    outcome=report.crash_outcome(e, "run_live"),
+                    detail={"error": repr(e), "stage": "run_live",
+                            "attempts": int(message.get("attempts") or 0)},
+                    workflow=WORKFLOW)
             return 0
         worker._finish_run(conn, run_id, result.get("status", "ok"), result)
         worker._check_spend_cap(conn, cfg, shadow=False)

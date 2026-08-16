@@ -123,6 +123,41 @@ def test_a_crashing_pipeline_releases_the_claim_and_does_not_mark_processed(pg):
     assert run[0] == "error" and "exploded" in run[1]
 
 
+def test_python_engine_crash_on_final_attempt_surfaces_a_real_diagnostic(pg):
+    """#330: an ai_orders message whose live run crashes with an UNEXPECTED exception
+    on its FINAL allowed attempt must surface a real, diagnosable error carrying the
+    exception TYPE + MESSAGE + stage — never vanish silently the way the pre-fix engine
+    did (it only wrote `order_runs.error` + a log line and released the claim, then
+    `_claim`'s `attempts < MAX_ATTEMPTS` guard quietly stopped reprocessing it, with
+    nothing on `proc_status`/`email_events`). This is the ai_orders engine's analog of
+    the identical gap fixed for the static engine (`static_worker.py`, same #330) —
+    `worker.tick`'s crash handler had the same silent-vanish shape."""
+    _msg(pg)
+    _snapshot(pg)
+    # attempts 4 -> `_claim` increments to 5 == MAX_ATTEMPTS, so after this crash the
+    # message can never be re-claimed; it must NOT disappear with no human diagnostic.
+    pg.execute("UPDATE messages SET attempts = %s WHERE message_id = 'm1'",
+               (worker.MAX_ATTEMPTS - 1,))
+
+    def boom(*a, **k):
+        raise RuntimeError("catalog snapshot vanished mid-run")
+
+    assert worker.tick(pg, _cfg(ai_orders_engine="python"), pipeline=boom) == 0
+    ev = pg.execute(
+        "SELECT status, outcome, detail FROM email_events "
+        "WHERE message_id = 'm1' AND status = 'error'").fetchone()
+    assert ev is not None, (
+        "an ai_orders message crashing on its final attempt must surface a real error "
+        "event, not vanish silently")
+    status, outcome, detail = ev
+    assert "RuntimeError" in outcome, outcome
+    assert "catalog snapshot vanished mid-run" in outcome, outcome
+    assert "neznáma" not in outcome.lower(), outcome
+    assert "RuntimeError" in (detail.get("error") or ""), detail
+    assert pg.execute(
+        "SELECT proc_status FROM messages WHERE message_id = 'm1'").fetchone()[0] == "error"
+
+
 def test_other_categories_are_never_touched(pg):
     _msg(pg, mid="static1", category="static_orders")
     _snapshot(pg)
