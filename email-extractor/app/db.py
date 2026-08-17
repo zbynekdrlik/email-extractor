@@ -64,6 +64,20 @@ DEDUP_HELD_ALERTS = [
 ]
 
 
+# --- #331 (revision 4): drop the dead legacy `processed` table --------------------
+# `processed` was the original 2026-06-25 n8n-era contract ("each terminal n8n workflow
+# writes message_id"); the Python engines took over the categories long ago and NOTHING
+# reads or writes it any more — 0 rows over its whole history, no app/test reference, absent
+# from conftest's TRUNCATE list, and none of the live n8n workflows touch it. The real
+# "processed" contract today is the messages.processed column + the email_events rollup
+# (n8n reads via `status`). The CREATE was also removed from db_schema.py's baseline, so on a
+# fresh/self-healing DB the table is never created and this DROP is a plain IF EXISTS no-op;
+# on a pre-drop prod DB (ledger at r3) this is the ONE statement that removes it.
+DROP_PROCESSED = [
+    "DROP TABLE IF EXISTS processed",
+]
+
+
 # SCHEMA above is FROZEN as revision 1 (the baseline). NEVER edit those statements for a
 # schema change — append a NEW numbered migrate.Revision to this list instead
 # (immutable-migrations, #269). run_migrations() applies only the unapplied revisions, in
@@ -72,6 +86,7 @@ REVISIONS = [
     migrate.Revision(migrate.BASELINE_REVISION, "baseline", SCHEMA),
     migrate.Revision(2, "add_dl_nonwarehouse_supplier", DL_NONWAREHOUSE_SUPPLIER),
     migrate.Revision(3, "dedup_held_channel0_alerts", DEDUP_HELD_ALERTS),
+    migrate.Revision(4, "drop_processed_table", DROP_PROCESSED),
 ]
 
 

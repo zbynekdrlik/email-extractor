@@ -73,16 +73,9 @@ SCHEMA = [
     # serializes across concurrent init_schema() callers, unlike the ALTER TABLE +
     # backfill migrations elsewhere in this file that genuinely need the lock). ---
     "CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id)",
-    """
-    CREATE TABLE IF NOT EXISTS processed (
-        id           BIGSERIAL PRIMARY KEY,
-        message_id   TEXT NOT NULL,
-        handled_by   TEXT,
-        category     TEXT,
-        result       TEXT,
-        processed_at TIMESTAMPTZ DEFAULT now()
-    )
-    """,
+    # NOTE: the legacy `processed` table (dead n8n-era contract) was removed here in #331 —
+    # it had 0 consumers and 0 rows; migrate.Revision(4, "drop_processed_table") drops it on
+    # any DB that still carries it. See db.py's DROP_PROCESSED for the full rationale.
     """
     CREATE TABLE IF NOT EXISTS folder_state (
         folder       TEXT PRIMARY KEY,
