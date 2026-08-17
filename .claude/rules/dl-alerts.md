@@ -62,8 +62,10 @@ channel configured yet — the #310 hold): it never resolves, so the window expi
 #308 `human_processing.sweep` (and the `dl_stuck_classified` sweep) re-enqueued the same
 message every ~4h, piling up duplicate held rows (live #319: 65 held rows for only 10
 distinct messages). Fix: the window applies ONLY to delivered rows —
-`WHERE kind=%s AND message_id=%s AND (delivered_at IS NULL OR created_at > now() -
-make_interval(hours => %s))`. An undelivered row suppresses a re-enqueue forever (there is
+`WHERE kind=%s AND message_id=%s AND (delivered_at IS NULL OR delivered_at > now() -
+make_interval(hours => %s))` (the recency term was anchored on `created_at` here until
+#334 corrected it to `delivered_at` — see the #334 section below). An undelivered row
+suppresses a re-enqueue forever (there is
 nothing to remind about while the first alert hasn't even gone out; the held row itself
 still delivers once an ops channel is set, per `flush_pending`'s re-derive). **Any FUTURE
 dedup guard over a durable outbox that can HOLD a row undelivered must make the same split
@@ -92,3 +94,33 @@ The subquery's `WHERE` must be byte-identical to the outer `WHERE` so every `min
 itself a delete-candidate (a wider subquery population could let a delivered/real-channel
 row own the `min` and orphan-delete a whole group). A data-cleanup DELETE is a legitimate
 migration revision (transaction-safe, idempotent on re-run) — see `schema-migrations.md`.
+
+## The DELIVERED-row dedup window must anchor on `delivered_at`, never `created_at` (#334)
+
+The #327 split above bounds a DELIVERED row's dedup by a recency window — but that window's
+recency term must be measured from **`delivered_at`** (the actual delivery), NOT `created_at`.
+`flush_pending()` only ever writes `SET delivered_at = now()`; it NEVER touches `created_at`.
+So a row that sat HELD for days at `channel_id=0` (the #310/#332 backlog, waiting for an ops
+channel) then finally delivered has a `created_at` far outside the 4h window. Anchoring the
+window on `created_at` (`created_at > now() - make_interval(hours => %s)`) made the
+just-delivered row stop matching the dedup predicate the instant it delivered — so the #308
+`human_processing.sweep` (whose candidate query re-selects `category='human_processing' AND
+processed=false` forever, never durably marking a message notified) re-enqueued the same
+`message_id` ~15s later, and the ops channel got a DUPLICATE grouped post, repeating every ~4h.
+Live incident 2026-08-16 21:42: right after the ops channel was configured (#332), 15 held
+`human_processing_review` alerts delivered, then 15s later the same 10 message_ids were
+re-enqueued and channel 592 got a duplicate post.
+
+Fix (one word in the predicate + docstrings): `delivered_at IS NULL OR delivered_at > now() -
+make_interval(hours => %s)` — mirrors `confirm.py`'s `last_alert_at` recency (measured from
+the last alert). This preserves the intended 4h reminder cadence, now measured from the real
+delivery. **Any FUTURE recency/reminder window over a durable outbox whose rows can be HELD
+undelivered for an arbitrary time before delivery must anchor on the DELIVERY timestamp
+(`delivered_at`/`last_alert_at`), never the creation timestamp** — `created_at` silently
+breaks the instant a held-then-delivered row exists, which is exactly the state this outbox
+is built to support. Regression: `test_dl_alerts.py::
+test_already_pending_a_held_then_delivered_row_still_dedupes_even_though_created_at_is_stale`
+(insert `created_at = now() - interval '3 days'`, `delivered_at = now()`, assert
+`already_pending()` is True). The two pre-existing delivered-row window tests were re-scoped
+to age `delivered_at` instead of `created_at` (the same "re-scope the tests that encoded the
+old anchor" step #327 itself did when it moved the window to delivered-only).

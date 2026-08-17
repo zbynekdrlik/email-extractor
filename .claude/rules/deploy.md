@@ -328,3 +328,34 @@ carries them (the admin-stats path). Never POST it.
 inside a Slovak `„…"` quote pair breaks a DOUBLE-quoted `--goal`/`--achieved` arg (the `"`
 closes the shell quote, argparse then errors "unrecognized arguments" and NO card fires,
 though a piped `| tail` masks the real exit code). Single-quote the whole value.
+
+## Setting add-on options over the Supervisor REST API — a PARTIAL POST REPLACES all user options
+
+`ha apps options` (and the older `ha addons options`) is READ-ONLY — there is NO
+set-subcommand; the only way to change an add-on's options from the CLI/SSH is the
+Supervisor REST API. From the HA host the Supervisor is reachable directly at
+`http://172.30.32.2/addons/e0ac7775_email_extractor/options` (the same endpoint
+`http://supervisor/...` resolves to from inside `hassio_cli`; `172.30.32.2` is the
+Supervisor's fixed docker-network IP):
+
+```bash
+export SUPERVISOR_TOKEN=$(cat /run/s6/container_environment/HASSIO_TOKEN)  # airuleset:secret-read-ok
+# 1. READ the current options FIRST (you must send them ALL back):
+curl -s -H "Authorization: Bearer $SUPERVISOR_TOKEN" \
+  http://172.30.32.2/addons/e0ac7775_email_extractor/info | jq '.data.options'
+# 2. Merge your change into that FULL dict, then POST the WHOLE thing:
+curl -s -X POST -H "Authorization: Bearer $SUPERVISOR_TOKEN" -H "Content-Type: application/json" \
+  http://172.30.32.2/addons/e0ac7775_email_extractor/options -d @/tmp/merged_options.json
+# body shape: {"options": { ...EVERY existing key PLUS your change... }}
+ha apps restart e0ac7775_email_extractor   # options only take effect after a restart
+```
+
+**A partial POST REPLACES all user options — it is NOT a merge.** POSTing
+`{"options": {"one_key": "..."}}` alone drops every OTHER configured option (and then
+fails Supervisor validation with "Missing option '<required>'"). ALWAYS read the current
+options, merge your one change in, and send the FULL dict back. For a large payload,
+base64 it to the host and `curl -d @/tmp/x.json` (see the "Updating a supervisor add-on's
+options with a LARGER merged JSON payload" gotcha above — zero shell-quoting to get right).
+**Never write real secret values into this committed rule file** — the token comes from
+`/run/s6/container_environment/HASSIO_TOKEN` on the box, option VALUES stay in the live
+`/data/options.json`, never in git.
