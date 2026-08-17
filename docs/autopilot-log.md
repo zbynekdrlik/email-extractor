@@ -3665,3 +3665,22 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
   (held ch0 PRED ~65/~10 správ → PO cleanup ≈15, potom stabilné) + run-card = supervízor.
 - **Playbook:** doplnok do `.claude/rules/dl-alerts.md` (dedup po delivered_at, nie len po veku;
   jednorazové data-cleanup = migračná revízia, nie perpetuálna maintenance funkcia).
+
+## 2026-08-17 — #331 (DROP mŕtvej legacy tabuľky `processed`) — v0.9.107
+- **Príčina:** `processed` tabuľka = pozostatok pôvodného n8n-éra kontraktu (2026-06-25);
+  0 riadkov za celú históriu, 0 konzumentov (žiaden read/write v `app/`+`tests/`, nie je v
+  `conftest.py` TRUNCATE zozname, žiaden zo 7 živých n8n workflowov sa jej nedotýka). Skutočný
+  „spracované" kontrakt drží stĺpec `messages.processed` + `email_events` rollup. `fix_requests`
+  je NAOPAK živá (producent `httpapi_fixqueue.py`, konzument dashboard + fixqueue, testovaná) →
+  ostáva nedotknutá.
+- **Zmena:** `migrate.Revision(4, "drop_processed_table", ["DROP TABLE IF EXISTS processed"])`
+  do `db.REVISIONS` + odstránený mŕtvy `CREATE TABLE processed` z `db_schema.py` baseline
+  (nie mechanizmus zmeny schémy — tú robí r4 — ale čistenie zdroja; r4 je na fresh/self-heal
+  DB `IF EXISTS` no-op, na prod (ledger r3) jediný statement čo tabuľku dropne). Architektúra
+  v `CLAUDE.md` opravená (žiadna `processed` tabuľka, `messages.processed` + rollup).
+- **Test (RED→GREEN):** `test_migrate.py::test_drop_processed_removes_the_dead_legacy_table` —
+  po plnej migrácii tabuľka neexistuje; na DB kde ešte je (pre-drop prod) ju r4 odstráni;
+  re-migrácia s už chýbajúcou tabuľkou = čistý no-op. RED `4f10e09` (StopIteration, revízia
+  neexistuje) → GREEN `35f1b24`.
+- **Commity:** bump `717cf08`, red `4f10e09`, green `35f1b24`, docs (tento). Worktree dispatch
+  (isolated, sole worker), test-pg :15433.
