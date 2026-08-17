@@ -15,12 +15,17 @@ live values belong in the add-on options / `.env`.
 
 - **Extractor (this add-on)** — read-only on IMAP, polls configured folders, dedups
   by `message_id`, extracts, stores originals on its volume, writes Postgres.
-- **Postgres** — `messages` (extractor-owned), `attachments` (text + file URL +
-  `needs_vision`), `processed` (each terminal n8n workflow writes `message_id` when
-  done). NO IMAP folder moves anywhere.
-- **n8n** — reads new messages (`status='new'` / not in `processed`), classifies
-  (existing `Email Sorting`), runs AI Vision selectively on files fetched by URL,
-  writes `processed`. Forwards via SMTP using stored `raw_eml`.
+- **Postgres** — `messages` (extractor-owned; "done" is tracked by the `messages.processed`
+  BOOLEAN column plus the `proc_status`/`proc_outcome` fields the `email_events` rollup
+  trigger maintains), `attachments` (text + file URL + `needs_vision`). NO IMAP folder moves
+  anywhere. (There is NO separate `processed` table — the original n8n-era one had 0
+  consumers and was dropped in #331.)
+- **n8n** — reads new messages by `status`, classifies (existing `Email Sorting`), runs AI
+  Vision selectively on files fetched by URL, and records outcomes via `email_events` /
+  `messages`. Forwards via SMTP using stored `raw_eml`. (The order + delivery-note
+  categories — `ai_orders`/`static_orders`/`dodacie_listy` — are now owned by the Python
+  engines; the dispatcher's trigger branches for them are disabled. Faktúry and reklamácie
+  still run as n8n workflows.)
 
 ## Extraction strategy (validated by the 100-email spike)
 

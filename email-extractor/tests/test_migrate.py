@@ -239,3 +239,34 @@ def test_data_untouched_across_reruns():
         assert before == after == 1
         assert conn.execute(
             "SELECT message_id FROM messages").fetchone()[0] == "keep-me-269"
+
+
+# --- #331: the dead legacy `processed` table is dropped by a versioned revision ---
+# The n8n-era `processed` table had 0 rows over its whole history and zero consumers (no
+# app/test read or write, absent from conftest's TRUNCATE list, no live n8n workflow touches
+# it). Revision "drop_processed_table" removes it. The baseline no longer CREATEs it either,
+# so the drop is a no-op on a fresh DB (IF EXISTS) but genuinely removes it on a pre-drop
+# prod DB that still carries it.
+
+def test_drop_processed_removes_the_dead_legacy_table():
+    drop_rev = next(r.revision for r in db.REVISIONS if r.name == "drop_processed_table")
+    with fresh_db() as (conn, _dsn):
+        db.init_schema(conn)                            # full schema incl. the drop revision
+        assert _regclass(conn, "processed") is None     # dead table absent after full migrate
+
+        # simulate a pre-drop prod DB: the table exists and the ledger stops BEFORE the drop
+        conn.execute(
+            "CREATE TABLE processed (id BIGSERIAL PRIMARY KEY, message_id TEXT NOT NULL, "
+            "handled_by TEXT, category TEXT, result TEXT, processed_at TIMESTAMPTZ DEFAULT now())")
+        # roll back ONLY the drop revision's ledger row (scoped by = drop_rev, not >=, so
+        # this stays correct when a later rev N is appended — that row is left untouched).
+        conn.execute("DELETE FROM schema_version WHERE revision = %s", (drop_rev,))
+        assert _regclass(conn, "processed") is not None
+
+        done = db.init_schema(conn)                     # only the pending drop revision re-runs
+        assert drop_rev in done
+        assert _regclass(conn, "processed") is None     # and it removed the dead table
+
+        # idempotent no-op: DROP TABLE IF EXISTS — re-migrating with the table already gone
+        assert db.init_schema(conn) == []
+        assert _regclass(conn, "processed") is None
