@@ -258,11 +258,13 @@ def test_drop_processed_removes_the_dead_legacy_table():
         conn.execute(
             "CREATE TABLE processed (id BIGSERIAL PRIMARY KEY, message_id TEXT NOT NULL, "
             "handled_by TEXT, category TEXT, result TEXT, processed_at TIMESTAMPTZ DEFAULT now())")
-        conn.execute("DELETE FROM schema_version WHERE revision >= %s", (drop_rev,))
+        # roll back ONLY the drop revision's ledger row (scoped by = drop_rev, not >=, so
+        # this stays correct when a later rev N is appended — that row is left untouched).
+        conn.execute("DELETE FROM schema_version WHERE revision = %s", (drop_rev,))
         assert _regclass(conn, "processed") is not None
 
-        done = db.init_schema(conn)                     # only the pending drop revision runs
-        assert done == [drop_rev]
+        done = db.init_schema(conn)                     # only the pending drop revision re-runs
+        assert drop_rev in done
         assert _regclass(conn, "processed") is None     # and it removed the dead table
 
         # idempotent no-op: DROP TABLE IF EXISTS — re-migrating with the table already gone

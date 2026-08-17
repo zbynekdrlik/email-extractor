@@ -22,9 +22,10 @@ live values belong in the add-on options / `.env`.
   consumers and was dropped in #331.)
 - **n8n** — reads new messages by `status`, classifies (existing `Email Sorting`), runs AI
   Vision selectively on files fetched by URL, and records outcomes via `email_events` /
-  `messages`. Forwards via SMTP using stored `raw_eml`. (The order/DL/faktúry/reklamácie
-  categories are now owned by the Python engines; the dispatcher's trigger branches are
-  disabled.)
+  `messages`. Forwards via SMTP using stored `raw_eml`. (The order + delivery-note
+  categories — `ai_orders`/`static_orders`/`dodacie_listy` — are now owned by the Python
+  engines; the dispatcher's trigger branches for them are disabled. Faktúry and reklamácie
+  still run as n8n workflows.)
 
 ## Extraction strategy (validated by the 100-email spike)
 
