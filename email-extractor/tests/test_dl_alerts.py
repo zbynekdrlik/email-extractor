@@ -217,6 +217,23 @@ def test_already_pending_default_window_is_four_hours_for_a_delivered_row(pg):
     assert dl_alerts.already_pending(pg, "dl_stuck_classified", "m1") is False
 
 
+def test_already_pending_a_held_then_delivered_row_still_dedupes_even_though_created_at_is_stale(pg):
+    """#334: the live 2026-08-16 21:42 incident. A row HELD for days at channel_id=0 (the
+    #310/#332 backlog, no ops channel configured yet) then finally delivered has `created_at`
+    far outside the 4h window — but `flush_pending()` only ever sets `delivered_at`, it never
+    touches `created_at`. The dedup window for a delivered row must anchor on `delivered_at`
+    (the ACTUAL delivery), NOT `created_at`, or the just-delivered row immediately stops
+    deduping and the #308 sweep re-enqueues the same `message_id` ~15s later — producing a
+    duplicate grouped ops post to the channel, repeating every ~4h. Anchored on `created_at`
+    (the bug) this returns False; anchored on `delivered_at` (the fix) it returns True."""
+    pg.execute(
+        "INSERT INTO pending_alerts (channel_id, kind, message_id, body_html, "
+        "created_at, delivered_at) VALUES "
+        "(243, 'human_processing_review', 'm1', '<p>held then delivered</p>', "
+        "now() - interval '3 days', now())")
+    assert dl_alerts.already_pending(pg, "human_processing_review", "m1") is True
+
+
 # --- #327: an UNDELIVERED row dedupes regardless of age (the 4h window is delivered-only) --
 
 def test_already_pending_dedupes_an_undelivered_alert_regardless_of_age(pg):
