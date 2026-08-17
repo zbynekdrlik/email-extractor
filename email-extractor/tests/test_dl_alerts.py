@@ -198,12 +198,18 @@ def test_already_pending_a_delivered_row_expires_after_the_window_so_a_reprocess
     #327: this test (and the default-window one below) used to enqueue an UNDELIVERED row
     and assert it stops deduping past the window — that encoded the exact bug #327 fixes.
     The window now governs DELIVERED rows only, so both are re-scoped to deliver first;
-    an UNDELIVERED row deduping regardless of age has its own dedicated test above."""
+    an UNDELIVERED row deduping regardless of age has its own dedicated test above.
+
+    #334: the window is now measured from `delivered_at`, not `created_at` — so the ageing
+    UPDATE below moves `delivered_at` (the real delivery instant), not `created_at`. Ageing
+    `created_at` alone no longer expires the window (that was exactly the bug: a held row
+    with a stale `created_at` but a recent `delivered_at` must STILL dedupe — see the
+    held-then-delivered test above)."""
     dl_alerts.enqueue(pg, 243, "dl_stuck_classified", "<p>x</p>", message_id="m1")
     dl_alerts.flush_pending(pg, cfg=None, post=lambda c, h, **kw: {"id": 1})  # delivered
     assert dl_alerts.already_pending(pg, "dl_stuck_classified", "m1",
                                      window_hours=4) is True
-    pg.execute("UPDATE pending_alerts SET created_at = created_at - interval '5 hours'")
+    pg.execute("UPDATE pending_alerts SET delivered_at = delivered_at - interval '5 hours'")
     assert dl_alerts.already_pending(pg, "dl_stuck_classified", "m1",
                                      window_hours=4) is False
 
@@ -212,7 +218,8 @@ def test_already_pending_default_window_is_four_hours_for_a_delivered_row(pg):
     dl_alerts.enqueue(pg, 243, "dl_stuck_classified", "<p>x</p>", message_id="m1")
     dl_alerts.flush_pending(pg, cfg=None, post=lambda c, h, **kw: {"id": 1})  # delivered
     assert dl_alerts.already_pending(pg, "dl_stuck_classified", "m1") is True
-    pg.execute("UPDATE pending_alerts SET created_at = created_at - interval '4 hours "
+    # #334: age delivered_at (the recency anchor), not created_at.
+    pg.execute("UPDATE pending_alerts SET delivered_at = delivered_at - interval '4 hours "
               "1 minute'")
     assert dl_alerts.already_pending(pg, "dl_stuck_classified", "m1") is False
 

@@ -135,8 +135,14 @@ def already_pending(conn, kind: str, message_id: str,
       very first alert has not even gone out there is nothing to remind about, and the
       already-held row will still deliver once it can (e.g. a held channel-0 operator
       alert delivers as soon as an ops channel is configured, per `flush_pending`);
-    * a DELIVERED row dedupes only WITHIN `window_hours` — the recency protection against
-      an immediate re-ask right after delivery.
+    * a DELIVERED row dedupes only WITHIN `window_hours` **measured from `delivered_at`**
+      (NOT `created_at`) — the recency protection against an immediate re-ask right after
+      delivery. #334: `flush_pending()` sets only `delivered_at`, never `created_at`, so a
+      row HELD for days (the #310/#332 channel-0 backlog) then finally delivered has a
+      `created_at` far outside the window; anchoring the window on `created_at` made the
+      dedup fail the instant such a held row delivered, and the #308 sweep re-enqueued the
+      same message ~15s later — a duplicate grouped ops post, repeating every ~4h (mirrors
+      `confirm.py`'s `last_alert_at` recency, which is measured from the last alert too).
 
     **#239 reopened, finding 3: this dedup used to be PERMANENT (never expires) — that
     was wrong.** The original design assumed the two kinds this guards
@@ -151,12 +157,13 @@ def already_pending(conn, kind: str, message_id: str,
     duplicate held rows (live #319: 65 held rows for only 10 distinct messages). The
     window now applies ONLY to delivered rows; an undelivered row suppresses a re-enqueue
     forever (until it is finally delivered, after which the 4h `DEFAULT_REMINDER_HOURS`
-    recency window — the same value `confirm.py` uses — governs a genuine re-alert)."""
+    recency window — the same value `confirm.py` uses, and, per #334, measured from
+    `delivered_at` — governs a genuine re-alert)."""
     if not message_id:
         return False
     row = conn.execute(
         "SELECT 1 FROM pending_alerts WHERE kind = %s AND message_id = %s "
-        "AND (delivered_at IS NULL OR created_at > now() - make_interval(hours => %s)) "
+        "AND (delivered_at IS NULL OR delivered_at > now() - make_interval(hours => %s)) "
         "LIMIT 1",
         (kind, message_id, max(1, int(window_hours)))).fetchone()
     return row is not None
