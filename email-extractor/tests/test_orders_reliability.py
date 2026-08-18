@@ -410,6 +410,12 @@ def _open_q(pg, mid):
         "VALUES (%s, '111', 'x', 'x', 'open')", (mid,))
 
 
+def _expired_q(pg, mid):
+    pg.execute(
+        "INSERT INTO order_questions (message_id, customer_ean, wording, item_key, status) "
+        "VALUES (%s, '111', %s, %s, 'expired')", (mid, mid, mid))
+
+
 def test_working_days_before_skips_weekends():
     from datetime import date, timedelta
     d = date(2026, 8, 12)
@@ -451,6 +457,17 @@ def test_aging_review_backlog_counts_only_aged_review_without_open_question(pg):
     dl = reliability.aging_review_backlog(pg, reliability.DL_CATEGORIES)
     assert dl["count"] == 1
     assert dl["items"][0]["subject"] == "DL stará"
+
+
+def test_aging_review_backlog_excludes_a_message_whose_question_expired(pg):
+    """#341: an EXPIRED board question means the message is handled manually and must
+    never be re-nudged by the aging digest — the same exclusion an OPEN question gets."""
+    _aging_msg(pg, "o-old1", "ai_orders", "review", 10, subject="Stará A")
+    _aging_msg(pg, "o-exp", "ai_orders", "review", 9, subject="Expirovaná")
+    _expired_q(pg, "o-exp")
+    orders = reliability.aging_review_backlog(pg, reliability.ORDER_CATEGORIES)
+    assert orders["count"] == 1, "the expired-question message must be excluded"
+    assert orders["items"][0]["subject"] == "Stará A"
 
 
 def test_aging_review_backlog_sample_is_capped_and_oldest_first(pg):
