@@ -249,8 +249,11 @@ def aging_review_backlog(conn, categories, min_working_days: int = AGING_REVIEW_
         "WHERE m.category = ANY(%s) "
         "  AND m.proc_status IN ('review', 'partial') "
         "  AND m.created_at::date < %s "
+        # #341: an EXPIRED question means the message is on manual review and must never
+        # be re-nudged here — the same exclusion an OPEN question already gets.
         "  AND NOT EXISTS (SELECT 1 FROM order_questions q "
-        "                   WHERE q.message_id = m.message_id AND q.status = 'open')")
+        "                   WHERE q.message_id = m.message_id "
+        "                     AND q.status IN ('open', 'expired'))")
     head = conn.execute(
         "SELECT count(*), (CURRENT_DATE - min(m.created_at)::date) " + where,
         (cats, cutoff)).fetchone()

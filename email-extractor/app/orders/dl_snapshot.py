@@ -302,6 +302,24 @@ def dl_catalog_for_management(conn) -> list[dict]:
     return [dict(r, overridden=r["gtin"] in overrides) for r in merged]
 
 
+def retired_dl_cards(conn) -> list[dict]:
+    """#337: the RETIRED override cards — present in `dl_catalog_overrides` with
+    `retired=true`, therefore ABSENT from the effective/frozen catalog (`_merge_dl_catalog`
+    drops them). A delivery item that corresponds to one of these is a KNOWN product whose
+    automatic EDI has no safe warehouse target (the 9 beverage cards, #337) — the DL worker
+    recognizes it and routes it to manual review instead of treating it as an unknown and
+    flooding the nástenka with a per-delivery question. Each row carries `retired: True`.
+    Deliberately kept SEPARATE from `catalog_gtins` (which stays active-only) so the
+    memory-rescue filter (`dl_memory.resolve(catalog_gtins=…)`) can never resurrect one."""
+    rows = conn.execute(
+        "SELECT gtin, name, doplnok, mass, sklad, cena FROM dl_catalog_overrides "
+        "WHERE retired").fetchall()
+    return [{"gtin": r[0], "name": r[1], "doplnok": r[2] or "",
+             "mass": float(r[3]) if r[3] is not None else None, "sklad": r[4] or "",
+             "cena": float(r[5]) if r[5] is not None else None, "retired": True}
+            for r in rows]
+
+
 def upsert_dl_catalog_card(conn, gtin: str, name: str, *, doplnok: str = "",
                            mass: float | None = None, sklad: str = "",
                            cena: float | None = None) -> None:

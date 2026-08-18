@@ -51,6 +51,11 @@ log = logging.getLogger("orders.question_alerts")
 
 DEFAULT_STALE_WORKING_DAYS = 2
 DEFAULT_ESCALATE_WORKING_DAYS = 4
+# #341: a question open across MORE than this many working days is auto-expired.
+DEFAULT_EXPIRE_WORKING_DAYS = 2
+# `processed_by` / audit marker for a message routed to review by expiry (never a real
+# processor name — it makes the auto-expiry provenance obvious in the timeline).
+EXPIRED_BY = "auto-expiry"
 
 # Kinds answered on the DELIVERY-NOTES-only nástenka (`/sklad-dl`, `report.dl_sklad_link`)
 # and routed to `delivery_notes_channel_id` — every other kind is an AI-orders question,
@@ -244,3 +249,63 @@ def sweep(conn, cfg, now: datetime | None = None) -> int:
         log.info("enqueued %s question alert (%s): %d question(s)", level,
                  "dl" if is_dl else "orders", len(ids))
     return marked
+
+
+def expire_stale(conn, cfg, now: datetime | None = None) -> int:
+    """#341: auto-expire every OPEN board question open across MORE than
+    `question_expire_working_days` (default 2) distinct working days (Mon-Fri,
+    Europe/Bratislava — `_weekdays_touched`, the SAME counter the #237 reminder uses, so
+    the weekend arithmetic is identical: a Friday-opened question has touched only
+    {Fri, Mon} = 2 on Monday and is NOT expired, {Fri, Mon, Tue} = 3 on Tuesday and is).
+
+    Expiry is a NEUTRAL terminal state (`status='expired'`) that bypasses EVERY teach/
+    answer path — critically the `mail`-kind apply, whose BOTH answers write a durable
+    `mail_rules(sender_norm, subject_key)` rule that (with a generic "Re: objednávka"
+    subject from a real customer) would silently discard their future orders. It writes
+    NOTHING learnable (no mail_rules, no teach.apply, no item/dl memory), and routes the
+    underlying message honestly to manual review: `processed=true` (so it is never
+    re-claimed nor re-asked, and stays out of the n8n "zaseknuté" stuck list, which reads
+    `processed=false`) plus a rollup review `email_events` row. Expired questions leave
+    the open list automatically (every reader queries `status='open'`) and are excluded
+    from the aging-review digest (`reliability.aging_review_backlog` excludes
+    `status IN ('open','expired')`), so a stale question is never reminded again.
+
+    Deliberately NOT gated on `confirm.morning_check_active`: this is a silent state
+    cleanup, not a notification, and `_weekdays_touched` already excludes weekends — so a
+    question is never expired before its full working days pass, whenever the sweep ticks.
+    Returns how many questions were expired.
+    """
+    now = now or datetime.now(UTC)
+    expire_days = int(getattr(cfg, "question_expire_working_days",
+                              DEFAULT_EXPIRE_WORKING_DAYS) or DEFAULT_EXPIRE_WORKING_DAYS)
+    rows = conn.execute(
+        "SELECT id, message_id, created_at FROM order_questions "
+        "WHERE status = 'open'").fetchall()
+    expired_ids: list[int] = []
+    per_message: dict[str, list[int]] = {}
+    for qid, message_id, created_at in rows:
+        if _weekdays_touched(created_at, now) > expire_days:
+            expired_ids.append(int(qid))
+            if message_id:
+                per_message.setdefault(message_id, []).append(int(qid))
+    if not expired_ids:
+        return 0
+
+    conn.execute(
+        """UPDATE order_questions
+              SET status = 'expired', answer = '{"expired": true}'::jsonb,
+                  answered_by = %s, answered_at = %s
+            WHERE id = ANY(%s)""", (EXPIRED_BY, now, expired_ids))
+    outcome = (f"Otázka na nástenke expirovala (otvorená viac ako {expire_days} pracovné "
+               "dni bez odpovede) — správa je na ručné vybavenie; systém ju už "
+               "nepripomína.")
+    for message_id, qids in per_message.items():
+        conn.execute(
+            """UPDATE messages SET processed = true, processed_at = now(),
+                   processed_by = %s, processing_at = NULL
+                WHERE message_id = %s""", (EXPIRED_BY, message_id))
+        report.log_event(conn, message_id, stage="review", status="review",
+                         outcome=outcome, detail={"expired_questions": qids}, rollup=True)
+    log.info("expired %d stale question(s) across %d message(s)",
+             len(expired_ids), len(per_message))
+    return len(expired_ids)

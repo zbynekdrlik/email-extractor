@@ -10,19 +10,20 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from app.config import Config
-from app.orders import dl_alerts, question_alerts
+from app.orders import dl_alerts, question_alerts, teach
 
 PG_DSN = os.environ.get("PG_TEST_DSN")
 TZ = ZoneInfo("Europe/Bratislava")
 
 # 2026-08-11 = Tuesday, 08-12 = Wednesday, 08-13 = Thursday, 08-14 = Friday,
-# 08-15 = Saturday, 08-16 = Sunday, 08-17 = Monday.
+# 08-15 = Saturday, 08-16 = Sunday, 08-17 = Monday, 08-18 = Tuesday.
 TUE = datetime(2026, 8, 11, 17, 42, tzinfo=TZ)
 WED = datetime(2026, 8, 12, 18, 13, tzinfo=TZ)
 THU = datetime(2026, 8, 13, 11, 0, tzinfo=TZ)
 FRI = datetime(2026, 8, 14, 11, 0, tzinfo=TZ)
 SAT = datetime(2026, 8, 15, 11, 0, tzinfo=TZ)
 NEXT_MON = datetime(2026, 8, 17, 11, 0, tzinfo=TZ)
+NEXT_TUE = datetime(2026, 8, 18, 11, 0, tzinfo=TZ)
 
 
 def _cfg(**kw):
@@ -72,6 +73,26 @@ def _reminder_sent_at(pg, qid):
 def _escalated_at(pg, qid):
     return pg.execute(
         "SELECT escalated_at FROM order_questions WHERE id = %s", (qid,)).fetchone()[0]
+
+
+def _msg(pg, message_id="m1", category="ai_orders"):
+    pg.execute(
+        "INSERT INTO messages (message_id, category, processed) VALUES (%s, %s, false) "
+        "ON CONFLICT (message_id) DO NOTHING", (message_id, category))
+
+
+def _status(pg, qid):
+    return pg.execute(
+        "SELECT status FROM order_questions WHERE id = %s", (qid,)).fetchone()[0]
+
+
+def _mail_rules_count(pg):
+    return int(pg.execute("SELECT count(*) FROM mail_rules").fetchone()[0])
+
+
+def _msg_processed(pg, message_id):
+    return pg.execute(
+        "SELECT processed FROM messages WHERE message_id = %s", (message_id,)).fetchone()[0]
 
 
 # --- cadence: reminder --------------------------------------------------------------
@@ -234,3 +255,73 @@ def test_a_failed_post_leaves_the_reminder_pending_for_the_next_flush(pg):
         or {"id": 1})
     assert n2 == 1
     assert len(posted) == 1
+
+
+# --- #341: auto-expiry of questions older than 2 WORKING days -----------------------
+
+def test_expire_over_age_mail_question_learns_nothing_and_routes_to_manual_review(pg):
+    """A `mail`-kind question open across MORE than 2 working days is neutrally expired:
+    status 'expired', ZERO `mail_rules` written (the whole danger — the two answer paths
+    would each teach a durable ignore/manual rule keyed on a generic subject from a real
+    customer), message routed honestly to manual review (`processed=true`), and dropped
+    from the open list so it is never reminded again."""
+    _msg(pg, "m1")
+    qid = _ask(pg, kind="mail", customer_ean="", wording="Re: objednávka",
+               item_key="mail:m1", message_id="m1", created_at=TUE,
+               payload={"sender_norm": "z@x.sk", "subject_key": "re objednavka",
+                        "sender_email": "z@x.sk", "subject": "Re: objednávka"})
+    n = question_alerts.expire_stale(pg, _cfg(), now=THU)  # Tue->Thu = 3 working days > 2
+    assert n == 1
+    assert _status(pg, qid) == "expired"
+    assert _mail_rules_count(pg) == 0  # never taught anything
+    assert _msg_processed(pg, "m1") is True
+    open_ids = [q["id"] for q in teach.open_questions(pg)]
+    assert qid not in open_ids
+
+
+def test_a_question_at_exactly_two_working_days_is_not_yet_expired(pg):
+    """Expiry is STRICTLY more than the threshold (the reminder fires AT 2 working days;
+    expiry only past it), so a question is never expired before it has had its full 2
+    working days open."""
+    _msg(pg, "m1")
+    qid = _ask(pg, created_at=TUE, message_id="m1")
+    n = question_alerts.expire_stale(pg, _cfg(), now=WED)  # Tue->Wed = 2 working days, not > 2
+    assert n == 0
+    assert _status(pg, qid) == "open"
+
+
+def test_weekend_arithmetic_friday_question_not_expired_monday_but_expired_tuesday(pg):
+    """Sat/Sun don't count: a Friday-opened question has touched only {Fri, Mon} = 2
+    working days on Monday morning (not expired), and {Fri, Mon, Tue} = 3 on Tuesday
+    (expired)."""
+    _msg(pg, "m1")
+    qid = _ask(pg, created_at=FRI, message_id="m1")
+    assert question_alerts.expire_stale(pg, _cfg(), now=NEXT_MON) == 0
+    assert _status(pg, qid) == "open"
+    assert question_alerts.expire_stale(pg, _cfg(), now=NEXT_TUE) == 1
+    assert _status(pg, qid) == "expired"
+
+
+def test_an_expired_question_is_never_reminded_again_by_the_sweep(pg):
+    """Once expired, the #237 reminder sweep (status='open' only) must never touch it."""
+    _msg(pg, "m1")
+    qid = _ask(pg, kind="dl_supplier", customer_ean="", item_key="dlsupplier:x",
+               message_id="m1", created_at=TUE,
+               payload={"sender_email": "s@x.sk"})
+    assert question_alerts.expire_stale(pg, _cfg(), now=THU) == 1
+    assert _status(pg, qid) == "expired"
+    n = question_alerts.sweep(pg, _cfg(), now=THU)
+    assert n == 0
+    assert _pending(pg) == []
+
+
+def test_expiry_writes_no_item_or_dl_memory(pg):
+    """Expiring item/dl_item questions must NOT teach any card memory (no answer path)."""
+    _msg(pg, "m1")
+    _ask(pg, kind="item", customer_ean="2000000000001", wording="Šiška", item_key="siska",
+         message_id="m1", created_at=TUE)
+    _ask(pg, kind="dl_item", customer_ean="", wording="Great", item_key="dlitem:x",
+         message_id="m1", created_at=TUE, payload={"supplier_ean": "111"})
+    question_alerts.expire_stale(pg, _cfg(), now=THU)
+    assert int(pg.execute("SELECT count(*) FROM item_memory").fetchone()[0]) == 0
+    assert int(pg.execute("SELECT count(*) FROM dl_item_memory").fetchone()[0]) == 0

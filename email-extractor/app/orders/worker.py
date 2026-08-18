@@ -358,6 +358,10 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pra
                 # modes never write an order_questions row through either engine, so
                 # there is never anything for this to find there either.
                 from . import question_alerts
+                # #341: auto-expire questions older than 2 working days FIRST, so an
+                # about-to-expire question is neutrally closed before the reminder below
+                # could nag it one last time.
+                question_alerts.expire_stale(conn, cfg)
                 question_alerts.sweep(conn, cfg)
                 # #308: no message may sit SILENTLY in the terminal `human_processing`
                 # pit (a scan the classifier could not place, needs_vision, no processor
