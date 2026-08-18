@@ -828,12 +828,14 @@ def _retire_card(pg, gtin, name):
 
 
 def _bev_doc(doc_number="0100000050", items=None):
+    items = items or [{"name": "Kombucha zázvor 250ml", "quantity": 6, "unit": "ks",
+                       "unitPrice": 2.0, "totalPrice": 12.0, "vatRate": 10}]
+    # total MUST equal the line sum or the money gate reviews the whole doc before matching
+    total = round(sum(float(it.get("totalPrice") or 0) for it in items), 2)
     return {"documents": [{
         "supplierName": "Pekáreň Lunys", "supplierCity": "Prešov",
         "supplierEmail": "dodavatel@lunys.sk", "docNumber": doc_number,
-        "deliveryDate": "01.08.2026", "documentTotalWithoutVAT": 12.0,
-        "items": items or [{"name": "Kombucha zázvor 250ml", "quantity": 6, "unit": "ks",
-                            "unitPrice": 2.0, "totalPrice": 12.0, "vatRate": 10}]}]}
+        "deliveryDate": "01.08.2026", "documentTotalWithoutVAT": total, "items": items}]}
 
 
 def _dl_question_count(pg):

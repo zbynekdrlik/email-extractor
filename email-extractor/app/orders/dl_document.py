@@ -12,6 +12,7 @@ from . import (
     dl_memory,
     dl_nonwarehouse,
     dl_report,
+    dl_snapshot,
     report,
     teach,
 )
@@ -180,6 +181,11 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # short-circuited (terminal skip, zero questions) before any question is raised.
     unmatched_asks: list[tuple[dict, dl_memory.Recalled | None, str]] = []
     catalog_gtins = {str(c.get("gtin")) for c in catalog}
+    # #337: the RETIRED override cards (absent from the frozen catalog, so NOT in
+    # `catalog_gtins` — the memory-rescue filter stays intact). Used ONLY to recognize an
+    # item that failed to match the ACTIVE catalog as a known-but-manual retired product.
+    retired_cards = dl_snapshot.retired_dl_cards(conn)
+    retired_gtins = {str(c["gtin"]) for c in retired_cards}
     for item in doc.get("items") or []:
         recalled = dl_memory.resolve(conn, supplier_decision.ean_edi, item.get("name", ""),
                                      catalog_gtins=catalog_gtins,
@@ -197,6 +203,32 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                 confidence=0.0, rule="match_failed",
                 note="Položku sa nepodarilo priradiť ku karte — over ju ručne.",
                 review=True)
+        # #337: ACTIVE-MATCH-FIRST retired-card recognition. Only an item that did NOT
+        # match an active card (`not decision.gtin`) and is not a matcher exception
+        # (`match_failed`) is checked against the RETIRED cards — so a product with an
+        # active sibling card (e.g. #246's 13-digit card next to a retired 14-digit one)
+        # still ships via its own active match and never reaches here. A recognized retired
+        # product becomes a `retired_manual` decision: `gtin=None` (never ships, never a
+        # catalog match) + an honest manual-only note, and its board question is SKIPPED
+        # below. The history signal uses an UNFILTERED `dl_memory.resolve` (catalog_gtins=
+        # None) purely to IDENTIFY the retired GTIN — never to ship it (gtin stays None).
+        if retired_cards and not decision.gtin and decision.rule != "match_failed":
+            retired_recall = dl_memory.resolve(
+                conn, supplier_decision.ean_edi, item.get("name", ""),
+                catalog_gtins=None, as_of=message.get("today", ""))
+            recall_gtin = (str(retired_recall.gtin) if retired_recall
+                           and str(retired_recall.gtin) in retired_gtins else "")
+            retired_card = dl_match.match_retired(
+                item.get("name", ""), retired_cards, recall_gtin=recall_gtin)
+            if retired_card is not None:
+                decision = dl_match.Decision(
+                    item_name=decision.item_name, gtin=None,
+                    card=retired_card.get("name", ""), mass=0.0,
+                    confidence=decision.confidence, rule="retired_manual",
+                    note=("Známy produkt s vyradenou skladovou kartou — automatický EDI "
+                          "preň nemá bezpečný cieľ, vybav ručne v CODEXe (kartu "
+                          "nepridávaj do znalostí)."),
+                    review=True, trace=decision.trace)
         decisions.append((item, decision))
         matched_items.append({
             "gtin": decision.gtin, "name": decision.item_name,
@@ -222,7 +254,9 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         # the #204 deep-review finding, unchanged (every rule with no real card — `unmatched`,
         # the R75 `llm_sure_lexical_gap` tripwire, `match_failed` — is captured, not just the
         # literal `"unmatched"` rule name).
-        if not decision.gtin:
+        # #337: a `retired_manual` item is a KNOWN retired card — route it to review via
+        # its note (below), but NEVER raise a per-delivery board question for it.
+        if not decision.gtin and decision.rule != "retired_manual":
             unmatched_asks.append((item, recalled, decision.note))
 
     # #314: a remembered non-warehouse supplier whose document produced NO catalog GTIN
@@ -268,14 +302,25 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     built = desadv_edi.build(header, extraction, matched_items, catalog)
 
     if not built.can_create:
+        # #337: name the retired products explicitly in the review, so a document that is
+        # all (or partly) retired cards reads as a HONEST known-but-manual outcome, not a
+        # bare "no items with GTIN". (A mixed document that DOES ship shows the same note
+        # per item via `_finish_shipped`'s `unmatched_notes`.)
+        reason = built.reject_reason
+        retired_names = [d.card or d.item_name for _, d in decisions
+                         if d.rule == "retired_manual"]
+        if retired_names:
+            reason = ((reason + " " if reason else "")
+                      + "Vyradené skladové karty (automatický EDI nemá bezpečný cieľ, "
+                      "vybav ručne v CODEXe): " + ", ".join(retired_names) + ".")
         _post(cfg, shadow, lambda: dl_report.build_review(
-            built.reject_reason, supplier_decision.name, built.doc_number, delivery_date,
+            reason, supplier_decision.name, built.doc_number, delivery_date,
             from_addr, subject, link=link), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
-              outcome=built.reject_reason, detail={"doc_number": built.doc_number},
+              outcome=reason, detail={"doc_number": built.doc_number},
               rollup=False, workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": built.doc_number,
-               "supplier_name": supplier_decision.name, "reason": built.reject_reason}
+               "supplier_name": supplier_decision.name, "reason": reason}
 
     if shadow:
         is_dup = desadv.already_sent(conn, supplier_decision.ean_edi, built.doc_number)

@@ -201,6 +201,38 @@ def candidates(item_name: str, catalog: list[dict], memory_gtin: str = "",
     return scored[:limit]
 
 
+# #337: an unmatched item is recognized as a RETIRED card — known-but-manual, routed to
+# review with no board question — when its best retired-card name score reaches this bar
+# (name-in-item / item-in-name / exact / alias — a genuine name correspondence, above the
+# pure word-overlap tiers `_score_item` tops out around 60-70), OR ship-history points at a
+# retired GTIN. Conservative on purpose: a false positive only routes a genuinely-unknown
+# item to review (safe, and aligned with #341's less-board-noise intent), never ships
+# anything wrong.
+RETIRED_MATCH_MIN_SCORE = 65.0
+
+
+def match_retired(item_name: str, retired_cards: list[dict],
+                  recall_gtin: str = "") -> dict | None:
+    """#337: return the RETIRED catalog card this item corresponds to, or None. Two
+    deterministic signals: `recall_gtin` (a ship-history/alias recall the CALLER has
+    already confirmed belongs to a retired card — the exact, strongest signal) wins first;
+    otherwise a name score against the retired cards (`_score_item`, the SAME scorer the
+    live candidate shortlist uses). Touches ONLY the retired-card list, never the active
+    catalog, so it can never change a shippable decision — it is meant to run ONLY for an
+    item that already failed to match an active card (active-match-first, enforced by the
+    caller)."""
+    if not retired_cards:
+        return None
+    if recall_gtin:
+        for c in retired_cards:
+            if str(c.get("gtin")) == str(recall_gtin):
+                return c
+    best = candidates(item_name, retired_cards, limit=1)
+    if best and float(best[0].get("score", 0.0)) >= RETIRED_MATCH_MIN_SCORE:
+        return best[0]
+    return None
+
+
 # --- supplier candidate scoring (R60) --------------------------------------
 
 _EMAIL_RE = re.compile(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}")
