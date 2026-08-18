@@ -106,7 +106,6 @@ Deliberately scoped to `dl_supplier` only — see that function's own docstring 
 from __future__ import annotations
 
 import logging
-from html import escape
 
 from . import (
     dl_alerts,
@@ -234,26 +233,19 @@ def stuck_classified_sweep(conn, cfg, threshold_minutes: int = STUCK_CLASSIFIED_
                               WHERE r.message_id = m.message_id)
             ORDER BY m.created_at ASC LIMIT 20""",
         (CATEGORY, max(1, int(threshold_minutes)))).fetchall()
-    # Deep-review finding on this ticket's own PR: `flush_pending` may deliver this
-    # alert well after it was detected here (a queued Odoo outage, a busy sweep) — by
-    # then the message may already have been claimed and finished normally, which
-    # would make a reader think it "never started" when it since has. Stamping the
-    # DETECTION time (read once, shared by every row this pass) alongside the
-    # message's own received time lets a reader judge staleness for themselves;
-    # `created_at` alone cannot distinguish "just detected" from "detected an hour
-    # ago, still undelivered".
-    detected_at = conn.execute("SELECT now()").fetchone()[0]
     n = 0
     for message_id, subject, from_addr, created_at in rows:
-        if dl_alerts.already_pending(conn, "dl_stuck_classified", message_id):
+        # #336: throttle the RE-reminder to once per morning (skip weekends) — the first
+        # alert still fires promptly. Replaces the old flat ~4h `already_pending` re-ask.
+        if dl_alerts.reminder_suppressed(conn, cfg, "dl_stuck_classified", message_id):
             continue
-        html = (
-            "<p>&#9888;&#65039; E-mail bol zaradený ako dodací list, ale spracovanie "
-            "sa vôbec nezačalo &mdash; over, či beží spracovanie dodacích listov.</p>"
-            f"<p>Od: {escape(from_addr or '-')} / Predmet: {escape(subject or '-')} / "
-            f"prijaté: {escape(str(created_at))} / "
-            f"zistené: {escape(str(detected_at))}</p>")
-        dl_alerts.enqueue(conn, channel, "dl_stuck_classified", html,
+        # #336: ONE short line (`• odosielateľ — predmet (prijaté D.M.)`); the explanation
+        # sentence + the dashboard action link are added ONCE in the per-kind header
+        # `dl_alerts.flush_pending` builds for the whole group (`GROUPED_ITEM_KINDS`), never
+        # repeated per message (the pre-#336 wall). The old microsecond `zistené`/`prijaté`
+        # timestamps are dropped — the once-daily cadence makes them moot.
+        dl_alerts.enqueue(conn, channel, "dl_stuck_classified",
+                          dl_alerts.item_line(from_addr, subject, created_at),
                           message_id=message_id)
         n += 1
     if n:

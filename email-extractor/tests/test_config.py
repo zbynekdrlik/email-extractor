@@ -99,6 +99,21 @@ def test_delivery_notes_engine_reads_from_options(tmp_path, monkeypatch):
     assert cfg.delivery_notes_shadow_days == 7
 
 
+def test_delivery_notes_max_age_days_default_and_explicit_zero_disables(tmp_path, monkeypatch):
+    # #339: default 14 when the option is absent (active on deploy with no options change).
+    assert _load_with_options(tmp_path, monkeypatch, {}).delivery_notes_max_age_days == 14
+    # a real value is read through unchanged.
+    assert _load_with_options(
+        tmp_path, monkeypatch,
+        {"delivery_notes_max_age_days": 30}).delivery_notes_max_age_days == 30
+    # an explicit 0 must DISABLE the guard — NOT be silently re-enabled to 14 by an `or 14`
+    # idiom (the #229 falsy-override trap the load line deliberately avoids). This locks the
+    # load-layer behaviour so a future "consistency" edit re-adding `or 14` fails here.
+    assert _load_with_options(
+        tmp_path, monkeypatch,
+        {"delivery_notes_max_age_days": 0}).delivery_notes_max_age_days == 0
+
+
 _DEAD_SHEET_OPTIONS = ("catalog_sheet_id", "catalog_gid", "customer_gid",
                       "catalog_refresh_minutes", "dl_catalog_gid")
 

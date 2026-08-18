@@ -105,3 +105,37 @@ dependencies, the index swap). A per-domain sub-list split would move statement 
 its table's domain cluster and change execution order. Keeping `SCHEMA` as ONE ordered
 verbatim data list is deliberate (see #309's design comment) — a NEW schema change is still
 a new `Revision` appended to `db.REVISIONS` (top of this file), NEVER an edit to `SCHEMA`.
+
+## Dropping a DEAD table — a new `DROP TABLE IF EXISTS` revision + remove the CREATE from the frozen baseline (#331)
+
+`#331` retired the dead legacy `processed` table (the 2026-06-25 n8n-era "each terminal
+workflow inserts a row" contract, 0 consumers today — the live "done" signal is
+`messages.processed` + the `email_events` rollup). The safe shape, which LOOKS like it
+violates "never edit the baseline" but does not:
+
+- **Add a new revision that drops it**: `migrate.Revision(4, "drop_processed_table",
+  ["DROP TABLE IF EXISTS processed"])` appended to `db.REVISIONS` — this is what removes
+  the table from an existing PROD DB (a real table with real, if unused, rows), runs
+  exactly once, tracked in `schema_version`.
+- **AND remove the `CREATE TABLE processed` statement from the frozen baseline `SCHEMA`**
+  (`db_schema.py`). This is the part that reads like a baseline edit — but it is SAFE, and
+  necessary, for a specific reason: the migrate ledger stores only revision NUMBERS, never
+  a per-statement hash of `SCHEMA` (unlike a checksum-based migration tool). So the
+  self-healing baseline re-run (`run_migrations` on a lagging/fresh DB) is judged purely by
+  "is revision 1 recorded?", not by whether `SCHEMA`'s text still matches what first ran.
+  Removing the CREATE means a genuinely FRESH DB never creates the dead table at all, while
+  an existing DB that already has it gets it dropped by revision 4 — both correct. Leaving
+  the CREATE in would re-create the table on every fresh DB immediately after revision 4
+  dropped it on prod, a pointless resurrection. (This is the one narrow case where touching
+  `SCHEMA` is right: DELETING a whole dead object's creation, never CHANGING a live
+  statement's semantics — the #269 risk the immutable-baseline rule actually guards.)
+
+**The migration TEST's ledger-rollback must be scoped `WHERE revision = <drop_rev>`, NOT
+`>=`** (`test_migrate.py`, the #331 self-healing-drop test). To prove revision 4 re-drops
+the table on a DB that still has it, the test re-creates `processed`, deletes ONLY revision
+4's ledger row (`DELETE FROM schema_version WHERE revision = %s`, `drop_rev` looked up by
+name via `next(r.revision for r in db.REVISIONS if r.name == "drop_processed_table")`), then
+re-runs migrations and asserts the table is gone again. A `>= drop_rev` delete would also
+strip every LATER revision's ledger row, forcing them all to re-run — noisy and not what the
+test is isolating. Scope the rollback to the exact revision under test, and look its number
+up by NAME (never hardcode `4`), so appending a rev 5+ never silently shifts it.

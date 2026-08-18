@@ -518,6 +518,113 @@ def test_body_text_with_no_real_delivery_note_still_reviews_cleanly(pg, tmp_path
     assert row == (True, "dodacie_listy")
 
 
+def test_a_dl_message_older_than_the_cutoff_routes_to_review_never_auto_uploads(
+        pg, tmp_path):
+    """#339 safety gap: an OLD stuck dodacie_listy message that becomes claimable again
+    (a fresh _claim, a _release_stuck_siblings reset, or a release_for_question reprocess)
+    must route to MANUAL REVIEW with an honest reason — NEVER auto-upload a months-old
+    delivery note to ORION (the #338 duplicate-delivery risk: 3 DLs from 7.7/17.7
+    auto-uploaded 15.8). RED on the pre-fix code: with no age gate a fully-shippable old
+    message reaches _process_document -> desadv claim -> upload. The gate short-circuits
+    BEFORE extraction, so not even a model call fires."""
+    _snapshot(pg)
+    _msg(pg, mid="old1", has_attachments=False, combined_text=BODY_TEXT_DL)
+    pg.execute("UPDATE messages SET created_at = now() - interval '40 days' "
+               "WHERE message_id = 'old1'")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    uploaded, posted = [], []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(
+        pg, cfg, client=client,
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+        post=lambda c, h: posted.append(h))
+    assert n == 1
+    assert uploaded == [], "an over-cutoff DL must NEVER auto-upload to ORION"
+    assert client.calls == [], "the age gate must short-circuit BEFORE extraction"
+    assert len(posted) == 1
+    assert "z bezpečnosti sa NEnahráva automaticky do ORIONu" in posted[0]
+    row = pg.execute(
+        "SELECT processed, processed_by, proc_status FROM messages "
+        "WHERE message_id = 'old1'").fetchone()
+    assert row == (True, "dodacie_listy", "review")
+
+
+def test_release_for_question_on_an_over_cutoff_message_routes_to_review_never_uploads(
+        pg, tmp_path):
+    """#339: the age gate sits at the shared `_process_message` choke point, so it also
+    covers the `release_for_question` re-entry path — a blocked DL whose item question is
+    finally answered WEEKS later must NOT silently ship a now-stale delivery note."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    doc = _doc(total=3.0, items=[{"name": "Neznámy chlebík", "quantity": 3, "unit": "ks",
+                                  "unitPrice": 1.0, "totalPrice": 3.0}])
+    client1 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                          "dl_item": [{"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                                       "matchReason": "žiadna zhoda"}]})
+    uploaded = []
+    n = dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client1,
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name))
+    assert n == 1 and uploaded == [], "nothing shippable on the first pass"
+    qid = pg.execute("SELECT id FROM order_questions WHERE kind='dl_item'").fetchone()[0]
+    # It sat unanswered so long it is now over the cutoff.
+    pg.execute("UPDATE messages SET created_at = now() - interval '40 days' "
+               "WHERE message_id = 'dl1'")
+    dl_memory.remember(pg, SUPPLIER_EAN, "Neznámy chlebík", ITEM_GTIN, "Rožok 50g",
+                       "2026-08-10", source="human")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": ITEM_GTIN}), qid))
+    client2 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                          "dl_item": [ITEM_MATCHED]})
+    uploaded2, posted2 = [], []
+    released = dl_worker.release_for_question(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), qid,
+        client=client2,
+        upload=lambda c, name, content, dir_override=None: uploaded2.append(name),
+        post=lambda c, h: posted2.append(h))
+    assert uploaded2 == [], "an over-cutoff DL must not ship even after its answer arrives"
+    assert client2.calls == [], "the age gate short-circuits before extraction"
+    assert released and released[0]["outcome"] == "review"
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE uploaded_at IS NOT NULL").fetchone()[0] == 0
+
+
+def test_delivery_notes_max_age_days_configures_and_disables_the_cutoff(pg, tmp_path):
+    """#339: the cutoff is configurable (a 40-day DL still ships under a 90-day window) and
+    0 disables the guard entirely (an old DL ships) — a deployment can tune or turn off the
+    safety valve deliberately."""
+    _snapshot(pg)
+    # (a) 40 days old, cutoff 90 -> within the window -> ships normally.
+    _msg(pg, mid="within", has_attachments=False, combined_text=BODY_TEXT_DL)
+    pg.execute("UPDATE messages SET created_at = now() - interval '40 days' "
+               "WHERE message_id = 'within'")
+    client_a = FakeClient({"dl_documents": [_doc(doc_number="0100000091")],
+                           "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [ITEM_MATCHED]})
+    up_a = []
+    dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path),
+                 delivery_notes_max_age_days=90),
+        client=client_a,
+        upload=lambda c, name, content, dir_override=None: up_a.append(name))
+    assert len(up_a) == 1, "within the configured window an old DL still ships"
+
+    # (b) 40 days old, cutoff 0 (disabled) -> ships normally.
+    _msg(pg, mid="disabled", has_attachments=False, combined_text=BODY_TEXT_DL)
+    pg.execute("UPDATE messages SET created_at = now() - interval '40 days' "
+               "WHERE message_id = 'disabled'")
+    client_b = FakeClient({"dl_documents": [_doc(doc_number="0100000092")],
+                           "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [ITEM_MATCHED]})
+    up_b = []
+    dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path),
+                 delivery_notes_max_age_days=0),
+        client=client_b,
+        upload=lambda c, name, content, dir_override=None: up_b.append(name))
+    assert len(up_b) == 1, "max_age_days=0 disables the guard"
+
+
 def test_empty_body_text_and_no_attachment_still_reviews_without_calling_the_model(
         pg, tmp_path):
     """No attachment AND no body text either -- must stay a cheap, immediate review (no
@@ -1443,7 +1550,9 @@ def test_non_transient_upload_failure_enqueues_a_durable_alert_not_a_direct_post
     assert alert[1] == "dl_upload_failed"
     assert alert[2] == "dl1"
     assert alert[3] is None, "not yet delivered — flush_pending delivers it later"
-    assert "Odoslanie dodacieho listu do ORIONu zlyhalo" in alert[4]
+    # #336: the enqueued body is ONE short line naming the supplier + delivery note; the
+    # "nahranie zlyhalo" explanation lives once in the flush-time header, not per row.
+    assert "dodací list" in alert[4] and "Pekáreň Lunys" in alert[4]
 
     # the claim was released — a later successful reprocess must not be blocked
     assert pg.execute(
@@ -1752,11 +1861,10 @@ def test_a_transient_upload_failure_never_trusts_a_stable_prefix_collision(pg, t
 
 # --- #239 class 3: classified as DL but never even attempted -----------------
 
-def test_stuck_classified_sweep_stamps_a_detection_time_alongside_the_received_time(pg):
-    """Deep-review finding on #239's own PR: `flush_pending` may deliver this alert
-    long after detection (a queued Odoo outage) — by then the message could already be
-    processed. Stamping the DETECTION time lets a reader judge staleness for
-    themselves, distinct from the message's own `created_at`."""
+def test_stuck_classified_sweep_uses_a_short_line_with_no_microsecond_timestamps(pg):
+    """#336: the enqueued body is ONE short line (`• odosielateľ — predmet (prijaté D.M.)`);
+    the explanation sentence + the dashboard action link live ONCE in the flush-time header
+    (`GROUPED_ITEM_KINDS`), and the old microsecond `prijaté:`/`zistené:` timestamps are gone."""
     _msg(pg, mid="dl1")
     pg.execute(
         "UPDATE messages SET created_at = now() - interval '31 minutes' "
@@ -1764,8 +1872,11 @@ def test_stuck_classified_sweep_stamps_a_detection_time_alongside_the_received_t
     dl_worker.stuck_classified_sweep(pg, _cfg())
     html = pg.execute(
         "SELECT body_html FROM pending_alerts WHERE message_id='dl1'").fetchone()[0]
-    assert "prijaté:" in html
-    assert "zistené:" in html
+    assert html.startswith("<p>&#8226; ")                        # a short bullet line
+    assert "dodavatel@lunys.sk" in html
+    assert "(prijaté " in html                                    # short D.M. suffix
+    assert "prijaté:" not in html and "zistené:" not in html      # no microsecond timestamps
+    assert "spracovanie sa vôbec nezačalo" not in html            # explanation is in the header
 
 
 def test_stuck_classified_sweep_alerts_a_message_with_no_order_runs_row(pg):
@@ -3059,8 +3170,9 @@ def test_upload_failure_alert_never_leaks_the_raw_error_to_243(pg, tmp_path):
     body = pg.execute(
         "SELECT body_html FROM pending_alerts WHERE kind='dl_upload_failed'").fetchone()
     assert body is not None
-    # the clean, warehouse-facing sentence is there; the raw exception is NOT
-    assert "Odoslanie dodacieho listu do ORIONu zlyhalo" in body[0]
+    # #336: the enqueued body is a clean short line (supplier + delivery note); the raw
+    # exception is NEVER in it (the "nahranie zlyhalo" sentence lives in the flush header).
+    assert "dodací list" in body[0]
     assert "__RAW_UP__" not in body[0] and "paramiko" not in body[0] and "10.9.9.9" not in body[0]
     # ...but preserved internally in email_events.detail (never on the channel)
     ev = pg.execute("SELECT detail::text FROM email_events WHERE message_id='dl1' "

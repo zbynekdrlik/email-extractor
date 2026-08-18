@@ -16,7 +16,12 @@ def test_enqueue_then_flush_delivers_and_marks_delivered(pg):
 
     n = dl_alerts.flush_pending(pg, cfg=None, post=_post)
     assert n == 1
-    assert posted == [("<p>zlyhalo</p>", 243)]
+    # #336: a grouped-kind post is ONE per-kind header + the short item line(s).
+    assert len(posted) == 1
+    html, channel = posted[0]
+    assert channel == 243
+    assert "<p>zlyhalo</p>" in html
+    assert "Nenahraté dodacie listy (1)" in html
     row = pg.execute(
         "SELECT delivered_at IS NOT NULL FROM pending_alerts WHERE message_id='m1'"
     ).fetchone()
@@ -111,7 +116,7 @@ def test_one_failing_group_never_blocks_a_different_group_in_the_same_sweep(pg):
 
     n = dl_alerts.flush_pending(pg, cfg=None, post=_post)
     assert n == 1, "only the succeeding group's row counts as delivered"
-    assert posted == ["<p>succeeds</p>"]
+    assert len(posted) == 1 and "<p>succeeds</p>" in posted[0]
 
     delivered = {row[0]: row[1] for row in pg.execute(
         "SELECT message_id, delivered_at IS NOT NULL FROM pending_alerts").fetchall()}
@@ -183,7 +188,7 @@ def test_quiet_seconds_zero_is_the_unchanged_immediate_behaviour(pg):
     n = dl_alerts.flush_pending(pg, cfg=None, post=lambda c, h, **kw: posted.append(h) or
                                 {"id": 1})
     assert n == 1
-    assert posted == ["<p>x</p>"]
+    assert len(posted) == 1 and "<p>x</p>" in posted[0]
 
 
 # --- #239 reopened, finding 3: the dedup must not be permanent -------------
@@ -409,3 +414,81 @@ def test_dedup_held_alerts_migration_keeps_oldest_and_deletes_newer_held_duplica
     assert "<p>real1</p>" in kept and "<p>real2</p>" in kept       # real-channel undelivered untouched
     assert "<p>del1</p>" in kept and "<p>del2</p>" in kept         # delivered rows untouched
     assert before - after == 2, "exactly the 2 newer held m1 duplicates removed"
+
+
+# --- #336: readable grouped ops alerts (header + short lines + cap) + daily cadence ---
+
+def test_item_line_is_a_short_bullet_with_no_microsecond_timestamp():
+    from datetime import datetime
+    line = dl_alerts.item_line("a@x.test", "Faktúra 5",
+                               datetime(2026, 7, 7, 13, 45, 12, 123456))
+    assert line == "<p>&#8226; a@x.test &mdash; Faktúra 5 (prijaté 7.7.)</p>"
+    # no received -> no date suffix at all (never a raw microsecond timestamp)
+    assert dl_alerts.item_line("a@x.test", "X") == "<p>&#8226; a@x.test &mdash; X</p>"
+    # subject/sender are HTML-escaped
+    assert "&lt;b&gt;" in dl_alerts.item_line("a@x.test", "<b>x</b>")
+
+
+def test_format_grouped_builds_one_header_capped_lines_and_a_dashboard_link(pg):
+    """#336: 12 stuck human_processing messages -> ONE post with a single header (count +
+    explanation), up to DISPLAY_ITEM_CAP short item lines, „…a N ďalších", and a dashboard
+    action link — never 12 repeated explanation sentences (the pre-#336 3000-char wall)."""
+    class Cfg:
+        dashboard_base_url = "http://46.224.130.35:8099/"
+        ops_channel_id = 592
+    for i in range(12):
+        dl_alerts.enqueue(pg, 592, "human_processing_review",
+                          dl_alerts.item_line(f"odosielatel{i}@x.test", f"Predmet {i}"),
+                          message_id=f"m{i}")
+    posted = []
+    n = dl_alerts.flush_pending(pg, Cfg(),
+                                post=lambda c, h, **kw: posted.append(h) or {"id": 1})
+    assert n == 12
+    assert len(posted) == 1, "12 stuck messages -> ONE grouped post, not 12"
+    html = posted[0]
+    assert "Nezaradené e-maily (12)" in html
+    assert html.count("&#8226;") == dl_alerts.DISPLAY_ITEM_CAP, "cap displayed lines at 10"
+    assert "a 2 ďalších" in html
+    assert 'href="http://46.224.130.35:8099"' in html   # trailing slash stripped
+    # the explanation sentence appears ONCE (in the header), never repeated per item
+    assert html.count("skontroluj ich na dashboarde") == 1
+
+
+def test_reminder_suppressed_first_fires_then_once_per_morning_skipping_weekends(pg):
+    """#336: replaces the flat ~4h re-ask. The FIRST alert always fires; a re-reminder for
+    a still-unresolved message fires at most once per morning (after the configured hour),
+    skipping Saturday/Sunday — mirrors confirm.py's carryover cadence."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Europe/Bratislava")
+
+    class Cfg:
+        import_morning_check_hour = 10
+        import_morning_check_skip_saturday = True
+        import_morning_check_skip_sunday = True
+    cfg, kind, mid = Cfg(), "dl_stuck_classified", "m1"
+
+    # (1) never alerted -> the first alert fires, regardless of hour/day (even Sat afternoon)
+    sat_pm = datetime(2026, 8, 15, 15, 0, tzinfo=tz)   # Saturday
+    assert dl_alerts.reminder_suppressed(pg, cfg, kind, mid, now=sat_pm) is False
+
+    # (2) an undelivered alert exists -> suppress (nothing to remind until it goes out)
+    dl_alerts.enqueue(pg, 592, kind, "<p>l</p>", message_id=mid)
+    assert dl_alerts.reminder_suppressed(pg, cfg, kind, mid, now=sat_pm) is True
+
+    # deliver it on Monday
+    mon = datetime(2026, 8, 17, 9, 0, tzinfo=tz)        # Monday
+    pg.execute("UPDATE pending_alerts SET delivered_at=%s WHERE message_id=%s", (mon, mid))
+
+    # (3) same local day, after the morning hour -> already reminded today -> suppress
+    assert dl_alerts.reminder_suppressed(
+        pg, cfg, kind, mid, now=datetime(2026, 8, 17, 11, 0, tzinfo=tz)) is True
+    # (4) next day but before the morning hour -> hold the reminder
+    assert dl_alerts.reminder_suppressed(
+        pg, cfg, kind, mid, now=datetime(2026, 8, 18, 8, 0, tzinfo=tz)) is True
+    # (5) next day after the morning hour, delivered on a PRIOR day -> re-remind
+    assert dl_alerts.reminder_suppressed(
+        pg, cfg, kind, mid, now=datetime(2026, 8, 18, 11, 0, tzinfo=tz)) is False
+    # (6) a weekend day after the morning hour -> skip -> suppress
+    assert dl_alerts.reminder_suppressed(
+        pg, cfg, kind, mid, now=datetime(2026, 8, 22, 11, 0, tzinfo=tz)) is True

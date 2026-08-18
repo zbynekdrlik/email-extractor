@@ -52,6 +52,16 @@ def dl_sklad_link(cfg) -> str:
     return linkutil.dl_url(cfg)
 
 
+def dashboard_link(cfg) -> str:
+    """#336: the admin dashboard base URL (the ops fix-queue / message list) — the "miesto
+    akcie" a grouped OPERATOR alert points at, where an operator reclassifies / marks a
+    stuck message done. Distinct from `sklad_link`/`dl_sklad_link` (the warehouse nástenka):
+    an unclassifiable / never-started / upload-failed message is an operator concern, not a
+    nástenka question. Returns "" when `dashboard_base_url` is unset (the header then simply
+    omits the action link, same "" fallback as the sklad links)."""
+    return (getattr(cfg, "dashboard_base_url", "") or "").rstrip("/")
+
+
 def link_line(link: str) -> str:
     """The ONE shared "go resolve this on the nástenka" line — the exact markup/wording
     both this module's own `build_summary` (orders) and `dl_report.py` (DL, #229

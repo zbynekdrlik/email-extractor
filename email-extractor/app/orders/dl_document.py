@@ -404,10 +404,12 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         note = ("Odoslanie dodacieho listu do ORIONu zlyhalo — skús znova alebo "
                "nahlás administrátorovi")
         # #312: the raw upload exception must NOT reach the warehouse channel (243) — a
-        # clean sentence (with the delivery-note filename, which IS warehouse-relevant)
-        # goes into the alert; the raw error stays in the log (`log.exception` above) and
-        # in `email_events.detail` (below), never on the user surface.
-        detail_text = f"{note} ({built.filename})."
+        # clean sentence goes into the alert; the raw error stays in the log
+        # (`log.exception` above) and in `email_events.detail` (below), never on the user
+        # surface. #336: the clean "nahranie do ORIONu zlyhalo" sentence + the dashboard
+        # action link now live ONCE in the per-kind header `dl_alerts.flush_pending` builds
+        # for the whole `dl_upload_failed` group (`GROUPED_ITEM_KINDS`); this alert is just
+        # ONE short line naming the supplier + delivery note.
         # Deep-review finding on this ticket's own PR: `stuck_classified_sweep` below
         # already bails out when `delivery_notes_channel_id` resolves to 0 (unset) —
         # this call site needs the SAME guard, or an unset channel would enqueue a
@@ -417,11 +419,11 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         channel = int(getattr(cfg, "delivery_notes_channel_id", 0) or 0)
         if channel:
             try:
-                html = dl_report.build_review(
-                    detail_text, supplier_decision.name, built.doc_number,
-                    delivery_date, from_addr, subject, link=link)
-                dl_alerts.enqueue(conn, channel, "dl_upload_failed", html,
-                                  message_id=message["message_id"])
+                dl_alerts.enqueue(
+                    conn, channel, "dl_upload_failed",
+                    dl_alerts.item_line(supplier_decision.name or from_addr,
+                                        f"dodací list {built.doc_number}"),
+                    message_id=message["message_id"])
             except Exception:
                 log.exception("failed to enqueue the DL upload-failure alert for %s",
                               built.filename)
