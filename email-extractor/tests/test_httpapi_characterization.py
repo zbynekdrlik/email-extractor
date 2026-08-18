@@ -61,6 +61,9 @@ def _login(c):
 # automatically to every GET route and every route in general, respectively).
 EXPECTED_ROUTES = sorted([
     (("GET",), "/"),
+    # #342: the codex-bridge push endpoint (machine X-Token auth) — a legitimate NEW route,
+    # not a #268 code-move; added here in the same commit that registers it.
+    (("POST",), "/api/codex/orders"),
     (("GET",), "/api/fix-queue"),
     (("POST",), "/api/fix/<int:fid>/resolve"),
     (("GET",), "/api/imap-failures"),

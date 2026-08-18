@@ -109,6 +109,7 @@ from werkzeug.exceptions import HTTPException
 from . import (
     __version__,
     db,  # noqa: F401
+    httpapi_codex,
     httpapi_dashboard_data,
     httpapi_files,
     httpapi_fixqueue,
@@ -210,7 +211,8 @@ def create_app(cfg) -> Flask:
                 or p.startswith("/static")
                 or p.startswith("/sklad/")          # the route verifies its own signature
                 or p.startswith("/sklad-dl/")       # ditto, the DL nástenka link (#231)
-                or p.startswith("/files") or p.startswith("/eml")):
+                or p.startswith("/files") or p.startswith("/eml")
+                or p.startswith("/api/codex")):     # #342: machine push, own X-Token check
             return None
         # Dashboard surface ("/", "/api/*"): session only — login requires a
         # configured dash_password, so an unconfigured add-on is closed, not open.
@@ -311,6 +313,11 @@ def create_app(cfg) -> Flask:
     # to sit at (route registration order is irrelevant to Flask; before_request hook
     # order, untouched by this move, is what actually matters — see the design comment).
     httpapi_files.register(app, deps)
+
+    # #342: POST /api/codex/orders — the codex-bridge push tool's write endpoint (X-Token
+    # machine auth, same pattern as /files above). Registered alongside the other machine
+    # endpoint; its own in-route token check is the guard (see _gate's /api/codex bypass).
+    httpapi_codex.register(app, deps)
 
     # #268 krok 6: the dashboard's own main data API (api_messages/api_message)
     # plus the operator's manual actions (api_reclassify/api_reprocess) — moved

@@ -78,6 +78,40 @@ DROP_PROCESSED = [
 ]
 
 
+# --- #342 (revision 5): CODEX order evidence + the List-Unsubscribe promo signal --------
+# `codex_orders` is a thin slice of the order HEADERS a `codex-bridge` push tool
+# (`tools/codex_orders_push.py`) reads read-only from the ERP's DuckDB and POSTs to the
+# add-on. It exists SOLELY as EVIDENCE that the warehouse already entered an order manually
+# in CODEX, so the worker can auto-resolve an open `mail`-kind board question ("je toto
+# vôbec objednávka?") instead of leaving it to nag the nástenka. PK = order number (the
+# push is idempotent, upserting by that key). `customer_ean` is the customer's EDI EAN,
+# bridged on the dev side via `raw.firma` (NICO → AEDIEAN) — the SAME identity the add-on's
+# own customer cards carry (`customer_snapshot.ean_edi`), so the sweep matches on an exact
+# string, no IČO column needed here (the boundary from #337 stays: CODEX docs are evidence,
+# never a product/card import). The `messages.list_unsubscribe` column captures the mail's
+# bulk-mail header at ingest so the pipeline can route an obvious promo flyer to
+# no_processing instead of asking "is this an order?" at all (#342 req 5).
+CODEX_ORDERS = [
+    """
+    CREATE TABLE IF NOT EXISTS codex_orders (
+        order_number   BIGINT PRIMARY KEY,
+        customer_nico  BIGINT,
+        customer_ean   TEXT NOT NULL,
+        customer_name  TEXT,
+        issue_date     DATE,
+        delivery_date  DATE,
+        line_count     INTEGER,
+        updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    # The sweep looks up "does this customer have a CODEX order issued on/after the mail's
+    # date" — keyed on (customer_ean, issue_date), the exact predicate it filters on.
+    "CREATE INDEX IF NOT EXISTS idx_codex_orders_customer "
+    "ON codex_orders (customer_ean, issue_date)",
+    "ALTER TABLE messages ADD COLUMN IF NOT EXISTS list_unsubscribe TEXT",
+]
+
+
 # SCHEMA above is FROZEN as revision 1 (the baseline). NEVER edit those statements for a
 # schema change — append a NEW numbered migrate.Revision to this list instead
 # (immutable-migrations, #269). run_migrations() applies only the unapplied revisions, in
@@ -87,6 +121,7 @@ REVISIONS = [
     migrate.Revision(2, "add_dl_nonwarehouse_supplier", DL_NONWAREHOUSE_SUPPLIER),
     migrate.Revision(3, "dedup_held_channel0_alerts", DEDUP_HELD_ALERTS),
     migrate.Revision(4, "drop_processed_table", DROP_PROCESSED),
+    migrate.Revision(5, "add_codex_orders", CODEX_ORDERS),
 ]
 
 
@@ -257,8 +292,8 @@ def insert_message(conn, rec: dict, folder: str, uid: int, uidvalidity: int,
         INSERT INTO messages (message_id, header_message_id, folder, imap_uid,
             imap_uidvalidity, from_addr, from_name, to_addrs, cc_addrs, subject,
             sent_at, body_text, body_source, combined_text, has_attachments,
-            needs_vision, raw_eml_path, content_sig)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            needs_vision, raw_eml_path, content_sig, list_unsubscribe)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT (message_id) DO NOTHING
         RETURNING id
         """,
@@ -267,7 +302,7 @@ def insert_message(conn, rec: dict, folder: str, uid: int, uidvalidity: int,
             h.get("from_addr"), h.get("from_name"), h.get("to_addrs"), h.get("cc_addrs"),
             h.get("subject"), h.get("date"), rec["body_text"], rec["body_source"],
             rec["combined_text"], rec["has_attachments"], rec["needs_vision"], raw_path,
-            content_sig)),
+            content_sig, h.get("list_unsubscribe"))),
     ).fetchone()
     if not row:
         return False

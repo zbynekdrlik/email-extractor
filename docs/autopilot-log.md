@@ -2,6 +2,34 @@
 
 Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions, shared PR #.
 
+## 2026-08-18 — #342 Učenie z CODEXu: auto-vybavenie „je toto objednávka?" otázok — v0.9.110 (plánovaný)
+- **Prečo:** nástenka sa zapĺňala otázkami druhu `mail` („je toto vôbec objednávka?"), lebo
+  add-on nevidel, čo pracovníčka reálne zadala ručne do CODEXu. Riešenie: čítať objednávkové
+  hlavičky z codex-bridge DuckDB (read-only) ako DÔKAZ o vybavení a otázky auto-vybaviť.
+- **Architektúra (záväzný komentár 5326604744 + implementačný komentár):** PUSH z dev servera
+  (add-on je z bridge nedosiahnuteľný). `tools/codex_orders_push.py` beží cez vlastný systemd
+  timer, číta `raw.sp002` + `meta.sp003_dedup`, mostík NICO→AEDIEAN cez `raw.firma`, POSTne na
+  nový `POST /api/codex/orders` (X-Token = `cfg.api_token`) → upsert do `codex_orders`
+  (migrate.py revízia 5). Sweep vo worker ticku (`codex_orders.resolve_mail_questions`,
+  gated `orders_python`) páruje odosielateľa otvorenej `mail` otázky cez jednoznačnú
+  zákaznícku kartu na `ean_edi` a hľadá CODEX objednávku s `issue_date >= dátum mailu`.
+- **Bezpečnosť (#341 nález 5325463114):** neutrálne zavretie NEZAPISUJE do `mail_rules` ani
+  pamäte — guarded `UPDATE ... WHERE status='open' RETURNING id` (súčasná ľudská odpoveď
+  vyhrá, #323), `messages.processed=true` (#307), poctivý review event. Negatívny prípad
+  (v CODEXe nič) sa NIKDY nezatvára — rieši 2-dňová expirácia #341. Párovanie EAN je exact
+  (žiadny fuzzy) — zriedkavý pobočkový NICO sa nespáruje = BEZPEČNÝ miss.
+- **Bod 5 (menej otázok):** `List-Unsubscribe` hlavička zachytená pri ingeste
+  (`messages.list_unsubscribe`) + konzervatívna bulk-odosielateľ+promo-predmet heuristika
+  (`app/orders/promo.py`) routujú zjavný leták do `no_processing` namiesto otázky.
+  Ohraničenie #337 trvá: CODEX = dôkaz, nikdy import produktov.
+- **Testy:** `test_codex_orders.py` (sweep match zavrie neutrálne + `mail_rules` nezmenené,
+  no-match/stale/ambiguous/iný-zákazník ostanú otvorené, guarded no-op pri už-zodpovedanej),
+  `test_httpapi_codex.py` (401/403 auth, upsert idempotencia, 400 body), `test_promo.py`
+  (reálne SK skloňovania vs reálne objednávky), `test_codex_orders_push.py` (DI seam bez
+  duckdb/requests). Feature (testy v tom istom PR).
+- **Commit:** feature (`git log`), worktree dispatch (isolated, dedikovaný test-pg :55471).
+  Verzia sa bumpne pri integrácii nad main (po merge #337+#341).
+
 ## 2026-08-14 — #314 Pamäť ne-skladových dodávateľov (pokračovanie #307) — v0.9.98
 
 - **Čo:** „Netýka sa skladu" (#307) si teraz zapamätá DODÁVATEĽA (nová tabuľka
