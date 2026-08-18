@@ -54,38 +54,54 @@ def upsert_orders(conn, orders: list[dict]) -> int:
         customer_ean = o.get("customer_ean")
         if order_number is None or not customer_ean:
             continue
-        conn.execute(
-            """INSERT INTO codex_orders
-                   (order_number, customer_nico, customer_ean, customer_name,
-                    issue_date, delivery_date, line_count, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, now())
-               ON CONFLICT (order_number) DO UPDATE SET
-                   customer_nico = EXCLUDED.customer_nico,
-                   customer_ean  = EXCLUDED.customer_ean,
-                   customer_name = EXCLUDED.customer_name,
-                   issue_date    = EXCLUDED.issue_date,
-                   delivery_date = EXCLUDED.delivery_date,
-                   line_count    = EXCLUDED.line_count,
-                   updated_at    = now()""",
-            (int(order_number), o.get("customer_nico"), str(customer_ean),
-             o.get("customer_name") or "", o.get("issue_date") or None,
-             o.get("delivery_date") or None, o.get("line_count")))
-        n += 1
+        # Per-row isolation: a single malformed row (non-int order number, unparsable date)
+        # must not abort the whole push nor 500 the endpoint. Safe on the autocommit
+        # connection — a failed statement opens no transaction to poison, so the next row's
+        # execute runs fine. The push tool is idempotent, so a skipped row lands next run.
+        try:
+            conn.execute(
+                """INSERT INTO codex_orders
+                       (order_number, customer_nico, customer_ean, customer_name,
+                        issue_date, delivery_date, line_count, updated_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+                   ON CONFLICT (order_number) DO UPDATE SET
+                       customer_nico = EXCLUDED.customer_nico,
+                       customer_ean  = EXCLUDED.customer_ean,
+                       customer_name = EXCLUDED.customer_name,
+                       issue_date    = EXCLUDED.issue_date,
+                       delivery_date = EXCLUDED.delivery_date,
+                       line_count    = EXCLUDED.line_count,
+                       updated_at    = now()""",
+                (int(order_number), o.get("customer_nico"), str(customer_ean),
+                 o.get("customer_name") or "", o.get("issue_date") or None,
+                 o.get("delivery_date") or None, o.get("line_count")))
+            n += 1
+        except Exception:
+            log.exception("codex order upsert skipped a malformed row: %r",
+                          o.get("order_number"))
     return n
 
 
 def _owner_ean(customers: list[dict], sender_email: str) -> str | None:
-    """The customer's EDI EAN when the sender address is written in EXACTLY ONE card that
-    carries an EAN — otherwise None. Same ambiguity bar as `customer.resolve`'s exact-email
-    rung (`len(owners) == 1`): a shared or unknown address never resolves, so a question is
-    never closed for the wrong customer. Reuses `customer._addresses` so the email-field
-    parsing is identical to the rest of the system (a list OR a comma string)."""
+    """The customer's EDI EAN when the sender address belongs to EXACTLY ONE customer card,
+    and that card carries an EAN — otherwise None.
+
+    Ambiguity is measured over EVERY card that lists the address, EXACTLY like
+    `customer.resolve`'s exact-email rung (`owners = [... addr in emails]; len(owners) == 1`),
+    NOT only over the EAN-carrying ones — a card WITHOUT an ean_edi that shares the address is
+    still a genuinely different customer, so the address is ambiguous and must not resolve
+    (else a mail from the non-EDI sibling would be closed against the EDI card's CODEX order).
+    A shared/unknown address, or a sole owner with a blank EAN, never resolves — the question
+    stays open (never a wrong close). Reuses `customer._addresses` so the email-field parsing
+    (a list OR a comma string) is identical to the rest of the system."""
     addr = (customer._addresses(sender_email) or [""])[0]
     if not addr:
         return None
-    eans = {str(c.get("ean_edi")) for c in customers
-            if c.get("ean_edi") and addr in customer._addresses(c.get("emails"))}
-    return next(iter(eans)) if len(eans) == 1 else None
+    owners = [c for c in customers if addr in customer._addresses(c.get("emails"))]
+    if len(owners) != 1:
+        return None
+    ean = str(owners[0].get("ean_edi") or "").strip()
+    return ean or None
 
 
 def _mail_date(conn, message_id: str):
@@ -96,6 +112,17 @@ def _mail_date(conn, message_id: str):
     row = conn.execute(
         "SELECT created_at::date FROM messages WHERE message_id = %s", (message_id,)).fetchone()
     return row[0] if row else None
+
+
+def _already_auto_closed(conn, message_id: str) -> bool:
+    """True if this message was ALREADY auto-closed from CODEX at least once. The close logs
+    an `email_events` row with `detail->>'auto' = 'codex'`; if a human later UNDOES that close
+    (reopening the question), this guard stops the very next sweep from silently re-closing it
+    — a deliberate human undo must stick, and the guarded `status='open'` UPDATE only protects
+    against a CONCURRENT answer, not an explicit undo."""
+    return conn.execute(
+        "SELECT 1 FROM email_events WHERE message_id = %s AND detail->>'auto' = 'codex' "
+        "LIMIT 1", (message_id,)).fetchone() is not None
 
 
 def _find_codex_order(conn, customer_ean: str, mail_date):
@@ -163,6 +190,9 @@ def resolve_mail_questions(conn, cfg) -> int:
             sender = (q.get("payload") or {}).get("sender_email", "")
             ean = _owner_ean(customers, sender)
             if not ean:
+                continue
+            # A human who UNDID an earlier codex-auto close meant it — never re-close it.
+            if _already_auto_closed(conn, q["message_id"]):
                 continue
             mail_date = _mail_date(conn, q["message_id"])
             if mail_date is None:

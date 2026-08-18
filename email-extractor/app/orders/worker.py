@@ -274,11 +274,16 @@ def tick(conn, cfg, pipeline=None) -> int:
         # message stays claimable-by-name-only (excluded from _claim above) until
         # hold.release_for_question / hold.release_due lets it go.
         if not has_open(conn, message["message_id"]):
+            # #342: `AND processed = false` so a message the pipeline ALREADY terminalized
+            # (the promo → no_processing branch marks processed=true, processed_by=
+            # 'promo-filter') is not re-stamped here as processed_by=CATEGORY — that would
+            # silently overwrite the promo attribution. In every normal flow the message is
+            # still processed=false at this point, so this is unchanged there.
             conn.execute(
                 """UPDATE messages
                       SET processed = true, processed_at = now(), processed_by = %s,
                           processing_at = NULL
-                    WHERE message_id = %s""",
+                    WHERE message_id = %s AND processed = false""",
                 (CATEGORY, message["message_id"]))
     return 1
 

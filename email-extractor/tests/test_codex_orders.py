@@ -178,3 +178,99 @@ def test_sweep_only_touches_mail_kind_questions(pg):
     codex_orders.upsert_orders(pg, [
         {"order_number": 561, "customer_ean": EAN, "issue_date": "2026-08-15"}])
     assert codex_orders.resolve_mail_questions(pg, _cfg()) == 0
+
+
+def test_sweep_refuses_when_the_address_is_shared_with_a_non_ean_card(pg):
+    """The address is written in one EAN-carrying card AND one card with a BLANK EAN — a
+    genuinely different customer shares it, so it is ambiguous and must NOT resolve (else a
+    mail from the non-EDI sibling would be closed on the EDI card's CODEX order)."""
+    snapshot.import_snapshot(
+        pg, _CATALOG,
+        "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,E-mail\n"
+        f"Zákazník A,{EAN},Martin,U 1,,,shared@x.sk\n"
+        "Zákazník B (bez EAN),,Žilina,U 2,,,shared@x.sk\n")
+    qid = _mail_question(pg, sender="shared@x.sk")
+    codex_orders.upsert_orders(pg, [
+        {"order_number": 562, "customer_ean": EAN, "issue_date": "2026-08-15"}])
+    assert codex_orders.resolve_mail_questions(pg, _cfg()) == 0
+    assert teach.get(pg, qid)["status"] == "open"
+
+
+def test_a_human_undo_of_an_auto_close_is_not_re_reverted_by_the_next_sweep(pg):
+    """After the sweep auto-closes and a human UNDOES it (reopening the question), the very
+    next sweep must NOT silently re-close it — the deliberate undo has to stick."""
+    from app.orders import teach as teach_mod
+    _seed_customer(pg)
+    qid = _mail_question(pg, mail_date="2026-08-14")
+    codex_orders.upsert_orders(pg, [
+        {"order_number": 563, "customer_ean": EAN, "issue_date": "2026-08-15"}])
+    assert codex_orders.resolve_mail_questions(pg, _cfg()) == 1
+    # a human undo reopens the question (the /otazky undo path -> _undo_mail)
+    teach_mod.KINDS["mail"].undo(pg, teach.get(pg, qid))
+    assert teach.get(pg, qid)["status"] == "open"
+    # the next sweep leaves it alone (the earlier codex-auto event is the marker)
+    assert codex_orders.resolve_mail_questions(pg, _cfg()) == 0
+    assert teach.get(pg, qid)["status"] == "open"
+
+
+# --- pipeline-level: the promo gate (req 5) ----------------------------------
+
+def test_pipeline_routes_a_promo_flyer_to_no_processing_without_asking(pg):
+    """A no-order mail carrying a List-Unsubscribe header is routed straight to
+    no_processing — NO mail question, an honest event, and a result dict `tick` can consume.
+    Proves the ingest→pipeline promo path end to end, not just the pure heuristic."""
+    from app.orders import pipeline
+    sid = _seed_customer(pg)
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('promo', 'ai_orders')")
+    mail = {"message_id": "promo", "subject": "AKCIA -20% na pečivo tento týždeň",
+            "from_addr": "newsletter@velkosklad.sk", "from_name": "Veľkosklad",
+            "combined_text": "Nezmeškajte našu týždennú akciu na pečivo.",
+            "list_unsubscribe": "<mailto:unsub@velkosklad.sk>", "today": "2026-08-18"}
+
+    class Client:
+        last_prompt_hash = "p"
+
+        def json_call(self, system, user, schema, name="result"):
+            if name == "orders":
+                return {"senderName": "", "senderEmail": "", "companyName": "",
+                        "isChangeRequest": False, "notes": "", "orders": []}
+            return {"gtin": "", "confidence": 0.1}
+
+    res = pipeline.run(pg, _cfg(), mail, sid, client=Client(),
+                       upload=lambda *a, **k: None, post=lambda *a, **k: None)
+    assert res["status"] == "review" and res["question_ids"] == []
+    cat, processed, by = pg.execute(
+        "SELECT category, processed, processed_by FROM messages WHERE message_id='promo'"
+    ).fetchone()
+    assert (cat, processed, by) == ("no_processing", True, "promo-filter")
+    assert teach.open_questions(pg, kinds=("mail",)) == [], "no board question was raised"
+    ev = pg.execute(
+        "SELECT outcome FROM email_events WHERE message_id='promo' "
+        "AND detail->>'promo'='true' ORDER BY id DESC LIMIT 1").fetchone()
+    assert ev and ("leták" in ev[0].lower() or "newsletter" in ev[0].lower())
+
+
+def test_pipeline_still_asks_for_a_non_promo_no_order_mail(pg):
+    """The gate is high-precision: an ordinary no-order mail (no bulk signal) still raises the
+    'is this an order?' question — the promo route must not swallow it."""
+    from app.orders import pipeline
+    sid = _seed_customer(pg)
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('m2', 'ai_orders')")
+    mail = {"message_id": "m2", "subject": "Re: dobrý deň", "from_addr": "klient@pekaren.sk",
+            "from_name": "Klient", "combined_text": "Ďakujem, ozvem sa neskôr.",
+            "list_unsubscribe": "", "today": "2026-08-18"}
+
+    class Client:
+        last_prompt_hash = "p"
+
+        def json_call(self, system, user, schema, name="result"):
+            if name == "orders":
+                return {"senderName": "", "senderEmail": "", "companyName": "",
+                        "isChangeRequest": False, "notes": "", "orders": []}
+            return {"gtin": "", "confidence": 0.1}
+
+    pipeline.run(pg, _cfg(), mail, sid, client=Client(),
+                 upload=lambda *a, **k: None, post=lambda *a, **k: None)
+    assert len(teach.open_questions(pg, kinds=("mail",))) == 1
+    cat = pg.execute("SELECT category FROM messages WHERE message_id='m2'").fetchone()[0]
+    assert cat == "ai_orders", "a non-promo mail is not reclassified"
