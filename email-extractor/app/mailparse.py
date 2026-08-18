@@ -100,4 +100,11 @@ def headers(msg) -> dict:
         "cc_addrs": _addr_list(msg.get("Cc")),
         "subject": str(msg.get("Subject", "")),
         "date": str(msg.get("Date", "")),
+        # #342: the bulk-mail header. Present only on newsletters/marketing blasts (a
+        # transactional order mail never carries it), so it is the highest-precision "this
+        # is not an order" signal the promo filter uses. Stored raw; the filter only checks
+        # emptiness. RFC 2369 also allows `List-Unsubscribe-Post` — presence of EITHER is
+        # the same bulk signal.
+        "list_unsubscribe": str(msg.get("List-Unsubscribe", "")
+                                or msg.get("List-Unsubscribe-Post", "")).strip(),
     }

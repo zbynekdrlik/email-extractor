@@ -808,6 +808,115 @@ def test_innocent_zmena_wording_does_not_trip_the_correction_detector(pg, tmp_pa
         "a bare 'zmena' mention must not trip the correction detector"
 
 
+# --- #337: a RETIRED catalog card is a KNOWN-but-manual product, never an unknown ----
+#
+# After the 9 beverage cards were retired (dl_catalog_overrides.retired=true), a delivery
+# of them finds no card in the frozen catalog -> unmatched -> a dl_item question EVERY
+# delivery (the flood). The engine must instead RECOGNIZE the retired card: route to
+# review, never auto-upload, never a per-delivery board question. All SYNTHETIC.
+RETIRED_BEV_GTIN = "8580000009999"
+RETIRED_BEV_NAME = "Kombucha zázvor"
+
+
+def _retire_card(pg, gtin, name):
+    """A card that exists in dl_catalog_overrides as RETIRED — so it is absent from the
+    frozen catalog (load_catalog) but present in dl_snapshot.retired_dl_cards."""
+    pg.execute(
+        "INSERT INTO dl_catalog_overrides (gtin, name, doplnok, mass, sklad, cena, "
+        "retired, updated_at) VALUES (%s, %s, '', NULL, '', NULL, true, now())",
+        (gtin, name))
+
+
+def _bev_doc(doc_number="0100000050", items=None):
+    items = items or [{"name": "Kombucha zázvor 250ml", "quantity": 6, "unit": "ks",
+                       "unitPrice": 2.0, "totalPrice": 12.0, "vatRate": 10}]
+    # total MUST equal the line sum or the money gate reviews the whole doc before matching
+    total = round(sum(float(it.get("totalPrice") or 0) for it in items), 2)
+    return {"documents": [{
+        "supplierName": "Pekáreň Lunys", "supplierCity": "Prešov",
+        "supplierEmail": "dodavatel@lunys.sk", "docNumber": doc_number,
+        "deliveryDate": "01.08.2026", "documentTotalWithoutVAT": total, "items": items}]}
+
+
+def _dl_question_count(pg):
+    return int(pg.execute(
+        "SELECT count(*) FROM order_questions WHERE kind='dl_item'").fetchone()[0])
+
+
+def test_a_delivery_of_only_a_retired_card_product_reviews_no_upload_no_question(pg, tmp_path):
+    """#337: a delivery of ONLY a retired-card product -> review, ZERO uploads, ZERO
+    dl_item board questions (recognized as known-but-manual, not treated as unknown)."""
+    _snapshot(pg)
+    _retire_card(pg, RETIRED_BEV_GTIN, RETIRED_BEV_NAME)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_bev_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [{"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                                      "matchReason": "karta vyradená z katalógu"}]})
+    uploaded, posted = [], []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client,
+                       upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+                       post=lambda c, h: posted.append(h))
+    assert n == 1
+    assert uploaded == [], "a retired-card product must never auto-upload"
+    assert int(pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0]) == 0
+    assert _dl_question_count(pg) == 0, "recognized as a retired card, not flooded as unknown"
+    row = pg.execute(
+        "SELECT processed, proc_status FROM messages WHERE message_id='dl1'").fetchone()
+    assert row[0] is True and row[1] == "review"
+
+
+def test_an_active_product_still_ships_when_a_retired_one_shares_the_document(pg, tmp_path):
+    """#337: recognition is ACTIVE-MATCH-FIRST — an active-card product in the same
+    document still ships (partial EDI); only the retired product is diverted, with no
+    board question raised for it."""
+    _snapshot(pg)
+    _retire_card(pg, RETIRED_BEV_GTIN, RETIRED_BEV_NAME)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    doc = _bev_doc(items=[
+        {"name": "Rožok 50g", "quantity": 10, "unit": "ks", "unitPrice": 0.5,
+         "totalPrice": 5.0, "vatRate": 10},
+        {"name": "Kombucha zázvor 250ml", "quantity": 6, "unit": "ks", "unitPrice": 2.0,
+         "totalPrice": 12.0, "vatRate": 10}])
+    client = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED, {"gtin": "NO_MATCH",
+                                                    "matchConfidence": 0.0,
+                                                    "matchReason": "karta vyradená"}]})
+    uploaded = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client,
+                       upload=lambda c, name, content, dir_override=None: uploaded.append(name))
+    assert n == 1
+    assert len(uploaded) == 1, "the active-card product still ships (partial EDI)"
+    assert _dl_question_count(pg) == 0, "the retired product raises NO board question"
+
+
+def test_ship_history_on_a_retired_gtin_never_resurrects_an_upload(pg, tmp_path):
+    """#337 bod 2: learned ship-history on a retired card's GTIN must NOT re-enable
+    auto-upload (the catalog_gtins filter blocks the memory rescue); the product is
+    recognized as retired-manual (review, no board question) instead."""
+    _snapshot(pg)
+    _retire_card(pg, RETIRED_BEV_GTIN, RETIRED_BEV_NAME)
+    for day in ("2026-08-10", "2026-08-11", "2026-08-12"):
+        dl_memory.remember(pg, SUPPLIER_EAN, "Kombucha zázvor 250ml", RETIRED_BEV_GTIN,
+                           RETIRED_BEV_NAME, day, source="ship")
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_bev_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [{"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                                      "matchReason": "karta vyradená"}]})
+    uploaded = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client,
+                       upload=lambda c, name, content, dir_override=None: uploaded.append(name))
+    assert n == 1
+    assert uploaded == [], "history on a retired GTIN must never re-enable auto-upload"
+    assert int(pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0]) == 0
+    assert _dl_question_count(pg) == 0, "recognized as retired, not asked about"
+
+
 def test_looks_like_correction_matches_both_real_265_incidents():
     assert dl_worker._looks_like_correction("OPRAVA HMOTNOSTI", "")
     assert dl_worker._looks_like_correction(

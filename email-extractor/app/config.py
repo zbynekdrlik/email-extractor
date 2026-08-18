@@ -173,6 +173,11 @@ class Config:
     # comment for the full reasoning.
     question_stale_working_days: int = 2
     question_escalate_working_days: int = 4
+    # #341: a board question open across MORE than this many WORKING days is auto-expired
+    # (neutral terminal state, teaches nothing) — the warehouse handles the underlying
+    # mail manually daily, so a stale question is bezpredmetná. Strictly greater than the
+    # threshold, so a question always gets its full N working days before expiring.
+    question_expire_working_days: int = 2
 
     @classmethod
     def load(cls) -> Config:
@@ -304,4 +309,7 @@ class Config:
             question_escalate_working_days=int(
                 _get(o, "question_escalate_working_days",
                      "QUESTION_ESCALATE_WORKING_DAYS", 4) or 4),
+            question_expire_working_days=int(
+                _get(o, "question_expire_working_days",
+                     "QUESTION_EXPIRE_WORKING_DAYS", 2) or 2),
         )
