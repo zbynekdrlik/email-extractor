@@ -66,6 +66,7 @@ options:
   delivery_notes_engine: "n8n"
   delivery_notes_shadow: false
   delivery_notes_shadow_days: 3
+  delivery_notes_max_age_days: 14
   dl_catalog_gid: ""
   question_stale_working_days: 2
   question_escalate_working_days: 4
@@ -131,6 +132,7 @@ schema:
   delivery_notes_engine: list(n8n|python)?
   delivery_notes_shadow: bool?
   delivery_notes_shadow_days: int?
+  delivery_notes_max_age_days: int?
   dl_catalog_gid: str?
   question_stale_working_days: int?
   question_escalate_working_days: int?

@@ -116,6 +116,16 @@ class Config:
     delivery_notes_engine: str = "n8n"
     delivery_notes_shadow: bool = False
     delivery_notes_shadow_days: int = 3
+    # #339: safety age cutoff for the DL engine. A `dodacie_listy` message older than this
+    # many days that becomes claimable again (a fresh claim, a stuck-sibling release, an
+    # answered-question reprocess) routes to MANUAL REVIEW instead of auto-uploading a
+    # months-old delivery note to ORION — the goods almost certainly already arrived and
+    # were handled by hand, so an automatic upload is a real duplicate-delivery risk
+    # (#338). A ROLLING window (not a fixed date like human_processing.BACKLOG_CUTOFF): the
+    # risk is the AGE of the document, so it catches a stuck DL whenever it re-enters. 0
+    # disables the guard. Loaded WITHOUT the `or N` idiom so an explicit 0 truly disables
+    # it (unlike delivery_notes_shadow_days, where 0 is meaningless — see #229 on the trap).
+    delivery_notes_max_age_days: int = 14
     # #129/#235: the DL-sheet counterpart of catalog_sheet_id above — same "unread,
     # never removed" precedent, see that field's own comment.
     dl_catalog_gid: str = ""
@@ -251,6 +261,10 @@ class Config:
                     "1", "true", "yes", "on"),
             delivery_notes_shadow_days=int(
                 _get(o, "delivery_notes_shadow_days", "DELIVERY_NOTES_SHADOW_DAYS", 3) or 3),
+            # #339: NO trailing `or 14` — an explicit 0 in options.json must DISABLE the
+            # guard, and `0 or 14` would silently re-enable it (the #229 falsy-override trap).
+            delivery_notes_max_age_days=int(
+                _get(o, "delivery_notes_max_age_days", "DELIVERY_NOTES_MAX_AGE_DAYS", 14)),
             dl_catalog_gid=str(_get(o, "dl_catalog_gid", "DL_CATALOG_GID", "") or ""),
             orion_dl_dir=_get(o, "orion_dl_dir", "ORION_DL_DIR",
                               "C:\\ORION\\COMMUNICATOR\\data\\in_DL"),

@@ -550,6 +550,81 @@ def test_a_dl_message_older_than_the_cutoff_routes_to_review_never_auto_uploads(
     assert row == (True, "dodacie_listy", "review")
 
 
+def test_release_for_question_on_an_over_cutoff_message_routes_to_review_never_uploads(
+        pg, tmp_path):
+    """#339: the age gate sits at the shared `_process_message` choke point, so it also
+    covers the `release_for_question` re-entry path — a blocked DL whose item question is
+    finally answered WEEKS later must NOT silently ship a now-stale delivery note."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    doc = _doc(total=3.0, items=[{"name": "Neznámy chlebík", "quantity": 3, "unit": "ks",
+                                  "unitPrice": 1.0, "totalPrice": 3.0}])
+    client1 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                          "dl_item": [{"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                                       "matchReason": "žiadna zhoda"}]})
+    uploaded = []
+    n = dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client1,
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name))
+    assert n == 1 and uploaded == [], "nothing shippable on the first pass"
+    qid = pg.execute("SELECT id FROM order_questions WHERE kind='dl_item'").fetchone()[0]
+    # It sat unanswered so long it is now over the cutoff.
+    pg.execute("UPDATE messages SET created_at = now() - interval '40 days' "
+               "WHERE message_id = 'dl1'")
+    dl_memory.remember(pg, SUPPLIER_EAN, "Neznámy chlebík", ITEM_GTIN, "Rožok 50g",
+                       "2026-08-10", source="human")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": ITEM_GTIN}), qid))
+    client2 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                          "dl_item": [ITEM_MATCHED]})
+    uploaded2, posted2 = [], []
+    released = dl_worker.release_for_question(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), qid,
+        client=client2,
+        upload=lambda c, name, content, dir_override=None: uploaded2.append(name),
+        post=lambda c, h: posted2.append(h))
+    assert uploaded2 == [], "an over-cutoff DL must not ship even after its answer arrives"
+    assert client2.calls == [], "the age gate short-circuits before extraction"
+    assert released and released[0]["outcome"] == "review"
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE uploaded_at IS NOT NULL").fetchone()[0] == 0
+
+
+def test_delivery_notes_max_age_days_configures_and_disables_the_cutoff(pg, tmp_path):
+    """#339: the cutoff is configurable (a 40-day DL still ships under a 90-day window) and
+    0 disables the guard entirely (an old DL ships) — a deployment can tune or turn off the
+    safety valve deliberately."""
+    _snapshot(pg)
+    # (a) 40 days old, cutoff 90 -> within the window -> ships normally.
+    _msg(pg, mid="within", has_attachments=False, combined_text=BODY_TEXT_DL)
+    pg.execute("UPDATE messages SET created_at = now() - interval '40 days' "
+               "WHERE message_id = 'within'")
+    client_a = FakeClient({"dl_documents": [_doc(doc_number="0100000091")],
+                           "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [ITEM_MATCHED]})
+    up_a = []
+    dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path),
+                 delivery_notes_max_age_days=90),
+        client=client_a,
+        upload=lambda c, name, content, dir_override=None: up_a.append(name))
+    assert len(up_a) == 1, "within the configured window an old DL still ships"
+
+    # (b) 40 days old, cutoff 0 (disabled) -> ships normally.
+    _msg(pg, mid="disabled", has_attachments=False, combined_text=BODY_TEXT_DL)
+    pg.execute("UPDATE messages SET created_at = now() - interval '40 days' "
+               "WHERE message_id = 'disabled'")
+    client_b = FakeClient({"dl_documents": [_doc(doc_number="0100000092")],
+                           "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [ITEM_MATCHED]})
+    up_b = []
+    dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path),
+                 delivery_notes_max_age_days=0),
+        client=client_b,
+        upload=lambda c, name, content, dir_override=None: up_b.append(name))
+    assert len(up_b) == 1, "max_age_days=0 disables the guard"
+
+
 def test_empty_body_text_and_no_attachment_still_reviews_without_calling_the_model(
         pg, tmp_path):
     """No attachment AND no body text either -- must stay a cheap, immediate review (no

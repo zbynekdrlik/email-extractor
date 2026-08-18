@@ -205,6 +205,44 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     # #231: the DL-only nástenka link, never the mixed AI-orders `sklad_link`.
     link = report.dl_sklad_link(cfg)
 
+    # #339: age cutoff. An OLD stuck delivery note that becomes claimable again (a fresh
+    # _claim, a _release_stuck_siblings reset, or a release_for_question reprocess — ALL
+    # three re-entry paths converge HERE on _process_message, so this ONE guard covers
+    # every one) must NEVER auto-upload a months-old document to ORION: the goods almost
+    # certainly already arrived and were handled by hand, so an automatic upload is a real
+    # duplicate-delivery risk (#338: 3 DLs from 7.7/17.7 auto-uploaded 15.8). The DL engine
+    # had NO age guard at all, unlike the orders engine's human_processing.BACKLOG_CUTOFF.
+    # Route straight to manual review with an honest reason, BEFORE extraction (no model
+    # call, no supplier/item match, no claim, no upload — exactly the #265 correction-mail
+    # gate's shape), marked processed so it never loops. Gated `not shadow` for the same
+    # reason the #265 gate is: a shadow run uploads nothing anyway and must keep measuring
+    # the full pipeline (the corpus/eval harness always runs shadow, so it never sees this
+    # branch). `created_at` is read here from `messages` rather than carried on the message
+    # dict so the ONE guard covers every re-entry path uniformly (release_for_question
+    # builds its own message dict from a SELECT that never carried created_at either).
+    # delivery_notes_max_age_days <= 0 disables the guard.
+    max_age_days = int(getattr(cfg, "delivery_notes_max_age_days", 14) or 0)
+    if max_age_days > 0 and not shadow:
+        agerow = conn.execute(
+            "SELECT created_at, created_at < now() - make_interval(days => %s) "
+            "FROM messages WHERE message_id = %s",
+            (max_age_days, message["message_id"])).fetchone()
+        if agerow and agerow[1]:
+            received = agerow[0]
+            reason = (
+                f"Tento dodací list je starší ako {max_age_days} dní (prijatý "
+                f"{received:%d.%m.%Y}) — z bezpečnosti sa NEnahráva automaticky do ORIONu, "
+                f"aby sa nezopakovala už raz vybavená dodávka. Skontroluj ho a v prípade "
+                f"potreby ho nahraj / vybav ručne.")
+            _post(cfg, shadow, lambda: dl_report.build_review(
+                reason, from_addr=message.get("from_addr", ""),
+                subject=message.get("subject", ""), link=link), post=post)
+            _event(conn, shadow, message["message_id"], stage="review", status="review",
+                  outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
+            return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
+                   "documents": [{"outcome": "review", "reason": reason,
+                                  "over_age_cutoff": True}], "items": []}
+
     # #247: a decorative/tiny/junk attachment (`app/extract.py`'s own ingest-time
     # `method='skipped'` classification, e.g. `flag='skipped_tiny_image'` for a
     # signature logo) must never be handed to `dl_extract` at all — it has no way to
