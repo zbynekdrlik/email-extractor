@@ -518,6 +518,38 @@ def test_body_text_with_no_real_delivery_note_still_reviews_cleanly(pg, tmp_path
     assert row == (True, "dodacie_listy")
 
 
+def test_a_dl_message_older_than_the_cutoff_routes_to_review_never_auto_uploads(
+        pg, tmp_path):
+    """#339 safety gap: an OLD stuck dodacie_listy message that becomes claimable again
+    (a fresh _claim, a _release_stuck_siblings reset, or a release_for_question reprocess)
+    must route to MANUAL REVIEW with an honest reason — NEVER auto-upload a months-old
+    delivery note to ORION (the #338 duplicate-delivery risk: 3 DLs from 7.7/17.7
+    auto-uploaded 15.8). RED on the pre-fix code: with no age gate a fully-shippable old
+    message reaches _process_document -> desadv claim -> upload. The gate short-circuits
+    BEFORE extraction, so not even a model call fires."""
+    _snapshot(pg)
+    _msg(pg, mid="old1", has_attachments=False, combined_text=BODY_TEXT_DL)
+    pg.execute("UPDATE messages SET created_at = now() - interval '40 days' "
+               "WHERE message_id = 'old1'")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    uploaded, posted = [], []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(
+        pg, cfg, client=client,
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+        post=lambda c, h: posted.append(h))
+    assert n == 1
+    assert uploaded == [], "an over-cutoff DL must NEVER auto-upload to ORION"
+    assert client.calls == [], "the age gate must short-circuit BEFORE extraction"
+    assert len(posted) == 1
+    assert "z bezpečnosti sa NEnahráva automaticky do ORIONu" in posted[0]
+    row = pg.execute(
+        "SELECT processed, processed_by, proc_status FROM messages "
+        "WHERE message_id = 'old1'").fetchone()
+    assert row == (True, "dodacie_listy", "review")
+
+
 def test_empty_body_text_and_no_attachment_still_reviews_without_calling_the_model(
         pg, tmp_path):
     """No attachment AND no body text either -- must stay a cheap, immediate review (no
