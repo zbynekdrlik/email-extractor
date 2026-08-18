@@ -3756,3 +3756,34 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
 - **Commity:** bump `ae9aecb`, #336 kód+docs (tento). Worktree dispatch (isolated, sole worker),
   vlastný test-pg :15466. Full flow (push dev → PR → merge → deploy v0.9.108 → verify → run-cards)
   per dispatch.
+
+## 2026-08-18 — #337 (poistka na vyradenú kartu) + #341 (auto-expirácia otázok) — v0.9.111
+
+- **#341:** nový neutrálny terminálny stav `order_questions.status='expired'` — sweep
+  `question_alerts.expire_stale` vo `worker.run_forever` (PRED `sweep`), expiruje otázku otvorenú
+  cez VIAC ako `question_expire_working_days` (default 2) pracovných dní (`_weekdays_touched` — Po–Pia,
+  Europe/Bratislava; víkendy sa nepočítajú, piatková otázka NIE je expirovaná v pondelok pri touched=2,
+  áno v utorok pri touched=3). Nezapíše NIČ (žiadne `mail_rules` — kritické: obe odpovede mail-druhu by
+  zapísali trvalé pravidlo a ticho zahodili budúce objednávky reálneho zákazníka; žiadne teach.apply,
+  žiadna item/dl pamäť). Správu pošle poctivo do ručného review (`processed=true` → nikdy sa neclaimne/
+  nespýta, mimo n8n „zaseknuté" zoznamu; rollup review event). Vylúčená z pripomínania: open-list
+  (`status='open'`) automaticky + `reliability.aging_review_backlog` rozšírené na `status IN
+  ('open','expired')`. n8n denný digest (JfiRvrOjP3jySSEL) číta `messages`, nie `order_questions` —
+  bez zmeny. `Config.question_expire_working_days` (default 2).
+  - RED `d8516eb` → GREEN `87dddae`. Testy: `test_question_alerts.py` (expirácia, boundary touched=2,
+    víkendová aritmetika, 0 mail_rules/pamäte, nikdy znovu pripomenutá), `test_orders_reliability.py`
+    (digest vylúčenie expirovanej otázky).
+- **#337:** kódová poistka nad hotovou dátovou opravou (9 nápojových kariet retired). Príčina: vyradená
+  karta zmizne zo zmrazeného katalógu → dodávka nesparovaná → `dl_item` otázka pri KAŽDEJ dodávke
+  (zaplavenie). Poistka (active-match-first, `catalog_gtins` ostáva len aktívny → memory-rescue bezpečnosť
+  zamknutá): `dl_snapshot.retired_dl_cards()` + `dl_match.match_retired()` (meno-skóre ≥65 alebo
+  ship-história na vyradený GTIN); v `dl_document._process_document` LEN položka, ktorá nesparovala aktívnu
+  kartu (a nie match_failed) → `rule='retired_manual'` (gtin=None, nikdy neodošle, nikdy zhoda), PRESKOČÍ
+  otázku, dokument do review s poctivým „vyradená karta, vybav ručne v CODEXe". Aktívna karta v tom istom
+  dokumente stále odošle (partial EDI).
+  - RED `3eb0483` → GREEN `0d945bf`. Testy: `test_dl_worker.py` (review+0 upload+0 otázka; aktívna karta
+    stále odošle; história na vyradený GTIN neobnoví upload).
+- **Integrácia:** worktree dispatch (isolated), vlastný test-pg :15466. Počas práce sibling zmergol #342
+  (v0.9.110) do dev+main → collision, bump na v0.9.111. Merge origin/dev čistý (žiadny konflikt), worker.py
+  má BOTH `codex_orders.resolve_mail_questions` (#342, prv) aj `expire_stale` (#341) — správne poradie.
+  PR #345, full flow per dispatch.
