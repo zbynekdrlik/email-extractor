@@ -215,7 +215,10 @@ def _format_grouped(kind: str, bodies: list[str], cfg) -> str:
     None (some tests) — `report.dashboard_link` then returns "" and the link line is
     simply omitted, exactly like an unset `dashboard_base_url`."""
     n = len(bodies)
-    parts = [f"<p>{GROUPED_ITEM_KINDS[kind].format(n=n)}</p>"]
+    # `.replace`, not `.format`: a future header template with a stray literal `{`/`}` (a
+    # CSS/JSON snippet, an emoji entity) must never raise and break the whole flush (this
+    # runs OUTSIDE flush_pending's post() try/except) — `{n}` is the only placeholder.
+    parts = [f"<p>{GROUPED_ITEM_KINDS[kind].replace('{n}', str(n))}</p>"]
     parts.extend(bodies[:DISPLAY_ITEM_CAP])
     if n > DISPLAY_ITEM_CAP:
         parts.append(f"<p>&#8230; a {n - DISPLAY_ITEM_CAP} ďalších.</p>")
