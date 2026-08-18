@@ -76,10 +76,34 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from html import escape
 
 from . import report
 
 log = logging.getLogger("orders.dl_alerts")
+
+# #336: the grouped OPERATOR-alert kinds whose rows are ONE-PER-ITEM short lines
+# (`• odosielateľ — predmet (prijaté D.M.)`), enqueued across many worker ticks and
+# grouped only at flush time. For each, `flush_pending` renders ONE readable message:
+# a per-kind HEADER (count + one explanation, `{n}` filled at flush) + up to
+# DISPLAY_ITEM_CAP short item lines + „…a N ďalších" + a dashboard action link — instead
+# of the pre-#336 wall where flush just concatenated N full explanation sentences (live
+# evidence: a 3177-char human_processing_review post). Mirrors question_alerts._group_html's
+# header/cap/„…ďalších"/link convention. A kind NOT in this registry (question_reminder/
+# question_escalation — already a fully-formatted single body from question_alerts;
+# spend_cap — a one-off) is concatenated as before, untouched.
+DISPLAY_ITEM_CAP = 10
+GROUPED_ITEM_KINDS = {
+    "human_processing_review":
+        "&#128194; Nezaradené e-maily ({n}) &mdash; systém ich nevedel automaticky "
+        "zaradiť; skontroluj ich na dashboarde a preklasifikuj / označ ako vybavené.",
+    "dl_stuck_classified":
+        "&#9888;&#65039; Zaseknuté dodacie listy ({n}) &mdash; zaradené ako dodací list, "
+        "ale spracovanie sa vôbec nezačalo; over, či beží spracovanie dodacích listov.",
+    "dl_upload_failed":
+        "&#128230; Nenahraté dodacie listy ({n}) &mdash; nahranie do ORIONu zlyhalo; "
+        "skús znova alebo nahlás administrátorovi.",
+}
 
 # #239 finding 1 (reopened): production calls flush_pending() on almost every worker
 # tick — this is the window a burst of same-kind alerts is given to accumulate before
@@ -109,6 +133,19 @@ DELIVERED_RETENTION_DAYS = 30
 # recent history still reaches it (flush_pending re-routes a still-held channel-0 row to
 # the current ops channel). A REAL-channel undelivered row is never touched by this.
 HELD_RETENTION_DAYS = 30
+
+
+def item_line(sender: str, subject: str, received=None) -> str:
+    """#336: ONE short per-item line for a grouped ops alert — `• odosielateľ — predmet
+    (prijaté D.M.)`. The explanation sentence + the dashboard action link live ONCE in the
+    group HEADER (`_format_grouped`, keyed on `GROUPED_ITEM_KINDS`), never repeated per
+    item — that repetition was the pre-#336 wall. `received` may be a datetime/date (a
+    `D.M.` suffix is added) or None (no suffix); never a microsecond timestamp."""
+    when = ""
+    if received is not None and hasattr(received, "day"):
+        when = f" (prijaté {received.day}.{received.month}.)"
+    return (f"<p>&#8226; {escape(sender or '-')} &mdash; "
+            f"{escape(subject or '-')}{when}</p>")
 
 
 def enqueue(conn, channel_id: int, kind: str, body_html: str,
@@ -169,6 +206,65 @@ def already_pending(conn, kind: str, message_id: str,
     return row is not None
 
 
+def _format_grouped(kind: str, bodies: list[str], cfg) -> str:
+    """#336: one readable grouped alert for a per-item wall kind — a single per-kind
+    HEADER (count + one explanation, `{n}` filled) + up to `DISPLAY_ITEM_CAP` short item
+    lines + „…a N ďalších" + a dashboard action link. Replaces the pre-#336 wall where
+    `flush_pending` just `"".join`-ed N full explanation sentences. Mirrors
+    `question_alerts._group_html`'s header/cap/„…ďalších"/link convention. `cfg` may be
+    None (some tests) — `report.dashboard_link` then returns "" and the link line is
+    simply omitted, exactly like an unset `dashboard_base_url`."""
+    n = len(bodies)
+    parts = [f"<p>{GROUPED_ITEM_KINDS[kind].format(n=n)}</p>"]
+    parts.extend(bodies[:DISPLAY_ITEM_CAP])
+    if n > DISPLAY_ITEM_CAP:
+        parts.append(f"<p>&#8230; a {n - DISPLAY_ITEM_CAP} ďalších.</p>")
+    base = report.dashboard_link(cfg)
+    if base:
+        parts.append(f'<p>&#128203; Otvor dashboard: '
+                     f'<a href="{escape(base)}">{escape(base)}</a></p>')
+    return "".join(parts)
+
+
+def reminder_suppressed(conn, cfg, kind: str, message_id: str, now=None) -> bool:
+    """#336: the re-enqueue cadence for the grouped ops SWEEP kinds
+    (`human_processing_review`, `dl_stuck_classified`) — replaces the old flat
+    `already_pending` 4h window that re-swept (and re-posted) the SAME still-stuck message
+    every ~4h, producing a repeated wall. Returns True when a fresh enqueue should be
+    SUPPRESSED:
+
+    - the FIRST alert for a message ALWAYS fires (surfaced promptly, any hour/day) — a
+      newly-stuck message must never be delayed to the next morning;
+    - a RE-reminder for a still-unresolved message fires at most ONCE per day, only after
+      the configured morning hour, skipping Saturday/Sunday — mirrors `confirm.py`'s
+      CARRYOVER cadence (`morning_check_active`, its own `import_morning_check_hour` knob).
+
+    Anchored on `delivered_at`, NEVER `created_at` (#334): a row HELD undelivered for days
+    (the #310 channel-0 hold) then finally delivered has a stale `created_at`, so the
+    once-per-day gate must measure from the real delivery. While a row is still undelivered
+    there is nothing to remind about — it suppresses regardless of age (#327), and the held
+    row itself still delivers once it can."""
+    if not message_id:
+        return False
+    now = now or datetime.now(UTC)
+    if conn.execute(
+            "SELECT 1 FROM pending_alerts WHERE kind = %s AND message_id = %s "
+            "AND delivered_at IS NULL LIMIT 1", (kind, message_id)).fetchone():
+        return True
+    row = conn.execute(
+        "SELECT max(delivered_at) FROM pending_alerts WHERE kind = %s AND message_id = %s",
+        (kind, message_id)).fetchone()
+    last = row[0] if row else None
+    if last is None:
+        return False   # never alerted → the first alert fires now, regardless of hour/day
+    # A delivered alert already exists → re-remind at most once per morning, skip weekends.
+    from . import confirm
+    if not confirm.morning_check_active(cfg, now):
+        return True    # not yet the morning window on a workday → hold the reminder
+    return (last.astimezone(confirm.LOCAL_TZ).date()
+            >= now.astimezone(confirm.LOCAL_TZ).date())   # already reminded today?
+
+
 def flush_pending(conn, cfg, post=None, limit: int = 50,
                   quiet_seconds: int = 0) -> int:
     """Deliver every undelivered alert, grouped by `(channel_id, kind)` into ONE Odoo
@@ -222,7 +318,14 @@ def flush_pending(conn, cfg, post=None, limit: int = 50,
             # Still receiving new alerts of this exact (channel, kind) — wait for the
             # burst to go quiet so it lands as ONE grouped post, never one per row.
             continue
-        html = "".join(body for _rid, body, _created_at in items)
+        bodies = [body for _rid, body, _created_at in items]
+        # #336: a per-item wall kind gets ONE header + capped short lines + a dashboard
+        # link; every other kind keeps the legacy concatenation (question_reminder/
+        # escalation are already a single formatted body, spend_cap is a one-off).
+        if kind in GROUPED_ITEM_KINDS:
+            html = _format_grouped(kind, bodies, cfg)
+        else:
+            html = "".join(bodies)
         ids = [rid for rid, _body, _created_at in items]
         try:
             result = post(cfg, html, channel_id=target)

@@ -124,3 +124,45 @@ test_already_pending_a_held_then_delivered_row_still_dedupes_even_though_created
 `already_pending()` is True). The two pre-existing delivered-row window tests were re-scoped
 to age `delivered_at` instead of `created_at` (the same "re-scope the tests that encoded the
 old anchor" step #327 itself did when it moved the window to delivered-only).
+
+## Grouped ops alerts: short per-item lines + a per-kind flush-time header, and a
+## once-daily-morning re-reminder cadence (#336)
+
+The pre-#336 wall: `human_processing._notify`/`dl_worker.stuck_classified_sweep`/
+`dl_document._alert_and_release` each enqueued a FULL explanation sentence + Od/Predmet +
+a microsecond timestamp PER message, and `flush_pending` just `"".join`-ed the group — so N
+stuck messages produced N repeated sentences (a live 3177-char `human_processing_review`
+post). Fixed by splitting the two concerns:
+
+- **Short per-item body + per-kind header at flush.** Each enqueue site now stores ONE
+  short line via `dl_alerts.item_line(sender, subject, received=None)` (`• odosielateľ —
+  predmet (prijaté D.M.)`, HTML-escaped, no microsecond timestamp). `flush_pending` renders
+  the group: for a kind in `GROUPED_ITEM_KINDS` (a `{kind: header_template}` registry, the
+  template carrying `{n}`) it builds ONE header (count + explanation + a
+  `report.dashboard_link(cfg)` action link) + up to `DISPLAY_ITEM_CAP` (10) lines +
+  „…a N ďalších"; every OTHER kind keeps the legacy `"".join` (question_reminder/escalation
+  already store a full formatted body from `question_alerts._group_html`; spend_cap is a
+  one-off). **To add a FUTURE grouped ops kind: add it to `GROUPED_ITEM_KINDS` AND make its
+  enqueue site call `item_line` — do only ONE and it either double-wraps or stays a wall.**
+  Mirrors `question_alerts._group_html`'s own header/cap/„…ďalších"/link convention — reuse
+  that shape, don't invent a second one.
+- **Cadence: `reminder_suppressed(conn, cfg, kind, message_id, now=None)` replaces the flat
+  4h `already_pending` re-ask for the two SWEEP kinds** (`human_processing_review`,
+  `dl_stuck_classified` — the only ones that re-discover the same stuck message every tick).
+  The FIRST alert always fires (any hour/day — never delay a first notification); a
+  RE-reminder fires at most ONCE per day, only after the configured morning hour, skipping
+  Sat/Sun (reuses `confirm.morning_check_active` + `confirm.LOCAL_TZ` — the SAME carryover
+  cadence, not a second policy). Anchored on `delivered_at`, never `created_at` (#334): a
+  held-then-delivered row's daily gate must measure from the real delivery. While a row is
+  still undelivered there is nothing to remind about → suppress regardless of age (#327).
+  `already_pending` is KEPT unchanged (still a valid delivered-window primitive with its own
+  #327/#334 tests); `reminder_suppressed` is the new, separate cadence built on the same
+  `delivered_at` anchor.
+
+Testing: `test_dl_alerts.py` proves the format (`test_format_grouped_...` — 12 items → one
+header + 10 lines + „a 2 ďalších" + dashboard link, explanation appears ONCE) and the
+cadence (`test_reminder_suppressed_...` — explicit `now=` at Sat-afternoon/Mon/Tue/weekend
+crossings, delivered_at set to a prior day). The three flush-mechanics tests that encoded
+the old exact-`"".join` body were re-scoped to substring assertions; `test_dl_worker.py`'s
+`..._stamps_a_detection_time...` (the removed microsecond timestamp) became
+`..._uses_a_short_line_with_no_microsecond_timestamps`.

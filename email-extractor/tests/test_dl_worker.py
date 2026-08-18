@@ -1550,7 +1550,9 @@ def test_non_transient_upload_failure_enqueues_a_durable_alert_not_a_direct_post
     assert alert[1] == "dl_upload_failed"
     assert alert[2] == "dl1"
     assert alert[3] is None, "not yet delivered — flush_pending delivers it later"
-    assert "Odoslanie dodacieho listu do ORIONu zlyhalo" in alert[4]
+    # #336: the enqueued body is ONE short line naming the supplier + delivery note; the
+    # "nahranie zlyhalo" explanation lives once in the flush-time header, not per row.
+    assert "dodací list" in alert[4] and "Pekáreň Lunys" in alert[4]
 
     # the claim was released — a later successful reprocess must not be blocked
     assert pg.execute(
@@ -1859,11 +1861,10 @@ def test_a_transient_upload_failure_never_trusts_a_stable_prefix_collision(pg, t
 
 # --- #239 class 3: classified as DL but never even attempted -----------------
 
-def test_stuck_classified_sweep_stamps_a_detection_time_alongside_the_received_time(pg):
-    """Deep-review finding on #239's own PR: `flush_pending` may deliver this alert
-    long after detection (a queued Odoo outage) — by then the message could already be
-    processed. Stamping the DETECTION time lets a reader judge staleness for
-    themselves, distinct from the message's own `created_at`."""
+def test_stuck_classified_sweep_uses_a_short_line_with_no_microsecond_timestamps(pg):
+    """#336: the enqueued body is ONE short line (`• odosielateľ — predmet (prijaté D.M.)`);
+    the explanation sentence + the dashboard action link live ONCE in the flush-time header
+    (`GROUPED_ITEM_KINDS`), and the old microsecond `prijaté:`/`zistené:` timestamps are gone."""
     _msg(pg, mid="dl1")
     pg.execute(
         "UPDATE messages SET created_at = now() - interval '31 minutes' "
@@ -1871,8 +1872,11 @@ def test_stuck_classified_sweep_stamps_a_detection_time_alongside_the_received_t
     dl_worker.stuck_classified_sweep(pg, _cfg())
     html = pg.execute(
         "SELECT body_html FROM pending_alerts WHERE message_id='dl1'").fetchone()[0]
-    assert "prijaté:" in html
-    assert "zistené:" in html
+    assert html.startswith("<p>&#8226; ")                        # a short bullet line
+    assert "dodavatel@lunys.sk" in html
+    assert "(prijaté " in html                                    # short D.M. suffix
+    assert "prijaté:" not in html and "zistené:" not in html      # no microsecond timestamps
+    assert "spracovanie sa vôbec nezačalo" not in html            # explanation is in the header
 
 
 def test_stuck_classified_sweep_alerts_a_message_with_no_order_runs_row(pg):
@@ -3166,8 +3170,9 @@ def test_upload_failure_alert_never_leaks_the_raw_error_to_243(pg, tmp_path):
     body = pg.execute(
         "SELECT body_html FROM pending_alerts WHERE kind='dl_upload_failed'").fetchone()
     assert body is not None
-    # the clean, warehouse-facing sentence is there; the raw exception is NOT
-    assert "Odoslanie dodacieho listu do ORIONu zlyhalo" in body[0]
+    # #336: the enqueued body is a clean short line (supplier + delivery note); the raw
+    # exception is NEVER in it (the "nahranie zlyhalo" sentence lives in the flush header).
+    assert "dodací list" in body[0]
     assert "__RAW_UP__" not in body[0] and "paramiko" not in body[0] and "10.9.9.9" not in body[0]
     # ...but preserved internally in email_events.detail (never on the channel)
     ev = pg.execute("SELECT detail::text FROM email_events WHERE message_id='dl1' "

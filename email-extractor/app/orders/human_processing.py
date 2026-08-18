@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import json
 import logging
-from html import escape
 
 from .. import db
 from . import dl_alerts, dl_extract, dl_worker, llm, report
@@ -192,14 +191,14 @@ def _notify(conn, cfg, message: dict) -> None:
     already routed to its engine by the Layer-1 vision rescue; this net catches only the
     residual an operator must triage."""
     channel = report.ops_channel(cfg)
-    html = (
-        "<p>&#128194; Prišiel e-mail, ktorý systém nevedel automaticky zaradiť "
-        "(nečitateľný / prázdny scan) &mdash; operátor nech ho skontroluje a prípadne "
-        "ručne preklasifikuje na dashboarde.</p>"
-        f"<p>Od: {escape(message['from_addr'] or '-')} / "
-        f"Predmet: {escape(message['subject'] or '-')} / "
-        f"prijaté: {escape(str(message['created_at']))}</p>")
-    dl_alerts.enqueue(conn, channel, ALERT_KIND, html,
+    # #336: the body is now just ONE short line (`• odosielateľ — predmet (prijaté D.M.)`);
+    # the explanation sentence + the dashboard action link live ONCE in the per-kind header
+    # `dl_alerts.flush_pending` builds for the whole group (`GROUPED_ITEM_KINDS`), never
+    # repeated per message — that repetition (plus the microsecond `prijaté` timestamp this
+    # drops) was the pre-#336 3000-char wall.
+    line = dl_alerts.item_line(message["from_addr"], message["subject"],
+                               message.get("created_at"))
+    dl_alerts.enqueue(conn, channel, ALERT_KIND, line,
                       message_id=message["message_id"])
 
 
@@ -225,11 +224,13 @@ def sweep(conn, cfg, classify=None) -> int:
             ORDER BY created_at ASC LIMIT 10""", (BACKLOG_CUTOFF, STUCK_MINUTES)).fetchall()
     handled = 0
     for message_id, subject, from_addr, has_attachments, needs_vision, created_at in rows:
-        # Already handled within the dedup window (notified last pass, or reprocessed and
-        # still stuck) — never re-spend a vision call or re-notify. `_recently_rescued`
-        # additionally blocks a re-rescue loop for a message that was returned to
-        # human_processing after an earlier rescue (see its docstring).
-        if (dl_alerts.already_pending(conn, ALERT_KIND, message_id)
+        # #336: the first notification for a stuck message fires promptly; a RE-reminder
+        # for a still-unresolved one is throttled to ONCE per morning (skipping weekends)
+        # by `reminder_suppressed`, instead of the old ~4h re-ask — never re-spend a vision
+        # call or re-notify off-cadence. `_recently_rescued` additionally blocks a re-rescue
+        # loop for a message returned to human_processing after an earlier rescue (see its
+        # docstring).
+        if (dl_alerts.reminder_suppressed(conn, cfg, ALERT_KIND, message_id)
                 or _recently_rescued(conn, message_id)):
             continue
         message = {"message_id": message_id, "subject": subject, "from_addr": from_addr,
