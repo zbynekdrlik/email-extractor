@@ -3684,3 +3684,47 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
   neexistuje) → GREEN `35f1b24`.
 - **Commity:** bump `717cf08`, red `4f10e09`, green `35f1b24`, docs (tento). Worktree dispatch
   (isolated, sole worker), test-pg :15433.
+
+## 2026-08-18 — #339 (vekový cutoff pre DL engine) — v0.9.108
+- **Príčina:** DL engine (`dl_worker`/`dl_message`) nemal ŽIADNU vekovú bránu (na rozdiel od
+  orders `human_processing.BACKLOG_CUTOFF`). `_claim`/`_process_message` claimoval a spracoval
+  ľubovoľnú `dodacie_listy` správu s `processed=false` bez ohľadu na vek → stará zaseknutá DL,
+  keď sa stala claimovateľnou, mohla auto-nahrať mesiac starý doklad do ORIONu (riziko
+  duplicitnej dodávky; #338: 3 doklady 7.7./17.7. → 15.8.).
+- **Zmena:** jedna veková brána na SPOLOČNOM choke-pointe — začiatok LIVE (not shadow) vetvy
+  `_process_message`, PRED extrakciou (ako korekčná brána #265). Pokrýva všetky 3 re-entry cesty
+  (fresh `_claim`, `_release_stuck_siblings`, `release_for_question` — všetky konvergujú na
+  `_run_and_finish` → `_process_message`). Správa staršia ako `delivery_notes_max_age_days`
+  (config, default 14, 0 vypína) → rovno review s čestným dôvodom, žiadny model/claim/upload.
+  ROLLING okno (nie fixný dátum) — riziko je vek dokladu, chytí ho kedykoľvek sa vráti.
+- **Test (RED→GREEN):** `test_dl_worker.py::test_a_dl_message_older_than_the_cutoff_routes_to_
+  review_never_auto_uploads` (40-dňová správa dosiahne upload → RED; po fixe review, 0 upload).
+  + coverage: `..._release_for_question_on_an_over_cutoff_message...` (choke-point pokrýva release
+  cestu), `..._max_age_days_configures_and_disables_the_cutoff` (90 → shipne, 0 → vypnuté).
+  RED `f4f9d6c` (upload `Z-DESADV_...`) → GREEN `321d5a9`.
+- **Commity:** bump `ae9aecb`, red `f4f9d6c`, green `321d5a9` (spolu s #336 v jednom PR).
+
+## 2026-08-18 — #336 (čitateľné zoskupené ops upozornenia + denná kadencia) — v0.9.108
+- **Príčina:** zoskupené ops upozornenia (`human_processing_review`, `dl_stuck_classified`,
+  `dl_upload_failed`) sa skladali per-položkovo pri ENQUEUE — každá položka CELÁ veta +
+  Od/Predmet/mikrosekundový timestamp; `flush_pending` ich len `"".join`-ol → N×veta = stena
+  (živý dôkaz: 3177 znakov). Kadencia: `already_pending` (4h) re-enqueue tej istej správy každé 4h.
+- **Zmena:** (1) krátke per-item telá (`dl_alerts.item_line` = `• odosielateľ — predmet (prijaté
+  D.M.)`) + per-kind hlavička pri flushi (`GROUPED_ITEM_KINDS` registry: počet + veta +
+  `report.dashboard_link` odkaz) + strop `DISPLAY_ITEM_CAP=10` + „…a N ďalších"; kindy mimo
+  registra (question_reminder/escalation, spend_cap) `"".join` ako doteraz. (2) nová
+  `reminder_suppressed(conn, cfg, kind, msg)` — prvý alert hneď, re-reminder max 1× denne po
+  rannej hodine, skip So/Ne (reuse `confirm.morning_check_active`/`LOCAL_TZ`, anchor `delivered_at`
+  → #334 zachovaný). Dve sweep-y prepnuté z `already_pending` na `reminder_suppressed`;
+  `already_pending` ostáva (jeho #327/#334 testy nedotknuté).
+- **Test:** `test_dl_alerts.py` — `test_format_grouped_...` (12 → 1 hlavička + 10 riadkov + „a 2
+  ďalších" + dashboard odkaz, veta 1×), `test_reminder_suppressed_...` (explicit `now=` cez
+  Sat/Mon/Tue/víkend, `delivered_at` na prior deň), `test_item_line_...`. 3 flush-mechanics testy
+  re-scoped na substring (predtým exact `"".join`); `..._stamps_a_detection_time...` →
+  `..._uses_a_short_line_with_no_microsecond_timestamps`. Celý lokálny suite zelený.
+- **Doc/playbook:** NOVÝ `.claude/rules/ops-backlog.md` (reclassify na `no_processing`, reverzibilné)
+  + `.claude/rules/dl-alerts.md` #336 sekcia + `.claude/rules/schema-migrations.md` #331 sekcia (DROP
+  mŕtvej tabuľky) + router riadok v `CLAUDE.md`.
+- **Commity:** bump `ae9aecb`, #336 kód+docs (tento). Worktree dispatch (isolated, sole worker),
+  vlastný test-pg :15466. Full flow (push dev → PR → merge → deploy v0.9.108 → verify → run-cards)
+  per dispatch.
