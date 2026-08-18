@@ -77,7 +77,7 @@ def _claim(conn) -> dict | None:
                                    AND q.kind = 'mail' AND q.status = 'open')
                           ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
          RETURNING message_id, subject, from_addr, from_name, combined_text, body_text,
-                   attempts""",
+                   attempts, list_unsubscribe""",
         (CATEGORY, MAX_ATTEMPTS)).fetchone()
     return _as_message(row)
 
@@ -112,12 +112,18 @@ def _as_message(row) -> dict | None:
     # build their message dict through this one function, so this covers both.
     msg = {"message_id": row[0], "subject": row[1] or "", "from_addr": row[2] or "",
            "from_name": row[3] or "", "combined_text": row[4] or row[5] or "",
-           "today": datetime.now(UTC).date().isoformat()}
+           # #342: default present on every path (shadow's 6-col row too) so the pipeline's
+           # promo gate can read it unconditionally; only `_claim` actually fills it.
+           "list_unsubscribe": "", "today": datetime.now(UTC).date().isoformat()}
     # #330: only `_claim` (engine=python) selects `attempts` — `_peek_for_shadow` (shadow
     # mode) never increments/claims and has no need for it, so its row stays 6 columns.
     # `tick`'s crash handler below only reads this for the python engine.
     if len(row) > 6:
         msg["attempts"] = int(row[6] or 0)
+    # #342: `_claim` adds list_unsubscribe as the 8th column (index 7); `_peek_for_shadow`
+    # never selects it (shadow never routes a promo mail — that write is not-shadow only).
+    if len(row) > 7:
+        msg["list_unsubscribe"] = row[7] or ""
     return msg
 
 
@@ -320,6 +326,14 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pra
                 # has to wait for its delivery date to arrive first.
                 from .hold import release_due, retry_unknown_customer_questions
                 retry_unknown_customer_questions(conn, cfg)
+                # #342: auto-resolve an open `mail`-kind board question ("je toto vôbec
+                # objednávka?") when the sender's customer already has a matching order the
+                # warehouse entered by hand in CODEX (pushed into `codex_orders`). Neutral
+                # close only, ZERO durable rules; the negative case is never auto-closed
+                # (#341's expiry handles it). Never raises — one bad question can't stop the
+                # tick. Gated on orders_python like the other order sweeps.
+                from . import codex_orders
+                codex_orders.resolve_mail_questions(conn, cfg)
                 # #93: the deadline backstop — ship whatever is still held once its
                 # delivery date arrives. Shadow/n8n modes never hold an order, so there is
                 # never anything for this to release there.

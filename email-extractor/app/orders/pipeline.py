@@ -20,7 +20,7 @@ import enum
 import logging
 from pathlib import Path
 
-from . import customer, edi, extract, hold, llm, match, memory, report, snapshot, teach
+from . import customer, edi, extract, hold, llm, match, memory, promo, report, snapshot, teach
 from . import upload as upload_mod
 
 log = logging.getLogger("orders.pipeline")
@@ -185,6 +185,34 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
 
     orders = extracted.get("orders") or []
     if not orders:
+        # #342: an obvious wholesale flyer / newsletter is not a missed order — route it
+        # straight to no_processing instead of nagging the nástenka with "je toto vôbec
+        # objednávka?". High-precision only (List-Unsubscribe header, or bulk-sender +
+        # promo-subject together — see promo.looks_like_promo); when in doubt it falls
+        # through and still asks. Never in shadow (shadow leaves no trace). Written directly,
+        # NOT through `_finish`, whose invariant would otherwise RAISE the very mail question
+        # we are avoiding (a non-technical review with no board question).
+        if not shadow and promo.looks_like_promo(
+                message.get("subject", ""), message.get("from_addr", ""),
+                message.get("combined_text", "") or "",
+                message.get("list_unsubscribe", "")):
+            conn.execute(
+                """UPDATE messages
+                      SET category = 'no_processing',
+                          original_category = COALESCE(original_category, category),
+                          processed = true, processed_at = now(),
+                          processed_by = 'promo-filter', processing_at = NULL
+                    WHERE message_id = %s""", (message.get("message_id", ""),))
+            report.log_event(
+                conn, message.get("message_id", ""), stage="review", status="review",
+                outcome="Reklamný leták / newsletter — nie je objednávka (nespracúva sa)",
+                detail={"promo": True})
+            log.info("promo mail routed to no_processing: %s (%s)",
+                     message.get("message_id", ""), message.get("from_addr", ""))
+            return {"status": "review", "items": [], "shadow": shadow, "would_ship": False,
+                    "customer_ean": "", "customer_name": "", "delivery_date": "",
+                    "orders": 0, "order_results": [], "question_ids": [],
+                    "notes": extracted.get("notes", "")}
         # #164 row 2: "is this even an order?" — a board question that TEACHES (a
         # `mail_rules` row), instead of a dead `review` nobody could ever act on. Never in
         # shadow: shadow must leave no trace.
