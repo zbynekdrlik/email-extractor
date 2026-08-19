@@ -726,14 +726,6 @@ SCHEMA = [
                        '2026“) stratil 5 z 6 dní objednávky — oprava #289', '#289')
     ON CONFLICT (issue_ref) DO NOTHING
     """,
-    # One post per calendar day, never once per worker tick — same "claim, don't
-    # spam" pattern order_spend_alerts already uses for the monthly cap.
-    """
-    CREATE TABLE IF NOT EXISTS order_digest_sent (
-        day     DATE PRIMARY KEY,
-        sent_at TIMESTAMPTZ NOT NULL DEFAULT now()
-    )
-    """,
 
     # ==========================================================================
     # #200 F1: delivery-notes (dodacie listy, "DL") migration — foundation only.
