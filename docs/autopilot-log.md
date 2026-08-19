@@ -3823,3 +3823,21 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
   ponechané s odôvodnením (osirotená `order_digest_sent`, name-only množstvo, header-cell reziduum).
   #348 🟡 eskalačná hlavička je PRE-EXISTING mŕtvy kód (expiry touched>2 predbehne escalate touched≥4,
   z #341) → follow-up **#349** (needs-user-decision).
+
+## #352 — drop osirotenej tabuľky `order_digest_sent` (0.9.114, serial single-worker, dev2 test-pg :55471)
+
+- **#352 (cleanup):** `order_digest_sent` OSIROTENÁ po #347 (v0.9.112 odstránil denný digest, `d348b86`) —
+  0 čitateľov/zapisovateľov v `app/` (jediná referencia bol CREATE vo frozen baseline + conftest TRUNCATE).
+  Predtým označená ako „schéma migrácia mimo rozsahu dávky" (batch #341/#348) → teraz doriešené.
+  Prístup = verzovaná revízia (verný mirror #331 `drop_processed_table`, per `schema-migrations.md`): nová
+  `migrate.Revision(6, "drop_order_digest_sent", ["DROP TABLE IF EXISTS order_digest_sent"])`, CREATE
+  odstránený z frozen `SCHEMA` (`db_schema.py`), `order_digest_sent` von z conftest TRUNCATE listu.
+  - Bez RED/GREEN (cleanup, nie bug). Migračný test `test_drop_order_digest_sent_removes_the_orphaned_table`
+    (`test_migrate.py`) zrkadlí #331: full migrate → preč; simuluj pre-drop prod (re-CREATE, rollback len
+    rev 6 riadok `WHERE revision = drop_rev` podľa MENA); re-run → dropped; re-run → `[]` idempotent no-op.
+  - Commity: bump `0da8c5f` (0.9.114), impl `b4ac5e1`. Review 0 🔴 0 🟡 0 🔵 (fresh-context reviewer).
+  - PR #353 dev→main, merge `2201299e`, CI zelené (test/typecheck/e2e-orders/e2e-dl/build, obe runy).
+    Deploy 0.9.114 na živý add-on (niesol aj docs-only 0.9.113, ktorý sa samostatne nenasadzoval).
+    Prod overenie: `/health`+`/version` 0.9.114, DOM v0.9.114 (0 console errors),
+    `to_regclass('public.order_digest_sent')` = NULL (tabuľka preč), `schema_version` najnovší riadok
+    rev 6 `drop_order_digest_sent` (applied 2026-08-19 15:27:35 pri štarte add-onu).
