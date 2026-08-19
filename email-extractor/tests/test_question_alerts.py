@@ -1,8 +1,9 @@
 """Stale-question reminders (#237): #35 (dl_supplier, gnip@hkloan.eu on the live box)
 sat open with zero reminder ever sent — nothing in this codebase ever re-visited an
 already-open `order_questions` row before this module existed. These tests pin the
-cadence (reminder once, escalate once, then silent), the grouping (one Odoo post per
-sweep per audience/level, never one per question), the weekday-only gate, the repeat
+cadence (ONE reminder, then silent until the question is answered or auto-expired —
+#349 removed the second escalation-level reminder), the grouping (one Odoo post per
+sweep per audience, never one per question), the weekday-only gate, the repeat
 highlight, and the channel routing.
 """
 import os
@@ -70,11 +71,6 @@ def _reminder_sent_at(pg, qid):
         "SELECT reminder_sent_at FROM order_questions WHERE id = %s", (qid,)).fetchone()[0]
 
 
-def _escalated_at(pg, qid):
-    return pg.execute(
-        "SELECT escalated_at FROM order_questions WHERE id = %s", (qid,)).fetchone()[0]
-
-
 def _msg(pg, message_id="m1", category="ai_orders"):
     pg.execute(
         "INSERT INTO messages (message_id, category, processed) VALUES (%s, %s, false) "
@@ -131,38 +127,37 @@ def test_a_reminder_is_never_sent_twice_for_the_same_threshold(pg):
     assert len(_pending(pg, "question_reminder")) == 1
 
 
-# --- cadence: escalate once, then silent --------------------------------------------
+# --- cadence: ONE reminder, then silent forever (#349: no escalation) ---------------
 
-def test_escalation_does_not_fire_the_same_day_as_the_reminder(pg):
-    """A cold-start sweep on an already very-old question sends the plain reminder
-    first (never both levels in one pass) — escalation needs a later calendar day."""
+def test_a_cold_start_on_an_already_old_question_sends_exactly_one_reminder(pg):
+    """A sweep that first encounters an already very-old question (well past the
+    reminder threshold) enqueues exactly ONE reminder — never a second, louder alert
+    on top of it (#349 removed the escalation level)."""
     qid = _ask(pg, created_at=TUE)
-    n = question_alerts.sweep(pg, _cfg(), now=NEXT_MON)  # already past escalate_days
+    n = question_alerts.sweep(pg, _cfg(), now=NEXT_MON)  # many working days old
+    assert n == 1
+    assert len(_pending(pg)) == 1
+    assert len(_pending(pg, "question_reminder")) == 1
+    assert _reminder_sent_at(pg, qid) is not None
+
+
+def test_a_reminder_fires_once_and_no_second_reminder_ever_follows(pg):
+    """A question's whole life is create -> ONE ⏰ reminder -> silent (then expire_stale,
+    tested separately, closes it). The sweep must NEVER enqueue a second alert for the
+    same still-open question, however many more working days pass (#349: the old 🚨
+    escalation level that fired a second reminder at touched>=4 is gone)."""
+    qid = _ask(pg, created_at=TUE)
+    n = question_alerts.sweep(pg, _cfg(), now=WED)  # reminder (2 working days)
     assert n == 1
     assert len(_pending(pg, "question_reminder")) == 1
-    assert len(_pending(pg, "question_escalation")) == 0
-    assert _escalated_at(pg, qid) is None
+    first_sent = _reminder_sent_at(pg, qid)
 
-
-def test_escalation_fires_once_after_the_reminder_and_then_stays_silent(pg):
-    qid = _ask(pg, created_at=TUE)
-    question_alerts.sweep(pg, _cfg(), now=WED)  # reminder (2 working days)
-    assert _escalated_at(pg, qid) is None
-
-    n2 = question_alerts.sweep(pg, _cfg(), now=THU)  # 3 working days, not yet escalate
-    assert n2 == 0
-    assert _escalated_at(pg, qid) is None
-
-    n3 = question_alerts.sweep(pg, _cfg(), now=FRI)  # 4 working days -> escalate
-    assert n3 == 1
-    esc_rows = _pending(pg, "question_escalation")
-    assert len(esc_rows) == 1
-    assert _escalated_at(pg, qid) is not None
-
-    # Still open, still stale — no third message ever again.
-    n4 = question_alerts.sweep(pg, _cfg(), now=NEXT_MON)
-    assert n4 == 0
-    assert len(_pending(pg)) == 2  # exactly reminder + escalation, forever
+    # Every later sweep, no matter how stale (incl. the old touched>=4 escalation
+    # trigger point), adds NOTHING — one reminder, forever.
+    for later in (THU, FRI, NEXT_MON, NEXT_TUE):
+        assert question_alerts.sweep(pg, _cfg(), now=later) == 0
+    assert _reminder_sent_at(pg, qid) == first_sent
+    assert len(_pending(pg)) == 1  # exactly the ONE reminder, never a second alert
 
 
 # --- weekday/hour gate (reused from confirm.morning_check_active) -------------------
@@ -249,17 +244,6 @@ def test_the_reminder_header_tells_the_truth_about_elapsed_working_days(pg):
     assert "dlhšie ako 2 pracovné dni" not in html
     assert "1 pracovný deň" in html
     assert _reminder_sent_at(pg, qid) is not None
-
-
-def test_the_escalation_header_tells_the_truth_about_elapsed_working_days(pg):
-    """The 🚨 escalation header used to claim "už 4+ pracovných dní" when only 3 working
-    days had actually elapsed (touched=4 = created + 3 elapsed working days) (#348)."""
-    _ask(pg, created_at=TUE)
-    question_alerts.sweep(pg, _cfg(), now=WED)   # reminder (touched=2)
-    question_alerts.sweep(pg, _cfg(), now=FRI)   # escalation (touched=4, 3 elapsed)
-    html = _pending(pg, "question_escalation")[0][2]
-    assert "4+ pracovných dní" not in html
-    assert "3+ pracovných dní" in html
 
 
 # --- delivery reuses the durable dl_alerts outbox, never a direct post --------------

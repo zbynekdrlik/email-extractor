@@ -89,9 +89,9 @@ log = logging.getLogger("orders.dl_alerts")
 # DISPLAY_ITEM_CAP short item lines + „…a N ďalších" + a dashboard action link — instead
 # of the pre-#336 wall where flush just concatenated N full explanation sentences (live
 # evidence: a 3177-char human_processing_review post). Mirrors question_alerts._group_html's
-# header/cap/„…ďalších"/link convention. A kind NOT in this registry (question_reminder/
-# question_escalation — already a fully-formatted single body from question_alerts;
-# spend_cap — a one-off) is concatenated as before, untouched.
+# header/cap/„…ďalších"/link convention. A kind NOT in this registry (question_reminder —
+# already a fully-formatted single body from question_alerts; spend_cap — a one-off) is
+# concatenated as before, untouched.
 DISPLAY_ITEM_CAP = 10
 GROUPED_ITEM_KINDS = {
     "human_processing_review":
@@ -323,8 +323,8 @@ def flush_pending(conn, cfg, post=None, limit: int = 50,
             continue
         bodies = [body for _rid, body, _created_at in items]
         # #336: a per-item wall kind gets ONE header + capped short lines + a dashboard
-        # link; every other kind keeps the legacy concatenation (question_reminder/
-        # escalation are already a single formatted body, spend_cap is a one-off).
+        # link; every other kind keeps the legacy concatenation (question_reminder is
+        # already a single formatted body, spend_cap is a one-off).
         if kind in GROUPED_ITEM_KINDS:
             html = _format_grouped(kind, bodies, cfg)
         else:

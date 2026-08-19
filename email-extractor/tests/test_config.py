@@ -170,6 +170,34 @@ def test_config_yaml_schema_still_declares_the_dead_sheet_options():
             f"{dead} missing from config.yaml schema: block"
 
 
+def test_question_escalate_working_days_stays_dead_but_declared(tmp_path, monkeypatch):
+    """#349 removed the escalation-level reminder (dead code under the default config)
+    but KEPT `question_escalate_working_days` as a declared-but-unread option — the live
+    add-on's /data/options.json still has it SET, so dropping it from config.yaml's
+    schema would risk the HA Supervisor rejecting the next options validation, the exact
+    #129 precedent the dead sheet options above already guard. Still parsed (a value
+    present in options.json is accepted), consumed by NOTHING downstream."""
+    cfg = _load_with_options(tmp_path, monkeypatch, {"question_escalate_working_days": 7})
+    assert cfg.question_escalate_working_days == 7
+    assert "question_escalate_working_days" in Config.__dataclass_fields__
+    # absent -> harmless default, same _get() fallback every other option relies on
+    assert _load_with_options(
+        tmp_path, monkeypatch, {}).question_escalate_working_days == 4
+
+
+def test_config_yaml_still_declares_question_escalate_working_days():
+    """Pin config.yaml's own options:/schema: blocks textually so a future cleanup pass
+    can't silently re-break the #129 deploy-safety precedent for this dead option (same
+    guard shape as the dead sheet options above)."""
+    text = CONFIG_YAML.read_text()
+    options_block, sep, schema_block = text.partition("\nschema:\n")
+    assert sep, "config.yaml has no schema: block"
+    assert re.search(r"^\s+question_escalate_working_days:", options_block, re.M), \
+        "question_escalate_working_days missing from config.yaml options: block"
+    assert re.search(r"^\s+question_escalate_working_days:", schema_block, re.M), \
+        "question_escalate_working_days missing from config.yaml schema: block"
+
+
 def test_orion_dl_dir_defaults_to_a_different_folder_than_orders(tmp_path, monkeypatch):
     """#200: DL uploads must never land in the orders folder — the two pipelines'
     uploads must be trivially distinguishable in ORION even before either engine

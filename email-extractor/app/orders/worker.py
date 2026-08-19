@@ -340,8 +340,9 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pra
                 # #237: a board question (order_questions, either audience — item/
                 # customer/mail/date/line from the orders_python path, dl_item/
                 # dl_supplier from the dl_python path) that has sat open too long gets
-                # reminded/escalated here, grouped, via the SAME durable pending_alerts
-                # outbox flushed below. Gated the same way confirm.sweep is: shadow/n8n
+                # reminded here (once, #349 removed the escalation level), grouped, via
+                # the SAME durable pending_alerts outbox flushed below. Gated the same
+                # way confirm.sweep is: shadow/n8n
                 # modes never write an order_questions row through either engine, so
                 # there is never anything for this to find there either.
                 from . import question_alerts
@@ -367,8 +368,8 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pra
                 # (finding 4) bounds the table's growth; it is cheap and idempotent, so
                 # running it on the same tick as everything else needs no extra timer.
                 # Moved OUT of the dl_python-only gate (#237): a plain orders_python-only
-                # install (no DL engine) can now also have pending question_reminder/
-                # question_escalation rows that need flushing.
+                # install (no DL engine) can now also have pending question_reminder rows
+                # that need flushing.
                 from . import dl_alerts
                 dl_alerts.flush_pending(conn, cfg, quiet_seconds=dl_alerts.FLUSH_QUIET_SECONDS)
                 dl_alerts.prune_delivered(conn)
