@@ -111,6 +111,14 @@ CODEX_ORDERS = [
     "ALTER TABLE messages ADD COLUMN IF NOT EXISTS list_unsubscribe TEXT",
 ]
 
+# #352: the daily order digest was removed in #347 (v0.9.112); its send-dedup claim
+# table `order_digest_sent` is now a pure orphan (zero readers/writers). Drop it via a
+# versioned revision and remove its CREATE from the frozen baseline (same shape as #331's
+# `drop_processed_table`). IF EXISTS makes it a no-op on a fresh DB.
+DROP_ORDER_DIGEST_SENT = [
+    "DROP TABLE IF EXISTS order_digest_sent",
+]
+
 
 # SCHEMA above is FROZEN as revision 1 (the baseline). NEVER edit those statements for a
 # schema change — append a NEW numbered migrate.Revision to this list instead
@@ -122,6 +130,7 @@ REVISIONS = [
     migrate.Revision(3, "dedup_held_channel0_alerts", DEDUP_HELD_ALERTS),
     migrate.Revision(4, "drop_processed_table", DROP_PROCESSED),
     migrate.Revision(5, "add_codex_orders", CODEX_ORDERS),
+    migrate.Revision(6, "drop_order_digest_sent", DROP_ORDER_DIGEST_SENT),
 ]
 
 

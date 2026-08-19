@@ -270,3 +270,34 @@ def test_drop_processed_removes_the_dead_legacy_table():
         # idempotent no-op: DROP TABLE IF EXISTS — re-migrating with the table already gone
         assert db.init_schema(conn) == []
         assert _regclass(conn, "processed") is None
+
+
+# --- #352: the orphaned `order_digest_sent` table is dropped by a versioned revision ---
+# The daily order digest was removed in #347 (v0.9.112); its send-dedup claim table
+# `order_digest_sent` is now a pure orphan (zero app readers/writers). Revision
+# "drop_order_digest_sent" removes it. The baseline no longer CREATEs it either, so the
+# drop is a no-op on a fresh DB (IF EXISTS) but genuinely removes it on a pre-drop prod DB
+# that still carries it. Same self-healing-drop shape as #331's `drop_processed_table`.
+
+def test_drop_order_digest_sent_removes_the_orphaned_table():
+    drop_rev = next(r.revision for r in db.REVISIONS if r.name == "drop_order_digest_sent")
+    with fresh_db() as (conn, _dsn):
+        db.init_schema(conn)                                    # full schema incl. the drop revision
+        assert _regclass(conn, "order_digest_sent") is None     # orphan absent after full migrate
+
+        # simulate a pre-drop prod DB: the table exists and the ledger stops BEFORE the drop
+        conn.execute(
+            "CREATE TABLE order_digest_sent (day DATE PRIMARY KEY, "
+            "sent_at TIMESTAMPTZ NOT NULL DEFAULT now())")
+        # roll back ONLY the drop revision's ledger row (scoped by = drop_rev, not >=, so
+        # this stays correct when a later rev N is appended — that row is left untouched).
+        conn.execute("DELETE FROM schema_version WHERE revision = %s", (drop_rev,))
+        assert _regclass(conn, "order_digest_sent") is not None
+
+        done = db.init_schema(conn)                             # only the pending drop revision re-runs
+        assert drop_rev in done
+        assert _regclass(conn, "order_digest_sent") is None     # and it removed the orphan
+
+        # idempotent no-op: DROP TABLE IF EXISTS — re-migrating with the table already gone
+        assert db.init_schema(conn) == []
+        assert _regclass(conn, "order_digest_sent") is None

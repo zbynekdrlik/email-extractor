@@ -40,7 +40,7 @@ def pg(_schema):
         "global_item_memory, held_orders, catalog_overrides, customer_overrides, "
         "mail_rules, static_order_digest, import_alert_incidents, "
         "import_alert_incident_members, import_alert_incident_desadv_members, "
-        "match_incidents, order_digest_sent, "
+        "match_incidents, "
         "desadv_sent, dl_item_memory, dl_snapshots, dl_supplier_memory, "
         "dl_catalog_overrides, dl_supplier_overrides, pending_alerts, "
         "dl_nonwarehouse_supplier, codex_orders "
