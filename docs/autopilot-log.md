@@ -2,6 +2,19 @@
 
 Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions, shared PR #.
 
+## 2026-08-19 — #349 Odstránenie mŕtvej 🚨 eskalačnej vetvy pripomienky otázok — v0.9.116
+- **Čo:** vymazaná 🚨 eskalačná vetva v `question_alerts` — bola štrukturálne mŕtva už od
+  #341: `expire_stale` (touched>2) beží v `worker.tick` PRED `sweep`, takže pri defaultnej
+  konfigurácii sa otázka expiruje na touched=3 skôr, než dosiahne eskalačný prah (touched≥4);
+  🚨 vetva sa s defaultmi nikdy nevykreslila.
+- **Rozhodnutie (ROZHODNUTÉ na tickete):** zmazať. Životný cyklus otázky = vznik → jedna
+  pravdivá ⏰ pripomienka → tichá expirácia. Žiadny eskalačný stupeň medzitým.
+- **PR #355** → merge `83e3672`, **v0.9.116 nasadené** a overené.
+- **CI infra sága:** tri behy uviazli na GitHub free-runner kroku „Install Playwright
+  browser" (výpadok na strane GitHubu, nie repo); vyriešené cancel+rerun po odznení výpadku.
+- **Poznámka:** docs-only dokončenie (tento záznam + `pr-merge-mechanics.md` gotcha) ide
+  vo v0.9.117, ktoré sa nasadí až s ďalším funkčným deployom.
+
 ## 2026-08-18 — #342 Učenie z CODEXu: auto-vybavenie „je toto objednávka?" otázok — v0.9.110 (plánovaný)
 - **Prečo:** nástenka sa zapĺňala otázkami druhu `mail` („je toto vôbec objednávka?"), lebo
   add-on nevidel, čo pracovníčka reálne zadala ručne do CODEXu. Riešenie: čítať objednávkové
