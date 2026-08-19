@@ -175,6 +175,24 @@ def test_a_phantom_name_absent_from_a_table_order_is_still_rejected():
     assert [i["name"] for i in result["unverified"]] == ["Croissant maslový extra veľký"]
 
 
+def test_a_plain_name_that_spans_a_table_column_boundary_is_not_verified():
+    """The plain-name fallback matches within a single cell, never across a column
+    boundary: a 'name' that glues the item onto its neighbouring day-column number (a
+    model mis-extraction) must NOT be verified just because the folded whole-source blob
+    happens to contain the run (#346 review — the fallback is cell-anchored)."""
+    # empty sourceQuote so only item_in_source's plain-name fallback decides (quote_in_source
+    # would otherwise accept "ražný 10 12" as a contiguous quote — a separate, pre-existing path)
+    result = extract.verify(
+        {"orders": [
+            {"deliveryDate": "", "recipientGroup": "", "store": "Ružinov", "items": [
+                {"name": "ražný 10 12", "quantity": 12, "unit": "ks", "sourceQuote": ""},
+            ]},
+        ]},
+        TABLE_ORDER_MAIL)
+    assert result["orders"] == []
+    assert [i["name"] for i in result["unverified"]] == ["ražný 10 12"]
+
+
 # --- 2b) the delivery DATE is citation-checked too (#163) -----------------
 #
 # Real incident: msg id 5679, subject "RE: catering 25.7. SL", arrived 2026-08-03. The
