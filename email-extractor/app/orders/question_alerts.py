@@ -181,12 +181,12 @@ def _group_html(level: str, rows: list[dict], repeats: dict[int, int], elapsed_d
     # the age by one (a Monday question was not "2 pracovné dni" old on Tuesday, #348).
     n = len(rows)
     noun = _plural(n, "otázka", "otázky", "otázok")
-    days = _plural(elapsed_days, "pracovný deň", "pracovné dni", "pracovných dní")
     if level == "escalation":
         head = (f"<p>&#128680; {n} {noun} na nástenke je STÁLE nezodpovedaných "
                f"(už {elapsed_days}+ pracovných dní) &mdash; treba to vyriešiť čo "
                "najskôr:</p>")
     else:
+        days = _plural(elapsed_days, "pracovný deň", "pracovné dni", "pracovných dní")
         head = (f"<p>&#9200; {n} {noun} na nástenke čaká na odpoveď už "
                f"{elapsed_days} {days}:</p>")
     shown = sorted(rows, key=lambda q: q["created_at"])[:15]
