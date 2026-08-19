@@ -115,6 +115,66 @@ def test_an_order_with_no_verifiable_item_is_not_kept():
     assert len(result["unverified"]) == 1
 
 
+# --- 2a2) a TABLE-layout order proves items by NAME, not quantity-adjacency (#346) --
+#
+# A cyclic (weekly) order lists item names in one column and quantities in separate,
+# tab-separated day columns. The extracted quantity (Tuesday's value here) is NOT the
+# first number after the name, so no quantity-adjacent pattern matches, and the model's
+# sourceQuote is reformatted so it does not exist contiguously either. Before #346 this
+# produced false "line" questions for items whose names ARE verbatim in the source
+# (msg 7658, 2026-08-18: 9 false questions). SYNTHETIC data only — this repo is public.
+TABLE_ORDER_MAIL = (
+    "Objednávka na budúci týždeň\n\n"
+    "Prevádzka Ružinov\n"
+    "\tPo\tUt\tSt\tŠt\tPi\n"
+    "Chlieb tmavý ražný\t10\t12\t8\t10\t11\n"
+    "Rožok pšeničný celozrnný\t20\t25\t20\t22\t18\n\n"
+    "Prevádzka Petržalka\n"
+    "\tPo\tUt\tSt\tŠt\tPi\n"
+    "Chlieb tmavý ražný\t5\t6\t4\t5\t5\n"
+    "Bageta sezamová dlhá\t8\t10\t9\t8\t7\n"
+)
+
+
+def test_a_table_order_verifies_items_by_name_even_when_quantity_is_in_a_day_column():
+    """Name in a column, quantities in tab-separated day columns — the extracted (Tuesday)
+    quantity is not adjacent to the name and the model's quote is reformatted, so neither
+    quote_in_source nor a quantity-adjacent pattern matches. The name is verbatim in the
+    source, so every item is real and must be kept, none reported unverified (#346)."""
+    result = extract.verify(
+        {"orders": [
+            {"deliveryDate": "", "recipientGroup": "", "store": "Ružinov", "items": [
+                {"name": "Chlieb tmavý ražný", "quantity": 12, "unit": "ks",
+                 "sourceQuote": "Chlieb tmavý ražný – utorok 12 ks"},
+                {"name": "Rožok pšeničný celozrnný", "quantity": 25, "unit": "ks",
+                 "sourceQuote": "Rožok pšeničný celozrnný – utorok 25 ks"},
+            ]},
+            {"deliveryDate": "", "recipientGroup": "", "store": "Petržalka", "items": [
+                {"name": "Bageta sezamová dlhá", "quantity": 10, "unit": "ks",
+                 "sourceQuote": "Bageta sezamová dlhá – utorok 10 ks"},
+            ]},
+        ]},
+        TABLE_ORDER_MAIL)
+    assert result["unverified"] == []
+    kept = [i["name"] for o in result["orders"] for i in o["items"]]
+    assert kept == ["Chlieb tmavý ražný", "Rožok pšeničný celozrnný", "Bageta sezamová dlhá"]
+
+
+def test_a_phantom_name_absent_from_a_table_order_is_still_rejected():
+    """The plain-name fallback must not weaken the anti-hallucination guard: a name that
+    is nowhere in the table source stays unverified, and its order is dropped (#346)."""
+    result = extract.verify(
+        {"orders": [
+            {"deliveryDate": "", "recipientGroup": "", "store": "Ružinov", "items": [
+                {"name": "Croissant maslový extra veľký", "quantity": 12, "unit": "ks",
+                 "sourceQuote": "Croissant maslový extra veľký 12 ks"},
+            ]},
+        ]},
+        TABLE_ORDER_MAIL)
+    assert result["orders"] == []
+    assert [i["name"] for i in result["unverified"]] == ["Croissant maslový extra veľký"]
+
+
 # --- 2b) the delivery DATE is citation-checked too (#163) -----------------
 #
 # Real incident: msg id 5679, subject "RE: catering 25.7. SL", arrived 2026-08-03. The
