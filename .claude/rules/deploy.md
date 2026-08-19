@@ -60,6 +60,17 @@ actually redirects to `/login` first as proof the session is genuinely clean.
 
 ## Known gotchas
 
+- **`ha addons update` right after `ha store reload` can return `Error: Another job is
+  running for job group app_e0ac7775_email_extractor` — this is NOT a failed deploy.** The
+  store reload (or the update's own pre-update backup job) briefly holds the add-on's
+  job-group lock; the update still proceeds and completes in the background. Do NOT treat the
+  first "Another job is running" as an error to fix or re-issue aggressively — wait a few
+  seconds and re-read `ha addons info <slug> --raw-json`: the `version` will already show the
+  new `<x.y.z>` with `update_available:false` and `state:"started"`. A retry loop with a
+  short backoff (~25 s) is the safe shape; the retry typically reports the benign "No update
+  available" precisely because the update ALREADY landed. Verified live 0.9.111→0.9.112
+  (2026-08-19): the first `ha addons update` reported the job-group lock, and a backoff retry
+  then showed `version:0.9.112`, `update_available:false`.
 - **`ha addons info <slug> --raw-json` nests everything under `.data`** — `jq
   '{version, state, update_available}'` on the raw output silently returns all-`null`
   (valid JSON, wrong keys) because the real fields are `.data.version`/`.data.state`/
