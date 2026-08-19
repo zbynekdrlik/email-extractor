@@ -3787,3 +3787,39 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
   (v0.9.110) do dev+main → collision, bump na v0.9.111. Merge origin/dev čistý (žiadny konflikt), worker.py
   má BOTH `codex_orders.resolve_mail_questions` (#342, prv) aj `expire_stale` (#341) — správne poradie.
   PR #345, full flow per dispatch.
+
+## 2026-08-19 — batch #346 + #347 + #348 (v0.9.112, serial single-worker)
+
+- **#346 (bug):** falošné `line` otázky pri tabuľkovej (cyklickej) objednávke. Príčina:
+  `extract.item_in_source` overí len vzory s množstvom pri názve a `quote_in_source` potrebuje súvislý
+  quote; v tabuľke je názov v stĺpci a množstvá v tab-oddelených denných stĺpcoch → extrahované množstvo
+  nie je pri názve, model cituje preformátovane, nič nematchne. 9 falošných otázok (správa 7658). Fix:
+  plain-name fallback v `item_in_source` (folded názov ≥ `_MIN_PLAIN_NAME_LEN`=8 vo folded zdroji ⇒
+  overené, nezávisle od množstva); anti-phantom guard zachovaný.
+  - RED `c48a1b7` → GREEN `981a484`. Testy: `test_orders_extract.py`
+    (`test_a_table_order_verifies_items_by_name_even_when_quantity_is_in_a_day_column`,
+    `test_a_phantom_name_absent_from_a_table_order_is_still_rejected`).
+- **#347 (MVP removal):** zrušené obe denné „Denný prehľad" digest správy do Odoo (spam, žiadny konzument —
+  vlastník 2026-08-19). Zmazané: `reliability.maybe_post_daily_digest`, `worker._check_daily_digest` +
+  volanie v `tick`, `report.build_daily_digest`, `report.build_dl_digest`, a výhradne-mŕtve
+  `reliability.aging_review_backlog`/`_working_days_before` + `report._aging_review_html` + konštanty
+  `AGING_REVIEW_WORKING_DAYS`/`ORDER_CATEGORIES`/`DL_CATEGORIES` + ich testy (762 mazaní). ZOSTALI zdieľané
+  štat. funkcie (`provenance_stats_for_day`, `dl_provenance_stats_for_day`, `days_since_incident`,
+  `dl_current_health`) — číta ich dashboard (`httpapi_reports.py`), aj `_yesterday` (dashboardový test).
+  Tabuľka `order_digest_sent` OSIROTENÁ (žiadny writer; schéma migrácia mimo rozsahu dávky).
+  - commit `d348b86` (čistá removal, žiadny RED).
+- **#348 (bug):** ⏰ pripomienka klamala o veku otázok. Príčina: `_weekdays_touched` počíta Mon-Fri dátumy
+  inkluzívne oboch koncov → pondelková otázka má v utorok touched=2, hlavička tvrdí „dlhšie ako 2 pracovné
+  dni" po 1 ubehnutom dni (eskalácia „4+" pri 3). Fix: `_elapsed_working_days = _weekdays_touched - 1`
+  (jedna zdieľaná odvodenina), `sweep` počíta min ubehnutých dní skupiny, `_group_html` renderuje pravdivo;
+  prahy/kadencia NEZMENENÉ (reminder stále chodí pred expiry `>2`).
+  - RED `39cc7d4` → GREEN `1be2d80`. Testy: `test_question_alerts.py` (reminder + eskalačná hlavička
+    hovoria pravdu o ubehnutých prac. dňoch).
+- **Batch:** bundle-safe (každý ≤300 LoC, žiadna schéma migrácia/API break), jeden PR dev→main. Serial
+  single-worker (main checkout, dev2, test-pg :55440). Bump `caa61f2` (0.9.111 → 0.9.112).
+- **Review (0 🔴 3 🟡 6 🔵, fresh-context general-purpose reviewer):** doriešené v tej istej vetve —
+  #346 🟡 unanchored substring → `_source_cells` (per-cell match, cross-cell span odmietnutý) + test,
+  commit `a985370`; #348 🔵 `days` plurál → do reminder vetvy, commit `4cab425`. Zámerné 🔵/tradeoffy
+  ponechané s odôvodnením (osirotená `order_digest_sent`, name-only množstvo, header-cell reziduum).
+  #348 🟡 eskalačná hlavička je PRE-EXISTING mŕtvy kód (expiry touched>2 predbehne escalate touched≥4,
+  z #341) → follow-up **#349** (needs-user-decision).
