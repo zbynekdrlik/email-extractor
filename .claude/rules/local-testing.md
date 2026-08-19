@@ -440,3 +440,16 @@ certainly checking the main tree first and the worktree second (or vice versa); 
 up (`python3 -m venv .venv && pip install ...`) and run every subsequent command
 from an explicit, confirmed worktree `cd`, never a bare relative path assumed to
 already be there.
+
+## A synthetic DL test document's total MUST equal the sum of its line `totalPrice`s, or the money gate reviews the WHOLE doc before matching (#337, 2026-08-18)
+
+`dl_extract` runs a MONEY GATE before item matching: if `documentTotalWithoutVAT`
+differs from the sum of the items' `totalPrice` beyond a small tolerance (~0.50 €), the
+ENTIRE document is routed to `review` immediately — `_process_document` never even reaches
+the per-item match/ask logic. So a hand-built multi-item `FakeClient` doc fixture whose
+hardcoded total doesn't match its lines will make a matching/board-question test fail for
+the WRONG reason (`money gate breach -> review`, log line in `dl_extract`), looking like a
+matching regression when it's just a bad fixture. Derive the total FROM the lines in the
+helper — `documentTotalWithoutVAT = round(sum(float(it["totalPrice"]) for it in items), 2)`
+(see `_bev_doc` in `test_dl_worker.py`) — so a fixture can never silently trip the gate.
+This is a genuinely-wrong FIXTURE fix, not an assertion weakening (test-strictness OK).

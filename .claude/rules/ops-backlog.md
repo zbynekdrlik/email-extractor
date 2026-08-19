@@ -29,6 +29,11 @@ for good, visible in the dashboard's reviewed list, without ever re-running anyt
    `message_id`): `POST /api/message/<pk>/reclassify` with body
    `{"category": "no_processing"}` (`api_reclassify`, `app/httpapi_dashboard_data.py`).
 
+To enumerate the pending candidate set read-only, replicate the sweep's own filter:
+`created_at >= BACKLOG_CUTOFF AND category='human_processing' AND human_reviewed=false`
+— note `messages` has NO `received` column (#338 verify tripped on this); the sweep
+keys on `created_at`, so any hand-written candidate query must too.
+
 That endpoint runs exactly one UPDATE:
 
 ```sql

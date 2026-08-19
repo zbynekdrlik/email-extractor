@@ -235,6 +235,33 @@ def test_a_first_time_question_is_never_reported_as_a_repeat(pg):
     assert "opakuje" not in html
 
 
+# --- the header tells the TRUTH about elapsed working days (#348) --------------------
+
+def test_the_reminder_header_tells_the_truth_about_elapsed_working_days(pg):
+    """`_weekdays_touched` counts Mon-Fri dates INCLUSIVE of both ends, so a Monday
+    question hits touched=2 on Tuesday and correctly fires its reminder — but the header
+    used to claim "dlhšie ako 2 pracovné dni" after only ONE working day had elapsed. The
+    reminder still fires (and still lands before expiry at >2); only the wording changes."""
+    qid = _ask(pg, created_at=NEXT_MON)
+    n = question_alerts.sweep(pg, _cfg(), now=NEXT_TUE)
+    assert n == 1
+    html = _pending(pg, "question_reminder")[0][2]
+    assert "dlhšie ako 2 pracovné dni" not in html
+    assert "1 pracovný deň" in html
+    assert _reminder_sent_at(pg, qid) is not None
+
+
+def test_the_escalation_header_tells_the_truth_about_elapsed_working_days(pg):
+    """The 🚨 escalation header used to claim "už 4+ pracovných dní" when only 3 working
+    days had actually elapsed (touched=4 = created + 3 elapsed working days) (#348)."""
+    _ask(pg, created_at=TUE)
+    question_alerts.sweep(pg, _cfg(), now=WED)   # reminder (touched=2)
+    question_alerts.sweep(pg, _cfg(), now=FRI)   # escalation (touched=4, 3 elapsed)
+    html = _pending(pg, "question_escalation")[0][2]
+    assert "4+ pracovných dní" not in html
+    assert "3+ pracovných dní" in html
+
+
 # --- delivery reuses the durable dl_alerts outbox, never a direct post --------------
 
 def test_a_failed_post_leaves_the_reminder_pending_for_the_next_flush(pg):

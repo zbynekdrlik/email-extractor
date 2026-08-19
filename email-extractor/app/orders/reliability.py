@@ -20,13 +20,10 @@ on #196 for why both alternatives were rejected):
 - `days_since_incident` — `now() - max(occurred_on)` over `match_incidents`, a small
   append-only table seeded with the two real incidents this batch (#195) already found.
   Returns `None` (never a fake 0) when nothing has ever been recorded.
-- `maybe_post_daily_digest` — posted through the SAME Odoo channel `report.py`'s other
-  order notifications already use, claimed once per calendar day
-  (`order_digest_sent`, the identical "claim, don't spam" pattern
-  `spend.cap_tripped`/`order_spend_alerts` already use for the monthly cap) — called
-  from `worker.tick()` on every tick, but only ever actually posts on the FIRST tick of
-  a new day, summarizing the day that JUST finished (never "today", which is still
-  incomplete while the day is in progress).
+
+These stats are read live by the dashboard (`httpapi_reports.py` → `/api/orders/digest`).
+The daily Odoo "Denný prehľad" digest that once posted them was removed in #347 (spam,
+no consumer); the stat functions themselves stay — the dashboard reads them.
 
 **#204 (DL migration F5) extends this file with a DL-scoped counterpart, never mixes the
 two.** F1 (#200)'s design decision reuses `order_runs`/`order_items` UNMODIFIED for DL
@@ -41,26 +38,17 @@ DL document decided by the model would silently count as an ORDER decided by the
 `dl_provenance_stats_for_day` is the DL-scoped mirror (its own review-rule set, `email_events`
 counts for W7's duplicate-skip visibility and the spec §4 announced-vs-attached mismatch —
 neither of those two has an `order_items` row at all, they are message/document-level
-findings, not item decisions). `maybe_post_daily_digest` computes BOTH blocks and posts
-ONE combined message (still one claim on `order_digest_sent`, never a second table) — "DL
-run[s go] into the daily reliability digest", per the design comment on #204.
+findings, not item decisions). Both stat sets are surfaced only on the dashboard now
+(`/api/orders/dl/stats` for DL); the daily digest that combined them was removed in #347.
 """
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
 
-from . import dl_alerts, dl_worker, report
+from . import dl_alerts, dl_worker
 from .pipeline import ASK_THE_WAREHOUSE
 
 log = logging.getLogger("orders.reliability")
-
-# #329: a review/partial message is "aging" once it has waited longer than this many
-# WORKING days (Sat/Sun skipped) without anything nudging it. The proposed default.
-AGING_REVIEW_WORKING_DAYS = 2
-# The order-side digest covers both order engines; the DL-side digest covers dodacie listy.
-ORDER_CATEGORIES = ("ai_orders", "static_orders")
-DL_CATEGORIES = (dl_worker.CATEGORY,)
 
 
 def provenance_stats_for_day(conn, day: str = "") -> dict:
@@ -190,8 +178,8 @@ def dl_current_health(conn) -> dict:
     them in sync. Reading `dl_worker.MAX_ATTEMPTS`/`dl_worker.CATEGORY` directly (no
     import cycle — `dl_worker` never imports `reliability`, confirmed by tracing its
     whole dependency chain) collapses it to ONE source of truth; `quarantine_threshold`
-    is carried in the returned dict so `report.build_daily_digest` can interpolate the
-    real number into its own text instead of hardcoding it a second time.
+    is carried in the returned dict so the dashboard (`/api/orders/dl/stats`) can show the
+    real number instead of hardcoding it a second time.
     """
     quarantined_row = conn.execute(
         """SELECT count(*) FROM messages
@@ -215,109 +203,6 @@ def days_since_incident(conn) -> int | None:
         return None
     delta = conn.execute("SELECT (now()::date - %s::date)", (row[0],)).fetchone()
     return int(delta[0])
-
-
-def _working_days_before(today: date, n: int) -> date:
-    """The date that is `n` working days (Mon–Fri) before `today` — Saturday/Sunday are
-    skipped, mirroring `confirm.py`'s carryover logic. A message created before this date
-    has been waiting longer than `n` working days."""
-    d = today
-    counted = 0
-    while counted < n:
-        d -= timedelta(days=1)
-        if d.weekday() < 5:  # Mon–Fri
-            counted += 1
-    return d
-
-
-def aging_review_backlog(conn, categories, min_working_days: int = AGING_REVIEW_WORKING_DAYS,
-                         sample: int = 5) -> dict:
-    """#329: review/partial messages in `categories` that have been waiting for manual
-    handling longer than `min_working_days` working days AND have NO open board question
-    (nothing is nudging them). Terminal `review`/`partial` gets a single Odoo post when
-    it is processed and is then never reminded again — this surfaces the whole aging pile.
-
-    Returns `{"count", "oldest_days", "items": [{"subject", "outcome", "age_days"}]}`.
-    `count == 0` means a genuinely quiet day, and the caller renders nothing (silence,
-    consistent with #312) — the compact summary (count + oldest age + up to `sample`
-    oldest lines) stays short even when the backlog is large."""
-    today = conn.execute("SELECT CURRENT_DATE").fetchone()[0]
-    cutoff = _working_days_before(today, min_working_days)
-    cats = list(categories)
-    where = (
-        "FROM messages m "
-        "WHERE m.category = ANY(%s) "
-        "  AND m.proc_status IN ('review', 'partial') "
-        "  AND m.created_at::date < %s "
-        # #341: an EXPIRED question means the message is on manual review and must never
-        # be re-nudged here — the same exclusion an OPEN question already gets.
-        "  AND NOT EXISTS (SELECT 1 FROM order_questions q "
-        "                   WHERE q.message_id = m.message_id "
-        "                     AND q.status IN ('open', 'expired'))")
-    head = conn.execute(
-        "SELECT count(*), (CURRENT_DATE - min(m.created_at)::date) " + where,
-        (cats, cutoff)).fetchone()
-    count = int(head[0] or 0)
-    if not count:
-        return {"count": 0, "oldest_days": 0, "items": [],
-                "min_working_days": min_working_days}
-    rows = conn.execute(
-        "SELECT m.subject, m.proc_outcome, (CURRENT_DATE - m.created_at::date) " + where +
-        " ORDER BY m.created_at ASC LIMIT %s", (cats, cutoff, sample)).fetchall()
-    items = [{"subject": r[0] or "", "outcome": r[1] or "", "age_days": int(r[2] or 0)}
-             for r in rows]
-    return {"count": count, "oldest_days": int(head[1] or 0), "items": items,
-            "min_working_days": min_working_days}
-
-
-def maybe_post_daily_digest(conn, cfg, post=None, shadow: bool = False) -> bool:
-    """Post the digest(s) for the day that JUST finished — claimed once per calendar
-    day, safe to call on every tick. Never in shadow mode: shadow's whole guarantee is
-    that nothing observable leaves the process. Never raises: a notification failure
-    must never break the worker loop (mirrors `pipeline._post_summary`/
-    `worker._check_spend_cap`).
-
-    **#239 reopened, finding 2: TWO independent posts, not one.** The orders digest
-    always goes to `orders_channel_id` (unchanged). The DL digest — when there was
-    anything to report — goes to `delivery_notes_channel_id` ONLY; an unset channel
-    just skips it (logged), never a silent fallback to the orders channel (that was
-    exactly the bug: every DL notice used to land with the wrong audience).
-    """
-    if shadow:
-        return False
-    post = post or (lambda c, html, **kw: report.post_from_config(
-        c, html, channel_id=kw.get("channel_id")))
-    yesterday = _yesterday(conn)
-    claimed = conn.execute(
-        "INSERT INTO order_digest_sent (day) VALUES (%s) ON CONFLICT (day) DO NOTHING "
-        "RETURNING day", (yesterday,)).fetchone()
-    if not claimed:
-        return False
-    stats = provenance_stats_for_day(conn, yesterday)
-    aging_orders = aging_review_backlog(conn, ORDER_CATEGORIES)
-    html = report.build_daily_digest(stats, days_since_incident(conn),
-                                     link=report.sklad_link(cfg), aging=aging_orders)
-    try:
-        post(cfg, html)
-    except Exception:
-        log.exception("posting the daily provenance digest failed")
-
-    # #312: `build_dl_digest` no longer renders the three `dl_current_health` gauges, so
-    # skip computing them on the digest path — they stay on `/api/orders/dl/stats`.
-    dl_stats = dl_provenance_stats_for_day(conn, yesterday, include_current_health=False)
-    aging_dl = aging_review_backlog(conn, DL_CATEGORIES)
-    dl_html = report.build_dl_digest(dl_stats, link=report.dl_sklad_link(cfg), aging=aging_dl)
-    if dl_html:
-        dl_channel = int(getattr(cfg, "delivery_notes_channel_id", 0) or 0)
-        if dl_channel:
-            try:
-                post(cfg, dl_html, channel_id=dl_channel)
-            except Exception:
-                log.exception("posting the daily DL digest failed")
-        else:
-            log.warning("delivery_notes_channel_id is unset — the daily DL digest "
-                       "was not posted")
-    return True
 
 
 def _today(conn) -> str:

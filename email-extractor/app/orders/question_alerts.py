@@ -106,6 +106,16 @@ def _weekdays_touched(start: datetime, end: datetime) -> int:
     return n
 
 
+def _elapsed_working_days(start: datetime, end: datetime) -> int:
+    """Full working days that have ELAPSED between `start` and `end` — the distinct
+    Mon-Fri dates the interval spans (`_weekdays_touched`) MINUS 1: a question created and
+    swept on two consecutive weekdays has elapsed exactly ONE working day, not two. This is
+    the truthful age a reminder header reports (#348); `_weekdays_touched` (spanned dates,
+    inclusive) stays the internal threshold counter the reminder/escalation/expiry cadence
+    keys on, so the arithmetic lives in exactly one place."""
+    return max(_weekdays_touched(start, end) - 1, 0)
+
+
 def _is_dl(kind: str) -> bool:
     return kind in _DL_KINDS
 
@@ -164,17 +174,21 @@ def _describe(q: dict, repeat: int) -> str:
     return f"<li>{line}</li>"
 
 
-def _group_html(level: str, rows: list[dict], repeats: dict[int, int], stale_days: int,
-                escalate_days: int, link: str) -> str:
+def _group_html(level: str, rows: list[dict], repeats: dict[int, int], elapsed_days: int,
+                link: str) -> str:
+    # `elapsed_days` is the truthful minimum age of the group in ELAPSED working days
+    # (`_elapsed_working_days` = touched - 1) — never the raw threshold, which overstated
+    # the age by one (a Monday question was not "2 pracovné dni" old on Tuesday, #348).
     n = len(rows)
     noun = _plural(n, "otázka", "otázky", "otázok")
     if level == "escalation":
         head = (f"<p>&#128680; {n} {noun} na nástenke je STÁLE nezodpovedaných "
-               f"(už {escalate_days}+ pracovných dní) &mdash; treba to vyriešiť čo "
+               f"(už {elapsed_days}+ pracovných dní) &mdash; treba to vyriešiť čo "
                "najskôr:</p>")
     else:
-        head = (f"<p>&#9200; {n} {noun} na nástenke čaká na odpoveď dlhšie ako "
-               f"{stale_days} pracovné dni:</p>")
+        days = _plural(elapsed_days, "pracovný deň", "pracovné dni", "pracovných dní")
+        head = (f"<p>&#9200; {n} {noun} na nástenke čaká na odpoveď už "
+               f"{elapsed_days} {days}:</p>")
     shown = sorted(rows, key=lambda q: q["created_at"])[:15]
     items = "".join(_describe(q, repeats.get(q["id"], 1)) for q in shown)
     parts = [head, f"<ul>{items}</ul>"]
@@ -239,7 +253,8 @@ def sweep(conn, cfg, now: datetime | None = None) -> int:
         link = report.dl_sklad_link(cfg) if is_dl else report.sklad_link(cfg)
         repeats = {q["id"]: _repeat_count(conn, q["kind"], q["customer_ean"],
                                           q["item_key"]) for q in group_rows}
-        html = _group_html(level, group_rows, repeats, stale_days, escalate_days, link)
+        elapsed_days = min(_elapsed_working_days(q["created_at"], now) for q in group_rows)
+        html = _group_html(level, group_rows, repeats, elapsed_days, link)
         dl_alerts.enqueue(conn, channel, f"question_{level}", html)
         column = "reminder_sent_at" if level == "reminder" else "escalated_at"
         ids = [q["id"] for q in group_rows]
@@ -266,9 +281,8 @@ def expire_stale(conn, cfg, now: datetime | None = None) -> int:
     underlying message honestly to manual review: `processed=true` (so it is never
     re-claimed nor re-asked, and stays out of the n8n "zaseknuté" stuck list, which reads
     `processed=false`) plus a rollup review `email_events` row. Expired questions leave
-    the open list automatically (every reader queries `status='open'`) and are excluded
-    from the aging-review digest (`reliability.aging_review_backlog` excludes
-    `status IN ('open','expired')`), so a stale question is never reminded again.
+    the open list automatically (every reader queries `status='open'`), so a stale
+    question is never reminded again.
 
     Deliberately NOT gated on `confirm.morning_check_active`: this is a silent state
     cleanup, not a notification, and `_weekdays_touched` already excludes weekends — so a
