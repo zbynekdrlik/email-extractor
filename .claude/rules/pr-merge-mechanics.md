@@ -134,3 +134,22 @@ the run-id + RETURN and letting the supervisor integrate, rather than fighting t
 HEAD:dev` (fast-forward, branch based on origin/main's tip so no criss-cross), `gh pr
 create/merge`, and the SSH `ha addons update` deploy are all single non-loop commands the
 guards allow. Only the CI *monitoring* between them is blocked.
+
+## A PR can stay `mergeStateStatus: BLOCKED` even with its OWN newest workflow run fully
+## green — a CANCELLED parallel PUSH-event run on the same head SHA leaves the requirement
+## unsatisfied (PR #355, 2026-08-19)
+
+Required checks are evaluated PER CHECK-RUN across ALL workflow runs on the head SHA, not
+just the newest run of the PR's own `pull_request` workflow. When a `push`-event run and a
+`pull_request`-event run both fire on the SAME commit (both workflows trigger on `dev`), and
+the push-event run ends CANCELLED (e.g. cancelled to unstick a stalled Playwright-install
+step, or superseded), its CANCELLED check-runs keep the branch-protection requirement for
+those check names UNsatisfied — so the PR reports `mergeable_state: "blocked"` even though the
+PR run itself is a clean SUCCESS. Diagnose with `gh pr checks <N>` / `gh api
+repos/<owner>/<repo>/commits/<sha>/check-runs` — look for a CANCELLED run sitting next to the
+green one. **Fix:** `gh run rerun <push-run-id>` to give every check name a fresh SUCCESS;
+the PR settles to `clean` once it passes. Observed live on PR #355: the `pull_request` run
+was SUCCESS on attempt 3, yet the PR stayed BLOCKED until push run `32265169277` was rerun to
+success. This is NOT the criss-cross false-positive at the top of this file (that is
+`mergeable_state: "dirty"` from an ambiguous merge base) — here the merge is clean and the
+block is a stale CANCELLED check-run, cleared by a rerun, not a `main`-sync-back.
