@@ -281,9 +281,8 @@ def expire_stale(conn, cfg, now: datetime | None = None) -> int:
     underlying message honestly to manual review: `processed=true` (so it is never
     re-claimed nor re-asked, and stays out of the n8n "zaseknuté" stuck list, which reads
     `processed=false`) plus a rollup review `email_events` row. Expired questions leave
-    the open list automatically (every reader queries `status='open'`) and are excluded
-    from the aging-review digest (`reliability.aging_review_backlog` excludes
-    `status IN ('open','expired')`), so a stale question is never reminded again.
+    the open list automatically (every reader queries `status='open'`), so a stale
+    question is never reminded again.
 
     Deliberately NOT gated on `confirm.morning_check_active`: this is a silent state
     cleanup, not a notification, and `_weekdays_touched` already excludes weekends — so a
