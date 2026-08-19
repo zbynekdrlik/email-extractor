@@ -1006,12 +1006,15 @@ SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_pending_alerts_message "
     "ON pending_alerts(kind, message_id) WHERE message_id IS NOT NULL",
     # --- #237: a board question that stays `open` too long gets NO further signal
-    # today — only the one-shot `on_new` notify fires, at creation. `reminder_sent_at`/
-    # `escalated_at` are the per-question cadence state `app/orders/question_alerts.py`
-    # reads/writes: NULL means "not yet sent"; once set, that level never fires again
-    # for this row (no daily nag — "escalate once", see that module's own docstring).
-    # Additive, nullable, no backfill needed: every existing row (open or answered)
-    # simply starts as "never reminded", which is the honest truth for all of them. ---
+    # today — only the one-shot `on_new` notify fires, at creation. `reminder_sent_at`
+    # is the per-question reminder cadence state `app/orders/question_alerts.py`
+    # reads/writes: NULL means "not yet reminded"; once set, the reminder never fires
+    # again for this row (no daily nag, see that module's own docstring). `escalated_at`
+    # backed a SECOND escalation-level reminder that #349 removed as dead code — the
+    # column is RETAINED (not dropped: schema-migration was out of that ticket's scope)
+    # but is no longer read or written by the sweep; teach.py's reopen paths still clear
+    # it to NULL harmlessly. Additive, nullable, no backfill needed: every existing row
+    # (open or answered) simply starts as "never reminded", the honest truth for all. ---
     "ALTER TABLE order_questions ADD COLUMN IF NOT EXISTS reminder_sent_at TIMESTAMPTZ",
     "ALTER TABLE order_questions ADD COLUMN IF NOT EXISTS escalated_at TIMESTAMPTZ",
     # --- #248: DB-level uniqueness for a hand-added (`orig_ean_edi IS NULL`) row's

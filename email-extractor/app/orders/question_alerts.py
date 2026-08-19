@@ -14,14 +14,14 @@ rejected-alternative write-up):
     question. Same discipline `confirm.py`/`dl_alerts.py` already enforce (the
     2026-08-05 flood of 5 separate alerts the user deleted is the standing precedent
     this whole codebase avoids repeating).
-  * Two-level cadence tracked directly on the row — `order_questions.reminder_sent_at`/
-    `escalated_at`, two new nullable columns, no separate ledger table (a question
-    already IS its own durable, uniquely-identified row). A 'reminder' fires the FIRST
-    time a question has been open across >= `question_stale_working_days` distinct
-    weekdays; an 'escalation' fires the FIRST time it reaches
-    >= `question_escalate_working_days`, and ONLY once at least one full calendar day
-    has passed since the reminder (so the two never fire back-to-back in one sweep) —
-    then SILENT, no daily nag, until the question is answered.
+  * Reminder cadence tracked directly on the row — `order_questions.reminder_sent_at`,
+    a nullable column, no separate ledger table (a question already IS its own durable,
+    uniquely-identified row). A 'reminder' fires the FIRST time a question has been open
+    across >= `question_stale_working_days` distinct weekdays — then SILENT, no daily
+    nag and no second louder alert, until the question is answered or auto-expired
+    (#341). (#349 removed a second, escalation-level reminder: it was structurally dead
+    code under the default config, since `expire_stale` closes a question before it can
+    ever reach the escalation threshold — see that ticket for the full trace.)
   * "Working days" = distinct Mon-Fri calendar dates (Europe/Bratislava) the question
     has been open across, INCLUSIVE of both its creation date and today
     (`_weekdays_touched`) — reuses `confirm.morning_check_active` (the SAME
@@ -50,7 +50,6 @@ from . import confirm, dl_alerts, report
 log = logging.getLogger("orders.question_alerts")
 
 DEFAULT_STALE_WORKING_DAYS = 2
-DEFAULT_ESCALATE_WORKING_DAYS = 4
 # #341: a question open across MORE than this many working days is auto-expired.
 DEFAULT_EXPIRE_WORKING_DAYS = 2
 # `processed_by` / audit marker for a message routed to review by expiry (never a real
@@ -74,14 +73,14 @@ _WHAT = {
 }
 
 _COLS = ("id, kind, customer_ean, customer_name, wording, item_key, context, payload, "
-        "created_at, reminder_sent_at, escalated_at")
+        "created_at, reminder_sent_at")
 
 
 def _row(r) -> dict:
     return {"id": int(r[0]), "kind": r[1] or "item", "customer_ean": r[2] or "",
             "customer_name": r[3] or "", "wording": r[4] or "", "item_key": r[5] or "",
             "context": r[6] or {}, "payload": r[7] or {}, "created_at": r[8],
-            "reminder_sent_at": r[9], "escalated_at": r[10]}
+            "reminder_sent_at": r[9]}
 
 
 def _local_date(ts: datetime) -> date:
@@ -111,8 +110,8 @@ def _elapsed_working_days(start: datetime, end: datetime) -> int:
     Mon-Fri dates the interval spans (`_weekdays_touched`) MINUS 1: a question created and
     swept on two consecutive weekdays has elapsed exactly ONE working day, not two. This is
     the truthful age a reminder header reports (#348); `_weekdays_touched` (spanned dates,
-    inclusive) stays the internal threshold counter the reminder/escalation/expiry cadence
-    keys on, so the arithmetic lives in exactly one place."""
+    inclusive) stays the internal threshold counter the reminder/expiry cadence keys on,
+    so the arithmetic lives in exactly one place."""
     return max(_weekdays_touched(start, end) - 1, 0)
 
 
@@ -174,21 +173,16 @@ def _describe(q: dict, repeat: int) -> str:
     return f"<li>{line}</li>"
 
 
-def _group_html(level: str, rows: list[dict], repeats: dict[int, int], elapsed_days: int,
+def _group_html(rows: list[dict], repeats: dict[int, int], elapsed_days: int,
                 link: str) -> str:
     # `elapsed_days` is the truthful minimum age of the group in ELAPSED working days
     # (`_elapsed_working_days` = touched - 1) — never the raw threshold, which overstated
     # the age by one (a Monday question was not "2 pracovné dni" old on Tuesday, #348).
     n = len(rows)
     noun = _plural(n, "otázka", "otázky", "otázok")
-    if level == "escalation":
-        head = (f"<p>&#128680; {n} {noun} na nástenke je STÁLE nezodpovedaných "
-               f"(už {elapsed_days}+ pracovných dní) &mdash; treba to vyriešiť čo "
-               "najskôr:</p>")
-    else:
-        days = _plural(elapsed_days, "pracovný deň", "pracovné dni", "pracovných dní")
-        head = (f"<p>&#9200; {n} {noun} na nástenke čaká na odpoveď už "
-               f"{elapsed_days} {days}:</p>")
+    days = _plural(elapsed_days, "pracovný deň", "pracovné dni", "pracovných dní")
+    head = (f"<p>&#9200; {n} {noun} na nástenke čaká na odpoveď už "
+           f"{elapsed_days} {days}:</p>")
     shown = sorted(rows, key=lambda q: q["created_at"])[:15]
     items = "".join(_describe(q, repeats.get(q["id"], 1)) for q in shown)
     parts = [head, f"<ul>{items}</ul>"]
@@ -202,10 +196,16 @@ def _group_html(level: str, rows: list[dict], repeats: dict[int, int], elapsed_d
 
 def sweep(conn, cfg, now: datetime | None = None) -> int:
     """One pass over every OPEN `order_questions` row: find the ones that just crossed
-    the reminder or escalation threshold, group them by (audience, level), enqueue ONE
-    grouped alert per group via `dl_alerts.enqueue` (durable — a failed post is retried
-    by the next `dl_alerts.flush_pending()` tick, never lost), and mark the rows so this
-    same threshold never fires twice for them. Returns how many rows were marked.
+    the reminder threshold, group them by audience, enqueue ONE grouped alert per group
+    via `dl_alerts.enqueue` (durable — a failed post is retried by the next
+    `dl_alerts.flush_pending()` tick, never lost), and mark the rows so the reminder
+    never fires twice for them. Returns how many rows were marked.
+
+    A question gets exactly ONE ⏰ reminder in its life: create → one reminder → silent,
+    until it is answered or auto-expired by `expire_stale` (#341). There is deliberately
+    no second, louder alert (#349 removed the escalation level — under the default config
+    `expire_stale`, which runs before this sweep, closes a question before it could ever
+    reach the escalation threshold, so that branch never rendered a single message).
 
     Gated on `confirm.morning_check_active` (#237: reuse the SAME "the warehouse works
     weekday mornings only" model `confirm.py`'s own import-carryover check already
@@ -218,50 +218,39 @@ def sweep(conn, cfg, now: datetime | None = None) -> int:
 
     stale_days = int(getattr(cfg, "question_stale_working_days",
                              DEFAULT_STALE_WORKING_DAYS) or DEFAULT_STALE_WORKING_DAYS)
-    escalate_days = int(getattr(cfg, "question_escalate_working_days",
-                                DEFAULT_ESCALATE_WORKING_DAYS)
-                        or DEFAULT_ESCALATE_WORKING_DAYS)
 
     raw_rows = conn.execute(
         f"SELECT {_COLS} FROM order_questions WHERE status = 'open'").fetchall()
     if not raw_rows:
         return 0
 
-    due: dict[tuple[bool, str], list[dict]] = {}
+    due: dict[bool, list[dict]] = {}
     for raw in raw_rows:
         q = _row(raw)
-        touched = _weekdays_touched(q["created_at"], now)
-        level = None
-        if q["reminder_sent_at"] is None:
-            if touched >= stale_days:
-                level = "reminder"
-        elif q["escalated_at"] is None:
-            if (touched >= escalate_days
-                    and _local_date(q["reminder_sent_at"]) < _local_date(now)):
-                level = "escalation"
-        if level is None:
+        if q["reminder_sent_at"] is not None:
             continue
-        due.setdefault((_is_dl(q["kind"]), level), []).append(q)
+        if _weekdays_touched(q["created_at"], now) >= stale_days:
+            due.setdefault(_is_dl(q["kind"]), []).append(q)
 
     if not due:
         return 0
 
     marked = 0
-    for (is_dl, level), group_rows in due.items():
+    for is_dl, group_rows in due.items():
         channel = int(getattr(cfg, "delivery_notes_channel_id" if is_dl
                               else "orders_channel_id", 0) or 0)
         link = report.dl_sklad_link(cfg) if is_dl else report.sklad_link(cfg)
         repeats = {q["id"]: _repeat_count(conn, q["kind"], q["customer_ean"],
                                           q["item_key"]) for q in group_rows}
         elapsed_days = min(_elapsed_working_days(q["created_at"], now) for q in group_rows)
-        html = _group_html(level, group_rows, repeats, elapsed_days, link)
-        dl_alerts.enqueue(conn, channel, f"question_{level}", html)
-        column = "reminder_sent_at" if level == "reminder" else "escalated_at"
+        html = _group_html(group_rows, repeats, elapsed_days, link)
+        dl_alerts.enqueue(conn, channel, "question_reminder", html)
         ids = [q["id"] for q in group_rows]
         conn.execute(
-            f"UPDATE order_questions SET {column} = %s WHERE id = ANY(%s)", (now, ids))
+            "UPDATE order_questions SET reminder_sent_at = %s WHERE id = ANY(%s)",
+            (now, ids))
         marked += len(ids)
-        log.info("enqueued %s question alert (%s): %d question(s)", level,
+        log.info("enqueued question reminder (%s): %d question(s)",
                  "dl" if is_dl else "orders", len(ids))
     return marked
 

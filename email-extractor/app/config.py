@@ -167,11 +167,19 @@ class Config:
     static_digest_idle_minutes: int = 60
     # #237: stale-question reminder sweep (app/orders/question_alerts.py). "Working
     # days" = distinct Mon-Fri calendar dates the question has been open across,
-    # inclusive of both its creation date and today. First reminder at
-    # question_stale_working_days; ONE escalation at question_escalate_working_days,
-    # then silent until answered — see that module's own docstring + the #237 design
-    # comment for the full reasoning.
+    # inclusive of both its creation date and today. ONE reminder at
+    # question_stale_working_days, then silent until the question is answered or
+    # auto-expired (#341) — see that module's own docstring + the #237 design comment
+    # for the full reasoning.
     question_stale_working_days: int = 2
+    # #349 removed the second, escalation-level reminder (dead code under the default
+    # config — expiry closes a question at touched=3 before it can reach the escalation
+    # threshold of touched=4, so the 🚨 branch never rendered a single message). This
+    # option is now DEAD-BUT-DECLARED, consumed by NOTHING — kept for exactly the same
+    # #129 reason as the dead sheet options above: the live add-on's /data/options.json
+    # still has it SET, so dropping it from config.yaml's schema would risk the HA
+    # Supervisor rejecting the next options validation (see deploy.md + test_config.py's
+    # question_escalate pin).
     question_escalate_working_days: int = 4
     # #341: a board question open across MORE than this many WORKING days is auto-expired
     # (neutral terminal state, teaches nothing) — the warehouse handles the underlying
@@ -306,6 +314,8 @@ class Config:
             question_stale_working_days=int(
                 _get(o, "question_stale_working_days", "QUESTION_STALE_WORKING_DAYS", 2)
                 or 2),
+            # #349: dead-but-declared (see the field's own comment above) — still parsed
+            # so a value present in options.json is accepted, never consumed downstream.
             question_escalate_working_days=int(
                 _get(o, "question_escalate_working_days",
                      "QUESTION_ESCALATE_WORKING_DAYS", 4) or 4),
