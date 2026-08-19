@@ -211,17 +211,30 @@ def quote_in_source(quote: str, source: str) -> bool:
     return hits >= -(-len(parts) // 2)
 
 
+# A folded item name at least this long, found verbatim in the folded source, proves the
+# item on its own (#346). A cyclic/table order puts the name in one column and the
+# quantities in separate day columns, so no quantity-adjacent pattern ever matches and the
+# model's quote is reformatted — the verbatim name is then the only honest proof left. The
+# length floor stops a very short name from matching an unrelated substring; a hallucinated
+# name is still nowhere in the source, so the anti-phantom guard is unchanged.
+_MIN_PLAIN_NAME_LEN = 8
+
+
 def item_in_source(item: dict, source: str) -> bool:
     """The item LINE proves the item even when the quote does not exist contiguously.
 
     VERIFY sometimes glues a section header onto the item line; ČSB (2026-07-23) shipped
-    1 of 9 items because of it. A phantom item still fails — it is nowhere in the source.
+    1 of 9 items because of it. A cyclic/TABLE order (#346) puts the quantity in a separate
+    day column, so a plain, long-enough item name found verbatim in the source is itself
+    proof. A phantom item still fails — its name is nowhere in the source.
     """
     name = _fold(item.get("name", ""))
+    folded_source = _fold(source)
+    if len(name) >= _MIN_PLAIN_NAME_LEN and name in folded_source:
+        return True
     qty = _number(item.get("quantity"))
     if len(name) < 4 or not qty or qty <= 0:
         return False
-    folded_source = _fold(source)
     n = str(round(qty))
     for candidate in (f"{n}x {name}", f"{n} x {name}", f"{n}x{name}",
                       f"{n}ks {name}", f"{n} ks {name}", f"{name} {n}"):
