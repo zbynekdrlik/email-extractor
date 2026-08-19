@@ -1865,3 +1865,34 @@ intentional there for cards it was tuned against.
   shared/forwarding email — otherwise a 3PL/forwarding address on one card routes another
   named supplier's document to that card's EAN, the #307/#314 "tlaciaren@ forwards
   everything" risk.)
+- **`extract.item_in_source`'s plain-name fallback (#346) matches PER CELL, never against
+  the whole folded blob — and a live probe of that fix reconstructs the failing items from
+  the `line` board questions, not from a fresh model call.** The fallback proves a
+  table/spreadsheet order item whose quantity sits in a separate tab/newline-delimited day
+  column (no quantity-adjacent pattern matches, the model's `sourceQuote` is non-contiguous)
+  by finding the folded item name (≥ `_MIN_PLAIN_NAME_LEN`=8) verbatim inside ONE folded
+  source CELL (`extract._source_cells`, splits on `[\t\r\n]+` BEFORE folding). Matching the
+  whole folded blob instead would accept a cross-cell span ("razny 10 12", name glued onto a
+  neighbouring number) — a real false-verify caught in review; per-cell rejects it. Residual
+  (accepted, downstream-guarded): a name equal to a section-header cell still verifies but
+  fails catalog matching → a board question, never a wrong ship. **Reusable live-verify
+  probe for any `verify()`/`item_in_source` change** (no LLM call, SELECT-only, container-
+  internal, counts-only output for the public repo): the `line` `order_questions` rows for
+  the affected message ARE the items `verify()` dropped as unverified — each carries `wording`
+  (the item name) + `payload.quantity`/`payload.unit`. Rebuild them as
+  `{name: wording, quantity, unit, sourceQuote: ""}` (empty quote forces the decision onto
+  `item_in_source`, since `quote_in_source` already failed for them by construction), call
+  `extract.verify({"orders":[{"items":[...]}]}, combined_text)` against the real
+  `messages.combined_text`, and print only kept/unverified counts. Verified on msg 7658
+  (0.9.112): 9 line-question items → 9 kept / 0 unverified after the fix.
+- **The ⏰ stale-question reminder header reports ELAPSED working days = `_weekdays_touched -
+  1` (#348), via the shared `question_alerts._elapsed_working_days` wrapper — `_weekdays_touched`
+  (spanned Mon-Fri dates, inclusive of both ends) stays the internal threshold counter the
+  reminder/escalation/expiry cadence keys on; only the displayed number is `- 1`.** A Monday
+  question is on its 2nd spanned working day on Tuesday (touched=2) but only ONE working day
+  has elapsed — the header used to lie "dlhšie ako 2 pracovné dni". Never change the thresholds
+  to fix a header wording; derive the elapsed count for display and leave the cadence alone.
+  **Known dead code (filed #349, needs-user-decision):** `expire_stale` (touched>2) runs
+  BEFORE `sweep` in `worker.tick`, so under default config a question is expired at touched=3
+  before it can reach the escalate threshold (touched≥4) — the 🚨 escalation branch never
+  renders with defaults.
