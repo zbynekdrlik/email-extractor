@@ -62,6 +62,29 @@ directly and then asserts the question is `answered` will FAIL (it stays `open`)
 human answer in a test, write the status transition directly:
 `UPDATE order_questions SET status='answered', answered_by='sklad', answered_at=now() WHERE id=%s`.
 
+## "Under which card did the warehouse book supplier item X?" — príjemky live in `raw.sp001`,
+## and `sm002.NEANKOD` EQUALS the add-on's dl-catalog gtin/candidate value (verified 2026-08-20)
+
+The reusable lookup that resolved the "Múka zytnia typ 720" dl_item question (#87 on the board):
+supplier mails → our EDI ships partial → warehouse adds the missing line by hand in CODEX →
+the manual line reveals the card they actually use. Steps, all read-only:
+1. Supplier NICO: `raw.firma` by name OR by `AEDIEAN` = the add-on's `supplier_ean` (DUOPACK
+   47977892 ↔ 2000000000655). HK LOAN-style trading names may not exist in firma at all —
+   search by the EDI EAN first.
+2. Receipt lines: `raw.sp001 WHERE NICO=<ico> AND SDPOH IN (10,12,14)` (10=nákup na faktúru;
+   see `meta.pohyb_codes`). `NCDLIST` = the príjemka doc number, `ACSKLP` = card code,
+   `AMATERNS` = card name, `UDATUMAKT` = when the operator entered it (`DDATUCT` is an
+   accounting-batch date, unusable for orientation; `NMNOZ` quantities are BE-double garbage).
+3. Card → catalog: `raw.sm002 WHERE ACSKLP=<code>` → `NEANKOD` is EXACTLY the value the
+   add-on's `dl_catalog_snapshot.gtin` / board-question candidate `value` carries (100005
+   "T 930 - ražná múka" → NEANKOD 1571 = candidate value "1571"). Prove the mapping on ≥2
+   deliveries (a receipt without the item must lack the card line) before teaching it.
+4. Teach via the app's OWN path, never SQL: `POST /login` (dash password) →
+   `POST /api/orders/question/<qid>/answer` `{"choice":"<value>"}` — writes `dl_item_memory`
+   (source=human) + `release_for_question`; an already-uploaded doc re-resolves as
+   `duplicate` (#239 claim guard), so no double-ship — the taught mapping applies from the
+   NEXT delivery.
+
 ## The push tool stays CI-testable without duckdb/requests
 
 `tools/codex_orders_push.py` lazy-imports `duckdb`/`requests` INSIDE `query_duckdb`/
