@@ -3883,3 +3883,25 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
     grep v kontejneri potvrdil, že `build_announced_mismatch` v nasadenom kóde už NIE JE. Živé správanie
     (reálny dodávateľský mail) sa nedá vyvolať on-demand — dôkaz je e2e test + grep nasadeného kódu.
   - Tiket #358 NEuzavretý workerom (per `block-worker-close-trigger`) — maintainer ho zavrie s dôkazmi.
+
+## 2026-08-21 — #361 (mail_rules 'manual' → normálny pipeline) + #359 (klikací link v súhrne) — v0.9.120
+- **#361** (`pipeline.py`, `teach.py`): odstránená skratovacia vetva `if rule == "manual":` v
+  `pipeline._run`. `mail_rules(action='manual')` už nepošle potvrdenú objednávku do „prepíš ručne"
+  review — beží úplne normálny automatický pipeline ako každá objednávka (zadanie majiteľa:
+  „normalne automaticky ako vsetky objednavky"). Uložená hodnota ostáva `'manual'` (existujúce riadky
+  fungujú po novom bez pre-učenia). Jediný zvyšný efekt pravidla: `mail` otázka „je to objednávka?"
+  sa už znova nekladie pre daného odosielateľa/predmet (`rule != "manual"` brána pri `ask_mail` AJ pri
+  promo-filtri). Nová technická `Reason.MAIL_RULE_MANUAL` (v `TECHNICAL_REASONS`) drží invariant
+  `_finish` bez fallback otázky pre manual+žiadna-objednávka. `action='ignore'` nezmenené.
+  teach.py znenie: spúšťacia správa (tú AI nevedela prečítať) → „vybav ručne v ORIONe"; ďalšie maily
+  → automaticky (review pass našiel tichú stratu pri pôvodnom „spracuje sa automaticky", opravené).
+  Testy: RED `test_a_taught_manual_rule_now_runs_the_normal_pipeline` → GREEN, no-re-ask test,
+  wording test. Commity: design PRED kódom; RED `c2e645f`, GREEN `6baa329`, review-fix `cdf5ed4`.
+  Gotcha: app-wide `STATUS_LABEL["review"]` = „treba zadať ručne" — test na odstránenie STARÉHO
+  retype textu musí kontrolovať konkrétny reject_reason token („prepíš"), nie akékoľvek „ručne".
+- **#359** (`report.py`, `pipeline.py`, `hold.py`): `report.build_summary` berie `cfg` a vo fallback
+  vete „Treba doriešiť — otvor dashboard" vykreslí klikací `<a href>` cez `report.dashboard_link(cfg)`
+  (vzor `dl_alerts._format_grouped`); prostá veta ostáva keď žiadne `dashboard_base_url`/`cfg`.
+  `cfg` previazané z `_post_summary`, `hold._post_still_held`, `hold.release_to_review`. Commit `927a8b8`.
+- Review: 1 🟡 + 2 🔵 (fresh-context reviewer, nie builtin skill), všetky opravené v `cdf5ed4`; #359 0 nálezov.
+- Tikety #361/#359 NEuzavreté workerom — maintainer/supervisor ich zavrie s dôkazmi z nasadenia.
