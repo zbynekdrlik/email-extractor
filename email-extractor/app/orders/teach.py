@@ -415,7 +415,7 @@ def ask_mail(conn, message_id: str, sender_email: str, subject: str, reason: str
     return ask_generic(
         conn, "mail", message_id, f"mail:{message_id}", subject or "(bez predmetu)",
         [{"value": "not_order", "label": "Toto nie je objednávka"},
-         {"value": "manual", "label": "Je to objednávka — spracujem ručne"}],
+         {"value": "manual", "label": "Je to objednávka — spracovať automaticky"}],
         reason or "AI nenašla v e-maile žiadnu objednávku",
         {"sender_norm": _sender_norm(sender_email), "subject_key": subject_key(subject),
          "sender_email": sender_email or "", "subject": subject or ""},
@@ -557,9 +557,12 @@ def _apply_mail(conn, cfg, q: dict, choice: str, by: str) -> dict:
         action, outcome = "ignore", "Sklad potvrdil: toto nie je objednávka"
         proc_by = "ai_orders_mail_rule"
     else:
+        # #361: value stays "manual" for compatibility (existing rows keep working), but the
+        # rule no longer means "retype by hand" — a confirmed order now runs the normal
+        # automatic pipeline; the rule only suppresses re-asking whether it is an order.
         action = "manual"
-        outcome = ("Sklad potvrdil: je to objednávka — spracuj ručne v "
-                  "ORIONe")
+        outcome = ("Sklad potvrdil: je to objednávka — spracuje sa automaticky "
+                  "ako každá objednávka")
         proc_by = "ai_orders_mail_rule"
     conn.execute(
         """INSERT INTO mail_rules (sender_norm, subject_key, action, question_id)

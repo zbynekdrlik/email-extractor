@@ -944,4 +944,6 @@ def test_a_taught_manual_rule_does_not_re_ask_whether_it_is_an_order(pg, env):
                           upload=rec.upload, post=rec.post)
     assert result["status"] == "review"
     assert len(teach.open_questions(pg)) == 0, "manual already answered 'yes' — never re-ask"
-    assert "ručne" not in rec.posts[0].lower()
+    # the old manual short-circuit's retype-in-ORION reject_reason ("prepíš ju ručne v
+    # ORIONe") is gone; the generic review label ("treba zadať ručne") is app-wide, unrelated
+    assert "prepíš" not in rec.posts[0].lower()
