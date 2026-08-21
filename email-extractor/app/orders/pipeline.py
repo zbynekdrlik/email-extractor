@@ -194,7 +194,10 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
         # through and still asks. Never in shadow (shadow leaves no trace). Written directly,
         # NOT through `_finish`, whose invariant would otherwise RAISE the very mail question
         # we are avoiding (a non-technical review with no board question).
-        if not shadow and promo.looks_like_promo(
+        # #361: never reclassify a `manual`-taught mail as promo — the warehouse explicitly
+        # confirmed this sender/subject IS an order, so its "it's an order" teaching outranks
+        # the promo heuristic (mirrors the `rule != "manual"` re-ask gate below).
+        if not shadow and rule != "manual" and promo.looks_like_promo(
                 message.get("subject", ""), message.get("from_addr", ""),
                 message.get("combined_text", "") or "",
                 message.get("list_unsubscribe", "")):
@@ -928,9 +931,10 @@ def _sender_address(message: dict, extracted: dict, customers: list[dict]) -> st
 
 def _mail_rule(conn, sender_email: str, subject: str) -> str | None:
     """What the warehouse already taught about mail shaped like this (#164) — `ignore`
-    (not an order) or `manual` (an order, always handled by hand), or `None` when nothing
-    is taught yet. A pure read: safe to run unconditionally, before the LLM call it is
-    meant to save."""
+    (not an order) or `manual` (#361: an order that runs the normal automatic pipeline; the
+    rule only suppresses re-asking whether it is an order — it no longer short-circuits), or
+    `None` when nothing is taught yet. A pure read: safe to run unconditionally, before the
+    LLM call `ignore` is meant to save."""
     row = conn.execute(
         "SELECT action FROM mail_rules WHERE sender_norm = %s AND subject_key = %s",
         (teach._sender_norm(sender_email), teach.subject_key(subject))).fetchone()
