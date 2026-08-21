@@ -153,3 +153,43 @@ was SUCCESS on attempt 3, yet the PR stayed BLOCKED until push run `32265169277`
 success. This is NOT the criss-cross false-positive at the top of this file (that is
 `mergeable_state: "dirty"` from an ambiguous merge base) — here the merge is clean and the
 block is a stale CANCELLED check-run, cleared by a rerun, not a `main`-sync-back.
+
+## A worktree worker must keep close-keywords away from `#N` in the PR BODY and issue
+## comments too — `block-worker-close-trigger` only guards the COMMIT message (#358, 2026-08-21)
+
+`block-worker-close-trigger.sh` blocks a close-keyword (`close`/`closes`/`closed`/`fix*`/
+`resolve*`) sitting next to a `#N` in a worktree/autopilot WORKER's COMMIT message — the
+fleet model is: the SUPERVISOR merges the worker's branch and the MAINTAINER closes the
+ticket with evidence, never an auto-close on merge (incident #564). But the hook does NOT
+scan the PR BODY or issue comments, and GitHub's own auto-close scans the merged PR's
+title/body with ZERO negation/context awareness (`gh-cli-recipes.md`). So a PR body that
+EXPLAINS the policy in prose — e.g. "the maintainer closes #358 with evidence" — contains
+the literal substring `closes #358` and auto-closes the ticket on merge, defeating the very
+policy it was describing (this happened live on #358: careful `(#358)` commit messages, but
+the explanatory PR-body sentence triggered the close).
+
+- In commit messages AND PR bodies AND issue comments, NEVER write close/closes/closed/
+  fix/fixes/fixed/resolve/resolves/resolved immediately before a `#N` — not even in a
+  sentence ABOUT the maintainer closing it. Reference it as `(#N)`, "ticket #N",
+  "the maintainer finishes/reviews #N", "leaves #N open" (all safe).
+- If it auto-closes anyway: `gh issue reopen <N> --comment "..."` (reopen is NOT blocked and
+  restores the intended worker/maintainer split), then post the deploy evidence and leave it
+  OPEN for the maintainer.
+- A full-flow worktree dispatch (dispatch explicitly delegates merge+deploy, per the
+  #305/#312 note above) therefore ends with the ticket left OPEN + an evidence comment, NOT
+  self-closed — the run-card + `issue_state: #N=OPEN` in the evidence block is correct.
+
+## Monitor's own shell command is ALSO worktree-guard-blocked — the only CI-wait spacing
+## from a worktree is single `gh` calls + a DETACHED sentinel (#358, 2026-08-21)
+
+The #305/#312 note above says a worktree worker polls CI with single `gh run view` calls +
+`# airuleset:poll-ok`. Two additions from #358: (1) the `Monitor` tool's `command` runs
+through the SAME worktree-isolation guard and is REFUSED when it contains `gh` in a loop
+(contrary to the general `local-testing.md` #285 claim that Monitor is exempt) — so Monitor
+is NOT an escape hatch for CI polling from a worktree either. (2) To space the single polls
+with a real foreground delay (a bare `sleep` is blocked; a `while ...; do sleep; done` loop
+containing `gh`/`git` is blocked), start a DETACHED sentinel and wait on its PID with the
+guard-accepted `while ps` shape: `nohup bash -c 'sleep 210' >/dev/null 2>&1 & echo $!` then
+`while ps -p <pid> >/dev/null 2>&1; do sleep 15; done; echo DONE`. The second such wait in a
+session needs `# airuleset:poll-ok <reason>` (block-local-poll-repeat). This let #358's
+full-flow worktree dispatch wait out the main-branch GHCR `build` job cleanly.
