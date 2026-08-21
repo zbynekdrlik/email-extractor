@@ -459,26 +459,24 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                 synthetic=True, post=post))
 
     # spec §4: announced-vs-attached (Lunys subject shape only — a real, still-useful
-    # signal for that supplier, kept as-is). Shadow guarantees nothing observable
-    # leaves the process, so neither the event log nor the Odoo post fire while
-    # shadowing (deep-review finding, #204 — the mismatch count must not be inflated
-    # by shadow runs). `dict.fromkeys` dedupes while keeping order — a subject naming
-    # the same DL number twice must not produce two identical synthetic entries.
+    # signal for that supplier). Detection stays, but the per-mail Odoo warning was
+    # removed as noise on the owner's request (#358, 0.9.119) — only the internal event
+    # log and the synthetic review entries below remain. Shadow guarantees nothing
+    # observable leaves the process, so the event log does not fire while shadowing
+    # (deep-review finding, #204 — the mismatch count must not be inflated by shadow
+    # runs). `dict.fromkeys` dedupes while keeping order — a subject naming the same DL
+    # number twice must not produce two identical synthetic entries.
     announced = _subject_doc_numbers(message.get("subject", ""))
     missing = list(dict.fromkeys(a for a in announced if a not in extracted_doc_numbers))
     if missing and not shadow:
         dl_report.log_announced_mismatch(conn, message["message_id"],
                                          message.get("subject", ""), missing,
                                          extracted_doc_numbers)
-        _post(cfg, shadow, lambda: dl_report.build_announced_mismatch(
-            message.get("subject", ""), message.get("from_addr", ""), missing,
-            extracted_doc_numbers, documents=documents_out, link=link), post=post)
     if missing:
-        # #238 requirement #2: fed into the AGGREGATE (`_aggregate_status` below) —
-        # AFTER the Odoo post/event above so `build_announced_mismatch`'s own
-        # per-document rendering never doubles up with these synthetic entries — so
+        # #238 requirement #2: fed into the AGGREGATE (`_aggregate_status` below) so
         # `messages.proc_status` itself is never "ok" while a document the mail's own
-        # subject announces is genuinely missing, not just alerted separately.
+        # subject announces is genuinely missing — the internal signal preserved when
+        # the per-mail Odoo warning was removed (#358).
         for num in missing:
             documents_out.append({
                 "outcome": "review", "doc_number": num, "synthetic": True,

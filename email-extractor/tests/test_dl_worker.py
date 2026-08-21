@@ -1435,9 +1435,12 @@ def test_item_match_prompt_states_the_same_weight_tolerance_the_code_applies_fix
     assert f"{tolerance_pct} %" in prompt or f"{tolerance_pct}%" in prompt
 
 
-def test_announced_but_not_attached_dl_is_flagged_not_silently_lost(pg, tmp_path):
-    """The exact incident spec §4 documents: the subject names TWO DL numbers, only
-    ONE PDF (and therefore one extracted docNumber) ever arrives."""
+def test_announced_but_not_attached_dl_is_logged_but_not_announced(pg, tmp_path):
+    """spec §4 detection stays, but the per-mail Odoo warning was removed as noise on the
+    owner's request (#358): the subject names TWO DL numbers, only ONE PDF (and therefore
+    one extracted docNumber) ever arrives. The mismatch must NO LONGER be posted to Odoo,
+    while the internal signal — the `announced_mismatch` email_events row and a
+    `proc_status` of "partial" — is preserved unchanged."""
     _snapshot(pg)
     _msg(pg, mid="dl1",
         subject="IS KARAT: Tlač: Dodací list SK Signatus (2610LT0100000002) - "
@@ -1450,24 +1453,22 @@ def test_announced_but_not_attached_dl_is_flagged_not_silently_lost(pg, tmp_path
         pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client,
         upload=lambda *a, **k: None, post=lambda c, h: posted.append(h))
 
-    mismatch = [h for h in posted if "ohlásený aj doklad" in h]
-    assert mismatch, "the announced-but-unattached DL number must be flagged"
-    assert "0100000002" in mismatch[0]
-    # #229 follow-up: the message must ALSO state the outcome of the doc that WAS
-    # attached, and state it FIRST — a reader must never be left guessing whether
-    # 0100000001 (the one PDF that did arrive) was actually processed.
-    assert "Dodací list 0100000001" in mismatch[0]
-    assert "spracovaný a nahratý do ORIONu" in mismatch[0]
-    assert (mismatch[0].index("Dodací list 0100000001") <
-           mismatch[0].index("ohlásený aj doklad"))
+    # #358: the announced-but-unattached warning must NOT be posted to Odoo any more.
+    assert not [h for h in posted if "ohlásený aj doklad" in h], \
+        "the per-mail announced-mismatch Odoo warning was removed on the owner's request"
+    # the change is surgical — the DL that DID arrive still gets its own success post.
+    assert any("Dodací list 0100000001" in h and "spracovaný a nahratý do ORIONu" in h
+               for h in posted), \
+        "the attached document's own success message must still be posted"
+    # detection is kept: the internal announced_mismatch event is still written.
     ev = pg.execute(
         "SELECT detail FROM email_events WHERE message_id='dl1' "
         "AND stage='announced_mismatch'").fetchone()
     assert ev is not None
     assert ev[0]["announced"] == ["0100000002"]
     # #238 requirement #2: a run with a genuinely missing announced document must
-    # NEVER roll up as "ok" — the whole point of an audit-by-proc_status is that
-    # proc_status itself must be honest, not just the separate Odoo alert.
+    # NEVER roll up as "ok" — proc_status itself must be honest, independent of the
+    # (now removed) Odoo alert.
     row = pg.execute(
         "SELECT proc_status FROM messages WHERE message_id='dl1'").fetchone()
     assert row[0] == "partial", \
