@@ -3854,3 +3854,32 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
     Prod overenie: `/health`+`/version` 0.9.114, DOM v0.9.114 (0 console errors),
     `to_regclass('public.order_digest_sent')` = NULL (tabuľka preč), `schema_version` najnovší riadok
     rev 6 `drop_order_digest_sent` (applied 2026-08-19 15:27:35 pri štarte add-onu).
+
+## #358 — DL: prestať posielať do Odoo upozornenie "ohlásený-ale-chýbajúci doklad" (0.9.119, worktree fleet, dev2 test-pg :55501)
+
+- **#358 (announcement-only removal, owner directive 2026-08-21):** majiteľ označil per-mail Odoo
+  Discuss správu "⚠️ V predmete e-mailu bol ohlásený aj doklad …, ktorý v prílohe nebol …" za šum
+  ("toto nech tam neoznamuje je to zbytočné, pravidlá ale máš správne"). Odstránený LEN Odoo post;
+  celá interná detekcia ostáva.
+  - `dl_message._process_message`: zrušené volanie `_post(... build_announced_mismatch ...)`.
+  - `dl_report`: zmazaný mŕtvy builder `build_announced_mismatch()` + jeho jediní privátni pomocníci
+    `_outcome_line()`/`_outcome_needs_link()` (MVP: mŕtvy kód). `_OUTCOME_ICON` orezaný na dosiahnuteľné
+    `ok`/`partial` (build_review si ❗ glyf hardkóduje). Docstringy/komentáre v `dl_report`+`dl_document`
+    zosúladené.
+  - Ponechané bez zmeny: `log_announced_mismatch()` (email_events `announced_mismatch` + denný súhrn
+    `reliability.dl_provenance_stats_for_day`), syntetické `review` položky do `documents_out`
+    (→ `proc_status` "partial" cez `_aggregate_status`), `_subject_doc_numbers` detekcia + eval-corpus
+    skórovanie.
+  - Bez RED/GREEN (odstránenie funkcie, nie bug). Testy: zmazané priame unit testy mŕtveho buildera
+    (`test_orders_dl_report_messages.py`) + nepoužitý `_doc` helper; e2e test premenovaný na
+    `test_announced_but_not_attached_dl_is_logged_but_not_announced` (`test_dl_worker.py`) — asertuje,
+    že sa upozornenie už NEPOSIELA, pričom `announced_mismatch` event riadok aj `proc_status` "partial"
+    ostávajú.
+  - Commity: design comment PRED kódom; bump `f893764` (0.9.119), impl `dbfebe4` (48+/211-).
+    Review 0 🔴 0 🟡 1 🔵 (fresh-context reviewer) — 🔵 (dve mŕtve `_OUTCOME_ICON` kľúče po odstránení)
+    opravené v `dbfebe4`. Full local suite zelené (1738 testov) + ruff.
+  - PR #362 dev→main, merge `28a9f81`, CI zelené (test/typecheck/e2e-orders/e2e-dl/build, obe runy).
+    Deploy 0.9.119 na živý add-on (z 0.9.116). Prod overenie: `/health` 0.9.119, DOM v0.9.119,
+    grep v kontejneri potvrdil, že `build_announced_mismatch` v nasadenom kóde už NIE JE. Živé správanie
+    (reálny dodávateľský mail) sa nedá vyvolať on-demand — dôkaz je e2e test + grep nasadeného kódu.
+  - Tiket #358 NEuzavretý workerom (per `block-worker-close-trigger`) — maintainer ho zavrie s dôkazmi.
