@@ -10,22 +10,21 @@ two would force `build_summary` to reason about a policy it was explicitly built
 have (same "keep unrelated rules apart" reasoning `dl_extract.py`'s own module docstring
 gives for staying standalone from `app/orders/extract.py`).
 
-Three message shapes:
+Two message shapes:
 
 - `build_success` (R95) — one ✅ per successfully-built DESADV (partial EDI included,
   R81: unmatched items are surfaced in the SAME message, never silently dropped).
 - `build_review` (R96) — one ❗ when a document could not become an EDI at all (supplier
   not matched, zero real items, extraction-level `needsReview`, a service failure that
   exhausted its retries).
-- `build_announced_mismatch` (spec §4) — the "second DL in one mail" fix: a supplier's own
-  subject line announces MORE delivery-note numbers than were actually attached/extracted
-  (the Lunys "IS KARAT" incident this whole phase exists to close). Corrected (#229
-  follow-up): this IS posted as its own immediate Odoo message, same as `build_success`/
-  `build_review` — only the plain W7 `duplicate_skip` event (below) is digest-only, never
-  posted immediately. `build_announced_mismatch` now ALSO opens with a short outcome line
-  per document that WAS extracted (`documents=`), because a reader who only sees this
-  message could not otherwise tell whether the attached DL was processed at all (live
-  complaint on run 406: "preco nenapisalo do odoo ze dodaci list bol spracovany").
+
+The announced-vs-attached mismatch (spec §4, the Lunys "IS KARAT" case: a supplier's own
+subject announces MORE delivery-note numbers than were attached/extracted) is DETECTED but
+no longer posted as its own Odoo message — the owner removed that per-mail warning as noise
+(#358, 0.9.119). Its internal signal stays: `log_announced_mismatch` writes the
+`announced_mismatch` event (surfaced in the DAILY digest via
+`reliability.dl_provenance_stats_for_day`), and `dl_message._process_message` still appends
+a synthetic `review` entry per missing document so `messages.proc_status` reflects it.
 
 Duplicate documents (W7) are NEVER posted as their own immediate message — visibility is
 the DAILY digest (`reliability.dl_provenance_stats_for_day`, extended #204) via
@@ -34,11 +33,7 @@ the DAILY digest (`reliability.dl_provenance_stats_for_day`, extended #204) via
 event; it never calls Odoo. `log_already_shipped_this_run` (#216) is a THIRD, deliberately
 different, non-Odoo, non-counted event: a retry after a partial ship re-skipping a
 document THIS SAME message already sent — never a real W7 cross-message duplicate, so it
-must not inflate that count. (A duplicate document's outcome CAN still surface as one of
-`build_announced_mismatch`'s per-document outcome lines when the SAME message also
-triggers an announced-vs-attached mismatch — that message is being posted regardless, so
-stating the duplicate's own outcome there is not a new immediate post, just a clearer
-existing one.)
+must not inflate that count.
 
 The dashboard link (#229 follow-up 2) is included ONLY when there is something the reader
 can actually go resolve — a genuine `review` outcome, or a `partial` success that raised a
@@ -55,10 +50,9 @@ from . import report
 
 WORKFLOW = "delivery_notes"
 
-# #229 follow-up: per-document outcome icons shared by build_success's headline and the
-# outcome lines build_announced_mismatch prepends — one place to keep the two consistent.
-_OUTCOME_ICON = {"ok": "&#9989;", "partial": "&#9888;&#65039;", "review": "&#10071;",
-                 "duplicate": "&#128257;"}
+# #229 follow-up: outcome icons for build_success's headline (only ok / partial are
+# reachable — build_review hardcodes its own ❗ glyph).
+_OUTCOME_ICON = {"ok": "&#9989;", "partial": "&#9888;&#65039;"}
 
 
 def _channel(cfg) -> int:
@@ -108,9 +102,7 @@ def build_success(supplier_name: str, doc_number: str, delivery_date: str,
     zero-quantity item even when unmatched, so a document whose ONLY unmatched item also
     has quantity 0 can have `partial=False` while a real `dl_item` question was still
     raised — `unmatched_items` has no such gap (`dl_worker`'s own teach.ask_dl_item call
-    fires for ANY unmatched item regardless of quantity). `_outcome_needs_link` below
-    mirrors this exact precision via `documents_out`'s own `unmatched_items` key, not the
-    less precise `outcome` string alone (review finding, PR #232)."""
+    fires for ANY unmatched item regardless of quantity)."""
     n_items = len(shipped_items or [])
     if partial:
         headline = (f"{_OUTCOME_ICON['partial']} Dodací list {escape(doc_number or '?')} "
@@ -168,69 +160,6 @@ def build_review(reason: str, supplier_name: str = "", doc_number: str = "",
     if link:
         parts.append(report.link_line(link))
     return "".join(p for p in parts if p)
-
-
-# --- per-document outcome line, shared by build_announced_mismatch ----------
-
-def _outcome_line(doc: dict) -> str:
-    """A single short, self-contained Slovak sentence stating whether THIS document
-    was actually processed (#229 follow-up) — a reader must never see only the
-    announced-but-missing warning below and be left guessing whether the attached DL
-    went through. `doc` is one of `_process_document`'s own returned outcome dicts —
-    no new data, just rendering what the worker already computed."""
-    outcome = doc.get("outcome") or "review"
-    doc_number = doc.get("doc_number") or ""
-    label = f"Dodací list {escape(doc_number)}" if doc_number else "Táto správa"
-    n = len(doc.get("items") or [])
-    if outcome == "ok":
-        return (f"{_OUTCOME_ICON['ok']} {label} spracovaný a nahratý do ORIONu "
-               f"({n} položiek).")
-    if outcome == "partial":
-        return (f"{_OUTCOME_ICON['partial']} {label} spracovaný ČIASTOČNE &mdash; "
-               f"nahratý do ORIONu, chýbajú niektoré položky ({n} položiek).")
-    if outcome == "duplicate":
-        return (f"{_OUTCOME_ICON['duplicate']} {label} bol už spracovaný skôr "
-               "&mdash; duplicitné oznámenie, nič sa neposiela znova.")
-    reason = escape(doc.get("reason") or "potrebuje kontrolu")
-    # #238 review: gender agreement — "Dodací list" (masculine) vs the "Táto správa"
-    # (feminine) fallback used when there is no doc_number at all (a whole-attachment
-    # or whole-message review entry).
-    verb = "NEBOL spracovaný" if doc_number else "NEBOLA spracovaná"
-    return f"{_OUTCOME_ICON['review']} {label} {verb} &mdash; {reason}."
-
-
-def _outcome_needs_link(doc: dict) -> bool:
-    """Mirrors `build_success`'s own link condition EXACTLY: `review` always; otherwise
-    only when `doc["unmatched_items"]` is non-empty (the SAME list `_process_document`
-    now carries on every live outcome dict, review finding PR #232 — reading the
-    `outcome` string alone ("partial") would miss a document whose only unmatched item
-    also has zero quantity, see `build_success`'s own docstring for why)."""
-    if doc.get("outcome") == "review":
-        return True
-    return bool(doc.get("unmatched_items"))
-
-
-# --- spec §4: announced-vs-attached mismatch --------------------------------
-
-def build_announced_mismatch(subject: str, from_addr: str, announced: list[str],
-                             attached: list[str], documents: list[dict] | None = None,
-                             link: str = "") -> str:
-    """`announced`/`attached` keep their existing meaning (see the call site in
-    `dl_worker._process_message`: `announced` actually receives the MISSING subset,
-    `attached` the extracted numbers). `documents` (#229 follow-up) is the SAME
-    per-document outcome list `_process_message` already built via `_process_document`
-    — rendered FIRST as short outcome lines, before the reworded missing-doc warning,
-    so this message is self-sufficient even when it is the ONLY one a reader sees."""
-    parts = [f"<p>{_outcome_line(d)}</p>" for d in (documents or [])]
-    miss = ", ".join(escape(a) for a in announced) or "?"
-    parts.append(
-        "<p>&#9888;&#65039; V predmete e-mailu bol ohlásený aj doklad "
-        f"{miss}, ktorý v prílohe nebol. Ak má existovať, treba ho vyžiadať od "
-        "dodávateľa.</p>")
-    parts.append(f"<p>Od: {escape(from_addr or '')}<br>Predmet: {escape(subject or '')}</p>")
-    if link and any(_outcome_needs_link(d) for d in (documents or [])):
-        parts.append(report.link_line(link))
-    return "".join(parts)
 
 
 # --- delivery ----------------------------------------------------------------

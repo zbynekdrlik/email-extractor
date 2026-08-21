@@ -428,8 +428,8 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                # teach.ask_dl_item call above fires for ANY unmatched item regardless
                # of quantity. `unmatched_notes` is that exact, precise signal (same
                # list build_success's own link condition already reads) -- carry it
-               # through so dl_report._outcome_needs_link can check it directly
-               # instead of re-deriving an imprecise proxy from `outcome`.
+               # through so build_success renders the dashboard link on exactly this
+               # signal, not an imprecise proxy from `outcome`.
                "unmatched_items": unmatched_notes,
                "items": _shipped_items(decisions)}
 

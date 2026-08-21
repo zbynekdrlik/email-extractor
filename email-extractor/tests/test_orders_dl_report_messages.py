@@ -1,15 +1,12 @@
 """DL Odoo message wording + link-only-when-actionable (#229 follow-ups).
 
-Two user-reported gaps in the DL notify messages, both traced to real live incidents:
+`build_success`/`build_review` message wording, verified against real live incidents:
 
-1. **Outcome first, always.** `build_announced_mismatch` is posted as its OWN, separate
-   Odoo message (never merged with `build_success` -- one mail can carry several
-   documents, and the mismatch is a property of the whole message, not one document) --
-   but it never said whether the attached DL was actually processed, only that a SECOND
-   number was announced-but-missing. A reader who only sees this second message cannot
-   tell whether the DL went through (live complaint on run 406: "preco nenapisalo do
-   odoo ze dodaci list bol spracovany"). Every DL message must now open with a short,
-   unambiguous per-document outcome line before any warning.
+1. **Outcome first, always.** Every DL message opens with a short, unambiguous
+   per-document outcome line before any detail — a reader must never be left guessing
+   whether the attached DL actually went through (live complaint on run 406: "preco
+   nenapisalo do odoo ze dodaci list bol spracovany"). `build_success`'s headline states
+   the doc number + item count explicitly.
 
 2. **Dashboard link only when there is something to actually resolve there** -- mirrors
    `report.build_summary`'s own `has_board_item`/`has_other_action` rule for the orders
@@ -18,16 +15,6 @@ Two user-reported gaps in the DL notify messages, both traced to real live incid
    (real unmatched items -> a genuine open `dl_item` question) and `review` always do.
 """
 from app.orders import dl_report, report
-
-
-def _doc(outcome="ok", doc_number="0100000001", items=None, reason=""):
-    d = {"outcome": outcome, "doc_number": doc_number, "supplier_name": "Pekáreň Lunys"}
-    if items is not None:
-        d["items"] = items
-    if reason:
-        d["reason"] = reason
-    return d
-
 
 # --- build_success: outcome-first headline, exact template ------------------
 
@@ -84,84 +71,6 @@ def test_review_message_always_carries_the_link_when_given():
 def test_review_message_with_no_link_renders_without_one():
     html = dl_report.build_review("Zlyhalo párovanie dodávateľa: timeout")
     assert "<a href" not in html
-
-
-# --- build_announced_mismatch: outcome-first + reworded warning + link rule -
-
-def test_mismatch_message_states_the_document_outcome_before_the_warning():
-    html = dl_report.build_announced_mismatch(
-        "subj", "dodavatel@lunys.sk", ["0100239776"], ["0100239749"],
-        documents=[_doc(outcome="ok", doc_number="0100239749",
-                        items=[{"name": "Rožok 50g"}] * 10)])
-    assert html.index("Dodací list 0100239749") < html.index("ohlásený aj doklad")
-    assert "spracovaný a nahratý do ORIONu" in html
-    assert "(10 položiek)" in html
-
-
-def test_mismatch_warning_is_reworded_per_the_user_request():
-    html = dl_report.build_announced_mismatch(
-        "subj", "dodavatel@lunys.sk", ["0100239776"], ["0100239749"])
-    assert "V predmete e-mailu bol ohlásený aj doklad" in html
-    assert "0100239776" in html
-    assert "ktorý v prílohe nebol" in html
-    assert "vyžiadať od dodávateľa" in html
-    # the old, unclear header wording is gone
-    assert "ohlásil viac dodacích listov" not in html
-
-
-def test_mismatch_with_no_documents_still_renders_gracefully():
-    html = dl_report.build_announced_mismatch(
-        "subj", "dodavatel@lunys.sk", ["0100239776"], [])
-    assert "V predmete e-mailu bol ohlásený aj doklad" in html
-
-
-def test_mismatch_with_a_clean_ok_document_carries_no_link():
-    html = dl_report.build_announced_mismatch(
-        "subj", "dodavatel@lunys.sk", ["0100239776"], ["0100239749"],
-        documents=[_doc(outcome="ok", items=[{"name": "x"}])],
-        link="http://example.com/sklad/xyz")
-    assert "<a href" not in html
-
-
-def test_mismatch_with_a_review_document_carries_the_link():
-    html = dl_report.build_announced_mismatch(
-        "subj", "dodavatel@lunys.sk", ["0100239776"], ["0100239749"],
-        documents=[_doc(outcome="review", reason="Zlyhalo párovanie dodávateľa")],
-        link="http://example.com/sklad/xyz")
-    assert "<a href" in html
-
-
-def test_mismatch_with_a_duplicate_document_states_it_and_carries_no_link():
-    html = dl_report.build_announced_mismatch(
-        "subj", "dodavatel@lunys.sk", ["0100239776"], ["0100239749"],
-        documents=[_doc(outcome="duplicate", doc_number="0100239749")],
-        link="http://example.com/sklad/xyz")
-    assert "Dodací list 0100239749" in html
-    assert "bol už spracovaný skôr" in html
-    assert "<a href" not in html
-
-
-def test_mismatch_with_an_outcome_ok_but_real_unmatched_items_still_carries_the_link():
-    """Review finding (PR #232): `desadv_edi.build()`'s own `partial`/no_match
-    computation excludes a zero-quantity item even when it is genuinely unmatched, so a
-    document can have `outcome="ok"` while STILL carrying a real, non-empty
-    `unmatched_items` list (a genuine `dl_item` board question was raised for it) --
-    `_outcome_needs_link` must key on `unmatched_items`, never the `outcome` string
-    alone, or this exact case would wrongly omit the link."""
-    html = dl_report.build_announced_mismatch(
-        "subj", "dodavatel@lunys.sk", ["0100239776"], ["0100239749"],
-        documents=[_doc(outcome="ok", doc_number="0100239749", items=[{"name": "x"}],
-                        )],
-        link="http://example.com/sklad/xyz")
-    assert "<a href" not in html, "sanity: a genuinely clean ok carries no link"
-
-    doc_with_real_gap = _doc(outcome="ok", doc_number="0100239749",
-                             items=[{"name": "x"}])
-    doc_with_real_gap["unmatched_items"] = ["Neznámy chlebík (nulové množstvo, žiadna zhoda)"]
-    html2 = dl_report.build_announced_mismatch(
-        "subj", "dodavatel@lunys.sk", ["0100239776"], ["0100239749"],
-        documents=[doc_with_real_gap], link="http://example.com/sklad/xyz")
-    assert "<a href" in html2
 
 
 # --- shared helper reused by both notify paths (#229 follow-up 2) -----------
