@@ -780,7 +780,7 @@ def _post_summary(cfg, post, shadow: bool, customer_name: str, orders: list[dict
     html = report.build_summary(customer_name=customer_name, orders=orders,
                                 new_questions=new_questions,
                                 unverified_count=unverified_count, link=report.sklad_link(cfg),
-                                notes=notes)
+                                notes=notes, cfg=cfg)
     try:
         post(cfg, html)
     except Exception:

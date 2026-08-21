@@ -83,7 +83,8 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
 
 
 def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0,
-                  unverified_count: int = 0, link: str = "", notes: str = "") -> str:
+                  unverified_count: int = 0, link: str = "", notes: str = "",
+                  cfg=None) -> str:
     """The ONE Odoo message for a whole processed e-mail.
 
     `orders` is a list of AGGREGATE per-order summaries — never raw decisions or items:
@@ -113,6 +114,12 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
     `held_orders`, but never actually rendered anywhere a human reads outcomes — silently
     write-only. Same short-plain-Slovak-sentence shape as `reject_reason`, so it renders
     the same way: `escape()`d, its own paragraph, never a raw trace/JSON/run id.
+
+    `cfg` (#359) is used ONLY to render a clickable admin-dashboard link on the
+    "treba doriešiť" fallback line (via `dashboard_link(cfg)`) when a review/error/
+    unverified outcome carries no `/sklad` `link` of its own. `None` (the default) or an
+    unset `dashboard_base_url` keeps the plain no-link sentence, so every existing caller
+    that omits it is unaffected.
     """
     orders = orders or []
     counts: dict[str, int] = {}
@@ -202,7 +209,16 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
         if has_board_item and link:
             parts.append(link_line(link))
         else:
-            parts.append("<p>&#128203; Treba doriešiť — otvor dashboard extraktora.</p>")
+            # #359: carry the CLICKABLE admin-dashboard URL when one is configured, the same
+            # way `dl_alerts._format_grouped` does — every actionable Odoo message must carry
+            # its functional URL. Falls back to the plain sentence only when no
+            # `dashboard_base_url` is configured (or `cfg` was not passed).
+            base = dashboard_link(cfg)
+            if base:
+                parts.append('<p>&#128203; Treba doriešiť — otvor dashboard: '
+                             f'<a href="{escape(base)}">{escape(base)}</a></p>')
+            else:
+                parts.append("<p>&#128203; Treba doriešiť — otvor dashboard extraktora.</p>")
 
     return "".join(parts)
 

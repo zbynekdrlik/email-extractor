@@ -192,6 +192,30 @@ def test_no_link_configured_still_says_something_is_unresolved():
     assert "dashboard" in html.lower() or "otvor" in html.lower()
 
 
+def test_the_fallback_line_carries_a_clickable_dashboard_link_when_configured():
+    """#359: a review/error outcome with no /sklad link still points a human at the admin
+    dashboard — and it must be a CLICKABLE <a href> when dashboard_base_url is configured, not
+    a dead sentence (every actionable Odoo message carries its functional URL)."""
+    class Cfg:
+        dashboard_base_url = "http://46.224.130.35:8099"
+    html = report.build_summary("Pekáreň X", [_order(status="review")], cfg=Cfg())
+    assert '<a href="http://46.224.130.35:8099">http://46.224.130.35:8099</a>' in html
+    assert "Treba doriešiť" in html
+
+
+def test_the_fallback_line_stays_a_plain_sentence_without_a_dashboard_base_url():
+    """#359: no base URL configured (Cfg with empty base) OR no cfg passed at all → the plain
+    no-link sentence, never a dead/empty <a href>."""
+    class Cfg:
+        dashboard_base_url = ""
+    html_no_base = report.build_summary("Pekáreň X", [_order(status="review")], cfg=Cfg())
+    html_no_cfg = report.build_summary("Pekáreň X", [_order(status="review")])
+    for html in (html_no_base, html_no_cfg):
+        assert "<a href" not in html
+        assert "http" not in html
+        assert "otvor dashboard extraktora" in html.lower()
+
+
 # --- (b) a clean success never shows the link -------------------------------
 
 def test_a_fully_shipped_multi_order_run_has_no_link():
