@@ -53,6 +53,10 @@ ORDER_SCHEMA = {
                         "name": {"type": "string"},
                         "quantity": {"type": "number"},
                         "unit": {"type": "string"},
+                        # #360: the per-unit price where the mail states one (else omitted).
+                        # Optional — most order mails carry only quantities. Shown on the
+                        # warehouse board for confirmation; never sent to ORION.
+                        "unitPrice": {"type": "number"},
                         "sourceQuote": {"type": "string"},
                     },
                     "required": ["name", "quantity", "unit", "sourceQuote"],
@@ -294,8 +298,10 @@ def verify(extracted: dict, source: str) -> dict:
 
 
 def _plain(item: dict) -> dict:
+    # #360: carry the optional per-line unit price through verification so the pipeline can
+    # store it on the board question. None when the mail stated no price (the common case).
     return {"name": item.get("name", ""), "quantity": item.get("quantity"),
-            "unit": item.get("unit", "ks") or "ks"}
+            "unit": item.get("unit", "ks") or "ks", "unitPrice": item.get("unitPrice")}
 
 
 # --- 3) sanity guard -----------------------------------------------------

@@ -29,6 +29,26 @@ from .httpapi_security import _role_kinds
 from .orders import dl_snapshot, snapshot
 
 
+def _num(v):
+    """Coerce a board-submitted number (a JSON number, a Slovak-decimal string like
+    "12,50", or a blank/absent field) to a float — or None when absent/unparseable, so a
+    missing field leaves the stored value unchanged (#360). A negative value is rejected
+    (a quantity/price is never negative) by returning None."""
+    if v is None or isinstance(v, bool):   # bool is an int subclass — never a qty/price
+        return None
+    if isinstance(v, (int, float)):
+        n = float(v)
+    else:
+        s = str(v).strip().replace(",", ".")
+        if not s:
+            return None
+        try:
+            n = float(s)
+        except ValueError:
+            return None
+    return n if n >= 0 else None
+
+
 def register(app: Flask, deps: Deps) -> None:
     @app.get("/api/orders/questions")
     def api_orders_questions():
@@ -444,15 +464,23 @@ def register(app: Flask, deps: Deps) -> None:
         gtin, card = str(body.get("gtin") or ""), str(body.get("card") or "")
         if not gtin:
             return jsonify(error="chýba karta"), 400
+        # #360: the board sends the warehouse-confirmed quantity + unit price for this line.
+        # The confirmed QUANTITY is what ships (threaded into release_for_question below);
+        # the price is stored on the question as a verification value (ORION has no price
+        # field). Both persist onto the question row via teach.answer (audit + display).
+        quantity = _num(body.get("quantity"))
+        unit_price = _num(body.get("unit_price"))
         try:
             with deps.db_tx() as c:
-                q = teach.answer(c, qid, gtin=gtin, card=card, by="sklad")
+                q = teach.answer(c, qid, gtin=gtin, card=card, by="sklad",
+                                 quantity=quantity, unit_price=unit_price)
         except teach.AlreadyAnswered as e:
             return jsonify(error=str(e)), 409
         except teach.NotACandidate as e:
             return jsonify(error=str(e)), 400
         with deps.db() as c2:
-            released = hold.release_for_question(c2, deps.cfg, qid)
+            released = hold.release_for_question(c2, deps.cfg, qid,
+                                                 confirmed_quantity=quantity)
         return jsonify(ok=True, question=q, released=released)
 
     @app.get("/api/orders/held")

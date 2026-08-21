@@ -3905,3 +3905,15 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
   `cfg` previazané z `_post_summary`, `hold._post_still_held`, `hold.release_to_review`. Commit `927a8b8`.
 - Review: 1 🟡 + 2 🔵 (fresh-context reviewer, nie builtin skill), všetky opravené v `cdf5ed4`; #359 0 nálezov.
 - Tikety #361/#359 NEuzavreté workerom — maintainer/supervisor ich zavrie s dôkazmi z nasadenia.
+- **#360** (`extract.py`, `db.py`, `teach.py`, `hold.py`, `pipeline.py`, `httpapi_orders_questions.py`,
+  `httpapi_templates.py`, v0.9.121): nástenka — pri každej `item` otázke vidno vpravo množstvo AJ
+  cenu/MJ, predvyplnené + upraviteľné; OK (klik na kartu / vyhľadávanie) pošle potvrdené hodnoty.
+  Potvrdené MNOŽSTVO ide do EDI (aplikované na held decision v `hold.release_for_question` cez
+  existujúcu answer→release cestu, žiadna druhá ship cesta). CENA je len overovacie zobrazenie +
+  uložená oprava — ORION ORDER_ EDI (`edi.build` LIN) nemá cenové pole, čestne označené na nástenke.
+  Extrakcia: voliteľné `unitPrice` v `ORDER_SCHEMA` + prompt, prenesené cez `verify()/_plain`.
+  Schéma: migrácia revízia 7 pridáva `order_questions.unit_price`. Korpus (36 prípadov) re-recordnutý
+  `--live` (zmena schémy = nový extraction cache key), matching cache netknutý. Test: ship-corrected
+  quantity (hold + HTTP end-to-end), teach storage, `_num` (Slovak comma), extract schema/verify.
+  Gotcha: `_num` odmieta záporné + bool; template hashe (DASH/ASK/ASK_DL) re-pinnuté (secret-ok bypass).
+  Tiket #360 NEuzavretý workerom — maintainer/supervisor ho zavrie s dôkazmi z nasadenia.

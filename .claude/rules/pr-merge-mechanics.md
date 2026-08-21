@@ -193,3 +193,30 @@ guard-accepted `while ps` shape: `nohup bash -c 'sleep 210' >/dev/null 2>&1 & ec
 `while ps -p <pid> >/dev/null 2>&1; do sleep 15; done; echo DONE`. The second such wait in a
 session needs `# airuleset:poll-ok <reason>` (block-local-poll-repeat). This let #358's
 full-flow worktree dispatch wait out the main-branch GHCR `build` job cleanly.
+
+## A `[skip ci]` commit left as the PR HEAD silently skips the PR's WHOLE CI — the PR then
+## sits `mergeable_state: BLOCKED` with "no checks reported" (2026-08-21)
+
+A THIRD, distinct cause of a PR stuck `BLOCKED` (alongside the criss-cross `dirty`
+false-positive at the top of this file and the CANCELLED-push-run cause above). When the
+LAST commit on `dev` carries `[skip ci]` (or `[ci skip]`) in its message — e.g. a
+docs-only/autopilot-log commit that legitimately wanted to skip its OWN push run — GitHub
+Actions skips EVERY workflow triggered by that head SHA, including the `pull_request` run
+the PR's required checks depend on. The result is a green-looking history with NO check runs
+on the PR's head at all: `gh pr checks <N>` reports nothing, `gh pr view <N> --json
+mergeable,mergeStateStatus` shows `mergeable_state: "blocked"`, and the PR page says "no
+checks reported on the latest commit on 'dev'". This is NOT a real conflict (the merge is
+clean) and NOT a stale CANCELLED check (there is no check at all to rerun).
+
+- **Diagnose:** `git log -1 origin/dev --format=%s` — a `[skip ci]`/`[ci skip]` on the HEAD
+  commit is the tell; `gh pr checks <N>` returning zero rows confirms nothing ran.
+- **Fix:** push ONE new commit to `dev` WITHOUT a skip token so CI re-triggers on a fresh
+  head SHA — an empty commit is enough:
+  `git commit --allow-empty -m "ci: re-trigger checks (prior dev head was a [skip ci] commit)"`
+  then `git push origin dev`. The PR updates to the new head, CI runs, and it settles to
+  `clean` once green. (Real precedent: dev head `dd75851 docs(autopilot-log): ... [skip ci]`
+  left the 0.9.120 batch PR with no checks until `f3aeb28 ci: trigger checks ...` re-fired
+  them.)
+- **Prevention:** never leave a `[skip ci]` commit as the LAST commit before opening/updating
+  a PR — put the skip on an intermediate commit, or follow it with a normal commit, so the
+  PR's head SHA always carries a runnable workflow.

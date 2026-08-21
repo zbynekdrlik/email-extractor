@@ -420,6 +420,9 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                     customer_ean=matched.ean_edi, customer_name=matched.name,
                     wording=item["name"], quantity=item.get("quantity"),
                     unit=item.get("unit", "ks"),
+                    # #360: carry the extracted per-line unit price so the board can prefill
+                    # it next to the quantity for the warehouse to confirm/correct.
+                    unit_price=item.get("unitPrice"),
                     candidates=[{"gtin": str(c.get("gtin")), "name": c.get("name", "")}
                                 for c in shown_cands],
                     delivery_date=order.get("deliveryDate", ""), reason=decision.note,

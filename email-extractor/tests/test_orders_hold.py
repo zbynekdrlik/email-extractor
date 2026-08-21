@@ -793,3 +793,36 @@ def test_release_due_never_ships_a_still_open_non_shippable_question(pg, env):
     assert hold.get(pg, hid)["status"] == "released"
     assert teach.get(pg, date_qid)["status"] == "open", \
         "the deadline sweep must never silently answer the question for the warehouse"
+
+
+# --- #360: the warehouse-confirmed quantity is what ships -------------------
+
+def test_a_confirmed_quantity_ships_the_human_corrected_value_not_the_extracted_one(pg, env):
+    """#360: the sklad can correct a misread quantity on the board before answering. The
+    CONFIRMED quantity — not the originally extracted one — is what the released order
+    ships, flowing through the SAME answer->release path (never a second ship path)."""
+    rec, qid = _hold_one_order(pg, env)   # rožok 120 ships; torta (5) asks, order held
+    teach.answer(pg, qid, gtin="TOR", card="Torta čokoládová", by="sklad", quantity=8)
+    released = hold.release_for_question(pg, _cfg(), qid, upload=rec.upload, post=rec.post,
+                                         confirmed_quantity=8)
+    assert len(released) == 1 and released[0]["status"] == "ok"
+    assert len(rec.uploads) == 1
+    content = rec.uploads[0][1]
+    assert content.count("LIN") == 2, "both lines ship together in the ONE document"
+    assert "8.000" in content, "the torta LIN carries the confirmed 8"
+    assert "5.000" not in content, "never the originally extracted 5"
+    assert "120.000" in content, "rožok's own uncorrected quantity is untouched"
+    # the confirmed value also persists on the answered question row (audit + display)
+    assert float(teach.get(pg, qid)["quantity"]) == 8
+
+
+def test_no_confirmed_quantity_ships_the_extracted_quantity_unchanged(pg, env):
+    """#360 backward-compat: every pre-#360 caller passes no confirmed_quantity — the
+    ORIGINALLY extracted quantity (torta 5) ships exactly as before."""
+    rec, qid = _hold_one_order(pg, env)
+    teach.answer(pg, qid, gtin="TOR", card="Torta čokoládová", by="sklad")
+    released = hold.release_for_question(pg, _cfg(), qid, upload=rec.upload, post=rec.post)
+    assert len(released) == 1 and released[0]["status"] == "ok"
+    content = rec.uploads[0][1]
+    assert "5.000" in content, "the extracted torta quantity ships unchanged"
+    assert "8.000" not in content
