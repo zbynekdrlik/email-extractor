@@ -46,13 +46,19 @@ class Reason(enum.Enum):
     # cannot be settled by a board click; it needs a /znalosti edit (which validates the
     # EAN) plus a reprocess, which is exactly what TECHNICAL_REASONS means.
     CUSTOMER_EAN_MISSING = "customer_ean_missing"
+    # #361: a sender/subject the warehouse taught `manual` (it IS an order) whose mail then
+    # extracted NO order — the "is this an order?" question is already answered, so we never
+    # re-ask it; nothing a board click could settle either (the warehouse handles the
+    # unreadable mail directly in ORION), so this is a technical review, not a board question.
+    MAIL_RULE_MANUAL = "mail_rule_manual"
 
 
 # Nothing a warehouse click could ever settle — a genuine engineering/instruction matter.
 # Every OTHER "review"/"error" reason MUST carry an open board question, enforced in
 # `_finish` below.
 TECHNICAL_REASONS = {Reason.CHANGE_REQUEST, Reason.LLM_REFUSED, Reason.UPLOAD_FAILED,
-                     Reason.DEDUP_ALREADY_SENT, Reason.CUSTOMER_EAN_MISSING}
+                     Reason.DEDUP_ALREADY_SENT, Reason.CUSTOMER_EAN_MISSING,
+                     Reason.MAIL_RULE_MANUAL}
 
 # The rungs that mean the engine could not settle the line on its own. Each becomes
 # ONE question for the warehouse (#88) — answering it teaches the wording for good.
@@ -148,15 +154,18 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
     catalog = snapshot.load_catalog(conn, snapshot_id)
     customers = snapshot.load_customers(conn, snapshot_id)
 
-    # #164: a sender+subject pattern the warehouse already taught (`mail`-kind answer,
-    # `teach.KINDS['mail'].apply`) is checked BEFORE the LLM ever runs — `ignore` saves
-    # the extraction call entirely, `manual` skips straight to the known instruction.
-    # `not shadow` ONLY: unlike a memory READ that merely informs a decision the model
-    # still makes, this SKIPS the entire extraction pipeline — shadow's whole contract is
-    # "run the same pipeline as live, just claim/upload/teach nothing" (its comparison
-    # against n8n would be corrupted if a taught rule silently changed the verdict itself,
-    # not just a side effect). The 30-email corpus runs forced-shadow and has no
-    # mail_rules rows anyway, so this never touches it.
+    # #164/#361: a sender+subject pattern the warehouse already taught (`mail`-kind answer,
+    # `teach.KINDS['mail'].apply`) is checked BEFORE the LLM runs. `ignore` (not an order)
+    # short-circuits the extraction call entirely. `manual` (#361 — the warehouse confirmed
+    # it IS an order) does NOT short-circuit any more: the mail runs the COMPLETELY normal
+    # automatic pipeline like every other order; the rule's only remaining effect is that the
+    # is-it-an-order `mail` question is not re-asked for that sender/subject (see the
+    # no-orders branch below). `not shadow` ONLY: unlike a memory READ that merely informs a
+    # decision the model still makes, the `ignore` short-circuit SKIPS the entire extraction
+    # pipeline — shadow's whole contract is "run the same pipeline as live, just claim/upload/
+    # teach nothing" (its comparison against n8n would be corrupted if a taught rule silently
+    # changed the verdict itself, not just a side effect). The 30-email corpus runs
+    # forced-shadow and has no mail_rules rows anyway, so this never touches it.
     rule = None if shadow else _mail_rule(
         conn, message.get("from_addr", ""), message.get("subject", ""))
     if rule == "ignore":
@@ -167,13 +176,6 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
         return _finish(conn, cfg, message, shadow, post, status="ok", items=[],
                        result={"shipped": False, "reject_reason": note, "customer": {},
                                "unverified": [], "notes": note})
-    if rule == "manual":
-        return _finish(conn, cfg, message, shadow, post, status="review", items=[],
-                       result={"shipped": False,
-                               "reject_reason": "Podľa naučeného pravidla: je to "
-                                                "objednávka, prepíš ju ručne v ORIONe.",
-                               "customer": {}, "unverified": [], "notes": ""},
-                       reason=Reason.CHANGE_REQUEST)
 
     extracted = extract.run(client, message)
     if extracted.get("refusal"):
@@ -192,7 +194,10 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
         # through and still asks. Never in shadow (shadow leaves no trace). Written directly,
         # NOT through `_finish`, whose invariant would otherwise RAISE the very mail question
         # we are avoiding (a non-technical review with no board question).
-        if not shadow and promo.looks_like_promo(
+        # #361: never reclassify a `manual`-taught mail as promo — the warehouse explicitly
+        # confirmed this sender/subject IS an order, so its "it's an order" teaching outranks
+        # the promo heuristic (mirrors the `rule != "manual"` re-ask gate below).
+        if not shadow and rule != "manual" and promo.looks_like_promo(
                 message.get("subject", ""), message.get("from_addr", ""),
                 message.get("combined_text", "") or "",
                 message.get("list_unsubscribe", "")):
@@ -215,9 +220,12 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                     "notes": extracted.get("notes", "")}
         # #164 row 2: "is this even an order?" — a board question that TEACHES (a
         # `mail_rules` row), instead of a dead `review` nobody could ever act on. Never in
-        # shadow: shadow must leave no trace.
+        # shadow: shadow must leave no trace. #361: when a `manual` rule already exists for
+        # this sender/subject the warehouse has ALREADY answered "yes, it's an order" — don't
+        # re-ask (that suppression is the rule's only remaining effect now that it no longer
+        # short-circuits the pipeline); the mail just falls through to a plain review here.
         qids: list[int] = []
-        if not shadow:
+        if not shadow and rule != "manual":
             mq = teach.ask_mail(conn, message_id=message.get("message_id", ""),
                                 sender_email=message.get("from_addr", ""),
                                 subject=message.get("subject", ""),
@@ -225,13 +233,17 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                                 on_new=new_questions.append)
             if mq:
                 qids.append(mq)
+        # #361: a `manual`-taught mail with no extractable order raises no board question
+        # (the is-it-an-order answer is already known), so it is a TECHNICAL review — the
+        # invariant in `_finish` must not synthesize a fallback mail question for it.
+        no_orders_reason = Reason.MAIL_RULE_MANUAL if rule == "manual" else Reason.NO_ORDERS
         return _finish(conn, cfg, message, shadow, post,
                        status="held" if qids else "review", items=[],
                        result={"shipped": False,
                                "reject_reason": "AI nenašla v e-maile žiadnu objednávku",
                                "customer": {}, "unverified": extracted.get("unverified", []),
                                "notes": extracted.get("notes", "")},
-                       reason=Reason.NO_ORDERS, question_ids=qids,
+                       reason=no_orders_reason, question_ids=qids,
                        new_questions=len(new_questions))
 
     # The customer is asked of the model ONCE per email — a second call would cost money to
@@ -771,7 +783,7 @@ def _post_summary(cfg, post, shadow: bool, customer_name: str, orders: list[dict
     html = report.build_summary(customer_name=customer_name, orders=orders,
                                 new_questions=new_questions,
                                 unverified_count=unverified_count, link=report.sklad_link(cfg),
-                                notes=notes)
+                                notes=notes, cfg=cfg)
     try:
         post(cfg, html)
     except Exception:
@@ -919,9 +931,10 @@ def _sender_address(message: dict, extracted: dict, customers: list[dict]) -> st
 
 def _mail_rule(conn, sender_email: str, subject: str) -> str | None:
     """What the warehouse already taught about mail shaped like this (#164) — `ignore`
-    (not an order) or `manual` (an order, always handled by hand), or `None` when nothing
-    is taught yet. A pure read: safe to run unconditionally, before the LLM call it is
-    meant to save."""
+    (not an order) or `manual` (#361: an order that runs the normal automatic pipeline; the
+    rule only suppresses re-asking whether it is an order — it no longer short-circuits), or
+    `None` when nothing is taught yet. A pure read: safe to run unconditionally, before the
+    LLM call `ignore` is meant to save."""
     row = conn.execute(
         "SELECT action FROM mail_rules WHERE sender_norm = %s AND subject_key = %s",
         (teach._sender_norm(sender_email), teach.subject_key(subject))).fetchone()

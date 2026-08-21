@@ -279,7 +279,7 @@ def _post_still_held(cfg, post, row: dict, decisions: list, new_qids: list[int],
     html = report.build_summary(customer_name=row["customer_name"], orders=[{
         "delivery_date": row["delivery_date"], "status": "held",
         "item_count": len(decisions), "missing_count": 0, "reject_reason": reason}],
-        new_questions=len(new_qids), link=report.sklad_link(cfg))
+        new_questions=len(new_qids), link=report.sklad_link(cfg), cfg=cfg)
     try:
         post(cfg, html)
     except Exception:
@@ -340,7 +340,7 @@ def release_to_review(conn, cfg, row: dict, post, reason: str) -> dict:
     html = report.build_summary(customer_name=row.get("customer_name") or "", orders=[{
         "delivery_date": row["delivery_date"], "status": "review",
         "item_count": len(row["decisions"]), "missing_count": 0,
-        "reject_reason": reason}])
+        "reject_reason": reason}], cfg=cfg)
     try:
         post(cfg, html)
     except Exception:

@@ -198,6 +198,22 @@ def test_mail_kind_manual_marks_review_and_teaches_a_rule(pg):
                      ).fetchone()[0] == 0
 
 
+def test_mail_kind_manual_wording_still_tells_the_warehouse_to_handle_this_message(pg):
+    """#361: a `manual` answer must NOT imply the triggering message itself is auto-handled.
+    A `mail` question is only ever raised when extraction found NO order, so the triggering
+    message is one the AI could not parse — its outcome must still tell the warehouse to
+    handle THIS message manually, while making clear FUTURE mails of this shape auto-process.
+    Otherwise the confirmed order is silently lost (a review finding)."""
+    mq = teach.ask_mail(pg, message_id="mk4w", sender_email="dodavatel@example.com",
+                        subject="Objednávka", reason="AI nenašla objednávku")
+    teach.KINDS["mail"].apply(pg, _cfg(), teach.get(pg, mq), "manual", "sklad")
+    outcome = pg.execute(
+        "SELECT outcome FROM email_events WHERE message_id='mk4w' ORDER BY id DESC LIMIT 1"
+    ).fetchone()[0].lower()
+    assert "ručne" in outcome, "the triggering message still needs manual handling"
+    assert "automaticky" in outcome, "future mails of this shape now auto-process"
+
+
 def test_mail_kind_undo_retracts_only_its_own_rule(pg):
     mq1 = teach.ask_mail(pg, message_id="mk5a", sender_email="a@x.sk", subject="Faktúra",
                          reason="r")
