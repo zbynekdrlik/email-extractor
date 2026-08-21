@@ -859,7 +859,8 @@ def test_num_parses_board_submitted_numbers():
     assert _num("12,50") == 12.5     # Slovak decimal comma
     assert _num("8") == 8.0
     assert _num(5) == 5.0
-    assert _num(0) == 0.0
+    assert _num(0) is None           # 0 rejected -> falls back to extracted (no zero LIN)
+    assert _num("0") is None
     assert _num("") is None
     assert _num(None) is None
     assert _num("abc") is None

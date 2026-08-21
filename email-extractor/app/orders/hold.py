@@ -68,28 +68,41 @@ def _load_decisions(rows: list[dict]):
             for d in rows]
 
 
-def _apply_confirmed_quantity(conn, decisions: list, qid: int, quantity) -> None:
-    """#360: the warehouse confirmed/corrected THIS line's quantity on the board — apply it
-    to the matching stored decision(s) so the human-confirmed value is what actually ships.
+def _apply_confirmed_quantities(conn, decisions: list, question_ids: list) -> None:
+    """#360: apply the warehouse-confirmed quantity of EVERY answered `item` question of this
+    held order to its matching stored decision, so a correction made on ANY of the order's
+    questions ships — not only the LAST one answered (a held order can wait on several).
 
-    Matched by `item_key` on the answered question's wording (the same normalizer
-    `teach.ask` keyed the question on), so it survives spacing/typo differences between the
-    stored `Decision.item_name` and the question's `wording`. A no-op when nothing matches
-    (the extracted quantity then stands, the safe default). Runs on the RAW loaded decisions
-    BEFORE `_redecide` — `_redecide` copies `d.quantity` verbatim (it only re-derives the
-    card), and `merge_same_card` sums the corrected quantity into any merged card, so the
-    correction survives both the redecide and the ship path unchanged.
+    The confirmed value lives on `order_questions.quantity` (persisted by `teach.answer`'s
+    COALESCE). For an un-corrected question this equals the decision's own extracted quantity
+    (both come from the same extracted item at ask time), so applying it is a no-op there —
+    which makes reading it back uniform for single- AND multi-question holds. Only `item`
+    kind carries the editable qty (customer/date/mail/line do not), so only those are read.
+
+    Matched by `item_key` (the same normalizer `teach.ask` keyed the question on), so it
+    survives spacing/typo differences between `Decision.item_name` and the question wording.
+    Each confirmed quantity is applied to exactly ONE decision (first match, then consumed):
+    two identically-worded lines share one question but stay separate decisions that
+    `merge_same_card` later sums, so applying the value to BOTH would double it.
+
+    Runs on the RAW loaded decisions BEFORE `_redecide` — `_redecide` copies `d.quantity`
+    verbatim (it only re-derives the card), so the correction survives the redecide and ship.
     """
     from . import memory, teach
-    if quantity is None or qid is None:
-        return
-    q = teach.get(conn, qid)
-    key = memory.item_key(q.get("wording", "")) if q else ""
-    if not key:
+    by_key: dict[str, object] = {}
+    for qid in question_ids or []:
+        q = teach.get(conn, qid)
+        if not q or q.get("kind", "item") != "item" or q.get("quantity") is None:
+            continue
+        key = memory.item_key(q.get("wording", ""))
+        if key:
+            by_key[key] = q["quantity"]   # last write wins for a shared key (rare)
+    if not by_key:
         return
     for d in decisions:
-        if memory.item_key(d.item_name) == key:
-            d.quantity = quantity
+        k = memory.item_key(d.item_name)
+        if k in by_key:
+            d.quantity = by_key.pop(k)    # apply to exactly ONE decision per key
 
 
 def place(conn, message_id: str, matched, order: dict, decisions, extracted: dict,
@@ -416,13 +429,12 @@ def _do_release(conn, cfg, row: dict, release_reason: str, upload, post,
     return {"id": row["id"], "status": status, "preview": preview}
 
 
-def release_for_question(conn, cfg, qid: int, upload=None, post=None,
-                         confirmed_quantity=None) -> list[dict]:
+def release_for_question(conn, cfg, qid: int, upload=None, post=None) -> list[dict]:
     """Release every held order whose LAST open question was just answered.
 
-    `confirmed_quantity` (#360): the warehouse-confirmed quantity for THIS answered line,
-    applied to the matching held decision before it ships (see `_apply_confirmed_quantity`).
-    `None` (every pre-#360 caller) keeps the ORIGINAL extracted quantity, unchanged.
+    #360: at ship time the human-confirmed quantity of EVERY answered `item` question of the
+    order (persisted on `order_questions.quantity` by `teach.answer`) is applied to its
+    decision, so a correction on any question ships — see `_apply_confirmed_quantities`.
 
     A held order may be waiting on more than one wording; it ships only once every one of
     its question ids is answered. Releasing on the first answer would ship a still-guessed
@@ -439,15 +451,13 @@ def release_for_question(conn, cfg, qid: int, upload=None, post=None,
         (qid,)).fetchall()]
     released = []
     for hid in ids:
-        result = _release_locked(conn, cfg, hid, upload, post,
-                                 answered_qid=qid, confirmed_quantity=confirmed_quantity)
+        result = _release_locked(conn, cfg, hid, upload, post)
         if result is not None:
             released.append(result)
     return released
 
 
-def _release_locked(conn, cfg, hid: int, upload, post,
-                    answered_qid: int | None = None, confirmed_quantity=None) -> dict | None:
+def _release_locked(conn, cfg, hid: int, upload, post) -> dict | None:
     """One held order's answered-release decision, serialized per-id (#118).
 
     A short, SEPARATE transaction (its own connection, never `conn`) locks the
@@ -505,9 +515,11 @@ def _release_locked(conn, cfg, hid: int, upload, post,
         # reuse it instead of paying for the identical lookup twice.
         recalled_cache: dict = {}
         loaded = _load_decisions(row["decisions"])
-        # #360: apply the warehouse-confirmed quantity for the answered line BEFORE redecide,
-        # so the human-corrected value flows through both the ship path and any re-hold.
-        _apply_confirmed_quantity(conn, loaded, answered_qid, confirmed_quantity)
+        # #360: apply every answered item-question's confirmed quantity (from
+        # order_questions.quantity) BEFORE redecide, so a correction on ANY of the order's
+        # questions — not just the last one answered — flows through the ship path and any
+        # re-hold. locked[0] is the held order's question_ids (all answered here: remaining==0).
+        _apply_confirmed_quantities(conn, loaded, locked[0])
         decisions = _redecide(conn, row["customer_ean"], loaded,
                               as_of=as_of, catalog=catalog, _recalled_cache=recalled_cache)
 

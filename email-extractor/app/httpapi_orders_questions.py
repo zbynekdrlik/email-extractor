@@ -31,9 +31,10 @@ from .orders import dl_snapshot, snapshot
 
 def _num(v):
     """Coerce a board-submitted number (a JSON number, a Slovak-decimal string like
-    "12,50", or a blank/absent field) to a float — or None when absent/unparseable, so a
-    missing field leaves the stored value unchanged (#360). A negative value is rejected
-    (a quantity/price is never negative) by returning None."""
+    "12,50", or a blank/absent field) to a POSITIVE float — or None when absent/unparseable/
+    non-positive, so a missing OR mis-entered value leaves the stored value unchanged (#360).
+    Rejecting <= 0 (not just negatives) is deliberate: a typed 0 must fall back to the
+    extracted quantity rather than ship a zero-quantity ORION line."""
     if v is None or isinstance(v, bool):   # bool is an int subclass — never a qty/price
         return None
     if isinstance(v, (int, float)):
@@ -46,7 +47,7 @@ def _num(v):
             n = float(s)
         except ValueError:
             return None
-    return n if n >= 0 else None
+    return n if n > 0 else None
 
 
 def register(app: Flask, deps: Deps) -> None:
@@ -465,9 +466,10 @@ def register(app: Flask, deps: Deps) -> None:
         if not gtin:
             return jsonify(error="chýba karta"), 400
         # #360: the board sends the warehouse-confirmed quantity + unit price for this line.
-        # The confirmed QUANTITY is what ships (threaded into release_for_question below);
-        # the price is stored on the question as a verification value (ORION has no price
-        # field). Both persist onto the question row via teach.answer (audit + display).
+        # teach.answer persists both onto the question row (audit + display); the confirmed
+        # QUANTITY is then read back at ship time by hold.release_for_question (from
+        # order_questions.quantity, covering every answered question of a multi-question hold,
+        # not just this one). Price is a verification value only (ORION has no price field).
         quantity = _num(body.get("quantity"))
         unit_price = _num(body.get("unit_price"))
         try:
@@ -479,8 +481,7 @@ def register(app: Flask, deps: Deps) -> None:
         except teach.NotACandidate as e:
             return jsonify(error=str(e)), 400
         with deps.db() as c2:
-            released = hold.release_for_question(c2, deps.cfg, qid,
-                                                 confirmed_quantity=quantity)
+            released = hold.release_for_question(c2, deps.cfg, qid)
         return jsonify(ok=True, question=q, released=released)
 
     @app.get("/api/orders/held")
