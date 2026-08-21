@@ -891,7 +891,8 @@ def test_the_full_exit_matrix_never_lets_a_resolvable_reason_go_silent(pg, env):
     assert len(rec.uploads) == 1, "the second run must never re-upload"
 
 
-# --- #164: a taught mail_rules pattern short-circuits BEFORE the LLM call ---------------
+# --- #164/#361: a taught `ignore` mail_rules pattern short-circuits BEFORE the LLM call;
+# a `manual` rule does NOT (it runs the normal pipeline, only suppressing the re-ask) -------
 
 def test_a_taught_ignore_rule_skips_extraction_entirely(pg, env):
     """`ignore` short-circuits before `extract.run` is ever called — the FIRST scripted
@@ -909,15 +910,38 @@ def test_a_taught_ignore_rule_skips_extraction_entirely(pg, env):
     assert len(rec.posts) == 1 and "ignorované" in rec.posts[0].lower()
 
 
-def test_a_taught_manual_rule_skips_extraction_and_goes_straight_to_review(pg, env):
+def test_a_taught_manual_rule_now_runs_the_normal_pipeline(pg, env):
+    """#361: `manual` no longer short-circuits — a mail the warehouse confirmed IS an order
+    runs the COMPLETELY normal automatic pipeline (extract → match → ship), exactly like
+    every other order (owner directive). `ScriptedClient(_answers())` provides the extract +
+    customer + item answers the normal pipeline consumes; a taught-manual rule must let it
+    ship, not short-circuit to review."""
     from app.orders import teach
     pg.execute(
         "INSERT INTO mail_rules (sender_norm, subject_key, action) VALUES (%s, %s, 'manual')",
         (teach._sender_norm(MAIL["from_addr"]), teach.subject_key(MAIL["subject"])))
     rec = Recorder()
-    result = pipeline.run(pg, _cfg(), MAIL, env, client=ScriptedClient([]),
+    result = pipeline.run(pg, _cfg(), MAIL, env, client=ScriptedClient(_answers()),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "ok"
+    assert len(rec.uploads) == 1
+    assert len(rec.posts) == 1 and "ručne" not in rec.posts[0].lower()
+
+
+def test_a_taught_manual_rule_does_not_re_ask_whether_it_is_an_order(pg, env):
+    """#361: the ONLY remaining effect of a `manual` rule — the is-it-an-order `mail`
+    question is not re-asked for that sender/subject (the warehouse already answered "yes,
+    process it normally"). Even when extraction finds no order, no new mail question is
+    created, and the old retype-in-ORION wording is gone from the Odoo summary."""
+    from app.orders import teach
+    pg.execute(
+        "INSERT INTO mail_rules (sender_norm, subject_key, action) VALUES (%s, %s, 'manual')",
+        (teach._sender_norm(MAIL["from_addr"]), teach.subject_key(MAIL["subject"])))
+    no_orders = {"senderName": "Sklad", "senderEmail": "sklad@pekaren.sk",
+                 "companyName": "", "isChangeRequest": False, "notes": "", "orders": []}
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), MAIL, env, client=ScriptedClient([no_orders]),
                           upload=rec.upload, post=rec.post)
     assert result["status"] == "review"
-    assert rec.uploads == []
-    assert len(teach.open_questions(pg)) == 0, "manual is technical — no new question"
-    assert "ručne" in rec.posts[0].lower()
+    assert len(teach.open_questions(pg)) == 0, "manual already answered 'yes' — never re-ask"
+    assert "ručne" not in rec.posts[0].lower()
