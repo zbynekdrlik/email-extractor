@@ -160,9 +160,11 @@ def test_route_table_matches_the_pre_split_baseline():
 # additional protection, so `_ASK_HTML_TEMPLATE` is deliberately NOT in this dict.
 EXPECTED_TEMPLATE_SHA256 = {
     "LOGIN_HTML": "d1eb57ea9d855df8d1b580ce2fcdc8135329c9ada4eb47bc2ec78bce9e20313c",
-    "DASH_HTML": "320268ef8103b7ae195b04872d5cfe8f2858d7345a4016a03dc2c6585f8731de",
-    "ASK_HTML": "139950acb6f0c5c2a909f72c010b88c334198d557695b1153643d87774af6bb6",
-    "ASK_DL_HTML": "6f3ebf4a39ecb33c8e1caf8838c0a6da0e2aaeecd784d842c0b4859da8aae76c",
+    # #360: re-pinned — the board item card gained editable qty + unit-price inputs (DASH_HTML
+    # directly; ASK_HTML/ASK_DL_HTML via the shared _ASK_HTML_TEMPLATE they both derive from).
+    "DASH_HTML": "e683e6236884cddbd459477719deab4ef5f1b8adc99791186f7751f5b45aa0f3",
+    "ASK_HTML": "b85080333e04fbdb4d9e58d2305f702c6de8b14ea4b922f5da7544874a09e100",
+    "ASK_DL_HTML": "49e59e9563bd46c44d55cbbe94a205e0cd3f915e5a424754b4859262171e0018",
     "ZNALOSTI_HTML": "9f04bd74b57f0e22b8b2e7b7810995f5955b1b7796925dd259f44b68eac598b7",
 }
 

@@ -305,11 +305,23 @@ async function loadAsk(){const L=document.getElementById('list');
     const who=document.createElement('div');who.className='sub';
     who.textContent=(q.customer_name||q.customer_ean)+' \u00b7 dodanie '+(q.delivery_date||'?');
     const why=document.createElement('div');why.className='sub';why.textContent=q.reason||'';
+    // #360: množstvo + cena/MJ for this line, prefilled + editable. teachIt() reads them on
+    // answer — the confirmed quantity ships, the price is a verification value only (no ORION
+    // price field).
+    const flds=document.createElement('div');flds.className='sub';
+    flds.appendChild(document.createTextNode('množstvo: '));
+    const qi=document.createElement('input');qi.id='oqty_'+q.id;qi.type='text';qi.inputMode='decimal';
+    qi.style.width='70px';qi.value=(q.quantity!=null?q.quantity:'');flds.appendChild(qi);
+    flds.appendChild(document.createTextNode('    cena/MJ: '));
+    const pi=document.createElement('input');pi.id='oprice_'+q.id;pi.type='text';pi.inputMode='decimal';
+    pi.style.width='80px';pi.placeholder='€';pi.value=(q.unit_price!=null?q.unit_price:'');
+    flds.appendChild(pi);
+    flds.appendChild(document.createTextNode('  (cena sa neposiela do ORIONu — len kontrola)'));
     const acts=document.createElement('div');acts.className='acts';
     for(const c of q.candidates){const bt=document.createElement('button');bt.className='btn';
       bt.textContent=c.name||c.gtin;            // textContent: a name may contain quotes
       bt.onclick=()=>teachIt(q.id,c.gtin,c.name||'');acts.appendChild(bt)}
-    head.appendChild(who);head.appendChild(why);head.appendChild(acts);
+    head.appendChild(who);head.appendChild(why);head.appendChild(flds);head.appendChild(acts);
     el.appendChild(head);L.appendChild(el)}
   await loadHeld(mine);loadTaught(mine)}
 async function loadHeld(token){const L=document.getElementById('list');let d;
@@ -345,8 +357,12 @@ async function loadTaught(token){const L=document.getElementById('list');let d;
     w.appendChild(who);w.appendChild(acts);el.appendChild(w);L.appendChild(el)}}
 async function undoIt(qid){try{await api('/api/orders/question/'+qid+'/undo',{method:'POST'});
   await loadAsk();await askBadgeRefresh()}catch(e){alert(e.message||'chyba')}}
-async function teachIt(qid,gtin,card){try{await api('/api/orders/question/'+qid+'/answer',
-  {method:'POST',body:JSON.stringify({gtin:gtin,card:card})});await loadAsk();await askBadgeRefresh()}
+async function teachIt(qid,gtin,card){try{
+  const body={gtin:gtin,card:card};
+  const qi=document.getElementById('oqty_'+qid),pi=document.getElementById('oprice_'+qid);
+  if(qi)body.quantity=qi.value;if(pi)body.unit_price=pi.value;   // #360: confirmed qty+price
+  await api('/api/orders/question/'+qid+'/answer',
+    {method:'POST',body:JSON.stringify(body)});await loadAsk();await askBadgeRefresh()}
   catch(e){alert(e.message||'chyba')}}
 async function answerCustomerIt(qid,ean_edi,name,unknown){try{await api('/api/orders/question/'+qid+'/answer',
   {method:'POST',body:JSON.stringify(unknown?{unknown:true}:{ean_edi:ean_edi,name:name})});
@@ -467,6 +483,22 @@ function searchBox(q){
   if(inp.value.trim().length>=2)run(inp.value.trim());
   return wrap;
 }
+// #360: množstvo + cena/MJ for THIS product line — prefilled from the extracted values,
+// editable. When the sklad answers (a candidate button OR the search box), teach() reads
+// these two inputs and sends them with the answer: the confirmed QUANTITY is what ships,
+// the price is a verification value only (the ORION ORDER_ EDI has no price field).
+function lineFields(q){
+  const box=el('div');box.style.margin='6px 0';
+  box.appendChild(el('span',null,'množstvo: '));
+  const qi=el('input');qi.id='oqty_'+q.id;qi.type='text';qi.inputMode='decimal';
+  qi.style.width='70px';qi.value=(q.quantity!=null?q.quantity:'');box.appendChild(qi);
+  box.appendChild(el('span',null,'    cena/MJ: '));
+  const pi=el('input');pi.id='oprice_'+q.id;pi.type='text';pi.inputMode='decimal';
+  pi.style.width='80px';pi.placeholder='€';pi.value=(q.unit_price!=null?q.unit_price:'');
+  box.appendChild(pi);
+  const note=el('div',null,'cena sa neposiela do ORIONu — len kontrola');
+  note.style.fontSize='11px';note.style.color='#57606a';box.appendChild(note);
+  return box}
 // #164/#202: ONE generic card for every kind BEYOND item/customer (mail/date/line, and
 // DL's own dl_item/dl_supplier) — each candidate button posts {"choice": <value>} through
 // the SAME dispatch endpoint, plus a universal "Neviem" escape that posts
@@ -769,6 +801,7 @@ async function load(){const mine=++render;let d,t;
     c.appendChild(el('div','who',(q.customer_name||q.customer_ean)+(q.delivery_date?' · na '+q.delivery_date:'')));
     c.appendChild(el('div','w',q.wording+(q.quantity?'  —  '+q.quantity+' '+(q.unit||'ks'):'')));
     c.appendChild(el('div','why',q.reason||'Ktorý výrobok to je?'));
+    c.appendChild(lineFields(q));
     for(const cand of (q.candidates||[])){const b=el('button',null,cand.name||cand.gtin);
       b.onclick=()=>teach(q.id,cand.gtin,cand.name||'');c.appendChild(b)}
     c.appendChild(el('div','slabel','alebo vyhľadaj v celom katalógu:'));
@@ -781,8 +814,12 @@ async function load(){const mine=++render;let d,t;
     for(const x of t.items){const r=el('div','t');
       r.appendChild(el('span',null,x.wording+' → '+(x.answer_card||x.answer_gtin)));
       const b=el('button',null,'vrátiť');b.onclick=()=>undo(x.id);r.appendChild(b);W.appendChild(r)}}}
-async function teach(qid,gtin,card){try{await api('/api/orders/question/'+qid+'/answer',
-  {method:'POST',body:JSON.stringify({gtin:gtin,card:card})});delete searchState[qid];await load()}
+async function teach(qid,gtin,card){try{
+  const body={gtin:gtin,card:card};
+  const qi=document.getElementById('oqty_'+qid),pi=document.getElementById('oprice_'+qid);
+  if(qi)body.quantity=qi.value;if(pi)body.unit_price=pi.value;   // #360: confirmed qty+price
+  await api('/api/orders/question/'+qid+'/answer',
+    {method:'POST',body:JSON.stringify(body)});delete searchState[qid];await load()}
   catch(e){alert(e.message||'chyba')}}
 async function undo(qid){try{await api('/api/orders/question/'+qid+'/undo',{method:'POST'});
   await load()}catch(e){alert(e.message||'chyba')}}

@@ -77,6 +77,9 @@ deadline remarks. Nothing of the kind → empty string.
 - `name`: the product name exactly as written in the email.
 - `quantity`: number of units. Skip items with quantity 0 or no quantity.
 - `unit`: as written (ks, kg, ...).
+- `unitPrice`: the per-unit price for this line ONLY when the email explicitly states one
+  (a price-list column, or a price written next to the item). Omit the field entirely when
+  the email gives no price — never guess, estimate or compute it.
 - Ignore quoted or forwarded text (lines starting with ">").
 
 ## Price-list attachments (XLS/CSV wholesale lists with quantities filled in)

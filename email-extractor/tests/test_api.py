@@ -850,3 +850,65 @@ def test_a_stale_role_cookie_never_restricts_a_real_admin_login(pg):
     assert r.status_code == 200
     r = c.post(f"/api/orders/question/{dl_qid}/answer", json={"choice": "G4"})
     assert r.status_code == 200
+
+
+# --- #360: the board sends a confirmed quantity + price; the confirmed quantity ships ---
+
+def test_num_parses_board_submitted_numbers():
+    from app.httpapi_orders_questions import _num
+    assert _num("12,50") == 12.5     # Slovak decimal comma
+    assert _num("8") == 8.0
+    assert _num(5) == 5.0
+    assert _num(0) is None           # 0 rejected -> falls back to extracted (no zero LIN)
+    assert _num("0") is None
+    assert _num("") is None
+    assert _num(None) is None
+    assert _num("abc") is None
+    assert _num("-3") is None        # negative rejected
+    assert _num(True) is None        # bool is not a quantity/price
+
+
+def test_answering_over_http_ships_the_confirmed_quantity(pg, monkeypatch):
+    """#360 end-to-end: the board POSTs a corrected quantity (and a price) with the answer;
+    the released order ships that human-confirmed value, through the SAME answer->release
+    path, and the price persists on the question as a verification value."""
+    from psycopg.types.json import Json
+
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('m360', 'ai_orders')")
+    qid = pg.execute(
+        """INSERT INTO order_questions (message_id, customer_ean, customer_name, wording,
+                                        item_key, quantity, unit, candidates, delivery_date,
+                                        reason)
+           VALUES ('m360', '2000000000864', 'Pekáreň', 'torta', 'torta', 5, 'ks', %s,
+                   '04.08.2026', 'test') RETURNING id""",
+        (Json([{"gtin": "TOR", "name": "Torta čokoládová"}]),)).fetchone()[0]
+    pg.execute(
+        """INSERT INTO held_orders (message_id, customer_ean, customer_name, delivery_date,
+                                    order_number, question_ids, order_json, extracted_json,
+                                    decisions_json)
+           VALUES ('m360', '2000000000864', 'Pekáreň', '04.08.2026', '', %s, %s, %s, %s)""",
+        ([qid], Json({"deliveryDate": "04.08.2026", "orderNumber": ""}),
+         Json({"isChangeRequest": False, "unverified": [], "notes": ""}),
+         Json([{"item_name": "torta", "gtin": None, "card": "", "confidence": 0.1,
+                "rule": "unmatched", "note": "", "review": False, "trace": {},
+                "quantity": 5, "unit": "ks"}])))
+
+    uploads = []
+    monkeypatch.setattr(
+        "app.orders.upload.put",
+        lambda cfg, name, content: uploads.append((name, content)) or True)
+    cfg = Config(pg_dsn=PG_DSN, data_dir="/tmp", api_token="tok", dash_password="secret",
+                 secret_key="test-secret", odoo_url="", odoo_api_key="", orders_channel_id=0)
+    app = create_app(cfg)
+    c = app.test_client()
+    _login(c)
+    r = c.post(f"/api/orders/question/{qid}/answer",
+               json={"gtin": "TOR", "card": "Torta čokoládová",
+                     "quantity": "8", "unit_price": "1,50"})
+    assert r.status_code == 200
+    assert len(uploads) == 1
+    content = uploads[0][1]
+    assert "8.000" in content and "5.000" not in content, "the confirmed quantity ships"
+    row = pg.execute(
+        "SELECT quantity, unit_price FROM order_questions WHERE id=%s", (qid,)).fetchone()
+    assert float(row[0]) == 8 and float(row[1]) == 1.5, "confirmed values persisted"

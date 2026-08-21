@@ -283,3 +283,35 @@ def test_content_signature_dedup():
     assert a == b
     assert a != c
     assert len(a) == 64
+
+
+# --- #360: optional per-line unit price in the extraction schema ----------
+
+def test_order_schema_carries_an_optional_unit_price():
+    from app.orders.extract import ORDER_SCHEMA
+    item_props = (ORDER_SCHEMA["properties"]["orders"]["items"]["properties"]["items"]
+                  ["items"]["properties"])
+    assert "unitPrice" in item_props and item_props["unitPrice"] == {"type": "number"}
+    # optional — NEVER required, so a mail with no price still extracts cleanly
+    required = ORDER_SCHEMA["properties"]["orders"]["items"]["properties"]["items"][
+        "items"]["required"]
+    assert "unitPrice" not in required
+
+
+def test_verify_carries_the_unit_price_through_to_the_pipeline():
+    from app.orders.extract import verify
+    src = "na 04.08.2026 prosím 3x rožok za 0,45"
+    extracted = {"orders": [{"deliveryDate": "04.08.2026", "items": [
+        {"name": "rožok", "quantity": 3, "unit": "ks", "unitPrice": 0.45,
+         "sourceQuote": "3x rožok za 0,45"}]}]}
+    out = verify(extracted, src)
+    assert out["orders"][0]["items"][0]["unitPrice"] == 0.45
+
+
+def test_verify_leaves_unit_price_none_when_the_mail_states_no_price():
+    from app.orders.extract import verify
+    src = "na 04.08.2026 prosím 3x rožok"
+    extracted = {"orders": [{"deliveryDate": "04.08.2026", "items": [
+        {"name": "rožok", "quantity": 3, "unit": "ks", "sourceQuote": "3x rožok"}]}]}
+    out = verify(extracted, src)
+    assert out["orders"][0]["items"][0]["unitPrice"] is None

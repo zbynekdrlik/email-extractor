@@ -39,7 +39,7 @@ class AlreadyAnswered(Exception):
 
 def ask(conn, message_id: str, customer_ean: str, customer_name: str, wording: str,
         quantity, unit: str, candidates: list[dict], delivery_date: str = "",
-        reason: str = "", on_new=None) -> int | None:
+        reason: str = "", on_new=None, unit_price=None) -> int | None:
     """Raise ONE question for this (customer, wording). Returns its id.
 
     Returns the EXISTING id when it is already open, and None when the wording has already
@@ -63,12 +63,12 @@ def ask(conn, message_id: str, customer_ean: str, customer_name: str, wording: s
     row = conn.execute(
         """INSERT INTO order_questions
                (message_id, customer_ean, customer_name, wording, item_key, quantity, unit,
-                candidates, delivery_date, reason)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                unit_price, candidates, delivery_date, reason)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
            ON CONFLICT (customer_ean, item_key) WHERE status = 'open' DO NOTHING
            RETURNING id""",
         (message_id, str(customer_ean), customer_name or "", str(wording), key, quantity,
-         unit or "ks", Json(candidates or []), delivery_date or "", reason or ""),
+         unit or "ks", unit_price, Json(candidates or []), delivery_date or "", reason or ""),
     ).fetchone()
     if row:
         qid = int(row[0])
@@ -85,9 +85,12 @@ def ask(conn, message_id: str, customer_ean: str, customer_name: str, wording: s
     return int(existing[0]) if existing else None
 
 
+# unit_price (#360) is appended LAST so every existing positional index in `_row` is
+# unchanged — a new column inserted mid-list would silently shift r[7]..r[19].
 _COLS = ("id, message_id, customer_ean, customer_name, wording, quantity, unit, "
         "candidates, delivery_date, reason, status, answer_gtin, answer_card, "
-        "answered_by, answered_at, created_at, kind, context, payload, answer")
+        "answered_by, answered_at, created_at, kind, context, payload, answer, "
+        "unit_price")
 
 
 def get(conn, qid: int) -> dict | None:
@@ -135,9 +138,16 @@ def recently_taught(conn, limit: int = 20, kinds: tuple[str, ...] | None = None)
     return [_row(r) for r in rows]
 
 
-def answer(conn, qid: int, gtin: str, card: str, by: str = "") -> dict:
+def answer(conn, qid: int, gtin: str, card: str, by: str = "",
+           quantity=None, unit_price=None) -> dict:
     """Settle a question and teach it. The card must be one that was offered, OR one that
     exists in the current catalog (#149 — the warehouse's full-catalog search on /otazky).
+
+    #360: the warehouse can confirm/correct this line's `quantity` and `unit_price` on the
+    board before answering. When either is supplied it is persisted onto the question row
+    (audit + the "recently taught" display). The corrected QUANTITY that actually SHIPS is
+    applied to the held order's decision separately (`hold.release_for_question`); the price
+    is a verification/stored value only (the ORION ORDER_ EDI has no price field).
 
     Teaches on TWO layers (#102): the existing per-customer mapping (unchanged — it is what
     makes THIS customer's answer instant), and a GLOBAL one for every other customer who ever
@@ -164,8 +174,11 @@ def answer(conn, qid: int, gtin: str, card: str, by: str = "") -> dict:
     conn.execute(
         """UPDATE order_questions
               SET status = 'answered', answer_gtin = %s, answer_card = %s,
-                  answered_by = %s, answered_at = now()
-            WHERE id = %s""", (str(gtin), card or "", by or "", qid))
+                  answered_by = %s, answered_at = now(),
+                  quantity = COALESCE(%s, quantity),
+                  unit_price = COALESCE(%s, unit_price)
+            WHERE id = %s""",
+        (str(gtin), card or "", by or "", quantity, unit_price, qid))
     log.info("taught %r -> %s for %s (by %s)", q["wording"], gtin, q["customer_ean"], by)
     return get(conn, qid) or {}
 
@@ -229,7 +242,7 @@ def _row(r) -> dict:
             "reason": r[9] or "", "status": r[10], "answer_gtin": r[11],
             "answer_card": r[12], "answered_by": r[13], "answered_at": r[14],
             "created_at": r[15], "kind": r[16] or "item", "context": r[17] or {},
-            "payload": r[18] or {}, "answer": r[19] or {}}
+            "payload": r[18] or {}, "answer": r[19] or {}, "unit_price": r[20]}
 
 
 # --- #159: the customer-half of the SAME teach-once loop — "who is this customer?" ----

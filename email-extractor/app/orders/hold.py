@@ -68,6 +68,43 @@ def _load_decisions(rows: list[dict]):
             for d in rows]
 
 
+def _apply_confirmed_quantities(conn, decisions: list, question_ids: list) -> None:
+    """#360: apply the warehouse-confirmed quantity of EVERY answered `item` question of this
+    held order to its matching stored decision, so a correction made on ANY of the order's
+    questions ships — not only the LAST one answered (a held order can wait on several).
+
+    The confirmed value lives on `order_questions.quantity` (persisted by `teach.answer`'s
+    COALESCE). For an un-corrected question this equals the decision's own extracted quantity
+    (both come from the same extracted item at ask time), so applying it is a no-op there —
+    which makes reading it back uniform for single- AND multi-question holds. Only `item`
+    kind carries the editable qty (customer/date/mail/line do not), so only those are read.
+
+    Matched by `item_key` (the same normalizer `teach.ask` keyed the question on), so it
+    survives spacing/typo differences between `Decision.item_name` and the question wording.
+    Each confirmed quantity is applied to exactly ONE decision (first match, then consumed):
+    two identically-worded lines share one question but stay separate decisions that
+    `merge_same_card` later sums, so applying the value to BOTH would double it.
+
+    Runs on the RAW loaded decisions BEFORE `_redecide` — `_redecide` copies `d.quantity`
+    verbatim (it only re-derives the card), so the correction survives the redecide and ship.
+    """
+    from . import memory, teach
+    by_key: dict[str, object] = {}
+    for qid in question_ids or []:
+        q = teach.get(conn, qid)
+        if not q or q.get("kind", "item") != "item" or q.get("quantity") is None:
+            continue
+        key = memory.item_key(q.get("wording", ""))
+        if key:
+            by_key[key] = q["quantity"]   # last write wins for a shared key (rare)
+    if not by_key:
+        return
+    for d in decisions:
+        k = memory.item_key(d.item_name)
+        if k in by_key:
+            d.quantity = by_key.pop(k)    # apply to exactly ONE decision per key
+
+
 def place(conn, message_id: str, matched, order: dict, decisions, extracted: dict,
           question_ids: list[int]) -> int:
     """Record a held order. Returns its id."""
@@ -395,6 +432,10 @@ def _do_release(conn, cfg, row: dict, release_reason: str, upload, post,
 def release_for_question(conn, cfg, qid: int, upload=None, post=None) -> list[dict]:
     """Release every held order whose LAST open question was just answered.
 
+    #360: at ship time the human-confirmed quantity of EVERY answered `item` question of the
+    order (persisted on `order_questions.quantity` by `teach.answer`) is applied to its
+    decision, so a correction on any question ships — see `_apply_confirmed_quantities`.
+
     A held order may be waiting on more than one wording; it ships only once every one of
     its question ids is answered. Releasing on the first answer would ship a still-guessed
     line the same way the immediate-partial-ship bug did (#81.1) — so a sibling still-open
@@ -473,7 +514,13 @@ def _release_locked(conn, cfg, hid: int, upload, post) -> dict | None:
         # `_redecide` a few lines earlier; the SAME dict lets `_ask_still_ambiguous`
         # reuse it instead of paying for the identical lookup twice.
         recalled_cache: dict = {}
-        decisions = _redecide(conn, row["customer_ean"], _load_decisions(row["decisions"]),
+        loaded = _load_decisions(row["decisions"])
+        # #360: apply every answered item-question's confirmed quantity (from
+        # order_questions.quantity) BEFORE redecide, so a correction on ANY of the order's
+        # questions — not just the last one answered — flows through the ship path and any
+        # re-hold. locked[0] is the held order's question_ids (all answered here: remaining==0).
+        _apply_confirmed_quantities(conn, loaded, locked[0])
+        decisions = _redecide(conn, row["customer_ean"], loaded,
                               as_of=as_of, catalog=catalog, _recalled_cache=recalled_cache)
 
         # #162: a customer-unknown hold never got a chance to ask about its ambiguous

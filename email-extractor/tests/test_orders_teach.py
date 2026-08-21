@@ -914,3 +914,35 @@ def test_the_only_card_of_its_kind_is_no_longer_a_question():
 
     assert "unique_card" not in ASK_THE_WAREHOUSE
     assert {"unmatched", "llm_borderline", "history_weight"} <= set(ASK_THE_WAREHOUSE)
+
+
+# --- #360: per-line unit price on the question ----------------------------
+
+def test_ask_stores_the_unit_price_and_get_returns_it(pg):
+    qid = teach.ask(pg, message_id="m1", customer_ean=EAN, customer_name="Zákazník A",
+                    wording="Šiška", quantity=30, unit="ks", unit_price=1.5,
+                    candidates=[{"gtin": "SLI50", "name": "Šiška džemová 50g"}],
+                    delivery_date="04.08.2026", reason="cena z mailu")
+    q = teach.get(pg, qid)
+    assert float(q["unit_price"]) == 1.5
+
+
+def test_ask_without_a_price_stores_none(pg):
+    qid = _ask(pg)
+    assert teach.get(pg, qid)["unit_price"] is None
+
+
+def test_answer_persists_the_confirmed_quantity_and_price(pg):
+    qid = _ask(pg)   # extracted quantity 30, no price
+    teach.answer(pg, qid, gtin="SLI50", card="Šiška džemová 50g", by="sklad",
+                 quantity=42, unit_price=1.25)
+    q = teach.get(pg, qid)
+    assert float(q["quantity"]) == 42 and float(q["unit_price"]) == 1.25
+    assert q["status"] == "answered"
+
+
+def test_answer_without_confirmed_values_leaves_the_stored_quantity_untouched(pg):
+    qid = _ask(pg)   # extracted quantity 30
+    teach.answer(pg, qid, gtin="SLI50", card="Šiška džemová 50g", by="sklad")
+    q = teach.get(pg, qid)
+    assert q["quantity"] == 30 and q["unit_price"] is None

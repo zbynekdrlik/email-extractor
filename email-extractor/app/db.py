@@ -119,6 +119,14 @@ DROP_ORDER_DIGEST_SENT = [
     "DROP TABLE IF EXISTS order_digest_sent",
 ]
 
+# #360: the warehouse board shows each order line's unit PRICE (where the mail states it)
+# next to its quantity, editable + confirmable. The extracted price is stored per question
+# so the board can prefill it; it is a verification display + stored correction only (the
+# ORION ORDER_ EDI wire format has no price field — see edi.build's LIN layout).
+ADD_ORDER_QUESTIONS_UNIT_PRICE = [
+    "ALTER TABLE order_questions ADD COLUMN IF NOT EXISTS unit_price NUMERIC",
+]
+
 
 # SCHEMA above is FROZEN as revision 1 (the baseline). NEVER edit those statements for a
 # schema change — append a NEW numbered migrate.Revision to this list instead
@@ -131,6 +139,7 @@ REVISIONS = [
     migrate.Revision(4, "drop_processed_table", DROP_PROCESSED),
     migrate.Revision(5, "add_codex_orders", CODEX_ORDERS),
     migrate.Revision(6, "drop_order_digest_sent", DROP_ORDER_DIGEST_SENT),
+    migrate.Revision(7, "add_order_questions_unit_price", ADD_ORDER_QUESTIONS_UNIT_PRICE),
 ]
 
 
