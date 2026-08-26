@@ -185,6 +185,30 @@ def test_adding_a_new_dl_product_from_the_card_teaches_it_and_answers(pg):
         "4003885181808")
 
 
+def test_ship_without_sentinel_goes_through_the_real_http_answer_path(pg):
+    """#365 review finding: drive the "nemá kartu — pošli bez tejto položky" sentinel through
+    the REAL HTTP answer path — the offered-lookup miss (the sentinel is never a catalog
+    GTIN) must fall through, `_validate_dl_item` must ALLOW it, and `_apply_dl_item` must
+    record it (no `dl_item_memory` teach) + trigger a reprocess. The question has no
+    `messages` row, so `release_for_question` short-circuits with no LLM call, exactly like
+    the new_item test above."""
+    from app.orders import dl_memory
+    qid = teach.ask_dl_item(
+        pg, message_id="m365sw", supplier_ean="S1", supplier_name="Mlyn s.r.o.",
+        wording="Neznáma DL položka", quantity=2, unit="ks",
+        candidates=[{"gtin": "4003885181808", "name": "Nejaká karta"}])
+    assert qid is not None
+    c = _dl_client()
+    r = c.post(f"/api/orders/question/{qid}/answer", json={"choice": "ship_without"})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert r.get_json()["ok"] is True
+    row = pg.execute(
+        "SELECT status, answer->>'choice' FROM order_questions WHERE id=%s", (qid,)).fetchone()
+    assert row == ("answered", "ship_without"), "the sentinel is stored on the question row"
+    # There is no card — the ship-without answer teaches NOTHING for this wording.
+    assert dl_memory.resolve(pg, "S1", "Neznáma DL položka") is None
+
+
 def test_a_new_dl_supplier_without_an_ean_is_refused(pg):
     qid = teach.ask_dl_supplier(pg, message_id="m235e", sender_email="x@y.sk",
                                 candidates=[])

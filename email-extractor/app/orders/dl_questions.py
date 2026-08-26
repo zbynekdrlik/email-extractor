@@ -126,7 +126,19 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
         result = _run_and_finish(conn, cfg, client, message, snapshot_id, catalog,
                                  suppliers, upload=upload, post=post,
                                  list_dirs=list_dirs)
-        if kind == "dl_supplier":
+        # #265 gap 2 (dl_supplier) + #365 (dl_item): a same-sender sibling message whose
+        # own `dl_item`/`dl_supplier` question DEDUPED onto THIS message's open question
+        # (`ask_generic`'s `ON CONFLICT ... DO NOTHING`) has NO `order_questions` row of its
+        # own, so `release_for_question` (which reprocesses only `qid`'s OWN message) never
+        # unsticks it. Before #365 such a sibling still PARTIAL-shipped; #365 now HOLDS it,
+        # so without this it would strand FOREVER (no question tied to it, no re-claim). The
+        # existing `_release_stuck_siblings` (keyed on the raw envelope `from_addr`, with ALL
+        # the #265 safety exclusions) resets those orphans back into the claim pool — safe
+        # for BOTH kinds because releasing only RE-QUEUES: the reprocess re-extracts and
+        # re-runs the deterministic rung on the REAL document (now with the just-taught
+        # memory), so a false-positive from_addr match never ships a wrong EDI, and the
+        # `desadv.claim_send_or_identify` claim still refuses any already-shipped re-upload.
+        if kind in ("dl_supplier", "dl_item"):
             _release_stuck_siblings(conn, message_id, message.get("from_addr", ""))
         return (result or {}).get("documents", [])
 
@@ -271,6 +283,19 @@ def close_message_sklad_unknown(conn, qid: int) -> dict:
 # messages sharing that exact wording without extracting them first. No live evidence
 # of the `dl_item` version of this gap has been observed; it needs its own design if it
 # ever is, not a copy of this one.
+#
+# #365 UPDATE (the gap became live-lossy): before #365 a `dl_item`-deduped sibling still
+# PARTIAL-shipped, so the strand was invisible; #365 HOLDS it instead, turning the strand
+# into a permanent no-re-entry hold. `release_for_question` now fires this widening for a
+# `dl_item` answer too. The #265 "no reliable correlation" worry does NOT bite here: a
+# HELD sibling is already PROCESSED (`processed=true`/`proc_status='review'`, no question
+# row of its own — the exact orphan shape this query targets), so `from_addr` is not
+# correlating an unextracted message, only selecting which already-held same-sender orphans
+# to re-queue. Over-broad matching (a same-sender orphan of a DIFFERENT unknown wording) is
+# harmless: release only RE-QUEUES, and the reprocess re-holds it (raising its OWN fresh
+# question, since the deduping question is now closed) or ships it if newly taught. The
+# `desadv.claim_send_or_identify` claim stays the backstop against any already-shipped
+# re-upload.
 #
 # Deep-review finding on this ticket's own PR (#265) — a REAL, proven safety bug in
 # the first cut: `processed=true AND proc_status='review' AND no order_questions row`
