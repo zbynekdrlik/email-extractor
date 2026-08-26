@@ -587,3 +587,103 @@ or raises a fresh question. Apply ALL the #265 exclusions in the SQL (`processed
 `proc_status='review'`, no `order_questions` row, no `status='error'` event). Normalization
 (`dl_match.supplier_name_key`, promoted from private in #323) is the reusable public helper —
 never re-derive the diacritic-folding (Slovak-stem-drift risk, see orders-corpus.md).
+
+## HOLD a shippable DL document with an unmatched warehouse item — never partial-ship it (#365)
+
+A delivery note with ≥1 matched item AND ≥1 genuinely-unmatched warehouse item used to upload a
+PARTIAL EDI to ORION IMMEDIATELY (dropping the unmatched line) while raising a `dl_item` board
+question that could only teach the FUTURE — the warehouse then added the missing row in ORION by
+hand (live incident: prod msg 8804 / question 101 — the ~90 g "Buchta maková nebalená" vs 56 g
+cards; the matcher was CORRECT, it was the partial-ship POLICY that was wrong). `dl_document.
+_process_document` now HOLDS such a document (no claim, no upload, `outcome="review"`), posts the
+❗ `build_review` "potrebuje kontrolu / Rieš na nástenke" message (never the ⚠️ partial-upload
+one), and lets `release_for_question` re-run the whole message on the board answer — a taught
+card ships the COMPLETE EDI; a new "Nemá kartu — pošli bez tejto položky" board answer ships it
+partial-yet-human-confirmed. Reusable design points (all cost a review round to get right):
+
+- **The hold gate keys on lines that ACTUALLY got a board question (`held_items`), NOT merely on
+  "unmatched".** `ask_dl_item` REFUSES to ask (returns `None`) for a human-taught-yet-unmatched
+  line (the #236 R75/R74 tripwire class — a confident model pick that bypasses the memory rescue
+  and trips the lexical gap) or a blank name. Holding such a line is a permanent DEAD-END (no
+  question row ⟹ `release_for_question` is structurally unreachable ⟹ stuck forever, a regression
+  on the old partial-ship). So collect the qid `ask_dl_item` returns (fresh OR deduped-onto-an-
+  existing-open) and hold ONLY those; an ask-refused line is excluded from the EDI and the doc
+  ships partial exactly as before. Any FUTURE "hold until resolved on the board" gate in this
+  engine must gate on a question genuinely existing, never on the raw match verdict.
+- **The "ship-without" skip is a SENTINEL (`teach.DL_ITEM_SHIP_WITHOUT = "ship_without"`, never a
+  real GTIN) recorded on the ANSWERED question row (`answer->>'choice'`), read back on reprocess
+  by `dl_document._skip_answered_item_keys(message_id)`.** The lookup reconstructs the key via the
+  SHARED `teach.dl_item_key(supplier_ean, wording)` — the exact key `ask_dl_item` stored the
+  question under — so the two can never drift on the diacritic-folding normalization (same "never
+  re-derive the folding" rule as `supplier_name_key`). No new table; `order_questions.answer` is
+  the durable store; `_undo_dl_item` clears the skip naturally (`answer=NULL`).
+- **A deduped same-sender sibling strands FOREVER now that it holds — `release_for_question` fires
+  `_release_stuck_siblings` for a `dl_item` answer too (was `dl_supplier`-only, #265).** Two mails
+  from one supplier with the SAME unknown wording: the 2nd's ask DEDUPES onto the 1st's open
+  question (`ask_generic` `ON CONFLICT DO NOTHING`), so the 2nd has NO own `order_questions` row.
+  Answering the 1st reprocesses only ITS message; the 2nd (a processed orphan) is now re-queued by
+  the existing from_addr-keyed widening (safe — release only re-queues, the claim guard still
+  blocks re-upload). Before #365 the 2nd partial-shipped so the strand was invisible; the hold
+  made it lossy.
+- **Shadow (the e2e-dl corpus) stays byte-identical — the hold gate + skip lookup are LIVE-path
+  only (`if not shadow` / after `if shadow: return`).** The corpus measures MATCHING ("partial" =
+  shippable-but-incomplete), never the live HOLD policy layered on top, so a partial→hold policy
+  change causes ZERO corpus drift. Any future outcome-POLICY change (not a match change) should be
+  gated the same way so the corpus keeps measuring matching alone.
+- **Skip the hold when the doc is ALREADY on ORION** (`desadv.already_sent`, read-only) — else a
+  doc still carrying a second pending line after an earlier ship posts a misleading "NEnahráva do
+  ORIONu" while it IS in ORION; falling through lets `claim_send_or_identify` log the duplicate.
+- **Post-deploy: the new skip button renders on a REAL open dl_item card WITHOUT answering it** —
+  navigate `/otazky-dl` (admin or the dl_key), read the DOM buttons for "Nemá kartu — pošli bez
+  tejto položky", never click it (answering defers/ships a real customer DL). If no live question,
+  grep the served ASK_DL_HTML for the button text (proves the template deployed). Both dl_item
+  card renderers were edited (ASK_DL_HTML `dlItemQuestionCard` + DASH_HTML's admin generic block) —
+  template hashes DASH/ASK/ASK_DL re-pinned (`# airuleset:secret-ok` for the hash blob).
+## `desadv_edi.generate()`'s R84 ladder normalizes a line to the CARD's tracking unit —
+## add a new unit FORM as its own exact-token branch scoped to kg-tracked, never a
+## supplier hack; the catalog `cena` is €/kg so a per-ton→per-kg conversion divides the
+## LINE price only, never `cat_price` (#366, 2026-08-26)
+
+The DESADV LIN quantity/price must be in the card's OWN tracking unit: **kg for a
+kg-tracked card (`sklad == "100"`), pieces otherwise.** `generate()`'s R84 ladder
+(inside `elif is_kg_tracked:`) converts the extracted (quantity, unit) into kg. Before
+#366 it knew only two rungs — `unit == "kg"` (identity) and per-piece `mass > 0`
+(`qty × mass`) — with an `else` that left the quantity UNCONVERTED and only
+`log.warning`ed. So a **tonne** delivery (`unit` = `"ton"`/`"t"`, mass blank — the norm
+for bulk flour/salt cards, which carry a WEIGHT-NEUTRAL name + blank `mass` per the
+"Great" note above) fell into that `else` and shipped `qty` as-is → ORION imported e.g.
+`2 kg` instead of `2000 kg` (live msg 8700, warehouse "2000kg"; ≥2 suppliers — HK LOAN
+flour + a salt supplier using `t`; 12 `ton` + 3 `t` lines). Fix = a general ton→kg rung
+(`_TON_UNITS` exact-token set + `_is_ton_unit()`, `out_qty = qty*1000`,
+`unit_price = up/1000`, `override_unit = "kg"`), checked BEFORE the kg/mass rungs (a
+tonne is 1000 kg regardless of any per-piece mass), scoped to kg-tracked cards.
+
+Reusable rules any FUTURE unit/quantity work on `desadv_edi.py` should follow:
+- **The rule is keyed on the CARD's unit (kg-tracked), never on a supplier/card name** —
+  it must be general (the ticket's own requirement, and the bug spanned ≥2 suppliers).
+- **A unit-token matcher is EXACT-token (diacritic-folded via `_to_win1250`, `.rstrip(".")`),
+  never a substring/prefix** — the real DL unit vocabulary includes `kt` (kartón), `ba`,
+  `ks`, `kus`, `balení` (Czech spelling occurs in real data), any of which a loose match
+  would corrupt. Cover Slovak AND Czech inflections (`ton`/`tona`/`tony`/`tonu` +
+  `tuna`/`tuny`/`tunu`/`tun`) — a missed form silently re-ships the ×1000 error.
+- **The catalog `cena` (`cena_by_gtin`) is stored €/kg for a kg-tracked card** (verified:
+  flour 0.368, salt 0.242 — €/ton would be impossible). So a per-ton→per-kg conversion
+  divides the LINE's own extracted price by 1000, but the R85 fallback substitutes
+  `cat_price` UNDIVIDED. Doing the conversion BEFORE R85 keeps its `cat_price*5 /
+  cat_price/5` comparison apples-to-apples (both €/kg).
+- **`generate()` is byte-pinned** against `fixtures/desadv_reference.json` — a new unit
+  branch is safe only because no fixture case uses that unit; the parity test must still
+  pass. Regression coverage for an EDI-generation bug lives in `test_orders_desadv_edi.py`
+  (direct `generate()` assertions on the LIN field slices: price `[82:91]`, qty
+  `[96:108]`, unit `[108:111]`), NOT the DL corpus — `dl_evaluate` scores the MATCHING
+  decisions (extracted qty/unit), which are UPSTREAM of `generate()`, so the corpus is
+  structurally blind to a byte-generation bug (same class as the #247/#205 unit-test note).
+
+**Ground-truth check for any "wrong quantity/price in ORION" DL incident — read the
+actual EDI BYTES, don't infer from `order_runs`.** A READ-ONLY container SFTP probe using
+the add-on's own `upload._connect(cfg)` + `sftp.open(path,"r").read()` reads the shipped
+`DESADV_*` file (in `in_DL` if still queued, or `in\archCodex` once imported, tolerating
+the `Z-`/`Z-Z-` wire prefix). Parse the LIN fixed-width fields at the offsets above to see
+exactly what ORION received (qty/price/unit) vs what it should be. `order_runs.result` shows
+the pre-EDI decision (extracted `quantity: 2, unit: ton`) but NOT the shipped bytes — the
+file itself is the only proof of the ×1000. Never write/rename/delete on ORION.

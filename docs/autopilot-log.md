@@ -3917,3 +3917,23 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
   quantity (hold + HTTP end-to-end), teach storage, `_num` (Slovak comma), extract schema/verify.
   Gotcha: `_num` odmieta záporné + bool; template hashe (DASH/ASK/ASK_DL) re-pinnuté (secret-ok bypass).
   Tiket #360 NEuzavretý workerom — maintainer/supervisor ho zavrie s dôkazmi z nasadenia.
+
+## 2026-08-26 — #365 DL: hold a doc with an unmatched item instead of partial-shipping (v0.9.122)
+- PR #367 (merge 75d8e30). RED 26c9bb1 → GREEN 100f430 → review-fix 91acd28.
+- `dl_document._process_document`: a shippable DL with a warehouse-relevant unmatched line that
+  raised a `dl_item` board question is HELD (no claim/upload, `review`) + ❗ `build_review`, not
+  partial-shipped. On the board answer `release_for_question` re-runs: taught card → COMPLETE EDI;
+  new "Nemá kartu — pošli bez tejto položky" sentinel (`teach.DL_ITEM_SHIP_WITHOUT`) → partial,
+  human-confirmed. Skip durable on `order_questions.answer`, read via `_skip_answered_item_keys` +
+  shared `teach.dl_item_key`. Both dl_item card renderers gained the button (DASH/ASK/ASK_DL hashes
+  re-pinned).
+- Adversarial review (Fable) caught 2 regressions, both fixed: hold gate keys on `held_items`
+  (lines that got a real question, never a dead-end for ask-refused #236 lines); `_release_stuck_
+  siblings` now fires for `dl_item` (a deduped same-sender sibling would else strand forever now it
+  holds). Plus `desadv.already_sent` guard before the hold.
+- Shadow byte-identical (live-path-only gate) → e2e-dl corpus green, no drift. Tests: hold,
+  answer→complete, skip→partial (no loop), already-shipped→no reupload, all-matched unchanged,
+  ask-refused→partial, deduped-sibling release, HTTP seam; 4 pre-#365 partial-ship tests updated.
+- Deploy 0.9.122 verified live: /health + DOM v0.9.122; the skip button RENDERS on the REAL
+  question-101 dl_item card (`/otazky-dl`), read-only, no rows created, no Odoo post.
+- #365 left OPEN — gatekeeper closes with deploy evidence.

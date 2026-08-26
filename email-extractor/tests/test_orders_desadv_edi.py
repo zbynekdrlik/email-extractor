@@ -139,6 +139,116 @@ def test_multipack_count_above_the_1000_sanity_cap_is_rejected():
     assert desadv_edi._detect_liquid_multipack("Voda / 1000x1l") is not None
 
 
+# --- R84.2 (#366): ton -> kg for a kg-tracked card ---------------------------
+
+def _ton_data(gtin, quantity, unit, unit_price=0, total_price=0, name="Múka",
+              supplier_name=""):
+    return {
+        "customerEanEdi": "2000000000099", "customerName": "X", "docNumber": "1",
+        "orderNumber": "1", "deliveryDate": "26.08.2026",
+        "items": [{"gtin": gtin, "name": name, "supplierName": supplier_name or name,
+                  "quantity": quantity, "mass": 0, "unit": unit,
+                  "totalPrice": total_price, "unitPrice": unit_price}],
+    }
+
+
+def test_kg_tracked_ton_unit_converts_quantity_to_kg():
+    """#366 core: message 8700 shipped '2 ton' of a kg-tracked flour card as qty 2, so
+    ORION imported 2 kg instead of 2000 kg (warehouse-reported '2000kg'). A tonne is
+    1000 kg — the LIN quantity must be in kg and the unit label must become kg."""
+    got = desadv_edi.generate(_ton_data("1557", 2, "ton", name="T 512 - hladná múka"),
+                              {"1557": "100"}, {})
+    lin = got.content.split("\r\n")[1]
+    assert lin[96:108] == "    2000.000"   # 2 ton -> 2000 kg
+    assert lin[108:111] == "kg "           # LIN unit label becomes kg, not "ton"
+
+
+def test_kg_tracked_ton_with_no_price_fills_per_kg_and_labels_kg():
+    """The EXACT message-8700 scenario end to end: '2 ton', no line price, catalog cena
+    0.368 (€/kg). The quantity must convert to 2000 kg AND the price-substitution note
+    must read '€/kg', never the misleading '€/ton' the bug produced."""
+    got = desadv_edi.generate(
+        _ton_data("1557", 2, "ton", name="T 512 - hladná múka"),
+        {"1557": "100"}, {"1557": 0.368})
+    lin = got.content.split("\r\n")[1]
+    assert lin[96:108] == "    2000.000"
+    assert lin[82:91] == "    0.368"        # catalog €/kg price, applied to the kg qty
+    assert lin[108:111] == "kg "
+    assert got.substituted == ["T 512 - hladná múka: bez ceny → 0.368 €/kg"]
+
+
+def test_kg_tracked_t_abbreviation_also_converts_to_kg():
+    """The salt supplier uses 't' (not 'ton') for a 1-tonne delivery of a kg-tracked
+    card (gtin 4003885181808) — the abbreviation must convert the same 1 t -> 1000 kg."""
+    got = desadv_edi.generate(_ton_data("4003885181808", 1, "t", name="Soľ voľná"),
+                              {"4003885181808": "100"}, {})
+    lin = got.content.split("\r\n")[1]
+    assert lin[96:108] == "    1000.000"
+    assert lin[108:111] == "kg "
+
+
+def test_kg_tracked_ton_line_with_a_per_ton_price_normalizes_to_per_kg():
+    """A line that DOES carry a €/ton price (368 €/ton) is normalized to €/kg (0.368)
+    when its quantity converts to kg — the per-line price divides by 1000 too, so the
+    R85 price-fallback comparison stays apples-to-apples and does not fire."""
+    got = desadv_edi.generate(
+        _ton_data("1", 2, "ton", unit_price=368, total_price=736),
+        {"1": "100"}, {"1": 0.368})
+    lin = got.content.split("\r\n")[1]
+    assert lin[96:108] == "    2000.000"
+    assert lin[82:91] == "    0.368"        # 368/1000 = 0.368 €/kg; within 5x of cena
+    assert got.substituted == []            # normalized price is fine -> no fallback
+
+
+def test_ton_conversion_is_scoped_to_kg_tracked_cards_only():
+    """A tonne unit only makes physical sense against a kg-tracked (sklad=100) card. A
+    NON-kg-tracked card is left exactly as before — the rule is keyed on the card's
+    unit, never applied blindly."""
+    got = desadv_edi.generate(
+        _ton_data("9", 2, "ton", unit_price=5, total_price=10, name="Kus"),
+        {"9": ""}, {})
+    lin = got.content.split("\r\n")[1]
+    assert lin[96:108] == "       2.000"    # unconverted (out of scope)
+    assert lin[108:111] == "ton"            # unit unchanged
+
+
+def test_a_non_ton_unit_like_kt_is_never_mistaken_for_ton():
+    """Exact-token match, never substring — 'kt' (kartón), 'ba', 'kus' must never be
+    read as a tonne and multiplied by 1000."""
+    got = desadv_edi.generate(_ton_data("1", 2, "kt", unit_price=5, total_price=10),
+                              {"1": "100"}, {})
+    lin = got.content.split("\r\n")[1]
+    assert lin[96:108] == "       2.000"    # kt is NOT ton -> no x1000
+    assert lin[108:111] == "kt "
+
+
+def test_ton_beats_a_per_piece_mass_on_a_kg_tracked_card():
+    """A tonne is 1000 kg regardless of any per-piece `mass` on the card, so the tonne
+    branch MUST win over the mass rung — a "2 ton" line on a card carrying mass 25 must
+    ship 2000 kg, never 2 x 25 = 50 kg. Pins the documented branch ordering (a refactor
+    that moved the tonne rung below the mass rung would otherwise leave every other test
+    green)."""
+    data = {
+        "customerEanEdi": "2000000000099", "customerName": "X", "docNumber": "1",
+        "orderNumber": "1", "deliveryDate": "26.08.2026",
+        "items": [{"gtin": "1", "name": "Múka 25 kg", "supplierName": "Múka 25 kg",
+                  "quantity": 2, "mass": 25, "unit": "ton", "totalPrice": 0,
+                  "unitPrice": 0}],
+    }
+    got = desadv_edi.generate(data, {"1": "100"}, {})
+    lin = got.content.split("\r\n")[1]
+    assert lin[96:108] == "    2000.000"   # 2 ton -> 2000 kg, NOT 2 x 25 = 50
+    assert lin[108:111] == "kg "
+
+
+def test_is_ton_unit_recognizes_tonne_forms_and_rejects_lookalikes():
+    for u in ["ton", "TON", " ton ", "t", "T", "tona", "tony", "tonu", "tonne", "tón",
+              "Tón", "ton.", "tuna", "tuny", "tunu", "tun", "TUNA"]:
+        assert desadv_edi._is_ton_unit(u), f"expected ton: {u!r}"
+    for u in ["kg", "ks", "kt", "ba", "kus", "balení", "g", "l", "", "to", None]:
+        assert not desadv_edi._is_ton_unit(u), f"expected NOT ton: {u!r}"
+
+
 # --- R85: price fallback -----------------------------------------------------
 
 def test_price_fallback_fires_when_price_is_missing():
