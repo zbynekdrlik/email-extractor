@@ -130,6 +130,11 @@ _MULTIPACK_RE = re.compile(r"(\d+)\s*[x\u00d7*]\s*([\d.,]+)\s*(ml|l)\b", re.IGNO
 _MASS_KG_RE = re.compile(r"(\d+)[,.]?(\d*)\s*kg", re.IGNORECASE)
 _MASS_G_RE = re.compile(r"(\d+)\s*g(?![a-z])", re.IGNORECASE)
 
+# R84.2 (#366): tonne-unit tokens. 1 ton == 1000 kg. Kept as an EXACT-token set (never
+# a substring/prefix match) so a piece unit like "kt" (kart\u00f3n), "ba", or "kus" can never
+# be misread as a tonne and multiplied by 1000.
+_TON_UNITS = {"t", "ton", "tona", "tony", "tonne", "tonnes"}
+
 
 def _to_win1250(text) -> str:
     return "".join(_WIN1250.get(ch, ch) for ch in str(text or ""))
@@ -202,6 +207,15 @@ def _detect_liquid_multipack(name) -> tuple[float, str] | None:
     unit = m.group(3).lower()
     size_l = size_num / 1000 if unit == "ml" else size_num
     return count * size_l, "L"
+
+
+def _is_ton_unit(unit) -> bool:
+    """R84.2 (#366): a tonne unit on a line (t / ton / tona / tonne / …). Diacritics are
+    folded (`tón` -> `ton`), a trailing dot is stripped (`ton.` -> `ton`), and the
+    result must EXACTLY equal one of `_TON_UNITS` — never a substring, so `kt`/`ba`/`kus`
+    can never match."""
+    u = _to_win1250(str(unit or "")).strip().lower().rstrip(".")
+    return u in _TON_UNITS
 
 
 def _extract_mass(name) -> float:
@@ -326,6 +340,19 @@ def generate(data: dict, sklad_by_gtin: dict, cena_by_gtin: dict) -> Desadv:
             unit_price = up / total_l if total_l else up
             log.info("desadv line %r: liquid multipack -> %.3f L @ %.3f", gtin, out_qty,
                      unit_price)
+        elif is_kg_tracked and _is_ton_unit(unit):
+            # R84.2 (#366): a kg-tracked card receiving a tonne-unit delivery — 1 ton ==
+            # 1000 kg. ORION keys the card in kg, so the LIN quantity AND the per-line
+            # price must be in kg, and the unit label becomes kg. Checked BEFORE the
+            # kg/mass rungs — a tonne is 1000 kg regardless of any per-piece `mass`.
+            # Without this a "2 ton" line shipped as qty 2 and ORION imported 2 kg
+            # instead of 2000 kg (warehouse-reported on message 8700). Dividing the
+            # per-line price by 1000 (€/ton -> €/kg) keeps R85's fallback comparison
+            # against the catalog cena (already €/kg) apples-to-apples; an empty line
+            # price stays 0 and R85 fills the €/kg cena, now correctly labelled kg.
+            out_qty, unit_price, override_unit = qty * 1000, up / 1000, "kg"
+            log.info("desadv line %r: tonne conversion %.3f ton -> %.3f kg @ %.3f", gtin,
+                     qty, out_qty, unit_price)
         elif is_kg_tracked:
             if str(unit).strip().lower() == "kg":
                 out_qty, unit_price = qty, up
