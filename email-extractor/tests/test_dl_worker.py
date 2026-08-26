@@ -917,6 +917,52 @@ def test_ship_history_on_a_retired_gtin_never_resurrects_an_upload(pg, tmp_path)
     assert _dl_question_count(pg) == 0, "recognized as retired, not asked about"
 
 
+# --- #365: a shippable DL doc with an unmatched WAREHOUSE item is HELD, not partial-shipped -
+#
+# Before #365: a document with ≥1 matched AND ≥1 genuinely-unmatched (not retired) item
+# uploaded a PARTIAL EDI to ORION immediately, dropping the unmatched line, while raising a
+# `dl_item` board question that could only teach the FUTURE — the current document's
+# completeness was already lost and the warehouse had to add the row in ORION by hand (the
+# live msg 8804 / question 101 incident). It must instead HOLD (no claim, no upload) and be
+# revisited when the answer arrives. All fixtures SYNTHETIC.
+
+def test_a_shippable_doc_with_an_unmatched_item_holds_instead_of_partial_shipping(
+        pg, tmp_path):
+    """#365 core: one item matches, one is genuinely unmatched (NOT retired). The document
+    is HELD — no claim, no upload — the `dl_item` question is raised, and the ❗ 'potrebuje
+    kontrolu / Rieš na nástenke' message is posted (never the ⚠️ 'EDI šlo BEZ nich'
+    partial-upload one). `messages` stays processed/review so an answer revisits it."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    doc = _bev_doc(items=[
+        {"name": "Rožok 50g", "quantity": 10, "unit": "ks", "unitPrice": 0.5,
+         "totalPrice": 5.0, "vatRate": 10},
+        {"name": "Neznámy nápoj XYZ", "quantity": 6, "unit": "ks", "unitPrice": 2.0,
+         "totalPrice": 12.0, "vatRate": 10}])
+    client = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED, {"gtin": "NO_MATCH",
+                                                    "matchConfidence": 0.0,
+                                                    "matchReason": "žiadna zhoda"}]})
+    uploaded, posted = [], []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client,
+                       upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+                       post=lambda c, h: posted.append(h))
+    assert n == 1
+    assert uploaded == [], "#365: a shippable doc with an unmatched item is HELD, not shipped"
+    assert int(pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0]) == 0, \
+        "no claim is taken while held"
+    assert _dl_question_count(pg) == 1, "the dl_item board question is raised, as before"
+    row = pg.execute(
+        "SELECT processed, proc_status FROM messages WHERE message_id='dl1'").fetchone()
+    assert row[0] is True and row[1] == "review", "held = processed review, revisited on answer"
+    assert posted, "the sklad is told on the delivery-notes channel"
+    assert "Rieš na nástenke" in posted[-1] and "potrebuje kontrolu" in posted[-1], \
+        "the ❗ hold message with the board link, not the ⚠️ partial-upload success message"
+    assert "šlo BEZ nich" not in posted[-1], "the partial-upload wording must NOT appear"
+
+
 def test_looks_like_correction_matches_both_real_265_incidents():
     assert dl_worker._looks_like_correction("OPRAVA HMOTNOSTI", "")
     assert dl_worker._looks_like_correction(
