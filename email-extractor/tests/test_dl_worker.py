@@ -945,7 +945,8 @@ def test_a_shippable_doc_with_an_unmatched_item_holds_instead_of_partial_shippin
                                                     "matchConfidence": 0.0,
                                                     "matchReason": "žiadna zhoda"}]})
     uploaded, posted = [], []
-    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path),
+               dashboard_base_url="http://board.test")
     n = dl_worker.tick(pg, cfg, client=client,
                        upload=lambda c, name, content, dir_override=None: uploaded.append(name),
                        post=lambda c, h: posted.append(h))
@@ -958,9 +959,122 @@ def test_a_shippable_doc_with_an_unmatched_item_holds_instead_of_partial_shippin
         "SELECT processed, proc_status FROM messages WHERE message_id='dl1'").fetchone()
     assert row[0] is True and row[1] == "review", "held = processed review, revisited on answer"
     assert posted, "the sklad is told on the delivery-notes channel"
-    assert "Rieš na nástenke" in posted[-1] and "potrebuje kontrolu" in posted[-1], \
+    assert "potrebuje kontrolu" in posted[-1] and "Rieš na nástenke" in posted[-1], \
         "the ❗ hold message with the board link, not the ⚠️ partial-upload success message"
     assert "šlo BEZ nich" not in posted[-1], "the partial-upload wording must NOT appear"
+
+
+def test_answering_a_held_dl_item_with_a_card_ships_the_complete_edi(pg, tmp_path):
+    """#365: the sklad finds/teaches the card → `release_for_question` reprocesses → the
+    line now matches (memory rescue) → the COMPLETE EDI ships, nothing dropped."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    doc = _bev_doc(items=[
+        {"name": "Rožok 50g", "quantity": 10, "unit": "ks", "unitPrice": 0.5,
+         "totalPrice": 5.0, "vatRate": 10},
+        {"name": "Neznámy nápoj XYZ", "quantity": 6, "unit": "ks", "unitPrice": 2.0,
+         "totalPrice": 12.0, "vatRate": 10}])
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    client1 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                          "dl_item": [ITEM_MATCHED, {"gtin": "NO_MATCH",
+                                                     "matchConfidence": 0.0,
+                                                     "matchReason": "žiadna zhoda"}]})
+    up1 = []
+    dl_worker.tick(pg, cfg, client=client1,
+                   upload=lambda c, name, content, dir_override=None: up1.append(name))
+    assert up1 == [], "held on the first pass"
+    qid = pg.execute("SELECT id FROM order_questions WHERE kind='dl_item'").fetchone()[0]
+    # The sklad answers with a card: the human teaching + the answered row (mirrors the
+    # real /otazky-dl answer path, exercised directly with a FakeClient like the existing
+    # release tests). On reprocess the item is rescued from `dl_item_memory`.
+    dl_memory.remember(pg, SUPPLIER_EAN, "Neznámy nápoj XYZ", ITEM_GTIN, "Rožok 50g",
+                       "2026-08-10", source="human")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+               (Json({"choice": ITEM_GTIN}), qid))
+    client2 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                          "dl_item": [ITEM_MATCHED, {"gtin": "NO_MATCH",
+                                                     "matchConfidence": 0.0,
+                                                     "matchReason": "žiadna zhoda"}]})
+    up2 = []
+    released = dl_worker.release_for_question(
+        pg, cfg, qid, client=client2,
+        upload=lambda c, name, content, dir_override=None: up2.append(name))
+    assert len(up2) == 1, "#365: the COMPLETE EDI ships once the card is known"
+    assert released and released[0]["outcome"] == "ok", "no unmatched item left -> full ship"
+    assert int(pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE uploaded_at IS NOT NULL").fetchone()[0]) == 1
+
+
+def test_answering_a_held_dl_item_with_ship_without_ships_partial_no_loop(pg, tmp_path):
+    """#365: "nemá kartu — pošli bez tejto položky" → `release_for_question` reprocesses →
+    the line is deliberately EXCLUDED and the doc ships PARTIAL (human-confirmed, honest
+    message). Crucially NO new question is re-raised and the doc does NOT re-hold — the
+    reprocess reads the ship-without answer back off the question row and skips the line."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    doc = _bev_doc(items=[
+        {"name": "Rožok 50g", "quantity": 10, "unit": "ks", "unitPrice": 0.5,
+         "totalPrice": 5.0, "vatRate": 10},
+        {"name": "Neznámy nápoj XYZ", "quantity": 6, "unit": "ks", "unitPrice": 2.0,
+         "totalPrice": 12.0, "vatRate": 10}])
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    client1 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                          "dl_item": [ITEM_MATCHED, {"gtin": "NO_MATCH",
+                                                     "matchConfidence": 0.0,
+                                                     "matchReason": "žiadna zhoda"}]})
+    up1 = []
+    dl_worker.tick(pg, cfg, client=client1,
+                   upload=lambda c, name, content, dir_override=None: up1.append(name))
+    assert up1 == [], "held on the first pass"
+    qid = pg.execute("SELECT id FROM order_questions WHERE kind='dl_item'").fetchone()[0]
+    # The sklad answers "pošli bez tejto položky" — the sentinel is stored on the question
+    # row exactly as _api_orders_answer_generic does (`{"choice": ship_without}`).
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+               (Json({"choice": teach.DL_ITEM_SHIP_WITHOUT}), qid))
+    client2 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                          "dl_item": [ITEM_MATCHED, {"gtin": "NO_MATCH",
+                                                     "matchConfidence": 0.0,
+                                                     "matchReason": "žiadna zhoda"}]})
+    up2, posted2 = [], []
+    released = dl_worker.release_for_question(
+        pg, cfg, qid, client=client2,
+        upload=lambda c, name, content, dir_override=None: up2.append(name),
+        post=lambda c, h: posted2.append(h))
+    assert len(up2) == 1, "#365: a partial EDI ships once the sklad confirms ship-without"
+    assert released and released[0]["outcome"] == "partial"
+    assert int(pg.execute(
+        "SELECT count(*) FROM order_questions WHERE kind='dl_item' AND status='open'"
+    ).fetchone()[0]) == 0, "no NEW question re-raised — no loop"
+    assert int(pg.execute(
+        "SELECT count(*) FROM order_questions WHERE kind='dl_item'").fetchone()[0]) == 1, \
+        "still exactly the one, now-answered question"
+    assert posted2 and "šlo BEZ nich" in posted2[-1], \
+        "the honest partial message says the item went WITHOUT — human-confirmed"
+
+
+def test_a_document_with_ALL_items_matched_still_ships_normally_no_hold(pg, tmp_path):
+    """#365 no-regression contract: a document whose items ALL match is UNCHANGED — it
+    ships the full EDI immediately, never held."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    doc = _bev_doc(items=[
+        {"name": "Rožok 50g", "quantity": 10, "unit": "ks", "unitPrice": 0.5,
+         "totalPrice": 5.0, "vatRate": 10}])
+    client = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    uploaded = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client,
+                       upload=lambda c, name, content, dir_override=None: uploaded.append(name))
+    assert n == 1
+    assert len(uploaded) == 1, "an all-matched document ships immediately — never held"
+    assert _dl_question_count(pg) == 0, "no board question for an all-matched document"
+    row = pg.execute(
+        "SELECT processed, proc_status FROM messages WHERE message_id='dl1'").fetchone()
+    assert row[1] == "ok", "a clean full ship stays 'ok', not 'review'"
 
 
 def test_looks_like_correction_matches_both_real_265_incidents():
@@ -1359,7 +1473,11 @@ def test_the_dashboard_link_is_the_dl_only_nastenka_never_the_orders_one(pg, tmp
     assert "http://x.example/sklad/" not in posted[0], posted[0]
 
 
-def test_unmatched_item_ships_a_partial_edi_and_raises_a_nastenka_question(pg, tmp_path):
+def test_unmatched_item_holds_the_document_and_raises_a_nastenka_question(pg, tmp_path):
+    """#365 (was: partial-ship — the R81 policy this reverses): a shippable document with a
+    genuinely unmatched warehouse item is HELD — no claim, no upload — and the `dl_item`
+    board question is raised, so the document is later completed rather than shipped
+    incomplete."""
     _snapshot(pg)
     _msg(pg, mid="dl1")
     _attach(pg, tmp_path, "dl1")
@@ -1379,10 +1497,12 @@ def test_unmatched_item_ships_a_partial_edi_and_raises_a_nastenka_question(pg, t
         upload=lambda c, name, content, dir_override=None: uploaded.append(name),
         post=lambda c, h: posted.append(h))
     assert n == 1
-    assert len(uploaded) == 1, "R81: partial EDI still ships"
-    success = [h for h in posted if "spracovaný ČIASTOČNE" in h][0]
-    assert "ČIASTOČNE" in success
-    assert "Nespárované" in success and "Neznámy chlebík" in success
+    assert uploaded == [], "#365: HELD, not partial-shipped"
+    assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0, \
+        "no claim while held"
+    review = [h for h in posted if "potrebuje kontrolu" in h][0]
+    assert "Neznámy chlebík" in review, "the held item is named in the ❗ message"
+    assert "spracovaný ČIASTOČNE" not in review, "not the partial-upload message"
     q = pg.execute(
         "SELECT kind FROM order_questions WHERE kind='dl_item'").fetchone()
     assert q is not None
@@ -2168,7 +2288,9 @@ def test_lexical_gap_item_is_visible_in_the_message_and_raises_a_question(pg, tm
     """Deep-review finding: an item excluded from the EDI by the R75 lexical-gap
     tripwire (`llm_sure_lexical_gap`) — or this worker's own `match_failed` fallback —
     was previously invisible: the gate only checked `rule == 'unmatched'`, so neither
-    the Odoo message nor a nástenka question ever mentioned it."""
+    the Odoo message nor a nástenka question ever mentioned it. #365: the excluded item
+    now HOLDS the document (was: partial-shipped) — it is still visible in `order_items`
+    and named in the ❗ hold message + a board question, never silently dropped."""
     _snapshot(pg)
     _msg(pg, mid="dl1")
     _attach(pg, tmp_path, "dl1")
@@ -2188,14 +2310,15 @@ def test_lexical_gap_item_is_visible_in_the_message_and_raises_a_question(pg, tm
         upload=lambda c, name, content, dir_override=None: uploaded.append(name),
         post=lambda c, h: posted.append(h))
     assert n == 1
-    assert len(uploaded) == 1, "the first item still ships (partial EDI, R81)"
-    success = [h for h in posted if "spracovaný ČIASTOČNE" in h][0]
-    assert "ČIASTOČNE" in success
-    assert "Nespárované" in success and "Úplne iný produkt" in success
+    assert uploaded == [], "#365: HELD (was: partial EDI) — not shipped incomplete"
+    review = [h for h in posted if "potrebuje kontrolu" in h][0]
+    assert "Úplne iný produkt" in review, "the R75-gap item is named in the ❗ hold message"
     q = pg.execute(
         "SELECT kind FROM order_questions WHERE kind='dl_item'").fetchone()
     assert q is not None
 
+    # The R75-tripwire item is still VISIBLE in order_items with its rule (the original
+    # deep-review finding this test protects) — the hold does not hide it.
     items = pg.execute("SELECT gtin, rule FROM order_items ORDER BY id").fetchall()
     assert ("8588000000001", "llm_sure") in items
     assert (None, "llm_sure_lexical_gap") in items
@@ -2406,8 +2529,9 @@ def test_release_for_question_waits_for_every_sibling_dl_item_question_before_re
 def test_release_for_question_raises_a_fresh_question_when_still_unresolved(pg, tmp_path):
     """Requirement 2: when the document STILL cannot fully resolve after the answer (a
     second, genuinely different wording was never taught), it must not silently hang —
-    it ships what it can (existing "ship what matched" behaviour, unchanged) AND raises a
-    FRESH, visible question for what remains, so the warehouse is never left guessing."""
+    it raises a FRESH, visible question for what remains, so the warehouse is never left
+    guessing. #365: it now HOLDS (was: shipped what it could as a partial EDI) — the still-
+    unresolved item is asked about again AND the document stays held until it is complete."""
     _snapshot(pg)
     _msg(pg, mid="dl1")
     _attach(pg, tmp_path, "dl1")
@@ -2461,26 +2585,28 @@ def test_release_for_question_raises_a_fresh_question_when_still_unresolved(pg, 
         client=client2,
         upload=lambda c, name, content, dir_override=None: uploaded2.append(name),
         post=lambda c, h: posted2.append(h))
-    assert len(uploaded2) == 1, "the resolvable item still ships (partial EDI, unchanged)"
-    assert released and released[0]["outcome"] == "partial"
+    assert uploaded2 == [], "#365: HELD (was: partial ship) — not shipped while unresolved"
+    assert released and released[0]["outcome"] == "review"
     fresh = pg.execute(
         "SELECT id, status FROM order_questions WHERE kind='dl_item' AND "
         "wording='Úplne iný produkt' ORDER BY id").fetchall()
     assert len(fresh) == 2, "a brand-new question was raised — the old one is not reused"
     assert fresh[0] == (qid_b, "answered")
     assert fresh[1][1] == "open", "the still-unresolved item is visibly asked about again"
-    assert any("Nespárované" in h and "Úplne iný produkt" in h for h in posted2), \
-        "also visible in the Odoo message, not just the nástenka question"
+    assert any("potrebuje kontrolu" in h and "Úplne iný produkt" in h for h in posted2), \
+        "also visible in the ❗ hold message, not just the nástenka question"
 
 
 def test_release_for_question_never_reuploads_an_already_partially_shipped_document(
         pg, tmp_path):
-    """HARD SAFETY (#240): a document that already shipped (partial — one item excluded)
-    must NEVER be re-uploaded just because its excluded item's dl_item question later
-    gets answered. The guard is the SAME `desadv.claim_send_or_identify` ledger every
-    `_process_document` call already makes — not new code added for this ticket — this
-    test proves it holds across the reprocess-on-answer path too, exactly as required
-    ("the re-run path must itself carry the ORION/registry check as a guard in code")."""
+    """HARD SAFETY (#240, updated for #365 — the msg 8804 / question 101 incident): a
+    document that ALREADY shipped must NEVER be re-uploaded just because its excluded item's
+    dl_item question later gets answered. Pre-#365 the first pass shipped a partial EDI to
+    set this up; #365 now HOLDS instead, so the already-shipped state is injected directly (a
+    confirmed `desadv_sent` claim, exactly as a pre-#365 partial ship or any earlier process
+    would have left it). The guard is the SAME `desadv.claim_send_or_identify` ledger every
+    `_process_document` call already makes — not new code — proven to hold across the
+    reprocess-on-answer path."""
     _snapshot(pg)
     _msg(pg, mid="dl3")
     _attach(pg, tmp_path, "dl3")
@@ -2489,17 +2615,22 @@ def test_release_for_question_never_reuploads_an_already_partially_shipped_docum
          "totalPrice": 5.0},
         {"name": "Neznámy chlebík", "quantity": 3, "unit": "ks", "unitPrice": 1.0,
          "totalPrice": 3.0}])
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
     client1 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
                          "dl_item": [ITEM_MATCHED,
                                     {"gtin": "NO_MATCH", "matchConfidence": 0.0,
                                      "matchReason": "žiadna zhoda"}]})
-    uploaded, posted = [], []
-    n = dl_worker.tick(
-        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client1,
-        upload=lambda c, name, content, dir_override=None: uploaded.append(name),
-        post=lambda c, h: posted.append(h))
+    uploaded = []
+    n = dl_worker.tick(pg, cfg, client=client1,
+                       upload=lambda c, name, content, dir_override=None: uploaded.append(name))
     assert n == 1
-    assert len(uploaded) == 1, "partial EDI still ships today (R81, unchanged)"
+    assert uploaded == [], "#365: HELD on the first pass — no partial ship, no claim"
+    # Inject the ALREADY-shipped state: a confirmed desadv_sent claim held by THIS message,
+    # exactly the msg 8804 situation (a document that shipped before #365 deployed, whose
+    # dl_item question is still open). The reprocess below must not re-upload it.
+    desadv.claim_send_or_identify(
+        pg, SUPPLIER_EAN, "0100000001", "DESADV_synthetic.txt", message_id="dl3")
+    desadv.confirm_sent(pg, SUPPLIER_EAN, "0100000001")
     assert pg.execute(
         "SELECT count(*) FROM desadv_sent WHERE supplier_ean=%s AND doc_number=%s "
         "AND uploaded_at IS NOT NULL", (SUPPLIER_EAN, "0100000001")).fetchone()[0] == 1
@@ -2517,12 +2648,14 @@ def test_release_for_question_never_reuploads_an_already_partially_shipped_docum
                                      "matchReason": "žiadna zhoda"}]})
     uploaded2, posted2 = [], []
     released = dl_worker.release_for_question(
-        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), qid,
-        client=client2,
+        pg, cfg, qid, client=client2,
         upload=lambda c, name, content, dir_override=None: uploaded2.append(name),
         post=lambda c, h: posted2.append(h))
     assert uploaded2 == [], "the already-shipped document must NEVER be re-uploaded"
     assert released and released[0]["outcome"] == "duplicate"
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE uploaded_at IS NOT NULL").fetchone()[0] == 1, \
+        "still exactly the ONE original confirmed claim — no second upload"
     assert pg.execute(
         "SELECT count(*) FROM desadv_sent WHERE supplier_ean=%s AND doc_number=%s",
         (SUPPLIER_EAN, "0100000001")).fetchone()[0] == 1, \

@@ -91,6 +91,39 @@ def _skip_not_warehouse(conn, shadow: bool, message: dict, doc_number: str,
            "supplier_name": supplier_name}
 
 
+# --- #365: hold-instead-of-partial-ship helpers -----------------------------
+
+def _skip_answered_item_keys(conn, message_id: str) -> set[str]:
+    """The `order_questions.item_key`s of every `dl_item` question of THIS message the sklad
+    has answered with "nemá kartu — pošli bez tejto položky" (`answer->>'choice'` equals the
+    `teach.DL_ITEM_SHIP_WITHOUT` sentinel). Read on the message's reprocess so a
+    deliberately-skipped line is shipped WITHOUT it instead of re-holding the whole document
+    forever. Matched against `teach.dl_item_key(supplier_ean, wording)` — the exact key
+    `ask_dl_item` stored the question under — so the skip survives the reprocess even though
+    the line stays genuinely unmatched (there is no card for it). A real-card answer stores
+    the GTIN as the choice, `close_message_sklad_unknown`/`not_warehouse` store a different
+    jsonb shape with no `choice` key at all — neither equals the sentinel, so only a real
+    "pošli bez nej" answer is returned here."""
+    rows = conn.execute(
+        """SELECT item_key FROM order_questions
+            WHERE message_id = %s AND kind = 'dl_item' AND status = 'answered'
+              AND answer->>'choice' = %s""",
+        (message_id, teach.DL_ITEM_SHIP_WITHOUT)).fetchall()
+    return {r[0] for r in rows}
+
+
+def _hold_review_reason(item_names: list[str]) -> str:
+    """The ❗ 'potrebuje kontrolu' body for a HELD document — names the unmatched line(s) and
+    tells the sklad exactly what to do on the board (find the card, or confirm „pošli bez
+    nej"). Deliberately NOT the ⚠️ 'EDI šlo BEZ nich' partial-upload wording — nothing was
+    uploaded."""
+    n = len(item_names)
+    listed = ", ".join(name for name in item_names if name) or "neznáme položky"
+    return (f"Dodací list má {n} nespárovanú/é skladovú/é položku/y — z bezpečnosti sa "
+            f"NEnahráva do ORIONu, kým ich nevybavíš na nástenke (nájdeš kartu, alebo "
+            f"potvrdíš „pošli bez tejto položky“), aby doklad odišiel KOMPLETNÝ: {listed}.")
+
+
 # --- one document (R60-R97) -------------------------------------------------
 
 def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list[dict],
@@ -273,11 +306,26 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         return _skip_not_warehouse(conn, shadow, message, doc_number,
                                    supplier_decision.name)
 
+    # #365: the sklad can answer a dl_item question with "nemá kartu — pošli bez tejto
+    # položky"; that skip is recorded on the (now answered) question row and read back here
+    # on the message's reprocess, so a deliberately-skipped line is shipped WITHOUT it
+    # instead of re-holding the whole document forever (the loop this ticket must avoid).
+    # LIVE path only — shadow (the eval corpus) never asks a question nor holds, so the
+    # shadow outcome stays byte-identical (no corpus drift): the corpus measures MATCHING
+    # ("partial" = shippable-but-incomplete), never the live HOLD policy layered on top.
+    skipped_keys = (_skip_answered_item_keys(conn, message["message_id"])
+                    if not shadow else set())
+    pending_asks = [(item, recalled, note) for item, recalled, note in unmatched_asks
+                    if teach.dl_item_key(supplier_decision.ean_edi, item.get("name", ""))
+                    not in skipped_keys]
+
     # Fire the deferred dl_item questions. For a non-remembered supplier this is byte-for-
     # byte the pre-#314 behaviour (the asks simply moved out of the loop); for a remembered
-    # supplier reached here (it HAS a catalog match) it is the safety-override path.
+    # supplier reached here (it HAS a catalog match) it is the safety-override path. #365: a
+    # line the sklad already said "pošli bez nej" for is filtered out (`pending_asks`), so it
+    # is never re-asked on reprocess.
     if not shadow:
-        for item, recalled, note in unmatched_asks:
+        for item, recalled, note in pending_asks:
             cands = dl_match.candidates(item.get("name", ""), catalog,
                                         memory_gtin=(recalled.gtin if recalled else ""))
             teach.ask_dl_item(conn, message["message_id"], supplier_decision.ean_edi,
@@ -332,6 +380,29 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                "items_skipped_no_match": built.items_skipped_no_match,
                "price_substitutions": built.price_substitutions,
                "items": _shipped_items(decisions)}
+
+    # #365: a shippable document (`can_create`) that still has an unmatched warehouse-relevant
+    # item AWAITING a board answer is HELD — never partial-shipped. No claim, no upload: the
+    # ORION document is never sent incomplete (the msg 8804 / question 101 incident). The
+    # dl_item question is already raised above; here we post the ❗ "potrebuje kontrolu /
+    # Rieš na nástenke" message (the SAME `build_review` shape a `can_create=False` document
+    # uses, and the price-mismatch check uses) and return a `review` outcome — `messages`
+    # ends processed/review, and answering the question re-runs the whole message
+    # (`release_for_question`) so a taught card ships the COMPLETE EDI, while a "pošli bez nej"
+    # answer (filtered out of `pending_asks` above) ships it partial-yet-human-confirmed.
+    # A document whose only unmatched items are ALL already skip-answered has an empty
+    # `pending_asks` and falls straight through to the normal ship below.
+    if pending_asks:
+        held_names = [item.get("name", "") for item, _r, _n in pending_asks]
+        reason = _hold_review_reason(held_names)
+        _post(cfg, shadow, lambda: dl_report.build_review(
+            reason, supplier_decision.name, built.doc_number, delivery_date, from_addr,
+            subject, link=link), post=post)
+        _event(conn, shadow, message["message_id"], stage="review", status="review",
+              outcome=reason, detail={"doc_number": built.doc_number, "held": True,
+              "held_items": held_names}, rollup=False, workflow=dl_report.WORKFLOW)
+        return {"outcome": "review", "doc_number": built.doc_number,
+               "supplier_name": supplier_decision.name, "reason": reason, "held": True}
 
     claimed, holder = desadv.claim_send_or_identify(
         conn, supplier_decision.ean_edi, built.doc_number, built.filename,

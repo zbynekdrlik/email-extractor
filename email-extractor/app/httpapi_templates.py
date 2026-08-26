@@ -298,6 +298,12 @@ async function loadAsk(){const L=document.getElementById('list');
         bt.textContent=c.label||c.value;bt.onclick=()=>answerGenericIt(q.id,c.value);acts.appendChild(bt)}
       const ub=document.createElement('button');ub.className='btn';ub.textContent='Neviem';
       ub.onclick=()=>answerGenericIt(q.id,'unknown');acts.appendChild(ub);
+      // #365: dl_item can also be answered "nemá kartu — pošli bez tejto položky" (ships the
+      // doc WITHOUT this line). Confirm first — it sends an incomplete document to ORION.
+      if(q.kind==='dl_item'){const sw=document.createElement('button');sw.className='btn';
+        sw.textContent='Nemá kartu — pošli bez';
+        sw.onclick=()=>{if(confirm('Naozaj poslať dodací list BEZ tejto položky? Doklad '
+          +'odíde do ORIONu neúplný.'))answerGenericIt(q.id,'ship_without')};acts.appendChild(sw)}
       head.appendChild(who);head.appendChild(why);head.appendChild(acts);
       el.appendChild(head);L.appendChild(el);continue}
     b.textContent=q.wording;head.appendChild(b);
@@ -673,6 +679,14 @@ function dlItemQuestionCard(q){
   c.appendChild(el('div','slabel','alebo nájdi v celom DL katalógu:'));
   c.appendChild(dlItemSearchBox(q));
   c.appendChild(newDlProductForm(q));
+  // #365: "nemá kartu — pošli bez tejto položky" — ships the doc WITHOUT this line
+  // (confirmed, honest). Distinct from "Neviem" (defers the whole DL). Confirm first — it
+  // sends an incomplete document to ORION.
+  const sw=el('button',null,'Nemá kartu — pošli bez tejto položky');
+  sw.style.borderColor='#e6a23c';sw.style.background='#fff3e0';sw.style.color='#8a5a00';
+  sw.onclick=()=>{if(confirm('Naozaj poslať dodací list BEZ tejto položky? Doklad odíde do '
+    +'ORIONu neúplný — použi len ak položka naozaj nemá skladovú kartu.'))answerGeneric(q.id,'ship_without')};
+  c.appendChild(sw);
   const nb=el('button',null,'Neviem');
   nb.style.borderColor='#d0d7de';nb.style.background='#f6f8fa';nb.style.color='#57606a';
   nb.onclick=()=>answerGeneric(q.id,'unknown');c.appendChild(nb);

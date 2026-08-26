@@ -705,6 +705,24 @@ def _undo_line(conn, q: dict) -> dict:
 # naturally has on hand (that shape is accepted as the FUNCTION's own input and translated
 # here — the caller never has to know the storage contract).
 
+# #365: the sklad can answer a dl_item board question with "nemá kartu — pošli bez tejto
+# položky". The pick is a SENTINEL value — never a real GTIN, so it can never collide with a
+# catalog card — recorded on the answered question row (`answer->>'choice'`) and read back on
+# the message's reprocess (`dl_document._skip_answered_item_keys`), so the line is shipped
+# WITHOUT it instead of re-holding the whole document forever.
+DL_ITEM_SHIP_WITHOUT = "ship_without"
+
+
+def dl_item_key(supplier_ean: str, wording: str) -> str:
+    """The synthetic `order_questions.item_key` a `dl_item` question is stored under —
+    `dlitem:{supplier_ean}:{item_key(wording)}`. Shared by `ask_dl_item` (which WRITES it)
+    and `dl_document`'s #365 skip lookup (which reconstructs it on reprocess), so the two can
+    never drift on the diacritic-folding normalization (`memory.item_key`) — the same
+    "never re-derive the folding" discipline `orders-corpus.md` documents for
+    `supplier_name_key`."""
+    return f"dlitem:{supplier_ean}:{memory.item_key(wording)}"
+
+
 def _offered_values(q: dict) -> set[str]:
     return {str(c.get("value")) for c in (q.get("candidates") or [])}
 
@@ -746,7 +764,7 @@ def ask_dl_item(conn, message_id: str, supplier_ean: str, supplier_name: str, wo
     options = [{"value": str(c.get("gtin")), "label": c.get("name") or str(c.get("gtin"))}
               for c in (candidates or [])]
     return ask_generic(
-        conn, "dl_item", message_id, f"dlitem:{supplier_ean}:{key}", wording,
+        conn, "dl_item", message_id, dl_item_key(supplier_ean, wording), wording,
         options, reason or "Neznáme znenie položky na dodacom liste",
         {"supplier_ean": supplier_ean, "supplier_name": supplier_name or "",
          "quantity": quantity, "unit": unit or "ks"},
@@ -761,7 +779,9 @@ def _present_dl_item(q: dict) -> dict:
 
 
 def _validate_dl_item(q: dict, choice: str, by: str) -> None:
-    if choice and choice not in _offered_values(q):
+    # #365: the "nemá kartu — pošli bez tejto položky" sentinel is a valid answer even though
+    # it is not (and never can be) one of the offered catalog GTINs.
+    if choice and choice != DL_ITEM_SHIP_WITHOUT and choice not in _offered_values(q):
         raise NotACandidate(f"{choice!r} nebolo ponúknuté pre otázku {q['id']}")
 
 
@@ -779,6 +799,18 @@ def _apply_dl_item(conn, cfg, q: dict, choice: str, by: str) -> dict:
     way `hold.py`'s own docstring already explains for its `pipeline` import."""
     if not choice:
         return {}
+    if choice == DL_ITEM_SHIP_WITHOUT:
+        # #365: "nemá kartu — pošli bez tejto položky". Teach NOTHING (there is genuinely no
+        # card) — the skip is durably recorded on THIS answered question row
+        # (`{"choice": ship_without}`, already committed by the caller) and read back by
+        # `dl_document._skip_answered_item_keys` on the reprocess, so the line is shipped
+        # WITHOUT it. Then give the document its second chance to finish once every sibling
+        # question is answered — it now ships PARTIAL, human-confirmed, with the honest
+        # "EDI šlo BEZ nich" message. Lazy `dl_worker` import, same reason as the real-pick
+        # path below.
+        from . import dl_worker
+        released = dl_worker.release_for_question(conn, cfg, q["id"])
+        return {"released": released, "shipped_without": True}
     payload = q.get("payload") or {}
     supplier_ean = payload.get("supplier_ean", "")
     card = next((c.get("label", "") for c in (q.get("candidates") or [])
