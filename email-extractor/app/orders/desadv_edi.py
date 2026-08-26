@@ -132,8 +132,12 @@ _MASS_G_RE = re.compile(r"(\d+)\s*g(?![a-z])", re.IGNORECASE)
 
 # R84.2 (#366): tonne-unit tokens. 1 ton == 1000 kg. Kept as an EXACT-token set (never
 # a substring/prefix match) so a piece unit like "kt" (kart\u00f3n), "ba", or "kus" can never
-# be misread as a tonne and multiplied by 1000.
-_TON_UNITS = {"t", "ton", "tona", "tony", "tonne", "tonnes"}
+# be misread as a tonne and multiplied by 1000. Covers Slovak (`ton`/`tona`/`tony`/
+# `tonu`), Czech (`tuna`/`tuny`/`tunu`/`tun` \u2014 real DL wording carries Czech spelling,
+# e.g. the observed `balen\u00ed` unit) and the English form \u2014 none collide with any observed
+# real unit (`ks`/`ba`/`kg`/`kt`/`kus`/`balen\u00ed`/\u2026), so extending the set is collision-free.
+_TON_UNITS = {"t", "ton", "tona", "tony", "tonu", "tonne", "tonnes",
+              "tuna", "tuny", "tunu", "tun"}
 
 
 def _to_win1250(text) -> str:
@@ -368,10 +372,12 @@ def generate(data: dict, sklad_by_gtin: dict, cena_by_gtin: dict) -> Desadv:
             out_qty, unit_price = qty, up
 
         # W11 explicit contract: the LIN unit column keeps the item's ORIGINAL unit
-        # text unchanged in every branch except the liquid-multipack one, which forces
-        # 'L' — ORION keys the import on the GTIN card, not on this text, so it is
-        # informational only, but a future reader must not have to reverse-engineer
-        # that from the JS the way the original node left it implicit.
+        # text unchanged EXCEPT in the two branches that set `override_unit` — the
+        # liquid-multipack branch (forces 'L') and the R84.2 tonne branch (forces 'kg',
+        # since the quantity was converted to kg). ORION keys the import on the GTIN
+        # card, not on this text, so it is informational only, but a future reader must
+        # not have to reverse-engineer that from the JS the way the original node left
+        # it implicit.
         final_unit = override_unit or unit
 
         # R85 PRICE FALLBACK, after conversion so units line up: catalog `cena` (>0)

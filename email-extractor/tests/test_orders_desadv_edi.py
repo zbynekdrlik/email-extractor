@@ -222,11 +222,30 @@ def test_a_non_ton_unit_like_kt_is_never_mistaken_for_ton():
     assert lin[108:111] == "kt "
 
 
+def test_ton_beats_a_per_piece_mass_on_a_kg_tracked_card():
+    """A tonne is 1000 kg regardless of any per-piece `mass` on the card, so the tonne
+    branch MUST win over the mass rung — a "2 ton" line on a card carrying mass 25 must
+    ship 2000 kg, never 2 x 25 = 50 kg. Pins the documented branch ordering (a refactor
+    that moved the tonne rung below the mass rung would otherwise leave every other test
+    green)."""
+    data = {
+        "customerEanEdi": "2000000000099", "customerName": "X", "docNumber": "1",
+        "orderNumber": "1", "deliveryDate": "26.08.2026",
+        "items": [{"gtin": "1", "name": "Múka 25 kg", "supplierName": "Múka 25 kg",
+                  "quantity": 2, "mass": 25, "unit": "ton", "totalPrice": 0,
+                  "unitPrice": 0}],
+    }
+    got = desadv_edi.generate(data, {"1": "100"}, {})
+    lin = got.content.split("\r\n")[1]
+    assert lin[96:108] == "    2000.000"   # 2 ton -> 2000 kg, NOT 2 x 25 = 50
+    assert lin[108:111] == "kg "
+
+
 def test_is_ton_unit_recognizes_tonne_forms_and_rejects_lookalikes():
-    for u in ["ton", "TON", " ton ", "t", "T", "tona", "tony", "tonne", "tón", "Tón",
-              "ton."]:
+    for u in ["ton", "TON", " ton ", "t", "T", "tona", "tony", "tonu", "tonne", "tón",
+              "Tón", "ton.", "tuna", "tuny", "tunu", "tun", "TUNA"]:
         assert desadv_edi._is_ton_unit(u), f"expected ton: {u!r}"
-    for u in ["kg", "ks", "kt", "ba", "kus", "g", "l", "", "to", None]:
+    for u in ["kg", "ks", "kt", "ba", "kus", "balení", "g", "l", "", "to", None]:
         assert not desadv_edi._is_ton_unit(u), f"expected NOT ton: {u!r}"
 
 
