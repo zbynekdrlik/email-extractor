@@ -324,15 +324,27 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # supplier reached here (it HAS a catalog match) it is the safety-override path. #365: a
     # line the sklad already said "pošli bez nej" for is filtered out (`pending_asks`), so it
     # is never re-asked on reprocess.
+    #
+    # #365 review finding: the HOLD gate keys on lines that ACTUALLY have a board question —
+    # NOT merely on "unmatched". `ask_dl_item` REFUSES to ask (returns None) for a line whose
+    # wording is already human-taught yet still comes back unmatched (the #236 R75/R74
+    # tripwire class) or whose name is blank — holding such a line would be a permanent
+    # DEAD-END (no question row ⟹ `release_for_question` is unreachable ⟹ stuck forever, a
+    # regression on the pre-#365 partial-ship). So only a line that got a real qid (a fresh
+    # question, OR an existing open one it deduped onto) is `held`; an ask-refused line is
+    # excluded from the EDI and the document ships partial exactly as before.
+    held_items: list[dict] = []
     if not shadow:
         for item, recalled, note in pending_asks:
             cands = dl_match.candidates(item.get("name", ""), catalog,
                                         memory_gtin=(recalled.gtin if recalled else ""))
-            teach.ask_dl_item(conn, message["message_id"], supplier_decision.ean_edi,
-                              supplier_decision.name, item.get("name", ""),
-                              item.get("quantity"), item.get("unit", ""), cands,
-                              delivery_date=delivery_date, reason=note,
-                              catalog_gtins=catalog_gtins)
+            qid = teach.ask_dl_item(conn, message["message_id"], supplier_decision.ean_edi,
+                                    supplier_decision.name, item.get("name", ""),
+                                    item.get("quantity"), item.get("unit", ""), cands,
+                                    delivery_date=delivery_date, reason=note,
+                                    catalog_gtins=catalog_gtins)
+            if qid is not None:
+                held_items.append(item)
 
     header = {"customerName": supplier_decision.name,
              "customerEanEdi": supplier_decision.ean_edi}
@@ -381,19 +393,27 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                "price_substitutions": built.price_substitutions,
                "items": _shipped_items(decisions)}
 
-    # #365: a shippable document (`can_create`) that still has an unmatched warehouse-relevant
-    # item AWAITING a board answer is HELD — never partial-shipped. No claim, no upload: the
-    # ORION document is never sent incomplete (the msg 8804 / question 101 incident). The
-    # dl_item question is already raised above; here we post the ❗ "potrebuje kontrolu /
-    # Rieš na nástenke" message (the SAME `build_review` shape a `can_create=False` document
-    # uses, and the price-mismatch check uses) and return a `review` outcome — `messages`
-    # ends processed/review, and answering the question re-runs the whole message
+    # #365: a shippable document (`can_create`) that still has a warehouse-relevant item
+    # AWAITING a board answer is HELD — never partial-shipped. No claim, no upload: the ORION
+    # document is never sent incomplete (the msg 8804 / question 101 incident). The dl_item
+    # question is already raised above; here we post the ❗ "potrebuje kontrolu / Rieš na
+    # nástenke" message (the SAME `build_review` shape a `can_create=False` document uses, and
+    # the price-mismatch check uses) and return a `review` outcome — `messages` ends
+    # processed/review, and answering the question re-runs the whole message
     # (`release_for_question`) so a taught card ships the COMPLETE EDI, while a "pošli bez nej"
     # answer (filtered out of `pending_asks` above) ships it partial-yet-human-confirmed.
-    # A document whose only unmatched items are ALL already skip-answered has an empty
-    # `pending_asks` and falls straight through to the normal ship below.
-    if pending_asks:
-        held_names = [item.get("name", "") for item, _r, _n in pending_asks]
+    #
+    # #365 review finding: skip the hold when the document is ALREADY on ORION
+    # (`already_sent` — a pre-#365 partial ship, or a doc still carrying a second pending line
+    # after an earlier ship). Holding it would post a misleading "NEnahráva do ORIONu" while
+    # the doc IS in ORION; falling through lets `claim_send_or_identify` recognise the
+    # confirmed claim and log a duplicate (no re-upload, no false hold message). `already_sent`
+    # is a read-only check (the same one the shadow branch above uses). A document whose only
+    # unmatched items are all skip-answered (or ask-refused) has an empty `held_items` and
+    # falls straight through to the normal ship/duplicate handling below.
+    if held_items and not desadv.already_sent(conn, supplier_decision.ean_edi,
+                                              built.doc_number):
+        held_names = [item.get("name", "") for item in held_items]
         reason = _hold_review_reason(held_names)
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, supplier_decision.name, built.doc_number, delivery_date, from_addr,

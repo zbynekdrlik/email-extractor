@@ -1077,6 +1077,100 @@ def test_a_document_with_ALL_items_matched_still_ships_normally_no_hold(pg, tmp_
     assert row[1] == "ok", "a clean full ship stays 'ok', not 'review'"
 
 
+def test_a_human_taught_but_still_unmatched_line_ships_partial_not_a_deadend_hold(
+        pg, tmp_path):
+    """#365 review finding: a line whose wording is already human-taught (so `ask_dl_item`
+    REFUSES to ask) yet still comes back unmatched (the #236 R75 lexical-gap class — a
+    confident model pick that trips the tripwire, which bypasses the memory rescue) must NOT
+    become a permanent DEAD-END hold: with no question row, `release_for_question` is
+    structurally unreachable and the doc would strand forever. It ships PARTIAL (the line
+    excluded), exactly as pre-#365 — the hold is reserved for board-resolvable lines."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    # The wording is human-taught to a valid catalog GTIN → ask_dl_item's recalled.human
+    # pre-check refuses to ask for it.
+    dl_memory.remember(pg, SUPPLIER_EAN, "Úplne iný produkt", ITEM_GTIN, "Rožok 50g",
+                       "2026-08-10", source="human")
+    doc = _doc(total=8.0, items=[
+        {"name": "Rožok 50g", "quantity": 10, "unit": "ks", "unitPrice": 0.5,
+         "totalPrice": 5.0},
+        {"name": "Úplne iný produkt", "quantity": 3, "unit": "ks", "unitPrice": 1.0,
+         "totalPrice": 3.0}])
+    # The model is CONFIDENT on the taught line (so R73 memory-rescue does NOT fire) but its
+    # pick trips the R75 lexical tripwire → gtin=None, unmatched (the #236 class).
+    client = FakeClient({
+        "dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+        "dl_item": [ITEM_MATCHED,
+                   {"gtin": ITEM_GTIN, "matchedCatalogName": "Rožok 50g",
+                    "matchConfidence": 0.97, "matchReason": "istý, no odlišné slová"}]})
+    uploaded = []
+    n = dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client,
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name))
+    assert n == 1
+    assert len(uploaded) == 1, "#365: an ask-refused line ships partial, never a dead-end hold"
+    assert _dl_question_count(pg) == 0, "no board question was raised (ask refused) → not held"
+    # The R75-tripwire line is still visible in order_items — never silently misclassified.
+    assert (None, "llm_sure_lexical_gap") in pg.execute(
+        "SELECT gtin, rule FROM order_items").fetchall()
+
+
+def test_answering_a_held_dl_item_also_releases_a_deduped_same_sender_sibling(pg, tmp_path):
+    """#365 review finding: two messages from the SAME supplier with the SAME unknown wording
+    — the second's `dl_item` question DEDUPES onto the first's (no own `order_questions` row).
+    Answering the first's question must ALSO re-queue the second (`_release_stuck_siblings`,
+    now fired for dl_item too), or the second strands FOREVER now that it HOLDS instead of
+    partial-shipping."""
+    _snapshot(pg)
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    items = [{"name": "Rožok 50g", "quantity": 10, "unit": "ks", "unitPrice": 0.5,
+              "totalPrice": 5.0, "vatRate": 10},
+             {"name": "Neznámy nápoj XYZ", "quantity": 6, "unit": "ks", "unitPrice": 2.0,
+              "totalPrice": 12.0, "vatRate": 10}]
+    _dl_ans = [ITEM_MATCHED, {"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                             "matchReason": "žiadna zhoda"}]
+    # M1 held — question Q raised, tied to dlA.
+    _msg(pg, mid="dlA")
+    _attach(pg, tmp_path, "dlA")
+    up_a = []
+    dl_worker.tick(pg, cfg, client=FakeClient(
+        {"dl_documents": [_bev_doc(doc_number="0100000060", items=items)],
+         "dl_supplier": [SUPPLIER_MATCHED], "dl_item": list(_dl_ans)}),
+        upload=lambda c, name, content, dir_override=None: up_a.append(name))
+    assert up_a == []
+    # M2 — same supplier, same wording. Its ask dedupes onto Q, so it has NO own question row,
+    # yet it HOLDS (the line has a board question, tied to dlA).
+    _msg(pg, mid="dlB")
+    _attach(pg, tmp_path, "dlB")
+    up_b = []
+    dl_worker.tick(pg, cfg, client=FakeClient(
+        {"dl_documents": [_bev_doc(doc_number="0100000061", items=items)],
+         "dl_supplier": [SUPPLIER_MATCHED], "dl_item": list(_dl_ans)}),
+        upload=lambda c, name, content, dir_override=None: up_b.append(name))
+    assert up_b == [], "M2 is also held"
+    assert pg.execute(
+        "SELECT count(*) FROM order_questions WHERE message_id='dlB'").fetchone()[0] == 0, \
+        "M2's ask deduped onto M1's question — no own row"
+    assert pg.execute(
+        "SELECT processed, proc_status FROM messages WHERE message_id='dlB'").fetchone() \
+        == (True, "review")
+    # Answer Q (tied to dlA) with a card → dlA ships; dlB must be re-queued, not stranded.
+    qid = pg.execute("SELECT id FROM order_questions WHERE message_id='dlA' "
+                     "AND kind='dl_item'").fetchone()[0]
+    dl_memory.remember(pg, SUPPLIER_EAN, "Neznámy nápoj XYZ", ITEM_GTIN, "Rožok 50g",
+                       "2026-08-10", source="human")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+               (Json({"choice": ITEM_GTIN}), qid))
+    dl_worker.release_for_question(pg, cfg, qid, client=FakeClient(
+        {"dl_documents": [_bev_doc(doc_number="0100000060", items=items)],
+         "dl_supplier": [SUPPLIER_MATCHED], "dl_item": list(_dl_ans)}),
+        upload=lambda *a, **k: None)
+    assert pg.execute(
+        "SELECT processed FROM messages WHERE message_id='dlB'").fetchone()[0] is False, \
+        "#365: the deduped sibling is re-queued into the claim pool, never stranded forever"
+
+
 def test_looks_like_correction_matches_both_real_265_incidents():
     assert dl_worker._looks_like_correction("OPRAVA HMOTNOSTI", "")
     assert dl_worker._looks_like_correction(
