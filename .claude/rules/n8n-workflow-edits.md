@@ -639,3 +639,51 @@ partial-yet-human-confirmed. Reusable design points (all cost a review round to 
   grep the served ASK_DL_HTML for the button text (proves the template deployed). Both dl_item
   card renderers were edited (ASK_DL_HTML `dlItemQuestionCard` + DASH_HTML's admin generic block) —
   template hashes DASH/ASK/ASK_DL re-pinned (`# airuleset:secret-ok` for the hash blob).
+## `desadv_edi.generate()`'s R84 ladder normalizes a line to the CARD's tracking unit —
+## add a new unit FORM as its own exact-token branch scoped to kg-tracked, never a
+## supplier hack; the catalog `cena` is €/kg so a per-ton→per-kg conversion divides the
+## LINE price only, never `cat_price` (#366, 2026-08-26)
+
+The DESADV LIN quantity/price must be in the card's OWN tracking unit: **kg for a
+kg-tracked card (`sklad == "100"`), pieces otherwise.** `generate()`'s R84 ladder
+(inside `elif is_kg_tracked:`) converts the extracted (quantity, unit) into kg. Before
+#366 it knew only two rungs — `unit == "kg"` (identity) and per-piece `mass > 0`
+(`qty × mass`) — with an `else` that left the quantity UNCONVERTED and only
+`log.warning`ed. So a **tonne** delivery (`unit` = `"ton"`/`"t"`, mass blank — the norm
+for bulk flour/salt cards, which carry a WEIGHT-NEUTRAL name + blank `mass` per the
+"Great" note above) fell into that `else` and shipped `qty` as-is → ORION imported e.g.
+`2 kg` instead of `2000 kg` (live msg 8700, warehouse "2000kg"; ≥2 suppliers — HK LOAN
+flour + a salt supplier using `t`; 12 `ton` + 3 `t` lines). Fix = a general ton→kg rung
+(`_TON_UNITS` exact-token set + `_is_ton_unit()`, `out_qty = qty*1000`,
+`unit_price = up/1000`, `override_unit = "kg"`), checked BEFORE the kg/mass rungs (a
+tonne is 1000 kg regardless of any per-piece mass), scoped to kg-tracked cards.
+
+Reusable rules any FUTURE unit/quantity work on `desadv_edi.py` should follow:
+- **The rule is keyed on the CARD's unit (kg-tracked), never on a supplier/card name** —
+  it must be general (the ticket's own requirement, and the bug spanned ≥2 suppliers).
+- **A unit-token matcher is EXACT-token (diacritic-folded via `_to_win1250`, `.rstrip(".")`),
+  never a substring/prefix** — the real DL unit vocabulary includes `kt` (kartón), `ba`,
+  `ks`, `kus`, `balení` (Czech spelling occurs in real data), any of which a loose match
+  would corrupt. Cover Slovak AND Czech inflections (`ton`/`tona`/`tony`/`tonu` +
+  `tuna`/`tuny`/`tunu`/`tun`) — a missed form silently re-ships the ×1000 error.
+- **The catalog `cena` (`cena_by_gtin`) is stored €/kg for a kg-tracked card** (verified:
+  flour 0.368, salt 0.242 — €/ton would be impossible). So a per-ton→per-kg conversion
+  divides the LINE's own extracted price by 1000, but the R85 fallback substitutes
+  `cat_price` UNDIVIDED. Doing the conversion BEFORE R85 keeps its `cat_price*5 /
+  cat_price/5` comparison apples-to-apples (both €/kg).
+- **`generate()` is byte-pinned** against `fixtures/desadv_reference.json` — a new unit
+  branch is safe only because no fixture case uses that unit; the parity test must still
+  pass. Regression coverage for an EDI-generation bug lives in `test_orders_desadv_edi.py`
+  (direct `generate()` assertions on the LIN field slices: price `[82:91]`, qty
+  `[96:108]`, unit `[108:111]`), NOT the DL corpus — `dl_evaluate` scores the MATCHING
+  decisions (extracted qty/unit), which are UPSTREAM of `generate()`, so the corpus is
+  structurally blind to a byte-generation bug (same class as the #247/#205 unit-test note).
+
+**Ground-truth check for any "wrong quantity/price in ORION" DL incident — read the
+actual EDI BYTES, don't infer from `order_runs`.** A READ-ONLY container SFTP probe using
+the add-on's own `upload._connect(cfg)` + `sftp.open(path,"r").read()` reads the shipped
+`DESADV_*` file (in `in_DL` if still queued, or `in\archCodex` once imported, tolerating
+the `Z-`/`Z-Z-` wire prefix). Parse the LIN fixed-width fields at the offsets above to see
+exactly what ORION received (qty/price/unit) vs what it should be. `order_runs.result` shows
+the pre-EDI decision (extracted `quantity: 2, unit: ton`) but NOT the shipped bytes — the
+file itself is the only proof of the ×1000. Never write/rename/delete on ORION.
