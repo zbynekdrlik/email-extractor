@@ -133,7 +133,23 @@ def _read_attachments(cfg, message_id: str, conn) -> list[dict]:
 # --- announced-vs-attached (spec §4) ----------------------------------------
 
 def _subject_doc_numbers(subject: str) -> list[str]:
-    return [dl_extract.strip_lt_prefix(m) for m in _SUBJECT_DOC_RE.findall(subject or "")]
+    # #371: Lunys' IS KARAT printer stamps EVERY print of a delivery note with the
+    # SAME <digits>LT<digits> shape twice — the real doc number after " - ", and a
+    # print-job id wrapped in parentheses right before it (which changes between the
+    # 1st and 2nd print of the SAME delivery, e.g. "(2610LT0100251629) - ...
+    # 2610LT0100251632" then "(2610LT0100252115) - ... 2610LT0100251632"). A token
+    # whose whole match is immediately enclosed by "(" and ")" is that print-job id,
+    # never a real document number — skip it. A bare (non-parenthesized) token, incl.
+    # the "Potvrdený DL: <n>" confirmation shape or a genuine multi-document subject,
+    # is unaffected.
+    subject = subject or ""
+    out = []
+    for m in _SUBJECT_DOC_RE.finditer(subject):
+        start, end = m.span()
+        if start > 0 and end < len(subject) and subject[start - 1] == "(" and subject[end] == ")":
+            continue
+        out.append(dl_extract.strip_lt_prefix(m.group(0)))
+    return out
 
 
 # --- one message (R1-R17) ---------------------------------------------------
