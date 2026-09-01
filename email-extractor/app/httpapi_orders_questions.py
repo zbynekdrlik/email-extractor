@@ -167,6 +167,23 @@ def register(app: Flask, deps: Deps) -> None:
         rollback-able transaction with anything after it).
         """
         from .orders import hold, teach
+        if body.get("not_order"):
+            # #369: the THIRD escape — "toto vôbec nie je objednávka, takéto maily
+            # ignoruj". Teaches a `mail_rules` ignore rule keyed on this message's
+            # (sender, subject-shape) so future mail of the same shape is short-circuited
+            # before extraction (`pipeline._mail_rule`). Same two-connection discipline as
+            # the "Neviem" path below: the guarded answer + rule write commit in
+            # `deps.db_tx()`, the (never-shipping) release runs afterward on autocommit.
+            try:
+                with deps.db_tx() as c:
+                    answered = teach.mark_customer_not_order(c, qid, by="sklad")
+            except teach.AlreadyAnswered as e:
+                return jsonify(error=str(e)), 409
+            except teach.NotACandidate as e:
+                return jsonify(error=str(e)), 400
+            with deps.db() as c2:
+                released = hold.release_unknown_customer(c2, deps.cfg, qid)
+            return jsonify(ok=True, question=answered, released=released, not_order=True)
         if isinstance(body.get("new_customer"), dict):
             return _api_orders_answer_new_customer(qid, q, body["new_customer"])
         unknown = bool(body.get("unknown"))
