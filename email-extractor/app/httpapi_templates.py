@@ -280,6 +280,10 @@ async function loadAsk(){const L=document.getElementById('list');
         bt.onclick=()=>answerCustomerIt(q.id,c.ean_edi,c.name||'');acts.appendChild(bt)}
       const ub=document.createElement('button');ub.className='btn';ub.textContent='Neviem, kto to je';
       ub.onclick=()=>answerCustomerIt(q.id,'','',true);acts.appendChild(ub);
+      // #369: the third escape — not an order at all, teach a mail_rules ignore rule.
+      const nob=document.createElement('button');nob.className='btn';
+      nob.textContent='Nie je to objednávka — takéto maily ignoruj';
+      nob.onclick=()=>answerCustomerNotOrderIt(q.id);acts.appendChild(nob);
       head.appendChild(who);head.appendChild(why);head.appendChild(acts);
       el.appendChild(head);L.appendChild(el);continue}
     // #164/#202: ONE generic renderer for every OTHER new kind (mail/date/line, and DL's
@@ -354,7 +358,7 @@ async function loadTaught(token){const L=document.getElementById('list');let d;
   for(const t of d.items){const el=document.createElement('div');el.className='row';
     const w=document.createElement('div');const b=document.createElement('b');
     b.textContent=t.wording;w.appendChild(b);
-    w.appendChild(document.createTextNode(' \u2192 '+(t.answer_card||t.answer_gtin)));
+    w.appendChild(document.createTextNode(' \u2192 '+(t.answer_card==='not_order'?'nie je objedn\u00e1vka':(t.answer_card||t.answer_gtin))));
     const who=document.createElement('div');who.className='sub';
     who.textContent=(t.customer_name||t.customer_ean);
     const acts=document.createElement('div');acts.className='acts';
@@ -372,6 +376,9 @@ async function teachIt(qid,gtin,card){try{
   catch(e){alert(e.message||'chyba')}}
 async function answerCustomerIt(qid,ean_edi,name,unknown){try{await api('/api/orders/question/'+qid+'/answer',
   {method:'POST',body:JSON.stringify(unknown?{unknown:true}:{ean_edi:ean_edi,name:name})});
+  await loadAsk();await askBadgeRefresh()}catch(e){alert(e.message||'chyba')}}
+async function answerCustomerNotOrderIt(qid){try{await api('/api/orders/question/'+qid+'/answer',
+  {method:'POST',body:JSON.stringify({not_order:true})});
   await loadAsk();await askBadgeRefresh()}catch(e){alert(e.message||'chyba')}}
 async function answerGenericIt(qid,choice){try{await api('/api/orders/question/'+qid+'/answer',
   {method:'POST',body:JSON.stringify({choice:choice})});await loadAsk();await askBadgeRefresh()}
@@ -796,9 +803,17 @@ function customerQuestionCard(q){
   const nb=el('button',null,'Neviem, kto to je');
   nb.style.borderColor='#d0d7de';nb.style.background='#f6f8fa';nb.style.color='#57606a';
   nb.onclick=()=>answerCustomer(q.id,'','',true);c.appendChild(nb);
+  // #369: the third escape — this is not an order at all (a supplier-eshop confirmation),
+  // teach a mail_rules ignore rule so mail of this shape stops asking.
+  const no=el('button',null,'Nie je to objednávka — takéto maily ignoruj');
+  no.style.borderColor='#d0d7de';no.style.background='#f6f8fa';no.style.color='#57606a';
+  no.onclick=()=>answerCustomerNotOrder(q.id);c.appendChild(no);
   return c}
 async function answerCustomer(qid,ean_edi,name,unknown){try{await api('/api/orders/question/'+qid+'/answer',
   {method:'POST',body:JSON.stringify(unknown?{unknown:true}:{ean_edi:ean_edi,name:name})});await load()}
+  catch(e){alert(e.message||'chyba')}}
+async function answerCustomerNotOrder(qid){try{await api('/api/orders/question/'+qid+'/answer',
+  {method:'POST',body:JSON.stringify({not_order:true})});await load()}
   catch(e){alert(e.message||'chyba')}}
 async function load(){const mine=++render;let d,t;
   try{d=await api('/api/orders/questions');t=await api('/api/orders/taught')}catch(e){return}
@@ -826,7 +841,7 @@ async function load(){const mine=++render;let d,t;
     W.appendChild(c)}
   if(t.items.length){W.appendChild(el('h2',null,'Naposledy naučené'));
     for(const x of t.items){const r=el('div','t');
-      r.appendChild(el('span',null,x.wording+' → '+(x.answer_card||x.answer_gtin)));
+      r.appendChild(el('span',null,x.wording+' → '+(x.answer_card==='not_order'?'nie je objednávka':(x.answer_card||x.answer_gtin))));
       const b=el('button',null,'vrátiť');b.onclick=()=>undo(x.id);r.appendChild(b);W.appendChild(r)}}}
 async function teach(qid,gtin,card){try{
   const body={gtin:gtin,card:card};

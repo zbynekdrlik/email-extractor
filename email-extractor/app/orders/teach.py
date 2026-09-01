@@ -212,11 +212,17 @@ def undo(conn, qid: int) -> dict:
             snapshot.forget_customer_email(
                 conn, q["answer_gtin"], (q.get("context") or {}).get("sender_email", ""))
             snapshot.rebuild_from_overrides(conn)
+        # #369: a `not_order` customer answer (`answer_card='not_order'`) also created a
+        # `mail_rules` ignore row — retract only the one THIS question created (mirrors
+        # `_undo_mail`'s own `question_id`-scoped delete). A no-op for every other customer
+        # answer (a plain pick / "Neviem" never writes a mail_rules row), so it is safe to
+        # run unconditionally rather than branch on the marker.
+        conn.execute("DELETE FROM mail_rules WHERE question_id = %s", (qid,))
         conn.execute(
             """UPDATE order_questions
                   SET status = 'open', answer_gtin = NULL, answer_card = NULL,
-                      answered_by = NULL, answered_at = NULL, reminder_sent_at = NULL,
-                      escalated_at = NULL
+                      answer = NULL, answered_by = NULL, answered_at = NULL,
+                      reminder_sent_at = NULL, escalated_at = NULL
                 WHERE id = %s""", (qid,))
         log.warning("customer teaching taken back for question %s (%s)", qid,
                     (q.get("context") or {}).get("sender_email", ""))
@@ -356,6 +362,82 @@ def answer_customer(conn, qid: int, ean_edi: str, name: str, by: str = "") -> di
             f"question {qid} was answered on {lost.get('answered_at')} with "
             f"{lost.get('answer_gtin')}")
     log.info("customer question %s answered: %r (%s) by %s", qid, ean_edi, name, by)
+    return get(conn, qid) or {}
+
+
+# #369: the THIRD escape on a customer question — "toto vôbec nie je objednávka, takéto
+# maily ignoruj". A supplier-eshop purchase confirmation (odbyt@karmen.sk) has the SHAPE
+# of an order, so extraction succeeds, but the sender is not a customer → `ask_customer`
+# re-opens an unanswerable customer question every week. This mirrors `_apply_mail`'s own
+# `not_order` branch (a `mail` question CANNOT be raised here — extraction DID find an
+# order, so the mail-question "is this even an order?" path is never reached; the dead end
+# is on the `customer` kind instead). A customer question's payload carries no
+# sender_norm/subject_key (only `context.sender_email`), so BOTH are computed here at apply
+# time from the triggering message's own `messages` row — the same `subject_key` folding
+# (dates/order-numbers stripped) that keeps ONE taught rule matching every future mail of
+# the same shape (never just the sender, which would suppress a genuine order too).
+def mark_customer_not_order(conn, qid: int, by: str = "") -> dict:
+    """Settle a `customer` question as "not an order at all" and teach a `mail_rules`
+    `ignore` rule so future mail of the same (sender, subject-shape) is short-circuited
+    BEFORE extraction (`pipeline._mail_rule`). Never ships anything — the held order the
+    question was tied to is released to `review` by the caller (`hold.release_unknown_
+    customer`, the SAME non-ship branch "Neviem" takes).
+
+    The answer is marked `answer_card='not_order'` (+ `answer={"choice":"not_order"}`) so
+    `undo` can distinguish it from a plain "Neviem" (`answer_card=''`) and retract the rule.
+    The `status='open'` WHERE-clause guards the write itself: a concurrent human answer to
+    the same question must win, so a 0-row update raises `AlreadyAnswered` (same discipline
+    as `answer_customer`).
+    """
+    from . import report
+    q = get(conn, qid)
+    if not q:
+        raise NotACandidate(f"question {qid} does not exist")
+    if q.get("kind") != "customer":
+        raise NotACandidate(f"question {qid} is not a customer question")
+    row = conn.execute(
+        """UPDATE order_questions
+              SET status = 'answered', answer_gtin = '', answer_card = 'not_order',
+                  answer = %s, answered_by = %s, answered_at = now()
+            WHERE id = %s AND status = 'open'
+            RETURNING id""",
+        (Json({"choice": "not_order"}), by or "", qid)).fetchone()
+    if not row:
+        lost = get(conn, qid) or {}
+        raise AlreadyAnswered(
+            f"question {qid} was answered on {lost.get('answered_at')} with "
+            f"{lost.get('answer_card')}")
+    msg = conn.execute(
+        "SELECT from_addr, subject FROM messages WHERE message_id = %s",
+        (q["message_id"],)).fetchone()
+    from_addr, subject = (msg[0] or "", msg[1] or "") if msg else ("", "")
+    sender_norm, key = _sender_norm(from_addr), subject_key(subject)
+    # Defensive (review #369): a customer question always references a real message, so a
+    # blank sender AND blank subject is unreachable in practice — but a degenerate
+    # `('', '', 'ignore')` rule would ignore any future truly-blank-header mail, so never
+    # write it. The question is still closed + the message marked processed above; only the
+    # (unteachable) rule is skipped.
+    if sender_norm or key:
+        conn.execute(
+            """INSERT INTO mail_rules (sender_norm, subject_key, action, question_id)
+                   VALUES (%s, %s, 'ignore', %s)
+               ON CONFLICT (sender_norm, subject_key)
+                   DO UPDATE SET action = EXCLUDED.action,
+                                 question_id = EXCLUDED.question_id
+               """, (sender_norm, key, qid))
+    else:
+        log.warning("customer question %s not_order: message %r has no sender/subject — "
+                    "no mail_rules taught", qid, q["message_id"])
+    conn.execute(
+        """UPDATE messages SET processed = true, processed_at = now(),
+               processed_by = 'ai_orders_mail_rule', processing_at = NULL
+            WHERE message_id = %s""", (q["message_id"],))
+    report.log_event(conn, q["message_id"], stage="review", status="ok",
+                     outcome="Sklad potvrdil: toto nie je objednávka",
+                     detail={"question_id": qid, "mail_rule": "ignore",
+                             "from_kind": "customer"})
+    log.info("customer question %s marked not_order by %s (rule %r/%r)",
+             qid, by, sender_norm, key)
     return get(conn, qid) or {}
 
 
