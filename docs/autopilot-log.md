@@ -3937,3 +3937,15 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
 - Deploy 0.9.122 verified live: /health + DOM v0.9.122; the skip button RENDERS on the REAL
   question-101 dl_item card (`/otazky-dl`), read-only, no rows created, no Odoo post.
 - #365 left OPEN — gatekeeper closes with deploy evidence.
+
+## 2026-09-01 — #369 customer-question not-order escape (0.9.124)
+
+Skladníčka (Odoo objednávky, msg 54683604): Karmen eshop potvrdenia = nákupy vlastnej
+predajne MIX, „nedá sa to tam dopísať". Root cause: customer otázka nemala únik „nie je
+to objednávka" (starý n8n tieto maily preskakoval, Python engine ich extrahuje). Fix
+#369/PR #370: tlačidlo na oboch card rendereroch → mail_rules ignore (kľúč z messages
+riadku), held order sa uvoľní bez shipu, undo maže rule. Živá otázka 117 zodpovedaná
+novou cestou (rule: odbyt@karmen.sk | karmen nová objednávka | ignore). Otázka 118
+(neznámy zákazník zo školskej jedálne) vyriešená ops-cestou: zákazník existoval v CODEXe
+(EAN cez raw.firma dev2 DuckDB read-only), doplnený cez new_customer API otázky — vzor:
+pred „vytvor v CODEXe" krokom vždy najprv over raw.firma, či už neexistuje.

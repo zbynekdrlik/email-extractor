@@ -267,6 +267,12 @@ wiring via a monkeypatched `waitress.serve`, full request/response equivalence o
 ## Re-pinning ASK_HTML/ASK_DL_HTML checksums trips `block-sensitive-staging.sh` as a
 ## false-positive "secret" — bypass with `# airuleset:secret-ok` (#306/#307, 2026-08-14)
 
+**#369 (2026-09-01): a change to a card renderer inside the SHARED `_ASK_HTML_TEMPLATE`
+(e.g. `customerQuestionCard`) that ALSO touches DASH_HTML's own duplicated copy of the
+same card block changes ALL THREE pinned hashes — DASH_HTML, ASK_HTML AND ASK_DL_HTML.
+Recompute and re-pin all three, not just the two ASK-derived ones this section's recipe
+names (extend the one-liner with `DASH_HTML`).**
+
 Any legitimate change to `_ASK_HTML_TEMPLATE` (both `ASK_HTML` and `ASK_DL_HTML` derive
 from it, so BOTH hashes change) requires updating the two 64-char SHA256 values in
 `EXPECTED_TEMPLATE_SHA256`. Staging that edit is BLOCKED by
