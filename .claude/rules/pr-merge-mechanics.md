@@ -220,3 +220,53 @@ clean) and NOT a stale CANCELLED check (there is no check at all to rerun).
 - **Prevention:** never leave a `[skip ci]` commit as the LAST commit before opening/updating
   a PR — put the skip on an intermediate commit, or follow it with a normal commit, so the
   PR's head SHA always carries a runnable workflow.
+
+## A worktree lane's CODE fix can invalidate an out-of-git CORPUS case the lane could
+## not touch — the e2e-dl/e2e-orders gate catches it at integration; verify against LIVE
+## PROD ground truth before "fixing" the corpus, never reflexively green the gate (#371, PR #374)
+
+The DL corpus (`~/eval-corpus/email-extractor/dl/`) and the AI-orders corpus
+(`~/eval-corpus/email-extractor/`) live OUTSIDE git on dev2, read by the `e2e-dl`/
+`e2e-orders` CI jobs at run time (`orders-corpus.md`). A worktree-isolated lane that
+changes matching/extraction/scan behaviour physically CANNOT update those corpus
+expectations (they're not in its checkout) — so a lane whose fix changes what a corpus
+case produces passes its OWN unit tests green, but the conflict only surfaces at
+INTEGRATION, when the shared corpus gate runs against the merged code. This is the
+corpus-shaped sibling of this file's "semantically stale after a clean textual merge"
+class: no merge conflict, all unit tests green, yet the shared gate red.
+
+**Live incident:** #371 (correctly) made `dl_message._subject_doc_numbers` IGNORE a
+`(<digits>LT<digits>)` token in parentheses (the Lunys IS KARAT print-job id, which
+changes between the 1st/2nd print of the SAME delivery). The DL corpus case
+`lunys_announced_not_attached` (built 2026-08-07) had encoded the OPPOSITE
+interpretation — it read the parenthesized `0100237306` as a genuinely-missing announced
+document (expected `partial` + `announced_mismatch=['0100237306']`). After #371 the scan
+correctly returns `ok`/`[]`, so `e2e-dl` failed at integration with `GATE FAILED: 1 of 10`.
+
+**The resolution discipline (the load-bearing part):** do NOT reflexively edit the corpus
+expectation to green the gate — that is exactly the "never mark a failing case as passing"
+trap `orders-corpus.md` warns about. First decide which side is RIGHT — the lane's fix or
+the corpus case — and settle it with LIVE PROD GROUND TRUTH, not by trusting the newer
+code over the older fixture. Here the HA-box `messages`/`email_events` (read-only) proved
+#371 conclusively: msg 6394 `Potvrdený DL: 2610LT0100237291` confirms ONLY the post-dash
+(bare) number; the real uploaded DESADV was `DESADV_000423_0100237291`; `0100237306` (the
+parenthesized number) never existed as a document anywhere. So the corpus case had encoded
+a misinterpretation and was CORRECTED (status `ok`, `announced_mismatch []`, `type` +
+`why` rewritten to pin #371), the fix was NOT reverted. Had prod shown the paren number as
+a real separate DL, the correct action would have been the reverse — reworking #371, not
+the corpus.
+
+**The mechanics once the direction is settled:**
+- The corpus is outside git → edit `~/eval-corpus/email-extractor/dl/manifest.json` (a
+  small Python script, never hand-edit JSON) + `--update-baseline`, then re-run the full
+  DL corpus offline (`dl_eval_run … --require-all`, PG_DSN at an idle test-pg, LLM_CACHE_DIR
+  = the SHARED `$CORPUS/llm-cache`) to confirm N/N pass.
+- **No `--live` llm-cache re-record** when the changed behaviour is a DETERMINISTIC Python
+  step (the announced-vs-attached scan) rather than a prompt/candidate change — the model
+  extraction of the attached document is unchanged, only the manifest's `expected` moves.
+- Re-run the FAILED CI job with `gh run rerun <run-id> --failed` — it re-reads the corrected
+  corpus from `~/eval-corpus` at job time (no git push needed for the corpus itself). The
+  concurrent `pull_request` run picks up the corrected corpus on its own next e2e-dl too.
+- Record the decision + the prod evidence on the ticket (`durable-decisions-to-tickets.md`)
+  BEFORE merging — the corpus change lives outside the PR diff, so the ticket comment is the
+  only durable record of WHY a real-incident corpus case was rewritten.
