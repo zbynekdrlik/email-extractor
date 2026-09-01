@@ -277,6 +277,69 @@ should reuse this exact shape (a `list_dirs=` DI seam threaded down to the call 
 `_check_landed()`'s `True`/`False`/`None` tri-state, one bounded retry, one shared
 success tail) rather than re-deriving it.
 
+## The STATIC-orders engine got the same #239 safe-retry (#372) — but its transient
+## classification needs an EXCEPTION-TYPE check (a bare `EOFError()` has `str()==""`), and
+## its stable identity is the WHOLE filename (no timestamp), so the presence match is EXACT
+
+`static_worker._ship`'s upload except-block was the LAST place still doing the pre-#239
+thing — release the `edi_sent` claim + alert on ANY upload failure, no retry — so a
+transient SFTP failure lost a static order forever (live incident msg 8447: a bare
+`EOFError()` on `upload(KARMEN_1811_26_002.txt)`). #372 ported the exact #239 tri-state
+shape into a new `app/orders/static_retry.py`. Reusable gotchas any FUTURE upload-retry
+(or a change to this one) must keep:
+
+- **Classify a SFTP upload failure as transient by TYPE, not only `str(e)`/
+  `dl_retry.TRANSIENT_RE`.** `TRANSIENT_RE` is an n8n-world FRASE list (rate limit / socket
+  hang up / econnreset …) and structurally CANNOT match a bare `EOFError()` — `str(EOFError())`
+  is `""` (verified), and neither `EOFError("Server connection dropped")` nor
+  `ConnectionResetError("Connection reset by peer")` matches it either. So
+  `static_retry.is_upload_transient` is `isinstance(e, (EOFError, TimeoutError,
+  ConnectionError)) or _is_transient(str(e))`. Deliberately NOT `OSError` (its subclass
+  `PermissionError` is a genuine, non-retryable ORION refusal). Over-classifying "transient"
+  is the SAFE direction — the PRESENCE CHECK, not the classification, prevents a double
+  upload, so a wrongly-transient permanent failure just does one wasted check + one retry
+  and lands in the same alert+release end state as today. **The DL side (`dl_retry`) has the
+  SAME latent gap** (a DL `EOFError` upload would not retry — it classifies on `str(e)`
+  only); not fixed in #372 (out of scope, e2e-dl corpus must stay byte-identical) but port
+  the type-check there if a DL `EOFError` incident ever appears.
+
+- **The static EDI filename IS the whole stable identity — no timestamp, so the presence
+  match is EXACT, not a prefix.** `static_edi._filename` is `<PARTNER>_<orderNumber>_
+  <prevPart>.txt`, fully deterministic (unlike `edi.filename`/`desadv_edi.filename`, which
+  append `_<HHMMSSmmm>`). The presence check matches the WHOLE name in `in`/`archCodex`/
+  `unconfirmed` (static uploads to `in`, NEVER `in_DL`) via `desadv_edi.matches_wire_name`
+  (EXACT + Z-/Z-Z- tolerance) — NOT `matches_wire_prefix` (its `startswith` is load-bearing
+  for DL's varying timestamp suffix but would false-positive on a `…_007.txt.bak` ops
+  artifact here, and a static false-positive silently CONFIRMS and drops the order). If a
+  FUTURE static-name scheme adds a per-attempt component, EXACT matching breaks — switch to
+  `desadv_edi.stable_prefix`'s strip-the-varying-suffix approach.
+
+- **Reuse the Z-/Z-Z- tolerance, never a second copy.** `desadv_edi._matches_stable_prefix`
+  was promoted to public `matches_wire_prefix` (byte-identical; the private name stays a
+  working alias for `already_landed`/`desadv.has_confirmed_collision`), and the EXACT sibling
+  `matches_wire_name` lives beside it — both encode the same three wire shapes in ONE place.
+
+- **A collision guard is needed because the static name does NOT encode content/date.** A
+  same-order-number CORRECTION produces the SAME filename with different content. `static_
+  retry._name_collision` distrusts the name when ANY DIFFERENT-content `edi_sent` row occupies
+  it — **confirmed OR still-unconfirmed** (the review found the dangerous case is a run that
+  crashed BETWEEN `sftp.rename` and `confirm_sent`: its bytes are on ORION under an
+  UNCONFIRMED row, so an earlier `uploaded_at IS NOT NULL` filter would have confirmed our
+  correction off the stranger's bytes — silent loss). Our OWN row is excluded by the
+  `content_sha256 <> %s` inequality. Residual (same as `desadv.has_confirmed_collision`): an
+  occupant whose `edi_sent` row was fully DELETED is undetectable via `edi_sent` alone —
+  bounded by the manual re-send absence-proof procedure.
+
+- **One shared success tail + `_alert_and_release` only from inside an active `except`.**
+  `_finish_shipped()`/`_alert_and_release()` are extracted closures so first-try-success,
+  landed-earlier-confirm and retry-success share EXACTLY one confirm/event/digest shape (the
+  same reasoning `dl_document._finish_shipped` documents). `_alert_and_release`'s
+  `log.exception` needs the live traceback, so it is only ever called from inside an except.
+
+- **The retry-fail path still releases without a SECOND presence check** — deliberate
+  byte-parity with the DL reference (`dl_document.py`), filed as a CROSS-CUTTING follow-up
+  (#373) to fix in BOTH engines together, never diverged in one.
+
 ## A SYNTHESIZED fallback identity feeding a claim/dedup key must be STABLE across retries too (#262)
 
 The same "stable identity" principle above applies one layer EARLIER than the upload

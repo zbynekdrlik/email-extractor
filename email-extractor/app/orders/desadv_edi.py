@@ -516,7 +516,7 @@ def filename(ean_edi: str, delivery_date: str, doc_number: str, stamp: str = "")
     return f"{stable_prefix(ean_edi, doc_number)}{_date_stamp(delivery_date)}_{stamp}.txt"
 
 
-def _matches_stable_prefix(name: str, prefix: str) -> bool:
+def matches_wire_prefix(name: str, prefix: str) -> bool:
     """Tolerates R89's own upload-time `Z-` wire prefix, PLUS Communicator's separate,
     uncontrolled archCodex rename job's OWN extra `Z-` on top of that — mirrors
     `confirm.py`'s own `_decide()` tolerance EXACTLY (`wire_name in archCodex or
@@ -524,10 +524,38 @@ def _matches_stable_prefix(name: str, prefix: str) -> bool:
     no `Z-`, exactly one, or exactly two leading `Z-`s all match. Review finding: an
     earlier draft stripped an UNBOUNDED number of leading `Z-`, which is more
     permissive than confirm.py's own check despite the docstring claiming parity —
-    fixed to the exact same three-way check."""
+    fixed to the exact same three-way check.
+
+    #372: promoted from the former private `_matches_stable_prefix` so the static-orders
+    upload-retry presence check (`static_retry.check_landed`) can reuse the SAME Z-/Z-Z-
+    tolerance instead of keeping a second copy of the prefix logic — the static EDI name
+    is stable across attempts (no timestamp), so it passes its WHOLE filename here as the
+    `prefix`, matching exactly the same three ORION wire shapes a DESADV stable prefix
+    does. Behaviour is byte-identical to the old private helper (the alias below keeps the
+    DL call sites — `already_landed` here and `desadv.has_confirmed_collision` — working)."""
     return (name.startswith(prefix)
            or name.startswith(f"Z-{prefix}")
            or name.startswith(f"Z-Z-{prefix}"))
+
+
+# Back-compat alias: `already_landed` (below) and `desadv.has_confirmed_collision` both
+# call this by its original private name — keep it pointing at the SAME function so the
+# DL side sees no behaviour change whatsoever.
+_matches_stable_prefix = matches_wire_prefix
+
+
+def matches_wire_name(name: str, base: str) -> bool:
+    """EXACT (not prefix) ORION wire-name tolerance — the sibling of `matches_wire_prefix`
+    for a caller whose WHOLE filename is the stable identity (#372: `static_edi._filename`
+    has no per-attempt timestamp, so the entire name IS the identity — a presence match
+    must be the exact name, tolerating only ORION's Z-/Z-Z- archCodex rename). Prefix
+    semantics are load-bearing on the DL side (the timestamp suffix varies per attempt) but
+    would be too loose here: `startswith` would false-positive on an unrelated longer name
+    (e.g. a `…_007.txt.bak` left by manual ops on the ORION box during an incident), and a
+    static presence check that false-positives silently CONFIRMS — dropping our order. The
+    Z-/Z-Z- tolerance itself still lives in exactly ONE place (this and `matches_wire_prefix`
+    encode the same three shapes), never a third copy."""
+    return name in (base, f"Z-{base}", f"Z-Z-{base}")
 
 
 def already_landed(dirs: dict, ean_edi: str, doc_number: str) -> bool:
