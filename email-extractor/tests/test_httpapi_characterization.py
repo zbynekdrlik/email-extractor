@@ -160,12 +160,12 @@ def test_route_table_matches_the_pre_split_baseline():
 # additional protection, so `_ASK_HTML_TEMPLATE` is deliberately NOT in this dict.
 EXPECTED_TEMPLATE_SHA256 = {
     "LOGIN_HTML": "d1eb57ea9d855df8d1b580ce2fcdc8135329c9ada4eb47bc2ec78bce9e20313c",
-    # #365: re-pinned — the dl_item board card gained a "Nemá kartu — pošli bez tejto položky"
-    # button (DASH_HTML's admin generic block directly; ASK_HTML/ASK_DL_HTML via the shared
-    # _ASK_HTML_TEMPLATE's dlItemQuestionCard both derive from).
-    "DASH_HTML": "27501cd5086167a07ca5f4d6eef2a307826866539fa161c959e9238a7871fcbe",
-    "ASK_HTML": "6583839caa36d71c24c5fb1b599871ed81e8c250a51c4a0272b9b9f5899076b7",
-    "ASK_DL_HTML": "16ba141e0d99a635e1246b1fa27fa9901aae66bd1871bdf627a999b783499f96",
+    # #369: re-pinned — the customer board card gained a "Nie je to objednávka — takéto
+    # maily ignoruj" button (DASH_HTML's admin customer block directly; ASK_HTML/ASK_DL_HTML
+    # via the shared _ASK_HTML_TEMPLATE's customerQuestionCard both derive from).
+    "DASH_HTML": "8469d756eb562dd944874321bfa2e8437a0926e8ac4cb668f675d1aa7b132158",
+    "ASK_HTML": "506cf695fba0943513cacda3652f5c7c7408b4c28b8abaf8978d75dfeb9815d3",
+    "ASK_DL_HTML": "f109cade30b1186a2e24e6e0a9ff5182889a9c73f321622fafb01e43e2601bab",
     "ZNALOSTI_HTML": "9f04bd74b57f0e22b8b2e7b7810995f5955b1b7796925dd259f44b68eac598b7",
 }
 
