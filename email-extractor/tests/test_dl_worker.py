@@ -1672,9 +1672,36 @@ def test_shadow_mode_still_extracts_a_correction_mail_for_comparison(pg, tmp_pat
 
 # --- spec §4: announced-vs-attached ------------------------------------------
 
-def test_subject_doc_numbers_extracts_the_lunys_shape():
-    subj = ("IS KARAT: Tlač: Dodací list SK Signatus (2610LT0100000002) - "
-            "Dodací list SK Signatus 2610LT0100000001")
+def test_subject_doc_numbers_ignores_the_is_karat_print_job_id_first_print():
+    """#371: Lunys' 1st-print subject carries the <digits>LT<digits> shape TWICE — the
+    real DL number after the dash, and the IS KARAT print-job id in parentheses. Only
+    the number after the dash is a real document number."""
+    subj = ("IS KARAT: Tlač: Dodací list SK Signatus (2610LT0100251629) - "
+            "Dodací list SK Signatus  2610LT0100251632")
+    assert dl_worker._subject_doc_numbers(subj) == ["0100251632"]
+
+
+def test_subject_doc_numbers_ignores_the_is_karat_print_job_id_second_print():
+    """#371: the SAME delivery's 2nd print carries a DIFFERENT print-job id in
+    parentheses (251629 -> 252115) but the SAME confirmed number after the dash —
+    live proof the parenthesized token is a print-job id, not a document number."""
+    subj = ("IS KARAT: Tlač: Dodací list SK Signatus (2610LT0100252115) - "
+            "Dodací list SK Signatus  2610LT0100251632")
+    assert dl_worker._subject_doc_numbers(subj) == ["0100251632"]
+
+
+def test_subject_doc_numbers_extracts_the_confirmed_dl_shape():
+    """#371: the 3rd Lunys mail ("Potvrdený DL: <n>") carries no parenthesized id at
+    all — must still extract the confirmed number."""
+    assert dl_worker._subject_doc_numbers("Potvrdený DL: 2610LT0100251632") == \
+        ["0100251632"]
+
+
+def test_subject_doc_numbers_still_extracts_two_genuinely_announced_numbers():
+    """#371 must stay sensitive to a real 2-DL subject: a subject naming two
+    DIFFERENT documents, neither wrapped in parentheses, must still surface both —
+    the fix only excludes a PARENTHESIZED token, never a bare one."""
+    subj = "Dodacie listy 2610LT0100000002 a 2610LT0100000001"
     assert dl_worker._subject_doc_numbers(subj) == ["0100000002", "0100000001"]
 
 
@@ -1695,12 +1722,15 @@ def test_item_match_prompt_states_the_same_weight_tolerance_the_code_applies_fix
     assert f"{tolerance_pct} %" in prompt or f"{tolerance_pct}%" in prompt
 
 
-def test_announced_but_not_attached_dl_is_logged_but_not_announced(pg, tmp_path):
-    """spec §4 detection stays, but the per-mail Odoo warning was removed as noise on the
-    owner's request (#358): the subject names TWO DL numbers, only ONE PDF (and therefore
-    one extracted docNumber) ever arrives. The mismatch must NO LONGER be posted to Odoo,
-    while the internal signal — the `announced_mismatch` email_events row and a
-    `proc_status` of "partial" — is preserved unchanged."""
+def test_lunys_print_job_id_in_subject_does_not_create_a_false_announced_mismatch(
+        pg, tmp_path):
+    """#371: the exact Lunys 1st-print subject shape (an IS KARAT print-job id in
+    parentheses + the real DL number after the dash) must NOT be treated as "2
+    announced, 1 attached, 1 missing" any more — the parenthesized number is a
+    print-job id, not a document number, so a mail whose ONE attached document
+    matches the number after the dash is a clean 'ok' with no synthetic
+    announced_mismatch event at all (live prod, 2026-08-18..09-01: 11 of 17 Lunys
+    mails were falsely partial/review this exact way before this fix)."""
     _snapshot(pg)
     _msg(pg, mid="dl1",
         subject="IS KARAT: Tlač: Dodací list SK Signatus (2610LT0100000002) - "
@@ -1713,27 +1743,50 @@ def test_announced_but_not_attached_dl_is_logged_but_not_announced(pg, tmp_path)
         pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client,
         upload=lambda *a, **k: None, post=lambda c, h: posted.append(h))
 
-    # #358: the announced-but-unattached warning must NOT be posted to Odoo any more.
-    assert not [h for h in posted if "ohlásený aj doklad" in h], \
-        "the per-mail announced-mismatch Odoo warning was removed on the owner's request"
-    # the change is surgical — the DL that DID arrive still gets its own success post.
+    # the one real document still gets its own success post.
     assert any("Dodací list 0100000001" in h and "spracovaný a nahratý do ORIONu" in h
                for h in posted), \
         "the attached document's own success message must still be posted"
-    # detection is kept: the internal announced_mismatch event is still written.
+    # #371: no more phantom mismatch for the IS KARAT print-job id in parentheses.
+    ev_count = pg.execute(
+        "SELECT count(*) FROM email_events WHERE message_id='dl1' "
+        "AND stage='announced_mismatch'").fetchone()
+    assert ev_count[0] == 0, \
+        "the IS KARAT print-job id in parentheses must never be logged as a " \
+        "second announced DL"
+    row = pg.execute(
+        "SELECT proc_status FROM messages WHERE message_id='dl1'").fetchone()
+    assert row[0] == "ok", \
+        "a single matching document must roll up as ok, not partial, once the " \
+        "print-job id is excluded from the announced-vs-attached scan"
+
+
+def test_two_genuinely_announced_dl_numbers_still_mismatch_when_only_one_attached(
+        pg, tmp_path):
+    """#371 must stay sensitive to the ORIGINAL #238 case: a subject genuinely naming
+    TWO different documents (neither wrapped in parentheses), only ONE PDF attached —
+    still a real announced_mismatch, proc_status='partial'. (The #238 fixture that
+    used to pin this behaviour actually reused the Lunys IS KARAT print-job shape by
+    coincidence — see the test above; this is a fresh, non-parenthesized fixture that
+    represents a genuine multi-document subject instead.)"""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", subject="Dodacie listy 2610LT0100000002 a 2610LT0100000001")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc(doc_number="0100000001")],
+                         "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [ITEM_MATCHED]})
+    dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client,
+        upload=lambda *a, **k: None, post=lambda *a, **k: None)
+
     ev = pg.execute(
         "SELECT detail FROM email_events WHERE message_id='dl1' "
         "AND stage='announced_mismatch'").fetchone()
     assert ev is not None
     assert ev[0]["announced"] == ["0100000002"]
-    # #238 requirement #2: a run with a genuinely missing announced document must
-    # NEVER roll up as "ok" — proc_status itself must be honest, independent of the
-    # (now removed) Odoo alert.
     row = pg.execute(
         "SELECT proc_status FROM messages WHERE message_id='dl1'").fetchone()
     assert row[0] == "partial", \
-        "proc_status must reflect the missing announced document, not just the " \
-        "one doc that happened to arrive"
+        "proc_status must reflect the genuinely missing announced document"
 
 
 def test_an_attachment_that_yields_no_document_is_flagged_not_silently_lost(pg, tmp_path):
