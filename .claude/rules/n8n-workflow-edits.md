@@ -687,3 +687,42 @@ the `Z-`/`Z-Z-` wire prefix). Parse the LIN fixed-width fields at the offsets ab
 exactly what ORION received (qty/price/unit) vs what it should be. `order_runs.result` shows
 the pre-EDI decision (extracted `quantity: 2, unit: ton`) but NOT the shipped bytes — the
 file itself is the only proof of the ×1000. Never write/rename/delete on ORION.
+
+## The announced-vs-attached subject scan (`dl_message._subject_doc_numbers`, spec §4)
+## can be fooled by a supplier printer's OWN internal id sharing the DL-number shape —
+## exclude it by POSITION (parenthesized), never by widening/narrowing the regex (#371)
+
+`_SUBJECT_DOC_RE = re.compile(r"\d{2,}LT\d{4,}")` matches ANY token of that shape in a
+subject, with no idea what the token actually MEANS. Lunys' printer (IS KARAT) stamps
+its own PRINT-JOB id into the subject using the exact same shape, wrapped in
+parentheses, right before the real document number: `... (2610LT<print-job-id>) - ...
+2610LT<real-doc-number>`. The print-job id CHANGES between the 1st and 2nd print of the
+SAME delivery while the real number after the dash stays fixed — proof it's metadata,
+not a document number — but the pre-#371 scan took every match unconditionally, so it
+mis-read the print-job id as a genuinely missing SECOND document and falsely flagged
+`announced_mismatch` (11 of 17 real Lunys mails over two weeks, 2026-08-18..09-01).
+
+**Fix shape, reusable for any FUTURE false-positive in this same scan (a different
+supplier's printer/system stamping its own internal id into the subject):** exclude by
+POSITION — a match whose whole `m.span()` is immediately enclosed by a literal `(`
+right before and `)` right after is metadata, never a document number — not by trying
+to special-case the supplier name or widen/narrow `_SUBJECT_DOC_RE` itself. The
+guard MUST check `start > 0` (not just `end < len(subject)`) before reading
+`subject[start - 1]`, or a match beginning at index 0 wraps to `subject[-1]` (the
+LAST character of the whole string) via Python's negative-index behaviour and can be
+wrongly excluded — proven with a fixture built so the wraparound char IS `(` and the
+char after the match IS `)` (`tests/test_dl_worker.py::
+test_subject_doc_numbers_handles_a_match_at_the_very_start_of_the_subject`).
+
+**A hand-built "genuine 2-DL mismatch" fixture can accidentally BE the exact
+false-positive shape it's meant to guard against — verify the fixture text against the
+CURRENT understanding of the bug, don't just trust its name.** The original #204/#238
+fixture (`test_subject_doc_numbers_extracts_the_lunys_shape`,
+`test_announced_but_not_attached_dl_is_flagged_not_silently_lost`) used the IDENTICAL
+IS KARAT print-job-in-parens subject text as its own "two different announced
+documents" pin — i.e. it was PINNING the #371 bug as correct behaviour the whole time,
+not testing a genuine two-document case at all. Fixed by replacing it with a fresh,
+non-parenthesized two-bare-token fixture ("Dodacie listy `<n1>` a `<n2>`") that
+actually represents two independent documents. Whenever a fix changes what a scan
+treats as a false positive, re-check every EXISTING fixture that claims to test "the
+positive case" — one of them may, by coincidence, already be an instance of the bug.
