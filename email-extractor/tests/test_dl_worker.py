@@ -1709,6 +1709,19 @@ def test_subject_doc_numbers_empty_for_an_unrelated_subject():
     assert dl_worker._subject_doc_numbers("Faktúra 123/2026") == []
 
 
+def test_subject_doc_numbers_handles_a_match_at_the_very_start_of_the_subject():
+    """#371 review finding: `_subject_doc_numbers`'s parenthesis check reads
+    `subject[start - 1]` — guarded by `start > 0` so a match beginning at index 0
+    (nothing genuinely before it) is never wrongly treated as parenthesized via
+    Python's negative-index wraparound (an UNGUARDED `subject[-1]` would silently
+    read the subject's LAST character instead of "nothing"). This subject is
+    deliberately built so the wraparound char (the very last one) IS "(" and the
+    char right after the match IS ")" — a version missing the `start > 0` guard
+    would wrongly exclude this leading, unparenthesized token."""
+    subj = "2610LT0100251632)("
+    assert dl_worker._subject_doc_numbers(subj) == ["0100251632"]
+
+
 def test_item_match_prompt_states_the_same_weight_tolerance_the_code_applies_fixes_225():
     """#225: a real production wording ("110g") was 10 % off its correct card's own
     stated weight ("100g") — exactly WEIGHT_TOLERANCE, so the deterministic
