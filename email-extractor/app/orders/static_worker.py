@@ -342,7 +342,7 @@ def _maybe_notify_extra_content(conn, cfg, message: dict, text: str, parsed: dic
 
 
 def _ship(conn, cfg, message: dict, parsed: dict, built, upload=None, post=None,
-          actionable_note: bool = False) -> dict:
+          actionable_note: bool = False, list_dirs=None) -> dict:
     """Upload ONE fully-resolved static order — the only path that ever writes to ORION
     from this module. Mirrors `pipeline._ship_one`'s claim/upload/confirm shape."""
     upload = upload or (lambda c, name, content: upload_mod.put(c, name, content))
@@ -418,7 +418,7 @@ def _ship(conn, cfg, message: dict, parsed: dict, built, upload=None, post=None,
 
 
 def run_live(conn, cfg, message: dict, snapshot_id: int, pipeline=None, upload=None,
-            post=None, llm_client=None) -> dict:
+            post=None, llm_client=None, list_dirs=None) -> dict:
     """The claimed message's real, live outcome — either a genuine ORION upload, a benign
     no-op (empty order / duplicate), or a fallback to the AI pipeline. Never silently
     drops an item."""
@@ -475,13 +475,14 @@ def run_live(conn, cfg, message: dict, snapshot_id: int, pipeline=None, upload=N
         return result
 
     result = _ship(conn, cfg, message, parsed, built, upload=upload, post=post,
-                   actionable_note=extra["actionable"])
+                   actionable_note=extra["actionable"], list_dirs=list_dirs)
     if extra["spend"]:
         result["spend"] = extra["spend"]
     return result
 
 
-def tick(conn, cfg, pipeline=None, upload=None, post=None, llm_client=None) -> int:
+def tick(conn, cfg, pipeline=None, upload=None, post=None, llm_client=None,
+         list_dirs=None) -> int:
     """Process at most one `static_orders` message. Returns 0 or 1 (whether a MESSAGE was
     handled — a digest flush alone, with no message, still returns 0).
 
@@ -511,7 +512,8 @@ def tick(conn, cfg, pipeline=None, upload=None, post=None, llm_client=None) -> i
         run_id = worker._start_run(conn, message["message_id"], snapshot_id, shadow=False)
         try:
             result = run_live(conn, cfg, message, snapshot_id, pipeline=pipeline,
-                              upload=upload, post=post, llm_client=llm_client)
+                              upload=upload, post=post, llm_client=llm_client,
+                              list_dirs=list_dirs)
         except Exception as e:
             log.exception("static order pipeline failed for %s", message["message_id"])
             worker._finish_run(conn, run_id, "error", None, error=repr(e))
