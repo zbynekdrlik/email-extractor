@@ -544,6 +544,20 @@ def matches_wire_prefix(name: str, prefix: str) -> bool:
 _matches_stable_prefix = matches_wire_prefix
 
 
+def matches_wire_name(name: str, base: str) -> bool:
+    """EXACT (not prefix) ORION wire-name tolerance — the sibling of `matches_wire_prefix`
+    for a caller whose WHOLE filename is the stable identity (#372: `static_edi._filename`
+    has no per-attempt timestamp, so the entire name IS the identity — a presence match
+    must be the exact name, tolerating only ORION's Z-/Z-Z- archCodex rename). Prefix
+    semantics are load-bearing on the DL side (the timestamp suffix varies per attempt) but
+    would be too loose here: `startswith` would false-positive on an unrelated longer name
+    (e.g. a `…_007.txt.bak` left by manual ops on the ORION box during an incident), and a
+    static presence check that false-positives silently CONFIRMS — dropping our order. The
+    Z-/Z-Z- tolerance itself still lives in exactly ONE place (this and `matches_wire_prefix`
+    encode the same three shapes), never a third copy."""
+    return name in (base, f"Z-{base}", f"Z-Z-{base}")
+
+
 def already_landed(dirs: dict, ean_edi: str, doc_number: str) -> bool:
     """#239 finding 6: has a document with THIS identity (buyer/supplier EAN + doc
     number) already reached ORION under ANY prior attempt's filename? `dirs` is

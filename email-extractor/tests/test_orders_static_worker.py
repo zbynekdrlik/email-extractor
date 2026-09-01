@@ -914,13 +914,16 @@ def test_python_engine_crash_on_final_attempt_surfaces_a_real_diagnostic(pg, mon
 _STATIC_FILENAME = "KARMEN_12345_2026_007.txt"
 
 
-def _orion_dirs(*, present=(), unconfirmed=()):
+def _orion_dirs(*, in_=(), arch=(), unconfirmed=(), present=None):
     """`upload.list_dirs()`'s return shape. Static orders upload to `in` (never `in_DL`);
-    once imported they move to the shared `archCodex` (possibly Z-/Z-Z--renamed). `present`
-    seeds both `in` and `archCodex` with the given names; `unconfirmed` seeds the failed-
-    import folder."""
-    return {"in": set(present), "in_DL": set(),
-            "archCodex": set(present), "unconfirmed": set(unconfirmed)}
+    once imported they move to the shared `archCodex` (possibly Z-/Z-Z--renamed); a failed
+    import lands in `unconfirmed`. Each folder can be seeded independently (to isolate which
+    folder a presence match came from); `present=[...]` is a convenience that seeds BOTH
+    `in` and `archCodex` (the common "somewhere on ORION" case)."""
+    if present is not None:
+        in_, arch = present, present
+    return {"in": set(in_), "in_DL": set(), "archCodex": set(arch),
+            "unconfirmed": set(unconfirmed)}
 
 
 def test_python_engine_transient_upload_confirms_when_already_landed(pg):
@@ -1130,3 +1133,105 @@ def test_matches_wire_prefix_is_byte_identical_to_the_former_private_helper():
     assert desadv_edi.matches_wire_prefix("Z-Z-" + base + "x", base)
     assert not desadv_edi.matches_wire_prefix("Z-Z-Z-" + base + "x", base)
     assert not desadv_edi.matches_wire_prefix("something-else", base)
+
+
+def test_matches_wire_name_is_exact_not_a_prefix():
+    """#372 review 🔵-4: the static presence check needs EXACT-name tolerance (the whole
+    static filename is the identity), not `startswith` — a `…_007.txt.bak` artifact from
+    manual ORION ops must NOT count as a match (a static false-positive silently confirms
+    and drops the order). Same Z-/Z-Z- tolerance as `matches_wire_prefix`, exact otherwise."""
+    from app.orders import desadv_edi
+    fn = "KARMEN_12345_2026_007.txt"
+    assert desadv_edi.matches_wire_name(fn, fn)
+    assert desadv_edi.matches_wire_name(f"Z-{fn}", fn)
+    assert desadv_edi.matches_wire_name(f"Z-Z-{fn}", fn)
+    assert not desadv_edi.matches_wire_name(f"Z-Z-Z-{fn}", fn)
+    assert not desadv_edi.matches_wire_name(f"{fn}.bak", fn), "a longer name must NOT match"
+    assert not desadv_edi.matches_wire_name(f"Z-{fn}.part", fn)
+    assert not desadv_edi.matches_wire_name("something-else.txt", fn)
+
+
+def test_present_on_orion_checks_each_static_folder_and_rejects_a_longer_name():
+    """#372 review 🔵-5 (isolate each folder) + 🔵-4 (exact match). Static orders live in
+    `in`/`archCodex`/`unconfirmed` (NEVER `in_DL`); a presence match in ANY ONE of them
+    counts, and a longer/artifact name never false-positives."""
+    from app.orders import static_retry
+    fn = _STATIC_FILENAME
+    for folder in ("in", "archCodex", "unconfirmed"):
+        dirs = {"in": set(), "in_DL": set(), "archCodex": set(), "unconfirmed": set()}
+        dirs[folder] = {f"Z-{fn}"}
+        assert static_retry._present_on_orion(dirs, fn), f"must match a file sitting in {folder}"
+    assert not static_retry._present_on_orion(
+        {"in": set(), "in_DL": {fn}, "archCodex": set(), "unconfirmed": set()}, fn), \
+        "in_DL is a DESADV folder, never a static-order location"
+    assert not static_retry._present_on_orion(
+        {"in": {f"{fn}.bak"}, "in_DL": set(), "archCodex": set(), "unconfirmed": set()}, fn), \
+        "a longer artifact name must never count as a presence match"
+
+
+def test_python_engine_transient_upload_distrusts_an_unconfirmed_name_collision(pg):
+    """#372 review 🟡-1: an UNCONFIRMED different-content `edi_sent` row occupying the same
+    filename (a run that crashed BETWEEN sftp.rename and confirm_sent — its bytes ARE on
+    ORION under that name, its claim row still `uploaded_at NULL`) must ALSO be treated as
+    an ambiguous collision → None → release, never confirmed off those bytes. The pre-fix
+    guard filtered `uploaded_at IS NOT NULL` and would have confirmed our order off the
+    stranger's bytes → silent loss."""
+    sid = _snapshot(pg)
+    parsed, built = _static_built(pg, sid)
+    # a genuinely DIFFERENT-content claim under the SAME filename, left UNCONFIRMED
+    edi.claim_send(pg, built.store_ean, "99.99.9999", "INY OBSAH", built.filename)
+    assert pg.execute("SELECT uploaded_at FROM edi_sent").fetchone()[0] is None, \
+        "the seeded occupant must be UNCONFIRMED — that is the case the fix adds"
+    _msg(pg)
+    tries, posted = [], []
+
+    def timed_out_upload(c, name, content):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    assert static_worker.tick(
+        pg, _python_cfg(), upload=timed_out_upload,
+        post=lambda c, h: posted.append(h) or {"id": 1},
+        list_dirs=lambda cfg: _orion_dirs(present=[f"Z-{built.filename}"]),
+        llm_client=_FakeLlmClient()) == 1
+    assert len(tries) == 1, "an ambiguous name collision must never re-upload"
+    ours = edi.content_hash(built.content)
+    assert pg.execute(
+        "SELECT count(*) FROM edi_sent WHERE content_sha256 = %s", (ours,)).fetchone()[0] == 0, \
+        "our order must be RELEASED, never confirmed off a DIFFERENT (even unconfirmed) occupant"
+    assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 1, \
+        "only the pre-existing occupant's row remains"
+    assert len(posted) == 1 and "zlyhalo" in posted[0]
+    assert pg.execute("SELECT status FROM order_runs").fetchone()[0] == "error"
+
+
+def test_python_engine_presence_check_failure_alerts_without_retry(pg):
+    """#372 review 🟡-2 (the DL 'presence-check-unavailable' branch, ported): when the ORION
+    listing itself raises — the SFTP connection that just failed the upload is very likely
+    down for the follow-up listing too — NO retry is attempted (a blind retry with no
+    absence proof is the v0.9.70 duplicate-delivery bug), falling back to today's
+    release + alert + error-event path. `check_landed` returns None on this branch, so the
+    claim must NOT be left held-without-an-alert."""
+    _msg(pg)
+    _snapshot(pg)
+    tries, posted = [], []
+
+    def timed_out_upload(c, name, content):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    def broken_list_dirs(cfg):
+        raise OSError("SFTP unavailable")
+
+    assert static_worker.tick(
+        pg, _python_cfg(), upload=timed_out_upload,
+        post=lambda c, h: posted.append(h) or {"id": 1},
+        list_dirs=broken_list_dirs, llm_client=_FakeLlmClient()) == 1
+    assert len(tries) == 1, "no retry is safe without an absence proof"
+    assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 0, \
+        "the claim must be released, never left held with no alert"
+    assert len(posted) == 1 and "zlyhalo" in posted[0]
+    ev = pg.execute(
+        "SELECT stage, status FROM email_events WHERE message_id='m1' "
+        "AND stage='review'").fetchone()
+    assert ev == ("review", "error")
