@@ -67,6 +67,7 @@ from . import (
     static_edi,
     static_extra,
     static_parse,
+    static_retry,
     worker,
 )
 from . import upload as upload_mod
@@ -382,9 +383,40 @@ def _ship(conn, cfg, message: dict, parsed: dict, built, upload=None, post=None,
         return {"status": "ok", "items": [], "shipped": True, "edi_filename": built.filename,
                 "partner": partner, "order_number": order_no, "delivery_date": delivery}
 
-    try:
-        upload(cfg, built.filename, built.content)
-    except Exception as e:
+    list_dirs = list_dirs or upload_mod.list_dirs
+
+    def _finish_shipped() -> dict:
+        """The shared "order is CONFIRMED on ORION" tail — called after a clean first-try
+        upload, AND (#372) after a transient failure whose presence check proved the bytes
+        already landed (reply lost), or whose single bounded retry succeeded. Extracted so
+        every success path shares EXACTLY one shape, never three independently-maintained
+        copies (the same reasoning `dl_document._finish_shipped` documents for #239).
+        Captures conn/cfg/message/store_ean/delivery/order_no/partner/built/actionable_note/
+        post from the enclosing scope."""
+        edi.confirm_sent(conn, store_ean, delivery, built.content,
+                         pg_dsn=getattr(cfg, "pg_dsn", ""))
+        outcome = f"EDI vytvorené: {built.filename}"
+        report.log_event(
+            conn, message["message_id"], stage="uploaded_orion", status="ok", outcome=outcome,
+            detail={"edi_file": built.filename, "orion_path": edi.orion_path(built.filename)},
+            workflow=WORKFLOW)
+        if not actionable_note:
+            # #133 "DOPLNENIE ROZHODNUTIA": a clean upload with nothing extra to say never
+            # posts its own message — it joins the durable digest instead (batch/idle flush).
+            static_digest.queue(conn, message["message_id"], built.filename)
+            static_digest.maybe_flush_batch(conn, cfg, post=post)
+        return {"status": "ok", "items": [], "shipped": True, "edi_filename": built.filename,
+                "partner": partner, "order_number": order_no, "delivery_date": delivery}
+
+    def _alert_and_release(err: Exception) -> dict:
+        """The pre-#372 "upload genuinely failed" tail, unchanged: release the claim so the
+        order can be retried by a LATER independent attempt (a human reprocess, or a stale-
+        claim reclaim), post one best-effort Odoo alert, and log a reviewable error event.
+        Reached whenever a safe retry was not possible: a NON-transient failure, a transient
+        one whose presence check proved the document genuinely absent AND whose single retry
+        also failed, or a transient one whose presence check itself could not be attempted /
+        was ambiguous (#372). Must be called from inside an active `except` so
+        `log.exception` captures the real traceback."""
         edi.release_send(conn, store_ean, delivery, built.content)
         log.exception("static order upload of %s failed", built.filename)
         note = ("Odoslanie statickej objednávky do ORIONu zlyhalo — skús znova alebo "
@@ -397,24 +429,52 @@ def _ship(conn, cfg, message: dict, parsed: dict, built, upload=None, post=None,
             log.exception("posting the static-order upload-failure alert failed")
         report.log_event(
             conn, message["message_id"], stage="review", status="error", outcome=note,
-            detail={"error": repr(e), "filename": built.filename}, workflow=WORKFLOW)
+            detail={"error": repr(err), "filename": built.filename}, workflow=WORKFLOW)
         return {"status": "error", "items": [], "shipped": False, "reject_reason": note,
                 "partner": partner, "order_number": order_no, "delivery_date": delivery}
 
-    edi.confirm_sent(conn, store_ean, delivery, built.content,
-                     pg_dsn=getattr(cfg, "pg_dsn", ""))
-    outcome = f"EDI vytvorené: {built.filename}"
-    report.log_event(
-        conn, message["message_id"], stage="uploaded_orion", status="ok", outcome=outcome,
-        detail={"edi_file": built.filename, "orion_path": edi.orion_path(built.filename)},
-        workflow=WORKFLOW)
-    if not actionable_note:
-        # #133 "DOPLNENIE ROZHODNUTIA": a clean upload with nothing extra to say never
-        # posts its own message — it joins the durable digest instead (batch/idle flush).
-        static_digest.queue(conn, message["message_id"], built.filename)
-        static_digest.maybe_flush_batch(conn, cfg, post=post)
-    return {"status": "ok", "items": [], "shipped": True, "edi_filename": built.filename,
-            "partner": partner, "order_number": order_no, "delivery_date": delivery}
+    try:
+        upload(cfg, built.filename, built.content)
+    except Exception as e:
+        # #372: a TRANSIENT failure gets a stable-identity presence check BEFORE deciding
+        # what to do — the exact #239 shape ported from `dl_document`. A NON-transient
+        # failure (`static_retry.is_upload_transient(e)` False) skips the check entirely
+        # and keeps the pre-#372 behaviour — `landed` stays `None`.
+        landed = (static_retry.check_landed(conn, cfg, list_dirs, built.filename,
+                                            built.content)
+                  if static_retry.is_upload_transient(e) else None)
+        if landed is True:
+            # The reply was lost, but the bytes are already on ORION under this exact
+            # (stable) filename — confirming, never re-uploading, is what actually prevents
+            # a duplicate delivery in the warehouse (the v0.9.70 incident class).
+            log.warning(
+                "static order upload of %s: the reply was lost but the document is already "
+                "on ORION (stable-name match) — confirming instead of re-uploading (%s)",
+                built.filename, e)
+            return _finish_shipped()
+        if landed is False:
+            # Genuinely absent everywhere a static EDI could sit — exactly ONE retry is
+            # safe here, bounded (never a loop), with the SAME claim held throughout (never
+            # release-then-reclaim, which is precisely what removed the anti-duplicate
+            # protection in the v0.9.70 incident this port exists to prevent).
+            log.info(
+                "static order upload of %s: transient failure (%s), document not yet on "
+                "ORION — retrying exactly once with the same claim", built.filename, e)
+            try:
+                upload(cfg, built.filename, built.content)
+            except Exception as e2:
+                log.exception("static order upload retry of %s also failed (original: %s)",
+                              built.filename, e)
+                return _alert_and_release(e2)
+            return _finish_shipped()
+        # `landed is None`: either non-transient, or the presence check itself could not be
+        # attempted (the SFTP connection that just failed the upload is very likely down for
+        # a follow-up listing too) or a presence match was ambiguous (a different confirmed
+        # order occupies the name) — no safe retry is possible, so this keeps the pre-#372
+        # behaviour exactly.
+        return _alert_and_release(e)
+
+    return _finish_shipped()
 
 
 def run_live(conn, cfg, message: dict, snapshot_id: int, pipeline=None, upload=None,

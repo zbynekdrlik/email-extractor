@@ -516,7 +516,7 @@ def filename(ean_edi: str, delivery_date: str, doc_number: str, stamp: str = "")
     return f"{stable_prefix(ean_edi, doc_number)}{_date_stamp(delivery_date)}_{stamp}.txt"
 
 
-def _matches_stable_prefix(name: str, prefix: str) -> bool:
+def matches_wire_prefix(name: str, prefix: str) -> bool:
     """Tolerates R89's own upload-time `Z-` wire prefix, PLUS Communicator's separate,
     uncontrolled archCodex rename job's OWN extra `Z-` on top of that — mirrors
     `confirm.py`'s own `_decide()` tolerance EXACTLY (`wire_name in archCodex or
@@ -524,10 +524,24 @@ def _matches_stable_prefix(name: str, prefix: str) -> bool:
     no `Z-`, exactly one, or exactly two leading `Z-`s all match. Review finding: an
     earlier draft stripped an UNBOUNDED number of leading `Z-`, which is more
     permissive than confirm.py's own check despite the docstring claiming parity —
-    fixed to the exact same three-way check."""
+    fixed to the exact same three-way check.
+
+    #372: promoted from the former private `_matches_stable_prefix` so the static-orders
+    upload-retry presence check (`static_retry.check_landed`) can reuse the SAME Z-/Z-Z-
+    tolerance instead of keeping a second copy of the prefix logic — the static EDI name
+    is stable across attempts (no timestamp), so it passes its WHOLE filename here as the
+    `prefix`, matching exactly the same three ORION wire shapes a DESADV stable prefix
+    does. Behaviour is byte-identical to the old private helper (the alias below keeps the
+    DL call sites — `already_landed` here and `desadv.has_confirmed_collision` — working)."""
     return (name.startswith(prefix)
            or name.startswith(f"Z-{prefix}")
            or name.startswith(f"Z-Z-{prefix}"))
+
+
+# Back-compat alias: `already_landed` (below) and `desadv.has_confirmed_collision` both
+# call this by its original private name — keep it pointing at the SAME function so the
+# DL side sees no behaviour change whatsoever.
+_matches_stable_prefix = matches_wire_prefix
 
 
 def already_landed(dirs: dict, ean_edi: str, doc_number: str) -> bool:
