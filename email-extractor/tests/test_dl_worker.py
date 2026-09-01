@@ -1787,9 +1787,10 @@ def test_two_genuinely_announced_dl_numbers_still_mismatch_when_only_one_attache
     _attach(pg, tmp_path, "dl1")
     client = FakeClient({"dl_documents": [_doc(doc_number="0100000001")],
                          "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [ITEM_MATCHED]})
+    posted = []
     dl_worker.tick(
         pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path)), client=client,
-        upload=lambda *a, **k: None, post=lambda *a, **k: None)
+        upload=lambda *a, **k: None, post=lambda c, h: posted.append(h))
 
     ev = pg.execute(
         "SELECT detail FROM email_events WHERE message_id='dl1' "
@@ -1800,6 +1801,11 @@ def test_two_genuinely_announced_dl_numbers_still_mismatch_when_only_one_attache
         "SELECT proc_status FROM messages WHERE message_id='dl1'").fetchone()
     assert row[0] == "partial", \
         "proc_status must reflect the genuinely missing announced document"
+    # #358 pin: a genuine announced mismatch must NOT post the per-mail
+    # "ohlásený aj doklad" Odoo warning (the old test asserted this before the
+    # #371 rewrite dropped the post-capture; keep the pin on this fixture).
+    assert not [h for h in posted if "ohlásený aj doklad" in h], \
+        "a genuine announced mismatch must not post the 'ohlásený aj doklad' warning"
 
 
 def test_an_attachment_that_yields_no_document_is_flagged_not_silently_lost(pg, tmp_path):
