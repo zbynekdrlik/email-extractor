@@ -277,6 +277,69 @@ should reuse this exact shape (a `list_dirs=` DI seam threaded down to the call 
 `_check_landed()`'s `True`/`False`/`None` tri-state, one bounded retry, one shared
 success tail) rather than re-deriving it.
 
+## The STATIC-orders engine got the same #239 safe-retry (#372) — but its transient
+## classification needs an EXCEPTION-TYPE check (a bare `EOFError()` has `str()==""`), and
+## its stable identity is the WHOLE filename (no timestamp), so the presence match is EXACT
+
+`static_worker._ship`'s upload except-block was the LAST place still doing the pre-#239
+thing — release the `edi_sent` claim + alert on ANY upload failure, no retry — so a
+transient SFTP failure lost a static order forever (live incident msg 8447: a bare
+`EOFError()` on `upload(KARMEN_1811_26_002.txt)`). #372 ported the exact #239 tri-state
+shape into a new `app/orders/static_retry.py`. Reusable gotchas any FUTURE upload-retry
+(or a change to this one) must keep:
+
+- **Classify a SFTP upload failure as transient by TYPE, not only `str(e)`/
+  `dl_retry.TRANSIENT_RE`.** `TRANSIENT_RE` is an n8n-world FRASE list (rate limit / socket
+  hang up / econnreset …) and structurally CANNOT match a bare `EOFError()` — `str(EOFError())`
+  is `""` (verified), and neither `EOFError("Server connection dropped")` nor
+  `ConnectionResetError("Connection reset by peer")` matches it either. So
+  `static_retry.is_upload_transient` is `isinstance(e, (EOFError, TimeoutError,
+  ConnectionError)) or _is_transient(str(e))`. Deliberately NOT `OSError` (its subclass
+  `PermissionError` is a genuine, non-retryable ORION refusal). Over-classifying "transient"
+  is the SAFE direction — the PRESENCE CHECK, not the classification, prevents a double
+  upload, so a wrongly-transient permanent failure just does one wasted check + one retry
+  and lands in the same alert+release end state as today. **The DL side (`dl_retry`) has the
+  SAME latent gap** (a DL `EOFError` upload would not retry — it classifies on `str(e)`
+  only); not fixed in #372 (out of scope, e2e-dl corpus must stay byte-identical) but port
+  the type-check there if a DL `EOFError` incident ever appears.
+
+- **The static EDI filename IS the whole stable identity — no timestamp, so the presence
+  match is EXACT, not a prefix.** `static_edi._filename` is `<PARTNER>_<orderNumber>_
+  <prevPart>.txt`, fully deterministic (unlike `edi.filename`/`desadv_edi.filename`, which
+  append `_<HHMMSSmmm>`). The presence check matches the WHOLE name in `in`/`archCodex`/
+  `unconfirmed` (static uploads to `in`, NEVER `in_DL`) via `desadv_edi.matches_wire_name`
+  (EXACT + Z-/Z-Z- tolerance) — NOT `matches_wire_prefix` (its `startswith` is load-bearing
+  for DL's varying timestamp suffix but would false-positive on a `…_007.txt.bak` ops
+  artifact here, and a static false-positive silently CONFIRMS and drops the order). If a
+  FUTURE static-name scheme adds a per-attempt component, EXACT matching breaks — switch to
+  `desadv_edi.stable_prefix`'s strip-the-varying-suffix approach.
+
+- **Reuse the Z-/Z-Z- tolerance, never a second copy.** `desadv_edi._matches_stable_prefix`
+  was promoted to public `matches_wire_prefix` (byte-identical; the private name stays a
+  working alias for `already_landed`/`desadv.has_confirmed_collision`), and the EXACT sibling
+  `matches_wire_name` lives beside it — both encode the same three wire shapes in ONE place.
+
+- **A collision guard is needed because the static name does NOT encode content/date.** A
+  same-order-number CORRECTION produces the SAME filename with different content. `static_
+  retry._name_collision` distrusts the name when ANY DIFFERENT-content `edi_sent` row occupies
+  it — **confirmed OR still-unconfirmed** (the review found the dangerous case is a run that
+  crashed BETWEEN `sftp.rename` and `confirm_sent`: its bytes are on ORION under an
+  UNCONFIRMED row, so an earlier `uploaded_at IS NOT NULL` filter would have confirmed our
+  correction off the stranger's bytes — silent loss). Our OWN row is excluded by the
+  `content_sha256 <> %s` inequality. Residual (same as `desadv.has_confirmed_collision`): an
+  occupant whose `edi_sent` row was fully DELETED is undetectable via `edi_sent` alone —
+  bounded by the manual re-send absence-proof procedure.
+
+- **One shared success tail + `_alert_and_release` only from inside an active `except`.**
+  `_finish_shipped()`/`_alert_and_release()` are extracted closures so first-try-success,
+  landed-earlier-confirm and retry-success share EXACTLY one confirm/event/digest shape (the
+  same reasoning `dl_document._finish_shipped` documents). `_alert_and_release`'s
+  `log.exception` needs the live traceback, so it is only ever called from inside an except.
+
+- **The retry-fail path still releases without a SECOND presence check** — deliberate
+  byte-parity with the DL reference (`dl_document.py`), filed as a CROSS-CUTTING follow-up
+  (#373) to fix in BOTH engines together, never diverged in one.
+
 ## A SYNTHESIZED fallback identity feeding a claim/dedup key must be STABLE across retries too (#262)
 
 The same "stable identity" principle above applies one layer EARLIER than the upload
@@ -687,3 +750,42 @@ the `Z-`/`Z-Z-` wire prefix). Parse the LIN fixed-width fields at the offsets ab
 exactly what ORION received (qty/price/unit) vs what it should be. `order_runs.result` shows
 the pre-EDI decision (extracted `quantity: 2, unit: ton`) but NOT the shipped bytes — the
 file itself is the only proof of the ×1000. Never write/rename/delete on ORION.
+
+## The announced-vs-attached subject scan (`dl_message._subject_doc_numbers`, spec §4)
+## can be fooled by a supplier printer's OWN internal id sharing the DL-number shape —
+## exclude it by POSITION (parenthesized), never by widening/narrowing the regex (#371)
+
+`_SUBJECT_DOC_RE = re.compile(r"\d{2,}LT\d{4,}")` matches ANY token of that shape in a
+subject, with no idea what the token actually MEANS. Lunys' printer (IS KARAT) stamps
+its own PRINT-JOB id into the subject using the exact same shape, wrapped in
+parentheses, right before the real document number: `... (2610LT<print-job-id>) - ...
+2610LT<real-doc-number>`. The print-job id CHANGES between the 1st and 2nd print of the
+SAME delivery while the real number after the dash stays fixed — proof it's metadata,
+not a document number — but the pre-#371 scan took every match unconditionally, so it
+mis-read the print-job id as a genuinely missing SECOND document and falsely flagged
+`announced_mismatch` (11 of 17 real Lunys mails over two weeks, 2026-08-18..09-01).
+
+**Fix shape, reusable for any FUTURE false-positive in this same scan (a different
+supplier's printer/system stamping its own internal id into the subject):** exclude by
+POSITION — a match whose whole `m.span()` is immediately enclosed by a literal `(`
+right before and `)` right after is metadata, never a document number — not by trying
+to special-case the supplier name or widen/narrow `_SUBJECT_DOC_RE` itself. The
+guard MUST check `start > 0` (not just `end < len(subject)`) before reading
+`subject[start - 1]`, or a match beginning at index 0 wraps to `subject[-1]` (the
+LAST character of the whole string) via Python's negative-index behaviour and can be
+wrongly excluded — proven with a fixture built so the wraparound char IS `(` and the
+char after the match IS `)` (`tests/test_dl_worker.py::
+test_subject_doc_numbers_handles_a_match_at_the_very_start_of_the_subject`).
+
+**A hand-built "genuine 2-DL mismatch" fixture can accidentally BE the exact
+false-positive shape it's meant to guard against — verify the fixture text against the
+CURRENT understanding of the bug, don't just trust its name.** The original #204/#238
+fixture (`test_subject_doc_numbers_extracts_the_lunys_shape`,
+`test_announced_but_not_attached_dl_is_flagged_not_silently_lost`) used the IDENTICAL
+IS KARAT print-job-in-parens subject text as its own "two different announced
+documents" pin — i.e. it was PINNING the #371 bug as correct behaviour the whole time,
+not testing a genuine two-document case at all. Fixed by replacing it with a fresh,
+non-parenthesized two-bare-token fixture ("Dodacie listy `<n1>` a `<n2>`") that
+actually represents two independent documents. Whenever a fix changes what a scan
+treats as a false positive, re-check every EXISTING fixture that claims to test "the
+positive case" — one of them may, by coincidence, already be an instance of the bug.

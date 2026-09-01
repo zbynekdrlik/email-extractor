@@ -3937,3 +3937,38 @@ Dve nezávisle postavené a nezávisle recenzované worktree-branche zmergnuté 
 - Deploy 0.9.122 verified live: /health + DOM v0.9.122; the skip button RENDERS on the REAL
   question-101 dl_item card (`/otazky-dl`), read-only, no rows created, no Odoo post.
 - #365 left OPEN — gatekeeper closes with deploy evidence.
+
+## 2026-09-01 — #369 customer-question not-order escape (0.9.124)
+
+Skladníčka (Odoo objednávky, msg 54683604): Karmen eshop potvrdenia = nákupy vlastnej
+predajne MIX, „nedá sa to tam dopísať". Root cause: customer otázka nemala únik „nie je
+to objednávka" (starý n8n tieto maily preskakoval, Python engine ich extrahuje). Fix
+#369/PR #370: tlačidlo na oboch card rendereroch → mail_rules ignore (kľúč z messages
+riadku), held order sa uvoľní bez shipu, undo maže rule. Živá otázka 117 zodpovedaná
+novou cestou (rule: odbyt@karmen.sk | karmen nová objednávka | ignore). Otázka 118
+(neznámy zákazník zo školskej jedálne) vyriešená ops-cestou: zákazník existoval v CODEXe
+(EAN cez raw.firma dev2 DuckDB read-only), doplnený cez new_customer API otázky — vzor:
+pred „vytvor v CODEXe" krokom vždy najprv over raw.firma, či už neexistuje.
+
+## #372 — statická objednávka: bezpečný ORION upload-retry (port #239) [worktree, local-green]
+- Príčina: `static_worker._ship` upload except vetva pri KAŽDEJ výnimke uvoľnila claim +
+  alert, bez retry a bez presence-check → prechodný SFTP výpadok (živý incident msg 8447,
+  bare `EOFError()` na `KARMEN_1811_26_002.txt`) navždy stratil objednávku; DL má #239 od
+  vtedy, statické nie.
+- Commits: 11bbba7 [red] (inert `list_dirs` seam + 6 padajúcich testov) → 71f60c0 [green]
+  (nový `app/orders/static_retry.py`; `desadv_edi._matches_stable_prefix`→public
+  `matches_wire_prefix` alias; `_ship` prepísaný na #239 tri-state + `_finish_shipped`/
+  `_alert_and_release`) → 814b739 (adversarial-review fixy).
+- Kľúčové rozhodnutia: klasifikácia prechodnosti = TYP (`EOFError`/`TimeoutError`/
+  `ConnectionError`) + `dl_retry.TRANSIENT_RE` — `str(EOFError())==""`, `TRANSIENT_RE` ho
+  nechytí, takže bez type-checku by fix minul incident; `PermissionError`/holé `OSError`
+  ostávajú NEprechodné. Statická identita = CELÝ názov (bez timestampu) → EXACT match
+  (`desadv_edi.matches_wire_name`, nie prefix; `.txt.bak` artefakt nesmie false-positive).
+  Collision guard `_name_collision` (akýkoľvek iný-obsahom `edi_sent` riadok pod názvom,
+  aj NEpotvrdený — beh spadnutý medzi rename a confirm) → None → alert, nie tichá strata.
+- Adversarial Fable review: 0🔴 2🟡 4🔵. 🟡-1 (nepotvrdený occupant prekĺzol) + 🔵-4 (exact
+  match) opravené; 🟡-2/🔵-5 nové testy; 🔵-3 (retry-fail bez 2. presence-check, byte-parita
+  s DL) → follow-up #373 (cross-cutting, obidva enginy).
+- Gates: ruff 0, mypy 0, statický worker suite (59) + DL suites (desadv/desadv_edi/dl_worker,
+  byte-identical) zelené. ŽIADNY dl_*.py neupravený → e2e-dl korpus nedotknutý. Bez bumpu,
+  bez push/PR (worktree — supervisor integruje).
