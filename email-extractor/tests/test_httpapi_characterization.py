@@ -163,9 +163,9 @@ EXPECTED_TEMPLATE_SHA256 = {
     # #369: re-pinned — the customer board card gained a "Nie je to objednávka — takéto
     # maily ignoruj" button (DASH_HTML's admin customer block directly; ASK_HTML/ASK_DL_HTML
     # via the shared _ASK_HTML_TEMPLATE's customerQuestionCard both derive from).
-    "DASH_HTML": "8469d756eb562dd944874321bfa2e8437a0926e8ac4cb668f675d1aa7b132158",
-    "ASK_HTML": "506cf695fba0943513cacda3652f5c7c7408b4c28b8abaf8978d75dfeb9815d3",
-    "ASK_DL_HTML": "f109cade30b1186a2e24e6e0a9ff5182889a9c73f321622fafb01e43e2601bab",
+    "DASH_HTML": "b64079c1743e3e468992c17e07ec4330fdecedaa65580697e9273619a93a61fc",
+    "ASK_HTML": "6a6042fbb6748849fa58166849557355e813ab9aee13cc7208ae9e385a893cd5",
+    "ASK_DL_HTML": "ae9282bb60588806f5ac9fd1e7a973627b9d0eba92423be87fa9c830ee8aeef5",
     "ZNALOSTI_HTML": "9f04bd74b57f0e22b8b2e7b7810995f5955b1b7796925dd259f44b68eac598b7",
 }
 

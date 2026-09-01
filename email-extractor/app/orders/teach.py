@@ -412,12 +412,22 @@ def mark_customer_not_order(conn, qid: int, by: str = "") -> dict:
         (q["message_id"],)).fetchone()
     from_addr, subject = (msg[0] or "", msg[1] or "") if msg else ("", "")
     sender_norm, key = _sender_norm(from_addr), subject_key(subject)
-    conn.execute(
-        """INSERT INTO mail_rules (sender_norm, subject_key, action, question_id)
-               VALUES (%s, %s, 'ignore', %s)
-           ON CONFLICT (sender_norm, subject_key)
-               DO UPDATE SET action = EXCLUDED.action, question_id = EXCLUDED.question_id
-           """, (sender_norm, key, qid))
+    # Defensive (review #369): a customer question always references a real message, so a
+    # blank sender AND blank subject is unreachable in practice — but a degenerate
+    # `('', '', 'ignore')` rule would ignore any future truly-blank-header mail, so never
+    # write it. The question is still closed + the message marked processed above; only the
+    # (unteachable) rule is skipped.
+    if sender_norm or key:
+        conn.execute(
+            """INSERT INTO mail_rules (sender_norm, subject_key, action, question_id)
+                   VALUES (%s, %s, 'ignore', %s)
+               ON CONFLICT (sender_norm, subject_key)
+                   DO UPDATE SET action = EXCLUDED.action,
+                                 question_id = EXCLUDED.question_id
+               """, (sender_norm, key, qid))
+    else:
+        log.warning("customer question %s not_order: message %r has no sender/subject — "
+                    "no mail_rules taught", qid, q["message_id"])
     conn.execute(
         """UPDATE messages SET processed = true, processed_at = now(),
                processed_by = 'ai_orders_mail_rule', processing_at = NULL

@@ -222,6 +222,26 @@ def test_mark_customer_not_order_writes_the_rule_and_marks_processed(pg):
     assert "nie je objednávka" in ev[2].lower()
 
 
+def test_not_order_with_a_blank_header_message_teaches_no_rule_but_still_closes(pg):
+    """Defensive (review #369): a message with no sender AND no subject must NOT teach a
+    degenerate ('', '', 'ignore') rule (it would ignore any future truly-blank mail) — the
+    question is still closed and the message still marked processed, only the rule is
+    skipped."""
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('mblank', 'ai_orders')")
+    qid = teach.ask_customer(
+        pg, message_id="mblank", sender_email="",
+        candidates=[{"ean_edi": "2000000000001", "name": "X", "city": "", "street": "",
+                    "address_match": False}],
+        delivery_date="04.08.2026",
+        context={"sender_email": "", "sender_name": "", "company_name": "",
+                "delivery_address_guess": ""})
+    q = teach.mark_customer_not_order(pg, qid, by="sklad")
+    assert q["status"] == "answered" and q["answer_card"] == "not_order"
+    assert pg.execute("SELECT count(*) FROM mail_rules").fetchone()[0] == 0
+    assert pg.execute(
+        "SELECT processed FROM messages WHERE message_id='mblank'").fetchone() == (True,)
+
+
 def test_mark_customer_not_order_refuses_a_non_customer_question(pg):
     """Defensive: the helper is customer-kind only (mirrors `answer_customer`'s own guard)."""
     import pytest

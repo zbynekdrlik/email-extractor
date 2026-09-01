@@ -358,7 +358,7 @@ async function loadTaught(token){const L=document.getElementById('list');let d;
   for(const t of d.items){const el=document.createElement('div');el.className='row';
     const w=document.createElement('div');const b=document.createElement('b');
     b.textContent=t.wording;w.appendChild(b);
-    w.appendChild(document.createTextNode(' \u2192 '+(t.answer_card||t.answer_gtin)));
+    w.appendChild(document.createTextNode(' \u2192 '+(t.answer_card==='not_order'?'nie je objedn\u00e1vka':(t.answer_card||t.answer_gtin))));
     const who=document.createElement('div');who.className='sub';
     who.textContent=(t.customer_name||t.customer_ean);
     const acts=document.createElement('div');acts.className='acts';
@@ -841,7 +841,7 @@ async function load(){const mine=++render;let d,t;
     W.appendChild(c)}
   if(t.items.length){W.appendChild(el('h2',null,'Naposledy naučené'));
     for(const x of t.items){const r=el('div','t');
-      r.appendChild(el('span',null,x.wording+' → '+(x.answer_card||x.answer_gtin)));
+      r.appendChild(el('span',null,x.wording+' → '+(x.answer_card==='not_order'?'nie je objednávka':(x.answer_card||x.answer_gtin))));
       const b=el('button',null,'vrátiť');b.onclick=()=>undo(x.id);r.appendChild(b);W.appendChild(r)}}}
 async function teach(qid,gtin,card){try{
   const body={gtin:gtin,card:card};
