@@ -463,6 +463,26 @@ def _ship(conn, cfg, message: dict, parsed: dict, built, upload=None, post=None,
             try:
                 upload(cfg, built.filename, built.content)
             except Exception as e2:
+                # #373 (mirrors the DL fix in dl_document.py — deliberate byte-parity): the
+                # retry's OWN upload has the SAME failure mode as the first attempt — its
+                # temp-write+rename may have landed the bytes on ORION while only the
+                # confirming reply was lost. Releasing the claim now would remove the anti-
+                # duplicate protection and let a later manual reprocess upload a SECOND copy
+                # (the v0.9.70 duplicate-delivery class, one attempt later). So presence-
+                # check ONCE MORE before releasing — gated exactly like the first check
+                # (transient e2), same tri-state, and the EXACT-name + collision guard still
+                # apply: found+trustworthy → confirm the SAME claim; absent / unavailable /
+                # collision → the release+alert path below. NEVER a third upload — the
+                # "exactly one retry" bound is unchanged.
+                landed2 = (static_retry.check_landed(conn, cfg, list_dirs, built.filename,
+                                                     built.content)
+                           if static_retry.is_upload_transient(e2) else None)
+                if landed2 is True:
+                    log.warning(
+                        "static order upload retry of %s failed but the document is already "
+                        "on ORION under this exact (stable) filename — confirming instead of "
+                        "releasing (%s)", built.filename, e2)
+                    return _finish_shipped()
                 log.exception("static order upload retry of %s also failed (original: %s)",
                               built.filename, e)
                 return _alert_and_release(e2)

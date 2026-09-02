@@ -3972,3 +3972,32 @@ pred „vytvor v CODEXe" krokom vždy najprv over raw.firma, či už neexistuje.
 - Gates: ruff 0, mypy 0, statický worker suite (59) + DL suites (desadv/desadv_edi/dl_worker,
   byte-identical) zelené. ŽIADNY dl_*.py neupravený → e2e-dl korpus nedotknutý. Bez bumpu,
   bez push/PR (worktree — supervisor integruje).
+
+## #373 — bezpečný ORION upload-retry: 2. presence-check po zlyhanom retry (DL + statické) [worktree, local-green]
+- Príčina: bezpečný retry (#239 DL, #372 statické) po ZLYHANÍ jediného retry vždy uvoľnil
+  claim + alert BEZ druhej presence-check. Lenže retry-ov upload má rovnaký failure mód:
+  temp-write + `sftp.rename` zapíše bajty na ORION, no potvrdzujúca odpoveď sa stratí
+  („reply lost, bytes landed"). Uvoľnenie claimu odstráni anti-duplicitnú ochranu →
+  neskorší manuálny reprocess môže dokument nahrať druhýkrát (trieda incidentu v0.9.70).
+  Bola to zámerne odložená byte-parita — #372 review 🔵-3 filed ako cross-cutting #373.
+- Commits: 97508ba (bump 0.9.126) → e4f689f [red] (7 padajúcich testov, oba enginy) →
+  687d906 [green] (oba `except Exception as e2:` bloky: 2. presence-check pred release).
+- Kľúčové rozhodnutia: 2. check gate-ovaný PRESNE ako 1. (transient `e2`) a routovaný cez
+  TEN ISTÝ tri-state helper (`dl_retry._check_landed` / `static_retry.check_landed`), takže
+  collision guard (`has_confirmed_collision` / `_name_collision`) sa NEobchádza ani na
+  retry-fail ceste — `True` → confirm ten istý claim cez zdieľaný `_finish_shipped()`;
+  `False`/`None` → dnešná release+alert vetva. „Presne jeden retry" strop nezmenený —
+  2. check nepridáva ŽIADNY upload (obe `False` aj `None` padnú do release). `log.exception`
+  stále z aktívneho `except` a loguje `e2` (interný try/except v `_check_landed` neprepíše
+  `sys.exc_info()` — empiricky preverené). Byte-parita oboch enginov zachovaná.
+- Testy (7): `test_a_transient_retry_that_fails_but_landed_confirms_instead_of_releasing`,
+  `_and_is_still_absent_releases_and_alerts`, `_then_a_broken_presence_check_never_reuploads`
+  (DL) + `test_python_engine_transient_retry_that_fails_but_landed_confirms`,
+  `_landed_but_name_collision_releases`, `_and_still_absent_releases`,
+  `_then_broken_presence_check_never_reuploads` (static). `list_dirs_calls == 2` je nosný
+  RED diskriminátor (2. check sa reálne spustí pred release).
+- Adversarial Fable review (gate OPEN): 0🔴 0🟡 0🔵 — nezávisle re-spustil RED (7×FAIL) aj
+  GREEN (7×PASS), preveril `log.exception` traceback probe-om. Žiadne nálezy.
+- Gates: ruff 0, mypy 0 (79 súborov), plná pytest suite (~1799) zelená, 0 F/E/s/x, exit 0.
+  Iba `dl_document.py` (už #239-dotknutý) + `static_worker.py` upravené → e2e-dl/e2e-orders
+  korpusy nedotknuté. Bez push/PR (worktree — supervisor integruje).
