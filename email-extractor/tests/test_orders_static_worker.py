@@ -1235,3 +1235,150 @@ def test_python_engine_presence_check_failure_alerts_without_retry(pg):
         "SELECT stage, status FROM email_events WHERE message_id='m1' "
         "AND stage='review'").fetchone()
     assert ev == ("review", "error")
+
+
+# --- #373: the SINGLE retry can ITSELF end "bytes landed, reply lost" — presence-check
+# --- ONCE MORE before releasing the claim, never a THIRD upload ----------------------
+
+def test_python_engine_transient_retry_that_fails_but_landed_confirms(pg):
+    """#373 (static side of the shared cross-cutting fix): the single bounded retry has the
+    SAME failure mode as the first attempt — its own temp-write+rename can land the bytes on
+    ORION while only the confirming reply is lost. Before #373 the retry-fail branch released
+    the claim WITHOUT a second presence check, so a later manual reprocess could upload a
+    SECOND copy. Now a SECOND presence check runs before releasing: found (this exact stable
+    filename) → CONFIRM the SAME claim, never a third upload, never a release, never an
+    alert."""
+    _msg(pg)
+    _snapshot(pg)
+    tries, list_calls, posted = [], [], []
+
+    def always_fail(c, name, content):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    def fake_list_dirs(cfg):
+        list_calls.append(cfg)
+        # absent before the retry → a retry is attempted; present (retry's own bytes landed,
+        # reply lost) on the SECOND check → confirm, never re-upload.
+        if len(list_calls) == 1:
+            return _orion_dirs()
+        return _orion_dirs(present=[f"Z-{_STATIC_FILENAME}"])
+
+    assert static_worker.tick(
+        pg, _python_cfg(), upload=always_fail,
+        post=lambda c, h: posted.append(h) or {"id": 1},
+        list_dirs=fake_list_dirs, llm_client=_FakeLlmClient()) == 1
+    assert len(tries) == 2, "the original attempt + exactly one bounded retry — never a third"
+    assert len(list_calls) == 2, "presence is checked once BEFORE and once AFTER the failed retry"
+    sent = pg.execute("SELECT filename, uploaded_at IS NOT NULL FROM edi_sent").fetchone()
+    assert sent == (_STATIC_FILENAME, True), \
+        "the retry's landed bytes CONFIRM the SAME claim, never released"
+    assert posted == [], "a reply-lost success must not post an upload-failure alert"
+    assert pg.execute("SELECT processed FROM messages").fetchone()[0] is True
+    ev = pg.execute(
+        "SELECT stage, status FROM email_events WHERE message_id='m1' "
+        "AND stage='uploaded_orion'").fetchone()
+    assert ev == ("uploaded_orion", "ok")
+
+
+def test_python_engine_transient_retry_that_fails_landed_but_name_collision_releases(pg):
+    """#373 collision guard still applies on the retry-fail path (the #239 mirror — silent
+    LOSS, not duplication): the static filename encodes partner/order/store, NOT content, so
+    a presence match on the SECOND check could be a DIFFERENT-content order's bytes. Seed a
+    different already-confirmed order under the same filename; a transient retry that fails
+    and finds that name occupied must RELEASE + alert, never confirm OUR order off the
+    stranger's bytes."""
+    sid = _snapshot(pg)
+    parsed, built = _static_built(pg, sid)
+    assert built.filename == _STATIC_FILENAME
+    # a genuinely DIFFERENT-content order already shipped under the SAME filename
+    edi.claim_send(pg, built.store_ean, "99.99.9999", "INY OBSAH", built.filename)
+    edi.confirm_sent(pg, built.store_ean, "99.99.9999", "INY OBSAH")
+    _msg(pg)
+    tries, list_calls, posted = [], [], []
+
+    def always_fail(c, name, content):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    def fake_list_dirs(cfg):
+        list_calls.append(cfg)
+        if len(list_calls) == 1:
+            return _orion_dirs()                          # absent → retry
+        return _orion_dirs(present=[f"Z-{built.filename}"])  # occupied by the STRANGER
+
+    assert static_worker.tick(
+        pg, _python_cfg(), upload=always_fail,
+        post=lambda c, h: posted.append(h) or {"id": 1},
+        list_dirs=fake_list_dirs, llm_client=_FakeLlmClient()) == 1
+    assert len(tries) == 2, "an ambiguous post-retry collision must never re-upload a third time"
+    assert len(list_calls) == 2, "the retry-fail path checks presence before releasing"
+    ours = edi.content_hash(built.content)
+    assert pg.execute(
+        "SELECT count(*) FROM edi_sent WHERE content_sha256 = %s", (ours,)).fetchone()[0] == 0, \
+        "our different-content order must be RELEASED, never confirmed off a filename collision"
+    assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 1, \
+        "only the pre-existing DIFFERENT order's confirmed row remains"
+    assert len(posted) == 1 and "zlyhalo" in posted[0]
+    assert pg.execute("SELECT status FROM order_runs").fetchone()[0] == "error"
+
+
+def test_python_engine_transient_retry_that_fails_and_still_absent_releases(pg):
+    """#373 (retry-fail, still absent): the SECOND presence check proves the document is
+    genuinely NOT on ORION after the failed retry → today's release + Odoo alert + error-
+    event path, unchanged. The bound stays "exactly one retry" (never a third upload), and
+    the second check IS attempted before releasing."""
+    _msg(pg)
+    _snapshot(pg)
+    tries, list_calls, posted = [], [], []
+
+    def always_fail(c, name, content):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    def fake_list_dirs(cfg):
+        list_calls.append(cfg)
+        return _orion_dirs()   # absent BEFORE and AFTER the retry
+
+    assert static_worker.tick(
+        pg, _python_cfg(), upload=always_fail,
+        post=lambda c, h: posted.append(h) or {"id": 1},
+        list_dirs=fake_list_dirs, llm_client=_FakeLlmClient()) == 1
+    assert len(tries) == 2, "the original attempt + exactly one bounded retry — never a third"
+    assert len(list_calls) == 2, \
+        "#373: the retry-fail path presence-checks ONCE MORE before releasing the claim"
+    assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 0, \
+        "a genuinely-absent failed retry releases the claim, same as today's no-retry path"
+    assert len(posted) == 1 and "zlyhalo" in posted[0]
+    assert pg.execute("SELECT status FROM order_runs").fetchone()[0] == "error"
+
+
+def test_python_engine_transient_retry_that_fails_then_broken_presence_check_never_reuploads(pg):
+    """#373 (retry-fail, then the post-retry check itself raises): the SFTP connection that
+    just failed the retry is very likely down for the follow-up listing too. The second
+    presence check IS attempted, `check_landed` returns None on its own failure, and this
+    falls back to release + alert — NEVER a third upload."""
+    _msg(pg)
+    _snapshot(pg)
+    tries, list_calls, posted = [], [], []
+
+    def always_fail(c, name, content):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    def fake_list_dirs(cfg):
+        list_calls.append(cfg)
+        if len(list_calls) == 1:
+            return _orion_dirs()                    # first check: absent → retry
+        raise OSError("SFTP unavailable")           # second check: connection now down
+
+    assert static_worker.tick(
+        pg, _python_cfg(), upload=always_fail,
+        post=lambda c, h: posted.append(h) or {"id": 1},
+        list_dirs=fake_list_dirs, llm_client=_FakeLlmClient()) == 1
+    assert len(tries) == 2, "never a THIRD upload even when the post-retry check is unavailable"
+    assert len(list_calls) == 2, "the second presence check was attempted before releasing"
+    assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 0, \
+        "the claim is released, never left held with no alert"
+    assert len(posted) == 1 and "zlyhalo" in posted[0]
+    assert pg.execute("SELECT status FROM order_runs").fetchone()[0] == "error"

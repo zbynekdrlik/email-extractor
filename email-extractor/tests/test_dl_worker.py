@@ -2301,6 +2301,135 @@ def test_a_transient_upload_failure_never_trusts_a_stable_prefix_collision(pg, t
     ).fetchone()[0] == 1
 
 
+# --- #373: the SINGLE retry can ITSELF end "bytes landed, reply lost" — presence-check
+# --- ONCE MORE before releasing the claim, never a THIRD upload ----------------------
+
+def test_a_transient_retry_that_fails_but_landed_confirms_instead_of_releasing(pg, tmp_path):
+    """#373: the single bounded retry has the SAME failure mode as the first attempt — its
+    own temp-write+rename can complete on ORION while only the confirming reply is lost.
+    Before #373 the retry-fail branch released the claim WITHOUT a second presence check, so
+    a later manual reprocess could upload a SECOND copy (the v0.9.70 duplicate-delivery
+    class, one attempt later). Now a SECOND presence check runs before releasing: found →
+    confirm the SAME claim via the shared `_finish_shipped()`, never a third upload, never a
+    release, never an alert."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    tries = []
+
+    def _always_timed_out_upload(c, name, content, dir_override=None):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    list_dirs_calls = []
+
+    def _fake_list_dirs(cfg):
+        list_dirs_calls.append(cfg)
+        # first check (before the retry): genuinely absent → a retry is attempted;
+        # second check (after the retry ALSO fails): the retry's own bytes are already on
+        # ORION under an earlier attempt's name — the reply was lost, not the write.
+        if len(list_dirs_calls) == 1:
+            return _dirs()
+        return _dirs(in_dl=[f"Z-{_stable_prefix()}20260801_120000000.txt"])
+
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, upload=_always_timed_out_upload,
+                       list_dirs=_fake_list_dirs)
+    assert n == 1
+    assert len(tries) == 2, "the original attempt + exactly one bounded retry — never a third"
+    assert len(list_dirs_calls) == 2, \
+        "presence is checked once BEFORE and once AFTER the failed retry"
+    row = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='dl1'").fetchone()
+    assert row == (True,)
+    assert pg.execute(
+        "SELECT count(*) FROM desadv_sent WHERE uploaded_at IS NOT NULL"
+    ).fetchone()[0] == 1, "the retry's landed bytes CONFIRM the SAME claim, never released"
+    assert pg.execute("SELECT count(*) FROM pending_alerts").fetchone()[0] == 0, \
+        "a reply-lost success must never enqueue an upload-failure alert"
+    event = pg.execute(
+        "SELECT stage, status FROM email_events WHERE message_id='dl1' "
+        "AND stage='uploaded_orion'").fetchone()
+    assert event == ("uploaded_orion", "ok")
+
+
+def test_a_transient_retry_that_fails_and_is_still_absent_releases_and_alerts(pg, tmp_path):
+    """#373 (retry-fail, still absent): the SECOND presence check proves the document is
+    genuinely NOT on ORION after the failed retry → today's release + durable-alert path,
+    unchanged. The bound stays "exactly one retry" (never a third upload), and the second
+    check IS attempted before releasing."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    tries = []
+
+    def _always_timed_out_upload(c, name, content, dir_override=None):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    list_dirs_calls = []
+
+    def _fake_list_dirs(cfg):
+        list_dirs_calls.append(cfg)
+        return _dirs()   # absent BEFORE and AFTER the retry
+
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, upload=_always_timed_out_upload,
+                       list_dirs=_fake_list_dirs)
+    assert n == 1
+    assert len(tries) == 2, "the original attempt + exactly one bounded retry — never a third"
+    assert len(list_dirs_calls) == 2, \
+        "#373: the retry-fail path presence-checks ONCE MORE before releasing the claim"
+    assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0, \
+        "a genuinely-absent failed retry releases the claim, same as today's no-retry path"
+    assert pg.execute(
+        "SELECT count(*) FROM pending_alerts WHERE kind='dl_upload_failed'"
+    ).fetchone()[0] == 1
+
+
+def test_a_transient_retry_that_fails_then_a_broken_presence_check_never_reuploads(
+        pg, tmp_path):
+    """#373 (retry-fail, then the post-retry check itself raises): the SFTP connection that
+    just failed the retry is very likely down for the follow-up listing too. The second
+    presence check IS attempted, `_check_landed` returns None on its own failure, and this
+    falls back to release + alert — NEVER a third upload (a blind re-upload with no absence
+    proof is exactly the v0.9.70 duplicate-delivery bug)."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({"dl_documents": [_doc()], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED]})
+    tries = []
+
+    def _always_timed_out_upload(c, name, content, dir_override=None):
+        tries.append(name)
+        raise OSError("connection timed out")
+
+    list_dirs_calls = []
+
+    def _fake_list_dirs(cfg):
+        list_dirs_calls.append(cfg)
+        if len(list_dirs_calls) == 1:
+            return _dirs()                       # first check: absent → retry attempted
+        raise OSError("SFTP unavailable")        # second check: connection now down
+
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    n = dl_worker.tick(pg, cfg, client=client, upload=_always_timed_out_upload,
+                       list_dirs=_fake_list_dirs)
+    assert n == 1
+    assert len(tries) == 2, "never a THIRD upload even when the post-retry check is unavailable"
+    assert len(list_dirs_calls) == 2, "the second presence check was attempted before releasing"
+    assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0, \
+        "the claim is released, never left held with no alert"
+    assert pg.execute(
+        "SELECT count(*) FROM pending_alerts WHERE kind='dl_upload_failed'"
+    ).fetchone()[0] == 1
+
+
 # --- #239 class 3: classified as DL but never even attempted -----------------
 
 def test_stuck_classified_sweep_uses_a_short_line_with_no_microsecond_timestamps(pg):
