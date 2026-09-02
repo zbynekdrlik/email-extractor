@@ -604,6 +604,24 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             try:
                 upload(cfg, upload_name, built.content, dir_override=upload_dir)
             except Exception as e2:
+                # #373: the retry's OWN upload has the SAME failure mode as the first
+                # attempt — its temp-write+rename may have landed the bytes on ORION while
+                # only the confirming reply was lost. Releasing the claim now would remove
+                # the anti-duplicate protection and let a later manual reprocess upload a
+                # SECOND copy (the v0.9.70 duplicate-delivery class, one attempt later). So
+                # presence-check ONCE MORE before releasing — gated exactly like the first
+                # check (transient e2), same tri-state: found+trustworthy → confirm the SAME
+                # claim; absent / unavailable / collision → the release+alert path below.
+                # NEVER a third upload — the "exactly one retry" bound is unchanged.
+                landed2 = (_check_landed(conn, cfg, list_dirs, supplier_decision.ean_edi,
+                                         built.doc_number)
+                           if _is_transient(str(e2)) else None)
+                if landed2 is True:
+                    log.warning(
+                        "DL upload retry of %s failed but the document is already on ORION "
+                        "under the retry's own name (stable identity match) — confirming "
+                        "instead of releasing (%s)", built.filename, e2)
+                    return _finish_shipped()
                 log.exception("DL upload retry of %s also failed (original: %s)",
                               built.filename, e)
                 return _alert_and_release(e2)
