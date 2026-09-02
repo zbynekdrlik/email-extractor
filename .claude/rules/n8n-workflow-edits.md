@@ -336,9 +336,32 @@ shape into a new `app/orders/static_retry.py`. Reusable gotchas any FUTURE uploa
   same reasoning `dl_document._finish_shipped` documents). `_alert_and_release`'s
   `log.exception` needs the live traceback, so it is only ever called from inside an except.
 
-- **The retry-fail path still releases without a SECOND presence check** — deliberate
-  byte-parity with the DL reference (`dl_document.py`), filed as a CROSS-CUTTING follow-up
-  (#373) to fix in BOTH engines together, never diverged in one.
+- **The retry-fail path now ALSO presence-checks before releasing (#373 — shipped in BOTH
+  engines together, byte-parallel).** The single bounded retry has the SAME failure mode as
+  the first attempt: its own temp-write+`sftp.rename` can land the bytes on ORION while only
+  the confirming reply is lost. Before #373 the `except Exception as e2:` branch released the
+  claim + alerted WITHOUT a second presence check, so a later manual reprocess could upload a
+  SECOND copy (the v0.9.70 duplicate class, one attempt later). Fix: after the failed retry,
+  run ONE MORE presence check — gated EXACTLY like the first (transient `e2`: `_is_transient(
+  str(e2))` DL / `static_retry.is_upload_transient(e2)` static) and routed through the SAME
+  tri-state helper (`_check_landed` / `check_landed`, so the `has_confirmed_collision` /
+  `_name_collision` guard is NEVER bypassed): `True` → confirm the SAME claim via the shared
+  `_finish_shipped()`; `False`/`None` (absent / SFTP down / collision) → today's release+alert
+  path. Reusable rules a FUTURE upload-with-retry MUST keep: (a) the "exactly one retry" bound
+  is unchanged — the second check adds ZERO uploads (both `False` and `None` fall through to
+  release, never a 3rd `upload()` call); (b) reuse the tri-state check, never a bare
+  `_present_on_orion`/`already_landed` — the collision guard is what stops confirming off a
+  stranger's bytes on the retry-fail path too; (c) `_alert_and_release`'s `log.exception` still
+  fires from inside the active `except` and logs `e2` — the intervening `_check_landed`/
+  `check_landed` call has its OWN internal try/except, so on return CPython restores the outer
+  exception state and `sys.exc_info()` is still `e2` (empirically probed, not assumed).
+  Residual unchanged: an occupant whose `edi_sent` row was fully DELETED is undetectable via
+  `edi_sent` alone — bounded by the manual re-send absence-proof procedure, same as the first
+  check. Regression pins live in `test_dl_worker.py` / `test_orders_static_worker.py`
+  (`*_retry_that_fails_but_landed_confirms*`, `*_landed_but_name_collision_releases`,
+  `*_and_still_absent_releases`, `*_broken_presence_check_never_reuploads`); their
+  `list_dirs_calls == 2` assertions are the load-bearing proof that the second check actually
+  runs before release (RED on the pre-#373 code, which checked only once).
 
 ## A SYNTHESIZED fallback identity feeding a claim/dedup key must be STABLE across retries too (#262)
 
