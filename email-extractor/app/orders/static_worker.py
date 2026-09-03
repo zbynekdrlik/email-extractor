@@ -625,11 +625,18 @@ def tick(conn, cfg, pipeline=None, upload=None, post=None, llm_client=None,
         # A run that just HELD this message (via the AI-pipeline fallback) must not be
         # marked processed — same #93 contract worker.tick already follows.
         if not has_open(conn, message["message_id"]):
+            # #342/#376: `AND processed = false` so a message the AI-pipeline fallback ALREADY
+            # terminalized (the promo → no_processing branch marks processed_by='promo-filter';
+            # the #376 AI-not-order discard marks processed_by='ai-not-order') is not re-stamped
+            # here as processed_by=CATEGORY — that would silently overwrite the attribution and
+            # hide an AI discard from the "Zahodené AI" dashboard tab. In every normal static
+            # flow the message is still processed=false at this point, so this is unchanged
+            # there. Mirrors worker.tick's own identical guard.
             conn.execute(
                 """UPDATE messages
                       SET processed = true, processed_at = now(), processed_by = %s,
                           processing_at = NULL
-                    WHERE message_id = %s""",
+                    WHERE message_id = %s AND processed = false""",
                 (CATEGORY, message["message_id"]))
         return 1
 

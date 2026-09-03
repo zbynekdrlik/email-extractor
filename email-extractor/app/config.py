@@ -79,6 +79,12 @@ class Config:
     static_orders_shadow: bool = False
     static_orders_shadow_days: int = 3
     # The monthly tripwire (#89): warn once past this, never stop shipping orders.
+    # #376: the AI-not-order safe-discard rollout switch. Default FALSE = DRY-RUN — the whole
+    # classifier gate still runs on every no-order mail (so its would-be verdict is recorded
+    # in the review event's outcome, "AI by zahodilo (...)"), but the mail STILL goes to the
+    # warehouse question. Flip to true (a deliberate operator decision, after ~a week of
+    # comparing the dry-run verdicts against the sklad's real answers) to actually discard.
+    ai_not_order_discard: bool = False
     orders_spend_cap_eur: float = 30.0
     openai_api_key: str = ""
     orders_model: str = "gpt-5.4"
@@ -239,6 +245,9 @@ class Config:
                     "1", "true", "yes", "on"),
             static_orders_shadow_days=int(
                 _get(o, "static_orders_shadow_days", "STATIC_ORDERS_SHADOW_DAYS", 3) or 3),
+            ai_not_order_discard=str(
+                _get(o, "ai_not_order_discard", "AI_NOT_ORDER_DISCARD", "false")).lower() in (
+                    "1", "true", "yes", "on"),
             orders_spend_cap_eur=float(
                 _get(o, "orders_spend_cap_eur", "ORDERS_SPEND_CAP_EUR", 30) or 0),
             openai_api_key=_get(o, "openai_api_key", "OPENAI_API_KEY", "") or "",
