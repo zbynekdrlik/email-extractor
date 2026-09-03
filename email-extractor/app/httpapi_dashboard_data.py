@@ -237,3 +237,47 @@ def register(app: Flask, deps: Deps) -> None:
                          outcome="manuálne preposlané na spracovanie", rollup=False)
         log.info("reprocess #%s", mid)
         return jsonify(ok=True, id=mid)
+
+    # #376: the "Zahodené AI (14 dní)" dashboard section + its one restore action.
+    @app.get("/api/orders/discarded")
+    def api_orders_discarded():
+        """The mails the AI-not-order gate discarded to `no_processing` in the last 14 days —
+        listed for the operator to eyeball and, if wrong, restore. Keyed on the STABLE
+        `processed_by='ai-not-order'` marker (never a text LIKE), so a promo-filtered or
+        hand-reclassified `no_processing` mail never shows up here."""
+        with deps.db() as c:
+            rows = c.execute(
+                """SELECT id, from_addr, from_name, subject, proc_outcome, processed_at
+                     FROM messages
+                    WHERE processed_by = 'ai-not-order'
+                      AND processed_at >= now() - interval '14 days'
+                    ORDER BY processed_at DESC LIMIT 200""").fetchall()
+        items = [{"id": r[0], "from": r[1], "from_name": r[2], "subject": r[3],
+                  "reason": r[4],
+                  "discarded_at": r[5].isoformat() if r[5] else None} for r in rows]
+        return jsonify(total=len(items), items=items)
+
+    @app.post("/api/message/<int:mid>/restore")
+    def api_restore(mid: int):
+        """Undo an AI-not-order discard: put the mail back to its original category and
+        re-queue it. It re-extracts (empty again), and the discard gate's rule-6 loop guard —
+        which reads THIS `stage='restore'` event via NOT EXISTS — refuses a second
+        auto-discard, so the mail lands on the warehouse question exactly as today. Scoped to
+        `category='no_processing' AND processed_by='ai-not-order'` (the exact set the "Zahodené
+        AI" tab lists) so it can only ever undo an AI discard — never a live message, never a
+        promo-filtered one."""
+        with deps.db() as c:
+            row = c.execute(
+                """UPDATE messages
+                      SET category = COALESCE(original_category, category),
+                          processed = false, processed_at = NULL, processed_by = NULL,
+                          processing_at = NULL, error = NULL
+                    WHERE id = %s AND category = 'no_processing'
+                      AND processed_by = 'ai-not-order'
+                    RETURNING id, message_id""", (mid,)).fetchone()
+            if not row:
+                abort(404)
+            db.log_event(c, row[1], "dashboard", "restore", "ok",
+                         outcome="Obnovené operátorom — daj na nástenku", rollup=True)
+        log.info("restore #%s", mid)
+        return jsonify(ok=True, id=mid)

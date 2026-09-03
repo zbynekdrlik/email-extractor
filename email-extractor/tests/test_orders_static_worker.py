@@ -1382,3 +1382,39 @@ def test_python_engine_transient_retry_that_fails_then_broken_presence_check_nev
         "the claim is released, never left held with no alert"
     assert len(posted) == 1 and "zlyhalo" in posted[0]
     assert pg.execute("SELECT status FROM order_runs").fetchone()[0] == "error"
+
+
+# --- #376 review finding 1: the static terminal UPDATE must not re-stamp an AI discard ----
+
+def test_ai_not_order_discard_is_not_restamped_by_the_static_terminal_update(pg):
+    """#376 review finding 1: an unparseable static mail falls back to the AI pipeline, which
+    (with the option on) DISCARDS it to no_processing/processed_by='ai-not-order'. The static
+    tick's OWN terminal UPDATE must NOT then re-stamp processed_by='static_orders' — that would
+    hide the discard from the 'Zahodene AI' tab (WHERE processed_by='ai-not-order'). Mirrors
+    worker.py's #342 `AND processed = false` guard."""
+    from app.orders import pipeline as pipeline_mod
+
+    class _Client:
+        last_prompt_hash = "p"
+
+        def json_call(self, system, user, schema, name="result"):
+            if name == "orders":
+                return {"senderName": "", "senderEmail": "", "companyName": "",
+                        "isChangeRequest": False, "notes": "", "orders": []}
+            if name == "mail_kind":
+                return {"kind": "other", "confidence": 0.95, "reason": "nie je objednavka"}
+            return {"gtin": "", "confidence": 0.1}
+
+    _msg(pg, text=UNPARSEABLE_TEXT)
+    _snapshot(pg)
+
+    def _pipeline(conn, cfg, message, snapshot_id):
+        return pipeline_mod.run(conn, cfg, message, snapshot_id, client=_Client(),
+                                upload=lambda *a, **k: None, post=lambda *a, **k: None)
+
+    assert static_worker.tick(
+        pg, _python_cfg(ai_not_order_discard=True), pipeline=_pipeline) == 1
+    cat, by = pg.execute(
+        "SELECT category, processed_by FROM messages WHERE message_id='m1'").fetchone()
+    assert (cat, by) == ("no_processing", "ai-not-order"), \
+        "the AI discard must survive, not be re-stamped as static_orders"

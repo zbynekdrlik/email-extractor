@@ -114,6 +114,7 @@ DASH_HTML = r"""<!doctype html><html lang="sk"><head><meta charset="utf-8">
   <button class="tab" id="tabFix" onclick="setView('fix')">Fix fronta</button>
   <button class="tab" id="tabImap" onclick="setView('imap')">Neprijaté <span id="imapBadge"></span></button>
   <button class="tab" id="tabAsk" onclick="setView('ask')">Otázky skladu <span id="askBadge"></span></button>
+  <button class="tab" id="tabDiscarded" onclick="setView('discarded')">Zahodené AI <span id="discardedBadge"></span></button>
 </div>
 <main>
   <div id="list"></div>
@@ -234,12 +235,33 @@ function setView(v){view=v;document.getElementById('tabMails').classList.toggle(
   document.getElementById('tabFix').classList.toggle('active',v==='fix');
   document.getElementById('tabImap').classList.toggle('active',v==='imap');
   document.getElementById('tabAsk').classList.toggle('active',v==='ask');
+  document.getElementById('tabDiscarded').classList.toggle('active',v==='discarded');
   if(v==='fix'){loadFix()}else if(v==='imap'){loadImap()}
   else if(v==='ask'){showSkladLink();loadAsk()}
+  else if(v==='discarded'){loadDiscarded()}
   else{document.getElementById('detail').innerHTML='<div class="empty">Vyber mail vľavo.</div>';loadList()}}
 function tick(){if(live&&document.getElementById('ov').style.display!=='flex'){
   if(view==='mails')loadList();else if(view==='imap')loadImap();
-  else if(view==='ask')loadAsk();else loadFix()}}
+  else if(view==='ask')loadAsk();else if(view==='discarded')loadDiscarded();else loadFix()}}
+async function loadDiscarded(){const D=document.getElementById('detail'),L=document.getElementById('list');
+  L.innerHTML='';let d;try{d=await api('/api/orders/discarded')}catch(e){return}
+  const b=document.getElementById('discardedBadge');b.textContent=d.total?String(d.total):'';b.style.color='#6e7681';
+  if(!d.items.length){D.innerHTML='<div class="empty">AI zatiaľ nič nezahodila (14 dní).</div>';return}
+  D.innerHTML='<div class="lbl">Zahodené AI (14 dní): '+d.total+'</div>'+
+    '<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>'+
+    '<th style="text-align:left;padding:5px;border-bottom:1px solid #d0d7de">Kedy</th>'+
+    '<th style="text-align:left;padding:5px;border-bottom:1px solid #d0d7de">Odosielateľ</th>'+
+    '<th style="text-align:left;padding:5px;border-bottom:1px solid #d0d7de">Predmet</th>'+
+    '<th style="text-align:left;padding:5px;border-bottom:1px solid #d0d7de">Dôvod</th>'+
+    '<th style="padding:5px;border-bottom:1px solid #d0d7de"></th></tr></thead><tbody>'+
+    d.items.map(it=>'<tr>'+
+      '<td style="padding:5px;border-bottom:1px solid #eaeef2;white-space:nowrap">'+tsShort(it.discarded_at)+'</td>'+
+      '<td style="padding:5px;border-bottom:1px solid #eaeef2">'+E(it.from||'')+'</td>'+
+      '<td style="padding:5px;border-bottom:1px solid #eaeef2">'+E(it.subject||'(bez predmetu)')+'</td>'+
+      '<td style="padding:5px;border-bottom:1px solid #eaeef2">'+E(it.reason||'')+'</td>'+
+      '<td style="padding:5px;border-bottom:1px solid #eaeef2"><button onclick="doRestore('+it.id+')">Nie je to na zahodenie → daj na nástenku</button></td>'+
+      '</tr>').join('')+'</tbody></table>'}
+async function doRestore(id){try{await api('/api/message/'+id+'/restore',{method:'POST'});await loadDiscarded()}catch(e){alert(e.message||'chyba')}}
 const SKLAD_LINK="__SKLADLINK__";
 const DL_SKLAD_LINK="__DLSKLADLINK__";
 function skladLinkRow(label,url){const w=document.createElement('div');w.className='row';
@@ -392,6 +414,8 @@ async function spendBadgeRefresh(){try{const d=await api('/api/orders/spend');
   b.style.color=(d.cap_eur&&d.cost_eur>d.cap_eur)?'#f85149':'#6e7681'}catch(e){}}
 async function imapBadgeRefresh(){try{const d=await api('/api/imap-failures');
   const b=document.getElementById('imapBadge');b.textContent=d.total?String(d.total):'';b.style.color='#f85149'}catch(e){}}
+async function discardedBadgeRefresh(){try{const d=await api('/api/orders/discarded');
+  const b=document.getElementById('discardedBadge');b.textContent=d.total?String(d.total):'';b.style.color='#6e7681'}catch(e){}}
 async function reliabilityBadgeRefresh(){try{const d=await api('/api/orders/digest');
   const b=document.getElementById('reliabilityBadge');
   const since=d.days_since_incident;
@@ -402,7 +426,7 @@ async function reliabilityBadgeRefresh(){try{const d=await api('/api/orders/dige
 document.getElementById('livetog').onclick=()=>{live=!live;document.getElementById('livetog').style.color=live?'#3fb950':'#6e7681';document.getElementById('livelbl').textContent=live?'LIVE':'pauza'};
 let deb;q.oninput=()=>{clearTimeout(deb);deb=setTimeout(loadList,350)};
 for(const el of [fcat,fstate,ffrom,fto])el.onchange=loadList;
-loadList();imapBadgeRefresh();spendBadgeRefresh();askBadgeRefresh();reliabilityBadgeRefresh();setInterval(askBadgeRefresh,30000);timer=setInterval(tick,5000);setInterval(imapBadgeRefresh,30000);setInterval(spendBadgeRefresh,60000);setInterval(reliabilityBadgeRefresh,60000);
+loadList();imapBadgeRefresh();spendBadgeRefresh();askBadgeRefresh();reliabilityBadgeRefresh();discardedBadgeRefresh();setInterval(askBadgeRefresh,30000);timer=setInterval(tick,5000);setInterval(imapBadgeRefresh,30000);setInterval(spendBadgeRefresh,60000);setInterval(reliabilityBadgeRefresh,60000);setInterval(discardedBadgeRefresh,30000);
 </script></body></html>"""
 
 
