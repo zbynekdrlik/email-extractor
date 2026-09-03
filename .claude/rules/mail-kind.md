@@ -77,6 +77,18 @@ Conditions, in the order the code evaluates them (cheap first):
   `if not shadow`, so the corpus/replay (forced-shadow) makes ZERO classifier calls and stays
   byte-identical. Test: `test_shadow_never_calls_the_classifier`.
 
+- **A discard reached via the STATIC fallback must survive the static tick's terminal
+  UPDATE — the #342 class, one engine over (review 🔴1).** `static_worker.tick`'s "mark
+  processed" UPDATE re-stamps `processed_by=CATEGORY` after `run_live`; when the unparseable
+  mail fell through `_fallback_to_ai` → `pipeline.run` → `_discard_no_processing`
+  (`processed_by='ai-not-order'`), that re-stamp silently overwrote the discard's attribution
+  and hid it from the "Zahodené AI" tab. The fix is the SAME `AND processed = false` guard
+  `worker.tick` already carries for the promo carve-out (#342) — any engine that terminalizes
+  a message inside `pipeline.run` and then has its OWN "mark processed" UPDATE needs this guard.
+- **A CHANGE REQUEST is never discarded — gate on `not extracted.isChangeRequest` BEFORE the
+  classifier, not just on the `other` verdict (review 🔴2, design B.1).** A change to an
+  already-placed order can extract `orders == []` yet must always reach a human; the classifier
+  is short-circuited for it (never even called).
 - **Restore endpoint + the "Zahodené AI (14 dní)" dashboard tab.** `POST
   /api/message/<id>/restore` restores `category = COALESCE(original_category, category)`,
   `processed=false`, re-queues, and writes the `stage='restore'` event the loop guard reads —

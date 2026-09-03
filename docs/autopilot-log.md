@@ -4038,3 +4038,11 @@ pred „vytvor v CODEXe" krokom vždy najprv over raw.firma, či už neexistuje.
   `test_httpapi_characterization.py` (2 nové routy + DASH_HTML hash re-pin `# airuleset:secret-ok`).
 - Brány: ruff 0, mypy 0 (80 súborov), plná pytest suite 1849 passed / 0 fail / 0 error, exit 0.
   Bez push/PR (worktree — supervisor integruje serially).
+- Adversarial review (Fable, gate OPEN) → 2🔴 3🟡 3🔵, všetky opravené v-branch (RED→GREEN):
+  🔴1 static_worker.tick terminal UPDATE dostal `AND processed = false` (#342 guard o engine
+  vedľa — inak sa AI discard cez static fallback prepíše na 'static_orders' a zmizne z tab-u);
+  🔴2 discard brána teraz gate-uje `not extracted.isChangeRequest` (B.1 — zmena objednávky sa
+  nikdy nezahadzuje, klasifikátor sa preň ani nevolá); 🟡 doc-ident stemy rozšírené (objednávka
+  číslo/čís., obj. č., číslo objednávky, kus/kusov), badge refresh na tab-e, `AND
+  processed_by='ai-not-order'` v restore; 🔵 mŕtva `í` vetva v `avízo` odstránená + change_request
+  verdict test. Commity: 9f3b8cd [red] → 8e2d364 [green]. ruff 0, mypy 0, plná suite zelená.
