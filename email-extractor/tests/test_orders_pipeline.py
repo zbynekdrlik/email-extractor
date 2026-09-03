@@ -1150,21 +1150,69 @@ def test_shadow_never_calls_the_classifier(pg, env):
     assert cat == "ai_orders"
 
 
-def test_a_restored_mail_is_never_auto_discarded_again(pg, env):
-    """F.6: the loop guard — a mail that already carries a `stage='restore'` event (the
-    operator undid an earlier discard) is asked, never auto-discarded a second time, even
-    with the option on and an `other` verdict."""
+def test_a_restored_mail_goes_to_the_board_not_re_discarded(pg, env):
+    """F.6 (review finding 4): compose the REAL flow through the actual restore endpoint —
+    a first live run DISCARDS the mail, the operator RESTORES it via POST /restore (Flask),
+    and the reprocess is asked (never auto-discarded a second time — the `stage='restore'`
+    loop guard skips the classifier). No hand-inserted `email_events` row."""
+    import os
+
+    from app.httpapi import create_app
     _seed_mail(pg, "k10")
-    pg.execute(
-        "INSERT INTO email_events (message_id, workflow, stage, status, outcome, rollup) "
-        "VALUES ('k10', 'dashboard', 'restore', 'ok', 'Obnovené operátorom', true)")
-    rec = Recorder()
-    client = ScriptedClient([dict(_NO_ORDERS_EXTRACT)],
-                            mail_kind={"kind": "other", "confidence": 0.99})
+    # 1. a genuine discard (not a fixture): first live run with the option on.
+    r1 = pipeline.run(pg, _cfg(ai_not_order_discard=True), _karmen_infomail("k10"), env,
+                      client=ScriptedClient([dict(_NO_ORDERS_EXTRACT)],
+                                            mail_kind={"kind": "other", "confidence": 0.99}),
+                      upload=lambda *a, **k: None, post=lambda *a, **k: None)
+    assert r1["status"] == "review"
+    mid = pg.execute("SELECT id FROM messages WHERE message_id='k10'").fetchone()[0]
+    assert pg.execute(
+        "SELECT category FROM messages WHERE id=%s", (mid,)).fetchone()[0] == "no_processing"
+    # 2. the operator restores it through the REAL endpoint.
+    app = create_app(Config(pg_dsn=os.environ["PG_TEST_DSN"], data_dir="/tmp",
+                            api_token="tok", dash_password="secret", secret_key="test-secret"))
+    app.testing = True
+    c = app.test_client()
+    c.post("/login", data={"password": "secret"})
+    assert c.post(f"/api/message/{mid}/restore").status_code == 200
+    assert pg.execute(
+        "SELECT category, processed FROM messages WHERE id=%s", (mid,)).fetchone() \
+        == ("ai_orders", False)
+    # 3. reprocess: the loop guard refuses a 2nd auto-discard -> the warehouse question.
+    client2 = ScriptedClient([dict(_NO_ORDERS_EXTRACT)],
+                             mail_kind={"kind": "other", "confidence": 0.99})
     pipeline.run(pg, _cfg(ai_not_order_discard=True), _karmen_infomail("k10"), env,
-                 client=client, upload=rec.upload, post=rec.post)
-    assert "mail_kind" not in client.asked, "the restore-loop guard skips the classifier"
-    cat = pg.execute("SELECT category FROM messages WHERE message_id='k10'").fetchone()[0]
+                 client=client2, upload=lambda *a, **k: None, post=lambda *a, **k: None)
+    assert "mail_kind" not in client2.asked, "the restore-loop guard must skip the classifier"
+    assert pg.execute(
+        "SELECT category FROM messages WHERE id=%s", (mid,)).fetchone()[0] == "ai_orders"
+    assert len(teach.open_questions(pg, kinds=("mail",))) == 1
+
+
+def test_a_change_request_is_never_discarded_even_when_classifier_says_other(pg, env):
+    """F (review finding 2, design B.1): a mail the extractor flagged `isChangeRequest` — a
+    change to an already-placed order — must NEVER be auto-discarded, even with the option on
+    and an `other` verdict. The classifier is not even consulted for it (short-circuited)."""
+    _seed_mail(pg, "k12")
+    client = ScriptedClient([dict(_NO_ORDERS_EXTRACT, isChangeRequest=True)],
+                            mail_kind={"kind": "other", "confidence": 0.99})
+    pipeline.run(pg, _cfg(ai_not_order_discard=True), _karmen_infomail("k12"), env,
+                 client=client, upload=lambda *a, **k: None, post=lambda *a, **k: None)
+    assert "mail_kind" not in client.asked, \
+        "isChangeRequest must short-circuit before the classifier"
+    cat = pg.execute("SELECT category FROM messages WHERE message_id='k12'").fetchone()[0]
+    assert cat == "ai_orders"
+
+
+def test_change_request_verdict_is_never_discarded(pg, env):
+    """F (review finding 8): a classifier `change_request` verdict (a change to an existing
+    order detected by the classifier, not the extractor flag) is never discarded."""
+    _seed_mail(pg, "k13")
+    pipeline.run(pg, _cfg(ai_not_order_discard=True), _karmen_infomail("k13"), env,
+                 client=ScriptedClient([dict(_NO_ORDERS_EXTRACT)],
+                                       mail_kind={"kind": "change_request", "confidence": 0.99}),
+                 upload=lambda *a, **k: None, post=lambda *a, **k: None)
+    cat = pg.execute("SELECT category FROM messages WHERE message_id='k13'").fetchone()[0]
     assert cat == "ai_orders"
     assert len(teach.open_questions(pg, kinds=("mail",))) == 1
 

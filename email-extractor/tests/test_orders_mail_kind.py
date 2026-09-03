@@ -71,12 +71,20 @@ def test_fold_strips_every_slovak_caron_and_acute():
     "objednávka no 5",
     "Objednávka nr 5",
     "objednávka #5",
+    # #376 review finding 5: the "číslo" spelled-out forms + obj. abbreviation + reversed
+    # "číslo objednávky" order — all real ways a Slovak order confirmation names its number.
+    "objednávka číslo 12345",
+    "Objednávka čís. 12345",
+    "obj. č. 12345",
+    "číslo objednávky 12345",
     "Dodací list k tovaru",
     "dodacích listov je viac",
     "DL č. 900",
     "posielam DESADV 7788",
     "avízo o dodávke",
     "AVÍZO 55",
+    # #376 review finding 5: "kusov" as a spelled-out unit — 2 item lines ⟹ veto.
+    "5 kusov chleba a 10 kusov rožkov",
 ])
 def test_structural_veto_fires_on_a_document_identifier(text):
     assert mail_kind.structural_veto("", text), f"veto must fire for {text!r}"
