@@ -84,9 +84,17 @@ def apply_ocr_fix(name: str) -> str:
 
 # --- text helpers ---------------------------------------------------------
 
-def _fold(text: str) -> str:
+def fold(text: str) -> str:
+    """Lowercase + strip diacritics (NFD, drop combining marks). The ONE diacritic-folding
+    normalizer reused across the package (#376 promoted it from the private `_fold`, same
+    promotion precedent as `matches_wire_prefix`) — a plain-ASCII regex stem can only match
+    Slovak `č/ľ/ĺ/ň/…` forms if the haystack is folded FIRST (the #265 lesson)."""
     s = unicodedata.normalize("NFD", str(text or "").lower())
     return "".join(c for c in s if unicodedata.category(c) != "Mn")
+
+
+# Byte-identical working alias — every existing internal caller keeps using `_fold`.
+_fold = fold
 
 
 def _norm(text: str) -> str:

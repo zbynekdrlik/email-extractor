@@ -39,6 +39,7 @@ options:
   static_orders_engine: "n8n"
   static_orders_shadow: false
   static_orders_shadow_days: 3
+  ai_not_order_discard: false
   orders_spend_cap_eur: 30
   openai_api_key: ""
   orders_model: "gpt-5.4"
@@ -105,6 +106,7 @@ schema:
   static_orders_engine: list(n8n|python)?
   static_orders_shadow: bool?
   static_orders_shadow_days: int?
+  ai_not_order_discard: bool?
   orders_spend_cap_eur: float?
   openai_api_key: password?
   orders_model: str?

@@ -20,7 +20,8 @@ import enum
 import logging
 from pathlib import Path
 
-from . import customer, edi, extract, hold, llm, match, memory, promo, report, snapshot, teach
+from . import (customer, edi, extract, hold, llm, mail_kind, match, memory, promo, report,
+               snapshot, teach)
 from . import upload as upload_mod
 
 log = logging.getLogger("orders.pipeline")
@@ -201,23 +202,28 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                 message.get("subject", ""), message.get("from_addr", ""),
                 message.get("combined_text", "") or "",
                 message.get("list_unsubscribe", "")):
-            conn.execute(
-                """UPDATE messages
-                      SET category = 'no_processing',
-                          original_category = COALESCE(original_category, category),
-                          processed = true, processed_at = now(),
-                          processed_by = 'promo-filter', processing_at = NULL
-                    WHERE message_id = %s""", (message.get("message_id", ""),))
-            report.log_event(
-                conn, message.get("message_id", ""), stage="review", status="review",
+            return _discard_no_processing(
+                conn, message,
                 outcome="Reklamný leták / newsletter — nie je objednávka (nespracúva sa)",
+                marker="promo-filter", notes=extracted.get("notes", ""),
                 detail={"promo": True})
-            log.info("promo mail routed to no_processing: %s (%s)",
-                     message.get("message_id", ""), message.get("from_addr", ""))
-            return {"status": "review", "items": [], "shadow": shadow, "would_ship": False,
-                    "customer_ean": "", "customer_name": "", "delivery_date": "",
-                    "orders": 0, "order_results": [], "question_ids": [],
-                    "notes": extracted.get("notes", "")}
+        # #376: the AI safe-discard. On the SAME `orders == []` branch, after the promo
+        # carve-out, before the warehouse question — a separate classifier verdict ("is this
+        # even an order or a DL?") plus a wall of vetoes decides whether the mail can be
+        # thrown away automatically instead of nagging the sklad. Never in shadow (shadow
+        # leaves no trace), never for a `manual`-taught sender (already confirmed an order).
+        # `_mail_kind_discard_reason` returns a non-empty reason ONLY when EVERY safety
+        # condition holds; the option `ai_not_order_discard` (default false = DRY-RUN) decides
+        # whether we act on it or merely record what we WOULD have done.
+        discard_reason = ""
+        if not shadow and rule != "manual":
+            discard_reason = _mail_kind_discard_reason(conn, client, message)
+        if discard_reason and getattr(cfg, "ai_not_order_discard", False):
+            return _discard_no_processing(
+                conn, message,
+                outcome=f"AI: nie je objednávka ani dodací list — zahodené ({discard_reason})",
+                marker="ai-not-order", notes=extracted.get("notes", ""),
+                detail={"ai_not_order": True, "reason": discard_reason})
         # #164 row 2: "is this even an order?" — a board question that TEACHES (a
         # `mail_rules` row), instead of a dead `review` nobody could ever act on. Never in
         # shadow: shadow must leave no trace. #361: when a `manual` rule already exists for
@@ -233,6 +239,12 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                                 on_new=new_questions.append)
             if mq:
                 qids.append(mq)
+        # #376: DRY-RUN trace — when the gate WOULD have discarded but the option is off, the
+        # (rollup) event outcome carries "AI by zahodilo (...)" so the owner can compare the
+        # week's would-be discards against the warehouse's real answers before flipping it on.
+        reject_reason = "AI nenašla v e-maile žiadnu objednávku"
+        if discard_reason and not getattr(cfg, "ai_not_order_discard", False):
+            reject_reason += f" — AI by zahodilo ({discard_reason})"
         # #361: a `manual`-taught mail with no extractable order raises no board question
         # (the is-it-an-order answer is already known), so it is a TECHNICAL review — the
         # invariant in `_finish` must not synthesize a fallback mail question for it.
@@ -240,7 +252,7 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
         return _finish(conn, cfg, message, shadow, post,
                        status="held" if qids else "review", items=[],
                        result={"shipped": False,
-                               "reject_reason": "AI nenašla v e-maile žiadnu objednávku",
+                               "reject_reason": reject_reason,
                                "customer": {}, "unverified": extracted.get("unverified", []),
                                "notes": extracted.get("notes", "")},
                        reason=no_orders_reason, question_ids=qids,
@@ -930,6 +942,73 @@ def _sender_address(message: dict, extracted: dict, customers: list[dict]) -> st
     if stated and stated.lower() in known:
         return stated
     return envelope or stated
+
+
+def _discard_no_processing(conn, message: dict, outcome: str, marker: str,
+                           notes: str = "", detail: dict | None = None) -> dict:
+    """Route a mail straight to `no_processing` with ONE honest review event and NO warehouse
+    question — the shared carve-out for BOTH the promo filter (#342) and the AI-not-order
+    discard (#376). Written directly, NOT through `_finish`, whose invariant would otherwise
+    RAISE the very mail question we are avoiding (a non-technical review with no board
+    question). `processed_by` is a STABLE marker (`promo-filter` / `ai-not-order`), never a
+    `LIKE` on the outcome text, so the dashboard can list each source exactly. Only ever
+    reached on the live (not-shadow) branch, so the result's `shadow` is always False."""
+    conn.execute(
+        """UPDATE messages
+              SET category = 'no_processing',
+                  original_category = COALESCE(original_category, category),
+                  processed = true, processed_at = now(),
+                  processed_by = %s, processing_at = NULL
+            WHERE message_id = %s""",
+        (marker, message.get("message_id", "")))
+    report.log_event(
+        conn, message.get("message_id", ""), stage="review", status="review",
+        outcome=outcome, detail=detail or {})
+    log.info("%s routed to no_processing: %s (%s)", marker,
+             message.get("message_id", ""), message.get("from_addr", ""))
+    return {"status": "review", "items": [], "shadow": False, "would_ship": False,
+            "customer_ean": "", "customer_name": "", "delivery_date": "",
+            "orders": 0, "order_results": [], "question_ids": [], "notes": notes}
+
+
+def _mail_kind_discard_reason(conn, client, message: dict) -> str:
+    """#376: the safe-discard decision for a mail the extractor found no order in. Returns a
+    non-empty human reason (with confidence) ONLY when EVERY safety condition holds; "" means
+    "ask the warehouse" (the fail-safe on every uncertainty). The gate is a big AND, so the
+    cheap deterministic guards run FIRST and the paid classifier call only when they pass —
+    the order never changes the result, it only saves a model call on obvious cases.
+
+    Conditions (design B): (6) never re-discard a mail already restored once — the loop guard,
+    read from the `stage='restore'` event; (3+4) the deterministic veto wall
+    (`mail_kind.veto_reason` — readability + structured attachment + document-identifier /
+    item-line structure); (5) the classifier verdict must READ cleanly (else ask); (2) it must
+    be `other` at `>= NOT_ORDER_MIN_CONFIDENCE`.
+    """
+    mid = message.get("message_id", "")
+    # (6) loop guard: a mail the operator already restored from an earlier discard must never
+    # be auto-discarded a second time — it goes to the warehouse question instead.
+    if conn.execute(
+            "SELECT 1 FROM email_events WHERE message_id = %s AND stage = 'restore' LIMIT 1",
+            (mid,)).fetchone():
+        return ""
+    subject = message.get("subject", "")
+    text = message.get("combined_text", "") or ""
+    attachments = [{"filename": r[0], "mime": r[1], "extracted_text": r[2], "needs_vision": r[3]}
+                   for r in conn.execute(
+                       "SELECT filename, mime, extracted_text, needs_vision FROM attachments "
+                       "WHERE message_id = %s", (mid,)).fetchall()]
+    # (3+4) the deterministic wall — any veto means ask, never discard.
+    if mail_kind.veto_reason(subject, text, attachments):
+        return ""
+    # (5) the classifier's own verdict; None on any failure -> ask (warning already logged).
+    verdict = mail_kind.classify(client, subject, text)
+    if verdict is None:
+        return ""
+    # (2) two independent NOs: extractor `[]` (we are here) AND classifier `other` + high conf.
+    if verdict.kind != "other" or verdict.confidence < mail_kind.NOT_ORDER_MIN_CONFIDENCE:
+        return ""
+    reason_txt = verdict.reason.strip() or "klasifikátor: nie je objednávka ani dodací list"
+    return f"{reason_txt}; conf {verdict.confidence:.2f}"
 
 
 def _mail_rule(conn, sender_email: str, subject: str) -> str | None:
