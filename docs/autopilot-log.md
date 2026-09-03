@@ -4001,3 +4001,40 @@ pred „vytvor v CODEXe" krokom vždy najprv over raw.firma, či už neexistuje.
 - Gates: ruff 0, mypy 0 (79 súborov), plná pytest suite (~1799) zelená, 0 F/E/s/x, exit 0.
   Iba `dl_document.py` (už #239-dotknutý) + `static_worker.py` upravené → e2e-dl/e2e-orders
   korpusy nedotknuté. Bez push/PR (worktree — supervisor integruje).
+
+## #376 — AI bezpečné zahodenie mailu, ktorý nie je objednávka ani dodací list (2026-09-03)
+- Problém: Karmen inšpektorky preposielajú infomaily z predajní (bez objednávky). Extraktor nemá
+  verdikt „je to objednávka?", takže `orders==[]` sa donekonečna pýtalo skladu — naučené
+  `mail_rules(sender,subject)` sa nezovšeobecní (Karmen mení predmet zakaždým). Owner ROZHODOL:
+  AI má posúdiť obsah a bezpečne zahodiť, čo nie je objednávka ani DL; nikdy nezahodiť skutočnú.
+- Verzia 0.9.126 → 0.9.127. Commity: e858842 [bump] → 71aa550 [red] (4 test súbory, RED
+  14 failed/86 passed/1 error proti pre-impl stromu) → a1c0ba3 [green] → bdce34b [style ruff
+  import-sort] → docs (tento zápis).
+- Architektúra (podľa design komentára #376, sekcie A–F): nový samostatný modul
+  `app/orders/mail_kind.py::classify` (strict schema, `additionalProperties:false`, ten istý
+  `llm.Client`/gpt-5.4), volaný v `pipeline.py` na `orders==[]` vetve AŽ po promo carve-oute,
+  PRED `teach.ask_mail`, gated `if not shadow` a `rule != "manual"`. Zahodenie = DVA nezávislé
+  NIE (extraktor `[]` + klasifikátor `other` conf ≥ 0.85) A celá stena vetov.
+- Brána (`pipeline._mail_kind_discard_reason`, lacné najprv): (6) restore-loop guard = NOT EXISTS
+  `email_events stage='restore'`; (3+4) `mail_kind.veto_reason` = readability (needs_vision /
+  prázdny text pdf/docx/xlsx) + štruktúrovaná príloha (xlsx/xls/csv/ods/fods) + textové vetá
+  (identifikátory dokladov / ≥2 položkové riadky, VŠETKO na diakriticky foldovanom texte cez
+  `dl_match.fold`); (2+5) klasifikátor — `classify` vracia None pri akejkoľvek chybe → pýtaj sa.
+- Rollout: option `ai_not_order_discard` (default false = DRY-RUN). V dry-rune brána beží celá,
+  ale mail ide na otázku a event outcome nesie „AI by zahodilo (...)" — to je porovnávací dôkaz
+  na ~týždeň pred prepnutím na true. `extract.py`/`ORDER_SCHEMA` NEDOTKNUTÉ → e2e-orders korpus
+  bajtovo identický (shadow = 0 klasifikačných callov).
+- Viditeľnosť + reverzia: dashboard tab „Zahodené AI (14 dní)" + `POST /api/message/<id>/restore`
+  (obnoví `original_category`, re-queue, zapíše `stage=restore` event pre loop guard; scoped na
+  `category='no_processing'`). Zdieľaný `pipeline._discard_no_processing` pre promo aj AI-not-order
+  (žiadna tretia kópia); vracia PRED `_finish` (aby #164 invariant nevyvolal falošnú mail otázku).
+- Odchýlky od dizajnu: `classify(client, subject, text)` bez `attachments` param (prílohy rieši
+  samostatné `veto_reason`, text príloh je už v `combined_text`); restore `RETURNING id,
+  message_id` (message_id nutný na event); `dl_match._fold` → verejné `fold` (`_fold` alias,
+  bajtovo identické); dashboard sekcia = nový tab (paralela „Otázky skladu").
+- Testy: `test_orders_mail_kind.py` (classify + vetá + F.12 diakritické tvary + fold sanity),
+  `test_orders_pipeline.py` (discard/dry-run/veto/low-conf/DL/exception/manual/shadow/restore-loop/
+  no-CRITICAL, ScriptedClient obsluhuje `mail_kind` podľa name), `test_api.py` (restore + zoznam),
+  `test_httpapi_characterization.py` (2 nové routy + DASH_HTML hash re-pin `# airuleset:secret-ok`).
+- Brány: ruff 0, mypy 0 (80 súborov), plná pytest suite 1849 passed / 0 fail / 0 error, exit 0.
+  Bez push/PR (worktree — supervisor integruje serially).
