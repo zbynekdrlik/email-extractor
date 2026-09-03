@@ -192,6 +192,55 @@ def test_reprocess_resets_flags_and_logs(pg):
     assert c.post("/api/message/9999999/reprocess").status_code == 404
 
 
+# ---- #376 AI-not-order: the "Zahodené AI" list + the restore action ----
+
+def test_restore_puts_a_discarded_mail_back_and_logs_the_restore_event(pg):
+    pg.execute(
+        "INSERT INTO messages (message_id, category, original_category, processed, "
+        "processed_by, proc_outcome) VALUES "
+        "('disc1','no_processing','ai_orders', true, 'ai-not-order', 'AI: zahodené')")
+    mid = pg.execute("SELECT id FROM messages WHERE message_id='disc1'").fetchone()[0]
+    c = _client()
+    _login(c)
+    assert c.post(f"/api/message/{mid}/restore").status_code == 200
+    cat, processed, by = pg.execute(
+        "SELECT category, processed, processed_by FROM messages WHERE id=%s", (mid,)).fetchone()
+    assert (cat, processed, by) == ("ai_orders", False, None)
+    # the stage='restore' event is what the discard gate's rule-6 loop guard reads.
+    assert pg.execute("SELECT count(*) FROM email_events WHERE message_id='disc1' "
+                      "AND stage='restore'").fetchone()[0] == 1
+
+
+def test_restore_is_scoped_to_no_processing_and_404s_otherwise(pg):
+    pg.execute("INSERT INTO messages (message_id, category, processed) "
+               "VALUES ('live1','ai_orders', false)")
+    mid = pg.execute("SELECT id FROM messages WHERE message_id='live1'").fetchone()[0]
+    c = _client()
+    _login(c)
+    # a live (non-no_processing) message must not be disturbed by restore.
+    assert c.post(f"/api/message/{mid}/restore").status_code == 404
+    assert pg.execute("SELECT category FROM messages WHERE id=%s", (mid,)).fetchone()[0] == "ai_orders"
+    assert c.post("/api/message/9999999/restore").status_code == 404
+
+
+def test_discarded_list_shows_only_recent_ai_not_order_mails(pg):
+    pg.execute(
+        "INSERT INTO messages (message_id, category, processed, processed_by, subject, "
+        "proc_outcome, processed_at) VALUES "
+        "('d_new','no_processing', true, 'ai-not-order', 'Fwd: info', 'AI: zahodené', now()),"
+        "('d_promo','no_processing', true, 'promo-filter', 'Akcia', 'leták', now()),"
+        "('d_old','no_processing', true, 'ai-not-order', 'Staré', 'AI: zahodené',"
+        " now() - interval '20 days')")
+    c = _client()
+    _login(c)
+    r = c.get("/api/orders/discarded")
+    assert r.status_code == 200
+    body = r.get_json()
+    subjects = {it["subject"] for it in body["items"]}
+    assert subjects == {"Fwd: info"}, "only recent ai-not-order discards, not promo, not >14d old"
+    assert body["total"] == 1 and body["items"][0]["reason"] == "AI: zahodené"
+
+
 # ---- #15 fix queue ----
 
 def test_fix_request_inserts_snapshot_event_and_shows_in_queue(pg):

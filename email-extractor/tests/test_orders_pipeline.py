@@ -35,19 +35,45 @@ MAIL = {"message_id": "m1", "subject": "Objednávka", "from_addr": "sklad@pekare
 
 
 class ScriptedClient:
-    """Answers in the order the pipeline asks: extract, customer, then one per item."""
+    """Answers in the order the pipeline asks: extract, customer, then one per item.
+
+    #376: the mail-kind classifier is served SEPARATELY, BY NAME — pass `mail_kind=` a dict
+    (or a list of dicts served in order, or an `Exception` to raise). Serving it by name is
+    what keeps inserting the classifier call on the no-orders branch from shifting the
+    POSITIONAL answers the extract/customer/item calls consume. A `mail_kind` call that is NOT
+    scripted raises WITHOUT touching the positional queue — `mail_kind.classify()` catches it
+    and falls back to asking (the safe default), so a test that expects no discard needs to
+    script nothing.
+    """
 
     last_prompt_hash = "testprompt12"
 
-    def __init__(self, answers):
+    def __init__(self, answers, mail_kind=None):
         self.answers = list(answers)
+        if mail_kind is None:
+            self._by_name = {}
+        elif isinstance(mail_kind, list):
+            self._by_name = {"mail_kind": list(mail_kind)}
+        else:
+            self._by_name = {"mail_kind": [mail_kind]}
         self.asked = []
 
     def json_call(self, system, user, schema, name="result"):
         self.asked.append(name)
-        if not self.answers:
-            raise AssertionError(f"pipeline asked for an unscripted answer: {name}")
-        return self.answers.pop(0)
+        if name in self._by_name:
+            queue = self._by_name[name]
+            if not queue:
+                raise AssertionError(f"pipeline asked for an unscripted {name!r} answer")
+            ans = queue.pop(0)
+        elif name == "mail_kind":
+            raise AssertionError("mail_kind classifier not scripted (falls back to ask)")
+        else:
+            if not self.answers:
+                raise AssertionError(f"pipeline asked for an unscripted answer: {name}")
+            ans = self.answers.pop(0)
+        if isinstance(ans, Exception):
+            raise ans
+        return ans
 
 
 def _answers(items=(("rožok 50g", "G50", 0.95), ("vianočka 400g", "VIA", 0.95)),
@@ -811,7 +837,12 @@ def test_the_full_exit_matrix_never_lets_a_resolvable_reason_go_silent(pg, env):
     rec = Recorder()
     mail2 = dict(MAIL, message_id="mx2")
     before = len(_open_qs())
-    result = pipeline.run(pg, _cfg(dashboard_base_url='http://test.local:8099', secret_key='s'), mail2, env, client=ScriptedClient([no_orders_answer]),
+    # #376: the classifier is now consulted on the no-orders branch — script an explicit
+    # verdict. An `order` verdict means no discard, so the NO_ORDERS mail-question path is
+    # byte-identical to before this feature (dry-run default asks anyway).
+    result = pipeline.run(pg, _cfg(dashboard_base_url='http://test.local:8099', secret_key='s'), mail2, env,
+                          client=ScriptedClient([no_orders_answer],
+                                                mail_kind={"kind": "order", "confidence": 0.9}),
                           upload=rec.upload, post=rec.post)
     assert result["status"] == "held" and len(result.get("question_ids", [])) == 1
     new = _open_qs()
@@ -947,3 +978,207 @@ def test_a_taught_manual_rule_does_not_re_ask_whether_it_is_an_order(pg, env):
     # the old manual short-circuit's retype-in-ORION reject_reason ("prepíš ju ručne v
     # ORIONe") is gone; the generic review label ("treba zadať ručne") is app-wide, unrelated
     assert "prepíš" not in rec.posts[0].lower()
+
+
+# --- #376: AI safe-discard of a mail that is not an order and not a delivery note ----------
+
+_NO_ORDERS_EXTRACT = {"senderName": "", "senderEmail": "", "companyName": "",
+                      "isChangeRequest": False, "notes": "", "orders": []}
+
+
+def _seed_mail(pg, mid, subject="Fwd: SLOVNORMAL", from_addr="inspektor@example-retail.sk",
+               category="ai_orders"):
+    pg.execute(
+        "INSERT INTO messages (message_id, category, from_addr, subject) VALUES (%s,%s,%s,%s)",
+        (mid, category, from_addr, subject))
+
+
+def _karmen_infomail(mid="k1", subject="Fwd: SLOVNORMAL"):
+    return {"message_id": mid, "subject": subject,
+            "from_addr": "inspektor@example-retail.sk", "from_name": "Inšpektor Predajne",
+            "combined_text": "Dobrý deň, posielam vám na vedomie foto z predajne, tovar "
+                             "nebol dodaný. Ďakujem a pekný deň.", "today": "2026-09-03"}
+
+
+def test_karmen_infomail_is_discarded_without_a_question_when_enabled(pg, env):
+    """F.1: an inspector's forwarded infomail (extractor found no order, classifier says
+    `other` at high confidence, no veto) is routed to no_processing with NO warehouse
+    question — the honest event, the stable marker and the preserved original_category."""
+    _seed_mail(pg, "k1")
+    rec = Recorder()
+    result = pipeline.run(
+        pg, _cfg(ai_not_order_discard=True), _karmen_infomail("k1"), env,
+        client=ScriptedClient([dict(_NO_ORDERS_EXTRACT)],
+                              mail_kind={"kind": "other", "confidence": 0.95,
+                                         "reason": "informačný mail z predajne, žiadna objednávka"}),
+        upload=rec.upload, post=rec.post)
+    assert result["status"] == "review" and result["question_ids"] == []
+    cat, processed, by, orig = pg.execute(
+        "SELECT category, processed, processed_by, original_category FROM messages "
+        "WHERE message_id='k1'").fetchone()
+    assert (cat, processed, by, orig) == ("no_processing", True, "ai-not-order", "ai_orders")
+    assert teach.open_questions(pg, kinds=("mail",)) == [], "no board question was raised"
+    ev = pg.execute(
+        "SELECT outcome FROM email_events WHERE message_id='k1' "
+        "AND detail->>'ai_not_order'='true' ORDER BY id DESC LIMIT 1").fetchone()
+    assert ev and "zahoden" in ev[0].lower() and "conf 0.95" in ev[0]
+
+
+def test_dry_run_default_still_asks_but_records_the_would_be_discard(pg, env):
+    """F.11: with the option OFF (default), the gate STILL runs, but the mail goes to the
+    warehouse question and the (rollup) review outcome carries the "AI by zahodilo" trace so
+    the owner can compare it against the sklad's real answer during the dry-run week."""
+    _seed_mail(pg, "k2")
+    rec = Recorder()
+    result = pipeline.run(
+        pg, _cfg(), _karmen_infomail("k2"), env,   # default ai_not_order_discard = False
+        client=ScriptedClient([dict(_NO_ORDERS_EXTRACT)],
+                              mail_kind={"kind": "other", "confidence": 0.91,
+                                         "reason": "informačný mail"}),
+        upload=rec.upload, post=rec.post)
+    assert result["status"] == "held" and len(result["question_ids"]) == 1
+    cat = pg.execute("SELECT category FROM messages WHERE message_id='k2'").fetchone()[0]
+    assert cat == "ai_orders", "dry-run must NOT reclassify"
+    assert len(teach.open_questions(pg, kinds=("mail",))) == 1
+    outcome = pg.execute("SELECT proc_outcome FROM messages WHERE message_id='k2'").fetchone()[0]
+    assert "AI by zahodilo" in outcome and "conf 0.91" in outcome
+
+
+def test_item_lines_veto_never_discards_and_skips_the_classifier(pg, env):
+    """F.2: extraction returned [] but the text carries >= 2 item lines — that reads like a
+    real order the extractor missed, so it is asked, never discarded. The deterministic veto
+    short-circuits BEFORE the paid classifier call (never even reached)."""
+    _seed_mail(pg, "k3")
+    mail = {"message_id": "k3", "subject": "objednavka", "from_addr": "x@example-retail.sk",
+            "from_name": "X", "combined_text": "prosím 10 ks rožok a 5 kg múka",
+            "today": "2026-09-03"}
+    rec = Recorder()
+    client = ScriptedClient([dict(_NO_ORDERS_EXTRACT)])   # NO mail_kind scripted on purpose
+    pipeline.run(pg, _cfg(ai_not_order_discard=True), mail, env, client=client,
+                 upload=rec.upload, post=rec.post)
+    assert "mail_kind" not in client.asked, "a structural veto must skip the classifier call"
+    cat = pg.execute("SELECT category FROM messages WHERE message_id='k3'").fetchone()[0]
+    assert cat == "ai_orders"
+    assert len(teach.open_questions(pg, kinds=("mail",))) == 1
+
+
+def test_needs_vision_attachment_veto_never_discards(pg, env):
+    """F.9: a mail whose attachment still awaits AI-Vision was not fully READ, so AI may not
+    discard it — asked, and the classifier is never called."""
+    _seed_mail(pg, "k4")
+    pg.execute(
+        "INSERT INTO attachments (message_id, idx, filename, mime, needs_vision, extracted_text)"
+        " VALUES ('k4', 0, 'sken.pdf', 'application/pdf', true, '')")
+    mail = {"message_id": "k4", "subject": "Fwd: info", "from_addr": "x@example-retail.sk",
+            "from_name": "X", "combined_text": "Posielam prílohu.", "today": "2026-09-03"}
+    rec = Recorder()
+    client = ScriptedClient([dict(_NO_ORDERS_EXTRACT)])
+    pipeline.run(pg, _cfg(ai_not_order_discard=True), mail, env, client=client,
+                 upload=rec.upload, post=rec.post)
+    assert "mail_kind" not in client.asked
+    cat = pg.execute("SELECT category FROM messages WHERE message_id='k4'").fetchone()[0]
+    assert cat == "ai_orders"
+    assert len(teach.open_questions(pg, kinds=("mail",))) == 1
+
+
+def test_low_confidence_other_verdict_asks_not_discards(pg, env):
+    """F.3: the classifier says `other` but below the confidence floor — fail-safe = ask."""
+    _seed_mail(pg, "k5")
+    rec = Recorder()
+    pipeline.run(pg, _cfg(ai_not_order_discard=True), _karmen_infomail("k5"), env,
+                 client=ScriptedClient([dict(_NO_ORDERS_EXTRACT)],
+                                       mail_kind={"kind": "other", "confidence": 0.7}),
+                 upload=rec.upload, post=rec.post)
+    cat = pg.execute("SELECT category FROM messages WHERE message_id='k5'").fetchone()[0]
+    assert cat == "ai_orders"
+    assert len(teach.open_questions(pg, kinds=("mail",))) == 1
+
+
+def test_delivery_note_verdict_is_never_discarded(pg, env):
+    """F.4: a `delivery_note` (or `change_request`) verdict must NEVER be discarded — those
+    are exactly what we must keep processing."""
+    _seed_mail(pg, "k6")
+    rec = Recorder()
+    pipeline.run(pg, _cfg(ai_not_order_discard=True), _karmen_infomail("k6"), env,
+                 client=ScriptedClient([dict(_NO_ORDERS_EXTRACT)],
+                                       mail_kind={"kind": "delivery_note", "confidence": 0.99}),
+                 upload=rec.upload, post=rec.post)
+    cat = pg.execute("SELECT category FROM messages WHERE message_id='k6'").fetchone()[0]
+    assert cat == "ai_orders"
+    assert len(teach.open_questions(pg, kinds=("mail",))) == 1
+
+
+def test_classifier_exception_falls_back_to_asking(pg, env):
+    """F.8: a classifier exception (or unreadable JSON) never discards — it asks."""
+    _seed_mail(pg, "k7")
+    rec = Recorder()
+    pipeline.run(pg, _cfg(ai_not_order_discard=True), _karmen_infomail("k7"), env,
+                 client=ScriptedClient([dict(_NO_ORDERS_EXTRACT)],
+                                       mail_kind=RuntimeError("model down")),
+                 upload=rec.upload, post=rec.post)
+    cat = pg.execute("SELECT category FROM messages WHERE message_id='k7'").fetchone()[0]
+    assert cat == "ai_orders"
+    assert len(teach.open_questions(pg, kinds=("mail",))) == 1
+
+
+def test_a_manual_rule_blocks_discard_even_when_enabled(pg, env):
+    """F.5: a `manual`-taught sender ('yes, it IS an order') is never discarded, even with the
+    option on and even if the classifier would say `other` — the classifier is never called."""
+    _seed_mail(pg, "k8", subject="Fwd: manual")
+    pg.execute(
+        "INSERT INTO mail_rules (sender_norm, subject_key, action) VALUES (%s, %s, 'manual')",
+        (teach._sender_norm("inspektor@example-retail.sk"), teach.subject_key("Fwd: manual")))
+    rec = Recorder()
+    client = ScriptedClient([dict(_NO_ORDERS_EXTRACT)])
+    pipeline.run(pg, _cfg(ai_not_order_discard=True),
+                 _karmen_infomail("k8", subject="Fwd: manual"), env, client=client,
+                 upload=rec.upload, post=rec.post)
+    assert "mail_kind" not in client.asked
+    cat = pg.execute("SELECT category FROM messages WHERE message_id='k8'").fetchone()[0]
+    assert cat == "ai_orders"
+
+
+def test_shadow_never_calls_the_classifier(pg, env):
+    """F.10: shadow must leave no trace and run no classifier — the e2e corpus stays
+    byte-identical."""
+    _seed_mail(pg, "k9")
+    client = ScriptedClient([dict(_NO_ORDERS_EXTRACT)])
+    pipeline.run(pg, _cfg(orders_shadow=True), _karmen_infomail("k9"), env, client=client,
+                 upload=lambda *a, **k: None, post=lambda *a, **k: None)
+    assert "mail_kind" not in client.asked
+    cat = pg.execute("SELECT category FROM messages WHERE message_id='k9'").fetchone()[0]
+    assert cat == "ai_orders"
+
+
+def test_a_restored_mail_is_never_auto_discarded_again(pg, env):
+    """F.6: the loop guard — a mail that already carries a `stage='restore'` event (the
+    operator undid an earlier discard) is asked, never auto-discarded a second time, even
+    with the option on and an `other` verdict."""
+    _seed_mail(pg, "k10")
+    pg.execute(
+        "INSERT INTO email_events (message_id, workflow, stage, status, outcome, rollup) "
+        "VALUES ('k10', 'dashboard', 'restore', 'ok', 'Obnovené operátorom', true)")
+    rec = Recorder()
+    client = ScriptedClient([dict(_NO_ORDERS_EXTRACT)],
+                            mail_kind={"kind": "other", "confidence": 0.99})
+    pipeline.run(pg, _cfg(ai_not_order_discard=True), _karmen_infomail("k10"), env,
+                 client=client, upload=rec.upload, post=rec.post)
+    assert "mail_kind" not in client.asked, "the restore-loop guard skips the classifier"
+    cat = pg.execute("SELECT category FROM messages WHERE message_id='k10'").fetchone()[0]
+    assert cat == "ai_orders"
+    assert len(teach.open_questions(pg, kinds=("mail",))) == 1
+
+
+def test_a_discard_raises_no_critical_finish_fallback(pg, env, caplog):
+    """F.7: the discard path returns BEFORE `_finish`, so its CRITICAL "no board question and
+    not technical" fallback never fires for a discarded mail."""
+    import logging
+    _seed_mail(pg, "k11")
+    rec = Recorder()
+    with caplog.at_level(logging.CRITICAL, logger="orders.pipeline"):
+        pipeline.run(pg, _cfg(ai_not_order_discard=True), _karmen_infomail("k11"), env,
+                     client=ScriptedClient([dict(_NO_ORDERS_EXTRACT)],
+                                           mail_kind={"kind": "other", "confidence": 0.95}),
+                     upload=rec.upload, post=rec.post)
+    assert not [r for r in caplog.records if r.levelno >= logging.CRITICAL], \
+        "no CRITICAL fallback for a clean AI discard"
