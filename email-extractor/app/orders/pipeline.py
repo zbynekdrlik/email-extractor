@@ -20,8 +20,20 @@ import enum
 import logging
 from pathlib import Path
 
-from . import (customer, edi, extract, hold, llm, mail_kind, match, memory, promo, report,
-               snapshot, teach)
+from . import (
+    customer,
+    edi,
+    extract,
+    hold,
+    llm,
+    mail_kind,
+    match,
+    memory,
+    promo,
+    report,
+    snapshot,
+    teach,
+)
 from . import upload as upload_mod
 
 log = logging.getLogger("orders.pipeline")
