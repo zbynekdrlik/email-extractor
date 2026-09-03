@@ -414,6 +414,8 @@ async function spendBadgeRefresh(){try{const d=await api('/api/orders/spend');
   b.style.color=(d.cap_eur&&d.cost_eur>d.cap_eur)?'#f85149':'#6e7681'}catch(e){}}
 async function imapBadgeRefresh(){try{const d=await api('/api/imap-failures');
   const b=document.getElementById('imapBadge');b.textContent=d.total?String(d.total):'';b.style.color='#f85149'}catch(e){}}
+async function discardedBadgeRefresh(){try{const d=await api('/api/orders/discarded');
+  const b=document.getElementById('discardedBadge');b.textContent=d.total?String(d.total):'';b.style.color='#6e7681'}catch(e){}}
 async function reliabilityBadgeRefresh(){try{const d=await api('/api/orders/digest');
   const b=document.getElementById('reliabilityBadge');
   const since=d.days_since_incident;
@@ -424,7 +426,7 @@ async function reliabilityBadgeRefresh(){try{const d=await api('/api/orders/dige
 document.getElementById('livetog').onclick=()=>{live=!live;document.getElementById('livetog').style.color=live?'#3fb950':'#6e7681';document.getElementById('livelbl').textContent=live?'LIVE':'pauza'};
 let deb;q.oninput=()=>{clearTimeout(deb);deb=setTimeout(loadList,350)};
 for(const el of [fcat,fstate,ffrom,fto])el.onchange=loadList;
-loadList();imapBadgeRefresh();spendBadgeRefresh();askBadgeRefresh();reliabilityBadgeRefresh();setInterval(askBadgeRefresh,30000);timer=setInterval(tick,5000);setInterval(imapBadgeRefresh,30000);setInterval(spendBadgeRefresh,60000);setInterval(reliabilityBadgeRefresh,60000);
+loadList();imapBadgeRefresh();spendBadgeRefresh();askBadgeRefresh();reliabilityBadgeRefresh();discardedBadgeRefresh();setInterval(askBadgeRefresh,30000);timer=setInterval(tick,5000);setInterval(imapBadgeRefresh,30000);setInterval(spendBadgeRefresh,60000);setInterval(reliabilityBadgeRefresh,60000);setInterval(discardedBadgeRefresh,30000);
 </script></body></html>"""
 
 

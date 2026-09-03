@@ -228,7 +228,10 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
         # condition holds; the option `ai_not_order_discard` (default false = DRY-RUN) decides
         # whether we act on it or merely record what we WOULD have done.
         discard_reason = ""
-        if not shadow and rule != "manual":
+        # #376 gate rule B.1: never even consult the classifier for a CHANGE REQUEST — a change
+        # to an already-placed order (`isChangeRequest`) must always reach a human, never be
+        # auto-discarded, even at high `other` confidence.
+        if not shadow and rule != "manual" and not extracted.get("isChangeRequest"):
             discard_reason = _mail_kind_discard_reason(conn, client, message)
         if discard_reason and getattr(cfg, "ai_not_order_discard", False):
             return _discard_no_processing(

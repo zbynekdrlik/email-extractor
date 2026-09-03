@@ -263,7 +263,9 @@ def register(app: Flask, deps: Deps) -> None:
         re-queue it. It re-extracts (empty again), and the discard gate's rule-6 loop guard —
         which reads THIS `stage='restore'` event via NOT EXISTS — refuses a second
         auto-discard, so the mail lands on the warehouse question exactly as today. Scoped to
-        `category='no_processing'` so it can never disturb an already-live message."""
+        `category='no_processing' AND processed_by='ai-not-order'` (the exact set the "Zahodené
+        AI" tab lists) so it can only ever undo an AI discard — never a live message, never a
+        promo-filtered one."""
         with deps.db() as c:
             row = c.execute(
                 """UPDATE messages
@@ -271,6 +273,7 @@ def register(app: Flask, deps: Deps) -> None:
                           processed = false, processed_at = NULL, processed_by = NULL,
                           processing_at = NULL, error = NULL
                     WHERE id = %s AND category = 'no_processing'
+                      AND processed_by = 'ai-not-order'
                     RETURNING id, message_id""", (mid,)).fetchone()
             if not row:
                 abort(404)

@@ -104,15 +104,18 @@ def classify(client, subject: str, text: str) -> MailKind | None:
 # actual č/no/nr/# + digit AFTER it, so a BARE word "objednávka" in prose is deliberately NOT
 # a veto (Karmen "nedodaný tovar z objednávky" must stay discardable — the design's own rule).
 _DOC_IDENT_RES = (
-    re.compile(r"objedn\w*\s*(?:c|no|nr|#)\.?\s*\d"),   # "objednávka č./no/nr/# <n>"
-    re.compile(r"dodac\w*\s+list"),                     # "dodací list" / "dodacích listov"
-    re.compile(r"\bdl\s*c"),                            # "DL č."
+    # "objednávka č./čís./číslo/no/nr/# <n>" — folded, so č→c: cislo/cis/c all covered.
+    re.compile(r"objedn\w*\s*(?:c(?:islo|is)?|no|nr|#)\.?\s*\d"),
+    re.compile(r"\bobj\.?\s*c\.?\s*\d"),                # "obj. č. <n>" (abbreviated)
+    re.compile(r"cislo\s+objedn\w*"),                  # "číslo objednávky ..." (reversed order)
+    re.compile(r"dodac\w*\s+list"),                    # "dodací list" / "dodacích listov"
+    re.compile(r"\bdl\s*c"),                           # "DL č."
     re.compile(r"desadv"),
-    re.compile(r"av[ií]zo"),                            # "avízo" (í folds to i)
+    re.compile(r"avizo"),                              # "avízo" (í folds to i; text is folded)
 )
 # A quantity followed by a warehouse unit. Two or more of these reads like a real order/DL the
-# extractor missed — never discard.
-_ITEM_LINE_RE = re.compile(r"\d+[\s,.]*\d*\s*(?:ks|kg|bal|kt|t|l)\b")
+# extractor missed — never discard. `kus\w*` covers the spelled-out "kus"/"kusov"/"kusy".
+_ITEM_LINE_RE = re.compile(r"\d+[\s,.]*\d*\s*(?:ks|kus\w*|kg|bal|kt|t|l)\b")
 
 _STRUCTURED_ATTACHMENT_EXT_RE = re.compile(r"\.(?:xlsx|xls|csv|ods|fods)$", re.IGNORECASE)
 _STRUCTURED_ATTACHMENT_MIME_RE = re.compile(

@@ -165,7 +165,7 @@ EXPECTED_TEMPLATE_SHA256 = {
     # #376: re-pinned — DASH_HTML gained the "Zahodené AI" tab + its loadDiscarded/doRestore
     # table (the AI-not-order discard review section). Only DASH_HTML changed; the two
     # _ASK_HTML_TEMPLATE-derived hashes below are untouched.
-    "DASH_HTML": "107fa5e6ac2354b755d99530c01e588bfaa61630da173943d1d62379f7582aa4",  # airuleset:secret-ok SHA256 template-checksum re-pin, not a credential
+    "DASH_HTML": "1f5c1a6ea1ceda7043ec24b583094a2e25ace6bbfa2fcf6cc57263793bb3885f",  # airuleset:secret-ok SHA256 template-checksum re-pin (added discardedBadge refresh), not a credential
     "ASK_HTML": "6a6042fbb6748849fa58166849557355e813ab9aee13cc7208ae9e385a893cd5",
     "ASK_DL_HTML": "ae9282bb60588806f5ac9fd1e7a973627b9d0eba92423be87fa9c830ee8aeef5",
     "ZNALOSTI_HTML": "9f04bd74b57f0e22b8b2e7b7810995f5955b1b7796925dd259f44b68eac598b7",
