@@ -139,11 +139,25 @@ def start_order_worker(cfg) -> None:   # pragma: no cover - thread wiring
     from .orders import worker
 
     def loop():
-        try:
-            conn = db.connect(cfg.pg_dsn)
-            worker.run_forever(conn, cfg)
-        except Exception:
-            log.exception("order worker died")
+        # #380: there is no supervisor that restarts this thread, so it must never die.
+        # A startup connect failure retries with a bounded backoff instead of exiting;
+        # run_forever itself now reconnects on a lost connection (OperationalError), and
+        # any OTHER unexpected crash restarts the whole loop rather than leaving order
+        # processing silently dead until a manual add-on restart (the 2h46m incident).
+        while True:
+            try:
+                conn = db.connect(cfg.pg_dsn)
+            except Exception as e:
+                log.error("order worker could not connect to Postgres (%s); "
+                          "retrying in 15s", e)
+                time.sleep(15)
+                continue
+            try:
+                worker.run_forever(conn, cfg)
+                return          # only returns if a stop event is set (never in prod)
+            except Exception:
+                log.exception("order worker died; restarting in 15s")
+                time.sleep(15)
 
     threading.Thread(target=loop, name="order-worker", daemon=True).start()
 
