@@ -29,9 +29,11 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime, timedelta
+from datetime import time as _dtime
 
 from .. import db
-from . import dl_alerts, dl_extract, dl_worker, llm, report
+from . import confirm, dl_alerts, dl_extract, dl_worker, llm, report
 
 log = logging.getLogger("orders.human_processing")
 
@@ -50,6 +52,22 @@ STUCK_MINUTES = 15
 # belongs at most in a future ops digest / dashboard listing, reviewed deliberately.
 # A fixed date (not a rolling window) is deliberate: the backlog stays excluded forever.
 BACKLOG_CUTOFF = "2026-08-14"
+
+# #385: the sweep's Layer-2 net used to re-notify a stuck mail once per working-day
+# morning FOREVER — two body-only "Re: objednávka" acknowledgment replies (correctly
+# parked in human_processing by the n8n sorter, since they carry no processable order)
+# were re-asked into the ops digest 36 times over 3 weeks. Owner directive
+# `two-workday-horizon` (memory, 2026-08-18): "nevybavené správy staršie ako 2 PRACOVNÉ
+# dni … nikdy nenaháňať" — a message older than 2 WORKING days is moot (already handled
+# manually by the warehouse's daily pass). So the sweep now takes ONLY messages within
+# this many working days of `now`: a fresh stuck mail is surfaced promptly and reminded
+# once per working-day morning until it crosses the horizon, then goes quiet (it stays in
+# human_processing, still visible on the dashboard for a deliberate operator reclassify —
+# only the Odoo nag stops). This upper bound ALSO fixes a latent starvation: the candidate
+# query is `ORDER BY created_at ASC LIMIT 10`, so without it a growing set of
+# permanently-stuck old mails would fill every slot and starve newer stuck mails of their
+# first alert. Overridable per the confirm.py getattr convention (no config.yaml change).
+REMINDER_MAX_WORKING_DAYS = 2
 
 # The categories that actually have a processor — the ONLY targets a rescue may route to.
 # `dodacie_listy`/`ai_orders`/`static_orders` are owned by the Python engines here;
@@ -202,14 +220,43 @@ def _notify(conn, cfg, message: dict) -> None:
                       message_id=message["message_id"])
 
 
-def sweep(conn, cfg, classify=None) -> int:
-    """One pass over `human_processing` messages older than `STUCK_MINUTES`. Each is
-    rescued (Layer 1) or notified (Layer 2), exactly once per message (deduped via
-    `dl_alerts.already_pending` on the notify kind — a rescued message leaves the pit,
-    a notified one is skipped next pass). Returns how many messages were handled (rescued
-    or newly notified) this pass. Never raises — a per-message failure is logged and the
-    pass continues, mirroring `worker.run_forever`'s other sweeps."""
+def _horizon_cutoff(now: datetime, working_days: int) -> datetime:
+    """The earliest `created_at` a message may have and still be a sweep candidate: the
+    START (local midnight, Europe/Bratislava) of the date `working_days` WORKING days
+    before `now`'s local date. Saturdays and Sundays never count (the warehouse does not
+    work weekends — same convention `confirm.morning_check_active` uses), so a Friday mail
+    is still within a 2-working-day horizon the following Monday. Returned as UTC so it
+    drops straight into the candidate query as a bind parameter. A message OLDER than this
+    has passed the owner's 2-working-day horizon (`two-workday-horizon`) and must never be
+    chased again (#385). `working_days <= 0` yields today's local midnight (only today's
+    mail stays)."""
+    d = now.astimezone(confirm.LOCAL_TZ).date()
+    counted = 0
+    while counted < max(0, working_days):
+        d -= timedelta(days=1)
+        if d.weekday() < 5:            # Monday=0 … Friday=4
+            counted += 1
+    start_local = datetime.combine(d, _dtime.min, tzinfo=confirm.LOCAL_TZ)
+    return start_local.astimezone(UTC)
+
+
+def sweep(conn, cfg, classify=None, now=None) -> int:
+    """One pass over `human_processing` messages older than `STUCK_MINUTES` AND within the
+    2-working-day horizon (`REMINDER_MAX_WORKING_DAYS`, #385 — a mail past the horizon is
+    moot and is never chased again; it stays in the pit, visible on the dashboard, only the
+    ops-digest nag stops). Each candidate is rescued (Layer 1) or notified (Layer 2),
+    exactly once per message (deduped via `dl_alerts.already_pending`/`reminder_suppressed`
+    on the notify kind — a rescued message leaves the pit, a notified one is skipped next
+    pass). Returns how many messages were handled (rescued or newly notified) this pass.
+    Never raises — a per-message failure is logged and the pass continues, mirroring
+    `worker.run_forever`'s other sweeps. `now` (defaults to the wall clock) is injectable
+    for deterministic horizon tests."""
     classify = classify or _vision_classify
+    now = now or datetime.now(UTC)
+    # #385: never chase a mail past the 2-working-day horizon (see REMINDER_MAX_WORKING_DAYS).
+    max_wd = int(getattr(cfg, "human_processing_reminder_max_working_days",
+                         REMINDER_MAX_WORKING_DAYS) or REMINDER_MAX_WORKING_DAYS)
+    horizon_cutoff = _horizon_cutoff(now, max_wd)
     # LIMIT paces the per-tick work: a first exposure to a backlog does at most this many
     # vision calls per ~15s tick, the rest drain over the next ticks. Total cost is
     # bounded by the dedup regardless (each message gets ONE vision attempt per 4h
@@ -219,9 +266,11 @@ def sweep(conn, cfg, classify=None) -> int:
                   created_at
              FROM messages
             WHERE category = 'human_processing' AND processed = false
-              AND created_at >= %s
+              AND created_at >= %s                          -- never the pre-sweep backlog
+              AND created_at >= %s                          -- never past the working-day horizon (#385)
               AND created_at < now() - make_interval(mins => %s)
-            ORDER BY created_at ASC LIMIT 10""", (BACKLOG_CUTOFF, STUCK_MINUTES)).fetchall()
+            ORDER BY created_at ASC LIMIT 10""",
+        (BACKLOG_CUTOFF, horizon_cutoff, STUCK_MINUTES)).fetchall()
     handled = 0
     for message_id, subject, from_addr, has_attachments, needs_vision, created_at in rows:
         # #336: the first notification for a stuck message fires promptly; a RE-reminder
