@@ -72,3 +72,32 @@ psql quoting): base64 a small script to the HA host, `docker cp` into
 functions directly (`dl_worker.close_message_not_warehouse(conn, qid)` neutralized a
 question through the real code path, not a hand-written UPDATE). See `.claude/rules/
 deploy.md` for the base64/`docker cp` mechanics and the `sudo -S` password pattern.
+
+## The Layer-2 re-ask MUST be bounded by the 2-working-day horizon — else it nags FOREVER (#385)
+
+`sweep`'s candidate query originally bounded `created_at` only from BELOW
+(`>= BACKLOG_CUTOFF`, `< now()-STUCK_MINUTES`) with NO upper bound, and `reminder_suppressed`
+re-reminds once per working-day morning with NO cap. So a `human_processing` mail that a human
+never reclassifies is re-notified into the ops digest EVERY working day forever — live #385: two
+body-only `Re:` order-ACKNOWLEDGMENT replies (the customer thanking us for an order WE sent THEM —
+párky supply / transport; the n8n sorter was CORRECT to keep them out of the order engines) were
+re-asked 36× over 3 weeks. This violates the owner directive `two-workday-horizon` (memory: a mail
+older than 2 WORKING days is moot, already handled manually).
+
+Fix: `sweep` now takes ONLY messages within `REMINDER_MAX_WORKING_DAYS` (=2) working days of `now`
+— a second `AND created_at >= %s` bound in the candidate SQL, computed by `_horizon_cutoff(now, wd)`
+(local-midnight of the date N working days back, weekends skipped via `confirm.LOCAL_TZ`, same
+convention `confirm.morning_check_active` uses). Two reasons it must be in the SQL WHERE, not a
+Python post-filter: (1) it stops the daily nag; (2) it fixes a LATENT STARVATION — `ORDER BY
+created_at ASC LIMIT 10` always picks the 10 OLDEST candidates, so a growing set of
+permanently-stuck old mails would fill every slot and starve NEWER stuck mails of their first
+alert; a Python filter after the LIMIT would still consume the slot. The mail STAYS in
+`human_processing` (visible on the dashboard for a deliberate operator reclassify) — only the Odoo
+nag stops. The knob is `getattr(cfg, "human_processing_reminder_max_working_days", 2)` (the
+confirm.py getattr convention, no config.yaml change). A genuine stuck WAREHOUSE document is a
+DIFFERENT kind (`dl_stuck_classified`, `dl_worker`), unaffected — only the operator-triage
+`human_processing_review` net is bounded.
+
+The two specific #385 mails were ALSO routed out via the ops path (`POST /api/message/<pk>/
+reclassify` → `no_processing`, per `ops-backlog.md`) — the code fix is the systemic guard for all
+future stuck mails; the reclassify clears these two specifically.

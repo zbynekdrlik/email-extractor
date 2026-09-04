@@ -4070,3 +4070,27 @@ pred „vytvor v CODEXe" krokom vždy najprv over raw.firma, či už neexistuje.
   [green] 14b2629. Testy: nový `test_orders_worker_reconnect.py` (fake mŕtve spojenie +
   connect factory + real pg ako čerstvé). Brány: ruff 0, mypy 0 (80 súborov), plná suita
   1858 passed / 0 fail / 0 skip, coverage 94.19 % (≥85 %). Bez push/PR (worktree — supervisor integruje).
+
+## #385 — maily s „objednávka" v predmete skončili v „Nezaradené e-maily" a 3 týždne sa dokola pýtali (2026-09-04)
+- Príčina (z LIVE PROD, read-only): dva maily (msg pk 7312 „Re: Objednávka" 14.8, 7571 „Re: objednávka
+  na tento týždeň" 17.8) sú body-only `Re:` POTVRDENIA („Ďakujeme za objednávku…"), citujúce objednávku,
+  ktorú SLOVNORMAL sám poslal zákazníkovi (nákup párkov / preprava). Nenesú žiadnu spracovateľnú
+  objednávku pre sklad → n8n `Email Sorting` (`sorter`) ich SPRÁVNE nezaradil do žiadneho engine a
+  nechal v terminálovom `human_processing`. Python orders engine sa nikdy nespustil (0 order_runs /
+  0 order_questions / 0 príloh, `attempts=0`). Skutočná chyba: `human_processing.sweep` Layer-2 sieť
+  (`human_processing_review`) re-notifikovala každé ráno pracovného dňa DONEKONEČNA — 36 doručených
+  `pending_alerts` riadkov za 3 týždne (kanál 592 = ops), lebo kandidátsky dotaz nemal HORNÚ vekovú
+  hranicu a `reminder_suppressed` nemá strop. Porušovalo to direktívu `two-workday-horizon`.
+- Oprava (RED→GREEN): `sweep` berie len správy do 2 PRACOVNÝCH dní (`REMINDER_MAX_WORKING_DAYS=2`,
+  víkendy sa nepočítajú — nový helper `_horizon_cutoff(now, wd)` cez `confirm.LOCAL_TZ`; getattr knob
+  `human_processing_reminder_max_working_days`, žiadna zmena config.yaml). Nová `AND created_at >= %s`
+  podmienka v kandidátskom SQL: zastaví denné otravovanie AJ latentnú starváciu (`ORDER BY created_at
+  ASC LIMIT 10` inak nechá staré zaseknuté maily blokovať sloty navždy). Mail ostáva v
+  `human_processing`, viditeľný na dashboarde na ručnú reklasifikáciu — vypne sa len ops-digest.
+- Ops-cesta: obidva maily reklasifikované cez `POST /api/message/<pk>/reclassify` na `no_processing`
+  (reverzibilné — `original_category=human_processing`, `human_reviewed=true`, nič sa nespustilo, nič
+  do ORIONu). Overené: 0 v sweep kandidátskom sete → z digestu preč. Nikdy sa nepustili znova.
+- Commity: bump 1972560 → [red] 8519d2b → [green] 7f502c6. Testy: `test_human_processing.py`
+  (+regression + `_horizon_cutoff` weekend unit test), 13/13 pass; ruff 0, mypy 0 (80 súborov),
+  worker+human_processing testy zelené. Review 0 🔴 0 🟡 0 🔵 (Opus 4.8 tier — gated Fable consult
+  padol na account limit). Bez push/PR (worktree — supervisor integruje; súbežné lane na 0.9.129/0.9.130).
