@@ -194,9 +194,12 @@ class Config:
     question_expire_working_days: int = 2
     # #381: optional retention for /data/store mail originals — delete files older than this
     # many days on a daily sweep (app/store_retention.py, driven from main.py's IMAP loop).
-    # 0 (default) = DISABLED, nothing is ever deleted; the DB keeps the extracted text so a
-    # reprocess still works without the originals (#251). Loaded WITHOUT the `or N` idiom so
-    # an explicit 0 truly disables it (the #229 falsy-override trap — same as
+    # 0 (default) = DISABLED, nothing is ever deleted. The DB keeps only the extracted TEXT
+    # (body_text/combined_text, attachments.extracted_text) so classification + a #251-style
+    # reprocess survive — but the raw .eml + attachment originals have NO DB copy, so enabling
+    # this makes /eml + /files 404 (SMTP re-forward / original download break) for mail older
+    # than N days: the trade-off the owner weighs. Loaded WITHOUT the `or N` idiom so an
+    # explicit 0 truly disables it (the #229 falsy-override trap — same as
     # delivery_notes_max_age_days above).
     store_retention_days: int = 0
 

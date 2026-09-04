@@ -1,7 +1,9 @@
 """Filesystem-only store-retention purge (#381) — no Postgres, no DB, tmp_path only.
 
 Deletes mail-original FILES older than N days under /data/store/<safe_id>/, keeping the
-DB text (attachments.machine_text / messages.raw_eml) that reprocess actually needs (#251).
+extracted TEXT the reprocess actually needs (attachments.extracted_text,
+messages.body_text/combined_text — #251). The raw .eml + attachment originals have NO DB copy,
+so purging them 404s /eml + /files for that mail (the owner's opt-in trade-off).
 Default N=0 disables the whole thing, so nothing is ever deleted unless the owner opts in.
 """
 
@@ -79,6 +81,47 @@ def test_symlink_is_never_touched(tmp_path):
     assert (files, freed) == (0, 0)
     assert outside.exists()
     assert link.exists()
+
+
+def test_symlinked_subdirectory_is_never_traversed(tmp_path):
+    # A symlinked SUBDIRECTORY inside the store must not be traversed — otherwise an old file
+    # living OUTSIDE the store, reached through the link, would be deleted. Guards the
+    # `sub.is_symlink()` check in purge() (distinct from the depth-2 file-symlink test above).
+    outside_dir = tmp_path / "elsewhere"
+    outside_dir.mkdir()
+    old_outside = outside_dir / "raw.eml"
+    old_outside.write_bytes(b"keep")
+    os.utime(old_outside, (NOW - 999 * DAY, NOW - 999 * DAY))
+    store = tmp_path / "store"
+    store.mkdir()
+    (store / "m").symlink_to(outside_dir, target_is_directory=True)
+    files, freed = store_retention.purge(store, 30, now=NOW)
+    assert (files, freed) == (0, 0)
+    assert old_outside.exists()
+
+
+def test_unreadable_subdir_does_not_crash_the_sweep(tmp_path):
+    # A subdir whose contents cannot be listed must be SKIPPED, not crash the whole sweep —
+    # otherwise the escaping OSError leaves maybe_purge()'s cadence unrecorded and main.py
+    # retries every poll_interval. The good subdir's old file is still purged.
+    good = tmp_path / "good"
+    good.mkdir()
+    old = good / "raw.eml"
+    old.write_bytes(b"x" * 10)
+    os.utime(old, (NOW - 999 * DAY, NOW - 999 * DAY))
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    (bad / "raw.eml").write_bytes(b"y")
+    os.chmod(bad, 0o000)
+    try:
+        files, freed = store_retention.purge(tmp_path, 30, now=NOW)
+    finally:
+        os.chmod(bad, 0o755)  # restore so pytest's tmp cleanup can remove it
+    # purge did not raise; the readable subdir's old file was deleted regardless of whether
+    # this process could read `bad` (a non-root run skips it; root would process it, but its
+    # file is not old so nothing there is deleted either way).
+    assert not old.exists()
+    assert files >= 1
 
 
 def test_top_level_files_are_left_alone(tmp_path):

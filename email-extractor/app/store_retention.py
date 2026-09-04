@@ -7,10 +7,14 @@ top-level `backup_exclude: ["store"]` in config.yaml so the backup stops carryin
 bytes, and this OPTIONAL retention purge so the store itself does not grow without bound.
 
 This module is filesystem-only — ZERO DB dependencies. It deletes FILES (never directories,
-never DB rows): the extracted text lives in Postgres (attachments.machine_text /
-extracted_text, messages.raw_eml), and #251 proved a reprocess works fine without the
-original PDF bytes. Disabled by default (store_retention_days = 0); the owner opts in with a
-day count.
+never DB rows). What the DB RETAINS is the EXTRACTED TEXT (messages.body_text/combined_text,
+attachments.extracted_text), so classification + a #251-style reprocess still work without
+the originals. What it does NOT retain: the raw .eml and attachment ORIGINALS have no DB copy
+(messages.raw_eml_path is a PATH into this very store, not the bytes). So purging a message's
+files makes /eml/<mid> and /files/<mid>/<i> return 404 for it — SMTP re-forwarding and
+original-file download of mail older than N days stop working. That is the accepted trade-off
+an opting-in owner weighs when choosing the retention window. Disabled by default
+(store_retention_days = 0); the owner opts in with a day count.
 
 Layout it walks (app/store.py): <data_dir>/<safe_id>/{raw.eml, att<i>__<name>} — depth 2.
 """
@@ -41,7 +45,7 @@ def describe(retention_days) -> str:
     return "DISABLED" if days <= 0 else f"enabled: {days} days"
 
 
-def purge(data_dir, retention_days, now: float | None = None) -> tuple[int, int]:
+def purge(data_dir: str | Path, retention_days, now: float | None = None) -> tuple[int, int]:
     """Delete files older than ``retention_days`` under ``<data_dir>/<safe_id>/``.
 
     Returns ``(files_deleted, bytes_freed)``. A no-op ``(0, 0)`` when retention is disabled
@@ -59,13 +63,27 @@ def purge(data_dir, retention_days, now: float | None = None) -> tuple[int, int]
     cutoff = (time.time() if now is None else now) - days * 86400
     files_deleted = 0
     bytes_freed = 0
-    for sub in root.iterdir():
+    # A best-effort cleanup must never raise on a filesystem error: an escaping OSError would
+    # leave maybe_purge()'s cadence timestamp unrecorded, so main.py would re-run the whole
+    # sweep (with a traceback) every poll_interval instead of once per 24h. So every listdir
+    # is guarded and simply skips the unreadable entry.
+    try:
+        subdirs = list(root.iterdir())
+    except OSError as e:
+        log.warning("store retention: could not list %s: %s", root, e)
+        return (0, 0)
+    for sub in subdirs:
         # store.py only ever writes files INSIDE a per-message subdirectory (depth 2); a
         # stray top-level file is not part of that layout, so leave it untouched. A symlinked
         # subdir is skipped too — never traverse out of the store.
         if sub.is_symlink() or not sub.is_dir():
             continue
-        for f in sub.iterdir():
+        try:
+            entries = list(sub.iterdir())
+        except OSError as e:
+            log.warning("store retention: could not list %s: %s", sub, e)
+            continue
+        for f in entries:
             # Never follow or delete a symlink — the store never creates one, and following
             # it could reach bytes outside the store.
             if f.is_symlink() or not f.is_file():
@@ -82,7 +100,8 @@ def purge(data_dir, retention_days, now: float | None = None) -> tuple[int, int]
     return (files_deleted, bytes_freed)
 
 
-def maybe_purge(data_dir, retention_days, last_run: float | None, now_monotonic: float, *,
+def maybe_purge(data_dir: str | Path, retention_days, last_run: float | None,
+                now_monotonic: float, *,
                 interval_s: float = MIN_INTERVAL_S,
                 wall_now: float | None = None) -> tuple[float | None, tuple[int, int] | None]:
     """Run :func:`purge` at most once per ``interval_s``. Returns ``(new_last_run, result)``,

@@ -149,6 +149,8 @@ schema:
   question_stale_working_days: int?
   question_escalate_working_days: int?
   # #381: optional retention purge for /data/store originals. 0 (default) = DISABLED, nothing
-  # is ever deleted; the owner opts in with a day count. Loaded WITHOUT the `or N` idiom so an
-  # explicit 0 truly disables it (same #229 trap as delivery_notes_max_age_days above).
+  # is ever deleted; the owner opts in with a day count. Enabling it deletes raw .eml +
+  # attachment originals older than N days (extracted TEXT stays in the DB so reprocess works,
+  # but /eml + original-file download and SMTP re-forwarding of older mail stop). Loaded
+  # WITHOUT the `or N` idiom so an explicit 0 truly disables it (#229 trap).
   store_retention_days: int?
