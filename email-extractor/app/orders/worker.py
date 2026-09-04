@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
+import psycopg
 from psycopg.types.json import Json
 
 from . import snapshot, spend
@@ -285,7 +286,7 @@ def refresh_due(conn, cfg) -> int | None:
     return snapshot.latest_snapshot_id(conn)
 
 
-def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pragma: no cover
+def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None, connect=None) -> None:  # pragma: no cover
     """Worker loop, started as a thread by the add-on entrypoint.
 
     Also drives the static-orders SHADOW worker (#132) on the SAME connection/thread — a
@@ -296,8 +297,13 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pra
     """
     import time as _time
 
+    from .. import db
     from . import dl_worker, static_worker
     sleep = sleep or _time.sleep
+    # #380: the worker holds ONE connection for its whole life. When the bundled Postgres
+    # crashes and recovers (2026-09-04 disk-full PANIC), that connection is permanently
+    # closed — so a lost connection must be REPLACED, not retried. Injectable for tests.
+    connect = connect or (lambda: db.connect(cfg.pg_dsn))
     log.info("order worker started (engine=%s shadow=%s static_shadow=%s dl_shadow=%s)",
              getattr(cfg, "ai_orders_engine", "n8n"), getattr(cfg, "orders_shadow", False),
              getattr(cfg, "static_orders_shadow", False),
@@ -392,6 +398,23 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pra
             handled = dl_worker.tick(conn, cfg) or handled
             if handled:
                 continue          # more may be waiting; do not sleep between messages
+        except psycopg.OperationalError as e:
+            # #380: the connection is gone (Postgres crashed/recovered). Swallowing this
+            # in the generic handler below made the worker spin the SAME dead connection
+            # every 15s for 2h46m until a manual restart. Mirror main.py's IMAP loop:
+            # drop the dead connection and reconnect. A reconnect that itself fails logs
+            # and falls through to the shared sleep(15) — the NEXT loop retries, never a
+            # tight spin, and `stop` is still honoured at the top of the loop.
+            log.error("order worker database connection lost (%s); reconnecting...", e)
+            try:
+                conn.close()
+            except Exception as close_err:
+                # already-dead connection: closing it is a courtesy, not required.
+                log.debug("closing the dead order-worker connection failed: %s", close_err)
+            try:
+                conn = connect()
+            except Exception as e2:
+                log.error("order worker reconnect failed: %s", e2)
         except Exception:
             log.exception("order worker tick failed")
         sleep(15)
