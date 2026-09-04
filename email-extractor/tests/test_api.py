@@ -961,3 +961,134 @@ def test_answering_over_http_ships_the_confirmed_quantity(pg, monkeypatch):
     row = pg.execute(
         "SELECT quantity, unit_price FROM order_questions WHERE id=%s", (qid,)).fetchone()
     assert float(row[0]) == 8 and float(row[1]) == 1.5, "confirmed values persisted"
+
+
+# --- #384: „Vyriešené ručne" on an ORDER item card, over HTTP -------------------------
+
+def _seed_item_hold(pg, mid, delivery="04.09.2026"):
+    """One ai_orders message + an item question + a held order waiting on it (raw insert,
+    same shape as test_answering_over_http_commits_the_ledger... above)."""
+    from psycopg.types.json import Json
+    pg.execute("INSERT INTO messages (message_id, category) VALUES (%s, 'ai_orders')", (mid,))
+    qid = pg.execute(
+        """INSERT INTO order_questions (message_id, customer_ean, customer_name, wording,
+                                        item_key, quantity, unit, candidates, delivery_date,
+                                        reason)
+           VALUES (%s, '2000000000864', 'Pekáreň', 'rožky', 'rožky', 105, 'ks', %s, %s, 'test')
+           RETURNING id""",
+        (mid, Json([{"gtin": "BAG", "name": "Bageta rožková 200g"}]), delivery)).fetchone()[0]
+    pg.execute(
+        """INSERT INTO held_orders (message_id, customer_ean, customer_name, delivery_date,
+                                    order_number, question_ids, order_json, extracted_json,
+                                    decisions_json)
+           VALUES (%s, '2000000000864', 'Pekáreň', %s, '', %s, %s, %s, %s)""",
+        (mid, delivery, [qid], Json({"deliveryDate": delivery, "orderNumber": ""}),
+         Json({"isChangeRequest": False, "unverified": [], "notes": ""}),
+         Json([{"item_name": "rožky", "gtin": None, "card": "", "confidence": 0.1,
+                "rule": "unmatched", "note": "", "review": False, "trace": {},
+                "quantity": 105, "unit": "ks"}])))
+    return qid
+
+
+def _no_upload(monkeypatch, sink):
+    monkeypatch.setattr("app.orders.upload.put",
+                        lambda cfg, name, content: sink.append((name, content)) or True)
+
+
+def test_manual_resolve_over_http_releases_without_shipping(pg, monkeypatch):
+    uploads = []
+    _no_upload(monkeypatch, uploads)
+    qid = _seed_item_hold(pg, "mm1")
+    c = _client()
+    _login(c)
+    r = c.post(f"/api/orders/question/{qid}/answer", json={"manual": True})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] and len(body["resolved_manually"]) == 1
+    assert uploads == []
+    assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 0
+    assert pg.execute("SELECT status, release_reason FROM held_orders").fetchone() \
+        == ("released", "manual")
+    assert pg.execute(
+        "SELECT status, answer->>'choice', answered_by FROM order_questions WHERE id=%s",
+        (qid,)).fetchone() == ("answered", "manual", "sklad-manual")
+
+
+def test_manual_resolve_refuses_a_question_shared_across_two_messages(pg, monkeypatch):
+    """Fable finding 1: an order question dedupes across messages, so a bare per-qid manual
+    release could free a FOREIGN mail's order (never hand-entered → lost). Refuse instead."""
+    from psycopg.types.json import Json
+    uploads = []
+    _no_upload(monkeypatch, uploads)
+    qid = _seed_item_hold(pg, "mm1")
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('mm2', 'ai_orders')")
+    pg.execute(
+        """INSERT INTO held_orders (message_id, customer_ean, customer_name, delivery_date,
+                                    order_number, question_ids, order_json, extracted_json,
+                                    decisions_json)
+           VALUES ('mm2', '2000000000864', 'Pekáreň', '05.09.2026', '', %s, %s, %s, %s)""",
+        ([qid], Json({"deliveryDate": "05.09.2026", "orderNumber": ""}),
+         Json({"isChangeRequest": False, "unverified": [], "notes": ""}), Json([])))
+    c = _client()
+    _login(c)
+    r = c.post(f"/api/orders/question/{qid}/answer", json={"manual": True})
+    assert r.status_code == 409
+    # the question stays OPEN and BOTH held orders stay held — nothing lost, nothing shipped
+    assert pg.execute(
+        "SELECT status FROM order_questions WHERE id=%s", (qid,)).fetchone() == ("open",)
+    assert pg.execute(
+        "SELECT count(*) FROM held_orders WHERE status='held'").fetchone()[0] == 2
+    assert uploads == []
+
+
+def test_manual_resolve_on_an_already_answered_question_is_a_loud_409(pg, monkeypatch):
+    uploads = []
+    _no_upload(monkeypatch, uploads)
+    qid = _seed_item_hold(pg, "mm1")
+    pg.execute("UPDATE order_questions SET status='answered' WHERE id=%s", (qid,))
+    c = _client()
+    _login(c)
+    r = c.post(f"/api/orders/question/{qid}/answer", json={"manual": True})
+    assert r.status_code == 409
+    assert "duplik" in r.get_json()["error"].lower()
+    assert uploads == []
+
+
+def test_undoing_a_manual_resolution_over_http_puts_the_held_order_back(pg, monkeypatch):
+    uploads = []
+    _no_upload(monkeypatch, uploads)
+    qid = _seed_item_hold(pg, "mm1")
+    c = _client()
+    _login(c)
+    assert c.post(f"/api/orders/question/{qid}/answer",
+                  json={"manual": True}).status_code == 200
+    assert pg.execute("SELECT status FROM held_orders").fetchone() == ("released",)
+    r = c.post(f"/api/orders/question/{qid}/undo")
+    assert r.status_code == 200
+    assert pg.execute("SELECT status, release_reason FROM held_orders").fetchone() \
+        == ("held", None)
+    assert pg.execute(
+        "SELECT status FROM order_questions WHERE id=%s", (qid,)).fetchone() == ("open",)
+    assert pg.execute(
+        "SELECT processed FROM messages WHERE message_id='mm1'").fetchone() == (False,)
+    assert uploads == []
+
+
+def test_manual_resolve_refuses_when_nothing_is_held_anymore(pg, monkeypatch):
+    """#384 (Fable review, zero-held case): if the order was already released (e.g. the deadline
+    sweep shipped it) while the board card stayed up, a later „Vyriešené ručne" must NOT silently
+    succeed — the confirm says „nič sa neposlalo" while a partial EDI may already sit in ORION.
+    Refuse with 409 and leave the question open so the sklad checks the dashboard."""
+    uploads = []
+    _no_upload(monkeypatch, uploads)
+    qid = _seed_item_hold(pg, "mm1")
+    # simulate the order already released (deadline sweep), question left open
+    pg.execute("UPDATE held_orders SET status='released', release_reason='deadline' "
+               "WHERE %s = ANY(question_ids)", (qid,))
+    c = _client()
+    _login(c)
+    r = c.post(f"/api/orders/question/{qid}/answer", json={"manual": True})
+    assert r.status_code == 409
+    assert pg.execute(
+        "SELECT status FROM order_questions WHERE id=%s", (qid,)).fetchone() == ("open",)
+    assert uploads == []

@@ -429,6 +429,45 @@ def _do_release(conn, cfg, row: dict, release_reason: str, upload, post,
     return {"id": row["id"], "status": status, "preview": preview}
 
 
+def _do_release_locked(conn, cfg, hid: int, upload, post, as_of: str = "") -> dict | None:
+    """#384: the deadline sweep's per-row release, SERIALIZED the SAME way `_release_locked`
+    serializes the answered path — a per-row `FOR UPDATE` lock held across ship + the guarded
+    final flip. Plain `_do_release` (kept unchanged, so its ledger-backstop test still
+    exercises the ledger) takes NO lock: it relied on `edi.claim_send`'s content-hash ledger
+    to stop a duplicate ORION upload if the sweep and the answered path raced. A „Vyriešené
+    ručne" (#384) release ships NOTHING and takes NO ledger claim, so an UNSERIALIZED sweep
+    could upload an EDI for an order the warehouse already resolved by hand → a duplicate
+    physical delivery the ledger cannot catch. This closes that window: whichever of the
+    sweep / manual-resolve / answered-release wins the row lock first, the others re-read
+    `status != 'held'` and skip. The customer-unknown → review branch runs BEFORE the lock
+    (it ships nothing, so it is outside the duplicate-upload risk — same as `_do_release`)."""
+    row = get(conn, hid)
+    if not row or row["status"] != "held":
+        return None
+    if not row["customer_ean"]:
+        return release_to_review(
+            conn, cfg, row, post,
+            "Zákazník nebol nájdený v tabuľke zákazníkov (do termínu dodania)")
+    with psycopg.connect(cfg.pg_dsn) as tx:
+        locked = tx.execute(
+            "SELECT status FROM held_orders WHERE id = %s FOR UPDATE", (hid,)).fetchone()
+        if not locked or locked[0] != "held":
+            return None  # a manual / answered release won the row while we waited on the lock
+        status, preview, _reason = _ship(conn, cfg, row, upload, post, redecide=False,
+                                         as_of=as_of)
+        if status == "error":
+            log.warning("release of held order #%s (deadline) for %s / %s did not ship — "
+                        "staying held", hid, row["customer_ean"], row["delivery_date"])
+            return {"id": hid, "status": status, "preview": preview}
+        tx.execute(
+            """UPDATE held_orders SET status = 'released', release_reason = 'deadline',
+                   released_at = now() WHERE id = %s AND status = 'held'""", (hid,))
+    log.info("released held order #%s (deadline) for %s / %s -> %s", hid,
+             row["customer_ean"], row["delivery_date"], status)
+    _mark_message_done_if_clear(conn, row["message_id"])
+    return {"id": hid, "status": status, "preview": preview}
+
+
 def release_for_question(conn, cfg, qid: int, upload=None, post=None) -> list[dict]:
     """Release every held order whose LAST open question was just answered.
 
@@ -804,8 +843,13 @@ def release_due(conn, cfg, upload=None, post=None, today: str = "") -> list[dict
                 "Termín dodania prišiel, ale otázka (dátum/zákazník/mail/riadok) ešte "
                 "nie je zodpovedaná — treba doriešiť ručne"))
             continue
-        released.append(_do_release(conn, cfg, row, "deadline", upload, post, redecide=False,
-                                    as_of=today))
+        # #384: the LOCK-SAFE deadline release — serialized against „Vyriešené ručne" and the
+        # answered path so the sweep can never upload an order already resolved (a hand-entry
+        # duplicate the edi_sent ledger cannot catch). `None` = the row was released by one of
+        # those paths while we held nothing yet — skip it.
+        result = _do_release_locked(conn, cfg, hid, upload, post, as_of=today)
+        if result:
+            released.append(result)
     return released
 
 

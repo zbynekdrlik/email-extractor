@@ -166,9 +166,13 @@ EXPECTED_TEMPLATE_SHA256 = {
     # table (the AI-not-order discard review section). Only DASH_HTML changed; the two
     # _ASK_HTML_TEMPLATE-derived hashes below are untouched.
     "DASH_HTML": "1f5c1a6ea1ceda7043ec24b583094a2e25ace6bbfa2fcf6cc57263793bb3885f",  # airuleset:secret-ok SHA256 template-checksum re-pin (added discardedBadge refresh), not a credential
-    "ASK_HTML": "6a6042fbb6748849fa58166849557355e813ab9aee13cc7208ae9e385a893cd5",
-    "ASK_DL_HTML": "ae9282bb60588806f5ac9fd1e7a973627b9d0eba92423be87fa9c830ee8aeef5",
-    "ZNALOSTI_HTML": "9f04bd74b57f0e22b8b2e7b7810995f5955b1b7796925dd259f44b68eac598b7",
+    # #383/#384 re-pin: _ASK_HTML_TEMPLATE gained the #383 „karta nie je v katalógu" hint
+    # (orders item + dl_item cards) and the #384 „Vyriešené ručne" button + manualResolve() —
+    # both ASK-derived hashes change. ZNALOSTI_HTML gained the products alias input + the
+    # „tabuľku už nečítame" notice. DASH_HTML/LOGIN_HTML untouched.
+    "ASK_HTML": "6b540f8d73b445787e119507c42e95ee3febd2346d0cfca808f8bafca45a9627",  # airuleset:secret-ok SHA256 template-checksum re-pin, not a credential
+    "ASK_DL_HTML": "6b7a73a1129e83046772414b134512c2d47b75e429b99e05bde102a614c1fe1c",  # airuleset:secret-ok SHA256 template-checksum re-pin, not a credential
+    "ZNALOSTI_HTML": "a83c51190cc84aa28f9bb93ec027fe45e263c9627699f8358bde67da81bc5569",  # airuleset:secret-ok SHA256 template-checksum re-pin, not a credential
 }
 
 _TEMPLATE_CONSTANTS = {

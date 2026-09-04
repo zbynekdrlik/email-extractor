@@ -427,6 +427,90 @@ def register(app: Flask, deps: Deps) -> None:
             answered = teach.get(c3, qid)
         return jsonify(ok=True, question=answered, released=extra.get("released", []))
 
+    def _api_orders_answer_item_manual(qid: int, q: dict):
+        """#384 „Vyriešené ručne": the sklad entered this ORDER into CODEX BY HAND, so every
+        held order of THIS question's message is released WITHOUT any ORION upload (a
+        duplicate upload = a duplicate physical delivery). Answers the question with the
+        `manual` sentinel (teaches nothing), then `hold.resolve_manually`. Order-item only —
+        the caller reaches here after the customer/generic kinds have already been routed."""
+        from .orders import hold, teach
+
+        # Fable finding 1: an order question DEDUPES across messages
+        # (`ON CONFLICT (customer_ean, item_key) WHERE status='open'`), so `qid` can belong to
+        # held orders of MORE THAN ONE mail. A bare per-qid manual release would free a FOREIGN
+        # mail's order that was never hand-entered → permanently lost, and the `manual`
+        # sentinel would leak into that order's later release build. REFUSE that case before
+        # answering — the sklad must resolve such a shared question the normal way (a real card,
+        # which teaches + ships every waiting order).
+        def _held_msgs(conn):
+            return {r[0] for r in conn.execute(
+                "SELECT DISTINCT message_id FROM held_orders "
+                "WHERE %s = ANY(question_ids) AND status = 'held'", (qid,)).fetchall()}
+        with deps.db() as clook:
+            msgs = _held_msgs(clook)
+            cur = teach.get(clook, qid) or {}
+        # An already-answered `manual` question with nothing left held is a completed
+        # idempotent no-op (a double click / a retried request) — return ok, never 409.
+        if not msgs and (cur.get("answer") or {}).get("choice") == teach.ITEM_MANUAL:
+            return jsonify(ok=True, question=cur, resolved_manually=[], released=[])
+        # 0 held rows on this qid = nothing to release. Most likely the deadline sweep already
+        # shipped it while the board card stayed up — refuse loudly so a hand-entry does not
+        # duplicate an EDI already sitting in ORION (the confirm dialog said „nič sa neposlalo").
+        if not msgs:
+            return jsonify(error="Na túto otázku už nečaká žiadna objednávka — mohla sa "
+                                 "medzitým odoslať do ORIONu; skontroluj dashboard."), 409
+        if len(msgs) > 1:
+            return jsonify(error="Táto otázka blokuje objednávky z viacerých mailov — nedá "
+                                 "sa hromadne vyriešiť ručne. Vyrieš ju bežnou odpoveďou "
+                                 "(vyber kartu)."), 409
+
+        # Fable finding 4: guarded sentinel answer. 0 rows = a concurrent real answer already
+        # won (a normal release may be uploading THIS instant) → a LOUD refusal, never a silent
+        # no-op — the DB lock stops divergence, not a physical duplicate of a hand-entered order.
+        with deps.db_tx() as c:
+            row = c.execute(
+                """UPDATE order_questions
+                      SET status = 'answered', answer = %s, answer_card = 'vyriešené ručne',
+                          answered_by = 'sklad-manual', answered_at = now()
+                    WHERE id = %s AND status = 'open'
+                    RETURNING id""", (Json({"choice": teach.ITEM_MANUAL}), qid)).fetchone()
+        if not row:
+            # 0 rows: a concurrent answer won between the check and here. If it was ANOTHER
+            # „Vyriešené ručne" click (sentinel already set), re-drive the release idempotently
+            # (a prior click whose per-row-guarded release failed mid-batch) — otherwise a real
+            # card was picked / an upload may be in flight → the loud duplicate warning below.
+            with deps.db() as cc:
+                cur = teach.get(cc, qid) or {}
+            if (cur.get("answer") or {}).get("choice") == teach.ITEM_MANUAL:
+                with deps.db() as c2:
+                    resolved = hold.resolve_manually(c2, deps.cfg, qid)
+                return jsonify(ok=True, question=cur, resolved_manually=resolved, released=[])
+            return jsonify(error="Otázka je už zodpovedaná — ak už bola nahraná do ORIONu, "
+                                 "ručné zadanie je duplikát, skontroluj to."), 409
+        # The answer committed in its own tx; the (no-upload) release runs afterward on an
+        # autocommit connection — mirrors the item/generic split, and here there is no external
+        # side effect at all, so a later failure can never undo the sentinel answer.
+        # POST-answer re-check (Fable finding 1 TOCTOU): a second mail could have attached to
+        # this qid between the pre-check and the answer. Answering closed the dedup window
+        # (`WHERE status='open'`), so the count is now STABLE — if it is no longer exactly one
+        # message, reopen the question (nothing released yet) and refuse, never release a
+        # foreign mail's order as „manual".
+        with deps.db() as c:
+            msgs = _held_msgs(c)
+        if len(msgs) != 1:
+            with deps.db_tx() as c:
+                c.execute(
+                    """UPDATE order_questions SET status = 'open', answer = NULL,
+                           answer_card = NULL, answered_by = NULL, answered_at = NULL
+                        WHERE id = %s""", (qid,))
+            return jsonify(error="Zoznam čakajúcich objednávok sa medzitým zmenil — skús to "
+                                 "znova, alebo otázku vyrieš bežnou odpoveďou."), 409
+        with deps.db() as c2:
+            resolved = hold.resolve_manually(c2, deps.cfg, qid)
+        with deps.db() as c3:
+            answered = teach.get(c3, qid)
+        return jsonify(ok=True, question=answered, resolved_manually=resolved, released=[])
+
     @app.post("/api/orders/question/<int:qid>/answer")
     def api_orders_answer(qid: int):
         """One click: this wording IS this card. Taught for that customer, forever. Or,
@@ -478,6 +562,10 @@ def register(app: Flask, deps: Deps) -> None:
             return _api_orders_answer_customer(qid, q0, body)
         if q0.get("kind") in ("mail", "date", "line", "dl_item", "dl_supplier"):
             return _api_orders_answer_generic(qid, q0, body)
+        # #384: „Vyriešené ručne" on an ORDER item card — the sklad handled it by hand in
+        # CODEX; release every held order of this message WITHOUT any ORION upload.
+        if body.get("manual") is True:
+            return _api_orders_answer_item_manual(qid, q0)
 
         gtin, card = str(body.get("gtin") or ""), str(body.get("card") or "")
         if not gtin:

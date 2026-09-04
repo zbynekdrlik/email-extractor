@@ -277,11 +277,13 @@ def tick(conn, cfg, pipeline=None) -> int:
 
 
 def refresh_due(conn, cfg) -> int | None:
-    """#129: the Google Sheet is never read anymore — Postgres (`catalog_overrides`/
-    `customer_overrides`, #127/#128) is the sole source of truth for the catalog and
-    customer list. This just reports whichever snapshot is currently frozen; there is
-    no fetch, no interval, and no config gate left to check. `cfg` stays in the
-    signature only so `run_forever`'s call site (and every caller) needs no change.
+    """#129 → #383: the Google Sheet is RETIRED as a card source (owner decision
+    „TABULKU ZRUSIT!!!", 2026-09-04) — Postgres (`catalog_overrides`/`customer_overrides`,
+    #127/#128, incl. the #383 override `alias`) is the SOLE source of truth for the catalog
+    and customer list; cards are added ONLY via `/znalosti` (see
+    `.claude/rules/catalog-sources.md`). This just reports whichever snapshot is currently
+    frozen; there is no fetch, no interval, and no config gate left to check. `cfg` stays in
+    the signature only so `run_forever`'s call site (and every caller) needs no change.
     """
     return snapshot.latest_snapshot_id(conn)
 

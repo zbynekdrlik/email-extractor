@@ -566,3 +566,33 @@ def test_sklad_link_does_not_match_a_path_that_merely_starts_with_dl_products(pg
     c.get("/sklad/" + sklad_key("test-secret"))
     assert c.get("/api/znalosti/dl-productsX").status_code == 401
     assert c.get("/api/znalosti/dl-suppliersX").status_code == 401
+
+
+# --- #383: /znalosti products can set + maintain a card's `doplnok` alias (tri-state) ---
+
+def test_products_upsert_accepts_and_maintains_the_doplnok_alias(pg):
+    """The Google Sheet is retired, so /znalosti is the only place a card's `doplnok` (a real
+    match.py::alias_exact signal) can be set. The API is tri-state: the `doplnok` KEY present
+    (incl "") sets/clears it; the key absent leaves it untouched."""
+    c = _client()
+    _login(c)
+    r = c.post("/api/znalosti/products",
+               json={"gtin": "ALZ1", "name": "Ciabatta 100g", "doplnok": "ciabatta malá"})
+    assert r.status_code == 200
+    items = {it["gtin"]: it
+             for it in c.get("/api/znalosti/products?q=ALZ1").get_json()["items"]}
+    assert items["ALZ1"]["alias"] == "ciabatta malá"
+    # a name-only edit (no `doplnok` key) must NOT wipe the alias
+    r = c.post("/api/znalosti/products", json={"gtin": "ALZ1", "name": "Ciabatta 100 g"})
+    assert r.status_code == 200
+    items = {it["gtin"]: it
+             for it in c.get("/api/znalosti/products?q=ALZ1").get_json()["items"]}
+    assert items["ALZ1"]["name"] == "Ciabatta 100 g"
+    assert items["ALZ1"]["alias"] == "ciabatta malá"
+    # an explicit empty `doplnok` clears it
+    r = c.post("/api/znalosti/products",
+               json={"gtin": "ALZ1", "name": "Ciabatta 100 g", "doplnok": ""})
+    assert r.status_code == 200
+    items = {it["gtin"]: it
+             for it in c.get("/api/znalosti/products?q=ALZ1").get_json()["items"]}
+    assert items["ALZ1"]["alias"] == ""

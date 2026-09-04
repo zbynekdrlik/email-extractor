@@ -872,3 +872,44 @@ def test_two_concurrent_already_overridden_sheet_bound_customer_edits_by_overrid
     names = {r["name"] for r in snapshot.customers_for_management(pg)
              if r["ean_edi"] == "7300000000006"}
     assert names == {"Pobočka A súbežne", "Pobočka B súbežne"}
+
+
+# --- #383: the card alias (`doplnok`) is editable via the override, tri-state ----------
+# (the Google Sheet is retired as a card source; alias was the one field only the sheet set)
+
+def test_catalog_override_alias_can_be_set_and_wins_over_the_snapshot_alias(pg):
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    # 8588001800013 carries a sheet-baked alias "rozok standard, žemľa 50g"
+    snapshot.upsert_catalog_card(pg, "8588001800013", "Rožok štandart 50g",
+                                 alias="rožok 50g, ČSB")
+    cat = {r["gtin"]: r for r in snapshot.catalog_for_management(pg)}
+    assert cat["8588001800013"]["alias"] == "rožok 50g, ČSB"
+
+
+def test_a_name_only_override_preserves_the_existing_alias(pg):
+    """alias=None (a two-arg / name-only edit) must NOT wipe the alias — the tri-state NULL
+    inherits the snapshot-baked alias. Guards every pre-#383 two-arg caller/test too."""
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    snapshot.upsert_catalog_card(pg, "8588001800013", "Rožok - nový názov")  # no alias arg
+    cat = {r["gtin"]: r for r in snapshot.catalog_for_management(pg)}
+    assert cat["8588001800013"]["name"] == "Rožok - nový názov"
+    assert cat["8588001800013"]["alias"] == "rozok standard, žemľa 50g"
+
+
+def test_an_empty_string_alias_explicitly_clears_it(pg):
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    snapshot.upsert_catalog_card(pg, "8588001800013", "Rožok štandart 50g", alias="")
+    cat = {r["gtin"]: r for r in snapshot.catalog_for_management(pg)}
+    assert cat["8588001800013"]["alias"] == ""
+
+
+def test_an_override_only_card_can_carry_an_alias_and_never_leaks_none(pg):
+    snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
+    snapshot.upsert_catalog_card(pg, "NEWAL", "Nová karta s aliasom",
+                                 alias="alias novej karty")
+    cat = {r["gtin"]: r for r in snapshot.catalog_for_management(pg)}
+    assert cat["NEWAL"]["alias"] == "alias novej karty"
+    # a bare override-only card (no alias) must expose "" to match.py, never None
+    snapshot.upsert_catalog_card(pg, "NOAL", "Karta bez aliasu")
+    cat = {r["gtin"]: r for r in snapshot.catalog_for_management(pg)}
+    assert cat["NOAL"]["alias"] == ""

@@ -710,6 +710,8 @@ function dlItemQuestionCard(q){
   c.appendChild(el('div','slabel','alebo nájdi v celom DL katalógu:'));
   c.appendChild(dlItemSearchBox(q));
   c.appendChild(newDlProductForm(q));
+  const dlhint=el('div',null,'Karta nie je v katalógu? Pridaj ju vyššie („➕ Nový produkt“) alebo v 📚 databáze znalostí — tabuľku „EAN slovnormal“ už program nečíta.');
+  dlhint.style.cssText='margin-top:6px;font-size:12px;color:#6a737d';c.appendChild(dlhint);
   // #365: "nemá kartu — pošli bez tejto položky" — ships the doc WITHOUT this line
   // (confirmed, honest). Distinct from "Neviem" (defers the whole DL). Confirm first — it
   // sends an incomplete document to ORION.
@@ -862,6 +864,13 @@ async function load(){const mine=++render;let d,t;
     const kb=document.createElement('a');kb.className='kb';kb.textContent='📚 databáza znalostí';
     kb.href='/znalosti/'+encodeURIComponent(q.customer_ean)+'?wording='+encodeURIComponent(q.wording);
     c.appendChild(kb);
+    const hint=el('div',null,'Karta nie je v katalógu? Pridaj ju v 📚 databáze znalostí — tabuľku „EAN slovnormal“ už program nečíta.');
+    hint.style.cssText='margin-top:6px;font-size:12px;color:#6a737d';c.appendChild(hint);
+    const mb=el('button',null,'Vyriešené ručne — zadané do CODEXu, nič neposielať');
+    mb.style.borderColor='#8250df';mb.style.background='#f3eefe';mb.style.color='#5a32a3';mb.style.marginTop='8px';
+    mb.onclick=()=>{if(confirm('Naozaj vyriešené ručne? Objednávku si zadala do CODEXu — nič sa NEpošle do '
+      +'ORIONu a zatvoria sa všetky dni dodania z tohto mailu, ktoré čakali na túto otázku.'))manualResolve(q.id)};
+    c.appendChild(mb);
     W.appendChild(c)}
   if(t.items.length){W.appendChild(el('h2',null,'Naposledy naučené'));
     for(const x of t.items){const r=el('div','t');
@@ -873,6 +882,13 @@ async function teach(qid,gtin,card){try{
   if(qi)body.quantity=qi.value;if(pi)body.unit_price=pi.value;   // #360: confirmed qty+price
   await api('/api/orders/question/'+qid+'/answer',
     {method:'POST',body:JSON.stringify(body)});delete searchState[qid];await load()}
+  catch(e){alert(e.message||'chyba')}}
+// #384: „Vyriešené ručne" — the sklad entered this order into CODEX by hand; release every
+// held order of this mail WITHOUT any ORION upload. Posts {manual:true}; the server refuses
+// (409) if the question blocks orders from several mails, alert() surfaces it.
+async function manualResolve(qid){try{
+  await api('/api/orders/question/'+qid+'/answer',
+    {method:'POST',body:JSON.stringify({manual:true})});delete searchState[qid];await load()}
   catch(e){alert(e.message||'chyba')}}
 async function undo(qid){try{await api('/api/orders/question/'+qid+'/undo',{method:'POST'});
   await load()}catch(e){alert(e.message||'chyba')}}
@@ -1050,9 +1066,17 @@ function aliasRow(item,onDelete){
 function productsBox(){
   const box=el('div','box');
   box.appendChild(el('h2',null,'Karty výrobkov'));
+  // #383: the Google Sheet „EAN slovnormal" is retired — this page is the ONLY source of cards.
+  const notice=el('div',null,'⚠️ Karty pridávaj a upravuj LEN tu. Tabuľku „EAN slovnormal“ '
+    +'už program NEČÍTA — čokoľvek doplníš do tabuľky, program neuvidí.');
+  notice.style.cssText='margin:4px 0 10px;padding:8px 10px;border-radius:6px;background:#fff8c5;'
+    +'border:1px solid #eac54f;color:#7d4e00;font-size:13px';
+  box.appendChild(notice);
   const gtin=el('input');gtin.placeholder='GTIN';
   const name=el('input');name.placeholder='názov karty';
-  box.appendChild(gtin);box.appendChild(name);
+  const alias=el('input');alias.placeholder='doplnok / alias (napr. „rožok 70g")';
+  let aliasTouched=false;alias.oninput=()=>{aliasTouched=true};gtin.oninput=()=>{aliasTouched=false};
+  box.appendChild(gtin);box.appendChild(name);box.appendChild(alias);
   const status=el('div','picked','');box.appendChild(status);
   const list=el('div');
   async function refresh(q){
@@ -1061,17 +1085,24 @@ function productsBox(){
     if(!d.items.length){list.appendChild(el('div','empty','Zatiaľ nič.'));return}
     for(const it of d.items){
       const r=el('div','row');
-      r.appendChild(el('div',null,it.name+'  ('+it.gtin+')'+(it.overridden?' · upravené':'')));
+      r.appendChild(el('div',null,it.name+'  ('+it.gtin+')'
+        +(it.alias?' · doplnok: '+it.alias:'')+(it.overridden?' · upravené':'')));
       const b=el('button',null,'upraviť');
-      b.onclick=()=>{gtin.value=it.gtin;name.value=it.name;status.textContent=''};
+      b.onclick=()=>{gtin.value=it.gtin;name.value=it.name;alias.value=it.alias||'';aliasTouched=true;status.textContent=''};
       r.appendChild(b);list.appendChild(r)
     }
   }
   const save=el('button','add','Uložiť (nový GTIN = pridá, existujúci = upraví)');
   save.onclick=async()=>{
     if(!gtin.value.trim()||!name.value.trim()){alert('vyplň GTIN aj názov');return}
-    try{await api('/api/znalosti/products',{method:'POST',
-      body:JSON.stringify({gtin:gtin.value.trim(),name:name.value.trim()})});
+    // #383: always send `doplnok` (the field is prefilled with the card's current alias),
+    // so an edit here sets it explicitly ("" clears it). The sheet is dead, so this page owns it.
+    // #383: send `doplnok` ONLY when the alias field was actually engaged (typed into, or
+    // prefilled by „upraviť") — a name-only save on a hand-typed GTIN must NOT silently clear a
+    // card's existing alias (a real match.py signal). An empty field that WAS engaged clears it.
+    const _pb={gtin:gtin.value.trim(),name:name.value.trim()};
+    if(aliasTouched)_pb.doplnok=alias.value.trim();
+    try{await api('/api/znalosti/products',{method:'POST',body:JSON.stringify(_pb)});
       status.textContent='uložené';await refresh(search.value.trim())}
     catch(e){alert(e.message||'chyba')}
   };
@@ -1081,7 +1112,7 @@ function productsBox(){
     const g=gtin.value.trim();if(!g)return;
     if(!confirm('Vyradiť kartu '+g+'?'))return;
     try{await api('/api/znalosti/products/'+encodeURIComponent(g),{method:'DELETE'});
-      gtin.value='';name.value='';status.textContent='vyradené';await refresh(search.value.trim())}
+      gtin.value='';name.value='';alias.value='';status.textContent='vyradené';await refresh(search.value.trim())}
     catch(e){alert(e.message||'chyba')}
   };
   box.appendChild(retire);

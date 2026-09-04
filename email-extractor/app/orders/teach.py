@@ -234,8 +234,8 @@ def undo(conn, qid: int) -> dict:
     conn.execute(
         """UPDATE order_questions
               SET status = 'open', answer_gtin = NULL, answer_card = NULL,
-                  answered_by = NULL, answered_at = NULL, reminder_sent_at = NULL,
-                  escalated_at = NULL
+                  answer = NULL, answered_by = NULL, answered_at = NULL,
+                  reminder_sent_at = NULL, escalated_at = NULL
             WHERE id = %s""", (qid,))
     log.warning("teaching taken back for %r (%s)", q["wording"], q["customer_ean"])
     return get(conn, qid) or {}
@@ -578,6 +578,14 @@ def _validate_item(q: dict, choice: str, by: str) -> None:
     return None  # `answer()` itself validates against the offered/catalog set
 
 
+# #384: the sklad can answer an ORDER item board question with „Vyriešené ručne" — the
+# order was entered into CODEX by hand, so it is released WITHOUT any ORION upload. Like
+# DL_ITEM_SHIP_WITHOUT this is a SENTINEL choice (never a real GTIN, teaches nothing);
+# recorded as `answer->>'choice'`, handled by the LIVE dispatch's manual branch
+# (`api_orders_answer`) → `hold.resolve_manually`, and undone via `hold.unresolve_manually`.
+ITEM_MANUAL = "manual"
+
+
 def _apply_item(conn, cfg, q: dict, choice: str, by: str) -> dict:
     """`choice` is the picked gtin. httpapi's LIVE dispatch still calls `answer()`
     directly with the click's own `card` text (a cosmetic label only) rather than through
@@ -594,6 +602,14 @@ def _apply_item(conn, cfg, q: dict, choice: str, by: str) -> dict:
 
 
 def _undo_item(conn, q: dict) -> dict:
+    # #384: undoing a „Vyriešené ručne" answer must ALSO put its held orders back to 'held'
+    # (nothing was ever shipped, so it is fully reversible) BEFORE reopening the question —
+    # `unresolve_manually` flips held→'held' first, then resets the message (Fable finding
+    # 5). `undo()` below reopens the question; its item_memory/global_alias deletes are
+    # harmless no-ops here (a manual answer taught nothing).
+    if (q.get("answer") or {}).get("choice") == ITEM_MANUAL:
+        from . import hold
+        hold.unresolve_manually(conn, q["id"])
     return undo(conn, q["id"])
 
 
