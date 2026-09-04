@@ -224,3 +224,21 @@ def test_sweep_does_not_notify_a_message_older_than_the_working_day_horizon(pg):
     kind = pg.execute(
         "SELECT kind FROM pending_alerts WHERE message_id='fresh_horizon'").fetchone()
     assert kind is not None and kind[0] == "human_processing_review"
+
+
+def test_horizon_cutoff_counts_working_days_and_skips_weekends():
+    """#385: the horizon never counts Saturday/Sunday. Thu - 2 working days = Tue;
+    Mon - 2 working days = the previous Thu (the weekend is skipped, so a Friday mail is
+    still within a 2-working-day horizon on Monday). The cutoff is local midnight."""
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Europe/Bratislava")
+    thu = datetime(2026, 9, 3, 12, 0, tzinfo=tz)          # a Thursday
+    cut = human_processing._horizon_cutoff(thu.astimezone(UTC), 2).astimezone(tz)
+    assert cut.date().isoformat() == "2026-09-01"          # Tue (Wed=1, Tue=2)
+    assert (cut.hour, cut.minute, cut.second) == (0, 0, 0)  # local midnight
+    mon = datetime(2026, 9, 7, 9, 0, tzinfo=tz)           # a Monday
+    cut2 = human_processing._horizon_cutoff(mon.astimezone(UTC), 2).astimezone(tz)
+    assert cut2.date().isoformat() == "2026-09-03"         # Thu (Fri=1, Thu=2; weekend skipped)
+    # working_days<=0 → today's local midnight (only today's mail stays)
+    cut0 = human_processing._horizon_cutoff(thu.astimezone(UTC), 0).astimezone(tz)
+    assert cut0.date().isoformat() == "2026-09-03"
