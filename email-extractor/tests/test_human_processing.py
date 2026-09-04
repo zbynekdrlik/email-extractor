@@ -7,6 +7,7 @@
   `human_processing` správa nikdy neskončí bez event/notifikácie.
 """
 import os
+from datetime import UTC, datetime, timedelta
 
 from app import db
 from app.config import Config
@@ -198,3 +199,28 @@ def test_a_processed_human_processing_message_is_ignored(pg):
     human_processing.sweep(pg, _cfg(), classify=lambda cfg, atts: None)
     assert pg.execute(
         "SELECT count(*) FROM pending_alerts WHERE message_id='hp7'").fetchone()[0] == 0
+
+
+# --- 2-working-day horizon: never chase a mail past the horizon (#385) -------
+
+def test_sweep_does_not_notify_a_message_older_than_the_working_day_horizon(pg):
+    """#385 regression: a human_processing mail older than the 2-working-day horizon
+    (owner directive `two-workday-horizon`) must NOT be re-notified. The live bug
+    re-asked two such mails once per working-day morning for 3 weeks (36 ops-digest
+    alerts) because the sweep's candidate query had no upper age bound. A genuinely
+    RECENT stuck mail is still surfaced — the horizon must not disable the net."""
+    old_ts = (datetime.now(UTC) - timedelta(days=10)).isoformat()   # >> 2 working days
+    _hp_msg(pg, "old_horizon", needs_vision=False, has_attachments=False,
+            created_at=old_ts)
+    _hp_msg(pg, "fresh_horizon", needs_vision=False, has_attachments=False,
+            minutes_old=31)   # today, well within the horizon
+    human_processing.sweep(pg, _cfg(ops_channel_id=888),
+                           classify=lambda cfg, atts: None)
+    # past-horizon mail: no ops-digest alert (the 3-week nag stops)
+    assert pg.execute(
+        "SELECT count(*) FROM pending_alerts WHERE message_id='old_horizon'"
+    ).fetchone()[0] == 0
+    # recent stuck mail: still surfaced exactly once (net not disabled)
+    kind = pg.execute(
+        "SELECT kind FROM pending_alerts WHERE message_id='fresh_horizon'").fetchone()
+    assert kind is not None and kind[0] == "human_processing_review"
