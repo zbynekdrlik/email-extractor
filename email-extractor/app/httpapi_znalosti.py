@@ -154,8 +154,18 @@ def register(app: Flask, deps: Deps) -> None:
         name = str(body.get("name") or "").strip()
         if not (gtin and name):
             return jsonify(error="chýba GTIN alebo názov"), 400
+        # #383 alias tri-state: the `alias`/`doplnok` KEY being ABSENT means "don't touch the
+        # alias" (→ None); PRESENT (even "") means set/clear it explicitly. The sheet is dead,
+        # so /znalosti is the only place a card's `doplnok` (a real match.py::alias_exact
+        # signal) can be maintained. `doplnok` wins if both keys are somehow present.
+        if "doplnok" in body:
+            alias: str | None = str(body.get("doplnok") or "").strip()
+        elif "alias" in body:
+            alias = str(body.get("alias") or "").strip()
+        else:
+            alias = None
         with deps.db() as c:
-            snapshot.upsert_catalog_card(c, gtin, name)
+            snapshot.upsert_catalog_card(c, gtin, name, alias=alias)
             snapshot.rebuild_from_overrides(c)
         return jsonify(ok=True)
 
