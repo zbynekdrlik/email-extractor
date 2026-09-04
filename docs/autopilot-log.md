@@ -4094,3 +4094,36 @@ pred „vytvor v CODEXe" krokom vždy najprv over raw.firma, či už neexistuje.
   (+regression + `_horizon_cutoff` weekend unit test), 13/13 pass; ruff 0, mypy 0 (80 súborov),
   worker+human_processing testy zelené. Review 0 🔴 0 🟡 0 🔵 (Opus 4.8 tier — gated Fable consult
   padol na account limit). Bez push/PR (worktree — supervisor integruje; súbežné lane na 0.9.129/0.9.130).
+
+## #381 — HA disk sa zaplnil automatickou zálohou → padol bundled Postgres: backup_exclude + voliteľná retencia store (0.9.133, 2026-09-04)
+- Príčina (host-side, z tela tiketu): HA automatická záloha (05:14 CEST 4.9.) ťahá KAŽDÝ add-on aj s
+  dátami — pre extraktor celý `/data/store` (7,4 GB originálov mailov + príloh, 9 928 správ). Záloha
+  narástla na 12,9 GB a spolu s recorder DB + docker images zaplnila `/dev/sda8` na 100 % o 05:21, čo
+  zhodilo bundled Postgres (`PANIC: No space left on device`). Bytes v store NIE SÚ v zálohe potrebné:
+  extrahovaný TEXT žije v DB, a #251 dokázal reprocess bez originálnych PDF bytes.
+- Oprava (technická časť tiketu; owner-rozhodnutia o retencii/recorder/volume ostávajú OTVORENÉ):
+  (1) top-level `backup_exclude: ["store"]` v `config.yaml` — HA prestane zálohovať store. Jednosegmentový
+  glob je JEDINÝ funkčný: HA Supervisor `_is_excluded_by_filter` matchuje plnú HOST cestu súboru cez
+  `PurePath.match` (segmenty sprava, `**` nie rekurzívne) + securetar odreže podstrom pri zhode na
+  adresár; lokálny probe proti reálnej host ceste `<host_data>/<slug>/store` potvrdil, že `store/**` a
+  `data/store` NEmatchujú nič, len `store` odreže store DIR (postgres/llm-cache/config ostávajú).
+  Zdroje: developers.home-assistant.io/docs/add-ons/configuration + Supervisor `apps/app.py`.
+  (2) nová add-on option `store_retention_days: int = 0` (0 = VYPNUTÉ, nič sa nemaže; owner opt-in) +
+  nový filesystem-only modul `app/store_retention.py` (`purge`/`maybe_purge`/`describe`, ZERO DB
+  závislostí) volaný z IMAP `while True` slučky v `main.py` (NIE order-worker slučky — čistenie disku
+  beží bez ohľadu na engine gate), in-memory monotónna ≥24 h kadencia, INFO-log každého behu. Maže LEN
+  súbory (nikdy adresáre, symlinky, DB riadky, ani stray top-level súbory) staršie ako N dní podľa
+  mtime v hĺbke 2 pod `/data/store/<safe_id>/`. Loaded bez `or N` (explicitná 0 naozaj vypne, #229).
+- Review (gated Fable, gate OPEN 6 %): 0 🔴 1 🟡 4 🔵, všetko opravené v `74026e3`. 🟡 (dôležité pre
+  owner-rozhodnutie o počte dní): docstringy pôvodne tvrdili, že DB drží `raw_eml`/`machine_text` — v
+  schéme NIE: `messages.raw_eml_path` je CESTA do store-u (nie bajty), `attachments.extracted_text` je
+  extrahovaný text, `/eml/<mid>` číta `raw.eml` Z DISKU. Takže zapnutie retencie 404-uje `/eml`+`/files`
+  a rozbije SMTP preposielanie staršej pošty — DB drží len TEXT (reprocess/klasifikácia OK). Docs (modul,
+  config.yaml, Config field, testy) opravené na tento presný trade-off; zaznamenané na tikete pre owner.
+  🔵: robustný per-subdir `iterdir` try/except (inak escaping OSError → sweep každých 60 s), test
+  symlinknutého PODadresára, test nečitateľného subdir, anotácia `data_dir: str | Path`.
+- Commity: bump 410e002 (0.9.130) → [red] 829acb7 → wip-salvage 2bc48e1 (supervisor po API 429) →
+  [green/review-fix] 74026e3 → merge origin/dev 536efc0 (rebump 0.9.133; #385=0.9.131 zmergnutý, #383/#384
+  rezervujú 0.9.132). Testy: `test_store_retention.py` (11) + `test_config.py` rozšírené, 33 pass; plný
+  suite exit 0 / coverage 94,09 % (store_retention.py 96 %); ruff 0, mypy 0 (81 súborov). Full-flow
+  worktree dispatch (dispatch explicitne delegoval merge+deploy). Tiket ostáva OTVORENÝ (owner-rozhodnutia).

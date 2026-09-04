@@ -210,3 +210,50 @@ def test_orion_dl_dir_defaults_to_a_different_folder_than_orders(tmp_path, monke
 def test_orion_dl_dir_reads_from_options(tmp_path, monkeypatch):
     cfg = _load_with_options(tmp_path, monkeypatch, {"orion_dl_dir": "C:\\custom\\in_DL"})
     assert cfg.orion_dl_dir == "C:\\custom\\in_DL"
+
+
+# --- #381: store-originals retention (default 0 = disabled, owner opts in) + the
+# backup_exclude that stops HA backups from carrying the 7.4 GB /data/store. ---
+
+def test_store_retention_days_default_and_explicit_zero_disables(tmp_path, monkeypatch):
+    # #381: default 0 (DISABLED) when absent — nothing is ever deleted unless the owner
+    # opts in, so a deploy with no options change changes NO deletion behaviour.
+    assert _load_with_options(tmp_path, monkeypatch, {}).store_retention_days == 0
+    # a real value is read through unchanged.
+    assert _load_with_options(
+        tmp_path, monkeypatch, {"store_retention_days": 90}).store_retention_days == 90
+    # an explicit 0 must STAY 0 (disabled) — NOT be silently re-enabled by an `or N` idiom
+    # (the #229 falsy-override trap the load line deliberately avoids, same as
+    # delivery_notes_max_age_days above). This locks the load-layer behaviour so a future
+    # "consistency" edit re-adding `or 90` fails here.
+    assert _load_with_options(
+        tmp_path, monkeypatch, {"store_retention_days": 0}).store_retention_days == 0
+
+
+def test_config_yaml_declares_backup_exclude_store():
+    """#381: the add-on MUST exclude /data/store from HA backups (the 7.4 GB of mail
+    originals that filled the disk and PANICked Postgres, 2026-09-04). Pin config.yaml
+    textually (this project has no PyYAML dep — same reason the dead-sheet-options pins
+    above regex the file). The value must be exactly the single-segment glob `["store"]`:
+    the #381 design comment's PurePath.match probe proved `store/**` and `data/store` both
+    fail to match on the real host path (`<host_data>/<slug>/store`), only `store` does."""
+    text = CONFIG_YAML.read_text()
+    m = re.search(r"^backup_exclude:\s*(.+)$", text, re.M)
+    assert m, "config.yaml must declare a top-level backup_exclude:"
+    assert '"store"' in m.group(1), \
+        f'backup_exclude must contain the single-segment glob "store", got: {m.group(1)}'
+    for bad in ('"store/**"', '"data/store"'):
+        assert bad not in m.group(1), f"backup_exclude must NOT use {bad} (never matches)"
+
+
+def test_config_yaml_declares_store_retention_days_option():
+    """Pin config.yaml's own options:/schema: blocks textually so a future cleanup pass
+    can't silently drop the store_retention_days knob (same guard shape as the dead sheet
+    options above)."""
+    text = CONFIG_YAML.read_text()
+    options_block, sep, schema_block = text.partition("\nschema:\n")
+    assert sep, "config.yaml has no schema: block"
+    assert re.search(r"^\s+store_retention_days:", options_block, re.M), \
+        "store_retention_days missing from config.yaml options: block"
+    assert re.search(r"^\s+store_retention_days:", schema_block, re.M), \
+        "store_retention_days missing from config.yaml schema: block"
