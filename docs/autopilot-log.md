@@ -4046,3 +4046,27 @@ pred „vytvor v CODEXe" krokom vždy najprv over raw.firma, či už neexistuje.
   číslo/čís., obj. č., číslo objednávky, kus/kusov), badge refresh na tab-e, `AND
   processed_by='ai-not-order'` v restore; 🔵 mŕtva `í` vetva v `avízo` odstránená + change_request
   verdict test. Commity: 9f3b8cd [red] → 8e2d364 [green]. ruff 0, mypy 0, plná suite zelená.
+
+## #380 — order worker sa po páde Postgresu znova pripojí (hotfix, v0.9.128) [worktree, local-green]
+
+- Incident 2026-09-04: bundlovaný Postgres o 05:21 spadol (disk plný → PANIC), o 05:22 sa
+  zotavil. IMAP slučka (`main.py::main`) to prežila (chytá `psycopg.OperationalError`,
+  reconnectne), ale vlákno order-workera (`worker.py::run_forever`) drží JEDNO spojenie na
+  celý život a jeho generický `except Exception` pohltil `OperationalError: the connection is
+  closed` a točil to isté MŔTVE spojenie každých 15 s do manuálneho reštartu o 08:07 → 2h46m
+  nulového spracovania (static/Karmen + AI + DL), 13+5 objednávok sa nakopilo.
+- Oprava (mirror IMAP slučky): `run_forever` má nový `except psycopg.OperationalError` PRED
+  generickým `except Exception` — zaloguje, best-effort `conn.close()` (debug log pri zlyhaní),
+  `conn = connect()`; padá do zdieľaného `sleep(15)`, takže žiadny tesný spin a `stop` sa stále
+  kontroluje na začiatku slučky. Nový `connect=` DI kwarg (default `lambda: db.connect(cfg.pg_dsn)`)
+  na testovateľnosť. `start_order_worker`-ov `loop()` retry-uje úvodný `db.connect` (log + sleep 15 s
+  + skús znova) namiesto „order worker died" a ukončenia vlákna (žiadny supervisor ho nereštartuje).
+- Sweep iných long-lived držiteľov spojenia: order worker bol JEDINÝ chybný daemon. IMAP loop už
+  reconnectuje; HTTP server (`httpapi._db`/`_db_tx`) je connect-per-request (factory, žiadne
+  dlhé spojenie); `dl_worker`/`confirm`/`static_worker`/`question_alerts`/`human_processing`/
+  `dl_alerts` bežia vnútri `run_forever` na ZDIEĽANOM `conn` → kryté touto opravou; ostatné
+  `db.connect` sú one-off CLI skripty (backfill/alias_migration/*_eval_run/memory_import).
+- Commity: bump a6c6fb8 → [red] 41dd0ff (slučka točila mŕtve spojenie, `factory_calls==0`) →
+  [green] 14b2629. Testy: nový `test_orders_worker_reconnect.py` (fake mŕtve spojenie +
+  connect factory + real pg ako čerstvé). Brány: ruff 0, mypy 0 (80 súborov), plná suita
+  1858 passed / 0 fail / 0 skip, coverage 94.19 % (≥85 %). Bez push/PR (worktree — supervisor integruje).
