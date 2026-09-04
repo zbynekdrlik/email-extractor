@@ -370,3 +370,33 @@ options with a LARGER merged JSON payload" gotcha above — zero shell-quoting t
 **Never write real secret values into this committed rule file** — the token comes from
 `/run/s6/container_environment/HASSIO_TOKEN` on the box, option VALUES stay in the live
 `/data/options.json`, never in git.
+
+## `backup_exclude: ["store"]` — keep the 7.4 GB of mail originals OUT of the HA backup (#381)
+
+The add-on's `config.yaml` carries a top-level `backup_exclude: ["store"]`. Without it, HA's
+automatic backup packs the WHOLE `/data/store` (raw `.eml` + attachment originals, ~7.4 GB for
+~10k messages) into every snapshot — on 2026-09-04 that filled `/dev/sda8` to 100 % and PANICked
+the bundled Postgres. With it, the backup keeps only `/data/postgres` (the DB — the actual state
+worth restoring), `/data/llm-cache` and config; the mail originals are pruned from the archive.
+
+**Why exactly `["store"]` and nothing else works — do NOT "fix" it to `store/**` or `data/store`:**
+HA's Supervisor `_is_excluded_by_filter` (`supervisor/apps/app.py`) matches each file's FULL HOST
+path with `PurePath.match(exclude)` — matching path SEGMENTS from the RIGHT, and `**` is NOT
+recursive there. securetar's `atomic_contents_add` then prunes the whole subtree the moment a
+DIRECTORY path matches. On the host the add-on's `/data` is bind-mounted from
+`<host_data>/<slug>/`, so the store's real host path is `.../addons/data/<slug>/store/…`:
+- `store` → matches the `.../<slug>/store` DIRECTORY (final segment `store`) → subtree pruned. ✅
+- `store/**` → matches NOTHING (`**` is not recursive in `PurePath.match`). ❌
+- `data/store` → matches NOTHING (the segment before `store` on the host is `<slug>`, not `data`). ❌
+Verified with a local `PurePath.match` probe against the real host path shape (`postgres`,
+`llm-cache`, `options.json` all return `False` → stay backed up). Source of truth:
+developers.home-assistant.io/docs/add-ons/configuration (`backup_exclude`).
+
+**The retention companion (`store_retention_days`, default 0 = disabled):** a separate, opt-in
+`app/store_retention.py` daily purge deletes store FILES older than N days (driven from `main.py`'s
+IMAP loop, never the order-worker loop). Enabling it (owner sets the day count) deletes raw `.eml` +
+attachment originals — extracted TEXT stays in the DB (`messages.body_text`/`combined_text`,
+`attachments.extracted_text`) so reprocess/classification survive (#251), but the raw `.eml` /
+attachment ORIGINALS have NO DB copy (`messages.raw_eml_path` is a PATH into the store, `/eml/<mid>`
+reads `raw.eml` off disk) — so purged mail 404s on `/eml`+`/files` and can no longer be SMTP
+re-forwarded. That is the accepted trade-off the owner weighs when choosing the retention window.
