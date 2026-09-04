@@ -192,6 +192,13 @@ class Config:
     # mail manually daily, so a stale question is bezpredmetná. Strictly greater than the
     # threshold, so a question always gets its full N working days before expiring.
     question_expire_working_days: int = 2
+    # #381: optional retention for /data/store mail originals — delete files older than this
+    # many days on a daily sweep (app/store_retention.py, driven from main.py's IMAP loop).
+    # 0 (default) = DISABLED, nothing is ever deleted; the DB keeps the extracted text so a
+    # reprocess still works without the originals (#251). Loaded WITHOUT the `or N` idiom so
+    # an explicit 0 truly disables it (the #229 falsy-override trap — same as
+    # delivery_notes_max_age_days above).
+    store_retention_days: int = 0
 
     @classmethod
     def load(cls) -> Config:
@@ -331,4 +338,9 @@ class Config:
             question_expire_working_days=int(
                 _get(o, "question_expire_working_days",
                      "QUESTION_EXPIRE_WORKING_DAYS", 2) or 2),
+            # #381: NO trailing `or N` — an explicit 0 in options.json must DISABLE the
+            # purge, and `0 or 90` would silently re-enable it (the #229 trap; same shape
+            # as delivery_notes_max_age_days).
+            store_retention_days=int(
+                _get(o, "store_retention_days", "STORE_RETENTION_DAYS", 0)),
         )

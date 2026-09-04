@@ -13,6 +13,15 @@ ports:
 ports_description:
   "8099/tcp": Dashboard + file API for n8n (original attachments + raw .eml)
   "5432/tcp": Bundled Postgres (only used when pg_dsn is empty; add-ons reach it internally without host mapping)
+# #381: exclude the 7.4 GB of mail originals (/data/store) from HA add-on backups so the
+# automatic backup can no longer fill the host disk + PANIC the bundled Postgres (2026-09-04).
+# Single-segment glob only: HA's Supervisor _is_excluded_by_filter matches each file's FULL
+# host path with PurePath.match (segments from the right; ** is NOT recursive), and securetar
+# prunes the whole subtree on a directory match — so "store" matches <host_data>/<slug>/store
+# and prunes it, while "store/**" and "data/store" match NOTHING on the real host path. The DB
+# (/data/postgres), llm-cache and config stay backed up. Extracted text lives in Postgres, so
+# reprocess/forward still work without the originals (#251).
+backup_exclude: ["store"]
 options:
   imap_host: ""
   imap_port: 993
@@ -71,6 +80,7 @@ options:
   dl_catalog_gid: ""
   question_stale_working_days: 2
   question_escalate_working_days: 4
+  store_retention_days: 0
 schema:
   imap_host: str
   imap_port: int
@@ -138,3 +148,7 @@ schema:
   dl_catalog_gid: str?
   question_stale_working_days: int?
   question_escalate_working_days: int?
+  # #381: optional retention purge for /data/store originals. 0 (default) = DISABLED, nothing
+  # is ever deleted; the owner opts in with a day count. Loaded WITHOUT the `or N` idiom so an
+  # explicit 0 truly disables it (same #229 trap as delivery_notes_max_age_days above).
+  store_retention_days: int?
