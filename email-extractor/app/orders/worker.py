@@ -285,7 +285,7 @@ def refresh_due(conn, cfg) -> int | None:
     return snapshot.latest_snapshot_id(conn)
 
 
-def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None) -> None:  # pragma: no cover
+def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None, connect=None) -> None:  # pragma: no cover
     """Worker loop, started as a thread by the add-on entrypoint.
 
     Also drives the static-orders SHADOW worker (#132) on the SAME connection/thread — a
