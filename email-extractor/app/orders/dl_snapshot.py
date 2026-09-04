@@ -1,10 +1,11 @@
 """DL (dodacie listy) catalog + supplier snapshots (#200 F1).
 
-**#129: the sheet is never fetched anymore — `refresh()` (and `snapshot.fetch_csv`,
-which it used to call) has been removed.** The DL catalog/supplier snapshot frozen
-2026-08-07 (491 catalog rows, 959 suppliers) is now permanent; `dl_worker.refresh_due`
-just reports it (or a future one imported some other way — a dashboard editing UI is
-tracked as a follow-up, #221). `import_snapshot` itself (pure CSV-text importer, no
+**#129 → #383: the sheet is RETIRED as a card source (owner decision „TABULKU ZRUSIT!!!",
+2026-09-04) — never fetched, never read „to check"; `refresh()` (and `snapshot.fetch_csv`,
+which it used to call) were removed in #129.** The DL catalog/supplier snapshot frozen
+2026-08-07 (491 catalog rows, 959 suppliers) is permanent; `dl_worker.refresh_due` just
+reports it, and DL cards are curated via `/znalosti` DL-products (`dl_catalog_overrides`) —
+see `.claude/rules/catalog-sources.md`. `import_snapshot` itself (pure CSV-text importer, no
 network) is unchanged and still used by tests and `dl_eval_run.py`'s corpus import.
 
 Same content-addressed pattern as app/orders/snapshot.py (the AI-orders catalog),

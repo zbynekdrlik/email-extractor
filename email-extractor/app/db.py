@@ -127,6 +127,27 @@ ADD_ORDER_QUESTIONS_UNIT_PRICE = [
     "ALTER TABLE order_questions ADD COLUMN IF NOT EXISTS unit_price NUMERIC",
 ]
 
+# #383: retire the Google Sheet as a card source. The card alias (`doplnok`) is a real
+# match.py::alias_exact matching signal, but it was only ever set from the sheet — so an
+# override-only card (added via /znalosti, the ONLY card source now) always got alias="".
+# Make alias part of the override so /znalosti can set + maintain it. Nullable = tri-state:
+# NULL "this override does not touch alias, inherit the snapshot's baked-in alias"; non-NULL
+# (incl "") "override wins" ("" = an explicit clear). See snapshot._merge_catalog.
+ADD_CATALOG_OVERRIDES_ALIAS = [
+    "ALTER TABLE catalog_overrides ADD COLUMN IF NOT EXISTS alias TEXT",
+]
+
+# #384: the board's "Vyriešené ručne" answer releases a held order WITHOUT shipping, keyed
+# release_reason='manual' (the warehouse entered it into CODEX by hand — nothing must reach
+# ORION). The baseline CHECK only allowed 'answered'/'deadline'; widen it. The inline column
+# CHECK is auto-named <table>_<column>_check by Postgres, so drop-then-add by that name is
+# transaction-safe (no CREATE INDEX CONCURRENTLY / VACUUM). Baseline SCHEMA stays frozen.
+ADD_HELD_ORDERS_MANUAL_RELEASE_REASON = [
+    "ALTER TABLE held_orders DROP CONSTRAINT IF EXISTS held_orders_release_reason_check",
+    "ALTER TABLE held_orders ADD CONSTRAINT held_orders_release_reason_check "
+    "CHECK (release_reason IN ('answered', 'deadline', 'manual'))",
+]
+
 
 # SCHEMA above is FROZEN as revision 1 (the baseline). NEVER edit those statements for a
 # schema change — append a NEW numbered migrate.Revision to this list instead
@@ -140,6 +161,9 @@ REVISIONS = [
     migrate.Revision(5, "add_codex_orders", CODEX_ORDERS),
     migrate.Revision(6, "drop_order_digest_sent", DROP_ORDER_DIGEST_SENT),
     migrate.Revision(7, "add_order_questions_unit_price", ADD_ORDER_QUESTIONS_UNIT_PRICE),
+    migrate.Revision(8, "add_catalog_overrides_alias", ADD_CATALOG_OVERRIDES_ALIAS),
+    migrate.Revision(9, "add_held_orders_manual_release_reason",
+                     ADD_HELD_ORDERS_MANUAL_RELEASE_REASON),
 ]
 
 

@@ -872,3 +872,122 @@ def test_a_correction_on_an_earlier_answered_question_of_a_multi_question_hold_s
     assert "8.000" in content, "torta's correction from the EARLIER-answered question ships"
     assert "5.000" not in content, "never the originally extracted torta quantity"
     assert "3.000" in content, "keksík's own (uncorrected) quantity ships unchanged"
+
+
+# --- #384: „Vyriešené ručne" — release a held order WITHOUT shipping to ORION ----------
+
+def test_resolve_manually_releases_the_held_order_without_shipping(pg, env):
+    rec, qid = _hold_one_order(pg, env)
+    resolved = hold.resolve_manually(pg, _cfg(), qid, post=rec.post)
+    assert len(resolved) == 1 and resolved[0]["status"] == "manual"
+    # nothing shipped: no ORION upload, no EDI ledger claim
+    assert rec.uploads == []
+    assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 0
+    # the held order is released, keyed 'manual' (the audit signal, acceptance criterion)
+    assert pg.execute("SELECT status, release_reason FROM held_orders").fetchone() \
+        == ("released", "manual")
+    # the message is closed and its rollup state reads 'manual'
+    assert pg.execute(
+        "SELECT processed, proc_status FROM messages WHERE message_id='m1'").fetchone() \
+        == (True, "manual")
+    # a manual event exists in the timeline (the digest/dashboard can see it)
+    assert pg.execute(
+        "SELECT count(*) FROM email_events WHERE message_id='m1' AND status='manual'"
+    ).fetchone()[0] == 1
+    # the sentinel teaches nothing
+    assert pg.execute("SELECT count(*) FROM item_memory").fetchone()[0] == 0
+
+
+def test_unresolve_manually_puts_the_held_order_back_and_resets_the_message(pg, env):
+    rec, qid = _hold_one_order(pg, env)
+    hold.resolve_manually(pg, _cfg(), qid, post=rec.post)
+    msgs = hold.unresolve_manually(pg, qid)
+    assert msgs == ["m1"]
+    # the held order is 'held' again, its manual reason cleared
+    assert pg.execute("SELECT status, release_reason FROM held_orders").fetchone() \
+        == ("held", None)
+    # the message is unprocessed again (Fable finding 5: the held row is restored FIRST, so
+    # worker._claim still excludes it — no re-processing / duplicate-upload window opens)
+    assert pg.execute(
+        "SELECT processed FROM messages WHERE message_id='m1'").fetchone() == (False,)
+    # still nothing ever shipped
+    assert rec.uploads == []
+    assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 0
+
+
+def test_resolve_manually_closes_every_delivery_day_of_the_message_together(pg, env):
+    """One mail can hold orders for several delivery days on the SAME question — „Vyriešené
+    ručne" closes them all at once (the warehouse entered the whole mail by hand, #384)."""
+    from psycopg.types.json import Json
+
+    rec, qid = _hold_one_order(pg, env)
+    # a SECOND delivery day of the SAME message, waiting on the SAME question
+    pg.execute(
+        """INSERT INTO held_orders (message_id, customer_ean, customer_name, delivery_date,
+                                    order_number, question_ids, order_json, extracted_json,
+                                    decisions_json)
+           VALUES ('m1', '2000000000001', 'Pekáreň', '05.08.2026', '', %s, %s, %s, %s)""",
+        ([qid], Json({"deliveryDate": "05.08.2026", "orderNumber": ""}),
+         Json({"isChangeRequest": False, "unverified": [], "notes": ""}), Json([])))
+    resolved = hold.resolve_manually(pg, _cfg(), qid, post=rec.post)
+    assert len(resolved) == 2
+    assert rec.uploads == []
+    assert pg.execute(
+        "SELECT count(*) FROM held_orders WHERE status='released' AND release_reason='manual'"
+    ).fetchone()[0] == 2
+
+
+def test_manual_resolve_and_the_deadline_sweep_never_both_act_on_one_order(pg, env):
+    """#384 🔴 (Fable review): the deadline sweep ships WITHOUT the edi_sent ledger being able
+    to catch a manual (no-upload) release, so the two MUST serialize on the row lock — else a
+    past-deadline order gets an ORION EDI (sweep) AND a CODEX hand-entry (manual) = a duplicate
+    physical delivery. Two real connections race `release_due` vs `resolve_manually` on the
+    same past-deadline held order; a slow upload widens the window a missing lock would exploit."""
+    import threading
+    import time
+
+    import psycopg
+    from _race import run_racers
+
+    rec, qid = _hold_one_order(pg, env)   # delivery 04.08.2026, one held item order
+
+    slow_uploads = []
+    upload_lock = threading.Lock()
+
+    def slow_upload(cfg, name, content):
+        time.sleep(0.3)
+        with upload_lock:
+            slow_uploads.append((name, content))
+        return True
+
+    barrier = threading.Barrier(2)
+
+    def sweep():
+        conn = psycopg.connect(PG_DSN, autocommit=True)
+        try:
+            barrier.wait(timeout=5)
+            hold.release_due(conn, _cfg(), upload=slow_upload, post=lambda *a, **k: None,
+                             today="2026-08-04")
+        finally:
+            conn.close()
+
+    def manual():
+        conn = psycopg.connect(PG_DSN, autocommit=True)
+        try:
+            barrier.wait(timeout=5)
+            hold.resolve_manually(conn, _cfg(), qid, post=lambda *a, **k: None)
+        finally:
+            conn.close()
+
+    t1 = threading.Thread(target=sweep, name="sweep")
+    t2 = threading.Thread(target=manual, name="manual")
+    run_racers(pg, [t1, t2], timeout=15, label="sweep-vs-manual")
+
+    status, reason = pg.execute(
+        "SELECT status, release_reason FROM held_orders").fetchone()
+    assert status == "released" and reason in ("deadline", "manual")
+    # the invariant: a manual (hand-entered) release ships NOTHING; a deadline release ships
+    # exactly once. NEVER both — that would be the duplicate physical delivery the lock prevents.
+    assert len(slow_uploads) == (1 if reason == "deadline" else 0)
+    assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == \
+        (1 if reason == "deadline" else 0)

@@ -67,6 +67,7 @@ Load the matching skill BEFORE working on that area (don't re-derive):
 - extraction quality / OCR tuning → see `docs/superpowers/specs/` + the spike memory
 - prílohy / formáty (xlsx, xls, ods, fods, csv) → `.claude/rules/extraction-formats.md` (auto-loads on `app/extract.py`)
 - AI objednávky (matching, korpus, CI gate) → `.claude/rules/orders-corpus.md` (auto-loads on `app/orders/**`)
+- zdroj kariet katalógu = LEN Postgres, Google tabuľka „EAN slovnormal" je ZRUŠENÁ (#383 — nikdy ju nečítaj); pridanie karty cez `/znalosti`, alias/`doplnok` tri-state override, reopen expirovanej (#341) otázky → `.claude/rules/catalog-sources.md` (auto-loads on `app/orders/snapshot.py`, `app/httpapi_znalosti.py`, `app/orders/teach.py`)
 - nasadenie na živý HA add-on → `.claude/rules/deploy.md` (auto-loads on config.yaml/app/__init__.py/Dockerfile)
 - lokálne spúšťanie pytest proti dev1 test-Postgres → `.claude/rules/local-testing.md` (auto-loads on `email-extractor/tests/**`)
 - `git commit -F <scratch-file>` bezpečnosť (stale scratchpad obsah) → `.claude/rules/git-commit-hygiene.md` (auto-loads on `email-extractor/app/**`, `tests/**`, `config.yaml`)

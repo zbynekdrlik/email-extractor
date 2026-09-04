@@ -31,10 +31,15 @@ WORKFLOW = "ai_orders"
 TIMEOUT = 30
 
 STATUS_ICON = {"ok": "&#9989;", "partial": "&#9888;&#65039;", "held": "&#8987;",
-               "review": "&#10071;", "error": "&#128721;"}
+               "review": "&#10071;", "error": "&#128721;", "manual": "&#9997;&#65039;"}
 STATUS_LABEL = {"ok": "nahraté do ORIONu", "partial": "neúplných (chýba časť položiek)",
                 "held": "čaká na odpoveď skladu", "review": "treba zadať ručne",
-                "error": "zlyhalo pri odosielaní"}
+                "error": "zlyhalo pri odosielaní",
+                # #384: the warehouse entered this order into CODEX by hand — released
+                # WITHOUT any ORION upload. Rendered as a plain done-flavour bit; deliberately
+                # NOT in build_summary's has_board_item/has_other_action link checks, so it
+                # never claims something is still "waiting" or needs the dashboard.
+                "manual": "vyriešené ručne skladom (nič sa neposlalo do ORIONu)"}
 
 
 def sklad_link(cfg) -> str:
@@ -158,7 +163,7 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
     parts = [f"<p>{head}</p>"]
 
     bits = []
-    for status in ("ok", "partial", "held", "review", "error"):
+    for status in ("ok", "partial", "held", "review", "error", "manual"):
         if not counts.get(status):
             continue
         if status == "partial" and total_missing:

@@ -1,16 +1,20 @@
 """Catalog + customer snapshots (#59).
 
-**#129: the Google Sheet is never read anymore — Postgres is the SOLE source of
-truth.** The pipeline used to fetch the sheet's two tabs as CSV over its public export
-URL every `catalog_refresh_minutes`; that network fetch (`fetch_csv`/`sheet_csv_url`/
-`refresh`) has been removed entirely (#127/#128's `catalog_overrides`/
-`customer_overrides` dashboard editing has been the maintained source since
-2026-08-02, several days before this change). What remains here is a pure, network-free
-CSV-text importer: `import_snapshot`/`import_files` freeze an already-obtained CSV
-(a golden-corpus fixture file, or a hand-built string in a test) into Postgres under a
-content hash, and every order run records the snapshot id it used. `worker.py`/
-`dl_worker.py` no longer call anything in this module that touches the network — see
-their own `refresh_due` docstrings.
+**#129 → #383: the Google Sheet „EAN slovnormal" is RETIRED as a card source — Postgres
+is the SOLE source of truth, and the sheet is never read, not even „to check".** The
+pipeline used to fetch the sheet's two tabs as CSV over its public export URL every
+`catalog_refresh_minutes`; that network fetch (`fetch_csv`/`sheet_csv_url`/`refresh`) was
+removed in #129. #383 (owner decision „TABULKU ZRUSIT!!!", 2026-09-04) made the retirement
+final: the warehouse kept editing the sheet, the app never saw it, and orders held for
+days (Ciabatta incident). Cards are now added/edited ONLY via `/znalosti` →
+`POST /api/znalosti/products` → `upsert_catalog_card` (`catalog_overrides`, incl. the
+`alias`/`doplnok` column added in #383). See `.claude/rules/catalog-sources.md`.
+What remains here is a pure, network-free CSV-text importer: `import_snapshot`/
+`import_files` freeze an already-obtained CSV (a golden-corpus fixture file, or a
+hand-built string in a test) into Postgres under a content hash — kept ONLY because the
+offline eval corpus (`eval_run.py`/`dl_eval_run.py`) still seeds its frozen snapshot that
+way; nothing in the live pipeline calls them, and neither `worker.py` nor `dl_worker.py`
+touches anything network-bound here (see their own `refresh_due` docstrings).
 """
 from __future__ import annotations
 
@@ -295,13 +299,15 @@ def import_files(conn, catalog_path: str, customers_path: str) -> int:
 #
 # `catalog_overrides` is keyed by gtin — the card's own natural, stable identity
 # everywhere else in this codebase — so there is no matching ambiguity: an edit or a
-# retirement always targets exactly one row, sheet-derived or not. `alias`/`doplnok` is
-# NOT part of this table on purpose (#127 design comment) — it stays owned by
-# `global_item_memory` (#104's stage c).
+# retirement always targets exactly one row, sheet-derived or not. `alias`/`doplnok`
+# used to be OUT of this table (#127 design comment), owned by the retired Google Sheet —
+# but since #383 the sheet is DEAD as a card source, so alias is now an override column
+# too, tri-state (see `_merge_catalog`): a NULL override-alias inherits whatever the frozen
+# snapshot row still carries; a non-NULL one (incl "") wins ("" = an explicit clear).
 
 def _load_catalog_overrides(conn) -> dict[str, dict]:
-    rows = conn.execute("SELECT gtin, name, retired FROM catalog_overrides").fetchall()
-    return {r[0]: {"name": r[1], "retired": r[2]} for r in rows}
+    rows = conn.execute("SELECT gtin, name, retired, alias FROM catalog_overrides").fetchall()
+    return {r[0]: {"name": r[1], "retired": r[2], "alias": r[3]} for r in rows}
 
 
 def _merge_catalog(catalog: list[dict], overrides: dict[str, dict]) -> list[dict]:
@@ -312,13 +318,17 @@ def _merge_catalog(catalog: list[dict], overrides: dict[str, dict]) -> list[dict
             seen.add(row["gtin"])
             if ov["retired"]:
                 continue
-            out.append({"gtin": row["gtin"], "name": ov["name"], "alias": row.get("alias", "")})
+            # #383 alias tri-state: a non-NULL override alias (incl "") wins; NULL inherits
+            # the snapshot row's baked-in alias. `or ""` guards `None` out of match.py either way.
+            ov_alias = ov.get("alias")
+            alias = ov_alias if ov_alias is not None else row.get("alias", "")
+            out.append({"gtin": row["gtin"], "name": ov["name"], "alias": alias or ""})
         else:
             out.append(row)
     for gtin, ov in overrides.items():
         if gtin in seen or ov["retired"]:
             continue
-        out.append({"gtin": gtin, "name": ov["name"], "alias": ""})
+        out.append({"gtin": gtin, "name": ov["name"], "alias": (ov.get("alias") or "")})
     return out
 
 
@@ -338,15 +348,30 @@ def catalog_for_management(conn) -> list[dict]:
     return [dict(r, overridden=r["gtin"] in overrides) for r in merged]
 
 
-def upsert_catalog_card(conn, gtin: str, name: str) -> None:
+def upsert_catalog_card(conn, gtin: str, name: str, alias: str | None = None) -> None:
     """Add a brand-new card, or edit an existing one (sheet-derived or already
-    overridden) — same call either way, keyed by gtin."""
-    conn.execute(
-        """INSERT INTO catalog_overrides (gtin, name, retired, updated_at)
-           VALUES (%s, %s, false, now())
-           ON CONFLICT (gtin) DO UPDATE
-              SET name = EXCLUDED.name, retired = false, updated_at = now()""",
-        (gtin, name))
+    overridden) — same call either way, keyed by gtin.
+
+    `alias` (#383) is tri-state: `None` = do NOT touch the alias column (a name-only edit
+    never wipes an existing alias, and every pre-#383 two-arg caller/test keeps its exact
+    behaviour); a string (incl `""`) = set the override alias explicitly (`""` clears it).
+    See `_merge_catalog` for how the stored value is layered over the snapshot alias.
+    """
+    if alias is None:
+        conn.execute(
+            """INSERT INTO catalog_overrides (gtin, name, retired, updated_at)
+               VALUES (%s, %s, false, now())
+               ON CONFLICT (gtin) DO UPDATE
+                  SET name = EXCLUDED.name, retired = false, updated_at = now()""",
+            (gtin, name))
+    else:
+        conn.execute(
+            """INSERT INTO catalog_overrides (gtin, name, retired, alias, updated_at)
+               VALUES (%s, %s, false, %s, now())
+               ON CONFLICT (gtin) DO UPDATE
+                  SET name = EXCLUDED.name, retired = false,
+                      alias = EXCLUDED.alias, updated_at = now()""",
+            (gtin, name, alias))
 
 
 def retire_catalog_card(conn, gtin: str) -> bool:

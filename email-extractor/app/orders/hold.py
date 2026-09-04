@@ -429,6 +429,45 @@ def _do_release(conn, cfg, row: dict, release_reason: str, upload, post,
     return {"id": row["id"], "status": status, "preview": preview}
 
 
+def _do_release_locked(conn, cfg, hid: int, upload, post, as_of: str = "") -> dict | None:
+    """#384: the deadline sweep's per-row release, SERIALIZED the SAME way `_release_locked`
+    serializes the answered path — a per-row `FOR UPDATE` lock held across ship + the guarded
+    final flip. Plain `_do_release` (kept unchanged, so its ledger-backstop test still
+    exercises the ledger) takes NO lock: it relied on `edi.claim_send`'s content-hash ledger
+    to stop a duplicate ORION upload if the sweep and the answered path raced. A „Vyriešené
+    ručne" (#384) release ships NOTHING and takes NO ledger claim, so an UNSERIALIZED sweep
+    could upload an EDI for an order the warehouse already resolved by hand → a duplicate
+    physical delivery the ledger cannot catch. This closes that window: whichever of the
+    sweep / manual-resolve / answered-release wins the row lock first, the others re-read
+    `status != 'held'` and skip. The customer-unknown → review branch runs BEFORE the lock
+    (it ships nothing, so it is outside the duplicate-upload risk — same as `_do_release`)."""
+    row = get(conn, hid)
+    if not row or row["status"] != "held":
+        return None
+    if not row["customer_ean"]:
+        return release_to_review(
+            conn, cfg, row, post,
+            "Zákazník nebol nájdený v tabuľke zákazníkov (do termínu dodania)")
+    with psycopg.connect(cfg.pg_dsn) as tx:
+        locked = tx.execute(
+            "SELECT status FROM held_orders WHERE id = %s FOR UPDATE", (hid,)).fetchone()
+        if not locked or locked[0] != "held":
+            return None  # a manual / answered release won the row while we waited on the lock
+        status, preview, _reason = _ship(conn, cfg, row, upload, post, redecide=False,
+                                         as_of=as_of)
+        if status == "error":
+            log.warning("release of held order #%s (deadline) for %s / %s did not ship — "
+                        "staying held", hid, row["customer_ean"], row["delivery_date"])
+            return {"id": hid, "status": status, "preview": preview}
+        tx.execute(
+            """UPDATE held_orders SET status = 'released', release_reason = 'deadline',
+                   released_at = now() WHERE id = %s AND status = 'held'""", (hid,))
+    log.info("released held order #%s (deadline) for %s / %s -> %s", hid,
+             row["customer_ean"], row["delivery_date"], status)
+    _mark_message_done_if_clear(conn, row["message_id"])
+    return {"id": hid, "status": status, "preview": preview}
+
+
 def release_for_question(conn, cfg, qid: int, upload=None, post=None) -> list[dict]:
     """Release every held order whose LAST open question was just answered.
 
@@ -575,6 +614,99 @@ def _release_locked(conn, cfg, hid: int, upload, post) -> dict | None:
     return {"id": hid, "status": status, "preview": preview}
 
 
+def resolve_manually(conn, cfg, qid: int, post=None) -> list[dict]:
+    """#384 „Vyriešené ručne": the warehouse entered this order into CODEX BY HAND, so every
+    held order of this question's message waiting on `qid` is released WITHOUT any claim or
+    ORION upload — nothing must reach ORION (a duplicate upload = a duplicate physical
+    delivery). Each is marked released with `release_reason='manual'`, a `manual` rollup
+    event (→ `messages.proc_status='manual'`), and its message closed if nothing else holds.
+
+    The caller (`api_orders_answer`'s manual branch) has already answered the QUESTION with
+    the `manual` sentinel AND refused the action if `qid` maps to held rows of more than one
+    message (Fable finding 1: an order question dedupes across messages via
+    `ON CONFLICT (customer_ean, item_key) WHERE status='open'`, so a bare per-qid release
+    could free a FOREIGN mail's order that was never hand-entered → permanently lost). So by
+    here every still-held order on `qid` belongs to the ONE message the board card showed;
+    release them all together (several delivery days of one mail close as one, per #384)."""
+    from . import report
+    post = post or (lambda c, html, **kw: report.post_from_config(c, html))
+    ids = [r[0] for r in conn.execute(
+        "SELECT id FROM held_orders WHERE %s = ANY(question_ids) AND status = 'held'",
+        (qid,)).fetchall()]
+    resolved = []
+    for hid in ids:
+        result = _resolve_one_manually(conn, cfg, hid, post)
+        if result:
+            resolved.append(result)
+    return resolved
+
+
+def _resolve_one_manually(conn, cfg, hid: int, post) -> dict | None:
+    """One held order's manual-resolution, serialized per-id against the normal
+    answered-release (#118) — the SAME `held_orders` row `FOR UPDATE` lock `_release_locked`
+    takes, so a concurrent real `release_for_question` upload and this no-upload close can
+    never both act on the same row (whichever wins the lock, the other sees `status != 'held'`
+    and skips → never a torn double-ship). The guarded flip to 'released'/'manual' runs FIRST,
+    inside the lock (Fable finding 3): only AFTER it commits do the Odoo post + rollup event +
+    message-done run, so a crash after the post can never leave the row 'held' for a later
+    sibling answer to ship an order the warehouse already handled by hand."""
+    from . import report
+    with psycopg.connect(cfg.pg_dsn) as tx:
+        locked = tx.execute(
+            "SELECT status FROM held_orders WHERE id = %s FOR UPDATE", (hid,)).fetchone()
+        if not locked or locked[0] != "held":
+            return None  # already released by a racing normal answer, or gone
+        row = get(conn, hid)
+        if not row:
+            return None
+        tx.execute(
+            """UPDATE held_orders SET status = 'released', release_reason = 'manual',
+                   released_at = now() WHERE id = %s AND status = 'held'""", (hid,))
+    # The row is now safely 'released' — no later sibling answer can ship it. Only NOW the
+    # cosmetic Odoo post + the rollup event + the message-done marker (Fable finding 3).
+    html = report.build_summary(customer_name=row.get("customer_name") or "", orders=[{
+        "delivery_date": row["delivery_date"], "status": "manual",
+        "item_count": len(row["decisions"]), "missing_count": 0,
+        "reject_reason": "Objednávku zadal sklad ručne do CODEXu — nič sa neposiela "
+                         "do ORIONu."}], cfg=cfg)
+    try:
+        post(cfg, html)
+    except Exception:
+        log.exception("posting the manual-resolution summary failed (held order #%s)", hid)
+    report.log_event(conn, row["message_id"], stage="manual", status="manual",
+                     outcome="Vyriešené ručne skladom — objednávka zadaná do CODEXu, "
+                             "nič sa neposiela do ORIONu",
+                     detail={"held_id": hid})
+    _mark_message_done_if_clear(conn, row["message_id"])
+    log.info("held order #%s resolved manually (nothing shipped) for %s / %s", hid,
+             row["customer_ean"], row["delivery_date"])
+    return {"id": hid, "status": "manual"}
+
+
+def unresolve_manually(conn, qid: int) -> list[str]:
+    """#384 undo: a manual resolution was a mis-click — put every held order it released
+    back to 'held' so the board card reappears, and reset its message. Flip `held_orders`
+    to 'held' FIRST, THEN reset the message (Fable finding 5): the reverse would briefly
+    leave the message `processed=false` with NO 'held' row, and `worker._claim`'s
+    `WHERE processed=false` would re-claim → reprocess → possibly re-upload a duplicate of
+    the hand-entered order. Nothing was ever shipped, so this restores the exact
+    pre-manual-resolve state; the deadline sweep then resumes only what it always would have
+    done for that held order (Fable finding 6 — `release_reason='manual'` never shipped, so
+    there is no NEW ship risk beyond the pre-existing past-deadline item-hold behaviour).
+    Returns the affected message ids. The caller reopens the QUESTION itself."""
+    rows = conn.execute(
+        """UPDATE held_orders SET status = 'held', release_reason = NULL, released_at = NULL
+            WHERE %s = ANY(question_ids) AND status = 'released' AND release_reason = 'manual'
+            RETURNING message_id""", (qid,)).fetchall()
+    message_ids = list({r[0] for r in rows})
+    for mid in message_ids:
+        conn.execute(
+            """UPDATE messages SET processed = false, processed_at = NULL,
+                   processed_by = NULL, processing_at = NULL WHERE message_id = %s""",
+            (mid,))
+    return message_ids
+
+
 def set_customer(conn, qid: int, ean_edi: str, name: str) -> None:
     """The unmatched-customer question (#159) is now answered with a REAL pick — tell
     every held order still waiting on it who it actually belongs to, BEFORE releasing.
@@ -711,8 +843,13 @@ def release_due(conn, cfg, upload=None, post=None, today: str = "") -> list[dict
                 "Termín dodania prišiel, ale otázka (dátum/zákazník/mail/riadok) ešte "
                 "nie je zodpovedaná — treba doriešiť ručne"))
             continue
-        released.append(_do_release(conn, cfg, row, "deadline", upload, post, redecide=False,
-                                    as_of=today))
+        # #384: the LOCK-SAFE deadline release — serialized against „Vyriešené ručne" and the
+        # answered path so the sweep can never upload an order already resolved (a hand-entry
+        # duplicate the edi_sent ledger cannot catch). `None` = the row was released by one of
+        # those paths while we held nothing yet — skip it.
+        result = _do_release_locked(conn, cfg, hid, upload, post, as_of=today)
+        if result:
+            released.append(result)
     return released
 
 
