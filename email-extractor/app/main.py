@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import date, timedelta
 
 import psycopg
 
-from . import __version__, config, db, httpapi, imap_poll, store
+from . import __version__, config, db, httpapi, imap_poll, store, store_retention
 from .process import process_raw
 
 log = logging.getLogger("email-extractor")
@@ -111,6 +112,9 @@ def main() -> None:
         log.exception("dl_nonwarehouse bootstrap failed (non-fatal)")
     httpapi.start(cfg)
     start_order_worker(cfg)
+    # #381: daily purge of /data/store mail originals older than store_retention_days.
+    log.info("store retention job: %s", store_retention.describe(cfg.store_retention_days))
+    last_retention_run: float | None = None
     while True:
         try:
             n = run_once(cfg, conn)
@@ -124,6 +128,21 @@ def main() -> None:
                 log.error("reconnect failed: %s", e2)
         except Exception:
             log.exception("cycle error")
+        # #381: delete /data/store originals older than the configured retention (default
+        # 0 = disabled). Driven from the IMAP loop, NOT the order worker, so disk cleanup
+        # runs regardless of which orders engine is active. In-memory monotonic cadence
+        # (>=24h, store_retention.MIN_INTERVAL_S); never fatal to the loop.
+        try:
+            last_retention_run, purged = store_retention.maybe_purge(
+                cfg.data_dir, cfg.store_retention_days, last_retention_run, time.monotonic())
+            if purged is not None:
+                files, freed = purged
+                cutoff = date.today() - timedelta(days=int(cfg.store_retention_days))
+                log.info("store retention: deleted %d file(s), freed %.1f MB "
+                         "(originals older than %d days, before %s)",
+                         files, freed / 1_000_000, int(cfg.store_retention_days), cutoff)
+        except Exception:
+            log.exception("store retention sweep error")
         time.sleep(cfg.poll_interval)
 
 
