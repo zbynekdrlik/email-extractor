@@ -261,16 +261,48 @@ def sweep(conn, cfg, classify=None, now=None) -> int:
     # vision calls per ~15s tick, the rest drain over the next ticks. Total cost is
     # bounded by the dedup regardless (each message gets ONE vision attempt per 4h
     # window), so a small limit just smooths the burst — it never skips a message.
+    #
+    # #390: the LIMIT must never starve a fresh message behind a backlog of already-
+    # notified/suppressed ones. Two SQL-level guards (the Python-side checks remain as a
+    # safety net for time-dependent edge cases like the morning-check window):
+    #  1. NOT EXISTS on pending_alerts with delivered_at IS NULL — a message with an
+    #     undelivered alert is ALWAYS suppressed by reminder_suppressed, regardless of
+    #     time of day, so it would always be skipped in Python. Excluding it in SQL frees
+    #     the LIMIT slot for a message that can actually be actioned.
+    #  2. NOT EXISTS on email_events rescued within DEDUP_WINDOW_HOURS — a recently-
+    #     rescued message is ALWAYS skipped by _recently_rescued.
+    #  3. ORDER BY "never-attempted first" — messages with no pending_alerts for this
+    #     kind sort before already-notified ones, so a brand-new stuck message always
+    #     gets a LIMIT slot before an old one that may only be due for a re-reminder.
     rows = conn.execute(
-        """SELECT message_id, subject, from_addr, has_attachments, needs_vision,
-                  created_at
-             FROM messages
-            WHERE category = 'human_processing' AND processed = false
-              AND created_at >= %s                          -- never the pre-sweep backlog
-              AND created_at >= %s                          -- never past the working-day horizon (#385)
-              AND created_at < now() - make_interval(mins => %s)
-            ORDER BY created_at ASC LIMIT 10""",
-        (BACKLOG_CUTOFF, horizon_cutoff, STUCK_MINUTES)).fetchall()
+        """SELECT m.message_id, m.subject, m.from_addr, m.has_attachments, m.needs_vision,
+                  m.created_at
+             FROM messages m
+            WHERE m.category = 'human_processing' AND m.processed = false
+              AND m.created_at >= %s                        -- never the pre-sweep backlog
+              AND m.created_at >= %s                        -- never past the working-day horizon (#385)
+              AND m.created_at < now() - make_interval(mins => %s)
+              -- #390: exclude unconditionally-suppressed messages before the LIMIT
+              AND NOT EXISTS (
+                  SELECT 1 FROM pending_alerts pa
+                   WHERE pa.message_id = m.message_id
+                     AND pa.kind = %s
+                     AND pa.delivered_at IS NULL)
+              AND NOT EXISTS (
+                  SELECT 1 FROM email_events ee
+                   WHERE ee.message_id = m.message_id
+                     AND ee.workflow = 'human_processing'
+                     AND ee.stage = 'rescued'
+                     AND ee.ts > now() - make_interval(hours => %s))
+            ORDER BY
+              -- #390: never-attempted messages first, then oldest
+              EXISTS (SELECT 1 FROM pending_alerts pa2
+                       WHERE pa2.message_id = m.message_id
+                         AND pa2.kind = %s) ASC,
+              m.created_at ASC
+            LIMIT 10""",
+        (BACKLOG_CUTOFF, horizon_cutoff, STUCK_MINUTES,
+         ALERT_KIND, dl_alerts.DEDUP_WINDOW_HOURS, ALERT_KIND)).fetchall()
     handled = 0
     for message_id, subject, from_addr, has_attachments, needs_vision, created_at in rows:
         # #336: the first notification for a stuck message fires promptly; a RE-reminder
