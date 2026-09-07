@@ -49,7 +49,10 @@ JPEG_EOI = b"\xff\xd9"
 # PDF pages instead of trusting the (garbage) marker-scanned bytes. Mirrors app/extract.py's
 # own OCR-fallback DPI (poppler render quality) and page cap, at a lighter DPI — a DL is
 # realistically 1-3 pages, not a multi-page invoice.
-VISION_RENDER_DPI = 200
+# #393: raised from 200 to 300 (matches app/extract.py's own OCR DPI) — a higher-
+# resolution render gives the vision model more pixel data to read small/faint digits
+# on thermal and dot-matrix scans.
+VISION_RENDER_DPI = 300
 VISION_RENDER_MAX_PAGES = 15
 
 # R51: the EDI is built from line items, so a misread SUMMARY digit must not block — but a
@@ -363,13 +366,25 @@ def self_correct_quantity(item: dict) -> dict:
 def money_gate(document: dict) -> str | None:
     """R51: |Σ line totalPrice - documentTotalWithoutVAT| <= 0.50 EUR, only when a real
     (> 0) document total was actually read — a no-price scan has no summary to check
-    against, and that is fine (the dual transcript + a later match gate cover it)."""
+    against, and that is fine (the dual transcript + a later match gate cover it).
+
+    #393: when Σ line totals = 0 but a real doc_total exists (the LLM failed to read
+    per-line prices from a faint scan), the review message explicitly tells the warehouse
+    what is missing so they know what to check manually."""
     doc_total = _num(document.get("documentTotalWithoutVAT"))
     if not doc_total or doc_total <= 0:
         return None
-    items_total = sum(_num(i.get("totalPrice")) or 0.0 for i in document.get("items") or [])
+    items = document.get("items") or []
+    items_total = sum(_num(i.get("totalPrice")) or 0.0 for i in items)
     diff = abs(items_total - doc_total)
     if diff > MONEY_GATE_TOLERANCE_EUR:
+        # #393: when ALL line prices are zero/missing but items exist, the problem is
+        # specifically that the AI could not read the price column — say so in plain
+        # Slovak so the warehouse knows what to check on the physical document.
+        if items and items_total == 0.0:
+            return (f"AI neprečítala ceny riadkov — súčet riadkov je 0.00 € "
+                    f"ale doklad má celkom {doc_total:.2f} €. "
+                    f"Skontrolujte ceny na fyzickom doklade.")
         return (f"Súčet riadkov ({items_total:.2f} €) sa nezhoduje s dokladom "
                 f"({doc_total:.2f} €), rozdiel {diff:.2f} € presahuje toleranciu "
                 f"{MONEY_GATE_TOLERANCE_EUR:.2f} €")
