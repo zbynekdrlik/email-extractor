@@ -682,3 +682,67 @@ def test_json_call_receives_the_multi_document_schema():
 @pytest.mark.parametrize("bad", [None, "", b""])
 def test_extract_embedded_jpegs_never_raises_on_falsy_input(bad):
     assert dl_extract.extract_embedded_jpegs(bad) == []
+
+
+def test_missing_totalPrice_is_filled_from_unitPrice_times_quantity():
+    """#395: when a DL has no per-line total column (only unit prices), the extraction
+    correctly returns unitPrice + quantity but NO totalPrice. validate_document must
+    compute totalPrice = quantity * unitPrice so money_gate sees the real line totals.
+
+    Dobrota Orava DL format: 7 items, all with unitPrice and quantity, none with
+    totalPrice. Printed document total matches sum(qty * unitPrice). Before the fix,
+    money_gate sums totalPrice (all 0.0) vs doc total -> breach. After the fix,
+    the computed line totals match and the document passes."""
+    items = [
+        {"name": "Testovaci chlieb 500g", "quantity": 3, "unit": "ks",
+         "unitPrice": 0.85, "vatRate": 5},
+        {"name": "Testovaci rozok 60g", "quantity": 150, "unit": "ks",
+         "unitPrice": 0.10, "vatRate": 5},
+        {"name": "Testovacia zemla 55g", "quantity": 200, "unit": "ks",
+         "unitPrice": 0.12, "vatRate": 5},
+        {"name": "Testovacia pletenka 90g", "quantity": 70, "unit": "ks",
+         "unitPrice": 0.20, "vatRate": 19},
+        {"name": "Testovaci rozok celozrnny 55g", "quantity": 180, "unit": "ks",
+         "unitPrice": 0.13, "vatRate": 5},
+        {"name": "Testovacia zemla specialna 60g", "quantity": 220, "unit": "ks",
+         "unitPrice": 0.17, "vatRate": 5},
+        {"name": "Testovacia dalamanka 85g", "quantity": 20, "unit": "ks",
+         "unitPrice": 0.35, "vatRate": 19},
+    ]
+    # The real printed document total — computed from the printed unit prices
+    doc_total = round(sum(i["quantity"] * i["unitPrice"] for i in items), 2)
+    doc = _doc(items=items, documentTotalWithoutVAT=doc_total)
+    got = dl_extract.validate_document(doc)
+    # After the fix: totalPrice should be filled and money_gate should pass
+    assert got["status"] == "valid", f"expected valid, got {got.get('reviewReason', '')}"
+    for item in got["items"]:
+        assert item.get("totalPrice"), f"totalPrice missing for {item['name']}"
+        expected_total = round(item["quantity"] * item["unitPrice"], 2)
+        assert item["totalPrice"] == expected_total
+
+
+def test_fill_missing_total_price_never_overwrites_a_real_printed_value():
+    """#395 review Y1a: a discounted line where printed totalPrice != qty*unitPrice must
+    keep its OWN printed value — the fill must never replace it with the product."""
+    item = {"name": "Akciovy rohlik 50g", "quantity": 10, "unit": "ks",
+            "unitPrice": 1.0, "totalPrice": 9.0, "vatRate": 5}
+    got = dl_extract.fill_missing_total_price(item)
+    assert got["totalPrice"] == 9.0, "printed totalPrice must be preserved"
+    assert "_totalPriceOcr" not in got, "_totalPriceOcr must not appear on a preserved line"
+
+
+def test_fill_missing_total_price_skipped_when_unitPrice_is_zero():
+    """#395 review Y1b: zero unitPrice => no fill, the #393 'AI neprecitala ceny'
+    wording must still fire via money_gate."""
+    item = {"name": "Rohlik testovaci 50g", "quantity": 120, "unit": "ks",
+            "unitPrice": 0, "vatRate": 5}
+    got = dl_extract.fill_missing_total_price(item)
+    assert not got.get("totalPrice"), "no totalPrice should be filled from zero unitPrice"
+
+
+def test_fill_missing_total_price_skipped_when_quantity_is_zero():
+    """#395 review Y1b: zero quantity => no fill."""
+    item = {"name": "Rohlik testovaci 50g", "quantity": 0, "unit": "ks",
+            "unitPrice": 0.38, "vatRate": 5}
+    got = dl_extract.fill_missing_total_price(item)
+    assert not got.get("totalPrice"), "no totalPrice should be filled from zero quantity"

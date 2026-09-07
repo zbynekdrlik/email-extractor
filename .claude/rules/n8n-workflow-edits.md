@@ -837,3 +837,31 @@ Reusable rules:
 - **When vision is forced**, `choose_source_text` must use `effective_scanned=True` (prefer
   vision transcript over placeholder), AND the placeholder must be excluded from
   `combine_transcripts`' cross-check input (it is noise, not OCR text).
+
+## A money_gate breach does NOT always mean "the model can't read the document" —
+## diagnose which step breaks before assuming model quality (#395, 2026-09-07)
+
+`money_gate()` sums `totalPrice` per item and compares against `documentTotalWithoutVAT`.
+A breach can come from THREE distinct layers: (1) the rendered image is illegible, (2) the
+vision transcript drops the price column, (3) the structured extraction drops `totalPrice`
+even though `unitPrice` was read. The fix is completely different for each: (1) image
+preprocessing, (2) prompt/DPI tuning, (3) a deterministic Python fill.
+
+**PROD diagnostic pattern (read-only, reusable for any future "extraction doesn't work"
+investigation):** `docker cp` a script into the container, `PYTHONPATH=/app`, then capture
+each layer separately: `dl_message._read_attachments(cfg, message_id, conn)` → PDF bytes;
+`dl_extract.render_pdf_pages(pdf_bytes)` → the EXACT JPEG sent to vision (save to /tmp and
+Read it); `client.vision_call(dl_extract.vision_prompt(), images=rendered)` → raw transcript
+text (are the prices there?); `dl_extract.run_extraction(client, source_text)` → structured
+JSON (is `totalPrice` populated?). Two API calls total (one vision, one extraction).
+
+**The #395 finding:** Dobrota Orava DL format has NO per-line total column — only "Cena b.
+DPH" (unit price). Vision + extraction correctly read `unitPrice` + `quantity` for all 7
+items, but `totalPrice` was left empty (the document genuinely has nothing to print there).
+`money_gate` summed 0.00 vs 113.54 → breach. Fix: `fill_missing_total_price()` in
+`validate_document()`, the symmetric counterpart of the existing `self_correct_quantity()` —
+computes `totalPrice = round(qty * unitPrice, 2)` when totalPrice is missing/zero but both
+inputs exist, with `_totalPriceOcr` traceability. Runs BEFORE `money_gate()`, AFTER
+`self_correct_quantity()`. Any FUTURE derivable-field gap in the extraction schema should
+follow the same "compute in Python from the model's own numbers, never ask the model to
+compute" pattern — the prompt already says "nikdy sám nedopočítavaj".

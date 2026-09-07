@@ -390,11 +390,33 @@ def money_gate(document: dict) -> str | None:
     return None
 
 
+def fill_missing_total_price(item: dict) -> dict:
+    """#395: when a DL format has no per-line total column (only "Cena b. DPH" unit prices),
+    the LLM correctly returns unitPrice + quantity but leaves totalPrice empty. Compute it
+    as quantity * unitPrice, rounded to 2 decimals, and store the original (missing) value
+    in _totalPriceOcr for traceability — same pattern self_correct_quantity uses for _qtyOcr.
+
+    Only fills when totalPrice is missing/zero AND both unitPrice > 0 and quantity > 0 exist
+    — never overwrites a real printed totalPrice the model already read."""
+    unit_price = _num(item.get("unitPrice"))
+    quantity = _num(item.get("quantity"))
+    total_price = _num(item.get("totalPrice"))
+    if (not total_price or total_price <= 0) and unit_price and unit_price > 0 and quantity and quantity > 0:
+        computed = round(quantity * unit_price, 2)
+        out = dict(item)
+        out["_totalPriceOcr"] = item.get("totalPrice")
+        out["totalPrice"] = computed
+        log.info("DL item %r: totalPrice filled from qty*unitPrice: %s * %s = %s",
+                 item.get("name", ""), quantity, unit_price, computed)
+        return out
+    return dict(item)
+
+
 def validate_document(document: dict) -> dict:
-    """R50-R52 applied to one document: quantity self-correction on every item, then a
-    missing/unparseable delivery date, the zero-items gate, and the money gate — in that
-    order. Never raises — a breach is reported on the document (`status`/`reviewReason`),
-    never thrown away.
+    """R50-R52 applied to one document: quantity self-correction on every item, then
+    fill_missing_total_price (#395), then a missing/unparseable delivery date, the
+    zero-items gate, and the money gate — in that order. Never raises — a breach is
+    reported on the document (`status`/`reviewReason`), never thrown away.
 
     The missing-date check (deep-review finding, #201) exists because
     `normalize_delivery_date` deliberately returns `None`/`""` for anything it cannot
@@ -406,6 +428,7 @@ def validate_document(document: dict) -> dict:
     doc = dict(document)
     doc_number = doc.get("docNumber") or "?"
     doc["items"] = [self_correct_quantity(i) for i in (document.get("items") or [])]
+    doc["items"] = [fill_missing_total_price(i) for i in doc["items"]]
     if not (doc.get("deliveryDate") or "").strip():
         doc["status"] = "needsReview"
         doc["reviewReason"] = "Dátum dodania sa nepodarilo rozpoznať alebo v dokumente chýba"
