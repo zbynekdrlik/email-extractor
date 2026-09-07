@@ -812,3 +812,28 @@ non-parenthesized two-bare-token fixture ("Dodacie listy `<n1>` a `<n2>`") that
 actually represents two independent documents. Whenever a fix changes what a scan
 treats as a false positive, re-check every EXISTING fixture that claims to test "the
 positive case" — one of them may, by coincidence, already be an instance of the bug.
+
+## `_read_attachments()` must thread EVERY column that affects downstream ROUTING, not
+## just content — and `dl_extract.extract_attachment` must detect the `[needs AI Vision: ...]`
+## placeholder as a belt-and-suspenders fallback (#392, 2026-09-07)
+
+`_read_attachments()` (dl_message.py) is the SOLE bridge between the DB's per-attachment
+metadata and `dl_extract.extract_attachment()`'s vision-routing decision. When the SELECT
+missed `needs_vision`, a PDF whose ingest correctly flagged it `needs_vision=true` (and
+replaced its text with the `[needs AI Vision: <filename>]` placeholder) took the W13
+"digital PDF with real text" branch and fed the placeholder as real content to the LLM.
+
+Reusable rules:
+- **Any NEW column on `attachments` that affects extraction routing** (not just content
+  display) must be added to BOTH the SELECT in `_read_attachments()` AND threaded into
+  the dict that `dl_extract.extract_email()` reads. A column the SELECT misses is
+  structurally invisible to the extraction layer, regardless of how correctly the ingest
+  pipeline sets it.
+- **`dl_extract._is_vision_placeholder(text)`** detects the `[needs AI Vision: ...]`
+  pattern even without the explicit DB flag — a belt-and-suspenders fallback for manual
+  replay scripts (`_process_document()` calls, #251 shape) that predate #392 and never
+  pass `needs_vision`. Any future synthetic-text-that-should-not-be-fed-to-the-LLM
+  should get the same dual-signal detection (DB flag + text pattern).
+- **When vision is forced**, `choose_source_text` must use `effective_scanned=True` (prefer
+  vision transcript over placeholder), AND the placeholder must be excluded from
+  `combine_transcripts`' cross-check input (it is noise, not OCR text).

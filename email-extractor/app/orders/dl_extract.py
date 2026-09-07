@@ -47,9 +47,11 @@ JPEG_EOI = b"\xff\xd9"
 
 # #224: when NO extracted candidate is both decodable and this size, we render the real
 # PDF pages instead of trusting the (garbage) marker-scanned bytes. Mirrors app/extract.py's
-# own OCR-fallback DPI (poppler render quality) and page cap, at a lighter DPI — a DL is
-# realistically 1-3 pages, not a multi-page invoice.
-VISION_RENDER_DPI = 200
+# own OCR-fallback DPI (poppler render quality) and page cap.
+# #393: 300 DPI (same as app/extract.py's OCR) — higher-resolution renders give the vision
+# model more pixel data to read small/faint digits on thermal and dot-matrix scans. A DL is
+# realistically 1-3 pages, so the token cost increase per doc is bounded.
+VISION_RENDER_DPI = 300
 VISION_RENDER_MAX_PAGES = 15
 
 # R51: the EDI is built from line items, so a misread SUMMARY digit must not block — but a
@@ -363,13 +365,25 @@ def self_correct_quantity(item: dict) -> dict:
 def money_gate(document: dict) -> str | None:
     """R51: |Σ line totalPrice - documentTotalWithoutVAT| <= 0.50 EUR, only when a real
     (> 0) document total was actually read — a no-price scan has no summary to check
-    against, and that is fine (the dual transcript + a later match gate cover it)."""
+    against, and that is fine (the dual transcript + a later match gate cover it).
+
+    #393: when Σ line totals = 0 but a real doc_total exists (the LLM failed to read
+    per-line prices from a faint scan), the review message explicitly tells the warehouse
+    what is missing so they know what to check manually."""
     doc_total = _num(document.get("documentTotalWithoutVAT"))
     if not doc_total or doc_total <= 0:
         return None
-    items_total = sum(_num(i.get("totalPrice")) or 0.0 for i in document.get("items") or [])
+    items = document.get("items") or []
+    items_total = sum(_num(i.get("totalPrice")) or 0.0 for i in items)
     diff = abs(items_total - doc_total)
     if diff > MONEY_GATE_TOLERANCE_EUR:
+        # #393: when ALL line prices are zero/missing but items exist, the problem is
+        # specifically that the AI could not read the price column — say so in plain
+        # Slovak so the warehouse knows what to check on the physical document.
+        if items and items_total == 0.0:
+            return (f"AI neprečítala ceny riadkov — súčet riadkov je 0.00 € "
+                    f"ale doklad má celkom {doc_total:.2f} €. "
+                    f"Skontrolujte ceny na fyzickom doklade.")
         return (f"Súčet riadkov ({items_total:.2f} €) sa nezhoduje s dokladom "
                 f"({doc_total:.2f} €), rozdiel {diff:.2f} € presahuje toleranciu "
                 f"{MONEY_GATE_TOLERANCE_EUR:.2f} €")
@@ -399,7 +413,16 @@ def validate_document(document: dict) -> dict:
         return doc
     if not doc["items"]:
         doc["status"] = "needsReview"
-        doc["reviewReason"] = "Dokument neobsahuje žiadne položky"
+        # #393: when a doc_total exists but zero items were extracted, name the gap
+        # explicitly so the warehouse knows to check ITEMS + prices, not just prices.
+        doc_total = _num(doc.get("documentTotalWithoutVAT"))
+        if doc_total and doc_total > 0:
+            doc["reviewReason"] = (
+                f"AI neprečítala žiadne položky z dokladu — "
+                f"doklad má celkom {doc_total:.2f} €. "
+                f"Skontrolujte položky a ceny na fyzickom doklade.")
+        else:
+            doc["reviewReason"] = "Dokument neobsahuje žiadne položky"
         log.warning("DL document %s: zero items -> review", doc_number)
         return doc
     reason = money_gate(doc)
@@ -433,21 +456,45 @@ def run_extraction(client, source_text: str) -> dict:
 
 # --- 8) one attachment end-to-end (vision routing) --------------------------
 
-def extract_attachment(client, pdf_bytes: bytes, machine_text: str = "") -> dict:
+def _is_vision_placeholder(text: str) -> bool:
+    """True when `text` is the ingest-time placeholder that `app/extract.py` substitutes
+    for a low-confidence scan flagged `needs_vision` — the pattern ``[needs AI Vision: ...]``.
+
+    Belt-and-suspenders detection: even when the caller does NOT pass ``needs_vision=True``
+    (e.g. a manual replay script that predates #392), the placeholder itself is an
+    unambiguous signal the text is NOT real document content and vision MUST be called."""
+    stripped = (text or "").strip()
+    return stripped.startswith("[needs AI Vision:") and stripped.endswith("]")
+
+
+def extract_attachment(client, pdf_bytes: bytes, machine_text: str = "",
+                       needs_vision: bool = False) -> dict:
     """Scan detection -> vision (only when actually needed, R42/W13) -> R43 cross-check
     -> multi-document extraction -> R50-R52 validation, for ONE attachment.
 
     `client` needs `vision_call` (llm.Client, #201) and `json_call`.
+
+    #392: when ``needs_vision`` is True OR ``machine_text`` is the ingest placeholder
+    ``[needs AI Vision: ...]``, the vision/render path is forced regardless of
+    ``is_scanned()``'s JPEG heuristic — the DB already knows this attachment needs
+    vision, and the placeholder is never real document content.
     """
     jpegs = extract_embedded_jpegs(pdf_bytes)
     scanned = is_scanned(jpegs)
     machine_text = machine_text or ""
-    log.info("DL attachment: %d embedded JPEG(s), scanned=%s", len(jpegs), scanned)
+    # #392: force vision when the DB flag or the placeholder text says so
+    force_vision = needs_vision or _is_vision_placeholder(machine_text)
+    if force_vision and not scanned:
+        log.info("DL attachment: needs_vision=%s, placeholder=%s — forcing vision "
+                 "path despite is_scanned()=False (#392)",
+                 needs_vision, _is_vision_placeholder(machine_text))
+    log.info("DL attachment: %d embedded JPEG(s), scanned=%s, force_vision=%s",
+             len(jpegs), scanned, force_vision)
 
     vision_used = False
     vision_primary: str | None = None
     vision_secondary: str | None = None
-    if scanned:
+    if scanned or force_vision:
         # #224: never trust the raw marker-scanned bytes blindly — only send genuinely
         # decodable, page-sized images. When extraction found nothing usable (the real
         # bug: a Flate-wrapped DCTDecode stream produces only garbage marker spans),
@@ -483,8 +530,15 @@ def extract_attachment(client, pdf_bytes: bytes, machine_text: str = "") -> dict
         vision_primary = transcripts[0] if len(transcripts) > 0 else None
         vision_secondary = transcripts[1] if len(transcripts) > 1 else None
 
-    primary_text = choose_source_text(scanned, machine_text, vision_primary)
-    source_text = combine_transcripts(machine_text, primary_text, vision_secondary)
+    # #392: when vision was forced (needs_vision/placeholder), treat the text-source
+    # priority the same as a real scan — prefer the vision transcript over the placeholder
+    # machine_text, which is NOT real document content. Also strip the placeholder from
+    # the cross-check input so it is never appended as an "alternative OCR transcript" —
+    # a placeholder is noise, not a cross-check signal.
+    effective_scanned = scanned or force_vision
+    cross_check_text = "" if force_vision else machine_text
+    primary_text = choose_source_text(effective_scanned, machine_text, vision_primary)
+    source_text = combine_transcripts(cross_check_text, primary_text, vision_secondary)
 
     extraction = run_extraction(client, source_text)
     return {"documents": extraction["documents"], "scanned": scanned,
@@ -507,7 +561,7 @@ def extract_email(client, attachments: list[dict]) -> dict:
     same mail (deep-review finding, #201). A caller that needs to know whether a specific
     attachment failed reads `attachments[i]["error"]` (`None` on success).
 
-    `attachments`: list of `{"idx", "filename", "pdf_bytes", "machine_text"}`.
+    `attachments`: list of `{"idx", "filename", "pdf_bytes", "machine_text"[, "needs_vision"]}`.
     """
     documents: list[dict] = []
     per_attachment: list[dict] = []
@@ -516,7 +570,8 @@ def extract_email(client, attachments: list[dict]) -> dict:
         filename = att.get("filename", "")
         try:
             result = extract_attachment(client, att.get("pdf_bytes") or b"",
-                                        att.get("machine_text") or "")
+                                        att.get("machine_text") or "",
+                                        needs_vision=bool(att.get("needs_vision")))
         except Exception as e:
             log.exception("DL attachment idx=%s filename=%r failed to extract — "
                           "continuing with the rest of this mail's attachments", idx, filename)
