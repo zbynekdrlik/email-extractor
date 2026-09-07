@@ -4142,3 +4142,13 @@ pred „vytvor v CODEXe" krokom vždy najprv over raw.firma, či už neexistuje.
 - Integrácia: PR #388 → a5a7cb5, main run 33869143209 ✓; deploy 0.9.134 (`/health` ok); DOM read na ŽIVEJ
   otvorenej karte (neklikané): tlačidlo + hint renderujú, 0 console errors. Run-cards #383/#384 odoslané.
   GitHub auto-close z tela PR zavrel aj #383 → supervisor reopen + `needs-answer` (oznam skladu).
+
+## #390 — human_processing sweep FIFO starvation fix (0.9.135)
+- Problém: `ORDER BY created_at ASC LIMIT 10` + Python-side `reminder_suppressed` post-filter
+  = 51 kandidátov v horizonte, rovnakých 10 najstarších (už notifikovaných) zaberá každý slot,
+  nová správa sa nikdy nedostane k Layer-1 vision pokusu a po 2 prac. dňoch zmizne — trvalo ticho.
+- Fix: SQL-level exclusion (NOT EXISTS na undelivered pending_alerts + recently rescued) +
+  ORDER BY "never-attempted first" → nové správy vždy dostanú LIMIT slot pred starými.
+  Python-side checks ostávajú ako safety net pre morning-check edge case.
+- Commity: bump 1b5a838 (0.9.135) → [red] 20eb383 → [green] 781de13 → docs e406e62.
+  Testy: 14 pass (test_human_processing.py), ruff 0. Review: fable-5-1, 0🔴 0🟡 2🔵.
