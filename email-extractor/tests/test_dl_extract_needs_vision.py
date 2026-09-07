@@ -62,7 +62,7 @@ def test_extract_attachment_forces_vision_on_placeholder_pattern_alone():
     pdf_bytes = b"%PDF-1.4 no embedded jpeg\n"
     placeholder = "[needs AI Vision: dodaci_list.pdf]"
 
-    result = dl_extract.extract_attachment(
+    dl_extract.extract_attachment(
         client, pdf_bytes, machine_text=placeholder)
 
     assert len(client.vision_calls) > 0, (
