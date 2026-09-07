@@ -694,20 +694,20 @@ def test_missing_totalPrice_is_filled_from_unitPrice_times_quantity():
     money_gate sums totalPrice (all 0.0) vs doc total -> breach. After the fix,
     the computed line totals match and the document passes."""
     items = [
-        {"name": "Chlieb zemiakový KB 450g", "quantity": 2, "unit": "ks",
-         "unitPrice": 0.765, "vatRate": 5},
-        {"name": "Rožok oravský bez E 50g", "quantity": 147, "unit": "ks",
-         "unitPrice": 0.099, "vatRate": 5},
-        {"name": "Žemľa oravská 50g", "quantity": 211, "unit": "ks",
-         "unitPrice": 0.11, "vatRate": 5},
-        {"name": "Pletenka 80g", "quantity": 63, "unit": "ks",
-         "unitPrice": 0.19, "vatRate": 19},
-        {"name": "Rožok grahamový 50g", "quantity": 183, "unit": "ks",
+        {"name": "Testovaci chlieb 500g", "quantity": 3, "unit": "ks",
+         "unitPrice": 0.85, "vatRate": 5},
+        {"name": "Testovaci rozok 60g", "quantity": 150, "unit": "ks",
+         "unitPrice": 0.10, "vatRate": 5},
+        {"name": "Testovacia zemla 55g", "quantity": 200, "unit": "ks",
          "unitPrice": 0.12, "vatRate": 5},
-        {"name": "Žemľa kajzerka cereálna 50g", "quantity": 210, "unit": "ks",
-         "unitPrice": 0.165, "vatRate": 5},
-        {"name": "Cereálna dalamánka 80g", "quantity": 15, "unit": "ks",
-         "unitPrice": 0.32, "vatRate": 19},
+        {"name": "Testovacia pletenka 90g", "quantity": 70, "unit": "ks",
+         "unitPrice": 0.20, "vatRate": 19},
+        {"name": "Testovaci rozok celozrnny 55g", "quantity": 180, "unit": "ks",
+         "unitPrice": 0.13, "vatRate": 5},
+        {"name": "Testovacia zemla specialna 60g", "quantity": 220, "unit": "ks",
+         "unitPrice": 0.17, "vatRate": 5},
+        {"name": "Testovacia dalamanka 85g", "quantity": 20, "unit": "ks",
+         "unitPrice": 0.35, "vatRate": 19},
     ]
     # The real printed document total — computed from the printed unit prices
     doc_total = round(sum(i["quantity"] * i["unitPrice"] for i in items), 2)
@@ -719,3 +719,30 @@ def test_missing_totalPrice_is_filled_from_unitPrice_times_quantity():
         assert item.get("totalPrice"), f"totalPrice missing for {item['name']}"
         expected_total = round(item["quantity"] * item["unitPrice"], 2)
         assert item["totalPrice"] == expected_total
+
+
+def test_fill_missing_total_price_never_overwrites_a_real_printed_value():
+    """#395 review Y1a: a discounted line where printed totalPrice != qty*unitPrice must
+    keep its OWN printed value — the fill must never replace it with the product."""
+    item = {"name": "Akciovy rohlik 50g", "quantity": 10, "unit": "ks",
+            "unitPrice": 1.0, "totalPrice": 9.0, "vatRate": 5}
+    got = dl_extract.fill_missing_total_price(item)
+    assert got["totalPrice"] == 9.0, "printed totalPrice must be preserved"
+    assert "_totalPriceOcr" not in got, "_totalPriceOcr must not appear on a preserved line"
+
+
+def test_fill_missing_total_price_skipped_when_unitPrice_is_zero():
+    """#395 review Y1b: zero unitPrice => no fill, the #393 'AI neprecitala ceny'
+    wording must still fire via money_gate."""
+    item = {"name": "Rohlik testovaci 50g", "quantity": 120, "unit": "ks",
+            "unitPrice": 0, "vatRate": 5}
+    got = dl_extract.fill_missing_total_price(item)
+    assert not got.get("totalPrice"), "no totalPrice should be filled from zero unitPrice"
+
+
+def test_fill_missing_total_price_skipped_when_quantity_is_zero():
+    """#395 review Y1b: zero quantity => no fill."""
+    item = {"name": "Rohlik testovaci 50g", "quantity": 0, "unit": "ks",
+            "unitPrice": 0.38, "vatRate": 5}
+    got = dl_extract.fill_missing_total_price(item)
+    assert not got.get("totalPrice"), "no totalPrice should be filled from zero quantity"
