@@ -242,3 +242,58 @@ def test_horizon_cutoff_counts_working_days_and_skips_weekends():
     # working_days<=0 → today's local midnight (only today's mail stays)
     cut0 = human_processing._horizon_cutoff(thu.astimezone(UTC), 0).astimezone(tz)
     assert cut0.date().isoformat() == "2026-09-03"
+
+
+# --- #390: FIFO starvation — LIMIT 10 vs suppressed backlog ----------------
+
+def test_sweep_processes_new_message_despite_suppressed_backlog(pg):
+    """#390 RED regression: 11 old already-notified (reminder_suppressed) messages fill
+    every LIMIT 10 slot, so a BRAND-NEW stuck message never gets its Layer-1 vision
+    attempt or Layer-2 notification. Pre-fix, the sweep returns handled=0 every tick and
+    the new message ages past the 2-working-day horizon — permanently lost.
+
+    Setup: 11 old messages with delivered pending_alerts (suppressed until morning) +
+    1 new message with no alerts. The sweep MUST process the new one in the first tick."""
+    from zoneinfo import ZoneInfo
+
+    # Use a fixed "now" that is afternoon on a weekday — NOT morning-check time,
+    # so delivered alerts are suppressed by reminder_suppressed.
+    tz = ZoneInfo("Europe/Bratislava")
+    now = datetime(2026, 9, 7, 14, 30, tzinfo=tz).astimezone(UTC)
+
+    # 11 old already-notified messages (created ~20 hours ago, within the horizon)
+    for i in range(11):
+        mid = f"old_suppressed_{i:02d}"
+        old_ts = (now - timedelta(hours=20 + i)).isoformat()
+        _hp_msg(pg, mid, needs_vision=True, has_attachments=True, created_at=old_ts)
+        # Each has a delivered pending_alert from earlier today -> reminder_suppressed
+        pg.execute(
+            """INSERT INTO pending_alerts (channel_id, kind, body_html, message_id,
+                                           created_at, delivered_at)
+               VALUES (888, %s, 'test', %s, %s, %s)""",
+            (human_processing.ALERT_KIND, mid,
+             (now - timedelta(hours=3)).isoformat(),
+             (now - timedelta(hours=2)).isoformat()))
+
+    # 1 brand-new message — no pending_alerts, no events, just stuck
+    new_ts = (now - timedelta(minutes=20)).isoformat()
+    _hp_msg(pg, "new_stuck_390", needs_vision=True, has_attachments=True,
+            created_at=new_ts)
+
+    # The classify mock returns a confident rescue for any message
+    rescued = []
+
+    def mock_classify(cfg, atts):
+        rescued.append(1)
+        return {"category": "dodacie_listy", "confidence": 0.95, "reason": "test"}
+
+    handled = human_processing.sweep(pg, _cfg(ops_channel_id=888),
+                                     classify=mock_classify, now=now)
+
+    # The new message MUST have been rescued (Layer-1 vision attempt made)
+    new_cat = pg.execute(
+        "SELECT category FROM messages WHERE message_id='new_stuck_390'").fetchone()[0]
+    assert new_cat == "dodacie_listy", (
+        f"new message was NOT rescued (still {new_cat!r}) — FIFO starvation bug #390")
+    assert handled >= 1, "sweep must handle at least the new message"
+    assert len(rescued) >= 1, "vision classify must have been called for the new message"
