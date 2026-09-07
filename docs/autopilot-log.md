@@ -13,6 +13,18 @@ Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions
 - RED `8a16000` test_missing_totalPrice_is_filled_from_unitPrice_times_quantity → GREEN `da6bc42`
 - **Rozhodnutie:** deterministický výpočet, nie prompt-zmena — prompt hovorí "nikdy sám
   nedopočítavaj", takže Python výpočet z tých istých čísel je čistejší a testovateľný.
+- **Integrácia + deploy + reprocess (2026-09-07):** PR #396 → main `09c7dd1`, CI zelené
+  (typecheck/test/e2e-orders/e2e-dl/build), nasadené 0.9.137 (`/health` potvrdil).
+  Owner-schválený reprocess msg 10419 + 10418 (jeden po druhom, ORION absence proof pred
+  aj po): `fill_missing_total_price` funguje presne podľa návrhu — msg 10418 súčet
+  riadkov sedí NA CENT presne s dokladom (127,17 €), money_gate prešiel čisto; msg 10419
+  sa priblížil (Σ 0,00 €→112,67 € vs doklad 113,54 €), ale 0,87 € rozdiel stále
+  presahuje toleranciu — zostávajúci problém je čítanie jednej-dvoch cien na tomto
+  konkrétnom bledom skene, nie chyba `fill_missing_total_price`. Msg 10418 navyše
+  narazil na NESÚVISIACI problém — dodávateľ "DOBROTA Orava" sa nezhodol s kandidátmi
+  → otvorená `dl_supplier` otázka na nástenke (id 168), nedotknutá. Oba doklady zostali
+  potvrdene mimo ORIONu (0 zhôd pred aj po). Plný dôkaz: issue #395 komentár
+  `issuecomment-5572941192`.
 
 ## 2026-08-19 — #349 Odstránenie mŕtvej 🚨 eskalačnej vetvy pripomienky otázok — v0.9.116
 - **Čo:** vymazaná 🚨 eskalačná vetva v `question_alerts` — bola štrukturálne mŕtva už od
