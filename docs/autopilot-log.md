@@ -2,6 +2,18 @@
 
 Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions, shared PR #.
 
+## 2026-09-07 — #395 DL sken: chýbajúci totalPrice dopočítaný z unitPrice * quantity — v0.9.137
+- **Čo:** Dobrota Orava DL formát nemá stĺpec riadkového súčtu (len "Cena b. DPH" = unitPrice).
+  Vision + extrakcia správne prečítajú unitPrice + quantity, ale totalPrice je prázdny.
+  money_gate sumuje totalPrice (0.00) vs documentTotal (113.54) → review. PROD diagnostika
+  (read-only vision + extraction na msg 10419) potvrdila: ceny sú čitateľné, chýba len
+  výpočet totalPrice = qty * unitPrice.
+- **Fix:** `fill_missing_total_price()` v `validate_document()` — rovnaký traceability vzor
+  ako `self_correct_quantity` (_totalPriceOcr). Beží PRED money_gate.
+- RED `8a16000` test_missing_totalPrice_is_filled_from_unitPrice_times_quantity → GREEN `da6bc42`
+- **Rozhodnutie:** deterministický výpočet, nie prompt-zmena — prompt hovorí "nikdy sám
+  nedopočítavaj", takže Python výpočet z tých istých čísel je čistejší a testovateľný.
+
 ## 2026-08-19 — #349 Odstránenie mŕtvej 🚨 eskalačnej vetvy pripomienky otázok — v0.9.116
 - **Čo:** vymazaná 🚨 eskalačná vetva v `question_alerts` — bola štrukturálne mŕtva už od
   #341: `expire_stale` (touched>2) beží v `worker.tick` PRED `sweep`, takže pri defaultnej
