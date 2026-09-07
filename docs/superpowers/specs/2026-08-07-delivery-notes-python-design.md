@@ -137,8 +137,9 @@ gpt-4.1-mini — stale, ignore.)
    schema: `{supplierName, supplierCity, supplierEmail, docNumber, deliveryDate(DD.MM.YYYY),
    deliveryTime, documentTotalWithoutVAT, items[{name, quantity, unit, unitPrice, totalPrice,
    vatRate}]}`. Full prompt: `prompt_sub1_extract_system.txt` (rules summarized in §2).
-7. **VALIDATE EXTRACTION** (R50–R51): per-line quantity self-correction + the 0.50 € money
-   gate; on gate breach THROWS (context first, numbers last — n8n keeps only the message tail)
+7. **VALIDATE EXTRACTION** (R50–R51): per-line quantity self-correction + fill missing
+   totalPrice from qty×unitPrice (#395) + the proportional money gate (#397:
+   `max(0.50, min(1%·doc_total, 2.00))`); on gate breach → needsReview
    → error output → **AI Failure → Needs Review**.
 8. **ASSEMBLE OUTPUT** (R52): 0 extracted items ⇒ needsReview ("Dokument neobsahuje žiadne
    položky…"); else `{email, extraction, validOrNeedsReview:'valid'}`.
@@ -267,11 +268,13 @@ One Code node (`sub3_edi_code.js`), v27. Gates, conversions, DESADV format: §2 
   otherwise) differs from the read quantity by > 0.5 (pieces) / 0.005 (kg) AND the derived
   quantity satisfies the line equation within max(0.02 €, 2 %), REPLACE the quantity (original
   kept in `_qtyOcr`).
-- **R51** Money gate: `|Σ line totalPrice − documentTotalWithoutVAT| ≤ 0.50 €` (only when a
-  doc total > 0 was read). Breach ⇒ throw ⇒ needs-review. Rationale: the EDI is built from
-  line items, so a misread SUMMARY digit must not block (tolerance 0.50), but a
-  missing/extra/mistranscribed LINE must. No-price scans have no money gate — covered by the
-  dual transcript + the match gate.
+- **R51** Money gate: `|Σ line totalPrice − documentTotalWithoutVAT| ≤ tolerance` where
+  tolerance = `max(0.50, min(1% · doc_total, 2.00))` (#397 — proportional with a cap; only
+  when doc total > 0 was read). Breach ⇒ needsReview. Rationale: the EDI is built from line
+  items, so a misread SUMMARY digit must not block, but a missing/extra/mistranscribed LINE
+  must — the 2.00 EUR cap keeps the blind spot bounded on large documents. Missing totalPrice
+  is filled from qty × unitPrice before the gate (#395). No-price scans have no money gate —
+  covered by the dual transcript + the match gate.
 - **R52** Zero extracted items ⇒ needsReview (not a DL — prevents the 0-item dead-end loop).
 
 ### Supplier (customer) matching (Sub2)

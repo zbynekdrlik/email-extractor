@@ -865,3 +865,13 @@ inputs exist, with `_totalPriceOcr` traceability. Runs BEFORE `money_gate()`, AF
 `self_correct_quantity()`. Any FUTURE derivable-field gap in the extraction schema should
 follow the same "compute in Python from the model's own numbers, never ask the model to
 compute" pattern — the prompt already says "nikdy sám nedopočítavaj".
+
+**The #397 finding (proportional tolerance):** Even with `fill_missing_total_price`, the
+model-extracted unit prices carry ~0.1% per-unit systematic inaccuracy on faint dot-matrix
+scans. Across many lines (831 items in the Dobrota case), the compound error reaches 0.87
+EUR on a 113.54 EUR doc (0.77% of total) — exceeding the old flat 0.50 EUR tolerance.
+Fix: `max(floor, min(pct * doc_total, cap))` = `max(0.50, min(1% * total, 2.00))`. The
+CAP (2.00 EUR) was a fable-5-1 review finding (F1): without it, a 2000 EUR bulk DL has a
+20 EUR blind spot — a genuinely missing line would pass. Any FUTURE tolerance calibration
+should follow this pattern: proportional for precision-class errors, capped to preserve the
+gate's original safety purpose (missing/extra lines).
