@@ -682,3 +682,40 @@ def test_json_call_receives_the_multi_document_schema():
 @pytest.mark.parametrize("bad", [None, "", b""])
 def test_extract_embedded_jpegs_never_raises_on_falsy_input(bad):
     assert dl_extract.extract_embedded_jpegs(bad) == []
+
+
+def test_missing_totalPrice_is_filled_from_unitPrice_times_quantity():
+    """#395: when a DL has no per-line total column (only unit prices), the extraction
+    correctly returns unitPrice + quantity but NO totalPrice. validate_document must
+    compute totalPrice = quantity * unitPrice so money_gate sees the real line totals.
+
+    Dobrota Orava DL format: 7 items, all with unitPrice and quantity, none with
+    totalPrice. Printed document total matches sum(qty * unitPrice). Before the fix,
+    money_gate sums totalPrice (all 0.0) vs doc total -> breach. After the fix,
+    the computed line totals match and the document passes."""
+    items = [
+        {"name": "Chlieb zemiakový KB 450g", "quantity": 2, "unit": "ks",
+         "unitPrice": 0.765, "vatRate": 5},
+        {"name": "Rožok oravský bez E 50g", "quantity": 147, "unit": "ks",
+         "unitPrice": 0.099, "vatRate": 5},
+        {"name": "Žemľa oravská 50g", "quantity": 211, "unit": "ks",
+         "unitPrice": 0.11, "vatRate": 5},
+        {"name": "Pletenka 80g", "quantity": 63, "unit": "ks",
+         "unitPrice": 0.19, "vatRate": 19},
+        {"name": "Rožok grahamový 50g", "quantity": 183, "unit": "ks",
+         "unitPrice": 0.12, "vatRate": 5},
+        {"name": "Žemľa kajzerka cereálna 50g", "quantity": 210, "unit": "ks",
+         "unitPrice": 0.165, "vatRate": 5},
+        {"name": "Cereálna dalamánka 80g", "quantity": 15, "unit": "ks",
+         "unitPrice": 0.32, "vatRate": 19},
+    ]
+    # The real printed document total — computed from the printed unit prices
+    doc_total = round(sum(i["quantity"] * i["unitPrice"] for i in items), 2)
+    doc = _doc(items=items, documentTotalWithoutVAT=doc_total)
+    got = dl_extract.validate_document(doc)
+    # After the fix: totalPrice should be filled and money_gate should pass
+    assert got["status"] == "valid", f"expected valid, got {got.get('reviewReason', '')}"
+    for item in got["items"]:
+        assert item.get("totalPrice"), f"totalPrice missing for {item['name']}"
+        expected_total = round(item["quantity"] * item["unitPrice"], 2)
+        assert item["totalPrice"] == expected_total
