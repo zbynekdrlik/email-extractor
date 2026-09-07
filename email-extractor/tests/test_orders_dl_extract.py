@@ -353,6 +353,64 @@ def test_money_gate_is_skipped_when_no_document_total_was_read():
     assert dl_extract.money_gate(doc) is None
 
 
+def test_money_gate_proportional_tolerance_passes_sub_1pct_gap():
+    """#397: a faint dot-matrix scan where the model reads unit prices with ~0.1%
+    per-unit systematic inaccuracy. With 7 lines and 831 total items, the compounded
+    error is 0.87 EUR on a 113.54 EUR document (0.77% of total). The tolerance must
+    be proportional to the document total — max(0.50, 1% of doc_total) — so this
+    passes (1.1354 > 0.87) while still catching a x10 quantity misread (130+ EUR gap).
+    Uses synthetic prices/quantities — no real document data."""
+    items = [
+        {"name": "Bread Type A 450g", "quantity": 2, "unit": "ks",
+         "unitPrice": 0.765, "totalPrice": 1.53, "vatRate": 5},
+        {"name": "Roll Type B 50g", "quantity": 147, "unit": "ks",
+         "unitPrice": 0.099, "totalPrice": 14.55, "vatRate": 5},
+        {"name": "Bread Type C 700g", "quantity": 211, "unit": "ks",
+         "unitPrice": 0.11, "totalPrice": 23.21, "vatRate": 5},
+        {"name": "Roll Type D 60g", "quantity": 63, "unit": "ks",
+         "unitPrice": 0.19, "totalPrice": 11.97, "vatRate": 19},
+        {"name": "Roll Type E 40g", "quantity": 183, "unit": "ks",
+         "unitPrice": 0.12, "totalPrice": 21.96, "vatRate": 19},
+        {"name": "Pastry Type F 60g", "quantity": 210, "unit": "ks",
+         "unitPrice": 0.165, "totalPrice": 34.65, "vatRate": 19},
+        {"name": "Roll Type G 80g", "quantity": 15, "unit": "ks",
+         "unitPrice": 0.32, "totalPrice": 4.80, "vatRate": 19},
+    ]
+    # items_total = 112.67, doc_total = 113.54, diff = 0.87
+    doc = _doc(documentTotalWithoutVAT=113.54, items=items)
+    assert dl_extract.money_gate(doc) is None, (
+        "A 0.87 EUR gap on a 113.54 EUR document (0.77%) should pass the "
+        "proportional tolerance max(0.50, 1% of 113.54) = 1.1354")
+
+
+def test_money_gate_proportional_tolerance_still_catches_quantity_misread():
+    """#397: even with the proportional tolerance, a x10 quantity misread is caught.
+    A 147-qty item misread as 1470 produces a 130+ EUR gap on a 113.54 EUR
+    document — far exceeding 1% of 113.54."""
+    items = [
+        {"name": "Bread Type A 450g", "quantity": 2, "unit": "ks",
+         "unitPrice": 0.765, "totalPrice": 1.53, "vatRate": 5},
+        {"name": "Roll Type B 50g", "quantity": 1470, "unit": "ks",
+         "unitPrice": 0.099, "totalPrice": 145.53, "vatRate": 5},
+    ]
+    doc = _doc(documentTotalWithoutVAT=113.54, items=items)
+    reason = dl_extract.money_gate(doc)
+    assert reason is not None, "A x10 quantity misread must still be caught"
+
+
+def test_money_gate_flat_floor_still_applies_for_small_documents():
+    """#397: for a small document (e.g. 30 EUR), 1% would be 0.30 EUR which is
+    below the 0.50 floor. The flat floor must still apply — a 0.51 EUR gap on a
+    30 EUR document is still a breach."""
+    items = [{"name": "Small Item", "quantity": 10, "unit": "ks",
+              "unitPrice": 2.949, "totalPrice": 29.49, "vatRate": 5}]
+    # items_total = 29.49, doc_total = 30.00, diff = 0.51
+    doc = _doc(documentTotalWithoutVAT=30.00, items=items)
+    reason = dl_extract.money_gate(doc)
+    assert reason is not None, (
+        "0.51 EUR gap on 30 EUR doc exceeds max(0.50, 0.30) = 0.50 floor")
+
+
 # --- 8) per-document validation (R50-R52) ---------------------------------
 
 def test_a_missing_delivery_date_forces_review():
