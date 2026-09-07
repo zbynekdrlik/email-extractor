@@ -4127,3 +4127,13 @@ pred „vytvor v CODEXe" krokom vždy najprv over raw.firma, či už neexistuje.
   rezervujú 0.9.132). Testy: `test_store_retention.py` (11) + `test_config.py` rozšírené, 33 pass; plný
   suite exit 0 / coverage 94,09 % (store_retention.py 96 %); ruff 0, mypy 0 (81 súborov). Full-flow
   worktree dispatch (dispatch explicitne delegoval merge+deploy). Tiket ostáva OTVORENÝ (owner-rozhodnutia).
+
+## #390 — human_processing sweep FIFO starvation fix (0.9.135)
+- Problém: `ORDER BY created_at ASC LIMIT 10` + Python-side `reminder_suppressed` post-filter
+  = 51 kandidátov v horizonte, rovnakých 10 najstarších (už notifikovaných) zaberá každý slot,
+  nová správa sa nikdy nedostane k Layer-1 vision pokusu a po 2 prac. dňoch zmizne — trvalo ticho.
+- Fix: SQL-level exclusion (NOT EXISTS na undelivered pending_alerts + recently rescued) +
+  ORDER BY "never-attempted first" → nové správy vždy dostanú LIMIT slot pred starými.
+  Python-side checks ostávajú ako safety net pre morning-check edge case.
+- Commity: bump 1b5a838 (0.9.135) → [red] 20eb383 → [green] 781de13 → docs e406e62.
+  Testy: 14 pass (test_human_processing.py), ruff 0. Review: fable-5-1, 0🔴 0🟡 2🔵.
