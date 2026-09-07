@@ -103,11 +103,12 @@ def _peek_for_shadow(conn, days: int = SHADOW_DAYS) -> dict | None:
 
 def _read_attachments(cfg, message_id: str, conn) -> list[dict]:
     rows = conn.execute(
-        """SELECT idx, filename, mime, extracted_text, method FROM attachments
+        """SELECT idx, filename, mime, extracted_text, method, needs_vision
+            FROM attachments
             WHERE message_id = %s ORDER BY idx""", (message_id,)).fetchall()
     data_dir = getattr(cfg, "data_dir", "") or "/data/store"
     out = []
-    for idx, filename, mime, extracted_text, method in rows:
+    for idx, filename, mime, extracted_text, method, needs_vision in rows:
         is_pdf_or_image = bool(_ATTACHMENT_MIME_RE.search(mime or "")
                                or _ATTACHMENT_EXT_RE.search(filename or ""))
         is_spreadsheet = bool(not is_pdf_or_image and (
@@ -126,7 +127,8 @@ def _read_attachments(cfg, message_id: str, conn) -> list[dict]:
             pdf_bytes = matches[0].read_bytes() if matches else b""
         out.append({"idx": idx, "filename": filename or "", "pdf_bytes": pdf_bytes,
                    "machine_text": extracted_text or "", "method": method or "",
-                   "is_spreadsheet": is_spreadsheet})
+                   "is_spreadsheet": is_spreadsheet,
+                   "needs_vision": bool(needs_vision)})
     return out
 
 

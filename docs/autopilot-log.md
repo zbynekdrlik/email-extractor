@@ -4152,3 +4152,14 @@ pred „vytvor v CODEXe" krokom vždy najprv over raw.firma, či už neexistuje.
   Python-side checks ostávajú ako safety net pre morning-check edge case.
 - Commity: bump 1b5a838 (0.9.135) → [red] 20eb383 → [green] 781de13 → docs e406e62.
   Testy: 14 pass (test_human_processing.py), ruff 0. Review: fable-5-1, 0🔴 0🟡 2🔵.
+
+## #392 + #393 — DL needs_vision routing fix + faint-scan money_gate message (0.9.136)
+- #392: `dl_message._read_attachments()` neprenasalo `needs_vision` z DB, `dl_extract.extract_attachment()`
+  rozhodovalo vision cestu len cez `is_scanned()` JPEG heuristiku. PDF bez vlozeneho JPEG s `needs_vision=true`
+  dostal placeholder `[needs AI Vision: ...]` ako realny text -> 0 dokumentov. Fix: thread `needs_vision` cez
+  celu chain + belt-and-suspenders detekcia placeholdera. RED ee829ce -> GREEN 5793d61.
+- #393: money_gate pri Sigma=0 hovorila len numericku diferenziu, sklad nevedel co chyba. Fix: ked vsetky
+  riadkove ceny su 0 ale dokladovy sucet > 0, spravu je "AI neprecitala ceny riadkov". VISION_RENDER_DPI
+  zvysene 200->300 (= extract.py OCR DPI). RED 1b48140 -> GREEN d02aa8b. Modelova kvalita (ci gpt-5.4
+  precita tento konkretny bledý sken na 300 DPI) je UNVERIFIED.
+- Testy: 175 pass (test_dl_worker + test_dl_eval + 2 nove subory), ruff 0.
