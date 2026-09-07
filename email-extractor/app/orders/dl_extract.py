@@ -47,11 +47,10 @@ JPEG_EOI = b"\xff\xd9"
 
 # #224: when NO extracted candidate is both decodable and this size, we render the real
 # PDF pages instead of trusting the (garbage) marker-scanned bytes. Mirrors app/extract.py's
-# own OCR-fallback DPI (poppler render quality) and page cap, at a lighter DPI — a DL is
-# realistically 1-3 pages, not a multi-page invoice.
-# #393: raised from 200 to 300 (matches app/extract.py's own OCR DPI) — a higher-
-# resolution render gives the vision model more pixel data to read small/faint digits
-# on thermal and dot-matrix scans.
+# own OCR-fallback DPI (poppler render quality) and page cap.
+# #393: 300 DPI (same as app/extract.py's OCR) — higher-resolution renders give the vision
+# model more pixel data to read small/faint digits on thermal and dot-matrix scans. A DL is
+# realistically 1-3 pages, so the token cost increase per doc is bounded.
 VISION_RENDER_DPI = 300
 VISION_RENDER_MAX_PAGES = 15
 
@@ -414,7 +413,16 @@ def validate_document(document: dict) -> dict:
         return doc
     if not doc["items"]:
         doc["status"] = "needsReview"
-        doc["reviewReason"] = "Dokument neobsahuje žiadne položky"
+        # #393: when a doc_total exists but zero items were extracted, name the gap
+        # explicitly so the warehouse knows to check ITEMS + prices, not just prices.
+        doc_total = _num(doc.get("documentTotalWithoutVAT"))
+        if doc_total and doc_total > 0:
+            doc["reviewReason"] = (
+                f"AI neprečítala žiadne položky z dokladu — "
+                f"doklad má celkom {doc_total:.2f} €. "
+                f"Skontrolujte položky a ceny na fyzickom doklade.")
+        else:
+            doc["reviewReason"] = "Dokument neobsahuje žiadne položky"
         log.warning("DL document %s: zero items -> review", doc_number)
         return doc
     reason = money_gate(doc)

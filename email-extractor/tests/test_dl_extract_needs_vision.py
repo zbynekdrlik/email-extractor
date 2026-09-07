@@ -69,6 +69,24 @@ def test_extract_attachment_forces_vision_on_placeholder_pattern_alone():
         "vision_call was not invoked for placeholder text pattern")
 
 
+def test_extract_email_threads_needs_vision_from_attachment_dict():
+    """Review finding 2: the DB -> dict -> kwarg seam must be pinned — extract_email
+    must pass needs_vision from the attachment dict to extract_attachment, and the
+    vision path must be taken even when machine_text is REAL (not a placeholder)."""
+    client = _TrackingClient({"documents": []})
+    attachments = [{
+        "idx": 0, "filename": "scan.pdf",
+        "pdf_bytes": b"%PDF-1.4 no embedded jpeg\n",
+        "machine_text": "real ocr text that is not a placeholder",
+        "needs_vision": True,
+    }]
+    dl_extract.extract_email(client, attachments)
+    # The vision path must be taken because needs_vision=True, even though
+    # machine_text is real (not a placeholder pattern)
+    assert len(client.vision_calls) > 0, (
+        "extract_email did not thread needs_vision to extract_attachment")
+
+
 def test_is_vision_placeholder_detects_the_real_pattern():
     """The placeholder pattern matches exactly what app/extract.py produces."""
     assert dl_extract._is_vision_placeholder("[needs AI Vision: scan.pdf]")
