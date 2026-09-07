@@ -55,15 +55,19 @@ VISION_RENDER_DPI = 300
 VISION_RENDER_MAX_PAGES = 15
 
 # R51: the EDI is built from line items, so a misread SUMMARY digit must not block — but a
-# missing/extra/mistranscribed LINE must.
-# #397: flat tolerance replaced by proportional: max(floor, pct * doc_total). On faint
-# dot-matrix scans the LLM reads unit prices with ~0.1% per-unit systematic inaccuracy
-# (e.g. prints 0,0993, model reads 0,099); across many lines the compound error can
-# reach ~0.8% of the total — a flat 0.50 EUR rejects these while a x10 qty misread
-# (producing >100% deviation) is still comfortably caught. The 1% threshold gives a 10x
-# safety margin over the observed 0.77% compound error on production data.
+# missing/extra/mistranscribed LINE must. The proportional tolerance below widens the gate
+# for model-read precision errors but is CAPPED so that missing-line detection stays bounded
+# regardless of document size (#397 F1 review finding).
+# #397: flat tolerance replaced by proportional: max(floor, min(pct * doc_total, cap)). On
+# faint dot-matrix scans the LLM likely reads unit prices with ~0.1% per-unit systematic
+# inaccuracy; across many lines the compound error can reach ~0.8% of the total — a flat
+# 0.50 EUR rejects these while a x10 qty misread (producing >100% deviation) is still
+# comfortably caught. The 1% threshold gives a ~1.3x margin over the observed 0.77%
+# compound error on production data. The 2.00 EUR cap keeps the blind spot bounded: even
+# on a 2000 EUR bulk DL, a missing line worth >2 EUR is still caught.
 MONEY_GATE_TOLERANCE_FLOOR_EUR = 0.50
 MONEY_GATE_TOLERANCE_PCT = 0.01
+MONEY_GATE_TOLERANCE_CAP_EUR = 2.00
 
 # R50: how far a derived quantity (totalPrice / unitPrice) may drift from the read one
 # before it is even considered a misread, split by unit class.
@@ -375,9 +379,10 @@ def money_gate(document: dict) -> str | None:
     against, and that is fine (the dual transcript + a later match gate cover it).
 
     #397: tolerance is now proportional to the document total —
-    max(MONEY_GATE_TOLERANCE_FLOOR_EUR, MONEY_GATE_TOLERANCE_PCT * doc_total) — so a
-    faint scan whose model-read unit prices compound ~0.8% systematic error passes,
-    while a x10 quantity misread (>100% deviation) is still comfortably caught.
+    max(floor, min(pct * doc_total, cap)) — so a faint scan whose model-read unit
+    prices compound ~0.8% systematic error passes, while a x10 quantity misread
+    (>100% deviation) is still comfortably caught. The cap keeps the blind spot
+    bounded at 2.00 EUR regardless of document size (#397 F1 review finding).
 
     #393: when Σ line totals = 0 but a real doc_total exists (the LLM failed to read
     per-line prices from a faint scan), the review message explicitly tells the warehouse
@@ -389,7 +394,8 @@ def money_gate(document: dict) -> str | None:
     items_total = sum(_num(i.get("totalPrice")) or 0.0 for i in items)
     diff = abs(items_total - doc_total)
     tolerance = max(MONEY_GATE_TOLERANCE_FLOOR_EUR,
-                    MONEY_GATE_TOLERANCE_PCT * doc_total)
+                    min(MONEY_GATE_TOLERANCE_PCT * doc_total,
+                        MONEY_GATE_TOLERANCE_CAP_EUR))
     if diff > tolerance:
         # #393: when ALL line prices are zero/missing but items exist, the problem is
         # specifically that the AI could not read the price column — say so in plain

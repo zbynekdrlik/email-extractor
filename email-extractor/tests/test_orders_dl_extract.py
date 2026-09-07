@@ -385,8 +385,8 @@ def test_money_gate_proportional_tolerance_passes_sub_1pct_gap():
 
 def test_money_gate_proportional_tolerance_still_catches_quantity_misread():
     """#397: even with the proportional tolerance, a x10 quantity misread is caught.
-    A 147-qty item misread as 1470 produces a 130+ EUR gap on a 113.54 EUR
-    document — far exceeding 1% of 113.54."""
+    A 147-qty item misread as 1470 shifts items_total to 147.06, diff from 113.54 doc
+    total = 33.52 EUR — far exceeding max(0.50, min(1.1354, 2.00)) = 1.14."""
     items = [
         {"name": "Bread Type A 450g", "quantity": 2, "unit": "ks",
          "unitPrice": 0.765, "totalPrice": 1.53, "vatRate": 5},
@@ -408,7 +408,20 @@ def test_money_gate_flat_floor_still_applies_for_small_documents():
     doc = _doc(documentTotalWithoutVAT=30.00, items=items)
     reason = dl_extract.money_gate(doc)
     assert reason is not None, (
-        "0.51 EUR gap on 30 EUR doc exceeds max(0.50, 0.30) = 0.50 floor")
+        "0.51 EUR gap on 30 EUR doc exceeds max(0.50, min(0.30, 2.00)) = 0.50 floor")
+
+
+def test_money_gate_cap_limits_blind_spot_on_large_documents():
+    """#397 F1 review finding: without a cap, a 2000 EUR bulk DL would have a 20 EUR
+    blind spot (1% of 2000). The cap at 2.00 EUR keeps the tolerance bounded:
+    max(0.50, min(20.00, 2.00)) = 2.00 EUR — a 2.50 EUR gap is still caught."""
+    items = [{"name": "Bulk Flour 25kg", "quantity": 80, "unit": "ks",
+              "unitPrice": 24.969, "totalPrice": 1997.52, "vatRate": 5}]
+    # items_total = 1997.52, doc_total = 2000.02, diff = 2.50
+    doc = _doc(documentTotalWithoutVAT=2000.02, items=items)
+    reason = dl_extract.money_gate(doc)
+    assert reason is not None, (
+        "2.50 EUR gap on 2000 EUR doc exceeds cap of 2.00 EUR")
 
 
 # --- 8) per-document validation (R50-R52) ---------------------------------
