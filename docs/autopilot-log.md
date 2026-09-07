@@ -4187,3 +4187,11 @@ pred „vytvor v CODEXe" krokom vždy najprv over raw.firma, či už neexistuje.
   zvysene 200->300 (= extract.py OCR DPI). RED 1b48140 -> GREEN d02aa8b. Modelova kvalita (ci gpt-5.4
   precita tento konkretny bledý sken na 300 DPI) je UNVERIFIED.
 - Testy: 175 pass (test_dl_worker + test_dl_eval + 2 nove subory), ruff 0.
+
+### 0.9.138 — #397: money_gate proportional+capped tolerance (2026-09-07)
+- #397: fill_missing_total_price (#395) computed line totals correctly, but sum 112.67 vs printed
+  113.54 (diff 0.87 EUR) exceeded flat 0.50 EUR tolerance. Root cause: model-extracted unit prices
+  carry ~0.1% per-unit systematic inaccuracy on faint dot-matrix scans; compound across 831 items
+  = 0.77% of total. Fix: tolerance = max(0.50, min(1% * doc_total, 2.00)). Cap from fable-5-1
+  review F1 finding: without it a 2000 EUR bulk DL blind spot = 20 EUR. RED 9c266ef -> GREEN
+  502ad2a -> review fixes 2a4bb91. 82 dl_extract tests pass, ruff 0.
