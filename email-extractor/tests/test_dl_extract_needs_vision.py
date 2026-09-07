@@ -1,5 +1,5 @@
-"""#392 RED test: extract_attachment must take the vision path when needs_vision=True,
-even when is_scanned() returns False (no embedded JPEG in the PDF bytes).
+"""#392: needs_vision must force the vision path in dl_extract, and _read_attachments
+must thread the DB column through to the extraction layer.
 
 Pre-fix: extract_attachment ignores needs_vision entirely — the placeholder text
 "[needs AI Vision: scan.pdf]" is fed to json_call as real document text, and the
@@ -8,7 +8,6 @@ model correctly returns 0 documents. The vision_call is never invoked.
 Post-fix: extract_attachment detects needs_vision=True (or the placeholder pattern)
 and forces the vision/render path, invoking vision_call.
 """
-import pytest
 from app.orders import dl_extract
 
 
@@ -68,3 +67,14 @@ def test_extract_attachment_forces_vision_on_placeholder_pattern_alone():
 
     assert len(client.vision_calls) > 0, (
         "vision_call was not invoked for placeholder text pattern")
+
+
+def test_is_vision_placeholder_detects_the_real_pattern():
+    """The placeholder pattern matches exactly what app/extract.py produces."""
+    assert dl_extract._is_vision_placeholder("[needs AI Vision: scan.pdf]")
+    assert dl_extract._is_vision_placeholder("[needs AI Vision: dodaci_list.pdf]")
+    assert dl_extract._is_vision_placeholder("  [needs AI Vision: x.pdf]  ")
+    assert not dl_extract._is_vision_placeholder("real document text here")
+    assert not dl_extract._is_vision_placeholder("")
+    assert not dl_extract._is_vision_placeholder(None)
+    assert not dl_extract._is_vision_placeholder("[needs AI Vision: incomplete")

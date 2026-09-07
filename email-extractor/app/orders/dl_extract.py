@@ -433,21 +433,45 @@ def run_extraction(client, source_text: str) -> dict:
 
 # --- 8) one attachment end-to-end (vision routing) --------------------------
 
-def extract_attachment(client, pdf_bytes: bytes, machine_text: str = "") -> dict:
+def _is_vision_placeholder(text: str) -> bool:
+    """True when `text` is the ingest-time placeholder that `app/extract.py` substitutes
+    for a low-confidence scan flagged `needs_vision` — the pattern ``[needs AI Vision: ...]``.
+
+    Belt-and-suspenders detection: even when the caller does NOT pass ``needs_vision=True``
+    (e.g. a manual replay script that predates #392), the placeholder itself is an
+    unambiguous signal the text is NOT real document content and vision MUST be called."""
+    stripped = (text or "").strip()
+    return stripped.startswith("[needs AI Vision:") and stripped.endswith("]")
+
+
+def extract_attachment(client, pdf_bytes: bytes, machine_text: str = "",
+                       needs_vision: bool = False) -> dict:
     """Scan detection -> vision (only when actually needed, R42/W13) -> R43 cross-check
     -> multi-document extraction -> R50-R52 validation, for ONE attachment.
 
     `client` needs `vision_call` (llm.Client, #201) and `json_call`.
+
+    #392: when ``needs_vision`` is True OR ``machine_text`` is the ingest placeholder
+    ``[needs AI Vision: ...]``, the vision/render path is forced regardless of
+    ``is_scanned()``'s JPEG heuristic — the DB already knows this attachment needs
+    vision, and the placeholder is never real document content.
     """
     jpegs = extract_embedded_jpegs(pdf_bytes)
     scanned = is_scanned(jpegs)
     machine_text = machine_text or ""
-    log.info("DL attachment: %d embedded JPEG(s), scanned=%s", len(jpegs), scanned)
+    # #392: force vision when the DB flag or the placeholder text says so
+    force_vision = needs_vision or _is_vision_placeholder(machine_text)
+    if force_vision and not scanned:
+        log.info("DL attachment: needs_vision=%s, placeholder=%s — forcing vision "
+                 "path despite is_scanned()=False (#392)",
+                 needs_vision, _is_vision_placeholder(machine_text))
+    log.info("DL attachment: %d embedded JPEG(s), scanned=%s, force_vision=%s",
+             len(jpegs), scanned, force_vision)
 
     vision_used = False
     vision_primary: str | None = None
     vision_secondary: str | None = None
-    if scanned:
+    if scanned or force_vision:
         # #224: never trust the raw marker-scanned bytes blindly — only send genuinely
         # decodable, page-sized images. When extraction found nothing usable (the real
         # bug: a Flate-wrapped DCTDecode stream produces only garbage marker spans),
@@ -483,8 +507,15 @@ def extract_attachment(client, pdf_bytes: bytes, machine_text: str = "") -> dict
         vision_primary = transcripts[0] if len(transcripts) > 0 else None
         vision_secondary = transcripts[1] if len(transcripts) > 1 else None
 
-    primary_text = choose_source_text(scanned, machine_text, vision_primary)
-    source_text = combine_transcripts(machine_text, primary_text, vision_secondary)
+    # #392: when vision was forced (needs_vision/placeholder), treat the text-source
+    # priority the same as a real scan — prefer the vision transcript over the placeholder
+    # machine_text, which is NOT real document content. Also strip the placeholder from
+    # the cross-check input so it is never appended as an "alternative OCR transcript" —
+    # a placeholder is noise, not a cross-check signal.
+    effective_scanned = scanned or force_vision
+    cross_check_text = "" if force_vision else machine_text
+    primary_text = choose_source_text(effective_scanned, machine_text, vision_primary)
+    source_text = combine_transcripts(cross_check_text, primary_text, vision_secondary)
 
     extraction = run_extraction(client, source_text)
     return {"documents": extraction["documents"], "scanned": scanned,
@@ -507,7 +538,7 @@ def extract_email(client, attachments: list[dict]) -> dict:
     same mail (deep-review finding, #201). A caller that needs to know whether a specific
     attachment failed reads `attachments[i]["error"]` (`None` on success).
 
-    `attachments`: list of `{"idx", "filename", "pdf_bytes", "machine_text"}`.
+    `attachments`: list of `{"idx", "filename", "pdf_bytes", "machine_text"[, "needs_vision"]}`.
     """
     documents: list[dict] = []
     per_attachment: list[dict] = []
@@ -516,7 +547,8 @@ def extract_email(client, attachments: list[dict]) -> dict:
         filename = att.get("filename", "")
         try:
             result = extract_attachment(client, att.get("pdf_bytes") or b"",
-                                        att.get("machine_text") or "")
+                                        att.get("machine_text") or "",
+                                        needs_vision=bool(att.get("needs_vision")))
         except Exception as e:
             log.exception("DL attachment idx=%s filename=%r failed to extract — "
                           "continuing with the rest of this mail's attachments", idx, filename)
