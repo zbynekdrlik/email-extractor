@@ -101,3 +101,29 @@ DIFFERENT kind (`dl_stuck_classified`, `dl_worker`), unaffected — only the ope
 The two specific #385 mails were ALSO routed out via the ops path (`POST /api/message/<pk>/
 reclassify` → `no_processing`, per `ops-backlog.md`) — the code fix is the systemic guard for all
 future stuck mails; the reclassify clears these two specifically.
+
+## LIMIT + Python-side filtering = FIFO starvation — exclude in SQL, not after (#390)
+
+`sweep`'s `ORDER BY created_at ASC LIMIT 10` fetches the 10 oldest candidates, but
+`reminder_suppressed` + `_recently_rescued` run in Python AFTER the LIMIT. With more than 10
+already-notified messages in the 2-working-day horizon (the live case: 51 candidates, same 10
+oldest suppressed every tick), the LIMIT is consumed entirely by messages the Python loop will
+skip — a brand-new stuck message never gets its Layer-1 vision attempt and ages past the horizon
+(permanently lost, zero trace). Live incident 2026-09-07: messages 10419/10418 (Dobrota scans)
+starved for >6 hours, 0 rescues since 2026-08-19.
+
+Fix: move UNCONDITIONAL suppressions into the SQL WHERE (before the LIMIT) and ORDER BY
+"never-attempted first":
+- `NOT EXISTS (pending_alerts ... delivered_at IS NULL)` — always suppressed
+- `NOT EXISTS (email_events ... stage='rescued' within DEDUP_WINDOW_HOURS)` — always skipped
+- `ORDER BY EXISTS(pending_alerts for this kind) ASC, created_at ASC` — new messages first
+
+The Python checks remain as a safety net for the TIME-DEPENDENT edge case (a delivered alert
+whose re-reminder is not yet due — the morning-check window logic that cannot be cleanly
+replicated in SQL).
+
+**Gotcha for any FUTURE sweep with a SQL LIMIT and a Python-side post-filter:** if the
+post-filter can skip a row the SQL selected, that skipped row consumes a LIMIT slot and starves
+rows the filter would NOT have skipped. Either move the filter INTO the SQL (before the LIMIT)
+or use an ORDER BY that prioritizes actionable rows — never rely on a Python filter running
+after a flat `LIMIT N` to "just work" when the candidate set can grow larger than N.

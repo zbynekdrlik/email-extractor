@@ -4127,3 +4127,28 @@ pred „vytvor v CODEXe" krokom vždy najprv over raw.firma, či už neexistuje.
   rezervujú 0.9.132). Testy: `test_store_retention.py` (11) + `test_config.py` rozšírené, 33 pass; plný
   suite exit 0 / coverage 94,09 % (store_retention.py 96 %); ruff 0, mypy 0 (81 súborov). Full-flow
   worktree dispatch (dispatch explicitne delegoval merge+deploy). Tiket ostáva OTVORENÝ (owner-rozhodnutia).
+
+## #383 + #384 — Google tabuľka „EAN slovnormal" ZRUŠENÁ ako zdroj kariet + „Vyriešené ručne" na nástenke (0.9.134, 2026-09-04)
+- #383 (owner „TABULKU ZRUSIT!!!"): od #129 sa tabuľka NIKDY nečítala, sklad ju však ďalej editoval (ciabatty
+  nikdy nedošli do app). Rozhodnutie: karty + alias (`doplnok`) LEN cez `/znalosti`; `POST /api/znalosti/products`
+  alias tri-state (kľúč chýba = nesiaha, prázdny = vymaže; nový nullable stĺpec cez `migrate.py`). Zvyšné 2
+  rozdiely tabuľky aplikované cez ŽIVÉ API po nasadení (gtin 154 názov, gtin 8588009799771 alias), prečítané späť.
+  Pravidlo: `.claude/rules/catalog-sources.md` + router. Oznam skladu (Odoo ch. 152) = LEN návrh, čaká owner OK.
+- #384 (owner „preco tu nie je moznost vyriesene rucne?"): sentinel `answer.choice="manual"` (nič neučí), scope
+  per DRŽANÝ mail (nie per qid; 409 ak otázka blokuje objednávky z viacerých mailov), JEDNA explicitná tx
+  `SELECT … FOR UPDATE` + guarded `status='held'` UPDATE PRED Odoo post/log_event; undo flipne `held_orders`
+  späť na `held` PRED `messages.processed=false`; serializované proti deadline sweep-u (Fable 🔴, racer test
+  na 2 spojeniach). `proc_status='manual'`. Tlačidlo len v ASK_HTML item-karte (`/otazky`), nie v DASH_HTML.
+- Integrácia: PR #388 → a5a7cb5, main run 33869143209 ✓; deploy 0.9.134 (`/health` ok); DOM read na ŽIVEJ
+  otvorenej karte (neklikané): tlačidlo + hint renderujú, 0 console errors. Run-cards #383/#384 odoslané.
+  GitHub auto-close z tela PR zavrel aj #383 → supervisor reopen + `needs-answer` (oznam skladu).
+
+## #390 — human_processing sweep FIFO starvation fix (0.9.135)
+- Problém: `ORDER BY created_at ASC LIMIT 10` + Python-side `reminder_suppressed` post-filter
+  = 51 kandidátov v horizonte, rovnakých 10 najstarších (už notifikovaných) zaberá každý slot,
+  nová správa sa nikdy nedostane k Layer-1 vision pokusu a po 2 prac. dňoch zmizne — trvalo ticho.
+- Fix: SQL-level exclusion (NOT EXISTS na undelivered pending_alerts + recently rescued) +
+  ORDER BY "never-attempted first" → nové správy vždy dostanú LIMIT slot pred starými.
+  Python-side checks ostávajú ako safety net pre morning-check edge case.
+- Commity: bump 1b5a838 (0.9.135) → [red] 20eb383 → [green] 781de13 → docs e406e62.
+  Testy: 14 pass (test_human_processing.py), ruff 0. Review: fable-5-1, 0🔴 0🟡 2🔵.
