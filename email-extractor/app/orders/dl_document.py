@@ -8,6 +8,7 @@ from . import (
     desadv,
     desadv_edi,
     dl_alerts,
+    dl_extract,
     dl_match,
     dl_memory,
     dl_nonwarehouse,
@@ -154,6 +155,29 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
               workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": doc_number,
                "supplier_name": doc.get("supplierName", ""), "reason": reason}
+
+    # #400: delivery-date sanity gate — LIVE-path only (shadow/e2e-dl corpus
+    # byte-identical, same pattern as #365's hold gate). A successfully-parsed
+    # but implausible date (>30d before or >14d after the mail's receipt) goes
+    # to review with a plain-Slovak reason. Never silently corrects the date.
+    if not shadow:
+        received = message.get("created_at") or datetime.now(UTC)
+        date_reason = dl_extract.delivery_date_gate(delivery_date, received)
+        if date_reason:
+            supplier_name = doc.get("supplierName", "")
+            full_reason = (f"{date_reason} "
+                           f"(DL {doc_number}, dodávateľ {supplier_name})."
+                           if supplier_name
+                           else f"{date_reason} (DL {doc_number}).")
+            _post(cfg, shadow, lambda: dl_report.build_review(
+                full_reason, supplier_name, doc_number, delivery_date, from_addr,
+                subject, link=link), post=post)
+            _event(conn, shadow, message["message_id"], stage="review",
+                  status="review", outcome=full_reason,
+                  detail={"doc_number": doc_number}, rollup=False,
+                  workflow=dl_report.WORKFLOW)
+            return {"outcome": "review", "doc_number": doc_number,
+                   "supplier_name": supplier_name, "reason": full_reason}
 
     try:
         supplier_decision = _match_supplier(conn, client, doc, suppliers, sender_email)

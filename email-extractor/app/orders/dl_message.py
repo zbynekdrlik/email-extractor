@@ -58,12 +58,13 @@ def refresh_due(conn, cfg) -> int | None:
 
 # --- message selection (R10/R11) --------------------------------------------
 
-def _as_message(row, attempts: int = 0) -> dict | None:
+def _as_message(row, attempts: int = 0, created_at=None) -> dict | None:
     if not row:
         return None
     return {"message_id": row[0], "subject": row[1] or "", "from_addr": row[2] or "",
             "from_name": row[3] or "", "combined_text": row[4] or row[5] or "",
             "has_attachments": bool(row[6]), "attempts": attempts,
+            "created_at": created_at,
             "today": datetime.now(UTC).date().isoformat()}
 
 
@@ -78,17 +79,18 @@ def _claim(conn) -> dict | None:
                                     - interval '{CLAIM_STALE_MINUTES} minutes')
                           ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
          RETURNING message_id, subject, from_addr, from_name, combined_text, body_text,
-                   has_attachments, attempts""",
+                   has_attachments, attempts, created_at""",
         (CATEGORY, MAX_ATTEMPTS)).fetchone()
     if not row:
         return None
-    return _as_message(row[:7], attempts=int(row[7] or 0))
+    return _as_message(row[:7], attempts=int(row[7] or 0), created_at=row[8])
 
 
 def _peek_for_shadow(conn, days: int = SHADOW_DAYS) -> dict | None:
     row = conn.execute(
         """SELECT m.message_id, m.subject, m.from_addr, m.from_name,
-                  m.combined_text, m.body_text, m.has_attachments
+                  m.combined_text, m.body_text, m.has_attachments,
+                  m.created_at
              FROM messages m
             WHERE m.category = %s
               AND m.created_at > now() - make_interval(days => %s)
@@ -96,7 +98,7 @@ def _peek_for_shadow(conn, days: int = SHADOW_DAYS) -> dict | None:
                                WHERE r.message_id = m.message_id AND r.shadow)
             ORDER BY m.created_at DESC LIMIT 1""",
         (CATEGORY, max(1, int(days or SHADOW_DAYS)))).fetchone()
-    return _as_message(row)
+    return _as_message(row, created_at=row[7] if row else None)
 
 
 # --- attachments (W1a: every attachment, not just the first PDF) ------------

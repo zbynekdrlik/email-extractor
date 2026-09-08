@@ -911,3 +911,17 @@ entirely. `release_for_supplier_card`'s email rung (which also calls
 CARD's own emails, not the message's from_addr, so a scanner address would only fire
 if someone registered the scanner itself as a supplier card's email (wrong, and a data
 problem, not a code gap).
+## Threading a NEW column into the DL message dict — THREE SELECT sites, not two (#400)
+
+`_as_message(row)` builds the `message` dict passed to `_process_document`. Adding a
+new column (e.g. `created_at` for the delivery-date gate) requires updating ALL THREE
+independent SELECTs that call `_as_message`:
+
+1. `dl_message._claim` (the live claim path, `RETURNING ...`)
+2. `dl_message._peek_for_shadow` (the shadow path, `SELECT ...`)
+3. `dl_questions.release_for_question` (the board-answer reprocess path, `SELECT ...`)
+
+Missing the third site means the new field is `None` on every reprocessed message,
+and any gate that falls back to a substitute (e.g. `datetime.now(UTC)`) silently uses
+a wrong value — the #400 review caught exactly this (F1: the delivery-date gate
+compared against "now" instead of the real received date on a board-answer reprocess).

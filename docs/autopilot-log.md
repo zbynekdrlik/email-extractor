@@ -4203,3 +4203,10 @@ pred „vytvor v CODEXe" krokom vždy najprv over raw.firma, či už neexistuje.
   suspenders exclusion); (2) scanner sender skip in release_for_question (config option
   delivery_notes_scanner_senders); (3) age-guard alert dedup via dl_alerts.already_pending.
   RED 6b694d2 -> GREEN 8685c32. 4 new tests, full dl_worker suite green, ruff 0.
+- **#400 DL delivery-date sanity gate (0.9.140):** Dobrota DL 126047290 had delivery date
+  08.09.2024 (year misread as 2024 instead of 2026) — no gate caught it. Added
+  `dl_extract.delivery_date_gate()`: >30d before or >14d after `messages.created_at` → review
+  with plain-Slovak reason. Live-path only (shadow/e2e-dl byte-identical). Threaded `created_at`
+  into message dict via `dl_message._as_message/_claim/_peek_for_shadow` + `dl_questions`. Review
+  findings fixed: F1 release_for_question path threading, F3 date-only arithmetic, F5 defensive
+  guards removed. RED 5a73dad -> GREEN 95e5e5d -> review fixes fe8d0bb. 97 tests pass, ruff 0.
