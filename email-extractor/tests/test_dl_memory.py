@@ -242,12 +242,11 @@ def test_resolve_human_taught_falls_back_to_an_older_still_valid_teach(pg):
     assert r is not None and r.gtin == "G_OLD" and r.human is True
 
 
-def test_resolve_as_of_excludes_deliveries_strictly_after_the_given_day(pg):
-    """#402: changed from strict `<` to `<=` — same-day is now included."""
+def test_resolve_as_of_excludes_deliveries_on_or_after_the_given_day(pg):
     _ship(pg, "S9x", "kvasnice", "G1", "Kvasnice", "2026-06-01")
     _ship(pg, "S9x", "kvasnice", "G1", "Kvasnice", "2026-06-15")
     r = dl_memory.resolve(pg, "S9x", "kvasnice", as_of="2026-06-10")
-    assert r is not None and r.strength == 1, "only 06-01 is on or before as_of; 06-15 is excluded"
+    assert r is not None and r.strength == 1, "only the 06-01 delivery is before as_of"
 
 
 def test_resolve_missing_supplier_or_item_returns_none(pg):
@@ -255,10 +254,10 @@ def test_resolve_missing_supplier_or_item_returns_none(pg):
     assert dl_memory.resolve(pg, "S1", "") is None
 
 
-# --- #402: human answer silently dropped + same-day ship history excluded ----------
+# --- #402: human answer silently dropped (ON CONFLICT DO NOTHING with ship row) ------
 
 def test_human_remember_overwrites_a_ship_row_with_the_same_conflict_key(pg):
-    """#402 root cause 1: a source='human' write whose (supplier_ean, item_key, gtin,
+    """#402 root cause: a source='human' write whose (supplier_ean, item_key, gtin,
     delivered_on, cnt) matches an existing source='ship' row must NOT be discarded —
     the human answer must survive. Before the fix the ON CONFLICT DO NOTHING clause
     silently drops the human row."""
@@ -275,27 +274,14 @@ def test_human_remember_overwrites_a_ship_row_with_the_same_conflict_key(pg):
         "discarded the human write)")
 
 
-def test_resolve_same_day_ship_is_included_with_as_of_equal_to_delivery_day(pg):
-    """#402 root cause 2: a delivery shipped TODAY must be usable by resolve() when
-    as_of=today. Before the fix, `delivered_on < as_of` (strict) excludes same-day
-    ship history, so memory rescue cannot fire on the same day the delivery was
-    shipped."""
-    _ship(pg, "H2", "múka T650", "G10", "Múka T650 25kg", "2026-09-08")
-    r = dl_memory.resolve(pg, "H2", "múka T650", as_of="2026-09-08")
-    assert r is not None, (
-        "a delivery from as_of day must be included — strict '<' excludes it")
-    assert r.gtin == "G10"
-
-
-def test_human_answer_same_day_as_ship_is_resolved_via_memory(pg):
+def test_human_answer_same_day_as_ship_resolves_via_taught_rung(pg):
     """#402 belt-and-braces: the full incident scenario — ship + human on the same day.
-    Both bugs compound: the human write collides with the ship row (bug 1) and then
-    same-day resolve excludes the ship row (bug 2). After fixing both, resolve() must
-    return the human-taught mapping."""
+    After the fix, resolve() returns the human-taught mapping via the taught_rows rung
+    (which has NO as_of filter), regardless of the strict `<` on the ship-history rung."""
     _ship(pg, "H3", "rožok 50g", "G99", "Rožok 50g", "2026-09-08")
     dl_memory.remember(pg, "H3", "rožok 50g", "G99", "Rožok 50g", "2026-09-08",
                        source="human")
     r = dl_memory.resolve(pg, "H3", "rožok 50g", as_of="2026-09-08")
-    assert r is not None, "human-taught row from today must resolve"
+    assert r is not None, "human-taught row from today must resolve via taught rung"
     assert r.human is True, "resolved row must be the human-taught one"
     assert r.gtin == "G99"

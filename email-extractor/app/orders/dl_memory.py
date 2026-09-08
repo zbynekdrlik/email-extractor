@@ -73,7 +73,9 @@ class Recalled:
 def remember(conn, supplier_ean: str, item: str, gtin: str | None, card: str,
              delivered_on, cnt: int | None = 1, source: str = "ship") -> bool:
     """Record one delivery (or one imported n8n history row). Returns False when this
-    exact (supplier, wording, gtin, day, cnt) is already known.
+    exact (supplier, wording, gtin, day, cnt) is already known AND no source promotion
+    happened (#402: a `source='human'` write that collides with a `source='ship'` row
+    promotes it and returns True).
 
     `cnt` is coerced defensively (review finding on #200's PR): a falsy value (0,
     None, "") OR a genuinely negative/non-numeric one (an export glitch, an upstream
@@ -100,7 +102,7 @@ def remember(conn, supplier_ean: str, item: str, gtin: str | None, card: str,
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
            ON CONFLICT (supplier_ean, item_key, gtin, delivered_on, cnt) DO UPDATE
               SET source = 'human', item_raw = EXCLUDED.item_raw, card = EXCLUDED.card
-            WHERE EXCLUDED.source = 'human' AND dl_item_memory.source <> 'human'
+            WHERE EXCLUDED.source = 'human' AND dl_item_memory.source IS DISTINCT FROM 'human'
            RETURNING id""",
         (str(supplier_ean), key, str(item), str(gtin), card or "", delivered_on,
          cnt_val, source),
@@ -148,11 +150,9 @@ def resolve(conn, supplier_ean: str, item: str, catalog_gtins=None,
     rung to gtins still present in the CURRENT catalog — pass the live snapshot's gtin set;
     `None` (the default) skips this filter, e.g. for a caller with no catalog handy yet.
 
-    `as_of` restricts to deliveries on or before this day (`<=`). #402: changed from strict
-    `<` — same-day ship history must be usable, otherwise a delivery shipped today cannot be
-    rescued by memory on a reprocess triggered the same day. Optional (defaults to no
-    restriction) — DL has no eval corpus yet to make this load-bearing, but the parameter
-    exists so one can be built later without an API change.
+    `as_of` mirrors `memory.resolve()`'s own semantics: restrict to deliveries strictly BEFORE
+    this day. Optional (defaults to no restriction) — DL has no eval corpus yet to make this
+    load-bearing, but the parameter exists so one can be built later without an API change.
 
     A `source='human'` row (the nástenka's "ktorá karta je táto DL položka?" answer, #202)
     outranks everything below unconditionally — mirrors `memory.resolve()`'s own taught-first
@@ -184,7 +184,7 @@ def resolve(conn, supplier_ean: str, item: str, catalog_gtins=None,
         """SELECT gtin, delivered_on, max(cnt) AS c, max(card) AS card
              FROM dl_item_memory
             WHERE supplier_ean = %s AND item_key = %s AND source <> 'human'
-              AND (%s::date IS NULL OR delivered_on <= %s::date)
+              AND (%s::date IS NULL OR delivered_on < %s::date)
             GROUP BY gtin, delivered_on""",
         (str(supplier_ean), key, as_of or None, as_of or None)).fetchall()
     if catalog_gtins is not None:
