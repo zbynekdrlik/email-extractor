@@ -875,3 +875,37 @@ CAP (2.00 EUR) was a fable-5-1 review finding (F1): without it, a 2000 EUR bulk 
 20 EUR blind spot — a genuinely missing line would pass. Any FUTURE tolerance calibration
 should follow this pattern: proportional for precision-class errors, capped to preserve the
 gate's original safety purpose (missing/extra lines).
+
+## A new `_event(..., status=X, rollup=True)` status value is a TWO-LAYER exclusion
+## from `_release_stuck_siblings` — the rollup trigger changes `proc_status` too (#399)
+
+The `email_events` rollup trigger (section 3 above) copies the LAST `rollup=True`
+event's `status` onto `messages.proc_status`. `_release_stuck_siblings` (and
+`_release_stuck_siblings_by_name`) both filter `proc_status = 'review'`, so any
+`_event(... status='X', rollup=True)` where X != 'review' AUTOMATICALLY breaks
+that match via the trigger. #399's `status='age_guard'` is the first case of this.
+
+Belt-and-suspenders: BOTH SQL queries also carry an explicit
+`AND NOT EXISTS (... status = 'age_guard')` so the exclusion holds even if
+`proc_status` is manually overridden to `'review'` in the DB.
+
+Reusable rule: any FUTURE "this message is terminally stuck, never auto-release it"
+event must use a DISTINCT status value (not `'review'`) with `rollup=True` — that
+gives BOTH layers for free (trigger-driven `proc_status` + the SQL's own exclusion).
+And add the `NOT EXISTS` clause to BOTH `_release_stuck_siblings` AND
+`_release_stuck_siblings_by_name` in `dl_questions.py` — they share the same predicate
+shape but are NOT a shared helper; missing one leaves the other path open.
+
+## Scanner/forwarding senders need a config-level exclusion from by-addr sibling
+## release — `from_addr` correlation is meaningless for them (#399)
+
+`tlaciaren@slovnormal.sk` is a shared scanner that forwards mail from EVERY supplier.
+`_release_stuck_siblings` keys on `from_addr`, so answering ANY supplier's question
+released ALL scanner mails. `delivery_notes_scanner_senders` (comma-separated config
+option) is checked in `release_for_question` and `_scanner_senders()` in
+`dl_questions.py` — for a scanner from_addr, the by-addr sibling release is skipped
+entirely. `release_for_supplier_card`'s email rung (which also calls
+`_release_stuck_siblings` per card email) is NOT gated on this — it loops over the
+CARD's own emails, not the message's from_addr, so a scanner address would only fire
+if someone registered the scanner itself as a supplier card's email (wrong, and a data
+problem, not a code gap).
