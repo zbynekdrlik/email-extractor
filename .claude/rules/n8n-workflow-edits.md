@@ -875,3 +875,18 @@ CAP (2.00 EUR) was a fable-5-1 review finding (F1): without it, a 2000 EUR bulk 
 20 EUR blind spot — a genuinely missing line would pass. Any FUTURE tolerance calibration
 should follow this pattern: proportional for precision-class errors, capped to preserve the
 gate's original safety purpose (missing/extra lines).
+
+## Threading a NEW column into the DL message dict — THREE SELECT sites, not two (#400)
+
+`_as_message(row)` builds the `message` dict passed to `_process_document`. Adding a
+new column (e.g. `created_at` for the delivery-date gate) requires updating ALL THREE
+independent SELECTs that call `_as_message`:
+
+1. `dl_message._claim` (the live claim path, `RETURNING ...`)
+2. `dl_message._peek_for_shadow` (the shadow path, `SELECT ...`)
+3. `dl_questions.release_for_question` (the board-answer reprocess path, `SELECT ...`)
+
+Missing the third site means the new field is `None` on every reprocessed message,
+and any gate that falls back to a substitute (e.g. `datetime.now(UTC)`) silently uses
+a wrong value — the #400 review caught exactly this (F1: the delivery-date gate
+compared against "now" instead of the real received date on a board-answer reprocess).
