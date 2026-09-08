@@ -6,7 +6,7 @@ import re
 from datetime import UTC, datetime
 
 from .. import store
-from . import dl_extract, dl_report, dl_snapshot, report, worker
+from . import dl_alerts, dl_extract, dl_report, dl_snapshot, report, worker
 from .dl_correction import _correction_review_reason, _looks_like_correction, _mail_body_only
 from .dl_document import _process_document
 from .dl_events import _event, _flag_attachment, _post
@@ -252,10 +252,19 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                 f"{received:%d.%m.%Y}) — z bezpečnosti sa NEnahráva automaticky do ORIONu, "
                 f"aby sa nezopakovala už raz vybavená dodávka. Skontroluj ho a v prípade "
                 f"potreby ho nahraj / vybav ručne.")
-            _post(cfg, shadow, lambda: dl_report.build_review(
-                reason, from_addr=message.get("from_addr", ""),
-                subject=message.get("subject", ""), link=link), post=post)
-            _event(conn, shadow, message["message_id"], stage="review", status="review",
+            # #399: dedupe — post the alert at most ONCE per message (a sibling release
+            # that re-enters _process_message for the same old message must not re-post).
+            mid = message["message_id"]
+            if not dl_alerts.already_pending(conn, "dl_age_guard", mid):
+                _post(cfg, shadow, lambda: dl_report.build_review(
+                    reason, from_addr=message.get("from_addr", ""),
+                    subject=message.get("subject", ""), link=link), post=post)
+                dl_alerts.enqueue(conn, int(getattr(cfg, "delivery_notes_channel_id", 0)),
+                                  "dl_age_guard", "", message_id=mid)
+            # #399: status='age_guard' (was 'review') so the rollup trigger sets
+            # proc_status='age_guard', and _release_stuck_siblings' SQL carries an
+            # explicit NOT EXISTS (status='age_guard') belt-and-suspenders exclusion.
+            _event(conn, shadow, mid, stage="review", status="age_guard",
                   outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
             return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
                    "documents": [{"outcome": "review", "reason": reason,
