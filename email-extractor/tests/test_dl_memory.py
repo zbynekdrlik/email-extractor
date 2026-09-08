@@ -242,11 +242,12 @@ def test_resolve_human_taught_falls_back_to_an_older_still_valid_teach(pg):
     assert r is not None and r.gtin == "G_OLD" and r.human is True
 
 
-def test_resolve_as_of_excludes_deliveries_on_or_after_the_given_day(pg):
+def test_resolve_as_of_excludes_deliveries_strictly_after_the_given_day(pg):
+    """#402: changed from strict `<` to `<=` — same-day is now included."""
     _ship(pg, "S9x", "kvasnice", "G1", "Kvasnice", "2026-06-01")
     _ship(pg, "S9x", "kvasnice", "G1", "Kvasnice", "2026-06-15")
     r = dl_memory.resolve(pg, "S9x", "kvasnice", as_of="2026-06-10")
-    assert r is not None and r.strength == 1, "only the 06-01 delivery is before as_of"
+    assert r is not None and r.strength == 1, "only 06-01 is on or before as_of; 06-15 is excluded"
 
 
 def test_resolve_missing_supplier_or_item_returns_none(pg):
