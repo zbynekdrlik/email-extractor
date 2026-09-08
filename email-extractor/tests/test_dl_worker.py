@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
@@ -38,6 +39,23 @@ SUPPLIERS_CSV = ("Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturác
 
 SUPPLIER_EAN = "2000000000864"
 ITEM_GTIN = "8588000000001"
+
+# #400 merged `dl_extract.delivery_date_gate()` (>30d before / >14d after
+# `messages.created_at`, which defaults to `now()`) into the live path. A hardcoded
+# calendar-date fixture literal goes stale the moment real wall-clock time passes
+# 30 days beyond it, silently routing every document built from it to review instead
+# of shipping — every pre-existing fixture below used to hardcode "01.08.2026" and
+# broke this way the moment "today" passed 2026-08-31. Compute a date inside the
+# gate's tolerance window at import time instead, so this file never goes stale again.
+_DL_DELIVERY_DATE = (datetime.now(UTC) - timedelta(days=1)).strftime("%d.%m.%Y")
+
+
+def _dl_days_ago(n: int) -> str:
+    """A `deliveryDate` string N days before "now", for a test that deliberately
+    backdates `messages.created_at` — keeps the two consistent so
+    `delivery_date_gate()` (compared against the message's own `created_at`, not
+    wall-clock "now") doesn't trip."""
+    return (datetime.now(UTC) - timedelta(days=n)).strftime("%d.%m.%Y")
 
 
 def _cfg(**kw):
@@ -85,11 +103,17 @@ def _attach(pg, tmp_path, mid, idx=0, filename="dl.pdf", text="dodaci list text"
         raw_bytes if raw_bytes is not None else b"%PDF-1.4 no embedded jpeg here\n")
 
 
-def _doc(doc_number="0100000001", total=5.0, items=None):
+def _doc(doc_number="0100000001", total=5.0, items=None, delivery_date=None):
+    # `delivery_date` lets a test that deliberately backdates `messages.created_at`
+    # (e.g. the max_age_days cutoff tests) supply a value consistent with that backdate
+    # — `delivery_date_gate()` compares against the message's OWN `created_at`, so a
+    # document built against a 40-day-old message needs a matching delivery date too,
+    # not today's.
     return {"documents": [{
         "supplierName": "Pekáreň Lunys", "supplierCity": "Prešov",
         "supplierEmail": "dodavatel@lunys.sk", "docNumber": doc_number,
-        "deliveryDate": "01.08.2026", "documentTotalWithoutVAT": total,
+        "deliveryDate": delivery_date or _DL_DELIVERY_DATE,
+        "documentTotalWithoutVAT": total,
         "items": items or [{"name": "Rožok 50g", "quantity": 10, "unit": "ks",
                             "unitPrice": 0.5, "totalPrice": 5.0, "vatRate": 10}]}]}
 
@@ -600,7 +624,8 @@ def test_delivery_notes_max_age_days_configures_and_disables_the_cutoff(pg, tmp_
     _msg(pg, mid="within", has_attachments=False, combined_text=BODY_TEXT_DL)
     pg.execute("UPDATE messages SET created_at = now() - interval '40 days' "
                "WHERE message_id = 'within'")
-    client_a = FakeClient({"dl_documents": [_doc(doc_number="0100000091")],
+    client_a = FakeClient({"dl_documents": [_doc(doc_number="0100000091",
+                                                  delivery_date=_dl_days_ago(40))],
                            "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [ITEM_MATCHED]})
     up_a = []
     dl_worker.tick(
@@ -614,7 +639,8 @@ def test_delivery_notes_max_age_days_configures_and_disables_the_cutoff(pg, tmp_
     _msg(pg, mid="disabled", has_attachments=False, combined_text=BODY_TEXT_DL)
     pg.execute("UPDATE messages SET created_at = now() - interval '40 days' "
                "WHERE message_id = 'disabled'")
-    client_b = FakeClient({"dl_documents": [_doc(doc_number="0100000092")],
+    client_b = FakeClient({"dl_documents": [_doc(doc_number="0100000092",
+                                                  delivery_date=_dl_days_ago(40))],
                            "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [ITEM_MATCHED]})
     up_b = []
     dl_worker.tick(
@@ -835,7 +861,7 @@ def _bev_doc(doc_number="0100000050", items=None):
     return {"documents": [{
         "supplierName": "Pekáreň Lunys", "supplierCity": "Prešov",
         "supplierEmail": "dodavatel@lunys.sk", "docNumber": doc_number,
-        "deliveryDate": "01.08.2026", "documentTotalWithoutVAT": total, "items": items}]}
+        "deliveryDate": _DL_DELIVERY_DATE, "documentTotalWithoutVAT": total, "items": items}]}
 
 
 def _dl_question_count(pg):
@@ -3031,12 +3057,12 @@ def test_release_for_question_waits_for_a_mixed_dl_supplier_and_dl_item_sibling_
     two_docs = {"documents": [
         {"supplierName": "Neznáma pekáreň s.r.o.", "supplierCity": "",
          "supplierEmail": "neznamy2@somewhere.sk", "docNumber": "0100000005",
-         "deliveryDate": "01.08.2026", "documentTotalWithoutVAT": 5.0,
+         "deliveryDate": _DL_DELIVERY_DATE, "documentTotalWithoutVAT": 5.0,
          "items": [{"name": "Rožok 50g", "quantity": 10, "unit": "ks", "unitPrice": 0.5,
                    "totalPrice": 5.0}]},
         {"supplierName": "Pekáreň Lunys", "supplierCity": "Prešov",
          "supplierEmail": "dodavatel@lunys.sk", "docNumber": "0100000006",
-         "deliveryDate": "01.08.2026", "documentTotalWithoutVAT": 3.0,
+         "deliveryDate": _DL_DELIVERY_DATE, "documentTotalWithoutVAT": 3.0,
          "items": [{"name": "Neznámy chlebík", "quantity": 3, "unit": "ks",
                    "unitPrice": 1.0, "totalPrice": 3.0}]},
     ]}
@@ -3218,7 +3244,7 @@ def _unknown_supplier_doc(sender_email, name="Neznáma pekáreň s.r.o."):
     messages can each ship without colliding on the same (supplier_ean, doc_number)."""
     return {"documents": [{
         "supplierName": name, "supplierCity": "", "supplierEmail": sender_email,
-        "docNumber": "", "deliveryDate": "01.08.2026", "documentTotalWithoutVAT": 5.0,
+        "docNumber": "", "deliveryDate": _DL_DELIVERY_DATE, "documentTotalWithoutVAT": 5.0,
         "items": [{"name": "Rožok 50g", "quantity": 10, "unit": "ks", "unitPrice": 0.5,
                   "totalPrice": 5.0}]}]}
 
@@ -3399,7 +3425,7 @@ def test_release_for_question_sibling_widening_keys_on_envelope_from_addr(
     doc = {"documents": [{
         "supplierName": "Neznáma pekáreň s.r.o.", "supplierCity": "",
         "supplierEmail": extracted_addr, "docNumber": "",
-        "deliveryDate": "01.08.2026", "documentTotalWithoutVAT": 5.0,
+        "deliveryDate": _DL_DELIVERY_DATE, "documentTotalWithoutVAT": 5.0,
         "items": [{"name": "Rožok 50g", "quantity": 10, "unit": "ks", "unitPrice": 0.5,
                   "totalPrice": 5.0}]}]}
     cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
@@ -3977,7 +4003,7 @@ def test_an_ambiguous_codex_name_match_still_raises_the_question(pg, tmp_path):
     _attach(pg, tmp_path, "dl1")
     doc = {"documents": [{
         "supplierName": "Pekáreň Lunys", "supplierCity": "", "supplierEmail": "",
-        "docNumber": "0100000001", "deliveryDate": "01.08.2026",
+        "docNumber": "0100000001", "deliveryDate": _DL_DELIVERY_DATE,
         "documentTotalWithoutVAT": 5.0,
         "items": [{"name": "Rožok 50g", "quantity": 10, "unit": "ks", "unitPrice": 0.5,
                   "totalPrice": 5.0}]}]}
