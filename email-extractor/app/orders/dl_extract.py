@@ -31,6 +31,7 @@ from __future__ import annotations
 import io
 import logging
 import re
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 log = logging.getLogger("orders.dl_extract")
@@ -68,6 +69,8 @@ VISION_RENDER_MAX_PAGES = 15
 MONEY_GATE_TOLERANCE_FLOOR_EUR = 0.50
 MONEY_GATE_TOLERANCE_PCT = 0.01
 MONEY_GATE_TOLERANCE_CAP_EUR = 2.00
+DELIVERY_DATE_MAX_PAST_DAYS = 30
+DELIVERY_DATE_MAX_FUTURE_DAYS = 14
 
 # R50: how far a derived quantity (totalPrice / unitPrice) may drift from the read one
 # before it is even considered a misread, split by unit class.
@@ -371,6 +374,35 @@ def self_correct_quantity(item: dict) -> dict:
     log.info("DL item %r: quantity self-corrected %s -> %s (unitPrice=%s totalPrice=%s)",
               item.get("name", ""), read_qty, derived, unit_price, total_price)
     return out
+
+
+def delivery_date_gate(delivery_date_str: str | None,
+                       received_date: datetime | None = None) -> str | None:
+    """#400: sanity gate on the extracted delivery date — when the date is more than
+    30 days before or more than 14 days after the message's received date, return a
+    plain-Slovak review reason. Never silently corrects the date.
+
+    Returns None (pass) for missing/empty/unparseable dates — those are already handled
+    by validate_document's own missing-date check upstream."""
+    if not delivery_date_str or not delivery_date_str.strip():
+        return None
+    try:
+        parts = delivery_date_str.strip().split(".")
+        if len(parts) < 3:
+            return None
+        day, month, year = int(parts[0]), int(parts[1]), int(parts[2])
+        date(year, month, day)  # validate the parsed components
+    except (ValueError, IndexError):
+        return None
+    ref = received_date or datetime.now(UTC)
+    # Compare date-only to avoid time-of-day noise and tz-offset edge cases
+    diff_days = (date(year, month, day) - ref.date()).days
+    if diff_days < -DELIVERY_DATE_MAX_PAST_DAYS or diff_days > DELIVERY_DATE_MAX_FUTURE_DAYS:
+        ref_str = ref.strftime("%d.%m.%Y")
+        return (f"AI prečítala dátum dodania {delivery_date_str} "
+                f"— mimo očakávaného rozsahu voči prijatiu mailu ({ref_str}). "
+                f"Skontroluj dátum na papieri.")
+    return None
 
 
 def money_gate(document: dict) -> str | None:

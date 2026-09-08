@@ -58,12 +58,13 @@ def refresh_due(conn, cfg) -> int | None:
 
 # --- message selection (R10/R11) --------------------------------------------
 
-def _as_message(row, attempts: int = 0) -> dict | None:
+def _as_message(row, attempts: int = 0, created_at=None) -> dict | None:
     if not row:
         return None
     return {"message_id": row[0], "subject": row[1] or "", "from_addr": row[2] or "",
             "from_name": row[3] or "", "combined_text": row[4] or row[5] or "",
             "has_attachments": bool(row[6]), "attempts": attempts,
+            "created_at": created_at,
             "today": datetime.now(UTC).date().isoformat()}
 
 
@@ -78,17 +79,18 @@ def _claim(conn) -> dict | None:
                                     - interval '{CLAIM_STALE_MINUTES} minutes')
                           ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
          RETURNING message_id, subject, from_addr, from_name, combined_text, body_text,
-                   has_attachments, attempts""",
+                   has_attachments, attempts, created_at""",
         (CATEGORY, MAX_ATTEMPTS)).fetchone()
     if not row:
         return None
-    return _as_message(row[:7], attempts=int(row[7] or 0))
+    return _as_message(row[:7], attempts=int(row[7] or 0), created_at=row[8])
 
 
 def _peek_for_shadow(conn, days: int = SHADOW_DAYS) -> dict | None:
     row = conn.execute(
         """SELECT m.message_id, m.subject, m.from_addr, m.from_name,
-                  m.combined_text, m.body_text, m.has_attachments
+                  m.combined_text, m.body_text, m.has_attachments,
+                  m.created_at
              FROM messages m
             WHERE m.category = %s
               AND m.created_at > now() - make_interval(days => %s)
@@ -96,7 +98,7 @@ def _peek_for_shadow(conn, days: int = SHADOW_DAYS) -> dict | None:
                                WHERE r.message_id = m.message_id AND r.shadow)
             ORDER BY m.created_at DESC LIMIT 1""",
         (CATEGORY, max(1, int(days or SHADOW_DAYS)))).fetchone()
-    return _as_message(row)
+    return _as_message(row, created_at=row[7] if row else None)
 
 
 # --- attachments (W1a: every attachment, not just the first PDF) ------------
@@ -252,10 +254,25 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                 f"{received:%d.%m.%Y}) — z bezpečnosti sa NEnahráva automaticky do ORIONu, "
                 f"aby sa nezopakovala už raz vybavená dodávka. Skontroluj ho a v prípade "
                 f"potreby ho nahraj / vybav ručne.")
-            _post(cfg, shadow, lambda: dl_report.build_review(
-                reason, from_addr=message.get("from_addr", ""),
-                subject=message.get("subject", ""), link=link), post=post)
-            _event(conn, shadow, message["message_id"], stage="review", status="review",
+            # #399: dedupe — post the alert at most ONCE per message. A sibling release
+            # that re-enters _process_message for the same old message must not re-post.
+            # Dedup on the email_events row: the age_guard event persists from the first
+            # entry, so the second entry sees it and skips the post.
+            mid = message["message_id"]
+            already = conn.execute(
+                "SELECT 1 FROM email_events WHERE message_id = %s "
+                "AND status = 'age_guard' LIMIT 1", (mid,)).fetchone()
+            if not already:
+                _post(cfg, shadow, lambda: dl_report.build_review(
+                    reason, from_addr=message.get("from_addr", ""),
+                    subject=message.get("subject", ""), link=link), post=post)
+            # #399: status='age_guard' (was 'review') — _release_stuck_siblings' SQL
+            # carries NOT EXISTS (status='age_guard') so an age-guarded message is never
+            # auto-released. NOTE: _run_and_finish logs a SECOND rollup with status=
+            # result["status"]='review', so proc_status ends up 'review' (the trigger
+            # copies the LAST rollup) — this is CORRECT: it keeps the message visible on
+            # the dashboard's review list. The event row is the sole exclusion key.
+            _event(conn, shadow, mid, stage="review", status="age_guard",
                   outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
             return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
                    "documents": [{"outcome": "review", "reason": reason,

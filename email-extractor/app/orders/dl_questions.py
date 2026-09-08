@@ -11,6 +11,17 @@ from .dl_message import CATEGORY, _as_message, _run_and_finish
 
 log = logging.getLogger("orders.dl_worker")
 
+
+def _scanner_senders(cfg) -> set[str]:
+    """#399: return the configured set of scanner/forwarding email addresses whose
+    from_addr must NOT be used for sibling release correlation (they forward mail from
+    every supplier, so from_addr is meaningless for identifying same-supplier siblings).
+    Config option: `delivery_notes_scanner_senders` — a comma-separated string of email
+    addresses, default empty (no scanner senders excluded). Lowercased for comparison."""
+    raw = str(getattr(cfg, "delivery_notes_scanner_senders", "") or "")
+    return {addr.strip().lower() for addr in raw.split(",") if addr.strip()}
+
+
 # --- #240: an answered dl_item/dl_supplier question gives its document another chance --
 
 def release_for_question(conn, cfg, qid: int, client=None, upload=None,
@@ -108,11 +119,12 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
             return []
         msg_row = conn.execute(
             """SELECT message_id, subject, from_addr, from_name, combined_text,
-                      body_text, has_attachments FROM messages
+                      body_text, has_attachments, created_at FROM messages
                 WHERE message_id = %s""", (message_id,)).fetchone()
         if not msg_row:
             return []
-        message = _as_message(msg_row)
+        message = _as_message(msg_row[:7],
+                              created_at=msg_row[7] if len(msg_row) > 7 else None)
         assert message is not None  # msg_row proven present above ⟹ _as_message returns a dict
         snapshot_id = dl_snapshot.latest_snapshot_id(conn)
         if not snapshot_id:
@@ -139,7 +151,12 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
         # memory), so a false-positive from_addr match never ships a wrong EDI, and the
         # `desadv.claim_send_or_identify` claim still refuses any already-shipped re-upload.
         if kind in ("dl_supplier", "dl_item"):
-            _release_stuck_siblings(conn, message_id, message.get("from_addr", ""))
+            from_addr = message.get("from_addr", "")
+            # #399: a scanner sender (tlaciaren@) forwards mail from EVERY supplier,
+            # so from_addr correlation is meaningless — skip the by-addr sibling release.
+            scanner_senders = _scanner_senders(cfg)
+            if from_addr.strip().lower() not in scanner_senders:
+                _release_stuck_siblings(conn, message_id, from_addr)
         return (result or {}).get("documents", [])
 
 
@@ -357,6 +374,9 @@ def _release_stuck_siblings(conn, exclude_message_id: str, sender_email: str) ->
               AND NOT EXISTS (SELECT 1 FROM email_events e
                               WHERE e.message_id = messages.message_id
                                 AND e.status = 'error')
+              AND NOT EXISTS (SELECT 1 FROM email_events e2
+                              WHERE e2.message_id = messages.message_id
+                                AND e2.status = 'age_guard')
             ORDER BY created_at ASC LIMIT %s""",
         (CATEGORY, exclude_message_id, sender_email, _STUCK_SIBLING_LIMIT)).fetchall()
     if not rows:
@@ -528,6 +548,9 @@ def _release_stuck_siblings_by_name(conn, card_ean: str, card_name: str) -> int:
               AND NOT EXISTS (SELECT 1 FROM email_events e
                               WHERE e.message_id = messages.message_id
                                 AND e.status = 'error')
+              AND NOT EXISTS (SELECT 1 FROM email_events e2
+                              WHERE e2.message_id = messages.message_id
+                                AND e2.status = 'age_guard')
             ORDER BY created_at ASC LIMIT %s""",
         (CATEGORY, _STUCK_SIBLING_CANDIDATE_LIMIT)).fetchall()
     ids = [mid for (mid, fname) in rows

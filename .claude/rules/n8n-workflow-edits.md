@@ -875,3 +875,53 @@ CAP (2.00 EUR) was a fable-5-1 review finding (F1): without it, a 2000 EUR bulk 
 20 EUR blind spot — a genuinely missing line would pass. Any FUTURE tolerance calibration
 should follow this pattern: proportional for precision-class errors, capped to preserve the
 gate's original safety purpose (missing/extra lines).
+
+## The `NOT EXISTS (status='age_guard')` event-row exclusion is the SOLE layer that
+## keeps an age-guarded message out of `_release_stuck_siblings` (#399)
+
+`_process_message`'s age guard writes `_event(..., status='age_guard', rollup=True)`.
+One might expect `proc_status` to become `'age_guard'` (via the rollup trigger, section
+3 above), breaking the SQL's `proc_status = 'review'` match as a SECOND layer. But
+`_run_and_finish` logs its OWN `rollup=True` event AFTER `_process_message` returns,
+with `status=result.get("status", "ok")` = `'review'` (from the age guard's own return
+dict) — the trigger copies the LAST rollup, so `proc_status` ends up `'review'`.
+
+This is CORRECT by design: `proc_status='review'` keeps the age-guarded message visible
+on the dashboard's review list (`httpapi_dashboard_data.py:68,117` filter `IN ('review',
+'partial')`) — the warehouse sees "skontroluj a nahraj ručne". The event-row `NOT EXISTS
+(status='age_guard')` clause on BOTH SQL queries (`_release_stuck_siblings` and
+`_release_stuck_siblings_by_name` in `dl_questions.py`) is the sole exclusion key.
+
+Reusable rule: a FUTURE "this message is terminally stuck, never auto-release it" event
+must add `NOT EXISTS (status='<new_status>')` to BOTH SQL queries — they share the same
+predicate shape but are NOT a shared helper; missing one leaves the other path open.
+Do NOT rely on `proc_status` for the exclusion; the `_run_and_finish` rollup overwrites
+it.
+
+## Scanner/forwarding senders need a config-level exclusion from by-addr sibling
+## release — `from_addr` correlation is meaningless for them (#399)
+
+`tlaciaren@slovnormal.sk` is a shared scanner that forwards mail from EVERY supplier.
+`_release_stuck_siblings` keys on `from_addr`, so answering ANY supplier's question
+released ALL scanner mails. `delivery_notes_scanner_senders` (comma-separated config
+option) is checked in `release_for_question` and `_scanner_senders()` in
+`dl_questions.py` — for a scanner from_addr, the by-addr sibling release is skipped
+entirely. `release_for_supplier_card`'s email rung (which also calls
+`_release_stuck_siblings` per card email) is NOT gated on this — it loops over the
+CARD's own emails, not the message's from_addr, so a scanner address would only fire
+if someone registered the scanner itself as a supplier card's email (wrong, and a data
+problem, not a code gap).
+## Threading a NEW column into the DL message dict — THREE SELECT sites, not two (#400)
+
+`_as_message(row)` builds the `message` dict passed to `_process_document`. Adding a
+new column (e.g. `created_at` for the delivery-date gate) requires updating ALL THREE
+independent SELECTs that call `_as_message`:
+
+1. `dl_message._claim` (the live claim path, `RETURNING ...`)
+2. `dl_message._peek_for_shadow` (the shadow path, `SELECT ...`)
+3. `dl_questions.release_for_question` (the board-answer reprocess path, `SELECT ...`)
+
+Missing the third site means the new field is `None` on every reprocessed message,
+and any gate that falls back to a substitute (e.g. `datetime.now(UTC)`) silently uses
+a wrong value — the #400 review caught exactly this (F1: the delivery-date gate
+compared against "now" instead of the real received date on a board-answer reprocess).
