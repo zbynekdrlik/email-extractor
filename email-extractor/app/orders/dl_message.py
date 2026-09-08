@@ -83,8 +83,7 @@ def _claim(conn) -> dict | None:
         (CATEGORY, MAX_ATTEMPTS)).fetchone()
     if not row:
         return None
-    return _as_message(row[:7], attempts=int(row[7] or 0),
-                       created_at=row[8] if len(row) > 8 else None)
+    return _as_message(row[:7], attempts=int(row[7] or 0), created_at=row[8])
 
 
 def _peek_for_shadow(conn, days: int = SHADOW_DAYS) -> dict | None:
@@ -99,7 +98,7 @@ def _peek_for_shadow(conn, days: int = SHADOW_DAYS) -> dict | None:
                                WHERE r.message_id = m.message_id AND r.shadow)
             ORDER BY m.created_at DESC LIMIT 1""",
         (CATEGORY, max(1, int(days or SHADOW_DAYS)))).fetchone()
-    return _as_message(row, created_at=row[7] if row and len(row) > 7 else None)
+    return _as_message(row, created_at=row[7] if row else None)
 
 
 # --- attachments (W1a: every attachment, not just the first PDF) ------------

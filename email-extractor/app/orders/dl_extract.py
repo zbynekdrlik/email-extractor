@@ -31,7 +31,7 @@ from __future__ import annotations
 import io
 import logging
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 log = logging.getLogger("orders.dl_extract")
@@ -391,13 +391,12 @@ def delivery_date_gate(delivery_date_str: str | None,
         if len(parts) < 3:
             return None
         day, month, year = int(parts[0]), int(parts[1]), int(parts[2])
-        delivery_date = datetime(year, month, day, tzinfo=UTC)
+        date(year, month, day)  # validate the parsed components
     except (ValueError, IndexError):
         return None
     ref = received_date or datetime.now(UTC)
-    # Compare date-only to avoid time-of-day noise
-    ref_date = ref.replace(hour=0, minute=0, second=0, microsecond=0)
-    diff_days = (delivery_date - ref_date).days
+    # Compare date-only to avoid time-of-day noise and tz-offset edge cases
+    diff_days = (date(year, month, day) - ref.date()).days
     if diff_days < -DELIVERY_DATE_MAX_PAST_DAYS or diff_days > DELIVERY_DATE_MAX_FUTURE_DAYS:
         ref_str = ref.strftime("%d.%m.%Y")
         return (f"AI prečítala dátum dodania {delivery_date_str} "
