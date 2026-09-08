@@ -252,10 +252,25 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                 f"{received:%d.%m.%Y}) — z bezpečnosti sa NEnahráva automaticky do ORIONu, "
                 f"aby sa nezopakovala už raz vybavená dodávka. Skontroluj ho a v prípade "
                 f"potreby ho nahraj / vybav ručne.")
-            _post(cfg, shadow, lambda: dl_report.build_review(
-                reason, from_addr=message.get("from_addr", ""),
-                subject=message.get("subject", ""), link=link), post=post)
-            _event(conn, shadow, message["message_id"], stage="review", status="review",
+            # #399: dedupe — post the alert at most ONCE per message. A sibling release
+            # that re-enters _process_message for the same old message must not re-post.
+            # Dedup on the email_events row: the age_guard event persists from the first
+            # entry, so the second entry sees it and skips the post.
+            mid = message["message_id"]
+            already = conn.execute(
+                "SELECT 1 FROM email_events WHERE message_id = %s "
+                "AND status = 'age_guard' LIMIT 1", (mid,)).fetchone()
+            if not already:
+                _post(cfg, shadow, lambda: dl_report.build_review(
+                    reason, from_addr=message.get("from_addr", ""),
+                    subject=message.get("subject", ""), link=link), post=post)
+            # #399: status='age_guard' (was 'review') — _release_stuck_siblings' SQL
+            # carries NOT EXISTS (status='age_guard') so an age-guarded message is never
+            # auto-released. NOTE: _run_and_finish logs a SECOND rollup with status=
+            # result["status"]='review', so proc_status ends up 'review' (the trigger
+            # copies the LAST rollup) — this is CORRECT: it keeps the message visible on
+            # the dashboard's review list. The event row is the sole exclusion key.
+            _event(conn, shadow, mid, stage="review", status="age_guard",
                   outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
             return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
                    "documents": [{"outcome": "review", "reason": reason,

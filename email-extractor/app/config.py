@@ -132,6 +132,10 @@ class Config:
     # disables the guard. Loaded WITHOUT the `or N` idiom so an explicit 0 truly disables
     # it (unlike delivery_notes_shadow_days, where 0 is meaningless — see #229 on the trap).
     delivery_notes_max_age_days: int = 14
+    # #399: comma-separated list of email addresses that are shared scanner/forwarding
+    # senders (tlaciaren@ that forwards from all suppliers). Sibling release skips
+    # from_addr correlation for these — from_addr is meaningless for them.
+    delivery_notes_scanner_senders: str = ""
     # #129/#235: the DL-sheet counterpart of catalog_sheet_id above — same "unread,
     # never removed" precedent, see that field's own comment.
     dl_catalog_gid: str = ""
@@ -297,6 +301,9 @@ class Config:
             # guard, and `0 or 14` would silently re-enable it (the #229 falsy-override trap).
             delivery_notes_max_age_days=int(
                 _get(o, "delivery_notes_max_age_days", "DELIVERY_NOTES_MAX_AGE_DAYS", 14)),
+            delivery_notes_scanner_senders=str(
+                _get(o, "delivery_notes_scanner_senders",
+                     "DELIVERY_NOTES_SCANNER_SENDERS", "") or ""),
             dl_catalog_gid=str(_get(o, "dl_catalog_gid", "DL_CATALOG_GID", "") or ""),
             orion_dl_dir=_get(o, "orion_dl_dir", "ORION_DL_DIR",
                               "C:\\ORION\\COMMUNICATOR\\data\\in_DL"),

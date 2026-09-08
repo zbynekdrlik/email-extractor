@@ -4195,3 +4195,11 @@ pred „vytvor v CODEXe" krokom vždy najprv over raw.firma, či už neexistuje.
   = 0.77% of total. Fix: tolerance = max(0.50, min(1% * doc_total, 2.00)). Cap from fable-5-1
   review F1 finding: without it a 2000 EUR bulk DL blind spot = 20 EUR. RED 9c266ef -> GREEN
   502ad2a -> review fixes 2a4bb91. 82 dl_extract tests pass, ruff 0.
+- **#399 (0.9.139):** DL sibling release flood — every board answer re-released ALL age-guarded
+  scanner mails (tlaciaren@slovnormal.sk), each re-entering _process_message, hitting the 14-day
+  guard again, and re-posting identical alerts to Odoo channel 243. Root cause: age guard logged
+  status='review' (indistinguishable from normal review) + scanner from_addr = all suppliers.
+  Fix: (1) age guard event status='age_guard' (rollup trigger sets proc_status, SQL belt-and-
+  suspenders exclusion); (2) scanner sender skip in release_for_question (config option
+  delivery_notes_scanner_senders); (3) age-guard alert dedup via dl_alerts.already_pending.
+  RED 6b694d2 -> GREEN 8685c32. 4 new tests, full dl_worker suite green, ruff 0.

@@ -4206,3 +4206,172 @@ def test_release_for_supplier_card_release_does_not_bypass_correction_routing(pg
                       ).fetchone()[0] == "review", "the reprocessed correction stays in review"
     assert pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0] == 0, \
         "a released correction mail must never ship to ORION"
+
+
+
+# --- #399: age-guarded + scanner-sender sibling release flood fix -----------------
+
+def test_age_guarded_message_excluded_from_sibling_release_via_event(pg, tmp_path):
+    """#399: a message with a `status='age_guard'` event must NEVER be selected by
+    `_release_stuck_siblings`. NOTE: `proc_status` ends up `'review'` in production
+    (the `_run_and_finish` rollup overwrites it — see F1 in the fable review), so the
+    SQL's `NOT EXISTS (status='age_guard')` clause is the SOLE exclusion layer.
+    `proc_status` is set to `'review'` here to match the real production state."""
+    sender = "tlaciaren@slovnormal.sk"
+    pg.execute(
+        """INSERT INTO messages (message_id, category, subject, from_addr,
+                                 combined_text, has_attachments, processed,
+                                 proc_status)
+           VALUES ('old-scan1', 'dodacie_listy', 'DL 08.07.', %s, '', false, true,
+                   'review')""", (sender,))
+    # Insert age_guard event (the fix status) + override proc_status to stay 'review'
+    # so we test the SQL exclusion, not just the trigger side-effect.
+    pg.execute(
+        """INSERT INTO email_events (message_id, workflow, stage, status, outcome)
+           VALUES ('old-scan1', 'delivery_notes', 'review', 'age_guard',
+                   'Tento dodací list je starší ako 14 dní')""")
+    # Override proc_status back to 'review' to isolate the test of the SQL exclusion
+    pg.execute(
+        "UPDATE messages SET proc_status = 'review' WHERE message_id = 'old-scan1'")
+    n = dl_worker._release_stuck_siblings(pg, "exclude-me", sender)
+    assert n == 0, "a message with an age_guard event must NEVER be auto-released"
+    row = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='old-scan1'").fetchone()
+    assert row == (True,), "stays processed — never reclaimed"
+
+
+def test_age_guarded_by_name_never_releases(pg, tmp_path):
+    """#399: same `status='age_guard'` exclusion must hold for
+    `_release_stuck_siblings_by_name` (the /znalosti card-add path)."""
+    _snapshot(pg)
+    # Use the supplier from the test snapshot so the name-rung card lookup succeeds
+    sender_name = "Pekáreň Lunys"
+    pg.execute(
+        """INSERT INTO messages (message_id, category, subject, from_addr, from_name,
+                                 combined_text, has_attachments, processed,
+                                 proc_status)
+           VALUES ('old-name1', 'dodacie_listy', 'DL', 'x@y.sk', %s, '', false, true,
+                   'review')""", (sender_name,))
+    pg.execute(
+        """INSERT INTO email_events (message_id, workflow, stage, status, outcome)
+           VALUES ('old-name1', 'delivery_notes', 'review', 'age_guard',
+                   'Tento dodací list je starší ako 14 dní')""")
+    pg.execute(
+        "UPDATE messages SET proc_status = 'review' WHERE message_id = 'old-name1'")
+    from app.orders import dl_questions
+    n = dl_questions._release_stuck_siblings_by_name(pg, SUPPLIER_EAN, sender_name)
+    assert n == 0, "an age-guarded message must not be released by the name rung either"
+
+
+def test_scanner_sender_sibling_release_does_not_cross_pollinate_suppliers(pg, tmp_path):
+    """#399: when the answered question's message came from a scanner sender
+    (tlaciaren@slovnormal.sk), release_for_question must NOT call
+    _release_stuck_siblings for that from_addr — the scanner forwards mail from EVERY
+    supplier, so from_addr correlation is meaningless. Answering supplier A's question
+    must NOT release supplier B's stuck messages."""
+    _snapshot(pg)
+    scanner = "tlaciaren@slovnormal.sk"
+    # Message for supplier A — has a question
+    _msg(pg, mid="scanA", from_addr=scanner, has_attachments=False,
+         combined_text=BODY_TEXT_DL)
+    # Message for supplier B — stuck orphan, no question, no error
+    pg.execute(
+        """INSERT INTO messages (message_id, category, subject, from_addr,
+                                 combined_text, has_attachments, processed,
+                                 proc_status)
+           VALUES ('scanB', 'dodacie_listy', 'Supplier B DL', %s, '', false, true,
+                   'review')""", (scanner,))
+    # Process A to get a question raised
+    doc = _doc(total=3.0, items=[{"name": "Neznámy chlebík", "quantity": 3, "unit": "ks",
+                                  "unitPrice": 1.0, "totalPrice": 3.0}])
+    client1 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                          "dl_item": [{"gtin": "NO_MATCH", "matchConfidence": 0.0,
+                                       "matchReason": "žiadna zhoda"}]})
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path),
+               delivery_notes_scanner_senders="tlaciaren@slovnormal.sk")
+    dl_worker.tick(pg, cfg, client=client1,
+                   upload=lambda *a, **k: None, post=lambda c, h: None)
+    qid = pg.execute("SELECT id FROM order_questions WHERE kind='dl_item'").fetchone()[0]
+
+    # Answer the question
+    dl_memory.remember(pg, SUPPLIER_EAN, "Neznámy chlebík", ITEM_GTIN, "Rožok 50g",
+                       "2026-08-10", source="human")
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+              (Json({"choice": ITEM_GTIN}), qid))
+
+    client2 = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                          "dl_item": [ITEM_MATCHED]})
+    dl_worker.release_for_question(
+        pg, cfg, qid, client=client2,
+        upload=lambda *a, **k: None, post=lambda c, h: None)
+
+    # Supplier B's message must NOT have been released
+    row = pg.execute(
+        "SELECT processed FROM messages WHERE message_id='scanB'").fetchone()
+    assert row == (True,), \
+        "scanner sender: answering A must NOT release B's stuck message"
+
+
+def test_two_consecutive_answers_post_age_guard_alert_only_once(pg, tmp_path):
+    """#399: when a message is stopped by the age guard and its Odoo alert is
+    posted, a SECOND re-entry into _process_message (e.g. from a second
+    release_for_question) must NOT post the alert again. The fix deduplicates via
+    dl_alerts.already_pending."""
+    _snapshot(pg)
+    # Old message — already processed with age guard
+    _msg(pg, mid="old-dup", from_addr="dodavatel@lunys.sk", has_attachments=False,
+         combined_text=BODY_TEXT_DL)
+    pg.execute("UPDATE messages SET created_at = now() - interval '40 days', "
+               "processed = false WHERE message_id = 'old-dup'")
+
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    posted = []
+    # First entry — should post the alert
+    dl_worker.tick(pg, cfg, client=FakeClient({}),
+                   upload=lambda *a, **k: None,
+                   post=lambda c, h: posted.append(h))
+    first_count = len(posted)
+    assert first_count == 1, "first pass should post exactly one age-guard alert"
+
+    # Reset the message as if sibling release happened (the pre-fix bug)
+    pg.execute("UPDATE messages SET processed = false, processing_at = NULL "
+               "WHERE message_id = 'old-dup'")
+
+    # Second entry — should NOT post the alert again
+    dl_worker.tick(pg, cfg, client=FakeClient({}),
+                   upload=lambda *a, **k: None,
+                   post=lambda c, h: posted.append(h))
+    assert len(posted) == first_count, \
+        "second pass must NOT re-post the age-guard alert (dedup)"
+
+
+def test_real_age_guard_path_then_sibling_release_returns_zero(pg, tmp_path):
+    """#399 F4 (fable review): drive the REAL age-guard producer (tick on a 40-day-old
+    message) and then verify _release_stuck_siblings returns 0 for that message. This
+    is the integration test the hand-inserted-event tests above cannot provide — it
+    proves the event the REAL code writes is the one the SQL excludes, through the
+    actual _run_and_finish path."""
+    _snapshot(pg)
+    sender = "dodavatel@lunys.sk"
+    _msg(pg, mid="real-old", from_addr=sender, has_attachments=False,
+         combined_text=BODY_TEXT_DL)
+    pg.execute("UPDATE messages SET created_at = now() - interval '40 days' "
+               "WHERE message_id = 'real-old'")
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    dl_worker.tick(pg, cfg, client=FakeClient({}),
+                   upload=lambda *a, **k: None, post=lambda c, h: None)
+    # The message went through the real _process_message -> age guard -> _run_and_finish
+    # path. proc_status should be 'review' (the _run_and_finish rollup overwrites it).
+    row = pg.execute(
+        "SELECT processed, proc_status FROM messages WHERE message_id='real-old'"
+    ).fetchone()
+    assert row == (True, "review"), \
+        "proc_status must be 'review' (the rollup overwrites — F1 reality)"
+    # The age_guard event row must exist
+    ev = pg.execute(
+        "SELECT 1 FROM email_events WHERE message_id='real-old' AND status='age_guard'"
+    ).fetchone()
+    assert ev is not None, "the age_guard event must be written by the real path"
+    # Now: sibling release must NOT pick up this message
+    n = dl_worker._release_stuck_siblings(pg, "other-msg", sender)
+    assert n == 0, "the real age-guard path must make the message immune to sibling release"
