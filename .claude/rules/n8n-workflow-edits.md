@@ -876,25 +876,27 @@ CAP (2.00 EUR) was a fable-5-1 review finding (F1): without it, a 2000 EUR bulk 
 should follow this pattern: proportional for precision-class errors, capped to preserve the
 gate's original safety purpose (missing/extra lines).
 
-## A new `_event(..., status=X, rollup=True)` status value is a TWO-LAYER exclusion
-## from `_release_stuck_siblings` — the rollup trigger changes `proc_status` too (#399)
+## The `NOT EXISTS (status='age_guard')` event-row exclusion is the SOLE layer that
+## keeps an age-guarded message out of `_release_stuck_siblings` (#399)
 
-The `email_events` rollup trigger (section 3 above) copies the LAST `rollup=True`
-event's `status` onto `messages.proc_status`. `_release_stuck_siblings` (and
-`_release_stuck_siblings_by_name`) both filter `proc_status = 'review'`, so any
-`_event(... status='X', rollup=True)` where X != 'review' AUTOMATICALLY breaks
-that match via the trigger. #399's `status='age_guard'` is the first case of this.
+`_process_message`'s age guard writes `_event(..., status='age_guard', rollup=True)`.
+One might expect `proc_status` to become `'age_guard'` (via the rollup trigger, section
+3 above), breaking the SQL's `proc_status = 'review'` match as a SECOND layer. But
+`_run_and_finish` logs its OWN `rollup=True` event AFTER `_process_message` returns,
+with `status=result.get("status", "ok")` = `'review'` (from the age guard's own return
+dict) — the trigger copies the LAST rollup, so `proc_status` ends up `'review'`.
 
-Belt-and-suspenders: BOTH SQL queries also carry an explicit
-`AND NOT EXISTS (... status = 'age_guard')` so the exclusion holds even if
-`proc_status` is manually overridden to `'review'` in the DB.
+This is CORRECT by design: `proc_status='review'` keeps the age-guarded message visible
+on the dashboard's review list (`httpapi_dashboard_data.py:68,117` filter `IN ('review',
+'partial')`) — the warehouse sees "skontroluj a nahraj ručne". The event-row `NOT EXISTS
+(status='age_guard')` clause on BOTH SQL queries (`_release_stuck_siblings` and
+`_release_stuck_siblings_by_name` in `dl_questions.py`) is the sole exclusion key.
 
-Reusable rule: any FUTURE "this message is terminally stuck, never auto-release it"
-event must use a DISTINCT status value (not `'review'`) with `rollup=True` — that
-gives BOTH layers for free (trigger-driven `proc_status` + the SQL's own exclusion).
-And add the `NOT EXISTS` clause to BOTH `_release_stuck_siblings` AND
-`_release_stuck_siblings_by_name` in `dl_questions.py` — they share the same predicate
-shape but are NOT a shared helper; missing one leaves the other path open.
+Reusable rule: a FUTURE "this message is terminally stuck, never auto-release it" event
+must add `NOT EXISTS (status='<new_status>')` to BOTH SQL queries — they share the same
+predicate shape but are NOT a shared helper; missing one leaves the other path open.
+Do NOT rely on `proc_status` for the exclusion; the `_run_and_finish` rollup overwrites
+it.
 
 ## Scanner/forwarding senders need a config-level exclusion from by-addr sibling
 ## release — `from_addr` correlation is meaningless for them (#399)

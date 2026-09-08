@@ -4212,13 +4212,11 @@ def test_release_for_supplier_card_release_does_not_bypass_correction_routing(pg
 # --- #399: age-guarded + scanner-sender sibling release flood fix -----------------
 
 def test_age_guarded_message_excluded_from_sibling_release_via_event(pg, tmp_path):
-    """#399: a message that was stopped by the 14-day age guard and has the
-    age-guard's own `status='age_guard'` event (the fix) must NEVER be selected by
-    `_release_stuck_siblings`. The rollup trigger sets `proc_status='age_guard'`
-    (which already doesn't match the SQL's `proc_status='review'`), but as belt-and-
-    suspenders the SQL also carries an explicit `NOT EXISTS (status='age_guard')`
-    exclusion — tested here by manually setting `proc_status='review'` to isolate
-    the SQL predicate from the trigger."""
+    """#399: a message with a `status='age_guard'` event must NEVER be selected by
+    `_release_stuck_siblings`. NOTE: `proc_status` ends up `'review'` in production
+    (the `_run_and_finish` rollup overwrites it — see F1 in the fable review), so the
+    SQL's `NOT EXISTS (status='age_guard')` clause is the SOLE exclusion layer.
+    `proc_status` is set to `'review'` here to match the real production state."""
     sender = "tlaciaren@slovnormal.sk"
     pg.execute(
         """INSERT INTO messages (message_id, category, subject, from_addr,
@@ -4345,3 +4343,35 @@ def test_two_consecutive_answers_post_age_guard_alert_only_once(pg, tmp_path):
                    post=lambda c, h: posted.append(h))
     assert len(posted) == first_count, \
         "second pass must NOT re-post the age-guard alert (dedup)"
+
+
+def test_real_age_guard_path_then_sibling_release_returns_zero(pg, tmp_path):
+    """#399 F4 (fable review): drive the REAL age-guard producer (tick on a 40-day-old
+    message) and then verify _release_stuck_siblings returns 0 for that message. This
+    is the integration test the hand-inserted-event tests above cannot provide — it
+    proves the event the REAL code writes is the one the SQL excludes, through the
+    actual _run_and_finish path."""
+    _snapshot(pg)
+    sender = "dodavatel@lunys.sk"
+    _msg(pg, mid="real-old", from_addr=sender, has_attachments=False,
+         combined_text=BODY_TEXT_DL)
+    pg.execute("UPDATE messages SET created_at = now() - interval '40 days' "
+               "WHERE message_id = 'real-old'")
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    dl_worker.tick(pg, cfg, client=FakeClient({}),
+                   upload=lambda *a, **k: None, post=lambda c, h: None)
+    # The message went through the real _process_message -> age guard -> _run_and_finish
+    # path. proc_status should be 'review' (the _run_and_finish rollup overwrites it).
+    row = pg.execute(
+        "SELECT processed, proc_status FROM messages WHERE message_id='real-old'"
+    ).fetchone()
+    assert row == (True, "review"), \
+        "proc_status must be 'review' (the rollup overwrites — F1 reality)"
+    # The age_guard event row must exist
+    ev = pg.execute(
+        "SELECT 1 FROM email_events WHERE message_id='real-old' AND status='age_guard'"
+    ).fetchone()
+    assert ev is not None, "the age_guard event must be written by the real path"
+    # Now: sibling release must NOT pick up this message
+    n = dl_worker._release_stuck_siblings(pg, "other-msg", sender)
+    assert n == 0, "the real age-guard path must make the message immune to sibling release"
