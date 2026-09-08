@@ -265,14 +265,14 @@ def test_human_remember_overwrites_a_ship_row_with_the_same_conflict_key(pg):
     assert _ship(pg, "H1", "rožok oravský bez e 50g", "G88", "Rožok štandart 50g",
                  "2026-09-08") is True  # ship row
     # human answer for the SAME key on the SAME day
-    result = dl_memory.remember(pg, "H1", "rožok oravský bez e 50g", "G88",
-                                "Rožok štandart 50g", "2026-09-08", source="human")
+    dl_memory.remember(pg, "H1", "rožok oravský bez e 50g", "G88",
+                       "Rožok štandart 50g", "2026-09-08", source="human")
     # The human write must NOT be lost
     row = pg.execute(
         "SELECT source FROM dl_item_memory WHERE supplier_ean='H1'").fetchone()
     assert row[0] == "human", (
-        "human answer must survive — got %r (the ON CONFLICT DO NOTHING silently "
-        "discarded the human write)" % row[0])
+        f"human answer must survive — got {row[0]!r} (the ON CONFLICT DO NOTHING silently "
+        "discarded the human write)")
 
 
 def test_resolve_same_day_ship_is_included_with_as_of_equal_to_delivery_day(pg):
