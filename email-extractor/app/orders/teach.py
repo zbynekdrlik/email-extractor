@@ -922,7 +922,13 @@ def _apply_dl_item(conn, cfg, q: dict, choice: str, by: str) -> dict:
 
 def _undo_dl_item(conn, q: dict) -> dict:
     """Only what a HUMAN taught is removed — same rule `undo()` already applies to
-    `item_memory`; a genuine `source='ship'` delivery record is evidence and stays."""
+    `item_memory`; a genuine `source='ship'` delivery record is evidence and stays.
+
+    #402 trade-off: `dl_memory.remember(source='human')` promotes an existing ship row
+    to human (ON CONFLICT DO UPDATE). Undoing that answer deletes the promoted row,
+    which also erases the original ship evidence for that (supplier, wording, gtin, day).
+    Acceptable for a hotfix (rare: requires same-day, same-gtin collision + undo); a
+    demote-instead-of-delete would be the structural fix if this proves problematic."""
     payload = q.get("payload") or {}
     conn.execute(
         "DELETE FROM dl_item_memory WHERE supplier_ean = %s AND item_key = %s "

@@ -252,3 +252,36 @@ def test_resolve_as_of_excludes_deliveries_on_or_after_the_given_day(pg):
 def test_resolve_missing_supplier_or_item_returns_none(pg):
     assert dl_memory.resolve(pg, "", "co") is None
     assert dl_memory.resolve(pg, "S1", "") is None
+
+
+# --- #402: human answer silently dropped (ON CONFLICT DO NOTHING with ship row) ------
+
+def test_human_remember_overwrites_a_ship_row_with_the_same_conflict_key(pg):
+    """#402 root cause: a source='human' write whose (supplier_ean, item_key, gtin,
+    delivered_on, cnt) matches an existing source='ship' row must NOT be discarded —
+    the human answer must survive. Before the fix the ON CONFLICT DO NOTHING clause
+    silently drops the human row."""
+    assert _ship(pg, "H1", "rožok oravský bez e 50g", "G88", "Rožok štandart 50g",
+                 "2026-09-08") is True  # ship row
+    # human answer for the SAME key on the SAME day
+    dl_memory.remember(pg, "H1", "rožok oravský bez e 50g", "G88",
+                       "Rožok štandart 50g", "2026-09-08", source="human")
+    # The human write must NOT be lost
+    row = pg.execute(
+        "SELECT source FROM dl_item_memory WHERE supplier_ean='H1'").fetchone()
+    assert row[0] == "human", (
+        f"human answer must survive — got {row[0]!r} (the ON CONFLICT DO NOTHING silently "
+        "discarded the human write)")
+
+
+def test_human_answer_same_day_as_ship_resolves_via_taught_rung(pg):
+    """#402 belt-and-braces: the full incident scenario — ship + human on the same day.
+    After the fix, resolve() returns the human-taught mapping via the taught_rows rung
+    (which has NO as_of filter), regardless of the strict `<` on the ship-history rung."""
+    _ship(pg, "H3", "rožok 50g", "G99", "Rožok 50g", "2026-09-08")
+    dl_memory.remember(pg, "H3", "rožok 50g", "G99", "Rožok 50g", "2026-09-08",
+                       source="human")
+    r = dl_memory.resolve(pg, "H3", "rožok 50g", as_of="2026-09-08")
+    assert r is not None, "human-taught row from today must resolve via taught rung"
+    assert r.human is True, "resolved row must be the human-taught one"
+    assert r.gtin == "G99"
