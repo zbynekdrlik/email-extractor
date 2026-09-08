@@ -73,7 +73,9 @@ class Recalled:
 def remember(conn, supplier_ean: str, item: str, gtin: str | None, card: str,
              delivered_on, cnt: int | None = 1, source: str = "ship") -> bool:
     """Record one delivery (or one imported n8n history row). Returns False when this
-    exact (supplier, wording, gtin, day, cnt) is already known.
+    exact (supplier, wording, gtin, day, cnt) is already known AND no source promotion
+    happened (#402: a `source='human'` write that collides with a `source='ship'` row
+    promotes it and returns True).
 
     `cnt` is coerced defensively (review finding on #200's PR): a falsy value (0,
     None, "") OR a genuinely negative/non-numeric one (an export glitch, an upstream
@@ -88,11 +90,19 @@ def remember(conn, supplier_ean: str, item: str, gtin: str | None, card: str,
         cnt_val = 1 if cnt is None else max(1, int(cnt))
     except (TypeError, ValueError):
         cnt_val = 1
+    # #402: a source='human' write must never be silently lost when a 'ship' row with the
+    # same conflict key already exists — the warehouse's answer outranks machine-inferred
+    # history. DO UPDATE promotes the existing row to 'human' (and refreshes item_raw/card)
+    # only when the incoming source IS 'human' and the stored row is NOT already 'human'.
+    # The WHERE clause makes a same-source duplicate behave like DO NOTHING (no row returned
+    # by RETURNING, so the function returns False — preserving the existing dedup semantics).
     row = conn.execute(
         """INSERT INTO dl_item_memory
                (supplier_ean, item_key, item_raw, gtin, card, delivered_on, cnt, source)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-           ON CONFLICT (supplier_ean, item_key, gtin, delivered_on, cnt) DO NOTHING
+           ON CONFLICT (supplier_ean, item_key, gtin, delivered_on, cnt) DO UPDATE
+              SET source = 'human', item_raw = EXCLUDED.item_raw, card = EXCLUDED.card
+            WHERE EXCLUDED.source = 'human' AND dl_item_memory.source IS DISTINCT FROM 'human'
            RETURNING id""",
         (str(supplier_ean), key, str(item), str(gtin), card or "", delivered_on,
          cnt_val, source),

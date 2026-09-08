@@ -4210,3 +4210,13 @@ pred „vytvor v CODEXe" krokom vždy najprv over raw.firma, či už neexistuje.
   into message dict via `dl_message._as_message/_claim/_peek_for_shadow` + `dl_questions`. Review
   findings fixed: F1 release_for_question path threading, F3 date-only arithmetic, F5 defensive
   guards removed. RED 5a73dad -> GREEN 95e5e5d -> review fixes fe8d0bb. 97 tests pass, ruff 0.
+
+## 0.9.141 — #402 dl_item_memory human answer silently dropped (hotfix)
+`dl_memory.remember()`: `ON CONFLICT DO NOTHING` → `DO UPDATE SET source='human' WHERE
+EXCLUDED.source='human' AND dl_item_memory.source IS DISTINCT FROM 'human'` — a warehouse
+answer that collides with an existing ship row on the same (supplier, item_key, gtin, day,
+cnt) conflict key is no longer silently discarded. The `WHERE` clause preserves dedup
+semantics for same-source duplicates (no row returned → returns False). `as_of` strict `<`
+kept (taught rung has no `as_of` filter — fable review F1). Undo trade-off documented
+(promoted ship→human row is deleted on undo — F2). `IS DISTINCT FROM` for NULL safety (F5).
+RED afb57f6 → GREEN 20c533e → review fixes 6f8f0fe. 28 dl_memory tests + ~270 related pass.
