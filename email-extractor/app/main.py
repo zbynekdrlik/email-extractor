@@ -7,7 +7,7 @@ from datetime import date, timedelta
 
 import psycopg
 
-from . import __version__, config, db, httpapi, imap_poll, store, store_retention
+from . import __version__, config, db, httpapi, imap_poll, mailparse, store, store_retention
 from .process import process_raw
 
 log = logging.getLogger("email-extractor")
@@ -48,12 +48,27 @@ def _matches_spam_allowlist(from_addr: str, allowlist: str) -> bool:
     return False
 
 
+def _cheap_from_addr(raw: bytes) -> str:
+    """Extract from_addr via a header-only parse — no OCR, no attachment extraction."""
+    try:
+        msg = mailparse.parse_message(raw)
+        return mailparse.headers(msg).get("from_addr", "")
+    except Exception:
+        return ""
+
+
 def _poll_folder(cfg, conn, folder: str, *, spam_allowlist: str = "") -> tuple[int, int]:
     """Poll one folder and return (new_count, skipped_count).
 
     When *spam_allowlist* is non-empty the folder is treated as a spam folder:
     only messages whose ``from_addr`` matches the allowlist are ingested; the rest
-    are silently skipped (log at debug level, watermark advances normally).
+    are silently skipped (log at INFO level, watermark advances normally).
+
+    F1 (review): a UIDVALIDITY change on a spam folder re-initializes at the max
+    returned UID instead of scanning from 0, preserving the no-backfill invariant.
+    F2 (review): the allowlist check runs on a cheap header-only parse BEFORE the
+    expensive ``process_raw`` (full OCR/extraction), so a non-allowlisted junk message
+    never triggers extraction or lands in ``imap_failures``.
     """
     new_count = 0
     skipped_count = 0
@@ -73,6 +88,15 @@ def _poll_folder(cfg, conn, folder: str, *, spam_allowlist: str = "") -> tuple[i
             log.warning("%s was re-numbered: %d unreceived email(s) from the previous "
                         "UIDVALIDITY can no longer be retried (kept on record)",
                         folder, retired)
+        # F1: a spam folder must NEVER backfill on a UIDVALIDITY change — re-initialize
+        # at the max UID in the batch (or 0 if empty) instead of scanning from 0.
+        if spam_allowlist and msgs:
+            max_uid = max(uid for uid, _ in msgs)
+            db.set_folder_state(conn, folder, uidvalidity, max_uid)
+            log.warning("spam folder %s re-numbered (UIDVALIDITY %s→%s): "
+                        "re-initialized at UID %d (no backfill)",
+                        folder, prev_validity, uidvalidity, max_uid)
+            return 0, 0
     if not msgs:
         if prev_validity != uidvalidity:
             db.set_folder_state(conn, folder, uidvalidity, base_uid)
@@ -82,17 +106,20 @@ def _poll_folder(cfg, conn, folder: str, *, spam_allowlist: str = "") -> tuple[i
     # poll (already-stored emails dedup on message_id, so re-reads are harmless).
     done_through = base_uid
     blocked = False
+    skipped_addrs: list[str] = []
     for uid, raw in sorted(msgs, key=lambda m: m[0]):
+        # F2: for spam folders, check the allowlist with a CHEAP header-only parse
+        # BEFORE running the expensive process_raw (full OCR/extraction).
+        if spam_allowlist:
+            from_addr = _cheap_from_addr(raw)
+            if not _matches_spam_allowlist(from_addr, spam_allowlist):
+                skipped_count += 1
+                skipped_addrs.append(from_addr or "<empty>")
+                if not blocked:
+                    done_through = max(done_through, uid)
+                continue
         try:
             rec = process_raw(raw)
-            # #408: spam folder sender filtering — skip non-allowlisted senders.
-            if spam_allowlist:
-                from_addr = rec["headers"].get("from_addr", "")
-                if not _matches_spam_allowlist(from_addr, spam_allowlist):
-                    skipped_count += 1
-                    if not blocked:
-                        done_through = max(done_through, uid)
-                    continue
             raw_path, files = store.save_message(
                 cfg.data_dir, rec["identity"], raw, rec["attachments"],
                 cfg.public_base_url,
@@ -121,8 +148,11 @@ def _poll_folder(cfg, conn, folder: str, *, spam_allowlist: str = "") -> tuple[i
                           uid, folder, attempts, MAX_UID_ATTEMPTS)
                 blocked = True
     if skipped_count:
-        log.debug("spam folder %s: skipped %d message(s) outside allowlist", folder,
-                  skipped_count)
+        # F5 (review): log at INFO with the skipped addresses so a domain change is
+        # visible in the prod log, not hidden at DEBUG.
+        unique_addrs = sorted(set(skipped_addrs))[:10]  # bounded
+        log.info("spam folder %s: skipped %d message(s) outside allowlist (%s)",
+                 folder, skipped_count, ", ".join(unique_addrs))
     db.set_folder_state(conn, folder, uidvalidity, done_through)
     return new_count, skipped_count
 
@@ -135,8 +165,8 @@ def run_once(cfg, conn) -> int:
         new_count += n
 
     # #408: spam folders — sender-allowlist filtering + no-backfill on first sight.
-    spam_set = set(getattr(cfg, "spam_folders", []) or [])
-    allowlist = getattr(cfg, "spam_folder_allowlist", "") or ""
+    spam_set = set(cfg.spam_folders or [])
+    allowlist = cfg.spam_folder_allowlist or ""
     for folder in spam_set:
         if folder in cfg.folders:
             continue  # already polled above as a normal folder

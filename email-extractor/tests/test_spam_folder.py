@@ -270,3 +270,96 @@ def test_config_yaml_declares_spam_options():
             f"{name} missing from config.yaml options: block"
         assert re.search(rf"^\s+{name}:", schema_block, re.M), \
             f"{name} missing from config.yaml schema: block"
+
+
+# ---------------------------------------------------------------------------
+# Review-finding regression tests (F1, F2, F3)
+# ---------------------------------------------------------------------------
+
+def test_uidvalidity_change_on_spam_folder_reinitializes_no_backfill(
+    pg, cfg, conn, monkeypatch,
+):
+    """F1: a UIDVALIDITY change on a spam folder must NOT backfill old messages —
+    it re-initializes at the max UID in the batch instead of scanning from 0."""
+    # Pre-set Junk with validity=1, last_uid=30 (previously initialized).
+    db.set_folder_state(conn, "Junk", 1, 30)
+
+    # Server returns a NEW validity (2) with old allowlisted messages.
+    allowlisted_raw = _raw_email(50, from_addr="noreply@inforcloudsuite.com")
+
+    def fake_poll(c, co, folder):
+        if folder == "Junk":
+            return (2, [(5, allowlisted_raw), (10, allowlisted_raw)])
+        return (1, [])
+
+    monkeypatch.setattr(main.imap_poll, "poll_folder", fake_poll)
+    n = main.run_once(cfg, conn)
+    assert n == 0, "a UIDVALIDITY change on a spam folder must NOT ingest anything"
+
+    # State should be re-initialized at the max UID (10) under the new validity (2).
+    validity, last_uid = db.get_folder_state(conn, "Junk")
+    assert validity == 2
+    assert last_uid == 10
+
+    # No messages stored.
+    row = conn.execute("SELECT count(*) FROM messages").fetchone()
+    assert row[0] == 0
+
+
+def test_init_spam_folder_raises_without_uidnext(pg, cfg, conn, monkeypatch):
+    """F1: init_spam_folder must raise when the server does not report UIDNEXT,
+    rather than writing watermark 0 (which would backfill the whole folder)."""
+
+    class NoUidnextIMAP:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def login(self, u, p):
+            pass
+
+        def select_folder(self, folder, readonly=False):
+            return {b"UIDVALIDITY": 1}  # no UIDNEXT
+
+    monkeypatch.setattr(imap_poll, "IMAPClient", lambda *a, **kw: NoUidnextIMAP())
+    with pytest.raises(ValueError, match="UIDNEXT"):
+        imap_poll.init_spam_folder(cfg, conn, "Junk")
+
+    # folder_state must NOT have been written.
+    assert db.get_folder_state(conn, "Junk") == (None, 0)
+
+
+def test_non_allowlisted_broken_message_does_not_stall_watermark(
+    pg, cfg, conn, monkeypatch,
+):
+    """F2: a non-allowlisted message whose process_raw would raise must still be
+    skipped cleanly — the allowlist check runs BEFORE extraction, so no
+    imap_failures row is created and the watermark advances."""
+    db.set_folder_state(conn, "Junk", 1, 0)
+
+    # A non-allowlisted message with garbage that would crash process_raw.
+    broken_raw = b"INVALID-NOT-AN-EMAIL"
+
+    # An allowlisted message after it, to prove the watermark advances.
+    good_raw = _raw_email(99, from_addr="noreply@inforcloudsuite.com")
+
+    def fake_poll(c, co, folder):
+        if folder == "Junk":
+            return (1, [(5, broken_raw), (10, good_raw)])
+        return (1, [])
+
+    monkeypatch.setattr(main.imap_poll, "poll_folder", fake_poll)
+    n = main.run_once(cfg, conn)
+
+    # The allowlisted message should be ingested.
+    assert n == 1
+
+    # The broken non-allowlisted message must NOT create an imap_failures row.
+    failures = db.list_uid_failures(conn)
+    assert len(failures) == 0, "non-allowlisted spam must not land in imap_failures"
+
+    # Watermark should be at 10 (past both messages).
+    validity, last_uid = db.get_folder_state(conn, "Junk")
+    assert last_uid == 10
