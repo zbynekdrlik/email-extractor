@@ -4229,3 +4229,4 @@ semantics for same-source duplicates (no row returned → returns False). `as_of
 kept (taught rung has no `as_of` filter — fable review F1). Undo trade-off documented
 (promoted ship→human row is deleted on undo — F2). `IS DISTINCT FROM` for NULL safety (F5).
 RED afb57f6 → GREEN 20c533e → review fixes 6f8f0fe. 28 dl_memory tests + ~270 related pass.
+- **#408 (0.9.144) — spam folder allowlist polling.** New options `spam_folders` (default `Junk`) + `spam_folder_allowlist` (default `inforcloudsuite.com`). A spam folder is polled separately from `folders`: only allowlisted senders are ingested; on first sight the cursor starts at UIDNEXT (no backfill). Dedup via `message_id` unchanged. bump f55aec4 → feat eaf3d25. 20 tests (12 unit + 4 integration + 4 config).
