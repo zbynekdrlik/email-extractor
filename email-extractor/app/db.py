@@ -212,6 +212,14 @@ REVISIONS = [
               outcome    TEXT
            )""",
     ]),
+    migrate.Revision(13, "add_dl_invoice_runs_attempts_finished_at", [
+        # #412: add attempts counter + finished_at to dl_invoice_runs so stale
+        # claims are reclaimable and exhausted messages get an ops alert.
+        """ALTER TABLE dl_invoice_runs
+              ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 1""",
+        """ALTER TABLE dl_invoice_runs
+              ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ""",
+    ]),
 ]
 
 
