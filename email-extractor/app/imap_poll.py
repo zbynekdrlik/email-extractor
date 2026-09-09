@@ -6,6 +6,21 @@ from imapclient import IMAPClient
 from . import db
 
 
+def init_spam_folder(cfg, conn, folder: str) -> None:
+    """Initialize a spam folder's cursor at UIDNEXT so no backfill occurs.
+
+    Called on a spam folder's first-ever poll (no folder_state row).  The next
+    poll_folder call will then start from UIDNEXT, fetching only truly NEW messages.
+    """
+    with IMAPClient(cfg.imap_host, port=cfg.imap_port, ssl=True) as c:
+        c.login(cfg.imap_user, cfg.imap_pass)
+        sel = c.select_folder(folder, readonly=True)
+        uidvalidity = int(sel.get(b"UIDVALIDITY", 0))
+        uidnext = int(sel.get(b"UIDNEXT", 0))
+    # Set watermark to uidnext - 1 so the next poll fetches only UIDs >= uidnext.
+    db.set_folder_state(conn, folder, uidvalidity, max(uidnext - 1, 0))
+
+
 def poll_folder(cfg, conn, folder: str) -> tuple[int, list[tuple[int, bytes]]]:
     """Return (uidvalidity, [(uid, raw_rfc822), ...]) for messages newer than last seen."""
     with IMAPClient(cfg.imap_host, port=cfg.imap_port, ssl=True) as c:

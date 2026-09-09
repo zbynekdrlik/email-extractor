@@ -19,65 +19,139 @@ log = logging.getLogger("email-extractor")
 MAX_UID_ATTEMPTS = db.MAX_UID_ATTEMPTS
 
 
-def run_once(cfg, conn) -> int:
+def _matches_spam_allowlist(from_addr: str, allowlist: str) -> bool:
+    """Check if from_addr matches any entry in a comma-separated allowlist.
+
+    An entry with ``@`` is matched as an exact address (case-insensitive).
+    An entry without ``@`` is matched as a domain-suffix (case-insensitive):
+    the domain part of *from_addr* must equal the entry or end with ``.`` + entry.
+    """
+    if not allowlist or not from_addr:
+        return False
+    addr_lower = from_addr.strip().lower()
+    at_pos = addr_lower.rfind("@")
+    if at_pos < 0:
+        return False
+    domain = addr_lower[at_pos + 1:]
+    for entry in allowlist.split(","):
+        entry = entry.strip().lower()
+        if not entry:
+            continue
+        if "@" in entry:
+            # Exact address match.
+            if addr_lower == entry:
+                return True
+        else:
+            # Domain suffix match.
+            if domain == entry or domain.endswith("." + entry):
+                return True
+    return False
+
+
+def _poll_folder(cfg, conn, folder: str, *, spam_allowlist: str = "") -> tuple[int, int]:
+    """Poll one folder and return (new_count, skipped_count).
+
+    When *spam_allowlist* is non-empty the folder is treated as a spam folder:
+    only messages whose ``from_addr`` matches the allowlist are ingested; the rest
+    are silently skipped (log at debug level, watermark advances normally).
+    """
     new_count = 0
-    for folder in cfg.folders:
-        prev_validity, prev_uid = db.get_folder_state(conn, folder)
-        try:
-            uidvalidity, msgs = imap_poll.poll_folder(cfg, conn, folder)
-        except Exception as e:
-            log.error("poll failed for folder %s: %s", folder, e)
-            continue
-        # A mailbox re-numbering resets the watermark; persist the new UIDVALIDITY
-        # even when nothing (or nothing successful) came out of this poll, or the
-        # rescan is re-detected on every cycle.
-        base_uid = prev_uid if prev_validity == uidvalidity else 0
+    skipped_count = 0
+    prev_validity, prev_uid = db.get_folder_state(conn, folder)
+    try:
+        uidvalidity, msgs = imap_poll.poll_folder(cfg, conn, folder)
+    except Exception as e:
+        log.error("poll failed for folder %s: %s", folder, e)
+        return 0, 0
+    # A mailbox re-numbering resets the watermark; persist the new UIDVALIDITY
+    # even when nothing (or nothing successful) came out of this poll, or the
+    # rescan is re-detected on every cycle.
+    base_uid = prev_uid if prev_validity == uidvalidity else 0
+    if prev_validity != uidvalidity:
+        retired = db.retire_stale_uid_failures(conn, folder, uidvalidity)
+        if retired:
+            log.warning("%s was re-numbered: %d unreceived email(s) from the previous "
+                        "UIDVALIDITY can no longer be retried (kept on record)",
+                        folder, retired)
+    if not msgs:
         if prev_validity != uidvalidity:
-            retired = db.retire_stale_uid_failures(conn, folder, uidvalidity)
-            if retired:
-                log.warning("%s was re-numbered: %d unreceived email(s) from the previous "
-                            "UIDVALIDITY can no longer be retried (kept on record)",
-                            folder, retired)
-        if not msgs:
-            if prev_validity != uidvalidity:
-                db.set_folder_state(conn, folder, uidvalidity, base_uid)
-            continue
-        # The watermark may only cover an unbroken run of successfully handled UIDs:
-        # everything from the first still-retryable failure upward is re-fetched next
-        # poll (already-stored emails dedup on message_id, so re-reads are harmless).
-        done_through = base_uid
-        blocked = False
-        for uid, raw in sorted(msgs, key=lambda m: m[0]):
-            try:
-                rec = process_raw(raw)
-                raw_path, files = store.save_message(
-                    cfg.data_dir, rec["identity"], raw, rec["attachments"],
-                    cfg.public_base_url,
-                )
-                if db.insert_message(conn, rec, folder, uid, uidvalidity, raw_path, files):
-                    new_count += 1
-                    log.info("stored %s [%s] atts=%d needs_vision=%s",
-                             rec["identity"][:60], folder, len(rec["attachments"]),
-                             rec["needs_vision"])
-                db.clear_uid_failure(conn, folder, uidvalidity, uid)
-                if not blocked:
-                    done_through = max(done_through, uid)
-            except Exception as e:
-                log.exception("failed to process uid=%s in %s", uid, folder)
-                attempts = db.record_uid_failure(conn, folder, uidvalidity, uid, repr(e))
-                if attempts > MAX_UID_ATTEMPTS:
-                    db.mark_uid_skipped(conn, folder, uidvalidity, uid)
-                    log.error("GIVING UP on uid=%s in %s after %d attempts (%s) — "
-                              "recorded in imap_failures, visible on the dashboard; "
-                              "this email was NOT ingested",
-                              uid, folder, attempts, e)
+            db.set_folder_state(conn, folder, uidvalidity, base_uid)
+        return 0, 0
+    # The watermark may only cover an unbroken run of successfully handled UIDs:
+    # everything from the first still-retryable failure upward is re-fetched next
+    # poll (already-stored emails dedup on message_id, so re-reads are harmless).
+    done_through = base_uid
+    blocked = False
+    for uid, raw in sorted(msgs, key=lambda m: m[0]):
+        try:
+            rec = process_raw(raw)
+            # #408: spam folder sender filtering — skip non-allowlisted senders.
+            if spam_allowlist:
+                from_addr = rec["headers"].get("from_addr", "")
+                if not _matches_spam_allowlist(from_addr, spam_allowlist):
+                    skipped_count += 1
                     if not blocked:
                         done_through = max(done_through, uid)
-                else:
-                    log.error("uid=%s in %s will be retried (attempt %d/%d)",
-                              uid, folder, attempts, MAX_UID_ATTEMPTS)
-                    blocked = True
-        db.set_folder_state(conn, folder, uidvalidity, done_through)
+                    continue
+            raw_path, files = store.save_message(
+                cfg.data_dir, rec["identity"], raw, rec["attachments"],
+                cfg.public_base_url,
+            )
+            if db.insert_message(conn, rec, folder, uid, uidvalidity, raw_path, files):
+                new_count += 1
+                log.info("stored %s [%s] atts=%d needs_vision=%s",
+                         rec["identity"][:60], folder, len(rec["attachments"]),
+                         rec["needs_vision"])
+            db.clear_uid_failure(conn, folder, uidvalidity, uid)
+            if not blocked:
+                done_through = max(done_through, uid)
+        except Exception as e:
+            log.exception("failed to process uid=%s in %s", uid, folder)
+            attempts = db.record_uid_failure(conn, folder, uidvalidity, uid, repr(e))
+            if attempts > MAX_UID_ATTEMPTS:
+                db.mark_uid_skipped(conn, folder, uidvalidity, uid)
+                log.error("GIVING UP on uid=%s in %s after %d attempts (%s) — "
+                          "recorded in imap_failures, visible on the dashboard; "
+                          "this email was NOT ingested",
+                          uid, folder, attempts, e)
+                if not blocked:
+                    done_through = max(done_through, uid)
+            else:
+                log.error("uid=%s in %s will be retried (attempt %d/%d)",
+                          uid, folder, attempts, MAX_UID_ATTEMPTS)
+                blocked = True
+    if skipped_count:
+        log.debug("spam folder %s: skipped %d message(s) outside allowlist", folder,
+                  skipped_count)
+    db.set_folder_state(conn, folder, uidvalidity, done_through)
+    return new_count, skipped_count
+
+
+def run_once(cfg, conn) -> int:
+    new_count = 0
+    # Normal folders — ingest everything.
+    for folder in cfg.folders:
+        n, _ = _poll_folder(cfg, conn, folder)
+        new_count += n
+
+    # #408: spam folders — sender-allowlist filtering + no-backfill on first sight.
+    spam_set = set(getattr(cfg, "spam_folders", []) or [])
+    allowlist = getattr(cfg, "spam_folder_allowlist", "") or ""
+    for folder in spam_set:
+        if folder in cfg.folders:
+            continue  # already polled above as a normal folder
+        prev_validity, _prev_uid = db.get_folder_state(conn, folder)
+        if prev_validity is None:
+            # First-ever poll of this spam folder: initialize at UIDNEXT (no backfill).
+            try:
+                imap_poll.init_spam_folder(cfg, conn, folder)
+                log.info("spam folder %s initialized at UIDNEXT (no backfill)", folder)
+            except Exception as e:
+                log.error("failed to initialize spam folder %s: %s", folder, e)
+            continue
+        n, _skipped = _poll_folder(cfg, conn, folder, spam_allowlist=allowlist)
+        new_count += n
+
     return new_count
 
 
