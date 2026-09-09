@@ -453,3 +453,26 @@ matching regression when it's just a bad fixture. Derive the total FROM the line
 helper — `documentTotalWithoutVAT = round(sum(float(it["totalPrice"]) for it in items), 2)`
 (see `_bev_doc` in `test_dl_worker.py`) — so a fixture can never silently trip the gate.
 This is a genuinely-wrong FIXTURE fix, not an assertion weakening (test-strictness OK).
+
+## CI e2e jobs use EPHEMERAL Postgres ports — no fixed port reservation on the self-hosted runner (#410, 2026-09-09)
+
+Before #410 the `e2e-orders` and `e2e-dl` CI jobs hardcoded host ports 55433 and 55435
+for their `services.postgres` containers. On the shared self-hosted runner (`dev2`),
+local dev/worktree sessions starting their own ad-hoc test-Postgres containers on the
+same ports caused CI to fail with `Bind for 0.0.0.0:55433 failed: port is already
+allocated` (happened 3x on 2026-09-09).
+
+**Fix:** both jobs now use `ports: - 5432` (no host-side port — Docker assigns an
+ephemeral one), resolved via `${{ job.services.postgres.ports['5432'] }}` into `PG_DSN`
+through `$GITHUB_ENV`. There are NO CI-reserved ports to avoid any more.
+
+**Local containers should also prefer ephemeral ports** to avoid collisions with CI or
+each other:
+
+```bash
+docker run -d --name my-test-pg -p 127.0.0.1::5432 -e POSTGRES_PASSWORD=postgres postgres:16
+PORT=$(docker port my-test-pg 5432/tcp | cut -d: -f2)
+export PG_TEST_DSN="postgresql://postgres:postgres@localhost:$PORT/postgres"
+```
+
+Always remove throwaway containers after use (`docker rm -f <name>`) to free the port.
