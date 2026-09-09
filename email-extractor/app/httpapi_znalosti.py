@@ -304,6 +304,10 @@ def register(app: Flask, deps: Deps) -> None:
         if not ean.isdigit():
             return jsonify(error="EAN kód EDI musí byť len číslice."), 400
         emails = _parse_emails_field(body.get("emails"))
+        # #407 F1: strip scanner/relay addresses from the submitted emails — same
+        # guard as httpapi_orders_questions.py's new-supplier answer endpoint.
+        from .orders.dl_questions import is_scanner_sender
+        emails = [e for e in emails if not is_scanner_sender(deps.cfg, e)]
         city = str(body.get("city") or "").strip()
         try:
             with deps.db() as c:

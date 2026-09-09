@@ -473,9 +473,8 @@ def _auto_close_matching_supplier_questions(conn, cfg, card_ean: str) -> int:
         sender_email = str(payload.get("sender_email") or "")
         doc = {"supplierName": str(payload.get("supplier_name") or ""),
                "supplierCity": str(payload.get("supplier_city") or "")}
-        # #407: exclude scanner/relay emails from rung 2.
-        _excl = (frozenset({sender_email.strip().lower()})
-                 if is_scanner_sender(cfg, sender_email) else frozenset())
+        # #407 F2: exclude the FULL configured scanner set from rung 2.
+        _excl = frozenset(_scanner_senders(cfg))
         dec = dl_match.resolve_supplier_from_cards(
             doc, cards, sender_email, exclude_emails=_excl)
         if not (dec and dec.matched and str(dec.ean_edi) == card_ean):

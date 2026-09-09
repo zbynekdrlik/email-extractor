@@ -83,13 +83,15 @@ def _match_supplier(conn, client, doc: dict, suppliers: list[dict],
     skips the memory rung entirely and is excluded from `resolve_supplier_from_cards`'s
     rung-2 email match — the supplier comes from the document's printed identity only."""
     # #407: compute the scanner-email exclusion set once, reused by both memory + rung 2.
+    # F2 review fix: exclude the FULL configured scanner set, not just the sender —
+    # doc.supplierEmail could also be a scanner address lifted from a cover sheet.
     _is_scanner = False
     _exclude_emails: frozenset[str] = frozenset()
-    if cfg is not None and sender_email:
-        from .dl_questions import is_scanner_sender
-        _is_scanner = is_scanner_sender(cfg, sender_email)
-        if _is_scanner:
-            _exclude_emails = frozenset({sender_email.strip().lower()})
+    if cfg is not None:
+        from .dl_questions import _scanner_senders, is_scanner_sender
+        _exclude_emails = frozenset(_scanner_senders(cfg))
+        if sender_email:
+            _is_scanner = is_scanner_sender(cfg, sender_email)
     if sender_email and not _is_scanner:
         recalled = dl_supplier_memory.resolve(conn, sender_email)
         if recalled:
