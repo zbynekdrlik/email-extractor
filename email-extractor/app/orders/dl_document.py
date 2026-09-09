@@ -180,7 +180,8 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                    "supplier_name": supplier_name, "reason": full_reason}
 
     try:
-        supplier_decision = _match_supplier(conn, client, doc, suppliers, sender_email)
+        supplier_decision = _match_supplier(conn, client, doc, suppliers, sender_email,
+                                             cfg=cfg)
     except Exception as e:
         _check_retry(message.get("attempts", 0), str(e))
         # #312: the raw exception repr must NOT reach the warehouse channel (243) — a

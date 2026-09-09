@@ -361,7 +361,9 @@ def supplier_name_key(name: str) -> str:
 
 
 def resolve_supplier_from_cards(doc: dict, cards: list[dict],
-                                sender_email: str = "") -> SupplierDecision | None:
+                                sender_email: str = "",
+                                *, exclude_emails: frozenset[str] = frozenset()
+                                ) -> SupplierDecision | None:
     """#322: a CONSERVATIVE, model-free identity match of the document's supplier against the
     effective CODEX supplier list (`dl_snapshot.dl_suppliers_for_management` — frozen snapshot
     ∪ /znalosti overrides). Returns a matched `SupplierDecision` ONLY on an UNAMBIGUOUS
@@ -417,8 +419,10 @@ def resolve_supplier_from_cards(doc: dict, cards: list[dict],
     # must not silently route another NAMED supplier's document to that card's EAN (the
     # #307/#314 "tlaciaren@ forwards everything" risk; #322 review 🔵). On such a name-vs-email
     # contradiction, defer to the name rung below, which matches the printed name.
+    # #407: exclude scanner/relay emails from rung 2 — they forward mail from every
+    # supplier and are never a supplier identity.
     wanted = {e for e in (str(doc.get("supplierEmail") or "").strip().lower(),
-                          str(sender_email or "").strip().lower()) if e}
+                          str(sender_email or "").strip().lower()) if e} - exclude_emails
     if wanted:
         email_cards = [c for c in usable
                        if wanted & {str(e).strip().lower() for e in (c.get("emails") or [])}]

@@ -1024,7 +1024,8 @@ def _apply_dl_supplier(conn, cfg, q: dict, choice: str, by: str) -> dict:
     payload = q.get("payload") or {}
     name = next((c.get("label", "") for c in (q.get("candidates") or [])
                 if str(c.get("value")) == str(choice)), "")
-    dl_supplier_memory.remember(conn, payload.get("sender_email", ""), str(choice), name)
+    dl_supplier_memory.remember(conn, payload.get("sender_email", ""), str(choice), name,
+                                cfg=cfg)
     from . import dl_worker
     released = dl_worker.release_for_question(conn, cfg, q["id"])
     return {"released": released}

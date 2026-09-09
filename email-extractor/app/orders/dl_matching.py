@@ -67,7 +67,7 @@ def _item_input(item: dict, cands: list[dict], partner_name: str) -> str:
 
 
 def _match_supplier(conn, client, doc: dict, suppliers: list[dict],
-                    sender_email: str = "") -> dl_match.SupplierDecision:
+                    sender_email: str = "", *, cfg=None) -> dl_match.SupplierDecision:
     """#240: a HUMAN-taught address (`dl_supplier_memory`, written the moment a
     `dl_supplier` nástenka question is answered) is checked FIRST, before the model is
     ever asked — mirrors AI-orders' own `human_taught` rung sitting above the whole
@@ -77,8 +77,20 @@ def _match_supplier(conn, client, doc: dict, suppliers: list[dict],
     resolved this address) — the document would never actually finish. A taught EAN that
     no longer exists in the CURRENT supplier snapshot (a retired card) falls through to
     the model exactly as before, the same defensive shape `decide_item`'s own
-    `unknown_gtin` guard already uses."""
-    if sender_email:
+    `unknown_gtin` guard already uses.
+
+    #407: when `cfg` is provided, a scanner/relay sender (`delivery_notes_scanner_senders`)
+    skips the memory rung entirely and is excluded from `resolve_supplier_from_cards`'s
+    rung-2 email match — the supplier comes from the document's printed identity only."""
+    # #407: compute the scanner-email exclusion set once, reused by both memory + rung 2.
+    _is_scanner = False
+    _exclude_emails: frozenset[str] = frozenset()
+    if cfg is not None and sender_email:
+        from .dl_questions import is_scanner_sender
+        _is_scanner = is_scanner_sender(cfg, sender_email)
+        if _is_scanner:
+            _exclude_emails = frozenset({sender_email.strip().lower()})
+    if sender_email and not _is_scanner:
         recalled = dl_supplier_memory.resolve(conn, sender_email)
         if recalled:
             row = next((s for s in suppliers
@@ -107,7 +119,8 @@ def _match_supplier(conn, client, doc: dict, suppliers: list[dict],
     # existing ask path — a false supplier match ships a wrongly-addressed EDI to ORION, so
     # this never guesses and never overrides a model MATCH (it runs only on a miss).
     codex = dl_match.resolve_supplier_from_cards(
-        doc, dl_snapshot.dl_suppliers_for_management(conn), sender_email)
+        doc, dl_snapshot.dl_suppliers_for_management(conn), sender_email,
+        exclude_emails=_exclude_emails)
     if codex is not None:
         log.info("dl supplier CODEX-card rescue: model missed but an unambiguous card "
                  "exists -> %s (%s)", codex.ean_edi, codex.name)

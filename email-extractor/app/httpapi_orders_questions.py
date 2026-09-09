@@ -252,7 +252,10 @@ def register(app: Flask, deps: Deps) -> None:
         # question, so the sender's own address was silently never appended.
         ctx = q.get("payload") or {}
         ctx_email = str(ctx.get("sender_email") or "").strip().lower()
-        if ctx_email and ctx_email not in [e.lower() for e in emails]:
+        # #407: never append a scanner/relay address — it is not a supplier identity.
+        from .orders.dl_questions import is_scanner_sender
+        if (ctx_email and ctx_email not in [e.lower() for e in emails]
+                and not is_scanner_sender(deps.cfg, ctx_email)):
             emails.append(ctx_email)
         city = str(ns.get("city") or "").strip()
         try:
