@@ -147,7 +147,9 @@ def test_a_following_mail_of_the_same_shape_is_ignored_before_extraction(pg, mon
     result = pipeline.run(pg, _cfg(), mail2, sid, client=_Empty(),
                           upload=lambda c, n, ct: True,
                           post=lambda c, html, **k: posts.append(html) or {"id": 1})
-    assert result["status"] == "ok"
+    # #404: the ignore branch now returns status="ignored" (not "ok") so the digest never
+    # renders "nahrate do ORIONu" for a mail that never shipped — see report.build_summary.
+    assert result["status"] == "ignored"
     assert len(posts) == 1 and "ignorované" in posts[0].lower()
 
 

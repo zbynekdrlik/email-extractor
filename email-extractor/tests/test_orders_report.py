@@ -379,3 +379,27 @@ def test_workflow_defaults_to_ai_orders_when_not_given(pg):
     report.log_event(pg, "m4", stage="review", status="review", outcome="x")
     row = pg.execute("SELECT workflow FROM email_events WHERE message_id='m4'").fetchone()
     assert row[0] == "ai_orders"
+
+
+# --- #404: the `ignored` status has its own label/icon and never pollutes the `ok` bucket ---
+
+def test_ignored_status_has_its_own_label():
+    """#404: build_summary must render 'ignored' as a distinct status, never 'nahrate'."""
+    html = report.build_summary("Test", [{"status": "ignored", "item_count": 0,
+                                          "missing_count": 0, "reject_reason": "test"}])
+    assert "nahraté do ORIONu" not in html
+    assert "ignorované" in html.lower()
+    # The ⛔ emoji (&#9940;) must be present
+    assert "&#9940;" in html
+
+
+def test_ignored_status_does_not_count_in_ok_bucket():
+    """#404: a single `ignored` order + a single `ok` order must report 1 ok, 1 ignored,
+    never 2 ok."""
+    html = report.build_summary("Test", [
+        {"status": "ok", "item_count": 3, "missing_count": 0, "reject_reason": ""},
+        {"status": "ignored", "item_count": 0, "missing_count": 0, "reject_reason": ""},
+    ])
+    # Exactly one "nahrate do ORIONu" mention (from the single ok order), not two
+    assert html.count("nahraté do ORIONu") == 1
+    assert "ignorované" in html.lower()

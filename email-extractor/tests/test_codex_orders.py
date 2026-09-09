@@ -252,10 +252,18 @@ def test_pipeline_routes_a_promo_flyer_to_no_processing_without_asking(pg):
 
 def test_pipeline_still_asks_for_a_non_promo_no_order_mail(pg):
     """The gate is high-precision: an ordinary no-order mail (no bulk signal) still raises the
-    'is this an order?' question — the promo route must not swallow it."""
+    'is this an order?' question — the promo route must not swallow it.
+
+    #404: the mail carries a real attachment so the (unrelated) 0-attachment ops-alert gate
+    does not redirect it — this test is specifically about the promo-vs-genuine distinction,
+    not about the attachment-presence gate (that gate has its own dedicated coverage in
+    test_orders_pipeline.py)."""
     from app.orders import pipeline
     sid = _seed_customer(pg)
     pg.execute("INSERT INTO messages (message_id, category) VALUES ('m2', 'ai_orders')")
+    pg.execute(
+        "INSERT INTO attachments (message_id, idx, filename, mime, extracted_text)"
+        " VALUES ('m2', 0, 'doc.pdf', 'application/pdf', 'some text')")
     mail = {"message_id": "m2", "subject": "Re: dobrý deň", "from_addr": "klient@pekaren.sk",
             "from_name": "Klient", "combined_text": "Ďakujem, ozvem sa neskôr.",
             "list_unsubscribe": "", "today": "2026-08-18"}
