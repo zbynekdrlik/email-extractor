@@ -418,13 +418,19 @@ def mark_customer_not_order(conn, qid: int, by: str = "") -> dict:
     # write it. The question is still closed + the message marked processed above; only the
     # (unteachable) rule is skipped.
     if sender_norm or key:
+        # #404: persist the sample's attachment presence on the rule.
+        sample_had_att = bool(conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM attachments WHERE message_id = %s)",
+            (q["message_id"],)).fetchone()[0])
         conn.execute(
-            """INSERT INTO mail_rules (sender_norm, subject_key, action, question_id)
-                   VALUES (%s, %s, 'ignore', %s)
+            """INSERT INTO mail_rules
+                   (sender_norm, subject_key, action, question_id, sample_had_attachments)
+                   VALUES (%s, %s, 'ignore', %s, %s)
                ON CONFLICT (sender_norm, subject_key)
                    DO UPDATE SET action = EXCLUDED.action,
-                                 question_id = EXCLUDED.question_id
-               """, (sender_norm, key, qid))
+                                 question_id = EXCLUDED.question_id,
+                                 sample_had_attachments = EXCLUDED.sample_had_attachments
+               """, (sender_norm, key, qid, sample_had_att))
     else:
         log.warning("customer question %s not_order: message %r has no sender/subject — "
                     "no mail_rules taught", qid, q["message_id"])
@@ -679,12 +685,20 @@ def _apply_mail(conn, cfg, q: dict, choice: str, by: str) -> dict:
                   "spracujú automaticky; túto správu vybav ručne v ORIONe (AI ju "
                   "nevedela prečítať)")
         proc_by = "ai_orders_mail_rule"
+    # #404: persist the sample message's attachment presence so `_mail_rule` can refuse
+    # to apply a 0-attachment-sample rule against a message that HAS attachments.
+    sample_had_att = bool(conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM attachments WHERE message_id = %s)",
+        (q["message_id"],)).fetchone()[0])
     conn.execute(
-        """INSERT INTO mail_rules (sender_norm, subject_key, action, question_id)
-               VALUES (%s, %s, %s, %s)
+        """INSERT INTO mail_rules
+               (sender_norm, subject_key, action, question_id, sample_had_attachments)
+               VALUES (%s, %s, %s, %s, %s)
            ON CONFLICT (sender_norm, subject_key)
-               DO UPDATE SET action = EXCLUDED.action, question_id = EXCLUDED.question_id
-           """, (sender_norm, key, action, q["id"]))
+               DO UPDATE SET action = EXCLUDED.action,
+                             question_id = EXCLUDED.question_id,
+                             sample_had_attachments = EXCLUDED.sample_had_attachments
+           """, (sender_norm, key, action, q["id"], sample_had_att))
     conn.execute(
         """UPDATE messages SET processed = true, processed_at = now(),
                processed_by = %s, processing_at = NULL

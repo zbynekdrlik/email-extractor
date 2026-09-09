@@ -31,7 +31,9 @@ WORKFLOW = "ai_orders"
 TIMEOUT = 30
 
 STATUS_ICON = {"ok": "&#9989;", "partial": "&#9888;&#65039;", "held": "&#8987;",
-               "review": "&#10071;", "error": "&#128721;", "manual": "&#9997;&#65039;"}
+               "review": "&#10071;", "error": "&#128721;", "manual": "&#9997;&#65039;",
+               # #404: a taught ignore rule skipped extraction entirely — never "nahrate".
+               "ignored": "&#9940;"}
 STATUS_LABEL = {"ok": "nahraté do ORIONu", "partial": "neúplných (chýba časť položiek)",
                 "held": "čaká na odpoveď skladu", "review": "treba zadať ručne",
                 "error": "zlyhalo pri odosielaní",
@@ -39,7 +41,9 @@ STATUS_LABEL = {"ok": "nahraté do ORIONu", "partial": "neúplných (chýba čas
                 # WITHOUT any ORION upload. Rendered as a plain done-flavour bit; deliberately
                 # NOT in build_summary's has_board_item/has_other_action link checks, so it
                 # never claims something is still "waiting" or needs the dashboard.
-                "manual": "vyriešené ručne skladom (nič sa neposlalo do ORIONu)"}
+                "manual": "vyriešené ručne skladom (nič sa neposlalo do ORIONu)",
+                # #404: a taught ignore rule skipped extraction entirely.
+                "ignored": "ignorované podľa naučeného pravidla"}
 
 
 def sklad_link(cfg) -> str:
@@ -163,7 +167,7 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
     parts = [f"<p>{head}</p>"]
 
     bits = []
-    for status in ("ok", "partial", "held", "review", "error", "manual"):
+    for status in ("ok", "partial", "held", "review", "error", "manual", "ignored"):
         if not counts.get(status):
             continue
         if status == "partial" and total_missing:
