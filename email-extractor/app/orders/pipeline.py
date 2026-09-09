@@ -257,9 +257,8 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
         # alert instead of asking the warehouse (whose "not_order" answer would teach a
         # permanent ignore rule from a non-representative broken sample). The `mail` question
         # fires ONLY when the message had attachments (extraction genuinely ran on real content).
-        msg_has_attachments = bool(conn.execute(
-            "SELECT EXISTS(SELECT 1 FROM attachments WHERE message_id = %s)",
-            (message.get("message_id", ""),)).fetchone()[0]) if not shadow else False
+        msg_has_attachments = teach.has_real_attachments(
+            conn, message.get("message_id", "")) if not shadow else False
         qids: list[int] = []
         if not shadow and rule != "manual":
             if msg_has_attachments:
@@ -278,8 +277,9 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                         conn, "mail_no_attachment", message.get("message_id", "")):
                     dl_alerts.enqueue(
                         conn, ops_ch, "mail_no_attachment",
-                        "<p>&#9888;&#65039; E-mail bez príloh — AI nenašla objednávku. "
-                        "Chýba príloha alebo zlyhala extrakcia.</p>",
+                        dl_alerts.item_line(
+                            message.get("from_addr", ""),
+                            message.get("subject", "")),
                         message_id=message.get("message_id", ""))
                 log.warning("0-attachment mail %s with no orders — ops alert, no mail "
                             "question (fail-safe, #404)", message.get("message_id", ""))
@@ -1081,13 +1081,11 @@ def _mail_rule(conn, sender_email: str, subject: str,
     if not row:
         return None
     action, sample_had_attachments = row[0], row[1]
-    if action == "ignore" and sample_had_attachments is not None:
-        # The sample had no attachments but this mail does — do NOT trust the rule.
+    if action == "ignore":
+        # #404: the sample had no attachments but this mail does — do NOT trust the rule.
+        # NULL sample_had_attachments also takes the fail-safe branch (unknown = distrust).
         if not sample_had_attachments and message_id:
-            has_att = conn.execute(
-                "SELECT EXISTS(SELECT 1 FROM attachments WHERE message_id = %s)",
-                (message_id,)).fetchone()[0]
-            if has_att:
+            if teach.has_real_attachments(conn, message_id):
                 log.info("mail_rule ignore for %s skipped — sample had no attachments "
                          "but incoming message %s has attachments", sender_email, message_id)
                 return None

@@ -153,8 +153,9 @@ ADD_HELD_ORDERS_MANUAL_RELEASE_REASON = [
 ADD_MAIL_RULES_SAMPLE_HAD_ATTACHMENTS = [
     "ALTER TABLE mail_rules ADD COLUMN IF NOT EXISTS sample_had_attachments boolean",
     # Backfill from the sample message via question_id → order_questions.message_id →
-    # attachments count. A rule with no resolvable question/message stays NULL (treated
-    # conservatively as "unknown, do not trust").
+    # attachments count. Excludes ingest-time-skipped images (signature logos etc.) —
+    # only REAL attachments count. A rule with no resolvable question/message stays NULL
+    # (treated conservatively as "unknown, do not trust" — fail-safe).
     """UPDATE mail_rules mr
           SET sample_had_attachments = (
               SELECT count(*) > 0
@@ -162,6 +163,7 @@ ADD_MAIL_RULES_SAMPLE_HAD_ATTACHMENTS = [
                WHERE a.message_id = (
                      SELECT oq.message_id FROM order_questions oq
                       WHERE oq.id = mr.question_id)
+                 AND (a.flag IS NULL OR a.flag NOT LIKE 'skipped_%%')
           )
         WHERE mr.question_id IS NOT NULL
           AND mr.sample_had_attachments IS NULL""",
