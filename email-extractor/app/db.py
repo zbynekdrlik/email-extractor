@@ -187,6 +187,16 @@ REVISIONS = [
                      ADD_HELD_ORDERS_MANUAL_RELEASE_REASON),
     migrate.Revision(10, "add_mail_rules_sample_had_attachments",
                      ADD_MAIL_RULES_SAMPLE_HAD_ATTACHMENTS),
+    migrate.Revision(11, "remove_scanner_sender_supplier_identity", [
+        # #407: delete dl_supplier_memory rows for scanner/relay senders.
+        # The live config value is 'tlaciaren@slovnormal.sk'; the migration hardcodes
+        # it so it is deterministic and does not depend on runtime config.
+        "DELETE FROM dl_supplier_memory WHERE sender_email IN ('tlaciaren@slovnormal.sk')",
+        # Remove scanner addresses from dl_supplier_overrides.emails arrays.
+        """UPDATE dl_supplier_overrides
+              SET emails = array_remove(emails, 'tlaciaren@slovnormal.sk')
+            WHERE 'tlaciaren@slovnormal.sk' = ANY(emails)""",
+    ]),
 ]
 
 

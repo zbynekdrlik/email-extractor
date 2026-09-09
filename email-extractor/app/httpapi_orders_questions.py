@@ -246,13 +246,20 @@ def register(app: Flask, deps: Deps) -> None:
         if not name:
             return jsonify(error="chýba názov"), 400
         emails = _parse_emails_field(ns.get("emails"))
+        # #407 F1: strip scanner/relay addresses from the submitted emails too — the
+        # form prefills with the scanner address and a user who doesn't clear it would
+        # store it into the card's emails, recreating the poisoned rung-2 match.
+        from .orders.dl_questions import is_scanner_sender
+        emails = [e for e in emails if not is_scanner_sender(deps.cfg, e)]
         # `ask_dl_supplier`/`ask_generic` store the sender address in `payload`, not
         # `context` (that column is `customer`-kind-only, see `ask_customer`) — the
         # bug this fixes: reading `context` here always returns {} for a dl_supplier
         # question, so the sender's own address was silently never appended.
         ctx = q.get("payload") or {}
         ctx_email = str(ctx.get("sender_email") or "").strip().lower()
-        if ctx_email and ctx_email not in [e.lower() for e in emails]:
+        # #407: never append a scanner/relay address — it is not a supplier identity.
+        if (ctx_email and ctx_email not in [e.lower() for e in emails]
+                and not is_scanner_sender(deps.cfg, ctx_email)):
             emails.append(ctx_email)
         city = str(ns.get("city") or "").strip()
         try:

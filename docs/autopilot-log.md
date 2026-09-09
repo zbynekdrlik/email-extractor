@@ -4229,3 +4229,14 @@ semantics for same-source duplicates (no row returned → returns False). `as_of
 kept (taught rung has no `as_of` filter — fable review F1). Undo trade-off documented
 (promoted ship→human row is deleted on undo — F2). `IS DISTINCT FROM` for NULL safety (F5).
 RED afb57f6 → GREEN 20c533e → review fixes 6f8f0fe. 28 dl_memory tests + ~270 related pass.
+
+## #407 — scanner-sender supplier identity poisoning (0.9.143)
+
+Scanner/relay address (tlaciaren@slovnormal.sk) forwarding mail from every supplier was
+learned as a single supplier's identity (Dobrota Orava), poisoning subsequent unrelated
+DL deliveries. Five poisoning paths guarded: remember() refuses scanner addresses (cfg=cfg),
+_match_supplier skips memory rung, resolve_supplier_from_cards rung 2 excludes scanner emails,
+httpapi answer endpoint does not append scanner email, _auto_close also excludes. Data
+migration rev 11: DELETE memory rows + array_remove from overrides.emails. RED 3ab0c89
+(3 failing: remember stores scanner, memory rescue used, rung 2 matches) → GREEN e8b415e
+(11 tests: test_scanner_sender_guard.py). Version bump b07b79f.

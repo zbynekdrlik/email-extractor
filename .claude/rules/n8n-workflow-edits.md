@@ -909,8 +909,40 @@ option) is checked in `release_for_question` and `_scanner_senders()` in
 entirely. `release_for_supplier_card`'s email rung (which also calls
 `_release_stuck_siblings` per card email) is NOT gated on this — it loops over the
 CARD's own emails, not the message's from_addr, so a scanner address would only fire
-if someone registered the scanner itself as a supplier card's email (wrong, and a data
-problem, not a code gap).
+if someone registered the scanner itself as a supplier card's email — **which is exactly
+what happened (#407, live incident 2026-09-09: the answer endpoint force-appended
+tlaciaren@ into Dobrota's card emails, and `remember()` stored it as Dobrota's identity;
+the next unrelated DL from Lesaffre through the same scanner shipped under Dobrota).**
+See the #407 section below for the full guard.
+
+## A scanner/relay sender address is NEVER a supplier identity — guard ALL five paths (#407)
+
+`delivery_notes_scanner_senders` (#399) is the single source of truth. `is_scanner_sender
+(cfg, email)` (`dl_questions.py`) is the reusable guard. Five poisoning paths + two upsert
+entry points, all guarded since 0.9.143:
+
+1. `dl_supplier_memory.remember(cfg=cfg)` — refuses a scanner address.
+2. `_match_supplier(cfg=cfg)` — skips the memory-rescue rung for scanner senders.
+3. `resolve_supplier_from_cards(exclude_emails=frozenset(_scanner_senders(cfg)))` — strips
+   scanner emails from rung 2's `wanted` set (the FULL config set, not just the sender —
+   F2: `doc.supplierEmail` can also be a scanner address lifted from a cover sheet).
+4. `httpapi_orders_questions.py` answer endpoint — does not append AND strips scanner emails
+   from the user-submitted `emails` list before `upsert_dl_supplier`.
+5. `httpapi_znalosti.py` card editor — same server-side strip before `upsert_dl_supplier`.
+6. `teach._apply_dl_supplier` — passes `cfg=cfg` to `remember()`.
+7. `_auto_close_matching_supplier_questions` — also excludes scanner emails from rung 2.
+
+Data migration (revision 11): one-shot DELETE from `dl_supplier_memory` + `array_remove`
+from `dl_supplier_overrides.emails`. The migration hardcodes the literal address (a
+migration cannot read runtime config).
+
+**Any FUTURE supplier-identity path in this engine that touches `dl_supplier_memory`,
+`dl_supplier_overrides.emails`, or `resolve_supplier_from_cards`'s email rung must check
+`is_scanner_sender` first.** The form-prefill JS (`httpapi_templates.py:622`) still shows
+the scanner address cosmetically — the server-side strip makes it harmless (saving the form
+cannot persist it), but a future JS-only supplier-card path (without a server round-trip)
+would need its own client-side guard.
+
 ## Threading a NEW column into the DL message dict — THREE SELECT sites, not two (#400)
 
 `_as_message(row)` builds the `message` dict passed to `_process_document`. Adding a
