@@ -42,7 +42,7 @@ def pg(_schema):
         "import_alert_incident_members, import_alert_incident_desadv_members, "
         "match_incidents, "
         "desadv_sent, dl_item_memory, dl_snapshots, dl_supplier_memory, "
-        "dl_catalog_overrides, dl_supplier_overrides, pending_alerts, "
+        "dl_catalog_overrides, dl_supplier_overrides, dl_invoice_runs, pending_alerts, "
         "dl_nonwarehouse_supplier, codex_orders "
         "RESTART IDENTITY CASCADE")
     return _schema

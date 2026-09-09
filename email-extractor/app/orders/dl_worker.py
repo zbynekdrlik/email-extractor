@@ -161,6 +161,9 @@ from .dl_message import (  # noqa: F401 (re-export: public dl_worker API)
     _aggregate_status,
     _as_message,
     _claim,
+    _claim_invoice,
+    _finish_invoice_run,
+    _invoice_supplier_emails,
     _peek_for_shadow,
     _process_message,
     _read_attachments,
@@ -285,12 +288,24 @@ def tick(conn, cfg, client=None, upload=None, post=None, list_dirs=None) -> int:
 
     if engine == "python":
         message = _claim(conn)
-        if not message:
+        if message:
+            result = _run_and_finish(conn, cfg, client, message, snapshot_id, catalog,
+                                     suppliers, upload=upload, post=post,
+                                     list_dirs=list_dirs)
+            return 1 if result is not None else 0
+
+        # #406: try invoice-as-DL dual routing when no regular DL message is pending.
+        # F8 (review finding): short-circuit when no supplier has the flag, avoiding
+        # the 3-query dl_suppliers_for_management call on every idle tick.
+        has_flag = conn.execute(
+            "SELECT 1 FROM dl_supplier_overrides "
+            "WHERE invoice_is_delivery_note AND NOT retired LIMIT 1").fetchone()
+        if not has_flag:
             return 0
-        result = _run_and_finish(conn, cfg, client, message, snapshot_id, catalog,
-                                 suppliers, upload=upload, post=post,
-                                 list_dirs=list_dirs)
-        return 1 if result is not None else 0
+        effective_suppliers = dl_snapshot.dl_suppliers_for_management(conn)
+        return _tick_invoice(conn, cfg, client, snapshot_id, catalog, suppliers,
+                             effective_suppliers, upload=upload, post=post,
+                             list_dirs=list_dirs)
 
     message = _peek_for_shadow(conn, getattr(cfg, "delivery_notes_shadow_days",
                                              SHADOW_DAYS))
@@ -318,3 +333,34 @@ def tick(conn, cfg, client=None, upload=None, post=None, list_dirs=None) -> int:
         return 0
     worker._finish_run(conn, run_id, result.get("status", "ok"), result)
     return 1
+
+
+# --- #406: invoice-as-DL tick ------------------------------------------------
+
+def _tick_invoice(conn, cfg, client, snapshot_id, catalog, suppliers,
+                  effective_suppliers, *, upload=None, post=None,
+                  list_dirs=None) -> int:
+    """Process at most one `category='invoices'` message from a flagged supplier,
+    through the DL pipeline with invoice_mode=True.
+
+    Uses the independent `dl_invoice_runs` ledger — NEVER touches `messages.processed`.
+    The n8n invoice-forward flow continues to own that column; this is the DL engine's
+    own parallel processing path (owner's ROZHODNUTÉ: dual routing).
+
+    F1 (review fix): delegates to `_run_and_finish(invoice_mode=True)` instead of
+    duplicating the tail — a single code path for retry/exception/finish handling,
+    so the invoice and DL paths cannot drift."""
+    message = _claim_invoice(conn, effective_suppliers, cfg=cfg)
+    if not message:
+        return 0
+
+    log.info("DL invoice tick: claimed invoice message %s (subject=%r)",
+             message["message_id"], message.get("subject", ""))
+
+    result = _run_and_finish(conn, cfg, client, message, snapshot_id, catalog,
+                             suppliers, upload=upload, post=post,
+                             list_dirs=list_dirs, invoice_mode=True)
+    if result is not None:
+        log.info("DL invoice tick: %s → %s",
+                 message["message_id"], result.get("status", "ok"))
+    return 1 if result is not None else 0
