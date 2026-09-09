@@ -648,6 +648,30 @@ def _invoice_supplier_emails(suppliers: list[dict]) -> dict[str, dict]:
     return result
 
 
+def _sweep_exhausted_invoices(conn, channel_id: int) -> int:
+    """Park any dl_invoice_runs rows that exhausted MAX_ATTEMPTS without finishing.
+
+    #412 FIX-1 (review finding): the handler-path park (`_run_and_finish`'s
+    `except Exception` at attempts >= MAX_ATTEMPTS) is event-detected — it fires
+    ONLY if the 5th run's own exception handler executes cleanly. An ungraceful
+    death on the 5th attempt (OOM, deploy restart, psycopg.OperationalError on a
+    dead connection) leaves the row `attempts=5, outcome IS NULL` permanently,
+    with no claim path ever picking it up again. This sweep is STATE-detected:
+    it finds any such row (stale + exhausted + unfinished) and parks it, making
+    the handler's own park the fast path and this sweep the guaranteed backstop.
+    Idempotent: `ledger_finish` is guarded on `outcome IS NULL`, `already_pending`
+    dedups the alert."""
+    rows = conn.execute(
+        """SELECT message_id FROM dl_invoice_runs
+            WHERE outcome IS NULL
+              AND attempts >= %s
+              AND claimed_at < now() - make_interval(mins => %s)""",
+        (MAX_ATTEMPTS, CLAIM_STALE_MINUTES)).fetchall()
+    for (mid,) in rows:
+        _park_exhausted_invoice(conn, mid, channel_id)
+    return len(rows)
+
+
 def _claim_invoice(conn, suppliers: list[dict], cfg=None) -> dict | None:
     """Select one unclaimed `category='invoices'` message from a flagged supplier.
 

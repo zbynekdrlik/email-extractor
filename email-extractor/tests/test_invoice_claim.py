@@ -288,3 +288,197 @@ def test_invoice_max_attempts_enqueues_alert(pg):
         "WHERE message_id = 'inv-claim-001'").fetchone()
     assert row[0] == "exhausted"
     assert row[1] is not None
+
+
+def test_park_exhausted_invoice_dedup(pg):
+    """A second _park_exhausted_invoice call does NOT create a duplicate alert."""
+    _snapshot(pg)
+    _insert_invoice_message(pg)
+    _flag_supplier(pg)
+    pg.execute(
+        "INSERT INTO dl_invoice_runs (message_id, attempts, claimed_at) "
+        "VALUES ('inv-claim-001', %s, now())",
+        (dl_message.MAX_ATTEMPTS,))
+
+    dl_message._park_exhausted_invoice(pg, "inv-claim-001", channel_id=243)
+    dl_message._park_exhausted_invoice(pg, "inv-claim-001", channel_id=243)
+
+    count = pg.execute(
+        "SELECT count(*) FROM pending_alerts "
+        "WHERE message_id = 'inv-claim-001'").fetchone()[0]
+    assert count == 1
+
+
+# --- test: _sweep_exhausted_invoices (FIX-1) --------------------------------
+
+def test_sweep_exhausted_invoices_parks_stranded_row(pg):
+    """A row at MAX_ATTEMPTS with no outcome (ungraceful death) is parked by sweep."""
+    _snapshot(pg)
+    _insert_invoice_message(pg)
+    _flag_supplier(pg)
+
+    # Simulate an ungraceful death on the 5th attempt: attempts=5, outcome NULL, stale
+    pg.execute(
+        "INSERT INTO dl_invoice_runs (message_id, attempts, claimed_at) "
+        "VALUES ('inv-claim-001', %s, now() - interval '60 minutes')",
+        (dl_message.MAX_ATTEMPTS,))
+
+    parked = dl_message._sweep_exhausted_invoices(pg, channel_id=243)
+    assert parked == 1
+
+    # Row should now be finished with 'exhausted'
+    row = pg.execute(
+        "SELECT outcome, finished_at FROM dl_invoice_runs "
+        "WHERE message_id = 'inv-claim-001'").fetchone()
+    assert row[0] == "exhausted"
+    assert row[1] is not None
+
+    # Alert should be enqueued
+    alert = pg.execute(
+        "SELECT kind FROM pending_alerts "
+        "WHERE message_id = 'inv-claim-001'").fetchone()
+    assert alert is not None
+    assert alert[0] == "dl_invoice_exhausted"
+
+
+def test_sweep_exhausted_invoices_skips_non_stale(pg):
+    """A row at MAX_ATTEMPTS that is NOT stale is not parked by sweep
+    (still within the stale window — the handler might still be running)."""
+    _snapshot(pg)
+    _insert_invoice_message(pg)
+    _flag_supplier(pg)
+
+    # Freshly claimed at MAX_ATTEMPTS (not yet stale)
+    pg.execute(
+        "INSERT INTO dl_invoice_runs (message_id, attempts, claimed_at) "
+        "VALUES ('inv-claim-001', %s, now())",
+        (dl_message.MAX_ATTEMPTS,))
+
+    parked = dl_message._sweep_exhausted_invoices(pg, channel_id=243)
+    assert parked == 0
+
+    # Row should still be unfinished
+    row = pg.execute(
+        "SELECT outcome FROM dl_invoice_runs "
+        "WHERE message_id = 'inv-claim-001'").fetchone()
+    assert row[0] is None
+
+
+# --- test: _run_and_finish invoice handler behaviour (FIX-2) -----------------
+
+def test_run_and_finish_invoice_transient_leaves_row_for_reclaim(pg):
+    """A transient failure (_RetryLater) in invoice_mode leaves the dl_invoice_runs
+    row intact with outcome IS NULL (not deleted), so the stale window makes it
+    reclaimable. This is the load-bearing behaviour change from #412."""
+    import unittest.mock
+
+    from app.orders import dl_snapshot as ds
+    from app.orders.dl_retry import _RetryLater
+
+    _snapshot(pg)
+    _insert_invoice_message(pg)
+    _flag_supplier(pg)
+    suppliers = ds.dl_suppliers_for_management(pg)
+    msg = dl_message._claim_invoice(pg, suppliers, cfg=_cfg())
+    assert msg is not None
+
+    sid = ds.latest_snapshot_id(pg)
+    catalog = ds.load_catalog(pg, sid)
+
+    # Patch _process_message to raise _RetryLater
+    with unittest.mock.patch("app.orders.dl_message._process_message",
+                             side_effect=_RetryLater("transient test")):
+        result = dl_message._run_and_finish(
+            pg, _cfg(), None, msg, sid, catalog, suppliers, invoice_mode=True)
+
+    assert result is None  # transient → no result
+
+    # The row must still exist with outcome IS NULL (NOT deleted)
+    row = pg.execute(
+        "SELECT outcome, attempts FROM dl_invoice_runs "
+        "WHERE message_id = %s", (msg["message_id"],)).fetchone()
+    assert row is not None, "dl_invoice_runs row was deleted — old F1 behaviour"
+    assert row[0] is None  # outcome IS NULL
+    assert row[1] == 1     # attempts unchanged (was set by _claim_invoice)
+
+
+def test_run_and_finish_invoice_hard_exception_at_max_parks(pg):
+    """A hard exception at MAX_ATTEMPTS parks the message with an alert."""
+    import unittest.mock
+
+    from app.orders import dl_snapshot as ds
+
+    _snapshot(pg)
+    _insert_invoice_message(pg)
+    _flag_supplier(pg)
+    suppliers = ds.dl_suppliers_for_management(pg)
+
+    # Claim, then set attempts to MAX_ATTEMPTS to simulate the 5th claim
+    msg = dl_message._claim_invoice(pg, suppliers, cfg=_cfg())
+    assert msg is not None
+    msg["attempts"] = dl_message.MAX_ATTEMPTS
+    pg.execute("UPDATE dl_invoice_runs SET attempts = %s WHERE message_id = %s",
+               (dl_message.MAX_ATTEMPTS, msg["message_id"]))
+
+    sid = ds.latest_snapshot_id(pg)
+    catalog = ds.load_catalog(pg, sid)
+
+    with unittest.mock.patch("app.orders.dl_message._process_message",
+                             side_effect=RuntimeError("hard failure")):
+        result = dl_message._run_and_finish(
+            pg, _cfg(), None, msg, sid, catalog, suppliers, invoice_mode=True)
+
+    assert result is None
+
+    # Row should be parked with 'exhausted'
+    row = pg.execute(
+        "SELECT outcome, finished_at FROM dl_invoice_runs "
+        "WHERE message_id = %s", (msg["message_id"],)).fetchone()
+    assert row[0] == "exhausted"
+    assert row[1] is not None
+
+    # Alert should be enqueued
+    alert = pg.execute(
+        "SELECT kind FROM pending_alerts "
+        "WHERE message_id = %s", (msg["message_id"],)).fetchone()
+    assert alert is not None
+    assert alert[0] == "dl_invoice_exhausted"
+
+
+def test_run_and_finish_invoice_hard_exception_below_max_leaves_for_reclaim(pg):
+    """A hard exception below MAX_ATTEMPTS leaves the row for stale reclaim
+    (outcome stays NULL, no alert)."""
+    import unittest.mock
+
+    from app.orders import dl_snapshot as ds
+
+    _snapshot(pg)
+    _insert_invoice_message(pg)
+    _flag_supplier(pg)
+    suppliers = ds.dl_suppliers_for_management(pg)
+
+    msg = dl_message._claim_invoice(pg, suppliers, cfg=_cfg())
+    assert msg is not None
+    # attempts=1 (from claim), well below MAX_ATTEMPTS=5
+
+    sid = ds.latest_snapshot_id(pg)
+    catalog = ds.load_catalog(pg, sid)
+
+    with unittest.mock.patch("app.orders.dl_message._process_message",
+                             side_effect=RuntimeError("hard failure")):
+        result = dl_message._run_and_finish(
+            pg, _cfg(), None, msg, sid, catalog, suppliers, invoice_mode=True)
+
+    assert result is None
+
+    # Row should still have outcome IS NULL (left for reclaim)
+    row = pg.execute(
+        "SELECT outcome FROM dl_invoice_runs "
+        "WHERE message_id = %s", (msg["message_id"],)).fetchone()
+    assert row[0] is None, "outcome should be NULL (left for stale reclaim)"
+
+    # No alert
+    alert = pg.execute(
+        "SELECT count(*) FROM pending_alerts "
+        "WHERE message_id = %s", (msg["message_id"],)).fetchone()
+    assert alert[0] == 0

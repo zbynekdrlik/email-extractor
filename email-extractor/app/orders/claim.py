@@ -42,10 +42,20 @@ problem shape, and forcing all of them through one abstraction would be exactly 
    lock guarding a single conflicting WRITE (#248's own problem), not a claim held
    across a slow external side effect.
 
-**Reach for this module when a NEW feature needs "claim this identity before a slow/
-irreversible external side effect, with an atomic answer to who currently holds it" —
-not for a plain work queue (#1), a stays-open marker (#3), a one-time migration (#4),
-or a single write-conflict guard (#5).**
+**Reach for `claim_or_identify` when a NEW feature needs "claim this identity before
+a slow/irreversible external side effect, with an atomic answer to who currently holds
+it" — not for a plain work queue (#1), a stays-open marker (#3), a one-time migration
+(#4), or a single write-conflict guard (#5).**
+
+6. **`dl_invoice_runs`** (#412) — an attempt-tracked LEDGER with stale-reclaim and
+   max-attempts exhaustion, guarding a per-message processing pass that may crash
+   mid-run. THIS is the shape `ledger_claim`/`ledger_finish` (below) generalizes —
+   a work-queue-style retry pattern on a ledger table with `claimed_at`/`attempts`/
+   `outcome`/`finished_at` columns. Designed so `desadv_sent`/`edi_sent` can adopt
+   later (after their own migration adds the same columns) without changing their
+   behaviour in the adoption lane. Reach for it when a NEW feature needs "claim
+   this row, retry up to N times with a stale-window reclaim, park on exhaustion"
+   — not for the two-phase upload identity question (#2's `claim_or_identify`).
 """
 from __future__ import annotations
 
