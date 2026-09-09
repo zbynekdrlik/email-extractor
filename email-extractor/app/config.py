@@ -26,6 +26,15 @@ def _get(opts: dict, key: str, env: str, default=None):
     return os.environ.get(env, default)
 
 
+def _parse_list(val) -> list[str]:
+    """Split a comma-separated string or pass through a list unchanged."""
+    if isinstance(val, str):
+        return [f.strip() for f in val.split(",") if f.strip()]
+    if isinstance(val, list):
+        return val
+    return []
+
+
 @dataclass
 class Config:
     imap_host: str = ""
@@ -206,6 +215,15 @@ class Config:
     # explicit 0 truly disables it (the #229 falsy-override trap — same as
     # delivery_notes_max_age_days above).
     store_retention_days: int = 0
+    # #408: IMAP folders to treat as spam/junk — polled with sender-allowlist filtering
+    # and no backfill on first sight (starts from UIDNEXT, not UID 0). Separate from
+    # `folders` because the semantics are fundamentally different.
+    spam_folders: list[str] = field(default_factory=lambda: ["Junk"])
+    # #408: comma-separated domains and/or full email addresses. A message in a spam
+    # folder is ingested ONLY when its from_addr matches an entry here. An entry with
+    # '@' is matched as an exact address (case-insensitive); without '@' as a domain
+    # suffix (case-insensitive).
+    spam_folder_allowlist: str = "inforcloudsuite.com"
 
     @classmethod
     def load(cls) -> Config:
@@ -353,4 +371,10 @@ class Config:
             # as delivery_notes_max_age_days).
             store_retention_days=int(
                 _get(o, "store_retention_days", "STORE_RETENTION_DAYS", 0)),
+            # #408: spam folder polling — same comma-split pattern as `folders`.
+            spam_folders=_parse_list(
+                _get(o, "spam_folders", "SPAM_FOLDERS", "Junk")),
+            spam_folder_allowlist=str(
+                _get(o, "spam_folder_allowlist", "SPAM_FOLDER_ALLOWLIST",
+                     "inforcloudsuite.com") or ""),
         )

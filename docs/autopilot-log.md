@@ -4240,3 +4240,4 @@ httpapi answer endpoint does not append scanner email, _auto_close also excludes
 migration rev 11: DELETE memory rows + array_remove from overrides.emails. RED 3ab0c89
 (3 failing: remember stores scanner, memory rescue used, rung 2 matches) → GREEN e8b415e
 (11 tests: test_scanner_sender_guard.py). Version bump b07b79f.
+- **#408 (0.9.144) — spam folder allowlist polling.** New options `spam_folders` (default `Junk`) + `spam_folder_allowlist` (default `inforcloudsuite.com`). A spam folder is polled separately from `folders`: only allowlisted senders are ingested; on first sight the cursor starts at UIDNEXT (no backfill). Dedup via `message_id` unchanged. bump f55aec4 → feat eaf3d25. 20 tests (12 unit + 4 integration + 4 config).

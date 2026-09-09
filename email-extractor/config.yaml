@@ -1,5 +1,5 @@
 name: Email OCR Extractor
-version: "0.9.143"
+version: "0.9.144"
 slug: email_extractor
 description: Reads an IMAP mailbox, OCR-extracts the body + all attachments, and writes Postgres for n8n. Bundles its own Postgres on /data (leave pg_dsn empty, set pg_password).
 url: https://github.com/zbynekdrlik/email-extractor
@@ -82,6 +82,8 @@ options:
   question_stale_working_days: 2
   question_escalate_working_days: 4
   store_retention_days: 0
+  spam_folders: "Junk"
+  spam_folder_allowlist: "inforcloudsuite.com"
 schema:
   imap_host: str
   imap_port: int
@@ -156,3 +158,10 @@ schema:
   # but /eml + original-file download and SMTP re-forwarding of older mail stop). Loaded
   # WITHOUT the `or N` idiom so an explicit 0 truly disables it (#229 trap).
   store_retention_days: int?
+  # #408: spam/junk folder polling — comma-separated IMAP folder names to poll with sender
+  # filtering (spam_folder_allowlist). Default "Junk". No backfill on first sight.
+  spam_folders: str?
+  # #408: comma-separated domains and/or full email addresses allowed from spam folders.
+  # Entry with @ = exact address match; without @ = domain-suffix match. Default
+  # "inforcloudsuite.com" (Zeelandia invoices).
+  spam_folder_allowlist: str?
