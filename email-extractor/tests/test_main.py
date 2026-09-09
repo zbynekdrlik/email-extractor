@@ -24,7 +24,8 @@ def cfg(pg, tmp_path):
     if pg.execute("SELECT to_regclass('imap_failures')").fetchone()[0]:
         pg.execute("TRUNCATE imap_failures")
     return config.Config(pg_dsn=PG_DSN, data_dir=str(tmp_path), folders=["INBOX"],
-                         public_base_url="http://email-extractor:8099", api_token="tok")
+                         public_base_url="http://email-extractor:8099", api_token="tok",
+                         spam_folders=[], spam_folder_allowlist="")
 
 
 @pytest.fixture
