@@ -1816,9 +1816,24 @@ intentional there for cards it was tuned against.
   `test_desadv_upload_integration.py`) passed unmodified, proving the port safe.
   `claim.py`'s own module docstring maps ALL FIVE of this project's claim/dedup
   mechanisms and explains which one (only #2, a two-phase external-side-effect
-  ledger) this primitive is actually for — read it before reaching for this module on
-  a `messages` work-queue claim, an `import_alert_incidents`-style stays-open marker,
-  a schema migration, or a plain write-conflict guard, none of which fit.
+  ledger) `claim_or_identify` is actually for — read it before reaching for this
+  module on a `messages` work-queue claim, an `import_alert_incidents`-style
+  stays-open marker, a schema migration, or a plain write-conflict guard, none of
+  which fit.
+- **`claim.ledger_claim` / `claim.ledger_finish` (#412) — a DIFFERENT shape from
+  `claim_or_identify`, for a work-queue-style RETRY ledger with attempt tracking.**
+  `ledger_claim(conn, table, pk_col, pk_val, stale_minutes, max_attempts)` does
+  atomic INSERT-or-reclaim-stale (bumps `attempts`, resets `claimed_at`);
+  `ledger_finish(conn, table, pk_col, pk_val, outcome)` sets `outcome` +
+  `finished_at`. Used by `dl_invoice_runs` now; designed so `desadv_sent`/`edi_sent`
+  can adopt later (after their own migration adds `attempts`/`finished_at` columns)
+  WITHOUT changing behaviour in the adoption lane. The table MUST have columns:
+  `claimed_at TIMESTAMPTZ`, `attempts INT`, `outcome TEXT` (nullable), `finished_at
+  TIMESTAMPTZ` (nullable). `claim_or_identify` stays the right tool for the
+  "claim-before-irreversible-side-effect + identify who holds it" shape (#2);
+  `ledger_claim`/`ledger_finish` is for the "retry up to N times with stale-window
+  reclaim, park on exhaustion" shape (#412's invoice runs, and eventually the other
+  two ledgers).
 - **`worker.CLAIM_STALE_MINUTES = 30` is a PIN against the n8n "AI auto orders"
   workflow (`wlORIhkVZISCdZNmBTM4Z`, node "Get AI Orders", `interval '30 minutes'`
   hardcoded there) — `tests/test_orders_worker.py::

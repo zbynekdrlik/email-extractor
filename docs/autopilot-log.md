@@ -2,6 +2,12 @@
 
 Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions, shared PR #.
 
+## 2026-09-09 — #412 dl_invoice_runs: attempts + stale reclaim + exhaustion alert — v0.9.147
+
+- RED `81c395d`: 11 tests — `test_ledger_claim_fresh_insert`, `test_ledger_claim_refuses_fresh_row`, `test_ledger_claim_reclaims_stale`, `test_ledger_claim_refuses_exhausted`, `test_ledger_claim_refuses_finished`, `test_ledger_finish_sets_outcome_and_finished_at`, `test_claim_invoice_reclaims_stale_row`, `test_claim_invoice_max_attempts_blocks_reclaim`, `test_claim_invoice_finished_row_never_reclaimed`, `test_finish_invoice_run_sets_finished_at`, `test_invoice_max_attempts_enqueues_alert`
+- GREEN `8aa47ae`: migration r13 (`attempts`, `finished_at` on `dl_invoice_runs`); `claim.py` `ledger_claim`/`ledger_finish` shared primitives; `_claim_invoice` stale-reclaim + attempt tracking; `_run_and_finish` invoice-mode retry uses stale window (no DELETE), hard exception parks at MAX_ATTEMPTS; `_park_exhausted_invoice` ops alert
+- Decision: shared `claim.py` primitive designed for `desadv_sent`/`edi_sent` adoption later; their semantics untouched in this lane (byte-identical corpus)
+
 ## 2026-09-09 — #404 mail_rules ignore-rule attachment safety + digest label + ops routing — v0.9.142
 
 - RED `4ba797f`: tests for ignore-rule attachment mismatch, digest label, 0-attachment ops routing

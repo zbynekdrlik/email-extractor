@@ -164,12 +164,14 @@ from .dl_message import (  # noqa: F401 (re-export: public dl_worker API)
     _claim_invoice,
     _finish_invoice_run,
     _invoice_supplier_emails,
+    _park_exhausted_invoice,
     _peek_for_shadow,
     _process_message,
     _read_attachments,
     _run_and_finish,
     _subject_doc_numbers,
     _summary_outcome,
+    _sweep_exhausted_invoices,
     refresh_due,
 )
 from .dl_questions import (  # noqa: F401 (re-export: public dl_worker API)
@@ -349,7 +351,15 @@ def _tick_invoice(conn, cfg, client, snapshot_id, catalog, suppliers,
 
     F1 (review fix): delegates to `_run_and_finish(invoice_mode=True)` instead of
     duplicating the tail — a single code path for retry/exception/finish handling,
-    so the invoice and DL paths cannot drift."""
+    so the invoice and DL paths cannot drift.
+
+    #412 FIX-1: sweeps exhausted rows BEFORE claiming, so an ungraceful 5th-attempt
+    death is state-detected and parked on the next tick (the handler-path park is
+    the fast path; this sweep is the guaranteed backstop)."""
+    # #412 FIX-1: park any rows stranded at MAX_ATTEMPTS by an ungraceful death
+    channel_id = int(getattr(cfg, "delivery_notes_channel_id", 0) or 0) if cfg else 0
+    _sweep_exhausted_invoices(conn, channel_id)
+
     message = _claim_invoice(conn, effective_suppliers, cfg=cfg)
     if not message:
         return 0
