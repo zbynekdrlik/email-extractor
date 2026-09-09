@@ -4241,3 +4241,27 @@ migration rev 11: DELETE memory rows + array_remove from overrides.emails. RED 3
 (3 failing: remember stores scanner, memory rescue used, rung 2 matches) → GREEN e8b415e
 (11 tests: test_scanner_sender_guard.py). Version bump b07b79f.
 - **#408 (0.9.144) — spam folder allowlist polling.** New options `spam_folders` (default `Junk`) + `spam_folder_allowlist` (default `inforcloudsuite.com`). A spam folder is polled separately from `folders`: only allowlisted senders are ingested; on first sight the cursor starts at UIDNEXT (no backfill). Dedup via `message_id` unchanged. bump f55aec4 → feat eaf3d25. 20 tests (12 unit + 4 integration + 4 config).
+
+## #406 — DL from invoice, dual routing for Zeelandia (0.9.145)
+
+Zeelandia sends only invoices (`category='invoices'`), never a separate delivery note —
+the DL engine couldn't reach that category. New per-supplier flag
+`dl_supplier_overrides.invoice_is_delivery_note` (migration r12) + an independent ledger
+`dl_invoice_runs` (never touches `messages.processed`, owned by the n8n invoice-forward
+flow) let a flagged supplier's invoice messages run through the SAME DL pipeline
+(matching, EDI build, ORION upload, Odoo post) via a new prompt variant
+(`dl_extract_invoice.md`, invoice-exclusion line removed) — both flows run: n8n still
+forwards to accounting, the DL engine independently ships the delivery note. Exact-email
+match (not domain) picks the flagged supplier's messages; short-circuit when no supplier
+carries the flag avoids the extra query on idle ticks. `_run_and_finish(invoice_mode=True)`
+is one shared finish/retry/error tail so the two paths can't drift. Review (gated
+fable-advisor): 2 HIGH + 4 MEDIUM + 4 LOW, all fixed in 76ab72f (independent ledger for
+the board-answer reprocess path, claim-query starvation, card-save flag-clear guard,
+exact-email match, dead code, idle-tick short-circuit, config-driven interval).
+`tests/test_invoice_dl.py` new; full suite 1977 tests EXIT 0. Merged via PR #413,
+deployed 0.9.145. **Zeelandia's own flag is NOT enabled** (no `dl_supplier_overrides`
+row for it) — first live ship is an owner decision via `/znalosti`. Shadow-verified on
+PROD message 10783: docNumber 1149285, deliveryDate 09.09.2026, documentTotalWithoutVAT
+191.70, both items GTIN-matched (0.97/0.99 confidence), money/date gates pass, zero
+writes.
+- **#410 (0.9.146) — CI e2e ephemeral Postgres ports.** e2e-orders/e2e-dl hardcoded host ports 55433/55435 collided with local dev containers on dev2 (3x failure 2026-09-09). Changed both to ephemeral `ports: - 5432`, resolved via `job.services.postgres.ports['5432']` + `$GITHUB_ENV`. Updated local-testing.md: no CI-reserved ports, prefer ephemeral locally. bump d1edabe → fix 5e0ab1a.

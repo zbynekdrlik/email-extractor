@@ -33,10 +33,12 @@ jobs:
           python-version: "3.12"
       - name: Install OCR system deps
         run: |
-          # Drop the runner's preinstalled 3rd-party apt sources (azure-cli / microsoft)
-          # — they intermittently 403 and break `apt-get update`; tesseract/poppler are
-          # in the standard Ubuntu repos and don't need them.
-          sudo rm -f /etc/apt/sources.list.d/*microsoft* /etc/apt/sources.list.d/*azure* 2>/dev/null || true
+          # Drop the runner's preinstalled 3rd-party apt sources (azure-cli / microsoft /
+          # google-chrome) — they intermittently 403 or serve a stale/corrupt Release
+          # file (google-chrome's Packages.gz Hash Sum mismatch, #410 CI investigation,
+          # 2026-09-09) and break `apt-get update`; tesseract/poppler are in the standard
+          # Ubuntu repos and don't need any of them.
+          sudo rm -f /etc/apt/sources.list.d/*microsoft* /etc/apt/sources.list.d/*azure* /etc/apt/sources.list.d/*google-chrome* 2>/dev/null || true
           sudo apt-get update -qq
           sudo apt-get install -y -qq tesseract-ocr tesseract-ocr-ces tesseract-ocr-slk poppler-utils
       - name: Install Python deps
@@ -87,18 +89,19 @@ jobs:
         env:
           POSTGRES_PASSWORD: postgres
         ports:
-          - 55433:5432
+          - 5432
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       CORPUS: /home/newlevel/eval-corpus/email-extractor
-      PG_DSN: postgresql://postgres:postgres@localhost:55433/postgres
     defaults:
       run:
         working-directory: email-extractor
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve ephemeral Postgres port
+        run: echo "PG_DSN=postgresql://postgres:postgres@localhost:${{ job.services.postgres.ports['5432'] }}/postgres" >> "$GITHUB_ENV"
       - name: The corpus must be present (a missing corpus fails, never skips)
         run: |
           for f in manifest.json catalog.csv customers.csv history.json taught.json llm-cache; do
@@ -151,18 +154,19 @@ jobs:
         env:
           POSTGRES_PASSWORD: postgres
         ports:
-          - 55435:5432
+          - 5432
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       CORPUS: /home/newlevel/eval-corpus/email-extractor
-      PG_DSN: postgresql://postgres:postgres@localhost:55435/postgres
     defaults:
       run:
         working-directory: email-extractor
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve ephemeral Postgres port
+        run: echo "PG_DSN=postgresql://postgres:postgres@localhost:${{ job.services.postgres.ports['5432'] }}/postgres" >> "$GITHUB_ENV"
       - name: The DL corpus must be present (a missing corpus fails, never skips)
         run: |
           for f in dl/manifest.json dl/dl_catalog.csv dl/objednavky_catalog.csv \
