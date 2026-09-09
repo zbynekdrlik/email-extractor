@@ -6,8 +6,7 @@ from __future__ import annotations
 
 import types
 
-from app.orders import claim, dl_alerts, dl_message, dl_snapshot
-
+from app.orders import claim, dl_message, dl_snapshot
 
 # --- fixtures ---------------------------------------------------------------
 
@@ -67,8 +66,9 @@ def _flag_supplier(pg, ean_edi="2000000000285", emails=None):
 
 def test_ledger_claim_fresh_insert(pg):
     """A fresh claim inserts a new row with attempts=1."""
+    pg.execute("DROP TABLE IF EXISTS _test_ledger")
     pg.execute(
-        """CREATE TABLE IF NOT EXISTS _test_ledger (
+        """CREATE TABLE _test_ledger (
                pk TEXT PRIMARY KEY,
                claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                attempts INT NOT NULL DEFAULT 1,
@@ -83,8 +83,9 @@ def test_ledger_claim_fresh_insert(pg):
 
 def test_ledger_claim_refuses_fresh_row(pg):
     """A second claim on a freshly-claimed row is refused."""
+    pg.execute("DROP TABLE IF EXISTS _test_ledger")
     pg.execute(
-        """CREATE TABLE IF NOT EXISTS _test_ledger (
+        """CREATE TABLE _test_ledger (
                pk TEXT PRIMARY KEY,
                claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                attempts INT NOT NULL DEFAULT 1,
@@ -102,8 +103,9 @@ def test_ledger_claim_refuses_fresh_row(pg):
 
 def test_ledger_claim_reclaims_stale(pg):
     """A stale row (claimed_at old, outcome IS NULL) is reclaimed with attempts+1."""
+    pg.execute("DROP TABLE IF EXISTS _test_ledger")
     pg.execute(
-        """CREATE TABLE IF NOT EXISTS _test_ledger (
+        """CREATE TABLE _test_ledger (
                pk TEXT PRIMARY KEY,
                claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                attempts INT NOT NULL DEFAULT 1,
@@ -125,8 +127,9 @@ def test_ledger_claim_reclaims_stale(pg):
 
 def test_ledger_claim_refuses_exhausted(pg):
     """A row at max_attempts is never reclaimed, even when stale."""
+    pg.execute("DROP TABLE IF EXISTS _test_ledger")
     pg.execute(
-        """CREATE TABLE IF NOT EXISTS _test_ledger (
+        """CREATE TABLE _test_ledger (
                pk TEXT PRIMARY KEY,
                claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                attempts INT NOT NULL DEFAULT 1,
@@ -143,8 +146,9 @@ def test_ledger_claim_refuses_exhausted(pg):
 
 def test_ledger_claim_refuses_finished(pg):
     """A row with a non-NULL outcome is never reclaimed."""
+    pg.execute("DROP TABLE IF EXISTS _test_ledger")
     pg.execute(
-        """CREATE TABLE IF NOT EXISTS _test_ledger (
+        """CREATE TABLE _test_ledger (
                pk TEXT PRIMARY KEY,
                claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                attempts INT NOT NULL DEFAULT 1,
@@ -161,8 +165,9 @@ def test_ledger_claim_refuses_finished(pg):
 
 def test_ledger_finish_sets_outcome_and_finished_at(pg):
     """ledger_finish records outcome + finished_at."""
+    pg.execute("DROP TABLE IF EXISTS _test_ledger")
     pg.execute(
-        """CREATE TABLE IF NOT EXISTS _test_ledger (
+        """CREATE TABLE _test_ledger (
                pk TEXT PRIMARY KEY,
                claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                attempts INT NOT NULL DEFAULT 1,

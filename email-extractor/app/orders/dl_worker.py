@@ -164,6 +164,7 @@ from .dl_message import (  # noqa: F401 (re-export: public dl_worker API)
     _claim_invoice,
     _finish_invoice_run,
     _invoice_supplier_emails,
+    _park_exhausted_invoice,
     _peek_for_shadow,
     _process_message,
     _read_attachments,

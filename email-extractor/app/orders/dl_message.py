@@ -562,10 +562,10 @@ def _run_and_finish(conn, cfg, client, message: dict, snapshot_id: int | None,
                             "invoice_mode": invoice_mode},
                            error=str(e))
         if invoice_mode:
-            # F1: invoice path uses its own ledger — delete the claim so the next tick
-            # can retry (same semantics as the old _tick_invoice retry branch).
-            conn.execute("DELETE FROM dl_invoice_runs WHERE message_id = %s",
-                         (message["message_id"],))
+            # #412: leave the row as-is (outcome IS NULL, claimed_at fresh from the
+            # claim). The stale window (CLAIM_STALE_MINUTES) makes it reclaimable.
+            # The old F1 DELETE is gone — attempts tracking replaces it.
+            pass
         else:
             # Deep-review finding on this ticket's own PR (#240): re-arm both columns
             # to make the message reclaimable by the SAME stale window.
@@ -582,8 +582,15 @@ def _run_and_finish(conn, cfg, client, message: dict, snapshot_id: int | None,
                             "invoice_mode": invoice_mode},
                            error=repr(e))
         if invoice_mode:
-            # F1: record error outcome in our own ledger, never touch messages.processed
-            _finish_invoice_run(conn, message["message_id"], "error")
+            # #412: if attempts >= MAX_ATTEMPTS, park with an alert; otherwise leave
+            # the row for stale reclaim (outcome stays NULL, claimed_at fresh).
+            attempts = int(message.get("attempts") or 0)
+            if attempts >= MAX_ATTEMPTS:
+                channel_id = int(getattr(cfg, "delivery_notes_channel_id", 0) or 0) \
+                    if cfg else 0
+                _park_exhausted_invoice(conn, message["message_id"], channel_id)
+            # else: row stays claimed (outcome IS NULL) — stale window makes it
+            # reclaimable; next claim increments attempts.
         else:
             conn.execute(
                 "UPDATE messages SET processed = false, processing_at = NULL "
@@ -649,7 +656,13 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None) -> dict | None:
     date gate (cfg.delivery_notes_max_age_days) are respected.
 
     F2 (review finding): the sender filter is pushed into SQL so the query never starves
-    on a window full of non-flagged invoices. F4: exact email match, not domain."""
+    on a window full of non-flagged invoices. F4: exact email match, not domain.
+
+    #412: stale-reclaim support — also selects messages whose `dl_invoice_runs` row is
+    stale (outcome IS NULL, claimed_at older than CLAIM_STALE_MINUTES, attempts <
+    MAX_ATTEMPTS). Uses `claim.ledger_claim` for the atomic INSERT-or-reclaim.
+    Returns `attempts` in the message dict."""
+    from . import claim
     from .dl_questions import is_scanner_sender
 
     email_map = _invoice_supplier_emails(suppliers)
@@ -668,6 +681,9 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None) -> dict | None:
     max_age = int(getattr(cfg, "delivery_notes_max_age_days", 14) or 14) if cfg else 14
     flagged_emails = list(email_map.keys())
 
+    # #412: also select messages with a STALE dl_invoice_runs row (reclaimable).
+    # A row blocks selection only when it is finished (outcome IS NOT NULL),
+    # freshly held (claimed_at recent), or exhausted (attempts >= MAX_ATTEMPTS).
     row = conn.execute(
         """SELECT m.message_id, m.subject, m.from_addr, m.from_name,
                   m.combined_text, m.body_text, m.has_attachments,
@@ -677,9 +693,13 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None) -> dict | None:
               AND m.created_at > now() - make_interval(days => %s)
               AND lower(m.from_addr) = ANY(%s)
               AND NOT EXISTS (SELECT 1 FROM dl_invoice_runs r
-                               WHERE r.message_id = m.message_id)
+                               WHERE r.message_id = m.message_id
+                                 AND (r.outcome IS NOT NULL
+                                      OR r.claimed_at > now()
+                                         - make_interval(mins => %s)
+                                      OR r.attempts >= %s))
             ORDER BY m.created_at ASC LIMIT 1""",
-        (max_age, flagged_emails)).fetchone()
+        (max_age, flagged_emails, CLAIM_STALE_MINUTES, MAX_ATTEMPTS)).fetchone()
 
     if not row:
         return None
@@ -688,23 +708,47 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None) -> dict | None:
     from_addr = (row[2] or "").strip().lower()
     supplier = email_map.get(from_addr)
 
-    # Claim in our independent ledger (idempotent — ON CONFLICT is a no-op)
-    claimed = conn.execute(
-        """INSERT INTO dl_invoice_runs (message_id) VALUES (%s)
-           ON CONFLICT (message_id) DO NOTHING
-           RETURNING message_id""",
-        (message_id,)).fetchone()
-    if not claimed:
-        return None  # already claimed by a prior tick
+    # #412: atomic claim via the shared ledger_claim primitive —
+    # INSERT (attempts=1) or reclaim stale (attempts+1).
+    ok, attempts = claim.ledger_claim(
+        conn, table="dl_invoice_runs", pk_col="message_id", pk_val=message_id,
+        stale_minutes=CLAIM_STALE_MINUTES, max_attempts=MAX_ATTEMPTS)
+    if not ok:
+        return None  # lost the race or row is exhausted/finished
 
     msg = _as_message(row[:7], created_at=row[7])
-    if msg is not None and supplier:
-        msg["_invoice_supplier"] = supplier
+    if msg is not None:
+        msg["attempts"] = attempts
+        if supplier:
+            msg["_invoice_supplier"] = supplier
     return msg
 
 
 def _finish_invoice_run(conn, message_id: str, outcome: str) -> None:
-    """Record the outcome of an invoice-as-DL processing run."""
-    conn.execute(
-        "UPDATE dl_invoice_runs SET outcome = %s WHERE message_id = %s",
-        (outcome, message_id))
+    """Record the outcome of an invoice-as-DL processing run.
+
+    #412: now sets finished_at alongside outcome via claim.ledger_finish."""
+    from . import claim
+    claim.ledger_finish(
+        conn, table="dl_invoice_runs", pk_col="message_id", pk_val=message_id,
+        outcome=outcome)
+
+
+def _park_exhausted_invoice(conn, message_id: str, channel_id: int) -> None:
+    """Park an invoice message that exhausted MAX_ATTEMPTS with an ops alert.
+
+    #412: sets outcome='exhausted' + enqueues a durable alert via dl_alerts."""
+    from html import escape
+
+    from . import claim, dl_alerts
+
+    claim.ledger_finish(
+        conn, table="dl_invoice_runs", pk_col="message_id", pk_val=message_id,
+        outcome="exhausted")
+
+    if not dl_alerts.already_pending(conn, "dl_invoice_exhausted", message_id):
+        body = (f"<b>Faktúra-ako-DL zlyhala {MAX_ATTEMPTS}x</b><br>"
+                f"message_id: <code>{escape(str(message_id))}</code><br>"
+                f"Skontroluj na nástenke a spracuj ručne.")
+        dl_alerts.enqueue(conn, channel_id, "dl_invoice_exhausted",
+                          body, message_id=message_id)

@@ -126,3 +126,74 @@ def claim_or_identify(conn, *, insert_sql: str, insert_params: tuple,
                   "column shapes may not match")
         return False, ()
     return bool(row[0]), tuple(row[1:])
+
+
+# ---------------------------------------------------------------------------
+# #412: attempt-tracked ledger claim — work-queue-style retry with attempts,
+# stale-reclaim, and max-attempts guard.  Used by `dl_invoice_runs` now;
+# structured so `desadv_sent`/`edi_sent` can adopt later (after their own
+# migration adds the same columns) WITHOUT changing behaviour in this lane.
+# ---------------------------------------------------------------------------
+
+def ledger_claim(conn, *, table: str, pk_col: str, pk_val,
+                 stale_minutes: int, max_attempts: int) -> tuple[bool, int]:
+    """Claim or reclaim a row in a ledger table with attempt tracking.
+
+    The target table MUST have these columns (names are fixed by convention):
+    - ``{pk_col}`` — the primary key (single column, TEXT or compatible)
+    - ``claimed_at  TIMESTAMPTZ NOT NULL DEFAULT now()``
+    - ``attempts    INT NOT NULL DEFAULT 1``
+    - ``outcome     TEXT`` (nullable — NULL means "in progress")
+    - ``finished_at TIMESTAMPTZ`` (nullable)
+
+    Behaviour:
+    - **Fresh insert** (no row exists): inserts with ``attempts=1``,
+      ``claimed_at=now()``, ``outcome=NULL``.
+    - **Stale reclaim** (row exists, ``outcome IS NULL``, ``claimed_at`` older
+      than *stale_minutes*, ``attempts < max_attempts``): bumps ``attempts``
+      and resets ``claimed_at`` to now.
+    - **Refused** (row exists but is freshly held, finished, or exhausted):
+      nothing is written.
+
+    Returns ``(True, attempts)`` on a successful claim/reclaim,
+    ``(False, 0)`` on refusal (the caller can distinguish finished from
+    exhausted by querying the row if needed — this primitive deliberately
+    does not, to stay cheap).
+
+    ``table`` and ``pk_col`` are **internal constant identifiers** (never user
+    input) — they are interpolated via f-string, matching the project's
+    existing pattern in ``claim_or_identify`` and throughout ``desadv.py``/
+    ``edi.py``.
+    """
+    # The INSERT ... ON CONFLICT ... DO UPDATE ... WHERE is Postgres's own
+    # atomic reclaim: two concurrent callers can never both win, because the
+    # WHERE on DO UPDATE is evaluated per-row as part of conflict resolution.
+    row = conn.execute(
+        f"""INSERT INTO {table} ({pk_col}, claimed_at, attempts)
+            VALUES (%s, now(), 1)
+            ON CONFLICT ({pk_col})
+            DO UPDATE SET claimed_at = now(),
+                          attempts = {table}.attempts + 1
+            WHERE {table}.outcome IS NULL
+              AND {table}.claimed_at < now() - make_interval(mins => %s)
+              AND {table}.attempts < %s
+            RETURNING attempts""",
+        (pk_val, stale_minutes, max_attempts),
+    ).fetchone()
+    if row is None:
+        return False, 0
+    return True, int(row[0])
+
+
+def ledger_finish(conn, *, table: str, pk_col: str, pk_val,
+                  outcome: str) -> None:
+    """Record outcome + finished_at on a claimed ledger row.
+
+    Only updates rows with ``outcome IS NULL`` (idempotent — a second call
+    for the same row after it is already finished is a silent no-op).
+    """
+    conn.execute(
+        f"""UPDATE {table}
+               SET outcome = %s, finished_at = now()
+             WHERE {pk_col} = %s AND outcome IS NULL""",
+        (outcome, pk_val))
