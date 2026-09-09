@@ -361,10 +361,12 @@ def retire_dl_catalog_card(conn, gtin: str) -> bool:
 
 def _load_dl_supplier_overrides(conn) -> list[dict]:
     rows = conn.execute(
-        """SELECT id, orig_ean_edi, orig_city, ean_edi, name, emails, city, retired
+        """SELECT id, orig_ean_edi, orig_city, ean_edi, name, emails, city, retired,
+                  invoice_is_delivery_note
            FROM dl_supplier_overrides ORDER BY id""").fetchall()
     return [{"id": r[0], "orig_ean_edi": r[1], "orig_city": r[2], "ean_edi": r[3] or "",
-             "name": r[4], "emails": list(r[5] or []), "city": r[6] or "", "retired": r[7]}
+             "name": r[4], "emails": list(r[5] or []), "city": r[6] or "", "retired": r[7],
+             "invoice_is_delivery_note": bool(r[8])}
             for r in rows]
 
 
@@ -390,14 +392,17 @@ def _merge_dl_suppliers(base: list[dict], overrides: list[dict]) -> list[dict]:
             continue
         out.append({"ean_edi": o["ean_edi"], "name": o["name"], "emails": o["emails"],
                     "city": o["city"], "override_id": o["id"],
-                    "orig_ean_edi": o["orig_ean_edi"], "orig_city": o["orig_city"]})
+                    "orig_ean_edi": o["orig_ean_edi"], "orig_city": o["orig_city"],
+                    "invoice_is_delivery_note": o.get("invoice_is_delivery_note", False)})
     return out
 
 
 def _apply_dl_supplier_overrides(conn, suppliers: list[dict]) -> list[dict]:
     merged = _merge_dl_suppliers(suppliers, _load_dl_supplier_overrides(conn))
     return [{"ean_edi": r["ean_edi"], "name": r["name"], "emails": r["emails"],
-             "city": r["city"]} for r in merged]
+             "city": r["city"],
+             "invoice_is_delivery_note": r.get("invoice_is_delivery_note", False)}
+            for r in merged]
 
 
 def dl_suppliers_for_management(conn) -> list[dict]:
