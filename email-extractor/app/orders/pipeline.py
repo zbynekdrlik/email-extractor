@@ -22,6 +22,7 @@ from pathlib import Path
 
 from . import (
     customer,
+    dl_alerts,
     edi,
     extract,
     hold,
@@ -64,6 +65,10 @@ class Reason(enum.Enum):
     # re-ask it; nothing a board click could settle either (the warehouse handles the
     # unreadable mail directly in ORION), so this is a technical review, not a board question.
     MAIL_RULE_MANUAL = "mail_rule_manual"
+    # #404: extraction found 0 orders and the message has 0 attachments — this is a technical
+    # failure (the expected attachment was missing), not a case the warehouse can settle.
+    # An ops alert is sent instead of the warehouse question.
+    NO_ATTACHMENT = "no_attachment"
 
 
 # Nothing a warehouse click could ever settle — a genuine engineering/instruction matter.
@@ -71,7 +76,7 @@ class Reason(enum.Enum):
 # `_finish` below.
 TECHNICAL_REASONS = {Reason.CHANGE_REQUEST, Reason.LLM_REFUSED, Reason.UPLOAD_FAILED,
                      Reason.DEDUP_ALREADY_SENT, Reason.CUSTOMER_EAN_MISSING,
-                     Reason.MAIL_RULE_MANUAL}
+                     Reason.MAIL_RULE_MANUAL, Reason.NO_ATTACHMENT}
 
 # The rungs that mean the engine could not settle the line on its own. Each becomes
 # ONE question for the warehouse (#88) — answering it teaches the wording for good.
@@ -180,13 +185,13 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
     # changed the verdict itself, not just a side effect). The 30-email corpus runs
     # forced-shadow and has no mail_rules rows anyway, so this never touches it.
     rule = None if shadow else _mail_rule(
-        conn, message.get("from_addr", ""), message.get("subject", ""))
+        conn, message.get("from_addr", ""), message.get("subject", ""),
+        message_id=message.get("message_id", ""))
     if rule == "ignore":
-        # `reject_reason` (not just `notes`) so `report.build_summary` actually prints it —
-        # status="ok" alone renders the generic "nahraté do ORIONu" label, which would be a
-        # lie here (nothing was ever uploaded); the reason line is what makes it honest.
+        # #404: status="ignored" (not "ok") so `report.build_summary` renders its own
+        # distinct label/emoji instead of the misleading "nahrate do ORIONu".
         note = "Ignorované podľa naučeného pravidla (nie je objednávka)."
-        return _finish(conn, cfg, message, shadow, post, status="ok", items=[],
+        return _finish(conn, cfg, message, shadow, post, status="ignored", items=[],
                        result={"shipped": False, "reject_reason": note, "customer": {},
                                "unverified": [], "notes": note})
 
@@ -245,15 +250,39 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
         # this sender/subject the warehouse has ALREADY answered "yes, it's an order" — don't
         # re-ask (that suppression is the rule's only remaining effect now that it no longer
         # short-circuits the pipeline); the mail just falls through to a plain review here.
+        #
+        # #404 gate: when extraction found 0 orders AND the message has 0 attachments, the
+        # missing attachment is the likely cause — this is a TECHNICAL failure, not a case
+        # where the warehouse should judge "is it an order?". Route to the ops channel as an
+        # alert instead of asking the warehouse (whose "not_order" answer would teach a
+        # permanent ignore rule from a non-representative broken sample). The `mail` question
+        # fires ONLY when the message had attachments (extraction genuinely ran on real content).
+        msg_has_attachments = teach.has_real_attachments(
+            conn, message.get("message_id", "")) if not shadow else False
         qids: list[int] = []
         if not shadow and rule != "manual":
-            mq = teach.ask_mail(conn, message_id=message.get("message_id", ""),
-                                sender_email=message.get("from_addr", ""),
-                                subject=message.get("subject", ""),
-                                reason="AI nenašla v e-maile žiadnu objednávku",
-                                on_new=new_questions.append)
-            if mq:
-                qids.append(mq)
+            if msg_has_attachments:
+                mq = teach.ask_mail(conn, message_id=message.get("message_id", ""),
+                                    sender_email=message.get("from_addr", ""),
+                                    subject=message.get("subject", ""),
+                                    reason="AI nenašla v e-maile žiadnu objednávku",
+                                    on_new=new_questions.append)
+                if mq:
+                    qids.append(mq)
+            else:
+                # 0 attachments — the expected order attachment is likely missing.
+                # Alert the owner (ops channel), never the warehouse.
+                ops_ch = report.ops_channel(cfg)
+                if ops_ch and not dl_alerts.already_pending(
+                        conn, "mail_no_attachment", message.get("message_id", "")):
+                    dl_alerts.enqueue(
+                        conn, ops_ch, "mail_no_attachment",
+                        dl_alerts.item_line(
+                            message.get("from_addr", ""),
+                            message.get("subject", "")),
+                        message_id=message.get("message_id", ""))
+                log.warning("0-attachment mail %s with no orders — ops alert, no mail "
+                            "question (fail-safe, #404)", message.get("message_id", ""))
         # #376: DRY-RUN trace — when the gate WOULD have discarded but the option is off, the
         # (rollup) event outcome carries "AI by zahodilo (...)" so the owner can compare the
         # week's would-be discards against the warehouse's real answers before flipping it on.
@@ -263,7 +292,14 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
         # #361: a `manual`-taught mail with no extractable order raises no board question
         # (the is-it-an-order answer is already known), so it is a TECHNICAL review — the
         # invariant in `_finish` must not synthesize a fallback mail question for it.
-        no_orders_reason = Reason.MAIL_RULE_MANUAL if rule == "manual" else Reason.NO_ORDERS
+        # #404: a 0-attachment mail with no orders is also TECHNICAL (the attachment was
+        # missing, not a case the warehouse can settle).
+        if rule == "manual":
+            no_orders_reason = Reason.MAIL_RULE_MANUAL
+        elif not msg_has_attachments and not shadow:
+            no_orders_reason = Reason.NO_ATTACHMENT
+        else:
+            no_orders_reason = Reason.NO_ORDERS
         return _finish(conn, cfg, message, shadow, post,
                        status="held" if qids else "review", items=[],
                        result={"shipped": False,
@@ -1026,13 +1062,31 @@ def _mail_kind_discard_reason(conn, client, message: dict) -> str:
     return f"{reason_txt}; conf {verdict.confidence:.2f}"
 
 
-def _mail_rule(conn, sender_email: str, subject: str) -> str | None:
+def _mail_rule(conn, sender_email: str, subject: str,
+               message_id: str = "") -> str | None:
     """What the warehouse already taught about mail shaped like this (#164) — `ignore`
     (not an order) or `manual` (#361: an order that runs the normal automatic pipeline; the
     rule only suppresses re-asking whether it is an order — it no longer short-circuits), or
     `None` when nothing is taught yet. A pure read: safe to run unconditionally, before the
-    LLM call `ignore` is meant to save."""
+    LLM call `ignore` is meant to save.
+
+    #404: an `ignore` rule learned from a 0-attachment sample must NOT short-circuit a mail
+    that has >=1 attachment — the sample was not representative. Fall through to normal
+    extraction (fail-safe direction, #376 doctrine).
+    """
     row = conn.execute(
-        "SELECT action FROM mail_rules WHERE sender_norm = %s AND subject_key = %s",
+        "SELECT action, sample_had_attachments FROM mail_rules"
+        " WHERE sender_norm = %s AND subject_key = %s",
         (teach._sender_norm(sender_email), teach.subject_key(subject))).fetchone()
-    return row[0] if row else None
+    if not row:
+        return None
+    action, sample_had_attachments = row[0], row[1]
+    if action == "ignore":
+        # #404: the sample had no attachments but this mail does — do NOT trust the rule.
+        # NULL sample_had_attachments also takes the fail-safe branch (unknown = distrust).
+        if not sample_had_attachments and message_id:
+            if teach.has_real_attachments(conn, message_id):
+                log.info("mail_rule ignore for %s skipped — sample had no attachments "
+                         "but incoming message %s has attachments", sender_email, message_id)
+                return None
+    return action

@@ -2,6 +2,15 @@
 
 Terse per-ticket record: issue #, commit SHAs, RED→GREEN test names, decisions, shared PR #.
 
+## 2026-09-09 — #404 mail_rules ignore-rule attachment safety + digest label + ops routing — v0.9.142
+
+- RED `4ba797f`: tests for ignore-rule attachment mismatch, digest label, 0-attachment ops routing
+- GREEN `0b19002`: `_mail_rule` guard (`sample_had_attachments`), `status="ignored"` + label, 0-attachment no-orders gate to ops channel, `_apply_mail`/`mark_customer_not_order` persist sample attachment info
+- Migration rev 10: `mail_rules.sample_had_attachments boolean` + backfill
+- Tests: `test_ignore_rule_from_zero_attachment_sample_does_not_suppress_mail_with_attachments`, `test_ignore_rule_with_sample_had_attachments_true_still_short_circuits`, `test_digest_for_ignored_mail_never_shows_nahrate_do_orionu`, `test_zero_attachment_mail_with_no_orders_routes_to_ops_not_warehouse`, `test_mail_with_attachments_and_no_orders_still_asks_the_warehouse`, `test_ignored_status_has_its_own_label`, `test_ignored_status_does_not_count_in_ok_bucket`
+- ROZHODNUTIE (owner): 0-attachment no-orders mail goes to ops alert, not warehouse question; mail question stays only for mails with attachments; rule 32 undone by separate lane
+- PROD audit: 12 of 31 ignore rules from 0-attachment samples; 3 caused false-positive ignores on 3 attachment-bearing messages; rule 32 (the incident) already deleted
+
 ## 2026-09-07 — #395 DL sken: chýbajúci totalPrice dopočítaný z unitPrice * quantity — v0.9.137
 - **Čo:** Dobrota Orava DL formát nemá stĺpec riadkového súčtu (len "Cena b. DPH" = unitPrice).
   Vision + extrakcia správne prečítajú unitPrice + quantity, ale totalPrice je prázdny.

@@ -830,12 +830,16 @@ def test_the_full_exit_matrix_never_lets_a_resolvable_reason_go_silent(pg, env):
     assert len(rec.posts) == 1 and "nástenke" not in rec.posts[0].lower()
 
     # 2. NO_ORDERS — resolvable: becomes a `mail`-kind board question.
+    # #404: the message must have an attachment, else the 0-attachment gate routes to ops.
     no_orders_answer = {
         "senderName": "Sklad", "senderEmail": "sklad@pekaren.sk",
         "companyName": "", "isChangeRequest": False, "notes": "", "orders": [],
     }
     rec = Recorder()
     mail2 = dict(MAIL, message_id="mx2")
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('mx2', 'ai_orders')")
+    pg.execute("INSERT INTO attachments (message_id, idx, filename, mime, extracted_text)"
+               " VALUES ('mx2', 0, 'doc.pdf', 'application/pdf', 'text')")
     before = len(_open_qs())
     # #376: the classifier is now consulted on the no-orders branch — script an explicit
     # verdict. An `order` verdict means no discard, so the NO_ORDERS mail-question path is
@@ -936,7 +940,8 @@ def test_a_taught_ignore_rule_skips_extraction_entirely(pg, env):
     rec = Recorder()
     result = pipeline.run(pg, _cfg(), MAIL, env, client=ScriptedClient([]),
                           upload=rec.upload, post=rec.post)
-    assert result["status"] == "ok"
+    # #404: the ignore branch now returns status="ignored", not "ok".
+    assert result["status"] == "ignored"
     assert rec.uploads == []
     assert len(rec.posts) == 1 and "ignorované" in rec.posts[0].lower()
 
@@ -987,10 +992,18 @@ _NO_ORDERS_EXTRACT = {"senderName": "", "senderEmail": "", "companyName": "",
 
 
 def _seed_mail(pg, mid, subject="Fwd: SLOVNORMAL", from_addr="inspektor@example-retail.sk",
-               category="ai_orders"):
+               category="ai_orders", with_attachment=True):
     pg.execute(
         "INSERT INTO messages (message_id, category, from_addr, subject) VALUES (%s,%s,%s,%s)",
         (mid, category, from_addr, subject))
+    # #404: most tests need the message to have an attachment so the 0-attachment gate
+    # does not redirect to ops instead of asking the warehouse. Pass with_attachment=False
+    # to test the 0-attachment path specifically.
+    if with_attachment:
+        pg.execute(
+            "INSERT INTO attachments (message_id, idx, filename, mime, extracted_text)"
+            " VALUES (%s, 0, 'doc.pdf', 'application/pdf', 'some text')",
+            (mid,))
 
 
 def _karmen_infomail(mid="k1", subject="Fwd: SLOVNORMAL"):
@@ -1230,3 +1243,100 @@ def test_a_discard_raises_no_critical_finish_fallback(pg, env, caplog):
                      upload=rec.upload, post=rec.post)
     assert not [r for r in caplog.records if r.levelno >= logging.CRITICAL], \
         "no CRITICAL fallback for a clean AI discard"
+
+
+# --- #404: ignore rule attachment-safety guard + digest label + no-orders routing -------
+
+def test_ignore_rule_from_zero_attachment_sample_does_not_suppress_mail_with_attachments(pg, env):
+    """#404: an `ignore` rule whose sample had 0 attachments must NOT short-circuit a mail
+    that HAS attachments — the rule was taught from a non-representative broken sample.
+    The pipeline must fall through to normal extraction."""
+    from app.orders import teach
+    mail_404 = {**MAIL, "message_id": "att1"}
+    pg.execute(
+        "INSERT INTO mail_rules (sender_norm, subject_key, action, sample_had_attachments)"
+        " VALUES (%s, %s, 'ignore', false)",
+        (teach._sender_norm(mail_404["from_addr"]), teach.subject_key(mail_404["subject"])))
+    # Give the message an attachment so it differs from the sample
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('att1', 'ai_orders')")
+    pg.execute("INSERT INTO attachments (message_id, idx, filename, mime, extracted_text)"
+               " VALUES ('att1', 0, 'order.xls', 'application/vnd.ms-excel', 'some text')")
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), mail_404, env, client=ScriptedClient(_answers()),
+                          upload=rec.upload, post=rec.post)
+    # The ignore rule was bypassed — extraction ran and the order shipped.
+    assert result["status"] == "ok"
+    assert len(rec.uploads) == 1
+
+
+def test_ignore_rule_with_sample_had_attachments_true_still_short_circuits(pg, env):
+    """#404: an ignore rule whose sample DID have attachments should still short-circuit
+    normally (the rule was taught from a representative sample)."""
+    from app.orders import teach
+    mail_404 = {**MAIL, "message_id": "att2"}
+    pg.execute(
+        "INSERT INTO mail_rules (sender_norm, subject_key, action, sample_had_attachments)"
+        " VALUES (%s, %s, 'ignore', true)",
+        (teach._sender_norm(mail_404["from_addr"]), teach.subject_key(mail_404["subject"])))
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('att2', 'ai_orders')")
+    pg.execute("INSERT INTO attachments (message_id, idx, filename, mime, extracted_text)"
+               " VALUES ('att2', 0, 'order.xls', 'application/vnd.ms-excel', 'some text')")
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), mail_404, env, client=ScriptedClient([]),
+                          upload=rec.upload, post=rec.post)
+    # The ignore rule fired — no extraction, no upload.
+    assert result["status"] == "ignored"
+    assert rec.uploads == []
+
+
+def test_digest_for_ignored_mail_never_shows_nahrate_do_orionu():
+    """#404: the Odoo summary for an `ignored` status must show its own distinct label,
+    never the misleading 'nahrate do ORIONu' from the `ok` bucket."""
+    from app.orders import report as _report
+    html = _report.build_summary("Test", [{"status": "ignored", "item_count": 0,
+                                           "missing_count": 0, "reject_reason": "ignored"}])
+    assert "nahraté do ORIONu" not in html
+    assert "ignorované" in html.lower()
+
+
+def test_zero_attachment_mail_with_no_orders_routes_to_ops_not_warehouse(pg, env):
+    """#404 ROZHODNUTIE: when extraction finds 0 orders AND the message has 0 attachments,
+    the system must NOT ask the warehouse the 'mail' question (that could teach an ignore
+    rule from a broken sample). Instead route to the ops channel as an alert."""
+    from app.orders import teach
+    _seed_mail(pg, "z1", with_attachment=False)
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(ops_channel_id=999), {"message_id": "z1",
+        "subject": "Objednávka", "from_addr": "sklad@pekaren.sk",
+        "from_name": "Sklad", "combined_text": "na 04.08.2026 poprosím",
+        "today": "2026-07-30"}, env,
+        client=ScriptedClient([dict(_NO_ORDERS_EXTRACT)]),
+        upload=rec.upload, post=rec.post)
+    assert result["status"] == "review"
+    # No mail question was asked (the 0-attachment gate prevented it)
+    mail_qs = [q for q in teach.open_questions(pg) if q.get("kind") == "mail"]
+    assert len(mail_qs) == 0
+    # An ops alert was enqueued
+    alert = pg.execute(
+        "SELECT kind FROM pending_alerts WHERE message_id = 'z1'").fetchone()
+    assert alert is not None
+    assert alert[0] == "mail_no_attachment"
+
+
+def test_mail_with_attachments_and_no_orders_still_asks_the_warehouse(pg, env):
+    """#404: when extraction finds 0 orders but the message HAS attachments, the normal
+    'mail' question should still be asked (extraction genuinely ran on real content)."""
+    from app.orders import teach
+    _seed_mail(pg, "z2")  # with_attachment=True by default — has an attachment
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), {"message_id": "z2",
+        "subject": "Objednávka", "from_addr": "sklad@pekaren.sk",
+        "from_name": "Sklad", "combined_text": "na 04.08.2026 poprosím",
+        "today": "2026-07-30"}, env,
+        client=ScriptedClient([dict(_NO_ORDERS_EXTRACT)]),
+        upload=rec.upload, post=rec.post)
+    # Status is "held" because a mail question was asked
+    assert result["status"] == "held"
+    # A mail question WAS asked (the message had attachments, so it's safe to ask)
+    mail_qs = [q for q in teach.open_questions(pg) if q.get("kind") == "mail"]
+    assert len(mail_qs) == 1

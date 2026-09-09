@@ -103,6 +103,11 @@ GROUPED_ITEM_KINDS = {
     "dl_upload_failed":
         "&#128230; Nenahraté dodacie listy ({n}) &mdash; nahranie do ORIONu zlyhalo; "
         "skús znova alebo nahlás administrátorovi.",
+    # #404: a mail with no real attachments where AI found no order — likely a missing
+    # attachment, not a non-order. Routed to ops instead of the warehouse mail question.
+    "mail_no_attachment":
+        "&#9888;&#65039; E-maily bez príloh ({n}) &mdash; AI nenašla objednávku a mail "
+        "nemá žiadnu prílohu; chýba príloha alebo zlyhala extrakcia.",
 }
 
 # #239 finding 1 (reopened): production calls flush_pending() on almost every worker

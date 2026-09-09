@@ -98,3 +98,24 @@ Conditions, in the order the code evaluates them (cheap first):
   two routes required updating `EXPECTED_ROUTES` AND re-pinning the DASH_HTML sha256 (with
   `# airuleset:secret-ok`, a page-hash not a credential) in `test_httpapi_characterization.py`
   — the same re-pin discipline as `board-line-edit.md`.
+
+## #404: a NEW gate that skips the warehouse `mail` question needs its own `Reason` in `TECHNICAL_REASONS`
+
+`pipeline._finish` enforces an invariant: a "review"/"error" outcome must either be in
+`TECHNICAL_REASONS` or carry at least one open board question. A new gate that routes AWAY
+from asking the warehouse (e.g. the 0-attachment gate added by #404, which sends an ops alert
+instead) produces a `review` status with NO board question — `_finish` then synthesizes a
+FALLBACK `mail` question, defeating the gate entirely. Fix: add a new `Reason.NO_ATTACHMENT`
+(or whatever the gate's classification is) to `TECHNICAL_REASONS`.
+
+Also: `_seed_mail` in `test_orders_pipeline.py` now seeds an attachment by default
+(`with_attachment=True`). Any new test that expects the warehouse `mail` question to fire on
+the no-orders path must have attachments on the message — pass `with_attachment=False` only
+when testing the 0-attachment ops-alert path specifically.
+
+## #404: adding a new `status` to `build_summary` requires THREE edits
+
+A new pipeline status (like `"ignored"`) needs:
+1. `STATUS_ICON["ignored"]` and `STATUS_LABEL["ignored"]` in `report.py`
+2. The status string in `build_summary`'s `for status in (...)` loop (line ~170)
+3. Correct handling in `_finish`'s event-log stage/status mapping (lines ~900-905)
