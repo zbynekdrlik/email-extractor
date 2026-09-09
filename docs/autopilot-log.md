@@ -4264,3 +4264,4 @@ row for it) — first live ship is an owner decision via `/znalosti`. Shadow-ver
 PROD message 10783: docNumber 1149285, deliveryDate 09.09.2026, documentTotalWithoutVAT
 191.70, both items GTIN-matched (0.97/0.99 confidence), money/date gates pass, zero
 writes.
+- **#410 (0.9.146) — CI e2e ephemeral Postgres ports.** e2e-orders/e2e-dl hardcoded host ports 55433/55435 collided with local dev containers on dev2 (3x failure 2026-09-09). Changed both to ephemeral `ports: - 5432`, resolved via `job.services.postgres.ports['5432']` + `$GITHUB_ENV`. Updated local-testing.md: no CI-reserved ports, prefer ephemeral locally. bump d1edabe → fix 5e0ab1a.

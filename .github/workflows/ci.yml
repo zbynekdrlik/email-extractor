@@ -87,18 +87,19 @@ jobs:
         env:
           POSTGRES_PASSWORD: postgres
         ports:
-          - 55433:5432
+          - 5432
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       CORPUS: /home/newlevel/eval-corpus/email-extractor
-      PG_DSN: postgresql://postgres:postgres@localhost:55433/postgres
     defaults:
       run:
         working-directory: email-extractor
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve ephemeral Postgres port
+        run: echo "PG_DSN=postgresql://postgres:postgres@localhost:${{ job.services.postgres.ports['5432'] }}/postgres" >> "$GITHUB_ENV"
       - name: The corpus must be present (a missing corpus fails, never skips)
         run: |
           for f in manifest.json catalog.csv customers.csv history.json taught.json llm-cache; do
@@ -151,18 +152,19 @@ jobs:
         env:
           POSTGRES_PASSWORD: postgres
         ports:
-          - 55435:5432
+          - 5432
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       CORPUS: /home/newlevel/eval-corpus/email-extractor
-      PG_DSN: postgresql://postgres:postgres@localhost:55435/postgres
     defaults:
       run:
         working-directory: email-extractor
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve ephemeral Postgres port
+        run: echo "PG_DSN=postgresql://postgres:postgres@localhost:${{ job.services.postgres.ports['5432'] }}/postgres" >> "$GITHUB_ENV"
       - name: The DL corpus must be present (a missing corpus fails, never skips)
         run: |
           for f in dl/manifest.json dl/dl_catalog.csv dl/objednavky_catalog.csv \
