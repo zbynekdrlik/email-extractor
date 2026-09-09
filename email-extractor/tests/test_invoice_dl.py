@@ -86,9 +86,9 @@ class FakeClient:
         return []
 
 
-# --- test: invoice_supplier_domains ----------------------------------------
+# --- test: _invoice_supplier_emails (F4: exact email, not domain) ----------
 
-def test_invoice_supplier_domains_returns_flagged_only():
+def test_invoice_supplier_emails_returns_flagged_only():
     suppliers = [
         {"ean_edi": "111", "name": "A", "emails": ["a@x.com"],
          "invoice_is_delivery_note": True},
@@ -97,19 +97,19 @@ def test_invoice_supplier_domains_returns_flagged_only():
         {"ean_edi": "333", "name": "C", "emails": [],
          "invoice_is_delivery_note": True},
     ]
-    result = dl_message._invoice_supplier_domains(suppliers)
-    assert "x.com" in result
-    assert result["x.com"]["ean_edi"] == "111"
-    assert "y.com" not in result
-    # C has no emails, so no domain entry
+    result = dl_message._invoice_supplier_emails(suppliers)
+    assert "a@x.com" in result
+    assert result["a@x.com"]["ean_edi"] == "111"
+    assert "b@y.com" not in result
+    # C has no emails, so no entry
 
 
-def test_invoice_supplier_domains_empty_when_no_flag():
+def test_invoice_supplier_emails_empty_when_no_flag():
     suppliers = [
         {"ean_edi": "111", "name": "A", "emails": ["a@x.com"],
          "invoice_is_delivery_note": False},
     ]
-    result = dl_message._invoice_supplier_domains(suppliers)
+    result = dl_message._invoice_supplier_emails(suppliers)
     assert result == {}
 
 

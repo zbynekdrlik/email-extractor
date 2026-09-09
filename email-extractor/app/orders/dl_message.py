@@ -528,7 +528,8 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
 
 def _run_and_finish(conn, cfg, client, message: dict, snapshot_id: int | None,
                     catalog: list[dict], suppliers: list[dict], upload=None,
-                    post=None, list_dirs=None) -> dict | None:
+                    post=None, list_dirs=None,
+                    invoice_mode: bool = False) -> dict | None:
     """One full `_process_message` pass for `message`, finished off exactly like the
     live `engine=python` claim branch of `tick()` always has: an `order_runs` row,
     `messages` marked processed, and the rollup summary event. Returns the result dict
@@ -539,95 +540,104 @@ def _run_and_finish(conn, cfg, client, message: dict, snapshot_id: int | None,
     answer (#240) — the SAME safe, already-tested shape either way: `_process_message`
     always calls `_process_document`, which always claims through `desadv.
     claim_send_or_identify` before any upload, so an ALREADY-SHIPPED document inside
-    `message` is never re-uploaded here, no matter which caller triggered this pass."""
+    `message` is never re-uploaded here, no matter which caller triggered this pass.
+
+    When `invoice_mode` is True (#406, F1 review fix), the finish tail uses the
+    independent `dl_invoice_runs` ledger instead of `messages.processed/processing_at`
+    (those belong to the n8n invoice-forward flow), and events are logged with
+    `rollup=False` so the `email_events` trigger never overwrites the invoice flow's
+    own `proc_status/proc_outcome`."""
     run_id = worker._start_run(conn, message["message_id"], None, shadow=False)
     try:
         result = _process_message(conn, cfg, client, message, snapshot_id, catalog,
                                   suppliers, shadow=False, upload=upload, post=post,
-                                  list_dirs=list_dirs)
+                                  list_dirs=list_dirs,
+                                  invoice_mode=invoice_mode)
     except _RetryLater as e:
         log.info("DL message %s: transient failure (attempts=%s) — leaving for the "
                  "30-min stale reclaim: %s", message["message_id"],
                  message.get("attempts"), e)
         worker._finish_run(conn, run_id, "retry",
-                           {"kind": "dl", "dl_snapshot_id": snapshot_id, "reason": str(e)},
+                           {"kind": "dl", "dl_snapshot_id": snapshot_id, "reason": str(e),
+                            "invoice_mode": invoice_mode},
                            error=str(e))
-        # Deep-review finding on this ticket's own PR (#240): `tick()`'s claim branch
-        # relies on `_claim()` having already set `processing_at = now()` and `processed
-        # = false` — leaving both UNTOUCHED here is what lets R10's 30-minute stale
-        # window reclaim the message later. `release_for_question`'s reprocess call
-        # never went through `_claim()` at all: the message arrives here with `processed
-        # = true` (its earlier, successful pass already set that) and `processing_at =
-        # NULL` — leaving BOTH untouched would permanently strand the message outside
-        # `_claim()`'s own `WHERE processed = false` filter, with no path back into the
-        # normal retry cycle at all (a human's answer recorded, but the document never
-        # gets the "second chance" this whole ticket exists to give it). Explicitly
-        # re-arming both columns here makes the message reclaimable by the SAME stale
-        # window either way — a genuine no-op for the tick()-claim path (both columns
-        # already held these values moments earlier) and the actual fix for the
-        # release_for_question-reprocess path.
-        conn.execute(
-            """UPDATE messages SET processed = false, processing_at = now()
-                WHERE message_id = %s""", (message["message_id"],))
+        if invoice_mode:
+            # F1: invoice path uses its own ledger — delete the claim so the next tick
+            # can retry (same semantics as the old _tick_invoice retry branch).
+            conn.execute("DELETE FROM dl_invoice_runs WHERE message_id = %s",
+                         (message["message_id"],))
+        else:
+            # Deep-review finding on this ticket's own PR (#240): re-arm both columns
+            # to make the message reclaimable by the SAME stale window.
+            conn.execute(
+                """UPDATE messages SET processed = false, processing_at = now()
+                    WHERE message_id = %s""", (message["message_id"],))
         report.log_event(conn, message["message_id"], stage="retry", status="retry",
                          outcome=str(e)[:500], rollup=False, workflow=dl_report.WORKFLOW)
         return None
     except Exception as e:
         log.exception("DL pipeline failed for %s", message["message_id"])
-        # Deep-review finding, #204: `result=None` leaves `result->>'kind'` NULL, which
-        # `reliability.provenance_stats_for_day`'s own `IS DISTINCT FROM 'dl'` exclusion
-        # treats as an ORDERS run (NULL is distinct from 'dl') — exactly the rows the
-        # DL/orders split exists to keep apart end up miscounted on the busiest signal
-        # (a hard failure). Always tag `kind`.
         worker._finish_run(conn, run_id, "error",
-                           {"kind": "dl", "dl_snapshot_id": snapshot_id}, error=repr(e))
-        # Deep-review finding on this ticket's own PR (#240), same reasoning as the
-        # `_RetryLater` branch above: a hard failure during a `release_for_question`
-        # reprocess also arrives here with `processed = true` (its earlier, successful
-        # pass already set that) — `processing_at = NULL` alone would leave `processed`
-        # untouched and permanently strand the message outside `_claim()`'s own `WHERE
-        # processed = false` filter, exactly like the retry case, just with no 30-minute
-        # stale window at all (a hard failure has always been immediately reclaimable —
-        # `processing_at = NULL` puts it straight back in `_claim()`'s pool, matching the
-        # existing tick()-claim behaviour this line already had). Re-arming `processed`
-        # too is a genuine no-op for the tick()-claim path (already `false`) and the
-        # actual fix for the reprocess path.
-        conn.execute(
-            "UPDATE messages SET processed = false, processing_at = NULL "
-            "WHERE message_id = %s", (message["message_id"],))
+                           {"kind": "dl", "dl_snapshot_id": snapshot_id,
+                            "invoice_mode": invoice_mode},
+                           error=repr(e))
+        if invoice_mode:
+            # F1: record error outcome in our own ledger, never touch messages.processed
+            _finish_invoice_run(conn, message["message_id"], "error")
+        else:
+            conn.execute(
+                "UPDATE messages SET processed = false, processing_at = NULL "
+                "WHERE message_id = %s", (message["message_id"],))
         return None
-    worker._finish_run(conn, run_id, result.get("status", "ok"), result)
-    conn.execute(
-        """UPDATE messages
-              SET processed = true, processed_at = now(), processed_by = %s,
-                  processing_at = NULL
-            WHERE message_id = %s""", (CATEGORY, message["message_id"]))
-    real_docs = [d for d in result.get("documents", []) if not d.get("synthetic")]
-    report.log_event(conn, message["message_id"], stage=result.get("status", "ok"),
-                     status=result.get("status", "ok"),
-                     outcome=_summary_outcome(result),
-                     detail={"documents": len(real_docs)},
-                     rollup=True, workflow=dl_report.WORKFLOW)
+    worker._finish_run(conn, run_id, result.get("status", "ok"),
+                       {**result, "invoice_mode": invoice_mode})
+    if invoice_mode:
+        # F1: record outcome in our own ledger; NEVER write messages.processed/
+        # proc_status/proc_outcome (owned by the n8n invoice-forward flow).
+        # rollup=False so the email_events trigger never overwrites them.
+        _finish_invoice_run(conn, message["message_id"],
+                            result.get("status", "ok"))
+        real_docs = [d for d in result.get("documents", []) if not d.get("synthetic")]
+        report.log_event(conn, message["message_id"],
+                         stage=result.get("status", "ok"),
+                         status=result.get("status", "ok"),
+                         outcome=_summary_outcome(result),
+                         detail={"documents": len(real_docs), "invoice_mode": True},
+                         rollup=False, workflow=dl_report.WORKFLOW)
+    else:
+        conn.execute(
+            """UPDATE messages
+                  SET processed = true, processed_at = now(), processed_by = %s,
+                      processing_at = NULL
+                WHERE message_id = %s""", (CATEGORY, message["message_id"]))
+        real_docs = [d for d in result.get("documents", []) if not d.get("synthetic")]
+        report.log_event(conn, message["message_id"],
+                         stage=result.get("status", "ok"),
+                         status=result.get("status", "ok"),
+                         outcome=_summary_outcome(result),
+                         detail={"documents": len(real_docs)},
+                         rollup=True, workflow=dl_report.WORKFLOW)
     return result
 
 
 # --- #406: invoice → delivery-note dual routing (independent ledger) --------
 
-def _invoice_supplier_domains(suppliers: list[dict]) -> dict[str, dict]:
-    """Build a domain→supplier mapping for flagged suppliers.
+def _invoice_supplier_emails(suppliers: list[dict]) -> dict[str, dict]:
+    """Build an exact-email→supplier mapping for flagged suppliers.
 
-    Returns {lowercase-domain: supplier_dict} for every supplier with
+    Returns {lowercase-email: supplier_dict} for every supplier with
     `invoice_is_delivery_note=True` and at least one email address — used by
     `_claim_invoice` to match a `category='invoices'` message's `from_addr`
-    against the flagged supplier's registered emails by domain."""
+    by EXACT email (not domain) to avoid false matches on shared SaaS sender
+    domains like inforcloudsuite.com (F4, review finding)."""
     result: dict[str, dict] = {}
     for s in suppliers:
         if not s.get("invoice_is_delivery_note"):
             continue
         for email in s.get("emails") or []:
-            domain = email.rsplit("@", 1)[-1].lower() if "@" in email else ""
-            if domain:
-                result[domain] = s
+            addr = email.strip().lower()
+            if addr:
+                result[addr] = s
     return result
 
 
@@ -636,52 +646,61 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None) -> dict | None:
 
     Uses the independent `dl_invoice_runs` ledger — NEVER touches `messages.processed`
     (owned by the n8n invoice-forward flow). The scanner-sender guard (#407) and the
-    14-day date gate (#400) are respected: scanner senders are excluded, and messages
-    older than 14 days are skipped.
+    date gate (cfg.delivery_notes_max_age_days) are respected.
 
-    Returns a message dict (same shape as `_as_message`) or None."""
+    F2 (review finding): the sender filter is pushed into SQL so the query never starves
+    on a window full of non-flagged invoices. F4: exact email match, not domain."""
     from .dl_questions import is_scanner_sender
 
-    domain_map = _invoice_supplier_domains(suppliers)
-    if not domain_map:
+    email_map = _invoice_supplier_emails(suppliers)
+    if not email_map:
         return None
 
-    # Select candidate invoice messages not yet claimed in our ledger, within 14 days.
-    rows = conn.execute(
+    # F4: strip scanner senders from the match set
+    if cfg:
+        email_map = {e: s for e, s in email_map.items()
+                     if not is_scanner_sender(cfg, e)}
+    if not email_map:
+        return None
+
+    # F2: push the sender filter into SQL to avoid starving on unflagged invoices.
+    # F9: use cfg.delivery_notes_max_age_days instead of hardcoded 14.
+    max_age = int(getattr(cfg, "delivery_notes_max_age_days", 14) or 14) if cfg else 14
+    flagged_emails = list(email_map.keys())
+
+    row = conn.execute(
         """SELECT m.message_id, m.subject, m.from_addr, m.from_name,
                   m.combined_text, m.body_text, m.has_attachments,
                   m.created_at
              FROM messages m
             WHERE m.category = 'invoices'
-              AND m.created_at > now() - interval '14 days'
+              AND m.created_at > now() - make_interval(days => %s)
+              AND lower(m.from_addr) = ANY(%s)
               AND NOT EXISTS (SELECT 1 FROM dl_invoice_runs r
                                WHERE r.message_id = m.message_id)
-            ORDER BY m.created_at ASC LIMIT 20""").fetchall()
+            ORDER BY m.created_at ASC LIMIT 1""",
+        (max_age, flagged_emails)).fetchone()
 
-    for row in rows:
-        message_id, from_addr = row[0], row[2] or ""
-        # Scanner-sender guard (#407)
-        if cfg and is_scanner_sender(cfg, from_addr):
-            continue
-        # Match from_addr domain against flagged supplier domains
-        addr_domain = from_addr.rsplit("@", 1)[-1].lower() if "@" in from_addr else ""
-        supplier = domain_map.get(addr_domain)
-        if not supplier:
-            continue
-        # Claim in our independent ledger (idempotent — ON CONFLICT is a no-op)
-        claimed = conn.execute(
-            """INSERT INTO dl_invoice_runs (message_id) VALUES (%s)
-               ON CONFLICT (message_id) DO NOTHING
-               RETURNING message_id""",
-            (message_id,)).fetchone()
-        if not claimed:
-            continue  # already claimed by a prior tick
-        msg = _as_message(row[:7], created_at=row[7])
-        if msg is not None:
-            msg["_invoice_supplier"] = supplier
-        return msg
+    if not row:
+        return None
 
-    return None
+    message_id = row[0]
+    from_addr = (row[2] or "").strip().lower()
+    supplier = email_map.get(from_addr)
+
+    # Claim in our independent ledger (idempotent — ON CONFLICT is a no-op)
+    claimed = conn.execute(
+        """INSERT INTO dl_invoice_runs (message_id) VALUES (%s)
+           ON CONFLICT (message_id) DO NOTHING
+           RETURNING message_id""",
+        (message_id,)).fetchone()
+    if not claimed:
+        return None  # already claimed by a prior tick
+
+    msg = _as_message(row[:7], created_at=row[7])
+    if msg is not None and supplier:
+        msg["_invoice_supplier"] = supplier
+    return msg
 
 
 def _finish_invoice_run(conn, message_id: str, outcome: str) -> None:
