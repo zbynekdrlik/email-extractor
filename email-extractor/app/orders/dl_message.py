@@ -211,7 +211,7 @@ def _summary_outcome(result: dict) -> str:
 def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                      catalog: list[dict], suppliers: list[dict], shadow: bool,
                      upload=None, post=None, attachments: list[dict] | None = None,
-                     list_dirs=None) -> dict:
+                     list_dirs=None, invoice_mode: bool = False) -> dict:
     # `attachments` injection (#205, DL migration F6 eval harness): mirrors the existing
     # `upload=`/`post=` DI seam. `None` (every real call site, incl. `tick()` below) keeps
     # reading `messages`/`attachments`/disk exactly as before; the eval harness passes a
@@ -417,7 +417,8 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                "status": _aggregate_status(documents_out + [this_doc]),
                "documents": documents_out + [this_doc], "items": []}
 
-    extraction = dl_extract.extract_email(client, sources)
+    extraction = dl_extract.extract_email(client, sources,
+                                            invoice_mode=invoice_mode)
 
     # #297: `documents_out` may already carry entries from the empty-spreadsheet
     # flagging above — accumulate into the SAME list, never reset it here.
@@ -608,3 +609,83 @@ def _run_and_finish(conn, cfg, client, message: dict, snapshot_id: int | None,
                      detail={"documents": len(real_docs)},
                      rollup=True, workflow=dl_report.WORKFLOW)
     return result
+
+
+# --- #406: invoice → delivery-note dual routing (independent ledger) --------
+
+def _invoice_supplier_domains(suppliers: list[dict]) -> dict[str, dict]:
+    """Build a domain→supplier mapping for flagged suppliers.
+
+    Returns {lowercase-domain: supplier_dict} for every supplier with
+    `invoice_is_delivery_note=True` and at least one email address — used by
+    `_claim_invoice` to match a `category='invoices'` message's `from_addr`
+    against the flagged supplier's registered emails by domain."""
+    result: dict[str, dict] = {}
+    for s in suppliers:
+        if not s.get("invoice_is_delivery_note"):
+            continue
+        for email in s.get("emails") or []:
+            domain = email.rsplit("@", 1)[-1].lower() if "@" in email else ""
+            if domain:
+                result[domain] = s
+    return result
+
+
+def _claim_invoice(conn, suppliers: list[dict], cfg=None) -> dict | None:
+    """Select one unclaimed `category='invoices'` message from a flagged supplier.
+
+    Uses the independent `dl_invoice_runs` ledger — NEVER touches `messages.processed`
+    (owned by the n8n invoice-forward flow). The scanner-sender guard (#407) and the
+    14-day date gate (#400) are respected: scanner senders are excluded, and messages
+    older than 14 days are skipped.
+
+    Returns a message dict (same shape as `_as_message`) or None."""
+    from .dl_questions import is_scanner_sender
+
+    domain_map = _invoice_supplier_domains(suppliers)
+    if not domain_map:
+        return None
+
+    # Select candidate invoice messages not yet claimed in our ledger, within 14 days.
+    rows = conn.execute(
+        """SELECT m.message_id, m.subject, m.from_addr, m.from_name,
+                  m.combined_text, m.body_text, m.has_attachments,
+                  m.created_at
+             FROM messages m
+            WHERE m.category = 'invoices'
+              AND m.created_at > now() - interval '14 days'
+              AND NOT EXISTS (SELECT 1 FROM dl_invoice_runs r
+                               WHERE r.message_id = m.message_id)
+            ORDER BY m.created_at ASC LIMIT 20""").fetchall()
+
+    for row in rows:
+        message_id, from_addr = row[0], row[2] or ""
+        # Scanner-sender guard (#407)
+        if cfg and is_scanner_sender(cfg, from_addr):
+            continue
+        # Match from_addr domain against flagged supplier domains
+        addr_domain = from_addr.rsplit("@", 1)[-1].lower() if "@" in from_addr else ""
+        supplier = domain_map.get(addr_domain)
+        if not supplier:
+            continue
+        # Claim in our independent ledger (idempotent — ON CONFLICT is a no-op)
+        claimed = conn.execute(
+            """INSERT INTO dl_invoice_runs (message_id) VALUES (%s)
+               ON CONFLICT (message_id) DO NOTHING
+               RETURNING message_id""",
+            (message_id,)).fetchone()
+        if not claimed:
+            continue  # already claimed by a prior tick
+        msg = _as_message(row[:7], created_at=row[7])
+        if msg is not None:
+            msg["_invoice_supplier"] = supplier
+        return msg
+
+    return None
+
+
+def _finish_invoice_run(conn, message_id: str, outcome: str) -> None:
+    """Record the outcome of an invoice-as-DL processing run."""
+    conn.execute(
+        "UPDATE dl_invoice_runs SET outcome = %s WHERE message_id = %s",
+        (outcome, message_id))

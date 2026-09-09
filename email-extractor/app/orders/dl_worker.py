@@ -110,6 +110,7 @@ import logging
 from . import (
     dl_alerts,
     dl_extract,  # noqa: F401 (re-export for dl_worker.dl_extract monkeypatch)
+    dl_report,
     dl_snapshot,
     llm,
     report,
@@ -161,6 +162,9 @@ from .dl_message import (  # noqa: F401 (re-export: public dl_worker API)
     _aggregate_status,
     _as_message,
     _claim,
+    _claim_invoice,
+    _finish_invoice_run,
+    _invoice_supplier_domains,
     _peek_for_shadow,
     _process_message,
     _read_attachments,
@@ -285,12 +289,19 @@ def tick(conn, cfg, client=None, upload=None, post=None, list_dirs=None) -> int:
 
     if engine == "python":
         message = _claim(conn)
-        if not message:
-            return 0
-        result = _run_and_finish(conn, cfg, client, message, snapshot_id, catalog,
-                                 suppliers, upload=upload, post=post,
-                                 list_dirs=list_dirs)
-        return 1 if result is not None else 0
+        if message:
+            result = _run_and_finish(conn, cfg, client, message, snapshot_id, catalog,
+                                     suppliers, upload=upload, post=post,
+                                     list_dirs=list_dirs)
+            return 1 if result is not None else 0
+
+        # #406: try invoice-as-DL dual routing when no regular DL message is pending.
+        # Uses the effective supplier list (snapshot + overrides merged) to find
+        # suppliers with invoice_is_delivery_note=True.
+        effective_suppliers = dl_snapshot.dl_suppliers_for_management(conn)
+        return _tick_invoice(conn, cfg, client, snapshot_id, catalog, suppliers,
+                             effective_suppliers, upload=upload, post=post,
+                             list_dirs=list_dirs)
 
     message = _peek_for_shadow(conn, getattr(cfg, "delivery_notes_shadow_days",
                                              SHADOW_DAYS))
@@ -317,4 +328,62 @@ def tick(conn, cfg, client=None, upload=None, post=None, list_dirs=None) -> int:
                            {"kind": "dl", "dl_snapshot_id": snapshot_id}, error=repr(e))
         return 0
     worker._finish_run(conn, run_id, result.get("status", "ok"), result)
+    return 1
+
+
+# --- #406: invoice-as-DL tick ------------------------------------------------
+
+def _tick_invoice(conn, cfg, client, snapshot_id, catalog, suppliers,
+                  effective_suppliers, *, upload=None, post=None,
+                  list_dirs=None) -> int:
+    """Process at most one `category='invoices'` message from a flagged supplier,
+    through the DL pipeline with invoice_mode=True.
+
+    Uses the independent `dl_invoice_runs` ledger — NEVER touches `messages.processed`.
+    The n8n invoice-forward flow continues to own that column; this is the DL engine's
+    own parallel processing path (owner's ROZHODNUTÉ: dual routing)."""
+    message = _claim_invoice(conn, effective_suppliers, cfg=cfg)
+    if not message:
+        return 0
+
+    log.info("DL invoice tick: claimed invoice message %s (subject=%r)",
+             message["message_id"], message.get("subject", ""))
+
+    run_id = worker._start_run(conn, message["message_id"], None, shadow=False)
+    try:
+        result = _process_message(conn, cfg, client, message, snapshot_id, catalog,
+                                  suppliers, shadow=False, upload=upload, post=post,
+                                  invoice_mode=True)
+    except _RetryLater as e:
+        log.info("DL invoice pipeline hit a transient failure for %s: %s",
+                 message["message_id"], e)
+        worker._finish_run(conn, run_id, "error",
+                           {"kind": "dl", "dl_snapshot_id": snapshot_id,
+                            "invoice_mode": True, "reason": str(e)},
+                           error=str(e))
+        # Remove the dl_invoice_runs row so the next tick can retry
+        conn.execute("DELETE FROM dl_invoice_runs WHERE message_id = %s",
+                     (message["message_id"],))
+        return 0
+    except Exception as e:
+        log.exception("DL invoice pipeline failed for %s", message["message_id"])
+        worker._finish_run(conn, run_id, "error",
+                           {"kind": "dl", "dl_snapshot_id": snapshot_id,
+                            "invoice_mode": True},
+                           error=repr(e))
+        _finish_invoice_run(conn, message["message_id"], "error")
+        return 0
+
+    outcome = result.get("status", "ok")
+    worker._finish_run(conn, run_id, outcome, {**result, "invoice_mode": True})
+    _finish_invoice_run(conn, message["message_id"], outcome)
+
+    real_docs = [d for d in result.get("documents", []) if not d.get("synthetic")]
+    report.log_event(conn, message["message_id"], stage=outcome,
+                     status=outcome,
+                     outcome=_summary_outcome(result),
+                     detail={"documents": len(real_docs), "invoice_mode": True},
+                     rollup=False, workflow=dl_report.WORKFLOW)
+    log.info("DL invoice tick: %s → %s (%d doc(s))",
+             message["message_id"], outcome, len(real_docs))
     return 1

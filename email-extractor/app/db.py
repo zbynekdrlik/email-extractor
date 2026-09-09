@@ -197,6 +197,21 @@ REVISIONS = [
               SET emails = array_remove(emails, 'tlaciaren@slovnormal.sk')
             WHERE 'tlaciaren@slovnormal.sk' = ANY(emails)""",
     ]),
+    migrate.Revision(12, "add_invoice_is_delivery_note", [
+        # #406: per-supplier flag — when true, the DL engine also processes
+        # category='invoices' messages from this supplier (dual routing).
+        """ALTER TABLE dl_supplier_overrides
+              ADD COLUMN IF NOT EXISTS invoice_is_delivery_note
+              BOOLEAN NOT NULL DEFAULT false""",
+        # Independent ledger for DL-engine processing of invoice messages — completely
+        # separate from messages.processed (owned by the n8n invoice-forward flow).
+        # Claim-first, idempotent: a second tick for the same message_id is a no-op.
+        """CREATE TABLE IF NOT EXISTS dl_invoice_runs (
+              message_id TEXT PRIMARY KEY,
+              claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+              outcome    TEXT
+           )""",
+    ]),
 ]
 
 

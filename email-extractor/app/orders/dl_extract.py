@@ -38,6 +38,7 @@ log = logging.getLogger("orders.dl_extract")
 
 PROMPTS_DIR = Path(__file__).with_name("prompts")
 EXTRACT_PROMPT_PATH = PROMPTS_DIR / "dl_extract.md"
+EXTRACT_INVOICE_PROMPT_PATH = PROMPTS_DIR / "dl_extract_invoice.md"
 VISION_PROMPT_PATH = PROMPTS_DIR / "dl_vision.md"
 
 # R40: the largest embedded JPEG over this size classifies the PDF as a scan.
@@ -121,8 +122,9 @@ DL_SCHEMA = {
 }
 
 
-def extract_prompt() -> str:
-    return EXTRACT_PROMPT_PATH.read_text(encoding="utf-8")
+def extract_prompt(invoice_mode: bool = False) -> str:
+    path = EXTRACT_INVOICE_PROMPT_PATH if invoice_mode else EXTRACT_PROMPT_PATH
+    return path.read_text(encoding="utf-8")
 
 
 def vision_prompt() -> str:
@@ -514,12 +516,17 @@ def validate_document(document: dict) -> dict:
 
 # --- 7) the LLM extraction call (multi-document schema, fixes W1b) ---------
 
-def run_extraction(client, source_text: str) -> dict:
+def run_extraction(client, source_text: str, *, invoice_mode: bool = False) -> dict:
     """One multi-document extraction call over `source_text` (already cross-checked by
     `combine_transcripts`, if applicable). `client` is an `llm.Client` (or any object
-    exposing `json_call`)."""
+    exposing `json_call`).
+
+    When `invoice_mode` is True (#406), uses the invoice-specific extraction prompt that
+    lifts the invoice exclusion and instructs the model to derive DL fields from the
+    invoice (delivery-note number, delivery date, základ dane)."""
     user = f"--- DELIVERY NOTE TEXT ---\n{source_text}\n--- END ---"
-    extracted = client.json_call(extract_prompt(), user, DL_SCHEMA, name="dl_documents")
+    extracted = client.json_call(extract_prompt(invoice_mode=invoice_mode), user,
+                                 DL_SCHEMA, name="dl_documents")
     documents = []
     for raw_doc in extracted.get("documents") or []:
         doc = dict(raw_doc)
@@ -543,7 +550,8 @@ def _is_vision_placeholder(text: str) -> bool:
 
 
 def extract_attachment(client, pdf_bytes: bytes, machine_text: str = "",
-                       needs_vision: bool = False) -> dict:
+                       needs_vision: bool = False, *,
+                       invoice_mode: bool = False) -> dict:
     """Scan detection -> vision (only when actually needed, R42/W13) -> R43 cross-check
     -> multi-document extraction -> R50-R52 validation, for ONE attachment.
 
@@ -615,7 +623,7 @@ def extract_attachment(client, pdf_bytes: bytes, machine_text: str = "",
     primary_text = choose_source_text(effective_scanned, machine_text, vision_primary)
     source_text = combine_transcripts(cross_check_text, primary_text, vision_secondary)
 
-    extraction = run_extraction(client, source_text)
+    extraction = run_extraction(client, source_text, invoice_mode=invoice_mode)
     return {"documents": extraction["documents"], "scanned": scanned,
             "vision_used": vision_used, "prompt_hash": extraction["prompt_hash"],
             "source_text": source_text}
@@ -623,7 +631,8 @@ def extract_attachment(client, pdf_bytes: bytes, machine_text: str = "",
 
 # --- 9) every attachment of the mail (fixes W1a) ----------------------------
 
-def extract_email(client, attachments: list[dict]) -> dict:
+def extract_email(client, attachments: list[dict], *,
+                   invoice_mode: bool = False) -> dict:
     """Every attachment of the message (fixes W1a — n8n's own `LIMIT 1` attachment pick).
     Each attachment can itself carry more than one delivery note (fixes W1b, via
     `extract_attachment`'s multi-document schema); every returned document is tagged with
@@ -636,6 +645,9 @@ def extract_email(client, attachments: list[dict]) -> dict:
     same mail (deep-review finding, #201). A caller that needs to know whether a specific
     attachment failed reads `attachments[i]["error"]` (`None` on success).
 
+    When `invoice_mode` is True (#406), the invoice-specific extraction prompt is used,
+    lifting the invoice exclusion so delivery-note fields can be derived from an invoice.
+
     `attachments`: list of `{"idx", "filename", "pdf_bytes", "machine_text"[, "needs_vision"]}`.
     """
     documents: list[dict] = []
@@ -646,7 +658,8 @@ def extract_email(client, attachments: list[dict]) -> dict:
         try:
             result = extract_attachment(client, att.get("pdf_bytes") or b"",
                                         att.get("machine_text") or "",
-                                        needs_vision=bool(att.get("needs_vision")))
+                                        needs_vision=bool(att.get("needs_vision")),
+                                        invoice_mode=invoice_mode)
         except Exception as e:
             log.exception("DL attachment idx=%s filename=%r failed to extract — "
                           "continuing with the rest of this mail's attachments", idx, filename)
