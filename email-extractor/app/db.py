@@ -148,6 +148,25 @@ ADD_HELD_ORDERS_MANUAL_RELEASE_REASON = [
     "CHECK (release_reason IN ('answered', 'deadline', 'manual'))",
 ]
 
+# #404: persist whether the sample message had attachments when the ignore rule was learned,
+# so `_mail_rule` can refuse to short-circuit a mail that differs in attachment shape.
+ADD_MAIL_RULES_SAMPLE_HAD_ATTACHMENTS = [
+    "ALTER TABLE mail_rules ADD COLUMN IF NOT EXISTS sample_had_attachments boolean",
+    # Backfill from the sample message via question_id → order_questions.message_id →
+    # attachments count. A rule with no resolvable question/message stays NULL (treated
+    # conservatively as "unknown, do not trust").
+    """UPDATE mail_rules mr
+          SET sample_had_attachments = (
+              SELECT count(*) > 0
+                FROM attachments a
+               WHERE a.message_id = (
+                     SELECT oq.message_id FROM order_questions oq
+                      WHERE oq.id = mr.question_id)
+          )
+        WHERE mr.question_id IS NOT NULL
+          AND mr.sample_had_attachments IS NULL""",
+]
+
 
 # SCHEMA above is FROZEN as revision 1 (the baseline). NEVER edit those statements for a
 # schema change — append a NEW numbered migrate.Revision to this list instead
@@ -164,6 +183,8 @@ REVISIONS = [
     migrate.Revision(8, "add_catalog_overrides_alias", ADD_CATALOG_OVERRIDES_ALIAS),
     migrate.Revision(9, "add_held_orders_manual_release_reason",
                      ADD_HELD_ORDERS_MANUAL_RELEASE_REASON),
+    migrate.Revision(10, "add_mail_rules_sample_had_attachments",
+                     ADD_MAIL_RULES_SAMPLE_HAD_ATTACHMENTS),
 ]
 
 
