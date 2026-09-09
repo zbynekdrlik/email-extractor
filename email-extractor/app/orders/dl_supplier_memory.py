@@ -22,15 +22,27 @@ def _norm(email: str) -> str:
     return str(email or "").strip().lower()
 
 
-def remember(conn, sender_email: str, ean_edi: str, name: str = "") -> bool:
+def remember(conn, sender_email: str, ean_edi: str, name: str = "",
+             *, cfg=None) -> bool:
     """Teach (or correct) which supplier this address belongs to. `ON CONFLICT ... DO UPDATE`
     (not `DO NOTHING`) — unlike a delivery record, a taught mapping is a single current fact
     about one address; a re-teach is a correction of a mis-click, not a second historical
     event, so overwriting in place is right (mirrors `dl_snapshots`' own `_freeze` "one current
-    row per identity" pattern, not `item_memory`'s append-only shipment history)."""
+    row per identity" pattern, not `item_memory`'s append-only shipment history).
+
+    #407: when `cfg` is provided and the address is a configured scanner/relay sender
+    (`delivery_notes_scanner_senders`), the write is silently refused — a scanner forwards
+    mail from EVERY supplier and is never a supplier identity."""
     email = _norm(sender_email)
     if not (email and ean_edi):
         return False
+    # #407: refuse to learn a scanner/relay address as a supplier identity.
+    if cfg is not None:
+        from .dl_questions import is_scanner_sender
+        if is_scanner_sender(cfg, email):
+            log.info("dl supplier memory REFUSED scanner address: %s (not an identity)",
+                     email)
+            return False
     conn.execute(
         """INSERT INTO dl_supplier_memory (sender_email, ean_edi, name)
                VALUES (%s, %s, %s)

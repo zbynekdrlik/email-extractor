@@ -22,6 +22,18 @@ def _scanner_senders(cfg) -> set[str]:
     return {addr.strip().lower() for addr in raw.split(",") if addr.strip()}
 
 
+def is_scanner_sender(cfg, email: str | None) -> bool:
+    """#407: True when `email` is a configured scanner/relay address — such an address
+    forwards mail from EVERY supplier and is NEVER a supplier identity.  Used to guard
+    `dl_supplier_memory.remember`, `_match_supplier`'s memory rung, rung 2 in
+    `resolve_supplier_from_cards`, the new-supplier form prefill, and the answer
+    endpoint's email-append.  Reuses the SAME `delivery_notes_scanner_senders` config
+    option (#399) — no second list."""
+    if not email:
+        return False
+    return str(email).strip().lower() in _scanner_senders(cfg)
+
+
 # --- #240: an answered dl_item/dl_supplier question gives its document another chance --
 
 def release_for_question(conn, cfg, qid: int, client=None, upload=None,
@@ -461,7 +473,10 @@ def _auto_close_matching_supplier_questions(conn, cfg, card_ean: str) -> int:
         sender_email = str(payload.get("sender_email") or "")
         doc = {"supplierName": str(payload.get("supplier_name") or ""),
                "supplierCity": str(payload.get("supplier_city") or "")}
-        dec = dl_match.resolve_supplier_from_cards(doc, cards, sender_email)
+        # #407 F2: exclude the FULL configured scanner set from rung 2.
+        _excl = frozenset(_scanner_senders(cfg))
+        dec = dl_match.resolve_supplier_from_cards(
+            doc, cards, sender_email, exclude_emails=_excl)
         if not (dec and dec.matched and str(dec.ean_edi) == card_ean):
             continue
         # Per-question isolation: this runs INSIDE the /znalosti card-save HTTP request and
