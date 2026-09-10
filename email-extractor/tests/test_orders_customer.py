@@ -231,3 +231,122 @@ def test_guess_delivery_address_finds_the_line_carrying_a_postal_code():
 
 def test_guess_delivery_address_is_empty_when_no_postal_code_appears():
     assert customer.guess_delivery_address("objednávka bez adresy") == ""
+
+
+# --- #418: delivery-address rung — multi-site sender resolved by delivery city/street ----
+
+KOSIK = [
+    {"ean_edi": "2000000000797", "name": "Košík.sk — MAKRO store Košice",
+     "emails": ["objednavky@kosik.sk"], "city": "Košice", "street": "Moldavská 32",
+     "zip": ""},
+    {"ean_edi": "2000000000798", "name": "Košík.sk — MAKRO store Žilina",
+     "emails": ["objednavky@kosik.sk"], "city": "Žilina", "street": "Prielohy 1",
+     "zip": ""},
+    {"ean_edi": "2000000000799", "name": "Košík.sk — MAKRO store Zvolen",
+     "emails": ["objednavky@kosik.sk"], "city": "Zvolen", "street": "Ulica Stráž 17",
+     "zip": ""},
+]
+
+KOSIK_ZILINA_TEXT = (
+    "Objednávka č. 4500317338\n"
+    "Doručenie na sklad Prielohy 1, 010 07, Žilina, MAKRO store Žilina\n"
+    "Termín dodania: 14.09.2026"
+)
+
+
+def test_delivery_address_resolves_to_the_matching_site_card():
+    """#418: two+ cards share an email — the delivery city in the mail text picks the
+    right one. The model is unsure and there is no multi-shop block header (store='')."""
+    hit = customer.resolve(
+        KOSIK, sender_email="objednavky@kosik.sk", sender_name="Košík.sk",
+        company_name="Košík.sk", llm={"ean_edi": "", "confidence": 0.2},
+        delivery_text=KOSIK_ZILINA_TEXT)
+    assert hit is not None, "should resolve, not fall through to question"
+    assert hit.ean_edi == "2000000000798"
+    assert hit.rule == "delivery_address"
+
+
+def test_delivery_address_zvolen_resolves_to_zvolen_card():
+    """Same sender, but mail says Zvolen."""
+    zvolen_text = (
+        "Objednávka č. 4500317337\n"
+        "Doručenie na sklad Ulica Stráž 17, 960 01, Zvolen\n"
+        "Termín dodania: 14.09.2026"
+    )
+    hit = customer.resolve(
+        KOSIK, sender_email="objednavky@kosik.sk", sender_name="Košík.sk",
+        company_name="Košík.sk", llm={"ean_edi": "", "confidence": 0.2},
+        delivery_text=zvolen_text)
+    assert hit is not None
+    assert hit.ean_edi == "2000000000799"
+    assert hit.rule == "delivery_address"
+
+
+def test_delivery_address_no_match_falls_through_to_none():
+    """When the delivery text doesn't match any card's city/street -> None, so the
+    pipeline raises the standard customer board question."""
+    unknown_text = (
+        "Objednávka č. 4500317340\n"
+        "Doručenie na sklad Bratislava, Einsteinova 25\n"
+        "Termín dodania: 14.09.2026"
+    )
+    hit = customer.resolve(
+        KOSIK, sender_email="objednavky@kosik.sk", sender_name="Košík.sk",
+        company_name="Košík.sk", llm={"ean_edi": "", "confidence": 0.2},
+        delivery_text=unknown_text)
+    assert hit is None
+
+
+def test_delivery_address_not_used_when_only_one_card_matches_email():
+    """When only ONE card owns the address -> exact_email wins, delivery_text is
+    irrelevant. Confirms single-card behaviour is unchanged (#418 point 3)."""
+    single = [KOSIK[0]]  # only the Košice card
+    hit = customer.resolve(
+        single, sender_email="objednavky@kosik.sk", sender_name="",
+        company_name="", llm={"ean_edi": "", "confidence": 0.2},
+        delivery_text=KOSIK_ZILINA_TEXT)
+    assert hit is not None
+    assert hit.rule == "exact_email"
+    assert hit.ean_edi == "2000000000797"
+
+
+def test_delivery_address_llm_still_wins_over_address_when_sure():
+    """A confident model match overrides the delivery-address rung — same priority
+    as the existing hierarchy."""
+    hit = customer.resolve(
+        KOSIK, sender_email="objednavky@kosik.sk", sender_name="",
+        company_name="Košík.sk",
+        llm={"ean_edi": "2000000000797", "confidence": 0.90},
+        delivery_text=KOSIK_ZILINA_TEXT)
+    assert hit.ean_edi == "2000000000797"
+    assert hit.rule == "llm"
+
+
+def test_delivery_address_ambiguous_two_cities_match_returns_none():
+    """If the delivery text happens to mention BOTH cities -> ambiguous -> None."""
+    both_text = "Doručenie: pobočky Košice a Žilina, rozvoz oboch"
+    hit = customer.resolve(
+        KOSIK, sender_email="objednavky@kosik.sk", sender_name="",
+        company_name="", llm={"ean_edi": "", "confidence": 0.2},
+        delivery_text=both_text)
+    assert hit is None
+
+
+def test_delivery_address_street_breaks_city_tie():
+    """Two cards in the same city — the street must break the tie."""
+    same_city = [
+        {"ean_edi": "3000000000001", "name": "Pekáreň Bratislava — Ružinov",
+         "emails": ["objednavky@pekarenba.sk"], "city": "Bratislava",
+         "street": "Cesta na Senec 2", "zip": ""},
+        {"ean_edi": "3000000000002", "name": "Pekáreň Bratislava — Petržalka",
+         "emails": ["objednavky@pekarenba.sk"], "city": "Bratislava",
+         "street": "Rusovská 18", "zip": ""},
+    ]
+    text = "Dodanie: Rusovská 18, 851 01 Bratislava"
+    hit = customer.resolve(
+        same_city, sender_email="objednavky@pekarenba.sk", sender_name="",
+        company_name="", llm={"ean_edi": "", "confidence": 0.2},
+        delivery_text=text)
+    assert hit is not None
+    assert hit.ean_edi == "3000000000002"
+    assert hit.rule == "delivery_address"
