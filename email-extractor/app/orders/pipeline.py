@@ -329,7 +329,7 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
         return customer.resolve(customers, sender,
                                 extracted.get("senderName", ""),
                                 extracted.get("companyName", ""), llm=cust_answer,
-                                store=store)
+                                store=store, delivery_text=extracted.get("notes", ""))
 
     email_matched = matched = _customer_for()
     is_change = bool(extracted.get("isChangeRequest"))
