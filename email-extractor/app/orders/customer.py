@@ -94,6 +94,47 @@ def candidates(customers: list[dict], sender_email: str, sender_name: str,
     return scored[:limit]
 
 
+def _by_delivery_address(owners: list[dict], delivery_text: str) -> dict | None:
+    """Which of the branches sharing one address does the delivery text name? (#418)
+
+    When two+ customer cards share a sender email and _by_store() cannot decide (no
+    multi-shop block header), try to match the delivery city/street from the raw email
+    text against each card's `city`/`street` fields. Exactly one hit -> that card;
+    zero or multiple -> None (falls through to the customer question).
+
+    Matching is case-insensitive substring, same approach candidates_for_question()
+    already uses successfully for ranking.
+    """
+    text = _norm_text(delivery_text)
+    if not text:
+        return None
+    scored = []
+    for c in owners:
+        city = _norm_text(c.get("city", ""))
+        street = _norm_text(c.get("street", ""))
+        city_hit = bool(city and len(city) > 2 and city in text)
+        street_hit = bool(street and len(street) > 3 and street in text)
+        if city_hit or street_hit:
+            scored.append((c, city_hit, street_hit))
+    if len(scored) == 1:
+        winner = scored[0][0]
+        parts = [scored[0][0].get("city", ""), scored[0][0].get("street", "")]
+        addr = ", ".join(p for p in parts if p)
+        log.info("address shared by %d customers; delivery text matches %s (%s, %s)",
+                 len(owners), winner.get("ean_edi"), winner.get("name"), addr)
+        return winner
+    # Multiple city hits -- can the street break the tie?
+    if len(scored) > 1:
+        street_hits = [s for s in scored if s[2]]
+        if len(street_hits) == 1:
+            winner = street_hits[0][0]
+            log.info("address shared by %d customers; multiple city matches but street "
+                     "breaks tie -> %s (%s, %s)", len(owners), winner.get("ean_edi"),
+                     winner.get("name"), winner.get("street"))
+            return winner
+    return None
+
+
 def _by_store(owners: list[dict], store: str) -> dict | None:
     """Which of the branches sharing one address does this block header name? (#101)
 
@@ -115,11 +156,15 @@ def _by_store(owners: list[dict], store: str) -> dict | None:
 
 def resolve(customers: list[dict], sender_email: str, sender_name: str,
             company_name: str, llm: dict | None = None,
-            store: str = "") -> Matched | None:
+            store: str = "", delivery_text: str = "") -> Matched | None:
     """Decide who ordered, or None when it cannot be decided safely.
 
     `store` is the block header of the order's own half of a multi-shop attachment; it is
     the only thing that separates two branches registered under one e-mail address.
+
+    `delivery_text` (#418) is the raw email text (subject + body) used to match a delivery
+    city/street against customer cards when two+ cards share one sender address and the
+    store header cannot decide.
     """
     llm = llm or {}
     conf = float(llm.get("confidence") or 0)
@@ -159,6 +204,16 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
                     note=(f"E-mail {addr} patrí viacerým predajniam; táto časť súboru je "
                           f"nadpísaná „{store}“, čo sedí na adresu "
                           f"„{branch.get('street', '')}“."))
+            # #418: try the delivery address from the mail text before giving up.
+            site = _by_delivery_address(owners, delivery_text)
+            if site:
+                parts = [site.get("city", ""), site.get("street", "")]
+                addr_note = ", ".join(p for p in parts if p)
+                return Matched(
+                    ean_edi=str(site.get("ean_edi") or ""), name=site.get("name", ""),
+                    confidence=0.95, rule="delivery_address",
+                    note=(f"E-mail {addr} patrí viacerým prevádzkovým kartám; "
+                          f"adresa doručenia v maile sedí na „{addr_note}“."))
             log.info("address %s belongs to %d customers — not guessing (store hint %r)",
                      addr, len(owners), store)
 
