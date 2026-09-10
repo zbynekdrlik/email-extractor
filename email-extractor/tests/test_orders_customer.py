@@ -350,3 +350,39 @@ def test_delivery_address_street_breaks_city_tie():
     assert hit is not None
     assert hit.ean_edi == "3000000000002"
     assert hit.rule == "delivery_address"
+
+
+# --- #418 review findings F1/F2: word-boundary city matching + notes-only text --------
+
+PNO_SITES = [
+    {"ean_edi": "2000000000864", "name": "PNO Martin",
+     "emails": ["objednavky@pno.sk"], "city": "Martin",
+     "street": "Kollarova 8", "zip": ""},
+    {"ean_edi": "2000000000865", "name": "PNO Poprad",
+     "emails": ["objednavky@pno.sk"], "city": "Poprad",
+     "street": "Sturova 3", "zip": ""},
+]
+
+
+def test_person_name_city_in_signature_does_not_auto_resolve():
+    """F2: a city that is also a person name in a signature must NOT decide the site.
+    Word-boundary matching prevents 'Martin' in 'S pozdravom Martin Novak' from matching
+    when it is part of a person name followed by more word chars (it would however match
+    as a standalone word — but in production this text is the model's `notes`, not the raw
+    email, so a signature never reaches the rung)."""
+    sig_text = "S pozdravom Martina Novakova"
+    hit = customer.resolve(
+        PNO_SITES, sender_email="objednavky@pno.sk", sender_name="",
+        company_name="", llm={"ean_edi": "", "confidence": 0.2},
+        delivery_text=sig_text)
+    assert hit is None, "a name substring must not auto-resolve"
+
+
+def test_city_word_boundary_prevents_substring_match():
+    """The word-boundary check prevents 'Martin' from matching inside 'Martina'."""
+    text = "Dodanie pre Martina"
+    hit = customer.resolve(
+        PNO_SITES, sender_email="objednavky@pno.sk", sender_name="",
+        company_name="", llm={"ean_edi": "", "confidence": 0.2},
+        delivery_text=text)
+    assert hit is None

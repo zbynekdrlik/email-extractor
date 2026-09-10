@@ -112,7 +112,7 @@ def _by_delivery_address(owners: list[dict], delivery_text: str) -> dict | None:
     for c in owners:
         city = _norm_text(c.get("city", ""))
         street = _norm_text(c.get("street", ""))
-        city_hit = bool(city and len(city) > 2 and city in text)
+        city_hit = bool(city and len(city) > 2 and re.search(r"(?<!\w)" + re.escape(city) + r"(?!\w)", text))
         street_hit = bool(street and len(street) > 3 and street in text)
         if city_hit or street_hit:
             scored.append((c, city_hit, street_hit))
