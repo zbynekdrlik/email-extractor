@@ -341,16 +341,25 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
     conflict = extract.date_conflict(message.get("subject", ""),
                                      [o.get("deliveryDate", "") for o in orders],
                                      body=message.get("combined_text", "") or "")
+    # #420: `extract.run` flags a written-day-vs-extracted-date conflict (a corrected typo
+    # OR an invented date) in `date_conflict` with ready candidate days, instead of #163's
+    # silent drop. Fold it into the SAME hold + `date`-question path; when present its
+    # reason + candidates take precedence (the more specific signal), and its reason
+    # replaces the summary note so the board shows the conflict, never "…sa nenašiel".
+    gc = extracted.get("date_conflict") or None
+    conflict = conflict or (gc.get("reason", "") if gc else "")
+    conflict_note = gc["reason"] if gc else extracted.get("notes", "")
     if conflict:
         if shadow:
             return _finish(conn, cfg, message, shadow, post, status="review", items=[],
                            result={"shipped": False, "reject_reason": conflict,
                                    "customer": {}, "unverified": [],
-                                   "notes": extracted.get("notes", "")},
+                                   "notes": conflict_note},
                            reason=Reason.DATE_CONFLICT)
         first_date = orders[0].get("deliveryDate", "") if orders else ""
-        dates = sorted({str(o.get("deliveryDate") or "") for o in orders
-                        if o.get("deliveryDate")})
+        dates = (list(gc["candidates"]) if gc and gc.get("candidates")
+                 else sorted({str(o.get("deliveryDate") or "") for o in orders
+                              if o.get("deliveryDate")}))
         dq = teach.ask_date(conn, message_id=message.get("message_id", ""), dates=dates,
                             reason=conflict, delivery_date=first_date,
                             on_new=new_questions.append)
@@ -393,11 +402,11 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
         _post_summary(cfg, post, shadow, customer_name=hold_matched.name,
                       orders=held_summaries, new_questions=len(new_questions),
                       unverified_count=len(extracted.get("unverified") or []),
-                      notes=extracted.get("notes", ""))
+                      notes=conflict_note)
         return {"status": "held", "items": [], "shadow": shadow, "would_ship": False,
                "customer_ean": hold_matched.ean_edi, "customer_name": hold_matched.name,
                "delivery_date": first_date, "orders": len(orders), "order_results": [],
-               "question_ids": qids, "notes": extracted.get("notes", "")}
+               "question_ids": qids, "notes": conflict_note}
 
     # #164 row 8 (report.py's phantom-item safeguard): a claimed line the source text
     # could not prove is not silently dropped — the warehouse confirms whether it really

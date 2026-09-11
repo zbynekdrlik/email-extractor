@@ -726,6 +726,19 @@ SCHEMA = [
                        '2026“) stratil 5 z 6 dní objednávky — oprava #289', '#289')
     ON CONFLICT (issue_ref) DO NOTHING
     """,
+    # #420 (2026-09-11): a customer typo in the delivery date (14.8. instead of 14.9., with
+    # the stated weekday "pondelok") tripped #163's grounding poistka, which SILENTLY
+    # DROPPED the whole order to "(nezistený zákazník)" — 13× in 60 days. The order is now
+    # HELD and asked on the board with the next-future written date as the first candidate,
+    # fixed in the SAME PR that adds this row (orders-corpus.md #188/#196 standing rules).
+    """
+    INSERT INTO match_incidents (occurred_on, description, issue_ref) VALUES
+        ('2026-09-11', 'Zákazník S.: preklep v dátume dodania (14.8. namiesto 14.9., '
+                       '„pondelok“) spustil #163 poistku, ktorá ticho zahodila celú '
+                       'objednávku („nezistený zákazník“) — 13× za 60 dní; oprava #420 '
+                       '(drží + pýta sa date otázkou)', '#420')
+    ON CONFLICT (issue_ref) DO NOTHING
+    """,
 
     # ==========================================================================
     # #200 F1: delivery-notes (dodacie listy, "DL") migration — foundation only.

@@ -363,26 +363,34 @@ def run(client, email: dict) -> dict:
     else:
         result = dict(verify(extracted, source), source="model")
 
-    # #163: an order whose deliveryDate the source text never wrote is not a real order —
-    # the model can invent a plausible-looking future day (e.g. re-dating a stale quoted
-    # order onto "next Saturday") with nothing in the mail to back it up. Drop it here,
-    # BEFORE it ever reaches pipeline.py's date_conflict() as if it were a genuine day.
-    grounded: list[dict] = []
-    ungrounded: list[dict] = []
-    for order in result["orders"]:
-        (grounded if date_grounded(order.get("deliveryDate", ""), source)
-         else ungrounded).append(order)
-    if ungrounded:
-        dates = [o.get("deliveryDate", "") for o in ungrounded]
-        log.warning("%d order(s) dropped: deliveryDate not found in the source text: %s",
-                   len(ungrounded), dates)
-        # review finding (#163): a log line alone leaves no trace anywhere a human ever
-        # reads (Odoo, `order_runs.result`) — fold it into `notes` too, the one field that
-        # already survives into both, without inventing a new pipeline.py/report.py field.
-        note = ("Dátum dodania sa nenašiel v texte e-mailu, objednávka nebola vytvorená: "
-                + ", ".join(dates))
-        result["notes"] = f"{result['notes']} {note}".strip() if result.get("notes") else note
-    result["orders"] = grounded
+    # #163/#420: an order whose deliveryDate the source text never wrote is suspect — the
+    # model may have INVENTED a plausible future day (msg 5679: re-dating a stale quoted
+    # order onto "next Saturday") OR corrected a real typo at a stated weekday (msg 11059:
+    # "14.8." + "pondelok" -> 14.09.). #163 silently DROPPED both, which for the typo case
+    # lost a genuine order to "(nezistený zákazník)". #420 KEEPS the order and surfaces a
+    # `date_conflict` so pipeline.py resolves the customer + items, HOLDS the order and
+    # raises a `date` board question with candidates — the order is never lost, and the
+    # model's guessed date is never silently shipped either.
+    conflicts = [(o, w) for o in result["orders"]
+                 if (w := date_ground_conflict(o.get("deliveryDate", ""), source))]
+    if conflicts:
+        written_all: set[tuple[int, int]] = set().union(*(w for _, w in conflicts))
+        model_dates = [o.get("deliveryDate", "") for o, _ in conflicts]
+        written_str = ", ".join(f"{d}.{m}." for d, m in sorted(written_all))
+        model_str = ", ".join(dict.fromkeys(_compact_day(md) for md in model_dates))
+        log.warning("%d order(s) held (date conflict): extracted %s not written in the "
+                    "source; written days %s", len(conflicts), model_dates,
+                    sorted(written_all))
+        result["date_conflict"] = {
+            "written": sorted(written_all),
+            "model_dates": model_dates,
+            "candidates": date_conflict_candidates(written_all, model_dates,
+                                                    email.get("today") or ""),
+            "reason": (f"Dátum v maile ({written_str}) nesedí s očakávaným ({model_str}) "
+                       f"— potvrď na nástenke"),
+        }
+    # the order(s) are KEPT (no drop) — grounded ones ship as before; a conflicting one is
+    # held by pipeline.py via `result["date_conflict"]`.
 
     # #187: a genuine SECOND order hiding in quoted ('>') text must not vanish with zero
     # trace. `unquote_fully_quoted` only strips markers when the WHOLE body is quoted; a
@@ -390,7 +398,7 @@ def run(client, email: dict) -> dict:
     # the prompt tells the model to ignore '>'-prefixed lines entirely — so the quoted
     # order never reaches the model's output at all, not even as an "ungrounded" order.
     covered_days: set[tuple[int, int]] = set()
-    for order in grounded:
+    for order in result["orders"]:
         covered_days |= _days_in(order.get("deliveryDate", "") or "")
     missed_quoted = quoted_future_dates_uncovered(
         source, email.get("today") or "", covered_days)
@@ -691,13 +699,122 @@ def date_grounded(date_str: str, source: str) -> bool:
     unwritten day (#163, msg 5679: text says "25.7." with no range, the model invented
     "08.08.2026" — 8.8 occurs nowhere in the mail and no range could derive it either).
     """
+    return date_ground_conflict(date_str, source) is None
+
+
+def date_ground_conflict(date_str: str, source: str) -> set[tuple[int, int]] | None:
+    """The written day(s) an extracted delivery date matches NONE of, or `None` when the
+    date is grounded.
+
+    `None` (grounded — accept exactly as `date_grounded` always did) when the date is
+    unparseable, when the source names no explicit day/range at all (ordinary
+    relative-date order), or when the date matches a written day/range. Returns the
+    non-empty set of written `(day, month)` pairs ONLY in the #163 shape — the text DID
+    name explicit day(s) and the returned date landed on none of them.
+
+    #420: that shape is NOT only a model-invented date (msg 5679: text "25.7.", model
+    "08.08." — nowhere in the mail); it is ALSO a corrected typo at a stated weekday
+    (msg 11059: text "14.8." + "pondelok", model "14.09."). #163 dropped both silently;
+    the caller now KEEPS the order and holds it with a `date` board question instead, so
+    neither is ever lost or silently shipped on a guess.
+    """
     claimed = _days_in(str(date_str or ""))
     if not claimed:
-        return True   # unparseable — nothing to hold accountable, don't invent a reject
+        return None   # unparseable — nothing to hold accountable, don't invent a reject
     written = _days_in(source) | _range_days(source)
     if not written:
-        return True   # no explicit day or range anywhere -> ordinary relative-date order
-    return bool(claimed & written)
+        return None   # no explicit day or range anywhere -> ordinary relative-date order
+    if claimed & written:
+        return None   # the extracted date matches a written day -> grounded
+    return written
+
+
+def _ref_date(today: str) -> date | None:
+    """The mail's own date as a `date`, from `DD.MM.YYYY` or ISO `YYYY-MM-DD`."""
+    s = str(today or "").strip()
+    iso = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", s)
+    if iso:
+        y, mo, d = int(iso.group(1)), int(iso.group(2)), int(iso.group(3))
+    else:
+        parts = re.findall(r"\d+", s)
+        if len(parts) < 3:
+            return None
+        d, mo, y = int(parts[0]), int(parts[1]), int(parts[2])
+    try:
+        return date(y, mo, d)
+    except ValueError:
+        return None   # not a real calendar date -> caller treats the mail date as unknown
+
+
+def _next_future_day_month(day: int, month: int, ref: date) -> date | None:
+    """The soonest date >= `ref` for a WRITTEN `day.month`.
+
+    The written month in the mail's own year when that is not already past (a stated month
+    still ahead is trusted — "20.12." stays 20.12.); otherwise the next month forward that
+    contains that day (#420: the typo is almost always in the MONTH — the customer writes
+    last month's number — while the DAY is right, so "14.8." written in September, 14.8.
+    already gone, resolves to 14.9.). Never the naive "next year's exact 14.8." — that is
+    useless to the warehouse.
+    """
+    written_month = None
+    try:
+        written_month = date(ref.year, month, day)
+    except ValueError:
+        written_month = None   # e.g. 31 in a 30-day month -> fall through to the walk
+    if written_month is not None and written_month >= ref:
+        return written_month
+    y, m = ref.year, month
+    for _ in range(13):
+        m += 1
+        if m > 12:
+            m, y = 1, y + 1
+        try:
+            cand = date(y, m, day)
+        except ValueError:
+            continue   # this month has no such day (e.g. 31 in Feb) -> try the next
+        if cand >= ref:
+            return cand
+    return None
+
+
+def _compact_day(date_str: str) -> str:
+    """"14.09.2026" / "2026-09-14" -> "14.9." for a human-readable reason line."""
+    ref = _ref_date(date_str)
+    if ref:
+        return f"{ref.day}.{ref.month}."
+    return str(date_str or "")
+
+
+def date_conflict_candidates(written: set[tuple[int, int]], model_dates: list[str],
+                             today: str) -> list[str]:
+    """The ordered, deduplicated `DD.MM.YYYY` candidates offered on the board when a
+    written day.month conflicts with the extracted date (#420):
+
+    1. the next FUTURE occurrence of each written day.month relative to the mail date,
+    2. the model's own extracted date(s),
+    3. the mail date + 7 days.
+
+    The free "iný dátum" input is offered by the `date` question kind itself
+    (`teach._validate_date` accepts any valid DD.MM.RRRR), so it needs no entry here.
+    """
+    ref = _ref_date(today)
+    out: list[str] = []
+
+    def _add(value: str) -> None:
+        if value and value not in out:
+            out.append(value)
+
+    if ref:
+        for d, m in sorted(written):
+            nxt = _next_future_day_month(d, m, ref)
+            if nxt:
+                _add(nxt.strftime("%d.%m.%Y"))
+    for md in model_dates:
+        parsed = _ref_date(md)
+        _add(parsed.strftime("%d.%m.%Y") if parsed else str(md or ""))
+    if ref:
+        _add((ref + timedelta(days=7)).strftime("%d.%m.%Y"))
+    return out
 
 
 def date_conflict(subject: str, dates: list[str], body: str = "") -> str:
