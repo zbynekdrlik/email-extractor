@@ -223,16 +223,21 @@ class _FakeStaleDateClient:
         ]}]}
 
 
-def test_a_stale_quoted_order_re_dated_by_the_model_is_not_shipped():
+def test_a_stale_quoted_order_re_dated_by_the_model_is_held_not_dropped():
+    """#420 revises #163: an order whose date the source never wrote is no longer silently
+    DROPPED — it is KEPT and flagged with a `date_conflict`, so the pipeline holds it and
+    asks the warehouse instead of losing it (or silently shipping the model's guess)."""
     result = extract.run(_FakeStaleDateClient(),
                          {"combined_text": STALE_QUOTE_MAIL, "today": "2026-08-03",
                           "subject": "RE: catering 25.7. SL"})
-    assert result["orders"] == []
-    # the invented date may still be NAMED (so a human can see what was rejected and why —
-    # #163 review finding), but never ASSERTED as a real delivery date the way the live
-    # incident's "objednávka je na 08.08.2026" did.
+    assert len(result["orders"]) == 1                # kept, no longer dropped
+    dc = result.get("date_conflict")
+    assert dc and [25, 7] in [list(w) for w in dc["written"]]
+    # the invented date may be OFFERED as a candidate, but is never ASSERTED as the final
+    # delivery date the way the live incident's "objednávka je na 08.08.2026" did.
     assert "objednávka je na 08.08" not in json.dumps(result)
-    assert "nenašiel" in result["notes"]
+    # #420 (3): the misleading "Dátum dodania sa nenašiel" note is gone
+    assert "nenašiel" not in (result.get("notes") or "")
 
 
 def test_date_grounded_accepts_an_explicit_day_that_is_actually_written():
@@ -351,10 +356,10 @@ TABLE_WITH_A_STALE_SUBJECT_DATE_MAIL = (
 )
 
 
-def test_a_table_parsed_order_is_also_dropped_when_its_header_date_is_ungrounded():
-    """The table branch takes ITEMS from the parsed grid but the header fields (including
-    deliveryDate) still come from the model — so an invented date must be caught there too,
-    not just on the free-text path."""
+def test_a_table_parsed_order_is_also_held_when_its_header_date_is_ungrounded():
+    """The table branch takes ITEMS from the parsed grid but the header deliveryDate still
+    comes from the model — so an ungrounded header date must be HELD + flagged there too
+    (#420), not silently dropped, exactly like the free-text path."""
     class FakeTableStaleDateClient:
         last_prompt_hash = "abc123abc123"
 
@@ -366,9 +371,11 @@ def test_a_table_parsed_order_is_also_dropped_when_its_header_date_is_ungrounded
                          {"combined_text": TABLE_WITH_A_STALE_SUBJECT_DATE_MAIL,
                           "today": "2026-08-03", "subject": "Objednávka 20.07."})
     assert result["source"] == "table"
-    assert result["orders"] == []
+    assert len(result["orders"]) == 1
+    dc = result.get("date_conflict")
+    assert dc and [20, 7] in [list(w) for w in dc["written"]]
     assert "objednávka je na 08.08" not in json.dumps(result)
-    assert "nenašiel" in result["notes"]
+    assert "nenašiel" not in (result.get("notes") or "")
 
 
 # --- 3) sanity guards ----------------------------------------------------
@@ -752,3 +759,67 @@ def test_a_price_after_na_is_not_read_as_a_date():
     catches this one."""
     quoted = "Body: Dobrý deň.\n> cena na 1.50 eur poprosím: Rožok 70g : 5 x\n"
     assert extract.quoted_future_dates_uncovered(quoted, "2026-08-06", set()) == []
+
+
+# --- #420: a corrected-typo delivery date is HELD + asked, never silently dropped -------
+
+TYPO_CORRECTED_MAIL = (
+    "Subject: Objednávka\nFrom: s@example.com\n"
+    "Body: Dobrý deň, na pondelok 14.8. by sme si objednali 5x rožok 50g. Ďakujem."
+)
+
+
+class _FakeTypoCorrectedDateClient:
+    """The real #420 model behaviour: the body wrote '14.8.' + 'pondelok', the model
+    corrected the typo to 14.09.2026 (14.8.2026 is a Friday). The written day (14.8.) and
+    the corrected date (14.9.) disagree — #163 used to DROP the whole order; #420 keeps it
+    and asks the warehouse which day is real."""
+
+    last_prompt_hash = "abc123abc123"
+
+    def json_call(self, system, user, schema, name="result"):
+        return {"orders": [{"deliveryDate": "14.09.2026", "recipientGroup": "", "items": [
+            {"name": "rožok 50g", "quantity": 5, "unit": "ks",
+             "sourceQuote": "5x rožok 50g"}]}],
+            "senderName": "", "companyName": "", "isChangeRequest": False, "notes": ""}
+
+
+def test_a_typo_corrected_date_is_held_not_dropped_and_carries_candidates():
+    result = extract.run(_FakeTypoCorrectedDateClient(),
+                         {"combined_text": TYPO_CORRECTED_MAIL, "today": "2026-09-11",
+                          "subject": "Objednávka"})
+    # the order is KEPT (not dropped as #163 did) ...
+    assert len(result["orders"]) == 1
+    assert result["orders"][0]["deliveryDate"] == "14.09.2026"
+    # ... and flagged as a date conflict so the pipeline holds + asks instead of shipping
+    dc = result.get("date_conflict")
+    assert dc, "an ungrounded (typo-corrected) date must surface a date_conflict"
+    assert [14, 8] in [list(w) for w in dc["written"]]
+    # candidate 1 = the next FUTURE occurrence of the written 14.8. relative to the mail
+    # date (14.8. already passed in September -> 14.9.2026)
+    assert dc["candidates"][0] == "14.09.2026"
+    assert "14.09.2026" in dc["candidates"]          # the model's own date offered too
+    # #420 (3): never the misleading "Dátum dodania sa nenašiel" note, and the reason
+    # names the written day + points to the board
+    assert "nenašiel" not in json.dumps(result, ensure_ascii=False)
+    assert "14.8" in dc["reason"] and "nástenke" in dc["reason"].lower()
+
+
+def test_date_ground_conflict_returns_written_days_only_on_a_real_conflict():
+    # a conflict -> the written day(s) the extracted date matches none of
+    assert extract.date_ground_conflict("14.09.2026", "na 14.8. prosím") == {(14, 8)}
+    # grounded (matches a written day) -> None
+    assert extract.date_ground_conflict("14.08.2026", "na 14.8. prosím") is None
+    # nothing written at all (relative date) -> None
+    assert extract.date_ground_conflict("31.07.2026", "na zajtra prosím") is None
+    # unparseable -> None
+    assert extract.date_ground_conflict("", "na 14.8. prosím") is None
+
+
+def test_next_future_written_date_keeps_the_day_and_finds_the_next_month():
+    from datetime import date
+    ref = date(2026, 9, 11)
+    # 14.8. already passed -> next month with a 14th that is >= mail date -> 14.09.2026
+    assert extract._next_future_day_month(14, 8, ref) == date(2026, 9, 14)
+    # a written month still ahead is preserved (20.12. -> 20.12.2026)
+    assert extract._next_future_day_month(20, 12, ref) == date(2026, 12, 20)
