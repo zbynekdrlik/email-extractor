@@ -94,6 +94,46 @@ def test_manual_on_a_never_held_question_answers_it_without_shipping(pg, monkeyp
     assert qid not in [q["id"] for q in teach.open_questions(pg)], "leaves the open list"
 
 
+def _shipped_orphan_item_question(pg, mid):
+    """An item question with NO held_orders row, but whose order ALREADY shipped to ORION
+    (a same-day / undated matched order with an unmatched line: pipeline.py:470 asks, the
+    hold gate at :559 is past-deadline so no hold, and _ship_one uploads a partial EDI
+    logging an `uploaded_orion` event carrying the question id). Manual close here would
+    invite a duplicate physical delivery — must 409."""
+    pg.execute("INSERT INTO messages (message_id, category) VALUES (%s, 'ai_orders')", (mid,))
+    qid = pg.execute(
+        """INSERT INTO order_questions (message_id, customer_ean, customer_name, wording,
+                                        item_key, quantity, unit, candidates, delivery_date,
+                                        reason)
+           VALUES (%s, '2000000000864', 'Pekáreň', 'torta', 'torta', 5, 'ks', %s,
+                   '10.09.2026', 'test')
+           RETURNING id""",
+        (mid, Json([{"gtin": "TOR", "name": "Torta 1kg"}]))).fetchone()[0]
+    # the real upload event _finish logs on a shipped/partial order, carrying question_ids
+    pg.execute(
+        """INSERT INTO email_events (message_id, workflow, stage, status, outcome, detail)
+           VALUES (%s, 'orders', 'uploaded_orion', 'ok', 'EDI', %s)""",
+        (mid, Json({"question_ids": [qid]})))
+    return qid
+
+
+def test_manual_on_a_never_held_but_already_shipped_question_refuses_409(pg, monkeypatch):
+    """#421 F1: never-held ≠ never-shipped. A same-day/undated order can ship a PARTIAL EDI
+    while its unmatched line's question stays open with no hold. Closing it manually would
+    duplicate the delivery — refuse with 409, leave the question open."""
+    uploads = []
+    _no_upload(monkeypatch, uploads)
+    qid = _shipped_orphan_item_question(pg, "ship1")
+    assert pg.execute("SELECT count(*) FROM held_orders").fetchone()[0] == 0
+    c = _client()
+    _login(c)
+    r = c.post(f"/api/orders/question/{qid}/answer", json={"manual": True})
+    assert r.status_code == 409, r.get_data(as_text=True)
+    assert pg.execute(
+        "SELECT status FROM order_questions WHERE id=%s", (qid,)).fetchone() == ("open",)
+    assert uploads == []
+
+
 def test_manual_on_a_released_hold_still_refuses_with_409(pg, monkeypatch):
     """#421 (c): a held order that EXISTED and is released/deadline keeps the loud 409 —
     the order may already sit in ORION, so a hand-entry would duplicate a physical

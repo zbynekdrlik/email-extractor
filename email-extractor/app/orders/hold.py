@@ -22,6 +22,7 @@ message is never silently re-run through the LLM while it waits.
 from __future__ import annotations
 
 import logging
+from html import escape
 
 import psycopg
 from psycopg.types.json import Json
@@ -707,34 +708,46 @@ def unresolve_manually(conn, qid: int) -> list[str]:
     return message_ids
 
 
-def close_expired_holds(conn, cfg, expired_qids: list[int]) -> list[dict]:
-    """#421: when `question_alerts.expire_stale` (#341) neutrally closes stale board
-    questions (`status='expired'`), a held order whose ONLY reason to wait was one of those
-    questions must NOT be left `held` forever. Close it TERMINALLY WITHOUT any ship
-    (`status='released', release_reason='expired'`), mirroring the expiry's own semantics:
-    the underlying message is already routed to manual review (`processed=true`), so the
-    order is now the warehouse's to enter by hand in CODEX — exactly like „Vyriešené ručne".
+def close_expired_holds(conn, cfg, post=None) -> list[dict]:
+    """#421: a held order whose gating board question(s) expired (#341) must not stay
+    `held` forever. Scan for any still-`held` row whose gating questions are ALL terminal
+    (none `status='open'`) AND at least one is `expired`, and close it TERMINALLY WITHOUT
+    any ship (`status='released', release_reason='expired'`) — mirroring the expiry's own
+    manual-review routing.
 
-    Deliberately NOT the deadline `release_due` path (ship-what-matched): shipping an
-    unconfirmed, incomplete EDI the warehouse never approved — and risking a duplicate of
-    anything the deadline sweep already shipped — is the unsafe direction. Closing without a
-    ship never touches ORION, so there is zero double-delivery risk.
+    Deliberately NOT the deadline `release_due` path (ship-what-matched): an expired
+    question means the warehouse never confirmed that line within its working-day window,
+    so the order is entered by hand in CODEX (the #365 "never partial-ship an unconfirmed
+    line" doctrine). Closing without a ship touches no ORION and cannot duplicate a
+    physical delivery — the safe direction.
 
-    Only a hold whose EVERY gating question is already terminal (no remaining `status='open'`
-    question) is closed — a hold still gated by a live sibling question is left `held`.
-    Returns one dict per closed hold ({"id", "message_id"}) so the caller can raise an ops
-    alert; the guarded `status='held'` flip means a row already released by any other path is
-    a silent no-op (never re-shipped, never relabelled)."""
-    from . import report
-    if not expired_qids:
-        return []
+    STATE-based (not keyed on one sweep's expired ids) so BOTH shapes are caught: the whole
+    hold expiring at once, AND the staggered dedup case — an OLDER deduped sibling question
+    expired in an earlier sweep while a NEWER sibling stayed open, then that newer sibling
+    was answered. `_release_locked` counts an `expired` sibling as still-pending and leaves
+    such a hold `held`, so without this scan it would fall to the deadline ship-what-matched
+    path. Because the scan requires ≥1 expired question, a normal all-`answered` hold
+    (release pending / mid-ship via `release_for_question`) is never touched — no race with
+    a real ship, and `close_expired_holds` never touches ORION regardless.
+
+    Only a hold with NO remaining open question is closed; one still gated by a live
+    question is left `held`. The guarded `status='held'` flip makes a row already released
+    by any other path (deadline/answered/manual) a silent no-op — never re-shipped, never
+    relabelled, so a later tick never re-alerts. Raises one ops alert per closed hold.
+    Returns one dict per closed hold ({"id", "message_id"})."""
+    from . import dl_alerts, report
     rows = conn.execute(
         """SELECT id, message_id FROM held_orders h
             WHERE h.status = 'held'
-              AND h.question_ids && %s::bigint[]
               AND NOT EXISTS (SELECT 1 FROM order_questions q
-                               WHERE q.id = ANY(h.question_ids) AND q.status = 'open')""",
-        (list(expired_qids),)).fetchall()
+                               WHERE q.id = ANY(h.question_ids) AND q.status = 'open')
+              AND EXISTS (SELECT 1 FROM order_questions q
+                           WHERE q.id = ANY(h.question_ids) AND q.status = 'expired')"""
+    ).fetchall()
+    if not rows:
+        return []
+    channel = int(getattr(cfg, "orders_channel_id", 0) or 0)
+    link = report.sklad_link(cfg)
     closed: list[dict] = []
     for hid, mid in rows:
         flipped = conn.execute(
@@ -746,8 +759,12 @@ def close_expired_holds(conn, cfg, expired_qids: list[int]) -> list[dict]:
         report.log_event(conn, mid, stage="review", status="review",
                          outcome="Otázka na nástenke expirovala — držaná objednávka sa "
                                  "zavrela bez odoslania do ORIONu; vybav ju ručne v CODEXe.",
-                         detail={"held_id": hid}, rollup=False)
+                         detail={"held_id": hid}, rollup=True)
         _mark_message_done_if_clear(conn, mid)
+        body = ("<p>&#9888; Držaná objednávka sa zavrela, lebo otázka na nástenke "
+                "expirovala — nič sa neposlalo do ORIONu, vybav ju ručne v CODEXe. "
+                f"{escape(link)}</p>")
+        dl_alerts.enqueue(conn, channel, "held_order_expired", body, message_id=mid)
         closed.append({"id": hid, "message_id": mid})
         log.info("closed held order #%s as expired (nothing shipped) — message %s", hid, mid)
     return closed
