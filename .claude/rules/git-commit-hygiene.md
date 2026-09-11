@@ -152,3 +152,26 @@ comment, from the start: `Príčina:` / root cause language, `Zvolený prístup:
 (CHOSEN/REJECTED):` markers, trade-off language (`trade-off`/`kompromis`/`výhod`/
 `nevýhod`), and an `Architektúra:` section containing the literal word
 "štruktúra"/"structure" AND a framework word ("framework"/"rámec"/"knižnica"/"library").
+
+## The non-trivial design gate ALSO requires a `Shared-benefit:` LINE, and it must be a
+## one-liner with the value AFTER the colon — not a `### Shared-benefit` header (#421/#877)
+
+Beyond `Príčina:` / `Approach N` / `Architektúra:` (documented above), `design_gate.
+classify_shared_benefit` (#877) now requires EVERY design comment — trivial tickets included —
+to carry a `Shared-benefit:` disposition. Two mechanical traps that each cost a rejected commit
+on #421:
+
+- **It must match `^[ \t>*#-]*\**\s*Shared-?benefit\**\s*:\s*<value>` on ONE line** — the value
+  has to be on the SAME line, right after the colon. A markdown `### Shared-benefit` header with
+  the text on the NEXT line does NOT match (no colon on the header line). Write
+  `**Shared-benefit:** single-client — <reason>` (bold is fine; the regex strips `*`).
+- **A bare `n/a` (or `nie`/`no`/`none`/`-`) with no trailing reason is REJECTED** — always
+  `n/a — <prečo>` / `single-client — <what>` / `shared — <where>`.
+
+And `classify_architecture_section`'s `_ARCH_STRUCTURE_RE` still needs the literal word
+`štruktúra`/`structure`/`topológia`/`topology` somewhere in the body (documented above for the
+#291 case) — a `### Architektúra` header describing the shape in other words is not enough; open
+the section with e.g. "Štruktúra/topológia bez zmeny — …". Draft ALL of these literal markers
+into the FIRST design comment for a non-trivial ticket (Triage / Príčina / 2-3 `Prístup N` /
+trade-off word / `Architektúra:` + structure-word + framework-word / `Shared-benefit:` line) to
+avoid the reject-and-repost loop.
