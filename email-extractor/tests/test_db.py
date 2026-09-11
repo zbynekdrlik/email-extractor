@@ -353,6 +353,60 @@ def test_insert_message_strips_nul_bytes(pg):
     assert "\x00" not in fname and "\x00" not in text
 
 
+def _insert_held(pg, hid, status="held", reason=None):
+    from psycopg.types.json import Json
+    pg.execute("INSERT INTO messages (message_id) VALUES (%s) ON CONFLICT DO NOTHING",
+               (f"held-{hid}",))
+    pg.execute(
+        """INSERT INTO held_orders (id, message_id, customer_ean, customer_name,
+                                    delivery_date, order_number, question_ids, order_json,
+                                    extracted_json, decisions_json, status, release_reason)
+           VALUES (%s, %s, '2000000000001', 'X', '04.09.2026', '', '{}', %s, %s, %s, %s, %s)""",
+        (hid, f"held-{hid}", Json({}), Json({}), Json([]), status, reason))
+
+
+def test_held_orders_release_reason_allows_expired(pg):
+    """#421: a hold whose gating question expired is closed terminally WITHOUT shipping,
+    keyed release_reason='expired'. The CHECK constraint (baseline: answered/deadline;
+    #384 added manual) must now also allow 'expired'."""
+    _insert_held(pg, 500, status="held")
+    # widened CHECK: this UPDATE must succeed, not raise a check violation
+    pg.execute("UPDATE held_orders SET status='released', release_reason='expired' "
+               "WHERE id=500")
+    assert pg.execute(
+        "SELECT status, release_reason FROM held_orders WHERE id=500").fetchone() \
+        == ("released", "expired")
+
+
+def test_migration_closes_stuck_held_orders_41_42_as_expired_without_shipping(pg, reapply_schema):
+    """#421 one-off: held_orders 41/42 sat `status='held'` on questions 151/154 that
+    expired 2026-09-08 (#341) — held forever, though the 4.9 order already went out
+    incomplete via the deadline sweep. The migration closes exactly those two ids terminally
+    (release_reason='expired'), NEVER re-ships, and is a no-op for any other held row and on
+    a DB where they were already released."""
+    _insert_held(pg, 41, status="held")
+    _insert_held(pg, 42, status="held")
+    _insert_held(pg, 43, status="held")          # an unrelated hold — must be left alone
+    reapply_schema()                              # re-runs the numbered revisions
+    rows = dict(pg.execute(
+        "SELECT id, status || ':' || COALESCE(release_reason,'') FROM held_orders "
+        "WHERE id IN (41, 42, 43) ORDER BY id").fetchall())
+    assert rows[41] == "released:expired"
+    assert rows[42] == "released:expired"
+    assert rows[43] == "held:", "the migration is scoped to 41/42, never a blanket close"
+
+
+def test_migration_41_42_backfill_is_a_noop_when_already_released(pg, reapply_schema):
+    """Belt-and-braces (`AND status='held'`): if 41/42 were already released (e.g. the
+    deadline sweep) the migration must NOT overwrite the real reason — never re-ship, never
+    relabel a genuine ship."""
+    _insert_held(pg, 41, status="released", reason="deadline")
+    reapply_schema()
+    assert pg.execute(
+        "SELECT status, release_reason FROM held_orders WHERE id=41").fetchone() \
+        == ("released", "deadline")
+
+
 def test_migration_strips_tokens_from_stored_file_urls(pg, reapply_schema):
     """#22: 2685 live rows had ?token=<secret> persisted; a DB dump leaked the token
     and rotating it broke every historical URL."""

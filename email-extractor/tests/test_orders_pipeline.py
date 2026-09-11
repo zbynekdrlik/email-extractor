@@ -267,10 +267,13 @@ def test_a_change_request_gets_its_own_wording_and_no_board_link(pg, env):
 
 
 def test_a_change_request_with_an_unmatched_item_never_holds(pg, env):
-    """#93 review finding: the hold condition explicitly excludes `is_change` — a change
-    request is always handled by hand in ORION regardless of matching, so it must go
-    straight to review (today's behaviour) even when one of its lines also raises a
-    warehouse question, never sit waiting in held_orders."""
+    """#93 review finding + #421: the hold condition AND the item ask-gate both exclude
+    `is_change` — a change request is always handled by hand in ORION regardless of
+    matching, so it goes straight to review, never sits in held_orders, AND (fixed in
+    #421) never raises a warehouse item question at all. Before #421 it asked the item
+    question anyway but never placed a hold, so the question was orphaned — nobody could
+    close it (the exact 215/216 incident). The ask-gate now matches the sibling hold
+    branches (`and not is_change`)."""
     rec = Recorder()
     result = pipeline.run(pg, _cfg(), MAIL, env,
                           client=ScriptedClient(_answers(items=(("torta", None, 0.2),),
@@ -279,9 +282,27 @@ def test_a_change_request_with_an_unmatched_item_never_holds(pg, env):
     assert result["status"] == "review"
     assert rec.uploads == []
     assert pg.execute("SELECT count(*) FROM held_orders").fetchone()[0] == 0
-    # the wording still gets a question — a change request neither prevents nor auto-
-    # resolves it, it just isn't why THIS order is stuck (it's stuck on being a change)
-    assert len(teach.open_questions(pg)) == 1
+    # #421: a change request no longer raises an orphaned item question — it is resolved
+    # by hand in ORION, so asking would only create a board card nobody can ever close.
+    assert len(teach.open_questions(pg)) == 0
+
+
+def test_a_change_request_mail_raises_no_item_questions(pg, env):
+    """#421 (a): a change-request mail whose lines would otherwise ask the warehouse must
+    raise ZERO `item` questions — the sibling hold branches (:522/:559) already exclude
+    `is_change`, the item ask-gate (:470) now does too. Two unmatched lines, both would
+    ask on a normal order; on a change request neither does."""
+    rec = Recorder()
+    result = pipeline.run(
+        pg, _cfg(), MAIL, env,
+        client=ScriptedClient(_answers(items=(("torta", None, 0.2), ("chlieb", None, 0.2)),
+                                       change=True)),
+        upload=rec.upload, post=rec.post)
+    assert result["status"] == "review"
+    assert rec.uploads == []
+    item_qs = [q for q in teach.open_questions(pg) if q["kind"] == "item"]
+    assert item_qs == [], "a change request must raise no item board questions"
+    assert pg.execute("SELECT count(*) FROM held_orders").fetchone()[0] == 0
 
 
 def test_a_change_request_from_an_unrecognized_customer_still_says_change_request(pg, env):
