@@ -1340,3 +1340,46 @@ def test_mail_with_attachments_and_no_orders_still_asks_the_warehouse(pg, env):
     # A mail question WAS asked (the message had attachments, so it's safe to ask)
     mail_qs = [q for q in teach.open_questions(pg) if q.get("kind") == "mail"]
     assert len(mail_qs) == 1
+
+
+def test_a_typo_corrected_delivery_date_is_held_and_asked_not_dropped(pg, env):
+    """#420: a September mail whose body wrote '14.8.' + 'pondelok' — the model corrects
+    the typo to 14.09.2026. #163 used to DROP the whole order (-> '(nezistený zákazník)',
+    slepá ulička); now the customer + items resolve normally, the order is HELD, and a
+    `date` board question is raised with 14.09.2026 as the first candidate."""
+    extract_answer = {
+        "senderName": "Sklad", "senderEmail": "sklad@pekaren.sk",
+        "companyName": "Pekáreň Testovacia s.r.o.", "isChangeRequest": False, "notes": "",
+        "orders": [{"orderNumber": "", "deliveryDate": "14.09.2026", "recipientGroup": "",
+                    "items": [{"name": "rožok 50g", "quantity": 120, "unit": "ks",
+                               "sourceQuote": "120x rožok 50g"}]}],
+    }
+    customer_answer = {"ean_edi": "2000000000001", "confidence": 0.95}
+    rec = Recorder()
+    mail = dict(MAIL, message_id="mtypo", subject="Objednávka", today="2026-09-11",
+                combined_text="Dobrý deň, na pondelok 14.8. by sme si objednali "
+                              "120x rožok 50g. Ďakujem.")
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('mtypo', 'ai_orders')")
+    before = len(teach.open_questions(pg))
+    before_held = pg.execute("SELECT count(*) FROM held_orders").fetchone()[0]
+    result = pipeline.run(pg, _cfg(dashboard_base_url='http://test.local:8099',
+                                   secret_key='s'), mail, env,
+                          client=ScriptedClient([extract_answer, customer_answer]),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "held"
+    assert len(result.get("question_ids", [])) == 1
+    # the customer RESOLVED (no longer "(nezistený zákazník)")
+    assert result["customer_name"] == "Pekáreň Testovacia s.r.o."
+    new = teach.open_questions(pg)
+    assert len(new) == before + 1
+    dq = new[-1]
+    assert dq["kind"] == "date"
+    cand_values = [c.get("value") for c in (dq.get("candidates") or [])]
+    assert cand_values and cand_values[0] == "14.09.2026"
+    # the order is HELD (nothing shipped)
+    assert pg.execute("SELECT count(*) FROM held_orders").fetchone()[0] == before_held + 1
+    assert rec.uploads == []
+    # #420 (3): the summary shows the conflict + the resolved customer, never "nenašiel"
+    assert len(rec.posts) == 1 and "nástenke" in rec.posts[0].lower()
+    assert "nenašiel" not in rec.posts[0]
+    assert "Pekáreň Testovacia" in rec.posts[0]
