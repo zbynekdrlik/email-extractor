@@ -286,29 +286,48 @@ def expire_stale(conn, cfg, now: datetime | None = None) -> int:
         "WHERE status = 'open'").fetchall()
     expired_ids: list[int] = []
     per_message: dict[str, list[int]] = {}
-    for qid, message_id, created_at in rows:
+    for qid, _mid, created_at in rows:
         if _weekdays_touched(created_at, now) > expire_days:
             expired_ids.append(int(qid))
+
+    if expired_ids:
+        # #421 (F3): guard the UPDATE with `status='open'` too — the SELECT above and this
+        # write are not one statement, so a concurrent human answer can flip a question to
+        # 'answered' in between; without the guard the UPDATE would clobber that real answer
+        # back to 'expired'. Recompute the actually-flipped set from RETURNING so the message
+        # rollups (and the held-order close below) only ever act on questions this call
+        # genuinely expired, never a race-answered one.
+        flipped = conn.execute(
+            """UPDATE order_questions
+                  SET status = 'expired', answer = '{"expired": true}'::jsonb,
+                      answered_by = %s, answered_at = %s
+                WHERE id = ANY(%s) AND status = 'open'
+                RETURNING id, message_id""", (EXPIRED_BY, now, expired_ids)).fetchall()
+        expired_ids = [int(r[0]) for r in flipped]
+        per_message = {}
+        for qid, message_id in flipped:
             if message_id:
                 per_message.setdefault(message_id, []).append(int(qid))
-    if not expired_ids:
-        return 0
+        outcome = (f"Otázka na nástenke expirovala (otvorená viac ako {expire_days} pracovné "
+                   "dni bez odpovede) — správa je na ručné vybavenie; systém ju už "
+                   "nepripomína.")
+        for message_id, qids in per_message.items():
+            conn.execute(
+                """UPDATE messages SET processed = true, processed_at = now(),
+                       processed_by = %s, processing_at = NULL
+                    WHERE message_id = %s""", (EXPIRED_BY, message_id))
+            report.log_event(conn, message_id, stage="review", status="review",
+                             outcome=outcome, detail={"expired_questions": qids}, rollup=True)
 
-    conn.execute(
-        """UPDATE order_questions
-              SET status = 'expired', answer = '{"expired": true}'::jsonb,
-                  answered_by = %s, answered_at = %s
-            WHERE id = ANY(%s)""", (EXPIRED_BY, now, expired_ids))
-    outcome = (f"Otázka na nástenke expirovala (otvorená viac ako {expire_days} pracovné "
-               "dni bez odpovede) — správa je na ručné vybavenie; systém ju už "
-               "nepripomína.")
-    for message_id, qids in per_message.items():
-        conn.execute(
-            """UPDATE messages SET processed = true, processed_at = now(),
-                   processed_by = %s, processing_at = NULL
-                WHERE message_id = %s""", (EXPIRED_BY, message_id))
-        report.log_event(conn, message_id, stage="review", status="review",
-                         outcome=outcome, detail={"expired_questions": qids}, rollup=True)
-    log.info("expired %d stale question(s) across %d message(s)",
-             len(expired_ids), len(per_message))
+    # #421: a held order whose gating question(s) expired must not stay `held` forever.
+    # Runs EVERY tick (NOT gated on this sweep's expired_ids) so a STAGGERED dedup case — an
+    # older sibling question expired an earlier sweep, the last open sibling answered since —
+    # is caught too, never left to the deadline ship-what-matched path. Self-contained: it
+    # closes without shipping and raises its own ops alert.
+    from . import hold
+    hold.close_expired_holds(conn, cfg)
+
+    if expired_ids:
+        log.info("expired %d stale question(s) across %d message(s)",
+                 len(expired_ids), len(per_message))
     return len(expired_ids)

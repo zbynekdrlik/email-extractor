@@ -449,6 +449,11 @@ def register(app: Flask, deps: Deps) -> None:
         # sentinel would leak into that order's later release build. REFUSE that case before
         # answering — the sklad must resolve such a shared question the normal way (a real card,
         # which teaches + ships every waiting order).
+        # #421: answered_by carries the session ROLE (`sklad`/`sklad_dl`) — or the
+        # `sklad-manual` fallback for a full-admin login (session.role is None then), which
+        # keeps the pre-#421 held-path marker byte-stable.
+        answered_by = session.get("role") or "sklad-manual"
+
         def _held_msgs(conn):
             return {r[0] for r in conn.execute(
                 "SELECT DISTINCT message_id FROM held_orders "
@@ -460,12 +465,96 @@ def register(app: Flask, deps: Deps) -> None:
         # idempotent no-op (a double click / a retried request) — return ok, never 409.
         if not msgs and (cur.get("answer") or {}).get("choice") == teach.ITEM_MANUAL:
             return jsonify(ok=True, question=cur, resolved_manually=[], released=[])
-        # 0 held rows on this qid = nothing to release. Most likely the deadline sweep already
-        # shipped it while the board card stayed up — refuse loudly so a hand-entry does not
-        # duplicate an EDI already sitting in ORION (the confirm dialog said „nič sa neposlalo").
+        # 0 held rows CURRENTLY. #421: distinguish two very different states before deciding.
         if not msgs:
-            return jsonify(error="Na túto otázku už nečaká žiadna objednávka — mohla sa "
-                                 "medzitým odoslať do ORIONu; skontroluj dashboard."), 409
+            with deps.db() as clook2:
+                ever = clook2.execute(
+                    "SELECT status, release_reason FROM held_orders "
+                    "WHERE %s = ANY(question_ids)", (qid,)).fetchall()
+            if not ever:
+                # NO held_orders row EVER referenced this qid. Usually an ORPHAN question (a
+                # change-request mail asked it but never placed a hold — the 215/216 case),
+                # SAFE to close as `manual` by hand: no EDI ever existed for it. BUT (#421
+                # Fable finding F1) "never held" is NOT the same as "never shipped": the item
+                # ask-gate (pipeline.py:470) has no deadline check, while the hold gate
+                # (:559) does — so a same-day / undated matched order with an unmatched line
+                # asks an item question, places NO hold, and ships what matched IMMEDIATELY.
+                # That leaves an open item question with zero held rows AND a partial EDI
+                # already in ORION. A manual close there would invite a duplicate physical
+                # delivery. So refuse if this question's order already reached ORION — keyed
+                # on the `uploaded_orion` event (its detail carries the question ids, so a
+                # deduped question shipped under a DIFFERENT message is caught too).
+                mid = (cur or {}).get("message_id") or ""
+                with deps.db() as cs:
+                    shipped = cs.execute(
+                        """SELECT 1 FROM email_events
+                            WHERE stage = 'uploaded_orion'
+                              AND (message_id = %s
+                                   OR detail->'question_ids' @> to_jsonb(%s::bigint))
+                            LIMIT 1""", (mid, qid)).fetchone()
+                if shipped:
+                    return jsonify(error="Na túto otázku nečakala žiadna objednávka, ale "
+                                         "mail už (čiastočne) odišiel do ORIONu — ručné "
+                                         "zadanie by bol duplikát; skontroluj dashboard."), 409
+                # Guarded `status='open'` so a concurrent real answer always wins; the
+                # reminder stops the instant the question leaves the open list.
+                with deps.db_tx() as c:
+                    row = c.execute(
+                        """UPDATE order_questions
+                              SET status = 'answered', answer = %s,
+                                  answer_card = 'vyriešené ručne',
+                                  answered_by = %s, answered_at = now()
+                            WHERE id = %s AND status = 'open'
+                            RETURNING id""",
+                        (Json({"choice": teach.ITEM_MANUAL}), answered_by, qid)).fetchone()
+                if not row:
+                    with deps.db() as cc:
+                        cur2 = teach.get(cc, qid) or {}
+                    if (cur2.get("answer") or {}).get("choice") == teach.ITEM_MANUAL:
+                        return jsonify(ok=True, question=cur2, resolved_manually=[],
+                                       released=[])
+                    return jsonify(error="Otázka je už zodpovedaná — skontroluj "
+                                         "dashboard."), 409
+                # #421 (F2, TOCTOU): a hold can be placed AFTER the item question is asked
+                # (pipeline asks per-item, then `hold.place` runs after the whole order) — a
+                # click landing in that window would answer here while `hold.place` attaches
+                # a hold to an already-answered question (invisible on the board, only the
+                # deadline sweep would ever move it). Re-check AFTER answering: if a hold now
+                # exists, reopen the question (nothing shipped) and refuse, mirroring the
+                # held-path's own post-answer re-check below.
+                with deps.db() as cr:
+                    ever2 = cr.execute(
+                        "SELECT 1 FROM held_orders WHERE %s = ANY(question_ids) LIMIT 1",
+                        (qid,)).fetchone()
+                if ever2:
+                    with deps.db_tx() as c:
+                        c.execute(
+                            """UPDATE order_questions SET status = 'open', answer = NULL,
+                                   answer_card = NULL, answered_by = NULL, answered_at = NULL
+                                WHERE id = %s""", (qid,))
+                    return jsonify(error="Objednávka sa medzitým zaradila medzi čakajúce — "
+                                         "skús to znova."), 409
+                with deps.db() as c3:
+                    answered = teach.get(c3, qid)
+                return jsonify(ok=True, question=answered, resolved_manually=[], released=[])
+            # A held row DID exist but is no longer held (released/deadline/manual/expired) —
+            # the order may already sit in ORION (e.g. the deadline sweep shipped it while the
+            # board card stayed up), so refuse loudly with a PRECISE reason; a hand-entry here
+            # would duplicate a physical delivery.
+            reasons = {r[1] for r in ever if r[1]}
+            if "deadline" in reasons:
+                why = "objednávka už odišla v termíne dodania (deadline)"
+            elif "manual" in reasons:
+                why = "objednávka už bola vyriešená ručne"
+            elif "answered" in reasons:
+                why = "objednávka už bola odoslaná po odpovedi na otázku"
+            elif "expired" in reasons:
+                why = "otázka expirovala a objednávka je na ručné vybavenie"
+            else:
+                why = "objednávka už bola uvoľnená"
+            return jsonify(error=f"Na túto otázku už nečaká žiadna objednávka — {why}; "
+                                 "mohla sa medzitým odoslať do ORIONu, skontroluj "
+                                 "dashboard."), 409
         if len(msgs) > 1:
             return jsonify(error="Táto otázka blokuje objednávky z viacerých mailov — nedá "
                                  "sa hromadne vyriešiť ručne. Vyrieš ju bežnou odpoveďou "
@@ -478,9 +567,10 @@ def register(app: Flask, deps: Deps) -> None:
             row = c.execute(
                 """UPDATE order_questions
                       SET status = 'answered', answer = %s, answer_card = 'vyriešené ručne',
-                          answered_by = 'sklad-manual', answered_at = now()
+                          answered_by = %s, answered_at = now()
                     WHERE id = %s AND status = 'open'
-                    RETURNING id""", (Json({"choice": teach.ITEM_MANUAL}), qid)).fetchone()
+                    RETURNING id""",
+                (Json({"choice": teach.ITEM_MANUAL}), answered_by, qid)).fetchone()
         if not row:
             # 0 rows: a concurrent answer won between the check and here. If it was ANOTHER
             # „Vyriešené ručne" click (sentinel already set), re-drive the release idempotently

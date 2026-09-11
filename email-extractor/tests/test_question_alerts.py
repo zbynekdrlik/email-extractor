@@ -336,3 +336,97 @@ def test_expiry_writes_no_item_or_dl_memory(pg):
     question_alerts.expire_stale(pg, _cfg(), now=THU)
     assert int(pg.execute("SELECT count(*) FROM item_memory").fetchone()[0]) == 0
     assert int(pg.execute("SELECT count(*) FROM dl_item_memory").fetchone()[0]) == 0
+
+
+# --- #421: a held order gated by a question that expires must not stay `held` forever ---
+
+def _held(pg, qid, message_id="m1", delivery="04.08.2026"):
+    """A held_orders row (status='held') waiting on `qid`, raw insert."""
+    import json
+    pg.execute(
+        """INSERT INTO held_orders (message_id, customer_ean, customer_name, delivery_date,
+                                    order_number, question_ids, order_json, extracted_json,
+                                    decisions_json)
+           VALUES (%s, '2000000000001', 'Zákazník A', %s, '', %s, %s, %s, %s)""",
+        (message_id, delivery, [qid],
+         json.dumps({"deliveryDate": delivery, "orderNumber": ""}),
+         json.dumps({"isChangeRequest": False, "unverified": [], "notes": ""}),
+         json.dumps([])))
+
+
+def test_expiring_a_gating_question_closes_its_held_order_without_shipping(pg):
+    """#421 (d): when `expire_stale` closes a stale `item` question that a held order is
+    waiting on, the held order must NOT be left `held` forever — it is closed terminally
+    WITHOUT any ship (release_reason='expired'), the message is routed to manual review,
+    and an ops alert is raised so a closed-unshipped hold is visible. Shipping-what-matched
+    here would send an unconfirmed incomplete EDI (and risk a duplicate)."""
+    _msg(pg, "m1")
+    qid = _ask(pg, kind="item", customer_ean="2000000000001", wording="Šiška",
+               item_key="siska", message_id="m1", created_at=TUE)
+    _held(pg, qid, message_id="m1")
+    assert question_alerts.expire_stale(pg, _cfg(), now=THU) == 1
+    assert _status(pg, qid) == "expired"
+    # the held order is closed terminally, NOT left 'held', and nothing shipped
+    status, reason = pg.execute(
+        "SELECT status, release_reason FROM held_orders").fetchone()
+    assert (status, reason) == ("released", "expired")
+    assert int(pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0]) == 0
+    # an ops alert was enqueued so the closed-unshipped hold is visible
+    assert len(_pending(pg, "held_order_expired")) == 1
+
+
+def test_expiry_leaves_a_held_order_with_a_still_open_sibling_question_alone(pg):
+    """A held order still gated by a NOT-yet-expired sibling question must stay `held` —
+    only a hold whose every gating question is terminal may be closed."""
+    _msg(pg, "m1")
+    old = _ask(pg, kind="item", customer_ean="2000000000001", wording="Šiška",
+               item_key="siska", message_id="m1", created_at=TUE)
+    fresh = _ask(pg, kind="item", customer_ean="2000000000001", wording="Rožok",
+                 item_key="rozok", message_id="m1", created_at=WED)
+    import json
+    pg.execute(
+        """INSERT INTO held_orders (message_id, customer_ean, customer_name, delivery_date,
+                                    order_number, question_ids, order_json, extracted_json,
+                                    decisions_json)
+           VALUES ('m1', '2000000000001', 'Zákazník A', '04.08.2026', '', %s, %s, %s, %s)""",
+        ([old, fresh], json.dumps({"deliveryDate": "04.08.2026", "orderNumber": ""}),
+         json.dumps({"isChangeRequest": False, "unverified": [], "notes": ""}),
+         json.dumps([])))
+    # `now=WED`: only `old` (TUE, 2 working days) is NOT yet expired either — nothing expires
+    # yet; advance to THU so `old` expires but `fresh` (WED) is still open.
+    assert question_alerts.expire_stale(pg, _cfg(), now=THU) == 1
+    assert _status(pg, old) == "expired"
+    assert _status(pg, fresh) == "open"
+    # the sibling is still open → the hold stays held
+    assert pg.execute("SELECT status FROM held_orders").fetchone() == ("held",)
+
+
+def test_expiry_closes_a_hold_whose_last_open_sibling_is_answered_after_an_older_one_expired(pg):
+    """#421 F4 (staggered dedup): a hold can gate an OLDER deduped question (expires first)
+    AND a NEWER one (still open). Once the newer is ANSWERED, `_release_locked` still counts
+    the expired sibling as pending and leaves the hold `held` — so without the state-based
+    close it would fall to the deadline ship-what-matched path. The next expiry tick's
+    close_expired_holds (all gating questions terminal, ≥1 expired) closes it WITHOUT
+    shipping. Proven end-to-end: expire the older, answer the newer, tick again."""
+    _msg(pg, "m1")
+    old = _ask(pg, kind="item", customer_ean="2000000000001", wording="Šiška",
+               item_key="siska", message_id="m1", created_at=TUE)
+    fresh = _ask(pg, kind="item", customer_ean="2000000000001", wording="Rožok",
+                 item_key="rozok", message_id="m1", created_at=WED)
+    _held(pg, old)  # _held only records ONE qid; overwrite question_ids to gate BOTH
+    pg.execute("UPDATE held_orders SET question_ids = %s WHERE message_id='m1'",
+               ([old, fresh],))
+    # THU: `old` (TUE) expires; `fresh` (WED) still open → hold stays held.
+    assert question_alerts.expire_stale(pg, _cfg(), now=THU) == 1
+    assert pg.execute("SELECT status FROM held_orders").fetchone() == ("held",)
+    # the last open sibling is answered (no ship — _release_locked would leave it held on
+    # the expired sibling); simulate the answer directly.
+    pg.execute("UPDATE order_questions SET status='answered' WHERE id=%s", (fresh,))
+    # next tick: nothing NEW expires, but close_expired_holds runs every tick and now sees a
+    # hold with no open question and an expired one → closes it without shipping.
+    question_alerts.expire_stale(pg, _cfg(), now=THU)
+    status, reason = pg.execute(
+        "SELECT status, release_reason FROM held_orders").fetchone()
+    assert (status, reason) == ("released", "expired")
+    assert int(pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0]) == 0
+    assert len(_pending(pg, "held_order_expired")) == 1

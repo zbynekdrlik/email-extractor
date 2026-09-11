@@ -170,6 +170,29 @@ ADD_MAIL_RULES_SAMPLE_HAD_ATTACHMENTS = [
 ]
 
 
+# #421: a held order whose gating board question expired (#341) is closed terminally WITHOUT
+# shipping, keyed release_reason='expired' — the expiry already routes the message to manual
+# review, so the order is entered by hand in CODEX and nothing reaches ORION. Widen the CHECK
+# (baseline: answered/deadline; #384 added manual). The one-off backfill closes the two
+# live-stuck rows 41/42 — scoped to those ids AND status='held' AND gating the specific
+# expired questions 151/154 (the F7 review guard: on a differently-populated DB — a second
+# instance, a restored dev copy — ids 41/42 could be unrelated live holds, so the extra
+# `question_ids && ARRAY[151,154]` clause makes closing the WRONG hold impossible). No-op on
+# any DB where that exact (id, question) pairing is absent, and on rows already released, so
+# it NEVER re-ships. Those two messages were already rolled up to review by expire_stale on
+# 2026-09-08, so the backfill writes no event/alert. Same drop-then-add-by-auto-name shape as
+# the #384 widen above (transaction-safe DDL; statements run in list order, so the CHECK is
+# widened BEFORE the UPDATE writes release_reason='expired').
+ADD_HELD_ORDERS_EXPIRED_RELEASE_REASON = [
+    "ALTER TABLE held_orders DROP CONSTRAINT IF EXISTS held_orders_release_reason_check",
+    "ALTER TABLE held_orders ADD CONSTRAINT held_orders_release_reason_check "
+    "CHECK (release_reason IN ('answered', 'deadline', 'manual', 'expired'))",
+    "UPDATE held_orders SET status = 'released', release_reason = 'expired', "
+    "released_at = now() WHERE id IN (41, 42) AND status = 'held' "
+    "AND question_ids && ARRAY[151, 154]::bigint[]",
+]
+
+
 # SCHEMA above is FROZEN as revision 1 (the baseline). NEVER edit those statements for a
 # schema change — append a NEW numbered migrate.Revision to this list instead
 # (immutable-migrations, #269). run_migrations() applies only the unapplied revisions, in
@@ -220,6 +243,8 @@ REVISIONS = [
         """ALTER TABLE dl_invoice_runs
               ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ""",
     ]),
+    migrate.Revision(14, "add_held_orders_expired_release_reason",
+                     ADD_HELD_ORDERS_EXPIRED_RELEASE_REASON),
 ]
 
 
