@@ -139,3 +139,41 @@ re-runs migrations and asserts the table is gone again. A `>= drop_rev` delete w
 strip every LATER revision's ledger row, forcing them all to re-run — noisy and not what the
 test is isolating. Scope the rollback to the exact revision under test, and look its number
 up by NAME (never hardcode `4`), so appending a rev 5+ never silently shifts it.
+
+## Widening a CHECK constraint in a NEW revision — the reused local test container +
+## `reapply_schema` can throw a false CheckViolation on an EARLIER revision (#421)
+
+A revision that widens a CHECK the SAME column already had narrowed in an earlier revision
+(here: rev 9 `ADD CHECK release_reason IN ('answered','deadline','manual')`, rev 14 drops+adds
+`... IN (...,'expired')`) is safe on a fresh DB and in CI, and safe in prod (rev 9 was recorded
+long ago and never re-runs; only the new rev 14 applies, on data that has no `'expired'` row
+yet). But it can produce a **scary, misleading `CheckViolation ... violated by some row` on rev
+9's ADD** in one specific LOCAL situation: a REUSED throwaway test-Postgres container that has
+accumulated `release_reason='expired'` rows from a PRIOR pytest invocation, hit by a
+`reapply_schema` test (which `DELETE FROM schema_version` + re-runs ALL revisions in order from
+the baseline). rev 9 then runs its OLDER 3-value CHECK against a leftover `'expired'` row and
+fails — and because it fails in the SESSION-scoped `_schema` fixture, EVERY test in the run
+errors, looking exactly like a real regression (thousands of E's).
+
+- **Diagnose:** the traceback points at `_schema`/`init_schema`/`run_migrations` and the failing
+  `query =` is an EARLIER revision's `ADD CONSTRAINT ... CHECK (... narrower set ...)`, not your
+  new one. That ordering (old revision, narrower set, "violated by some row") is the tell.
+- **Fix:** it is a dirty-container artifact, NOT a code bug — reset the container
+  (`docker exec <pg> psql -U postgres -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"`)
+  and re-run. Within a CLEAN session it cannot happen: the `pg` fixture TRUNCATEs `held_orders`
+  before every test, so no test holds an `'expired'` row at the moment a `reapply_schema` re-runs
+  rev 9. A brand-new container per CI run is why CI never sees it.
+- The real invariant this reveals: a narrowing CHECK in an early revision assumes the widening
+  value did not exist yet when it FIRST ran — true in the ordered-migration reality, but
+  `reapply_schema` re-runs from the baseline against WHATEVER data is present, so keep the
+  reused container clean when testing a CHECK-widening revision.
+
+## `array_col && %s` overlap against a `bigint[]` column needs an explicit `::bigint[]` cast
+## on the parameter — but an INSERT into that column does NOT (#421)
+
+`held_orders.question_ids` is `bigint[]`. A `WHERE question_ids && %s` with a Python list of
+small ints fails `operator does not exist: bigint[] && smallint[]` — psycopg adapts the list to
+`smallint[]` (the values fit), and `&&` has no cross-width operator. Cast the parameter:
+`question_ids && %s::bigint[]`. An `INSERT ... VALUES (%s)` into the same column needs NO cast —
+INSERT coerces the literal to the column's declared type. Same trap for any `bigint[]`/`int[]`
+overlap/containment (`&&`, `@>`, `<@`) fed a Python int list.
