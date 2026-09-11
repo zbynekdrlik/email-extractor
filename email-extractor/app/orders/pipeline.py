@@ -467,7 +467,7 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
             # leave no trace, and these are questions for a human. A genuinely NEW question
             # (never a duplicate of one already open) also reaches Odoo (#102) — the warehouse
             # reads Odoo, not always the dashboard.
-            if not shadow and matched and decision.rule in ASK_THE_WAREHOUSE:
+            if not shadow and matched and not is_change and decision.rule in ASK_THE_WAREHOUSE:
                 # #147: item_cands was scored/truncated to 6 BEFORE this decision existed,
                 # so the model's own answer can rank below the cutoff (e.g. a SYNONYMS hit
                 # on an unrelated card family). Re-head the list with the engine's actual

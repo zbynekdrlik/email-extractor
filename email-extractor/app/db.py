@@ -170,6 +170,23 @@ ADD_MAIL_RULES_SAMPLE_HAD_ATTACHMENTS = [
 ]
 
 
+# #421: a held order whose gating board question expired (#341) is closed terminally WITHOUT
+# shipping, keyed release_reason='expired' — the expiry already routes the message to manual
+# review, so the order is entered by hand in CODEX and nothing reaches ORION. Widen the CHECK
+# (baseline: answered/deadline; #384 added manual). The one-off backfill closes the two
+# live-stuck rows 41/42 (questions 151/154 expired 2026-09-08 while the 4.9 order had already
+# gone out incomplete via the deadline sweep) — scoped to those ids AND status='held' so it
+# NEVER re-ships and is a no-op on any other DB and on rows already released. Same
+# drop-then-add-by-auto-name shape as the #384 widen above (transaction-safe DDL).
+ADD_HELD_ORDERS_EXPIRED_RELEASE_REASON = [
+    "ALTER TABLE held_orders DROP CONSTRAINT IF EXISTS held_orders_release_reason_check",
+    "ALTER TABLE held_orders ADD CONSTRAINT held_orders_release_reason_check "
+    "CHECK (release_reason IN ('answered', 'deadline', 'manual', 'expired'))",
+    "UPDATE held_orders SET status = 'released', release_reason = 'expired', "
+    "released_at = now() WHERE id IN (41, 42) AND status = 'held'",
+]
+
+
 # SCHEMA above is FROZEN as revision 1 (the baseline). NEVER edit those statements for a
 # schema change — append a NEW numbered migrate.Revision to this list instead
 # (immutable-migrations, #269). run_migrations() applies only the unapplied revisions, in
@@ -220,6 +237,8 @@ REVISIONS = [
         """ALTER TABLE dl_invoice_runs
               ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ""",
     ]),
+    migrate.Revision(14, "add_held_orders_expired_release_reason",
+                     ADD_HELD_ORDERS_EXPIRED_RELEASE_REASON),
 ]
 
 

@@ -449,6 +449,11 @@ def register(app: Flask, deps: Deps) -> None:
         # sentinel would leak into that order's later release build. REFUSE that case before
         # answering — the sklad must resolve such a shared question the normal way (a real card,
         # which teaches + ships every waiting order).
+        # #421: answered_by carries the session ROLE (`sklad`/`sklad_dl`) — or the
+        # `sklad-manual` fallback for a full-admin login (session.role is None then), which
+        # keeps the pre-#421 held-path marker byte-stable.
+        answered_by = session.get("role") or "sklad-manual"
+
         def _held_msgs(conn):
             return {r[0] for r in conn.execute(
                 "SELECT DISTINCT message_id FROM held_orders "
@@ -460,12 +465,57 @@ def register(app: Flask, deps: Deps) -> None:
         # idempotent no-op (a double click / a retried request) — return ok, never 409.
         if not msgs and (cur.get("answer") or {}).get("choice") == teach.ITEM_MANUAL:
             return jsonify(ok=True, question=cur, resolved_manually=[], released=[])
-        # 0 held rows on this qid = nothing to release. Most likely the deadline sweep already
-        # shipped it while the board card stayed up — refuse loudly so a hand-entry does not
-        # duplicate an EDI already sitting in ORION (the confirm dialog said „nič sa neposlalo").
+        # 0 held rows CURRENTLY. #421: distinguish two very different states before deciding.
         if not msgs:
-            return jsonify(error="Na túto otázku už nečaká žiadna objednávka — mohla sa "
-                                 "medzitým odoslať do ORIONu; skontroluj dashboard."), 409
+            with deps.db() as clook2:
+                ever = clook2.execute(
+                    "SELECT status, release_reason FROM held_orders "
+                    "WHERE %s = ANY(question_ids)", (qid,)).fetchall()
+            if not ever:
+                # NO held_orders row EVER referenced this qid — an ORPHAN question (a
+                # change-request mail asked it but never placed a hold; the 215/216 case).
+                # No EDI ever existed for it, so closing it as `manual` by hand is SAFE and
+                # is the only way the sklad can clear the board card. Guarded `status='open'`
+                # so a concurrent real answer always wins; the reminder stops the instant the
+                # question leaves the open list.
+                with deps.db_tx() as c:
+                    row = c.execute(
+                        """UPDATE order_questions
+                              SET status = 'answered', answer = %s,
+                                  answer_card = 'vyriešené ručne',
+                                  answered_by = %s, answered_at = now()
+                            WHERE id = %s AND status = 'open'
+                            RETURNING id""",
+                        (Json({"choice": teach.ITEM_MANUAL}), answered_by, qid)).fetchone()
+                if not row:
+                    with deps.db() as cc:
+                        cur2 = teach.get(cc, qid) or {}
+                    if (cur2.get("answer") or {}).get("choice") == teach.ITEM_MANUAL:
+                        return jsonify(ok=True, question=cur2, resolved_manually=[],
+                                       released=[])
+                    return jsonify(error="Otázka je už zodpovedaná — skontroluj "
+                                         "dashboard."), 409
+                with deps.db() as c3:
+                    answered = teach.get(c3, qid)
+                return jsonify(ok=True, question=answered, resolved_manually=[], released=[])
+            # A held row DID exist but is no longer held (released/deadline/manual/expired) —
+            # the order may already sit in ORION (e.g. the deadline sweep shipped it while the
+            # board card stayed up), so refuse loudly with a PRECISE reason; a hand-entry here
+            # would duplicate a physical delivery.
+            reasons = {r[1] for r in ever if r[1]}
+            if "deadline" in reasons:
+                why = "objednávka už odišla v termíne dodania (deadline)"
+            elif "manual" in reasons:
+                why = "objednávka už bola vyriešená ručne"
+            elif "answered" in reasons:
+                why = "objednávka už bola odoslaná po odpovedi na otázku"
+            elif "expired" in reasons:
+                why = "otázka expirovala a objednávka je na ručné vybavenie"
+            else:
+                why = "objednávka už bola uvoľnená"
+            return jsonify(error=f"Na túto otázku už nečaká žiadna objednávka — {why}; "
+                                 "mohla sa medzitým odoslať do ORIONu, skontroluj "
+                                 "dashboard."), 409
         if len(msgs) > 1:
             return jsonify(error="Táto otázka blokuje objednávky z viacerých mailov — nedá "
                                  "sa hromadne vyriešiť ručne. Vyrieš ju bežnou odpoveďou "
@@ -478,9 +528,10 @@ def register(app: Flask, deps: Deps) -> None:
             row = c.execute(
                 """UPDATE order_questions
                       SET status = 'answered', answer = %s, answer_card = 'vyriešené ručne',
-                          answered_by = 'sklad-manual', answered_at = now()
+                          answered_by = %s, answered_at = now()
                     WHERE id = %s AND status = 'open'
-                    RETURNING id""", (Json({"choice": teach.ITEM_MANUAL}), qid)).fetchone()
+                    RETURNING id""",
+                (Json({"choice": teach.ITEM_MANUAL}), answered_by, qid)).fetchone()
         if not row:
             # 0 rows: a concurrent answer won between the check and here. If it was ANOTHER
             # „Vyriešené ručne" click (sentinel already set), re-drive the release idempotently

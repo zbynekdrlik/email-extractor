@@ -309,6 +309,21 @@ def expire_stale(conn, cfg, now: datetime | None = None) -> int:
                 WHERE message_id = %s""", (EXPIRED_BY, message_id))
         report.log_event(conn, message_id, stage="review", status="review",
                          outcome=outcome, detail={"expired_questions": qids}, rollup=True)
+    # #421: a held order whose gating question(s) just expired must not stay `held` forever.
+    # Close it terminally WITHOUT shipping (never the deadline ship-what-matched path) and
+    # raise an ops alert so a closed-unshipped hold is visible — the order is now the
+    # warehouse's to enter by hand in CODEX, mirroring the expiry's own manual-review routing.
+    from . import hold
+    closed = hold.close_expired_holds(conn, cfg, expired_ids)
+    if closed:
+        channel = int(getattr(cfg, "orders_channel_id", 0) or 0)
+        link = report.sklad_link(cfg)
+        for c in closed:
+            body = ("<p>&#9888; Držaná objednávka sa zavrela, lebo otázka na nástenke "
+                    f"expirovala ({expire_days} prac. dni bez odpovede) — nič sa neposlalo "
+                    f"do ORIONu, vybav ju ručne v CODEXe. {escape(link)}</p>")
+            dl_alerts.enqueue(conn, channel, "held_order_expired", body,
+                              message_id=c["message_id"])
     log.info("expired %d stale question(s) across %d message(s)",
              len(expired_ids), len(per_message))
     return len(expired_ids)

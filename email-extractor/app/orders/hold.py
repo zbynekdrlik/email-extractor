@@ -707,6 +707,52 @@ def unresolve_manually(conn, qid: int) -> list[str]:
     return message_ids
 
 
+def close_expired_holds(conn, cfg, expired_qids: list[int]) -> list[dict]:
+    """#421: when `question_alerts.expire_stale` (#341) neutrally closes stale board
+    questions (`status='expired'`), a held order whose ONLY reason to wait was one of those
+    questions must NOT be left `held` forever. Close it TERMINALLY WITHOUT any ship
+    (`status='released', release_reason='expired'`), mirroring the expiry's own semantics:
+    the underlying message is already routed to manual review (`processed=true`), so the
+    order is now the warehouse's to enter by hand in CODEX — exactly like „Vyriešené ručne".
+
+    Deliberately NOT the deadline `release_due` path (ship-what-matched): shipping an
+    unconfirmed, incomplete EDI the warehouse never approved — and risking a duplicate of
+    anything the deadline sweep already shipped — is the unsafe direction. Closing without a
+    ship never touches ORION, so there is zero double-delivery risk.
+
+    Only a hold whose EVERY gating question is already terminal (no remaining `status='open'`
+    question) is closed — a hold still gated by a live sibling question is left `held`.
+    Returns one dict per closed hold ({"id", "message_id"}) so the caller can raise an ops
+    alert; the guarded `status='held'` flip means a row already released by any other path is
+    a silent no-op (never re-shipped, never relabelled)."""
+    from . import report
+    if not expired_qids:
+        return []
+    rows = conn.execute(
+        """SELECT id, message_id FROM held_orders h
+            WHERE h.status = 'held'
+              AND h.question_ids && %s::bigint[]
+              AND NOT EXISTS (SELECT 1 FROM order_questions q
+                               WHERE q.id = ANY(h.question_ids) AND q.status = 'open')""",
+        (list(expired_qids),)).fetchall()
+    closed: list[dict] = []
+    for hid, mid in rows:
+        flipped = conn.execute(
+            """UPDATE held_orders SET status = 'released', release_reason = 'expired',
+                   released_at = now() WHERE id = %s AND status = 'held' RETURNING id""",
+            (hid,)).fetchone()
+        if not flipped:
+            continue   # a concurrent path released it first — never re-touch
+        report.log_event(conn, mid, stage="review", status="review",
+                         outcome="Otázka na nástenke expirovala — držaná objednávka sa "
+                                 "zavrela bez odoslania do ORIONu; vybav ju ručne v CODEXe.",
+                         detail={"held_id": hid}, rollup=False)
+        _mark_message_done_if_clear(conn, mid)
+        closed.append({"id": hid, "message_id": mid})
+        log.info("closed held order #%s as expired (nothing shipped) — message %s", hid, mid)
+    return closed
+
+
 def set_customer(conn, qid: int, ean_edi: str, name: str) -> None:
     """The unmatched-customer question (#159) is now answered with a REAL pick — tell
     every held order still waiting on it who it actually belongs to, BEFORE releasing.
