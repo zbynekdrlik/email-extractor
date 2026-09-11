@@ -233,6 +233,10 @@ def test_a_stale_quoted_order_re_dated_by_the_model_is_held_not_dropped():
     assert len(result["orders"]) == 1                # kept, no longer dropped
     dc = result.get("date_conflict")
     assert dc and [25, 7] in [list(w) for w in dc["written"]]
+    # candidate ORDER is pinned here (the model date 08.08. differs from the next-future
+    # written dates, unlike the typo case): the next-future written days come first, SOONEST
+    # first (22.08. before 25.08.), then the model's own date, then mail+7 days.
+    assert dc["candidates"] == ["22.08.2026", "25.08.2026", "08.08.2026", "10.08.2026"]
     # the invented date may be OFFERED as a candidate, but is never ASSERTED as the final
     # delivery date the way the live incident's "objednávka je na 08.08.2026" did.
     assert "objednávka je na 08.08" not in json.dumps(result)
@@ -823,3 +827,17 @@ def test_next_future_written_date_keeps_the_day_and_finds_the_next_month():
     assert extract._next_future_day_month(14, 8, ref) == date(2026, 9, 14)
     # a written month still ahead is preserved (20.12. -> 20.12.2026)
     assert extract._next_future_day_month(20, 12, ref) == date(2026, 12, 20)
+
+
+def test_date_conflict_candidates_orders_chronologically_dedups_and_filters_junk():
+    C = extract.date_conflict_candidates
+    # SOONEST written-derived date first (14.9. before 3.10.), then the model's date, then
+    # mail+7 — never day-major order (Fable review #420, finding 3)
+    assert C({(3, 10), (14, 8)}, ["01.01.2027"], "2026-09-11") == [
+        "14.09.2026", "03.10.2026", "01.01.2027", "18.09.2026"]
+    # the model date deduplicates against an identical next-future written date
+    assert C({(14, 8)}, ["14.09.2026"], "2026-09-11") == ["14.09.2026", "18.09.2026"]
+    # a junk day.month the strict scan produced ("verzia 1.13.") never becomes a candidate
+    assert C({(1, 13), (14, 8)}, ["14.09.2026"], "2026-09-11") == ["14.09.2026", "18.09.2026"]
+    # no usable mail date -> only the model's own date is offered
+    assert C({(14, 8)}, ["14.09.2026"], "") == ["14.09.2026"]

@@ -732,7 +732,7 @@ def date_ground_conflict(date_str: str, source: str) -> set[tuple[int, int]] | N
 def _ref_date(today: str) -> date | None:
     """The mail's own date as a `date`, from `DD.MM.YYYY` or ISO `YYYY-MM-DD`."""
     s = str(today or "").strip()
-    iso = re.match(r"^(\d{4})-(\d{2})-(\d{2})$", s)
+    iso = re.match(r"^(\d{4})-(\d{2})-(\d{2})", s)   # tolerate an ISO datetime suffix too
     if iso:
         y, mo, d = int(iso.group(1)), int(iso.group(2)), int(iso.group(3))
     else:
@@ -805,10 +805,17 @@ def date_conflict_candidates(written: set[tuple[int, int]], model_dates: list[st
             out.append(value)
 
     if ref:
-        for d, m in sorted(written):
-            nxt = _next_future_day_month(d, m, ref)
-            if nxt:
-                _add(nxt.strftime("%d.%m.%Y"))
+        # the next-future written date(s) come first, SOONEST first (chronological, not
+        # day-major) so the top button is the most likely day; a junk token the strict
+        # scan produced ("verzia 1.13." -> month 13) is range-filtered out, and a written
+        # RANGE (which `date_ground_conflict` also feeds in) is capped so the board never
+        # renders dozens of date buttons.
+        resolved = sorted(
+            nxt for d, m in written
+            if 1 <= d <= 31 and 1 <= m <= 12
+            and (nxt := _next_future_day_month(d, m, ref)) is not None)
+        for nxt in resolved[:6]:
+            _add(nxt.strftime("%d.%m.%Y"))
     for md in model_dates:
         parsed = _ref_date(md)
         _add(parsed.strftime("%d.%m.%Y") if parsed else str(md or ""))

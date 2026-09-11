@@ -344,10 +344,11 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
     # #420: `extract.run` flags a written-day-vs-extracted-date conflict (a corrected typo
     # OR an invented date) in `date_conflict` with ready candidate days, instead of #163's
     # silent drop. Fold it into the SAME hold + `date`-question path; when present its
-    # reason + candidates take precedence (the more specific signal), and its reason
-    # replaces the summary note so the board shows the conflict, never "…sa nenašiel".
+    # reason + candidates take precedence (the more specific signal), so its reason wins
+    # even if a subject/body conflict also fired, keeping the board question's wording,
+    # candidates and summary note consistent (never "…sa nenašiel").
     gc = extracted.get("date_conflict") or None
-    conflict = conflict or (gc.get("reason", "") if gc else "")
+    conflict = (gc.get("reason", "") if gc else "") or conflict
     conflict_note = gc["reason"] if gc else extracted.get("notes", "")
     if conflict:
         if shadow:
