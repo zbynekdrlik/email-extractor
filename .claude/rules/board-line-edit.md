@@ -98,3 +98,35 @@ specific to the item kind:
   share the template) — re-pin both in `test_httpapi_characterization.py`
   (`# airuleset:secret-ok` on the sha line, and append that same bypass to the `git commit`
   command, since the 64-char hex trips `block-sensitive-staging.sh`).
+
+## Any question-settle write needs the atomic `WHERE status='open' RETURNING` guard, and side effects go AFTER it (#428)
+
+`teach.answer` (the `item` settle — also reached by #426 `new_product` and the #360 line
+edit, since they call it) originally did a NON-atomic check-then-act: a Python
+`if q["status"] != "open": raise AlreadyAnswered` (read from an earlier SELECT), then
+`UPDATE … SET status='answered' … WHERE id = %s` with **no `AND status='open'`, no
+`RETURNING`**, and the two `memory.remember*` writes ran **BEFORE** that UPDATE. Two
+concurrent answers (two people / a double-click) both passed the Python check, both wrote
+memory, and the second UPDATE silently overwrote the first (no `edi_sent`/`_release_locked`
+duplicate-ship, but a lost answer + a duplicate memory write).
+
+The fix mirrors the already-hardened `answer_customer` (#234) and `_api_orders_answer_generic`
+(#323) — the invariant for EVERY question-settle path in this codebase:
+
+- Settle with an atomic guard: `UPDATE order_questions SET status='answered', … WHERE id=%s
+  AND status='open' RETURNING id`. Under READ COMMITTED the row lock serializes racers; the
+  loser matches 0 rows.
+- On 0 rows → `raise AlreadyAnswered` (re-read for the message detail) and apply **NO** side
+  effect. The endpoint turns that into a 409 ("otázka už bola zodpovedaná" → client refreshes).
+- Put memory/release side effects **AFTER** the successful guard, never before — so the loser
+  writes nothing. (Keep the early Python `status != 'open'` fast-path too; `answer_customer`
+  keeps both — it just is not the real guard.)
+- Callers stay unchanged: `api_orders_answer` (item tail) and `_api_orders_answer_new_product`
+  (#426 — whose whole `db_tx`, incl. the `catalog_overrides` card write, rolls back on the
+  raise) already catch `AlreadyAnswered → 409`; `_apply_item` calls `answer()` so it inherits it.
+
+When adding a NEW `teach.KINDS` kind or any new answer path, copy this shape — the guard
+belongs on the WRITE, not in one caller. RED proof = the `run_racers` helper (`tests/_race.py`):
+two real threads/connections that teach DIFFERENT gtins, asserting exactly one winner, one
+`AlreadyAnswered`, and exactly one human `item_memory` row (a leaked loser-write shows as a 2nd
+row because the conflict key is `(customer_ean, item_key, gtin, delivered_on)`).
