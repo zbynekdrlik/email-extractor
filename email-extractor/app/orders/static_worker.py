@@ -58,6 +58,7 @@ from datetime import UTC, datetime
 from html import escape
 
 from . import (
+    dl_alerts,
     edi,
     llm,
     report,
@@ -618,6 +619,19 @@ def tick(conn, cfg, pipeline=None, upload=None, post=None, llm_client=None,
                     detail={"error": repr(e), "stage": "run_live",
                             "attempts": int(message.get("attempts") or 0)},
                     workflow=WORKFLOW)
+                # #431: mirror worker.tick — the error event above is dashboard-visible, but
+                # nothing pinged the OPERATOR. Enqueue a durable ops-channel alert too so a
+                # deterministic static-orders crash never stays a silent traceback (sibling-
+                # engine parity, the same class #372/#373 kept in lock-step). Own kind keeps
+                # its dedup/grouping distinct from the AI engine's `order_pipeline_crash`.
+                ops_ch = report.ops_channel(cfg)
+                if not dl_alerts.already_pending(
+                        conn, "static_order_pipeline_crash", message["message_id"]):
+                    body = (f"<p>{escape(report.crash_outcome(e, 'run_live'))}</p>"
+                            + dl_alerts.item_line(message.get("from_addr", ""),
+                                                  message.get("subject", "")))
+                    dl_alerts.enqueue(conn, ops_ch, "static_order_pipeline_crash", body,
+                                      message_id=message["message_id"])
             return 0
         worker._finish_run(conn, run_id, result.get("status", "ok"), result)
         worker._check_spend_cap(conn, cfg, shadow=False)

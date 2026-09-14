@@ -424,3 +424,7 @@ def test_a_transient_crash_before_the_final_attempt_enqueues_no_ops_alert(pg):
     assert worker.tick(pg, cfg, pipeline=boom) == 0
     assert pg.execute(
         "SELECT count(*) FROM pending_alerts WHERE message_id = 'm1'").fetchone()[0] == 0
+    # fully silent-and-retryable: no error event either (proc_status stays clean)
+    assert pg.execute(
+        "SELECT count(*) FROM email_events WHERE message_id = 'm1' AND status = 'error'"
+    ).fetchone()[0] == 0

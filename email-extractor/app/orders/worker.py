@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from html import escape
 
 import psycopg
 from psycopg.types.json import Json
@@ -261,7 +262,7 @@ def tick(conn, cfg, pipeline=None) -> int:
                 ops_ch = report.ops_channel(cfg)
                 if not dl_alerts.already_pending(
                         conn, "order_pipeline_crash", message["message_id"]):
-                    body = (f"<p>{report.crash_outcome(e, 'run_live')}</p>"
+                    body = (f"<p>{escape(report.crash_outcome(e, 'run_live'))}</p>"
                             + dl_alerts.item_line(message.get("from_addr", ""),
                                                   message.get("subject", "")))
                     dl_alerts.enqueue(conn, ops_ch, "order_pipeline_crash", body,
