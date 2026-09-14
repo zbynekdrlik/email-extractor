@@ -64,3 +64,37 @@ edit → matching replays from the untouched cache, so only extraction re-runs a
 baseline holds as long as extraction still produces the same items/dates. DE-RISK cheaply:
 `--live --sample 5` first (~$0.75) — if the sampled outcomes still pass, the full 30+-case
 re-record is safe; then verify offline with `--require-all` (= exactly what CI runs).
+
+## „Genuinely new X right on the question card" now has an ORDERS-item member — mirror it exactly (#426)
+
+The board's "create the missing thing right on the question, one click" pattern now covers
+all three orders/DL kinds: customer (`new_customer`, #234), DL supplier/product
+(`new_supplier`/`new_item`, #235), and — since #426 — the ORDERS item card
+(`new_product`). Any FUTURE addition of this shape reuses the SAME structure; two traps
+specific to the item kind:
+
+- **The item candidate dict for `teach.add_candidate` uses key `"gtin"` + `"name"`, NOT
+  `"value"`/`"label"`.** `teach.answer` (the item path) checks
+  `offered = {str(c.get("gtin")) for c in candidates}` — a `{value,label}` candidate (the
+  shape the DL/generic kinds use, because they route through `_api_orders_answer_generic` →
+  `kind.validate`) would be invisible to it. `new_product` routes through `teach.answer`
+  directly (like the normal item tail), so it must add `{gtin,name}`.
+- **`teach.answer` accepts a freshly-created gtin two ways, both belt-and-suspenders:**
+  `add_candidate` puts it in the question's own offered set, AND `rebuild_from_overrides`
+  re-freezes it into `catalog_gtin_set(conn)` (which `answer` also checks). Either alone
+  would suffice; `_api_orders_answer_new_product` does both, mirroring `new_customer`.
+- **Same two-connection discipline (#116):** `upsert_catalog_card` + `rebuild_from_overrides`
+  + `add_candidate` + `teach.answer` in ONE `deps.db_tx()`; `hold.release_for_question`
+  AFTERWARDS on a separate `deps.db()` (autocommit) — a real ORION upload must never sit in
+  a rollback-able tx. The 409 collision check runs inside the same `db_tx` before any write
+  (a `return 409` there has written nothing, so it is a harmless empty commit).
+- **The UI form `newProductForm(q)` mirrors `newDlProductForm`** but posts
+  `{new_product:{gtin,name,doplnok?}, quantity, unit_price}` (carries the `lineFields`
+  `oqty_/oprice_` values, like `teach()`), sets `form.dataset.open` so the 5 s refresh
+  (`boardBusy()`) never wipes a half-filled form, and on a 409 renders „Použiť existujúcu
+  kartu" → `teach()` (which itself re-reads the qty/price inputs). The inline `item` branch
+  in `load()` was extracted into `itemQuestionCard(q)` — DOM behaviour byte-preserved.
+- **Editing `_ASK_HTML_TEMPLATE` changes BOTH `ASK_HTML` and `ASK_DL_HTML` hashes** (they
+  share the template) — re-pin both in `test_httpapi_characterization.py`
+  (`# airuleset:secret-ok` on the sha line, and append that same bypass to the `git commit`
+  command, since the 64-char hex trips `block-sensitive-staging.sh`).
