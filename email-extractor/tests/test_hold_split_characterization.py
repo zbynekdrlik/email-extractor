@@ -167,7 +167,8 @@ def test_verdict_noop_already_answered_manual_nothing_held_returns_200(pg, monke
     pg.execute(
         "UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
         (Json({"choice": teach.ITEM_MANUAL}), qid))
-    c = _client(); _login(c)
+    c = _client()
+    _login(c)
     r = _post_manual(c, qid)
     assert r.status_code == 200, r.get_data(as_text=True)
     body = r.get_json()
@@ -179,7 +180,8 @@ def test_verdict_never_held_answers_manual_returns_200(pg, monkeypatch):
     _no_upload(monkeypatch, uploads)
     _msg(pg, "nh1")
     qid = _item_question(pg, "nh1")
-    c = _client(); _login(c)
+    c = _client()
+    _login(c)
     r = _post_manual(c, qid)
     assert r.status_code == 200, r.get_data(as_text=True)
     assert uploads == []
@@ -196,7 +198,8 @@ def test_verdict_already_shipped_refuses_409_exact_message(pg, monkeypatch):
         """INSERT INTO email_events (message_id, workflow, stage, status, outcome, detail)
            VALUES (%s, 'orders', 'uploaded_orion', 'ok', 'EDI', %s)""",
         ("sh1", Json({"question_ids": [qid]})))
-    c = _client(); _login(c)
+    c = _client()
+    _login(c)
     r = _post_manual(c, qid)
     assert r.status_code == 409
     assert r.get_json()["error"] == _ALREADY_SHIPPED
@@ -221,7 +224,8 @@ def test_verdict_released_reasons_each_refuse_409_with_exact_message(pg, monkeyp
         _msg(pg, mid)
         qid = _item_question(pg, mid, key=f"item{i}")  # distinct key: idx_order_questions_open
         _held_row(pg, mid, qid, status="released", reason=reason)
-        c = _client(); _login(c)
+        c = _client()
+        _login(c)
         r = _post_manual(c, qid)
         assert r.status_code == 409, f"{reason}: {r.get_data(as_text=True)}"
         assert r.get_json()["error"] == _RELEASED_PREFIX + why + _RELEASED_SUFFIX, reason
@@ -236,7 +240,8 @@ def test_verdict_multi_message_refuses_409_exact_message(pg, monkeypatch):
     _held_row(pg, "mm_a", qid, status="held")
     _msg(pg, "mm_b")
     _held_row(pg, "mm_b", qid, status="held")  # SAME qid, DIFFERENT message -> >1 mail
-    c = _client(); _login(c)
+    c = _client()
+    _login(c)
     r = _post_manual(c, qid)
     assert r.status_code == 409
     assert r.get_json()["error"] == _MULTI_MESSAGE
@@ -251,7 +256,8 @@ def test_verdict_held_single_mail_resolves_manually_returns_200(pg, monkeypatch)
     _msg(pg, "held1")
     qid = _item_question(pg, "held1")
     _held_row(pg, "held1", qid, status="held")
-    c = _client(); _login(c)
+    c = _client()
+    _login(c)
     r = _post_manual(c, qid)
     assert r.status_code == 200, r.get_data(as_text=True)
     body = r.get_json()
