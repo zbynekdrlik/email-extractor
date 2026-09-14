@@ -212,6 +212,65 @@ def test_answering_twice_is_refused_rather_than_silently_overwritten(pg):
         teach.answer(pg, qid, gtin="SLI90", card="Šiška džemová 90g", by="sklad")
 
 
+def test_two_concurrent_answers_to_the_same_item_question_leave_exactly_one_winner(pg):
+    """#428: `teach.answer` (the ORDERS item question — item / #426 new_product / #360 line
+    edit all funnel through it) settled the question with a NON-atomic check-then-act: a
+    Python-level `status != 'open'` read from an earlier SELECT, then `UPDATE … WHERE id=%s`
+    with no `AND status='open'` guard and no `RETURNING` — AND the two `item_memory` writes
+    ran BEFORE that UPDATE. Two genuinely racing answers (two people / a double-click) could
+    both pass the check, both write memory, and the second UPDATE silently overwrote the
+    first's answer. This mirrors exactly what #234 hardened `answer_customer` against, proven
+    with real threads + real connections, not a mock. Exactly one answer may win, one must be
+    refused (`AlreadyAnswered` → the endpoint's 409), and the loser must leave NO side effect:
+    exactly ONE human `item_memory` row is written."""
+    import os
+    import threading
+
+    import psycopg
+    from _race import run_racers
+
+    PG_DSN = os.environ.get("PG_TEST_DSN")
+    qid = _ask(pg)
+    barrier = threading.Barrier(2)
+    results: dict[str, object] = {}
+
+    def answer(key, gtin, card):
+        conn = psycopg.connect(PG_DSN)
+        try:
+            barrier.wait(timeout=5)
+            try:
+                results[key] = teach.answer(conn, qid, gtin=gtin, card=card, by="sklad")
+                conn.commit()
+            except teach.AlreadyAnswered as e:
+                results[key] = e
+                conn.rollback()
+        finally:
+            conn.close()
+
+    t1 = threading.Thread(target=answer, args=("a", "SLI50", "Šiška džemová 50g"),
+                          name="answer-a")
+    t2 = threading.Thread(target=answer, args=("b", "SLI90", "Šiška džemová 90g"),
+                          name="answer-b")
+    # #291: bounded join() alone never kills a genuinely-stalled thread — run_racers
+    # fails loudly + cleans up any stray backend instead of wedging later tests.
+    run_racers(pg, [t1, t2], timeout=15, label="same_item_question")
+
+    outcomes = [results.get("a"), results.get("b")]
+    wins = [o for o in outcomes if isinstance(o, dict)]
+    losses = [o for o in outcomes if isinstance(o, teach.AlreadyAnswered)]
+    assert len(wins) == 1 and len(losses) == 1, \
+        f"exactly one racing answer may win, got wins={wins} losses={losses}"
+    q = teach.get(pg, qid)
+    assert q["status"] == "answered"
+    assert q["answer_gtin"] == wins[0]["answer_gtin"]
+    # The loser applied NO side effect: exactly one human item_memory row was written
+    # (the two racers taught DIFFERENT gtins, so a leaked loser-write would be a 2nd row).
+    (n_human,) = pg.execute(
+        "SELECT count(*) FROM item_memory WHERE customer_ean = %s AND source = 'human'",
+        (EAN,)).fetchone()
+    assert n_human == 1, f"exactly one memory write expected, got {n_human}"
+
+
 # --- #159: the customer-half of the same teach-once loop — "who is this?" -------
 
 CUST_CANDS = [{"ean_edi": "2000000000861", "name": "Potraviny nie otraviny Žilina",
