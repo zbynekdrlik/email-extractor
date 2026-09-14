@@ -50,6 +50,64 @@ def _num(v):
     return n if n > 0 else None
 
 
+def _held_msgs(conn, qid: int) -> set:
+    """message_ids of orders CURRENTLY held (`status='held'`) on this question."""
+    return {r[0] for r in conn.execute(
+        "SELECT DISTINCT message_id FROM held_orders "
+        "WHERE %s = ANY(question_ids) AND status = 'held'", (qid,)).fetchall()}
+
+
+def _classify_manual_target(conn, qid: int):
+    """#424: the READ-ONLY verdict for a „Vyriešené ručne" click on an order-item question,
+    extracted from `_api_orders_answer_item_manual` (#421 F8: it had grown ~170 r. with several
+    sequential DB reads before the first write). Returns `(verdict, cur)` where `cur` is the
+    current question dict (`teach.get`) the dispatcher reuses. `verdict` is one of:
+
+      "noop"              — already answered `manual` with nothing still held (idempotent
+                            double-click / retried request) → the endpoint returns 200 ok.
+      "already_shipped"   — NO held row ever referenced this qid, BUT the order already reached
+                            ORION (#421 F1: never-held ≠ never-shipped — a same-day/undated
+                            matched order ships a PARTIAL EDI while its unmatched line's
+                            question stays open with no hold) → refuse (a hand-entry duplicates).
+      "never_held"        — NO held row ever referenced this qid AND it never shipped (the
+                            215/216 change-request orphan) → safe to close as `manual` by hand.
+      "released_<reason>" — a held row EXISTED but is released; <reason> is the highest-priority
+                            of deadline/manual/answered/expired present, else "other" (reason
+                            NULL/unknown). The order may already sit in ORION → refuse loudly.
+      "multi_message"     — this qid blocks orders from MORE THAN ONE mail (an order question
+                            dedupes across messages, #421 F1) → refuse hromadné.
+      "held"              — exactly ONE mail's order is currently held → release without upload.
+
+    Purely read-derived: every WRITE and the post-answer TOCTOU re-checks stay in the endpoint
+    (which re-derives held state AFTER answering), so nothing here changes the DB."""
+    from .orders import teach
+    msgs = _held_msgs(conn, qid)
+    cur = teach.get(conn, qid) or {}
+    if not msgs and (cur.get("answer") or {}).get("choice") == teach.ITEM_MANUAL:
+        return "noop", cur
+    if not msgs:
+        ever = conn.execute(
+            "SELECT status, release_reason FROM held_orders "
+            "WHERE %s = ANY(question_ids)", (qid,)).fetchall()
+        if not ever:
+            mid = (cur or {}).get("message_id") or ""
+            shipped = conn.execute(
+                """SELECT 1 FROM email_events
+                    WHERE stage = 'uploaded_orion'
+                      AND (message_id = %s
+                           OR detail->'question_ids' @> to_jsonb(%s::bigint))
+                    LIMIT 1""", (mid, qid)).fetchone()
+            return ("already_shipped" if shipped else "never_held"), cur
+        reasons = {r[1] for r in ever if r[1]}
+        for reason in ("deadline", "manual", "answered", "expired"):
+            if reason in reasons:
+                return f"released_{reason}", cur
+        return "released_other", cur
+    if len(msgs) > 1:
+        return "multi_message", cur
+    return "held", cur
+
+
 def register(app: Flask, deps: Deps) -> None:
     @app.get("/api/orders/questions")
     def api_orders_questions():
@@ -503,127 +561,108 @@ def register(app: Flask, deps: Deps) -> None:
         held order of THIS question's message is released WITHOUT any ORION upload (a
         duplicate upload = a duplicate physical delivery). Answers the question with the
         `manual` sentinel (teaches nothing), then `hold.resolve_manually`. Order-item only —
-        the caller reaches here after the customer/generic kinds have already been routed."""
+        the caller reaches here after the customer/generic kinds have already been routed.
+
+        #424: the READ-ONLY verdict (never-held / released-* / already-shipped / held / …) is
+        derived once by `_classify_manual_target`; this endpoint is a thin dispatcher on it.
+        Every WRITE + post-answer TOCTOU re-check stays HERE (the classifier is purely
+        read-derived), so the duplicate-upload safety reasoning below is unchanged — an order
+        question dedupes across messages (`ON CONFLICT (customer_ean, item_key) WHERE
+        status='open'`), so `qid` can belong to held orders of MORE THAN ONE mail, and the
+        `multi_message` verdict refuses that case before answering."""
         from .orders import hold, teach
 
-        # Fable finding 1: an order question DEDUPES across messages
-        # (`ON CONFLICT (customer_ean, item_key) WHERE status='open'`), so `qid` can belong to
-        # held orders of MORE THAN ONE mail. A bare per-qid manual release would free a FOREIGN
-        # mail's order that was never hand-entered → permanently lost, and the `manual`
-        # sentinel would leak into that order's later release build. REFUSE that case before
-        # answering — the sklad must resolve such a shared question the normal way (a real card,
-        # which teaches + ships every waiting order).
         # #421: answered_by carries the session ROLE (`sklad`/`sklad_dl`) — or the
         # `sklad-manual` fallback for a full-admin login (session.role is None then), which
         # keeps the pre-#421 held-path marker byte-stable.
         answered_by = session.get("role") or "sklad-manual"
 
-        def _held_msgs(conn):
-            return {r[0] for r in conn.execute(
-                "SELECT DISTINCT message_id FROM held_orders "
-                "WHERE %s = ANY(question_ids) AND status = 'held'", (qid,)).fetchall()}
-        with deps.db() as clook:
-            msgs = _held_msgs(clook)
-            cur = teach.get(clook, qid) or {}
+        with deps.db() as conn:
+            verdict, cur = _classify_manual_target(conn, qid)
+
         # An already-answered `manual` question with nothing left held is a completed
         # idempotent no-op (a double click / a retried request) — return ok, never 409.
-        if not msgs and (cur.get("answer") or {}).get("choice") == teach.ITEM_MANUAL:
+        if verdict == "noop":
             return jsonify(ok=True, question=cur, resolved_manually=[], released=[])
-        # 0 held rows CURRENTLY. #421: distinguish two very different states before deciding.
-        if not msgs:
-            with deps.db() as clook2:
-                ever = clook2.execute(
-                    "SELECT status, release_reason FROM held_orders "
-                    "WHERE %s = ANY(question_ids)", (qid,)).fetchall()
-            if not ever:
-                # NO held_orders row EVER referenced this qid. Usually an ORPHAN question (a
-                # change-request mail asked it but never placed a hold — the 215/216 case),
-                # SAFE to close as `manual` by hand: no EDI ever existed for it. BUT (#421
-                # Fable finding F1) "never held" is NOT the same as "never shipped": the item
-                # ask-gate (pipeline.py:470) has no deadline check, while the hold gate
-                # (:559) does — so a same-day / undated matched order with an unmatched line
-                # asks an item question, places NO hold, and ships what matched IMMEDIATELY.
-                # That leaves an open item question with zero held rows AND a partial EDI
-                # already in ORION. A manual close there would invite a duplicate physical
-                # delivery. So refuse if this question's order already reached ORION — keyed
-                # on the `uploaded_orion` event (its detail carries the question ids, so a
-                # deduped question shipped under a DIFFERENT message is caught too).
-                mid = (cur or {}).get("message_id") or ""
-                with deps.db() as cs:
-                    shipped = cs.execute(
-                        """SELECT 1 FROM email_events
-                            WHERE stage = 'uploaded_orion'
-                              AND (message_id = %s
-                                   OR detail->'question_ids' @> to_jsonb(%s::bigint))
-                            LIMIT 1""", (mid, qid)).fetchone()
-                if shipped:
-                    return jsonify(error="Na túto otázku nečakala žiadna objednávka, ale "
-                                         "mail už (čiastočne) odišiel do ORIONu — ručné "
-                                         "zadanie by bol duplikát; skontroluj dashboard."), 409
-                # Guarded `status='open'` so a concurrent real answer always wins; the
-                # reminder stops the instant the question leaves the open list.
-                with deps.db_tx() as c:
-                    row = c.execute(
-                        """UPDATE order_questions
-                              SET status = 'answered', answer = %s,
-                                  answer_card = 'vyriešené ručne',
-                                  answered_by = %s, answered_at = now()
-                            WHERE id = %s AND status = 'open'
-                            RETURNING id""",
-                        (Json({"choice": teach.ITEM_MANUAL}), answered_by, qid)).fetchone()
-                if not row:
-                    with deps.db() as cc:
-                        cur2 = teach.get(cc, qid) or {}
-                    if (cur2.get("answer") or {}).get("choice") == teach.ITEM_MANUAL:
-                        return jsonify(ok=True, question=cur2, resolved_manually=[],
-                                       released=[])
-                    return jsonify(error="Otázka je už zodpovedaná — skontroluj "
-                                         "dashboard."), 409
-                # #421 (F2, TOCTOU): a hold can be placed AFTER the item question is asked
-                # (pipeline asks per-item, then `hold.place` runs after the whole order) — a
-                # click landing in that window would answer here while `hold.place` attaches
-                # a hold to an already-answered question (invisible on the board, only the
-                # deadline sweep would ever move it). Re-check AFTER answering: if a hold now
-                # exists, reopen the question (nothing shipped) and refuse, mirroring the
-                # held-path's own post-answer re-check below.
-                with deps.db() as cr:
-                    ever2 = cr.execute(
-                        "SELECT 1 FROM held_orders WHERE %s = ANY(question_ids) LIMIT 1",
-                        (qid,)).fetchone()
-                if ever2:
-                    with deps.db_tx() as c:
-                        c.execute(
-                            """UPDATE order_questions SET status = 'open', answer = NULL,
-                                   answer_card = NULL, answered_by = NULL, answered_at = NULL
-                                WHERE id = %s""", (qid,))
-                    return jsonify(error="Objednávka sa medzitým zaradila medzi čakajúce — "
-                                         "skús to znova."), 409
-                with deps.db() as c3:
-                    answered = teach.get(c3, qid)
-                return jsonify(ok=True, question=answered, resolved_manually=[], released=[])
-            # A held row DID exist but is no longer held (released/deadline/manual/expired) —
-            # the order may already sit in ORION (e.g. the deadline sweep shipped it while the
-            # board card stayed up), so refuse loudly with a PRECISE reason; a hand-entry here
-            # would duplicate a physical delivery.
-            reasons = {r[1] for r in ever if r[1]}
-            if "deadline" in reasons:
-                why = "objednávka už odišla v termíne dodania (deadline)"
-            elif "manual" in reasons:
-                why = "objednávka už bola vyriešená ručne"
-            elif "answered" in reasons:
-                why = "objednávka už bola odoslaná po odpovedi na otázku"
-            elif "expired" in reasons:
-                why = "otázka expirovala a objednávka je na ručné vybavenie"
-            else:
-                why = "objednávka už bola uvoľnená"
+
+        # never-held ≠ never-shipped (#421 F1): the item ask-gate (pipeline.py:470) has no
+        # deadline check, while the hold gate (:559) does — so a same-day / undated matched
+        # order with an unmatched line asks an item question, places NO hold, and ships what
+        # matched IMMEDIATELY (an `uploaded_orion` event carrying the question ids). A manual
+        # close there would invite a duplicate physical delivery.
+        if verdict == "already_shipped":
+            return jsonify(error="Na túto otázku nečakala žiadna objednávka, ale "
+                                 "mail už (čiastočne) odišiel do ORIONu — ručné "
+                                 "zadanie by bol duplikát; skontroluj dashboard."), 409
+
+        # A held row DID exist but is no longer held (released/deadline/manual/expired) — the
+        # order may already sit in ORION (e.g. the deadline sweep shipped it while the board
+        # card stayed up), so refuse loudly with a PRECISE reason; a hand-entry here would
+        # duplicate a physical delivery.
+        if verdict.startswith("released_"):
+            why = {
+                "released_deadline": "objednávka už odišla v termíne dodania (deadline)",
+                "released_manual": "objednávka už bola vyriešená ručne",
+                "released_answered": "objednávka už bola odoslaná po odpovedi na otázku",
+                "released_expired": "otázka expirovala a objednávka je na ručné vybavenie",
+                "released_other": "objednávka už bola uvoľnená",
+            }[verdict]
             return jsonify(error=f"Na túto otázku už nečaká žiadna objednávka — {why}; "
                                  "mohla sa medzitým odoslať do ORIONu, skontroluj "
                                  "dashboard."), 409
-        if len(msgs) > 1:
+
+        if verdict == "never_held":
+            # NO held_orders row EVER referenced this qid, not shipped — usually an ORPHAN
+            # question (a change-request mail asked it but never placed a hold, the 215/216
+            # case). SAFE to close as `manual` by hand: no EDI ever existed for it.
+            # Guarded `status='open'` so a concurrent real answer always wins; the
+            # reminder stops the instant the question leaves the open list.
+            with deps.db_tx() as c:
+                row = c.execute(
+                    """UPDATE order_questions
+                          SET status = 'answered', answer = %s,
+                              answer_card = 'vyriešené ručne',
+                              answered_by = %s, answered_at = now()
+                        WHERE id = %s AND status = 'open'
+                        RETURNING id""",
+                    (Json({"choice": teach.ITEM_MANUAL}), answered_by, qid)).fetchone()
+            if not row:
+                with deps.db() as cc:
+                    cur2 = teach.get(cc, qid) or {}
+                if (cur2.get("answer") or {}).get("choice") == teach.ITEM_MANUAL:
+                    return jsonify(ok=True, question=cur2, resolved_manually=[],
+                                   released=[])
+                return jsonify(error="Otázka je už zodpovedaná — skontroluj "
+                                     "dashboard."), 409
+            # #421 (F2, TOCTOU): a hold can be placed AFTER the item question is asked
+            # (pipeline asks per-item, then `hold.place` runs after the whole order) — a
+            # click landing in that window would answer here while `hold.place` attaches
+            # a hold to an already-answered question (invisible on the board, only the
+            # deadline sweep would ever move it). Re-check AFTER answering: if a hold now
+            # exists, reopen the question (nothing shipped) and refuse, mirroring the
+            # held-path's own post-answer re-check below.
+            with deps.db() as cr:
+                ever2 = cr.execute(
+                    "SELECT 1 FROM held_orders WHERE %s = ANY(question_ids) LIMIT 1",
+                    (qid,)).fetchone()
+            if ever2:
+                with deps.db_tx() as c:
+                    c.execute(
+                        """UPDATE order_questions SET status = 'open', answer = NULL,
+                               answer_card = NULL, answered_by = NULL, answered_at = NULL
+                            WHERE id = %s""", (qid,))
+                return jsonify(error="Objednávka sa medzitým zaradila medzi čakajúce — "
+                                     "skús to znova."), 409
+            with deps.db() as c3:
+                answered = teach.get(c3, qid)
+            return jsonify(ok=True, question=answered, resolved_manually=[], released=[])
+
+        if verdict == "multi_message":
             return jsonify(error="Táto otázka blokuje objednávky z viacerých mailov — nedá "
                                  "sa hromadne vyriešiť ručne. Vyrieš ju bežnou odpoveďou "
                                  "(vyber kartu)."), 409
 
+        # verdict == "held": exactly one mail's order is currently held on this qid.
         # Fable finding 4: guarded sentinel answer. 0 rows = a concurrent real answer already
         # won (a normal release may be uploading THIS instant) → a LOUD refusal, never a silent
         # no-op — the DB lock stops divergence, not a physical duplicate of a hand-entered order.
@@ -657,7 +696,7 @@ def register(app: Flask, deps: Deps) -> None:
         # message, reopen the question (nothing released yet) and refuse, never release a
         # foreign mail's order as „manual".
         with deps.db() as c:
-            msgs = _held_msgs(c)
+            msgs = _held_msgs(c, qid)
         if len(msgs) != 1:
             with deps.db_tx() as c:
                 c.execute(

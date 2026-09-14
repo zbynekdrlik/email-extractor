@@ -9,7 +9,12 @@ paths:
   - "email-extractor/app/orders/dl_message.py"
   - "email-extractor/app/orders/dl_questions.py"
   - "email-extractor/app/db_schema.py"
+  - "email-extractor/app/orders/hold.py"
+  - "email-extractor/app/orders/hold_place.py"
+  - "email-extractor/app/orders/hold_redecide.py"
+  - "email-extractor/app/orders/hold_close.py"
   - "email-extractor/tests/test_dl_worker_public_api.py"
+  - "email-extractor/tests/test_hold_split_characterization.py"
 ---
 
 # Splitting an oversized module by responsibility — the FACADE + byte-exact AST move (#309)
@@ -68,3 +73,18 @@ Drive the move with a scratch `ast` script (kept OUT of git), not by hand:
 The DAG must be acyclic: leaves (retry/correction/matching/events) ← document ← message
 ← questions; facade → all. Auto-computed imports surface a cycle immediately as an
 ImportError on the smoke test.
+
+## #424: hold.py (930 r.) split the same way — one lint gotcha worth pinning
+
+`hold.py` was split into the facade + `hold_place`/`hold_redecide`/`hold_close`
+(leaf ← redecide ← close ← facade), and `_classify_manual_target(conn, qid)` was
+extracted from `_api_orders_answer_item_manual` (READ-ONLY verdict → thin dispatcher,
+messages byte-for-byte). Same AST-byte-exact recipe as #309.
+
+**Lint the WHOLE tree as CI does (`ruff check .` from `email-extractor/`), not just the
+files you edited.** Step 3 above says to run `ruff check --fix` for I001 on the moved
+modules — but the NEW characterization test file is easy to forget, and CI runs
+`ruff check .` over `tests/` too. A batch of `c = _client(); _login(c)` one-liners in
+the new test tripped **E702** (multiple-statements-on-one-line) — invisible when you only
+`ruff check`ed the `app/` modules, red at CI. After writing any new test file for the
+split, `ruff check .` (whole tree) before the push, exactly the command CI uses.
