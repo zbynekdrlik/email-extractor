@@ -181,18 +181,35 @@ def answer(conn, qid: int, gtin: str, card: str, by: str = "",
         raise NotACandidate(
             f"{gtin} was not offered for {q['wording']!r} and is not in the catalog")
 
-    memory.remember(conn, q["customer_ean"], q["wording"], str(gtin), card or "",
-                    _today(conn), source="human")
-    memory.remember_global(conn, q["wording"], str(gtin), card or "", question_id=qid,
-                           taught_by=by)
-    conn.execute(
+    # #428: settle the question with the SAME atomic guard `answer_customer` (#234) and
+    # `_api_orders_answer_generic` (#323) already use — the Python `status != 'open'` check
+    # above is a read from an EARLIER select, not a WHERE-clause guard on this write, so two
+    # genuinely racing answers (two people / a double-click) could both pass it and the
+    # second UPDATE would silently overwrite the first's `answered_by`/`answered_at`.
+    # `WHERE id=%s AND status='open' RETURNING id` makes the row-lock serialize them: the
+    # loser matches 0 rows and is refused — with NO memory side effect, which is why the two
+    # `memory.remember*` writes now run AFTER the guard, not before (before, both racers
+    # wrote memory). Every caller (`api_orders_answer` item tail, `_api_orders_answer_new_
+    # product` #426 — whose whole transaction, incl. the catalog card write, rolls back on
+    # this raise — and `_apply_item`) already turns `AlreadyAnswered` into the endpoint's 409.
+    row = conn.execute(
         """UPDATE order_questions
               SET status = 'answered', answer_gtin = %s, answer_card = %s,
                   answered_by = %s, answered_at = now(),
                   quantity = COALESCE(%s, quantity),
                   unit_price = COALESCE(%s, unit_price)
-            WHERE id = %s""",
-        (str(gtin), card or "", by or "", quantity, unit_price, qid))
+            WHERE id = %s AND status = 'open'
+            RETURNING id""",
+        (str(gtin), card or "", by or "", quantity, unit_price, qid)).fetchone()
+    if not row:
+        lost = get(conn, qid) or {}
+        raise AlreadyAnswered(
+            f"question {qid} was answered on {lost.get('answered_at')} with "
+            f"{lost.get('answer_gtin')}")
+    memory.remember(conn, q["customer_ean"], q["wording"], str(gtin), card or "",
+                    _today(conn), source="human")
+    memory.remember_global(conn, q["wording"], str(gtin), card or "", question_id=qid,
+                           taught_by=by)
     log.info("taught %r -> %s for %s (by %s)", q["wording"], gtin, q["customer_ean"], by)
     return get(conn, qid) or {}
 
