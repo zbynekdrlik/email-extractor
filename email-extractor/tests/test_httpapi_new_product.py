@@ -20,12 +20,13 @@ from psycopg.types.json import Json
 
 from app.config import Config
 from app.httpapi import create_app, sklad_key
-from app.orders import snapshot, teach
+from app.orders import snapshot
 
 PG_DSN = os.environ.get("PG_TEST_DSN")
 
-# TOR is a pre-existing base-snapshot card → the duplicate-gtin test collides with it.
-CATALOG_CSV = "GTIN,Názov,doplnok\nTOR,Torta čokoládová,\n"
+# 3600 is a pre-existing base-snapshot card (a real číslo položky is numeric) → the
+# duplicate-gtin test collides with it.
+CATALOG_CSV = "GTIN,Názov,doplnok\n3600,Rožok štandart,\n"
 CUSTOMER_CSV = (
     "Názov organizácie,EAN kód EDI,Obec,Ulica,E-mail\n"
     "Pekáreň Testovacia,2000000000864,Martin,Košútka 1,sklad@pekaren.sk\n"
@@ -129,11 +130,11 @@ def test_new_product_with_a_gtin_that_already_has_a_live_card_is_refused(pg, mon
     c = _client()
     _login(c)
     r = c.post(f"/api/orders/question/{qid}/answer", json={
-        "new_product": {"gtin": "TOR", "name": "Iný názov"}, "quantity": 5})
+        "new_product": {"gtin": "3600", "name": "Iný názov"}, "quantity": 5})
     assert r.status_code == 409
     body = r.get_json()
-    assert body["existing"]["gtin"] == "TOR"
-    assert "Torta" in body["existing"]["name"]
+    assert body["existing"]["gtin"] == "3600"
+    assert "Rožok" in body["existing"]["name"]
     assert _answered_row(pg, qid)[0] == "open"
     assert pg.execute("SELECT count(*) FROM catalog_overrides").fetchone()[0] == 0
     assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 0
