@@ -903,6 +903,28 @@ def test_python_engine_crash_on_final_attempt_surfaces_a_real_diagnostic(pg, mon
         "SELECT proc_status FROM messages WHERE message_id = 'm1'").fetchone()[0] == "error"
 
 
+def test_python_engine_crash_on_final_attempt_also_enqueues_an_ops_alert(pg, monkeypatch):
+    """#431 (sibling-engine parity): the #330 error event above is dashboard-visible, but
+    nothing pinged the OPERATOR. A deterministic static-orders crash must ALSO enqueue a
+    durable ops-channel alert (its own kind, distinct from the AI engine), so it never
+    stays a silent traceback — the same silent-loss class #431 closes for `worker.tick`."""
+    _msg(pg)
+    _snapshot(pg)
+    pg.execute("UPDATE messages SET attempts = %s WHERE message_id = 'm1'",
+               (worker.MAX_ATTEMPTS - 1,))
+
+    def boom(*a, **k):
+        raise RuntimeError("catalog snapshot vanished mid-run")
+
+    monkeypatch.setattr(static_parse, "parse_static_order", boom)
+
+    assert static_worker.tick(pg, _python_cfg(ops_channel_id=999)) == 0
+    row = pg.execute(
+        "SELECT channel_id, kind FROM pending_alerts WHERE message_id = 'm1'").fetchone()
+    assert row is not None, "a final-attempt static crash must enqueue an ops alert"
+    assert row == (999, "static_order_pipeline_crash")
+
+
 # --- #372: safe automatic ORION upload retry for the static engine (port of #239) -----
 #
 # The static EDI filename (static_edi._filename) is `KARMEN_12345_2026_007.txt` for

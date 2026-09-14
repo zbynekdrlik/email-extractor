@@ -991,3 +991,16 @@ def test_manual_resolve_and_the_deadline_sweep_never_both_act_on_one_order(pg, e
     assert len(slow_uploads) == (1 if reason == "deadline" else 0)
     assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == \
         (1 if reason == "deadline" else 0)
+
+
+# --- #431: hold.place must reject matched=None with a clear ValueError -------------------
+
+def test_place_rejects_matched_none(pg, env):
+    """#431: passing matched=None used to raise an opaque AttributeError deep in the INSERT
+    (`matched.ean_edi`) — a caller bug that lost an order silently. hold.place now refuses
+    it up front with a clear ValueError naming the message, so the combination can never
+    slip through as an undiagnosable crash again."""
+    with pytest.raises(ValueError, match="matched=None"):
+        hold.place(pg, message_id="m1", matched=None,
+                   order={"deliveryDate": "04.08.2026"}, decisions=[],
+                   extracted={}, question_ids=[])

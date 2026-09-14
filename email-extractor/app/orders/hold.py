@@ -109,6 +109,16 @@ def _apply_confirmed_quantities(conn, decisions: list, question_ids: list) -> No
 def place(conn, message_id: str, matched, order: dict, decisions, extracted: dict,
           question_ids: list[int]) -> int:
     """Record a held order. Returns its id."""
+    # #431: a caller that cannot resolve the customer MUST hold on a placeholder
+    # `customer.Matched(ean_edi="", …, rule="unmatched")`, never pass None. Passing None
+    # used to raise an opaque `AttributeError: 'NoneType' … 'ean_edi'` deep in the INSERT
+    # that a catch-all turned into a silent lost order (the 2026-09-14 incident). Refuse it
+    # up front with a clear, diagnosable error so the combination can never slip through.
+    if matched is None:
+        raise ValueError(
+            f"hold.place called with matched=None (message {message_id}) — the caller "
+            "must resolve the customer or hold on a placeholder Matched(rule='unmatched') "
+            "first (#431)")
     row = conn.execute(
         """INSERT INTO held_orders
                (message_id, customer_ean, customer_name, delivery_date, order_number,

@@ -1404,3 +1404,78 @@ def test_a_typo_corrected_delivery_date_is_held_and_asked_not_dropped(pg, env):
     assert len(rec.posts) == 1 and "nástenke" in rec.posts[0].lower()
     assert "nenašiel" not in rec.posts[0]
     assert "Pekáreň Testovacia" in rec.posts[0]
+
+
+# --- #431: matched=None must never reach hold.place in the date-conflict branch ---------
+#
+# Two customer cards share one sender e-mail (the gazdovskytrh case): customer.resolve()
+# returns None (ambiguous, #418). With a written-date conflict (#420) the order is held on
+# a `date` question. Before #431, the placeholder `hold_matched` was only assigned on the
+# `not is_change` path, so a CHANGE REQUEST from such a sender left `hold_matched = None`
+# and crashed at hold.place (pipeline.py:392 -> hold.py:119 `matched.ean_edi`,
+# AttributeError) — the whole order lost silently, nothing on the board (the 2026-09-14
+# 12:07 prod incident). Reproduced live before the fix.
+
+TWO_CARD_CSV = (
+    "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,E-mail\n"
+    "Gazdovský trh A,2000000000001,Bratislava,Ulica A 1,,,objednavky@gazdovskytrh.sk\n"
+    "Gazdovský trh B,2000000000002,Košice,Ulica B 2,,,objednavky@gazdovskytrh.sk\n"
+)
+
+
+def _two_card_conflict_answers(change):
+    """Extract answer with a written-date conflict (subject 29.06 vs body 08.08), then the
+    customer LLM call that finds no single owner (empty EAN -> resolve stays None)."""
+    extract = {
+        "senderName": "G", "senderEmail": "objednavky@gazdovskytrh.sk",
+        "companyName": "Gazdovský trh", "isChangeRequest": change, "notes": "",
+        "orders": [{"orderNumber": "", "deliveryDate": "08.08.2026", "recipientGroup": "",
+                    "items": [{"name": "rožok 50g", "quantity": 10, "unit": "ks",
+                               "sourceQuote": "10x rožok 50g"}]}],
+    }
+    return [extract, {"ean_edi": "", "confidence": 0.1}]
+
+
+def _two_card_mail():
+    return dict(MAIL, message_id="m1", subject="Objednávka 29.06.2026",
+                from_addr="objednavky@gazdovskytrh.sk", from_name="G",
+                combined_text="na 08.08.2026 prosím 10x rožok 50g", today="2026-07-30")
+
+
+def test_change_request_two_card_date_conflict_holds_without_crashing(pg):
+    """#431: a CHANGE REQUEST from a 2-card sender + a date conflict must HOLD (on the
+    date question), never crash into a silent loss. Per #421 a change request raises NO
+    customer question — but the order is still held on a placeholder customer, not None."""
+    sid = snapshot.import_snapshot(pg, CATALOG_CSV, TWO_CARD_CSV)
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('m1', 'ai_orders')")
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), _two_card_mail(), sid,
+                          client=ScriptedClient(_two_card_conflict_answers(change=True)),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "held"          # no AttributeError, order not lost
+    assert rec.uploads == []
+    kinds = [q["kind"] for q in teach.open_questions(pg)]
+    assert "date" in kinds
+    assert "customer" not in kinds, "#421: a change request raises no customer question"
+    held = pg.execute(
+        "SELECT customer_ean, status FROM held_orders WHERE message_id='m1'").fetchone()
+    assert held == ("", "held"), "held on a placeholder customer, never matched=None"
+
+
+def test_two_card_date_conflict_not_a_change_request_asks_customer_and_date(pg):
+    """Regression guard (#420/#164): a 2-card sender + date conflict that is NOT a change
+    request keeps its existing behaviour — BOTH a `customer` and a `date` question, order
+    held. (Already correct before #431; pinned so the #431 fix does not disturb it.)"""
+    sid = snapshot.import_snapshot(pg, CATALOG_CSV, TWO_CARD_CSV)
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('m1', 'ai_orders')")
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), _two_card_mail(), sid,
+                          client=ScriptedClient(_two_card_conflict_answers(change=False)),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "held"
+    assert rec.uploads == []
+    kinds = sorted(q["kind"] for q in teach.open_questions(pg))
+    assert kinds == ["customer", "date"]
+    held = pg.execute(
+        "SELECT customer_ean, status FROM held_orders WHERE message_id='m1'").fetchone()
+    assert held == ("", "held")

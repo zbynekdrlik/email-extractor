@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from html import escape
 
 import psycopg
 from psycopg.types.json import Json
@@ -246,12 +247,26 @@ def tick(conn, cfg, pipeline=None) -> int:
             # per-tick email_events flood on a deterministic crash. Mirrors
             # static_worker.tick's identical #330 fix.
             if int(message.get("attempts") or 0) >= MAX_ATTEMPTS:
-                from . import report
+                from . import dl_alerts, report
                 report.log_event(
                     conn, message["message_id"], stage="error", status="error",
                     outcome=report.crash_outcome(e, "run_live"),
                     detail={"error": repr(e), "stage": "run_live",
                             "attempts": int(message.get("attempts") or 0)})
+                # #431: the error event above makes the crash visible on the DASHBOARD, but
+                # nothing pinged the OPERATOR — a deterministic crash stayed invisible on
+                # the phone (the 2026-09-14 silent-loss class). Enqueue a durable ops-channel
+                # alert too (routed to `ops_channel`, never the warehouse/sales channels;
+                # deduped per message so a re-run cannot flood). A missing ops channel (0)
+                # simply holds the row until one is configured, per `flush_pending`.
+                ops_ch = report.ops_channel(cfg)
+                if not dl_alerts.already_pending(
+                        conn, "order_pipeline_crash", message["message_id"]):
+                    body = (f"<p>{escape(report.crash_outcome(e, 'run_live'))}</p>"
+                            + dl_alerts.item_line(message.get("from_addr", ""),
+                                                  message.get("subject", "")))
+                    dl_alerts.enqueue(conn, ops_ch, "order_pipeline_crash", body,
+                                      message_id=message["message_id"])
         return 0
 
     _finish_run(conn, run_id, result.get("status", "ok"), result)

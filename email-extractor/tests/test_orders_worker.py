@@ -383,3 +383,48 @@ def test_claim_stale_minutes_matches_n8n_ai_orders_window():
         "'30 minutes'' there. This is a PIN (CI has no n8n API access), not a live "
         "comparison — if you intentionally change this constant, also update that "
         "n8n node (or document why they now intentionally diverge).")
+
+
+# --- #431: an unexpected pipeline crash must PING OPS, not just log an error event --------
+
+def test_python_engine_crash_on_final_attempt_also_enqueues_an_ops_alert(pg):
+    """#431: #330 made a final-attempt crash surface a `proc_status='error'` event (visible
+    on the dashboard), but nothing ever PINGED the operator — a deterministic crash stayed
+    invisible on the phone (the 2026-09-14 silent-loss class). worker.tick now also enqueues
+    a durable `pending_alerts` row routed to the ops channel, deduped per message."""
+    _msg(pg)
+    _snapshot(pg)
+    pg.execute("UPDATE messages SET attempts = %s WHERE message_id = 'm1'",
+               (worker.MAX_ATTEMPTS - 1,))
+
+    def boom(*a, **k):
+        raise RuntimeError("catalog snapshot vanished mid-run")
+
+    cfg = _cfg(ai_orders_engine="python", ops_channel_id=999)
+    assert worker.tick(pg, cfg, pipeline=boom) == 0
+    row = pg.execute(
+        "SELECT channel_id, kind, message_id FROM pending_alerts "
+        "WHERE message_id = 'm1'").fetchone()
+    assert row is not None, "a final-attempt crash must enqueue an ops alert"
+    assert row[0] == 999, "the alert must route to the ops channel"
+
+
+def test_a_transient_crash_before_the_final_attempt_enqueues_no_ops_alert(pg):
+    """#330/#431: a non-final crash must still auto-recover silently — no ops alert (and no
+    proc_status='error' event) until the message has genuinely exhausted its attempts, so a
+    transient failure never floods the operator."""
+    _msg(pg)
+    _snapshot(pg)
+    pg.execute("UPDATE messages SET attempts = 0 WHERE message_id = 'm1'")
+
+    def boom(*a, **k):
+        raise RuntimeError("transient")
+
+    cfg = _cfg(ai_orders_engine="python", ops_channel_id=999)
+    assert worker.tick(pg, cfg, pipeline=boom) == 0
+    assert pg.execute(
+        "SELECT count(*) FROM pending_alerts WHERE message_id = 'm1'").fetchone()[0] == 0
+    # fully silent-and-retryable: no error event either (proc_status stays clean)
+    assert pg.execute(
+        "SELECT count(*) FROM email_events WHERE message_id = 'm1' AND status = 'error'"
+    ).fetchone()[0] == 0
