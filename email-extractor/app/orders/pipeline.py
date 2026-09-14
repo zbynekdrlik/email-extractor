@@ -369,24 +369,32 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
         # #164 (e).1: the date conflict may ALSO hit an unresolved customer — a SECOND,
         # independent open question on the SAME held order(s), each released on its own
         # schedule (`release_for_question` ships only once EVERY id is answered).
-        if matched is None and not is_change:
-            cust_cands = customer.candidates_for_question(
-                customers, sender, extracted.get("senderName", ""),
-                extracted.get("companyName", ""), free_text=free_text)
-            cq = teach.ask_customer(
-                conn, message_id=message.get("message_id", ""), sender_email=sender,
-                candidates=[{"ean_edi": c.get("ean_edi", ""), "name": c.get("name", ""),
-                            "city": c.get("city", ""), "street": c.get("street", ""),
-                            "address_match": bool(c.get("address_match"))}
-                           for c in cust_cands],
-                delivery_date=first_date,
-                context={"sender_email": sender,
-                        "sender_name": extracted.get("senderName", ""),
-                        "company_name": extracted.get("companyName", ""),
-                        "delivery_address_guess": customer.guess_delivery_address(free_text)},
-                on_new=new_questions.append)
-            if cq:
-                qids.append(cq)
+        # #431: the placeholder `hold_matched` is assigned WHENEVER the customer is
+        # unresolved, NOT only on the `not is_change` path — otherwise a change request
+        # from an ambiguous (2-card, #418) sender left `hold_matched = None` and crashed
+        # at `hold.place` (AttributeError on `matched.ean_edi`), losing the order silently
+        # (the 2026-09-14 gazdovskytrh incident). The customer QUESTION stays gated on
+        # `not is_change` (per #421 a change request is resolved by hand, no board
+        # question) — but the order is still HELD on its date question, never crashed.
+        if matched is None:
+            if not is_change:
+                cust_cands = customer.candidates_for_question(
+                    customers, sender, extracted.get("senderName", ""),
+                    extracted.get("companyName", ""), free_text=free_text)
+                cq = teach.ask_customer(
+                    conn, message_id=message.get("message_id", ""), sender_email=sender,
+                    candidates=[{"ean_edi": c.get("ean_edi", ""), "name": c.get("name", ""),
+                                "city": c.get("city", ""), "street": c.get("street", ""),
+                                "address_match": bool(c.get("address_match"))}
+                               for c in cust_cands],
+                    delivery_date=first_date,
+                    context={"sender_email": sender,
+                            "sender_name": extracted.get("senderName", ""),
+                            "company_name": extracted.get("companyName", ""),
+                            "delivery_address_guess": customer.guess_delivery_address(free_text)},
+                    on_new=new_questions.append)
+                if cq:
+                    qids.append(cq)
             hold_matched = customer.Matched(ean_edi="", name="", confidence=0.0,
                                             rule="unmatched", note="")
         held_ids = [hold.place(conn, message_id=message.get("message_id", ""),
