@@ -727,6 +727,81 @@ function dlItemQuestionCard(q){
   nw.style.borderColor='#eac54f';nw.style.background='#fff8c5';nw.style.color='#7d4e00';
   nw.onclick=()=>answerNotWarehouse(q.id);c.appendChild(nw);
   return c}
+// #426: „➕ Nová karta" straight on an item question — mirror of newDlProductForm above,
+// the ORDERS half. The warehouse creates the card in CODEX (číslo položky = the catalog
+// gtin), then types it in here instead of leaving for /znalosti. POSTs
+// {new_product:{gtin,name,doplnok?}, quantity, unit_price} (carrying the lineFields values,
+// exactly like teach()); on a 409 collision offers a one-click „Použiť existujúcu kartu".
+function newProductForm(q){
+  const box=el('div');box.style.marginTop='12px';
+  const toggle=el('button',null,'➕ Nová karta (číslo položky z CODEXu)');
+  toggle.style.borderColor='#d0d7de';toggle.style.background='#f6f8fa';toggle.style.color='#57606a';
+  const form=el('div');form.style.display='none';
+  const gtin=el('input');gtin.placeholder='číslo položky (z CODEXu) *';gtin.inputMode='numeric';
+  const name=el('input');name.placeholder='názov karty *';name.value=q.wording||'';
+  const doplnok=el('input');doplnok.placeholder='doplnok (nepovinné)';
+  for(const i of [gtin,name,doplnok])form.appendChild(i);
+  const status=el('div','slabel','');form.appendChild(status);
+  const extra=el('div');form.appendChild(extra);
+  const save=el('button',null,'Uložiť novú kartu');
+  save.style.borderColor='#1f6feb';save.style.background='#ddf4ff';save.style.color='#0969da';
+  save.onclick=async()=>{
+    const g=gtin.value.replace(/[\s-]/g,'');
+    if(!g){alert('Bez čísla položky sa karta nedá uložiť — nájdeš ho v CODEXe pri produkte.');return}
+    if(!/^\d+$/.test(g)){alert('Číslo položky musí byť len číslice.');return}
+    if(!name.value.trim()){alert('vyplň názov karty');return}
+    status.textContent='';extra.textContent='';save.disabled=true;
+    const np={gtin:g,name:name.value.trim()};
+    if(doplnok.value.trim())np.doplnok=doplnok.value.trim();
+    const body={new_product:np};
+    // #360: send the confirmed quantity + unit price for this line, exactly like teach().
+    const qi=document.getElementById('oqty_'+q.id),pi=document.getElementById('oprice_'+q.id);
+    if(qi)body.quantity=qi.value;if(pi)body.unit_price=pi.value;
+    try{
+      await api('/api/orders/question/'+q.id+'/answer',{method:'POST',body:JSON.stringify(body)});
+      await load()
+    }catch(err){
+      save.disabled=false;
+      status.textContent=err.message||'chyba';
+      // A 409 collision (the server found this číslo položky already has a live card) carries
+      // err.body.existing — offer a one-click „Použiť existujúcu kartu" that goes through the
+      // normal teach() answer (which itself reads the qty/price inputs), mirroring
+      // newCustomerForm's reclaim button.
+      if(err.body&&err.body.existing){
+        const b=el('button',null,'Použiť existujúcu kartu '+err.body.existing.name);
+        b.onclick=()=>teach(q.id,err.body.existing.gtin,err.body.existing.name);
+        extra.appendChild(b)}
+    }
+  };
+  form.appendChild(save);
+  toggle.onclick=()=>{const open=form.style.display==='none';form.style.display=open?'block':'none';form.dataset.open=open?'1':'';};
+  box.appendChild(toggle);box.appendChild(form);
+  return box}
+// #426: the item ("ktorý výrobok to je?") card — extracted verbatim from load()'s old
+// inline branch + the new „➕ Nová karta" form. Candidates, full-catalog search, the new
+// card form, the 📚 databáza znalostí link (now secondary), and „Vyriešené ručne".
+function itemQuestionCard(q){
+  const c=el('div','q');
+  c.appendChild(el('div','who',(q.customer_name||q.customer_ean)+(q.delivery_date?' · na '+q.delivery_date:'')));
+  c.appendChild(el('div','w',q.wording+(q.quantity?'  —  '+q.quantity+' '+(q.unit||'ks'):'')));
+  c.appendChild(el('div','why',q.reason||'Ktorý výrobok to je?'));
+  c.appendChild(lineFields(q));
+  for(const cand of (q.candidates||[])){const b=el('button',null,cand.name||cand.gtin);
+    b.onclick=()=>teach(q.id,cand.gtin,cand.name||'');c.appendChild(b)}
+  c.appendChild(el('div','slabel','alebo vyhľadaj v celom katalógu:'));
+  c.appendChild(searchBox(q));
+  c.appendChild(newProductForm(q));
+  const hint=el('div',null,'Karta nie je v katalógu? Pridaj ju vyššie („➕ Nová karta“).');
+  hint.style.cssText='margin-top:6px;font-size:12px;color:#6a737d';c.appendChild(hint);
+  const kb=document.createElement('a');kb.className='kb';kb.textContent='📚 databáza znalostí';
+  kb.href='/znalosti/'+encodeURIComponent(q.customer_ean)+'?wording='+encodeURIComponent(q.wording);
+  c.appendChild(kb);
+  const mb=el('button',null,'Vyriešené ručne — zadané do CODEXu, nič neposielať');
+  mb.style.borderColor='#8250df';mb.style.background='#f3eefe';mb.style.color='#5a32a3';mb.style.marginTop='8px';
+  mb.onclick=()=>{if(confirm('Naozaj vyriešené ručne? Objednávku si zadala do CODEXu — nič sa NEpošle do '
+    +'ORIONu a zatvoria sa všetky dni dodania z tohto mailu, ktoré čakali na túto otázku.'))manualResolve(q.id)};
+  c.appendChild(mb);
+  return c}
 // #234: a live search over ALL current customers — not just the frozen candidates the
 // question was asked with. Mirrors searchBox() above, one input, debounced.
 function customerSearchBox(q){
@@ -852,26 +927,7 @@ async function load(){const mine=++render;let d,t;
     if(q.kind==='dl_item'){W.appendChild(dlItemQuestionCard(q));continue}
     if(q.kind==='mail'||q.kind==='date'||q.kind==='line'){
       W.appendChild(genericQuestionCard(q));continue}
-    const c=el('div','q');
-    c.appendChild(el('div','who',(q.customer_name||q.customer_ean)+(q.delivery_date?' · na '+q.delivery_date:'')));
-    c.appendChild(el('div','w',q.wording+(q.quantity?'  —  '+q.quantity+' '+(q.unit||'ks'):'')));
-    c.appendChild(el('div','why',q.reason||'Ktorý výrobok to je?'));
-    c.appendChild(lineFields(q));
-    for(const cand of (q.candidates||[])){const b=el('button',null,cand.name||cand.gtin);
-      b.onclick=()=>teach(q.id,cand.gtin,cand.name||'');c.appendChild(b)}
-    c.appendChild(el('div','slabel','alebo vyhľadaj v celom katalógu:'));
-    c.appendChild(searchBox(q));
-    const kb=document.createElement('a');kb.className='kb';kb.textContent='📚 databáza znalostí';
-    kb.href='/znalosti/'+encodeURIComponent(q.customer_ean)+'?wording='+encodeURIComponent(q.wording);
-    c.appendChild(kb);
-    const hint=el('div',null,'Karta nie je v katalógu? Pridaj ju v 📚 databáze znalostí — tabuľku „EAN slovnormal“ už program nečíta.');
-    hint.style.cssText='margin-top:6px;font-size:12px;color:#6a737d';c.appendChild(hint);
-    const mb=el('button',null,'Vyriešené ručne — zadané do CODEXu, nič neposielať');
-    mb.style.borderColor='#8250df';mb.style.background='#f3eefe';mb.style.color='#5a32a3';mb.style.marginTop='8px';
-    mb.onclick=()=>{if(confirm('Naozaj vyriešené ručne? Objednávku si zadala do CODEXu — nič sa NEpošle do '
-      +'ORIONu a zatvoria sa všetky dni dodania z tohto mailu, ktoré čakali na túto otázku.'))manualResolve(q.id)};
-    c.appendChild(mb);
-    W.appendChild(c)}
+    W.appendChild(itemQuestionCard(q))}
   if(t.items.length){W.appendChild(el('h2',null,'Naposledy naučené'));
     for(const x of t.items){const r=el('div','t');
       r.appendChild(el('span',null,x.wording+' → '+(x.answer_card==='not_order'?'nie je objednávka':(x.answer_card||x.answer_gtin))));

@@ -166,12 +166,12 @@ EXPECTED_TEMPLATE_SHA256 = {
     # table (the AI-not-order discard review section). Only DASH_HTML changed; the two
     # _ASK_HTML_TEMPLATE-derived hashes below are untouched.
     "DASH_HTML": "1f5c1a6ea1ceda7043ec24b583094a2e25ace6bbfa2fcf6cc57263793bb3885f",  # airuleset:secret-ok SHA256 template-checksum re-pin (added discardedBadge refresh), not a credential
-    # #383/#384 re-pin: _ASK_HTML_TEMPLATE gained the #383 „karta nie je v katalógu" hint
-    # (orders item + dl_item cards) and the #384 „Vyriešené ručne" button + manualResolve() —
-    # both ASK-derived hashes change. ZNALOSTI_HTML gained the products alias input + the
-    # „tabuľku už nečítame" notice. DASH_HTML/LOGIN_HTML untouched.
-    "ASK_HTML": "6b540f8d73b445787e119507c42e95ee3febd2346d0cfca808f8bafca45a9627",  # airuleset:secret-ok SHA256 template-checksum re-pin, not a credential
-    "ASK_DL_HTML": "6b7a73a1129e83046772414b134512c2d47b75e429b99e05bde102a614c1fe1c",  # airuleset:secret-ok SHA256 template-checksum re-pin, not a credential
+    # #426 re-pin: _ASK_HTML_TEMPLATE gained newProductForm() + itemQuestionCard() (the
+    # „➕ Nová karta" form on the orders item question), and load()'s inline item branch was
+    # extracted into itemQuestionCard(). Both ASK-derived hashes change (the two share the
+    # template); ZNALOSTI_HTML/DASH_HTML/LOGIN_HTML untouched.
+    "ASK_HTML": "dd85de5e49966772df1d0337b027b63f87fec134b97677f7cbb4caaabf349958",  # airuleset:secret-ok SHA256 template-checksum re-pin, not a credential
+    "ASK_DL_HTML": "5f7699b3a819febfe54895b3b935f9748e1d38acf7513c6d4b5e36056efd60cb",  # airuleset:secret-ok SHA256 template-checksum re-pin, not a credential
     "ZNALOSTI_HTML": "a83c51190cc84aa28f9bb93ec027fe45e263c9627699f8358bde67da81bc5569",  # airuleset:secret-ok SHA256 template-checksum re-pin, not a credential
 }
 

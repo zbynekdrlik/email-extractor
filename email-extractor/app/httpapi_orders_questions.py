@@ -338,6 +338,70 @@ def register(app: Flask, deps: Deps) -> None:
             return jsonify(error="Otázka už neexistuje."), 404
         return _api_orders_answer_generic(qid, q2, {"choice": gtin, "by": "sklad"})
 
+    def _api_orders_answer_new_product(qid: int, q: dict, body: dict):
+        """#426: the ORDERS item half of the same "genuinely new card" action #234 gave
+        customers and #235 gave the two DL kinds — a brand-new catalog card whose číslo
+        položky (the catalog `gtin`, read from CODEX) is not in the snapshot yet, typed
+        straight onto the item question instead of the warehouse leaving for /znalosti
+        (owner request 2026-09-14: skladníčka "to nevie"). Same two-connection discipline
+        as `_api_orders_answer_new_customer`: the catalog write, the `teach.add_candidate`
+        audit trail, and `teach.answer` commit together in ONE transaction; the release
+        (a REAL external ORION upload) runs afterward on its own autocommit connection —
+        never inside the same rollback-able transaction (#116). The card lands in
+        `catalog_overrides` exactly like `POST /api/znalosti/products`."""
+        from .orders import hold, teach
+        np = body.get("new_product") or {}
+        gtin = _EAN_STRIP_RE.sub("", str(np.get("gtin") or ""))
+        if not gtin:
+            return jsonify(error="Bez čísla položky sa karta nedá uložiť — nájdeš ho "
+                                 "v CODEXe pri produkte."), 400
+        if not gtin.isdigit():
+            return jsonify(error="Číslo položky musí byť len číslice."), 400
+        name = str(np.get("name") or "").strip()
+        if not name:
+            return jsonify(error="chýba názov"), 400
+        # #383 alias tri-state, exactly like /api/znalosti/products: the `doplnok` key being
+        # ABSENT means "don't touch the alias" (→ None); PRESENT (even "") sets/clears it.
+        if "doplnok" in np:
+            alias: str | None = str(np.get("doplnok") or "").strip()
+        else:
+            alias = None
+        # #360: the board's confirmed quantity + unit price for THIS line (top-level body,
+        # carried by lineFields), same as the normal item tail in `api_orders_answer`.
+        quantity = _num(body.get("quantity"))
+        unit_price = _num(body.get("unit_price"))
+        try:
+            with deps.db_tx() as c:
+                # Refuse a číslo položky that already belongs to a LIVE card (sheet-derived
+                # OR already overridden — `catalog_for_management` merges both, excludes
+                # retired) — mirrors #234's own new_customer collision check. The client
+                # shows „Použiť existujúcu kartu" from `existing`, one click through the
+                # normal teach() answer, never a forced duplicate override.
+                existing = [r for r in snapshot.catalog_for_management(c)
+                           if str(r.get("gtin") or "") == gtin]
+                if existing:
+                    hit = existing[0]
+                    return jsonify(
+                        error=f"Číslo položky {gtin} už má karta {hit.get('name', '')}.",
+                        existing={"gtin": hit.get("gtin", ""),
+                                 "name": hit.get("name", "")}), 409
+                snapshot.upsert_catalog_card(c, gtin, name, alias=alias)
+                snapshot.rebuild_from_overrides(c)
+                # audit trail (mirrors new_customer): the answered gtin is present in the
+                # question's own candidates; `teach.answer` would also accept it via the
+                # freshly-rebuilt `catalog_gtin_set`, so this is belt-and-suspenders.
+                teach.add_candidate(c, qid, {"gtin": gtin, "name": name})
+                answered = teach.answer(c, qid, gtin=gtin, card=name, by="sklad-new-card",
+                                        quantity=quantity, unit_price=unit_price)
+        except teach.AlreadyAnswered as e:
+            return jsonify(error=str(e)), 409
+        except teach.NotACandidate as e:
+            return jsonify(error=str(e)), 400
+        with deps.db() as c2:
+            released = hold.release_for_question(c2, deps.cfg, qid)
+        return jsonify(ok=True, question=answered, released=released,
+                       product={"gtin": gtin, "name": name})
+
     def _api_orders_answer_generic(qid: int, q: dict, body: dict):
         """#164: the SAME dispatch endpoint, generalized for kinds beyond item/customer
         (mail/date/line, and #235's dl_item/dl_supplier) — a UNIFIED `{"choice": ...,
@@ -659,6 +723,12 @@ def register(app: Flask, deps: Deps) -> None:
             return _api_orders_answer_customer(qid, q0, body)
         if q0.get("kind") in ("mail", "date", "line", "dl_item", "dl_supplier"):
             return _api_orders_answer_generic(qid, q0, body)
+        # #426: „➕ Nová karta" on an item question — create the catalog card + answer +
+        # release in one click, dispatched BEFORE the existing-card gtin check below
+        # (kind=='item' only reaches here — every other kind returned above). Mirrors how
+        # `_api_orders_answer_customer` dispatches its own `new_customer` body.
+        if isinstance(body.get("new_product"), dict):
+            return _api_orders_answer_new_product(qid, q0, body)
         # #384: „Vyriešené ručne" on an ORDER item card — the sklad handled it by hand in
         # CODEX; release every held order of this message WITHOUT any ORION upload.
         if body.get("manual") is True:
