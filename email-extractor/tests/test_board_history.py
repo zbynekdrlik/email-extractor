@@ -256,6 +256,24 @@ def test_rerun_refuses_when_orion_has_the_file(pg, monkeypatch):
     assert c.post("/api/board/history/orio/rerun").status_code == 409
 
 
+def test_rerun_refuses_error_state_whose_built_edi_landed_in_orion(pg, monkeypatch):
+    """The #448 review 🔴: an error-state order has messages.edi_file NULL (set only on a
+    CONFIRMED upload), but the EDI filename lives in order_runs.result.order_results — a failed
+    upload whose bytes landed is still recoverable there. rerun MUST refuse via ORION presence,
+    never treat NULL edi_file as 'never uploaded'."""
+    from app.orders import upload
+    _msg(pg, "boom", proc_status="error", subject="upload zlyhal, bajty možno prišli",
+         edi_file=None)
+    _run(pg, "boom", status="error",
+         result={"customer_ean": "EANZ", "order_results": [
+             {"status": "error", "edi_filename": "ORDER_000999_20260915_101010001.txt"}]})
+    monkeypatch.setattr(upload, "list_dirs",
+                        lambda cfg: {"in": {"ORDER_000999_20260915_101010001.txt"}})
+    c = _client()
+    _sklad(c)
+    assert c.post("/api/board/history/boom/rerun").status_code == 409
+
+
 def test_rerun_fail_safe_refuses_when_orion_unreachable(pg, monkeypatch):
     """If ORION cannot be read AND there is a document identity to check, refuse (fail-safe)."""
     from app.orders import upload

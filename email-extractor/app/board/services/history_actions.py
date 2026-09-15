@@ -18,7 +18,7 @@ import logging
 
 from ... import db
 from ...orders import report
-from . import audit
+from . import audit, history
 
 log = logging.getLogger("board.history_actions")
 
@@ -57,19 +57,26 @@ def _ledger_uploaded(conn, scope: str, message_id: str) -> bool:
                     "AND uploaded_at IS NOT NULL", (ean, doc)).fetchone():
                 return True
         return False
-    edi_file = conn.execute("SELECT edi_file FROM messages WHERE message_id = %s",
-                            (message_id,)).fetchone()
-    edi_file = edi_file[0] if edi_file else None
-    if edi_file and conn.execute(
-            "SELECT 1 FROM edi_sent WHERE filename = %s AND uploaded_at IS NOT NULL",
-            (edi_file,)).fetchone():
-        return True
+    edi_file = _msg_edi_file(conn, message_id)
+    # #51/#239: check EVERY recoverable EDI filename, not only messages.edi_file (NULL on an
+    # upload-failure error state whose bytes may still have landed).
+    for name in history.orders_edi_names(result, edi_file):
+        if conn.execute(
+                "SELECT 1 FROM edi_sent WHERE filename = %s AND uploaded_at IS NOT NULL",
+                (name,)).fetchone():
+            return True
     ean, dd = result.get("customer_ean"), result.get("delivery_date")
     if ean and dd and conn.execute(
             "SELECT 1 FROM edi_sent WHERE customer_ean = %s AND delivery_date = %s "
             "AND uploaded_at IS NOT NULL", (ean, dd)).fetchone():
         return True
     return False
+
+
+def _msg_edi_file(conn, message_id: str) -> str:
+    r = conn.execute("SELECT edi_file FROM messages WHERE message_id = %s",
+                     (message_id,)).fetchone()
+    return (r[0] or "") if r else ""
 
 
 class HistoryActionError(Exception):
@@ -115,10 +122,18 @@ def _orion_has_document(conn, cfg, scope: str, message_id: str) -> bool:
             return True
         return any(desadv_edi.already_landed(dirs, d["supplier_ean"], str(d["doc_number"]))
                    for d in docs)
-    edi_file = conn.execute("SELECT edi_file FROM messages WHERE message_id = %s",
-                            (message_id,)).fetchone()
-    edi_file = edi_file[0] if edi_file else None
-    if not edi_file:
+    # #51/#239: the EDI filename is set in the run's order_results the moment the EDI is BUILT
+    # — BEFORE the upload — so a failed upload whose bytes may have landed still has a
+    # recoverable filename even though messages.edi_file (set only on a CONFIRMED upload) is
+    # NULL. Check every recoverable name against ORION, never just messages.edi_file.
+    names = history.orders_edi_names(result, _msg_edi_file(conn, message_id))
+    if not names:
+        # No EDI filename anywhere. If the run nonetheless intended to ship we cannot prove
+        # absence → fail-safe refuse; otherwise no EDI was ever built → nothing to be present.
+        if result.get("would_ship"):
+            log.warning("no EDI name but would_ship for %s — refusing rerun (fail-safe)",
+                        message_id)
+            return True
         return False
     try:
         dirs = upload_mod.list_dirs(cfg)
@@ -127,7 +142,7 @@ def _orion_has_document(conn, cfg, scope: str, message_id: str) -> bool:
         return True
     for folder in ("in", "archCodex", "unconfirmed"):
         for name in (dirs or {}).get(folder) or ():
-            if desadv_edi.matches_wire_name(name, edi_file):
+            if any(desadv_edi.matches_wire_name(name, n) for n in names):
                 return True
     return False
 

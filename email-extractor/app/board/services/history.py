@@ -72,6 +72,24 @@ def is_history_document(conn, message_id: str, scope: str | None = None) -> bool
         (message_id, list(cats))).fetchone() is not None
 
 
+def orders_edi_names(result: dict | None, edi_file: str = "") -> list[str]:
+    """Every candidate ORDERS EDI filename recoverable for a message — the message's own
+    `edi_file` (set ONLY on a confirmed upload), the run's top-level `edi_filename`, AND every
+    per-order `order_results[*].edi_filename` (which IS set the moment the EDI is BUILT, even
+    if the subsequent upload FAILED — so `messages.edi_file` being NULL is NOT proof the
+    bytes never reached ORION, #51/#239). Order-preserving, de-duplicated."""
+    result = result or {}
+    names: list[str] = []
+    for n in [edi_file, result.get("edi_filename")]:
+        if n and n not in names:
+            names.append(str(n))
+    for r in (result.get("order_results") or []):
+        n = r.get("edi_filename") if isinstance(r, dict) else None
+        if n and str(n) not in names:
+            names.append(str(n))
+    return names
+
+
 def partner_and_docs(scope: str, result: dict | None, from_name: str) -> tuple[str, str, list[str]]:
     """(partner_name, partner_ean, doc_numbers) derived from a run's `result` for one scope.
     Falls back to the envelope `from_name` when the run carries no partner name."""
@@ -88,7 +106,7 @@ def partner_and_docs(scope: str, result: dict | None, from_name: str) -> tuple[s
     else:
         name = result.get("customer_name") or ""
         ean = result.get("customer_ean") or ""
-        numbers = [str(result.get("edi_filename"))] if result.get("edi_filename") else []
+        numbers = orders_edi_names(result)
     return (name or from_name or ""), (ean or ""), numbers
 
 
