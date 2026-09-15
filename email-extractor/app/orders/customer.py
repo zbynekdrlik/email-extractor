@@ -3,6 +3,11 @@
 An unmatched customer stops the whole document — there is nowhere to address the order —
 so the authority order matters:
 
+0. a multi-site FAMILY (cards of one company with several branches — shared sender e-mail
+   OR a shared distinctive name stem, #435) is decided by the DELIVERY ADDRESS in the mail
+   BEFORE any model pick is trusted: a confident model pick of the central card must never
+   silently win when the text names another site; no unambiguous address -> a board
+   question. A sender that uniquely owns exactly ONE card skips this (it is not ambiguous);
 1. the model, when it is SURE (>= 0.85) and names an EAN that exists in the snapshot —
    one address may legitimately order for a different branch than it is registered to;
 2. an address written in the customer table that belongs to exactly ONE customer — a
@@ -17,6 +22,8 @@ import logging
 import re
 from dataclasses import dataclass
 
+from . import dl_match
+
 log = logging.getLogger("orders.customer")
 
 GATE_SURE = 0.85
@@ -29,6 +36,49 @@ GENERIC_DOMAINS = {
     "protonmail.com", "proton.me", "aol.com",
 }
 _EMAIL_RE = re.compile(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}")
+
+# #435: a customer "family" is a set of cards belonging to one company with several
+# operating sites (Košík.sk Košice/Žilina/Zvolen). The e-mail-only definition (`owners`,
+# shared sender address) missed the incident, where the real sender `supply@kosik.sk` is on
+# NO card at all — so the family is ALSO found by a shared, DISTINCTIVE name stem. The stem
+# must be distinctive so two genuinely separate orgs that merely share a generic
+# institutional prefix ("Centrum pre deti a rodiny <miesto>") are NOT welded into one family
+# and forced into a needless question — hence the generic-word drop below.
+_GENERIC_NAME_WORDS = frozenset({
+    # legal forms / connectors
+    "s", "r", "o", "sro", "a", "as", "spol", "spolocnost", "druzstvo", "co", "ltd",
+    "n", "no", "k",
+    # institution / descriptor types
+    "centrum", "pre", "deti", "rodiny", "rodina", "nemocnica", "poliklinika",
+    "materska", "skola", "skolka", "zakladna", "stredna",
+    "cafe", "kaviaren", "restauracia", "pizzeria", "hotel", "penzion",
+    "obchod", "obchodik", "potraviny", "market", "supermarket", "hypermarket",
+    "velkoobchod", "maloobchod", "online", "store", "shop", "predajna", "prevadzka",
+    "mesto", "obec", "ulica", "namestie", "nam",
+})
+
+
+def _name_stem(name) -> str:
+    """The distinctive family stem of a customer name (#435): fold diacritics via
+    `dl_match.fold` — the ONE folding helper in the package, never re-derived here (the
+    #265 Slovak-stem lesson) — then the FIRST token that is neither a pure number nor a
+    generic institution/legal-form word. Groups the branches of one brand ("Košík.sk MAKRO
+    store Žilina/Zvolen" + "Košík.sk Online Supermarket … Košice" all -> "kosik") while
+    keeping two separate orgs that merely share a generic prefix apart ("Centrum pre deti a
+    rodiny Kolinovce/Lipová" -> "kolinovce"/"lipova"). Empty when the name carries no
+    distinctive token — an empty stem NEVER groups (see `_stem_family`)."""
+    for t in re.sub(r"[^a-z0-9]+", " ", dl_match.fold(name)).split():
+        if t not in _GENERIC_NAME_WORDS and not t.isdigit():
+            return t
+    return ""
+
+
+def _stem_family(customers: list[dict], anchor: dict) -> list[dict]:
+    """Cards sharing `anchor`'s distinctive name stem (#435). Empty stem -> no family."""
+    key = _name_stem(anchor.get("name"))
+    if not key:
+        return [anchor]
+    return [c for c in customers if _name_stem(c.get("name")) == key]
 
 
 @dataclass
@@ -173,49 +223,72 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
     by_ean = {str(c.get("ean_edi")): c for c in customers if c.get("ean_edi")}
     picked = by_ean.get(str(llm.get("ean_edi") or ""))
 
+    addr = (_addresses(sender_email) or [""])[0]
+    owners = [c for c in customers if addr and addr in _addresses(c.get("emails"))]
+
+    # #435: within a multi-site FAMILY the delivery address decides ABOVE the llm pick — a
+    # confident model pick of the central card must never silently win when the mail names
+    # another site (the Košík.sk incident). Two ways a family applies:
+    #   * the sender e-mail is shared by >1 card (`owners`), or
+    #   * the sender is on NO card, yet the model confidently picked a card whose
+    #     distinctive name stem is shared by >1 card (the real sender `supply@kosik.sk` is
+    #     on none of the Košík cards).
+    # A sender that resolves to exactly ONE card (`owners == 1`) is deliberately excluded
+    # from the stem path — the unique address already disambiguates, and the confident-llm
+    # / exact_email hierarchy below keeps deciding it unchanged.
+    family = None
+    if len(owners) > 1:
+        family = owners
+    elif not owners and picked and conf >= GATE_SURE:
+        stem_family = _stem_family(customers, picked)
+        if len(stem_family) > 1:
+            family = stem_family
+
+    if family:
+        branch = _by_store(family, store)
+        if branch:
+            # The EAN, not just the name: the live table calls both Gazdovský trh rows
+            # "GT1", so a name-only log line reads as if the wrong branch was picked.
+            log.info("family of %d cards; the block header %r picks %s (%s, %s)",
+                     len(family), store, branch.get("ean_edi"), branch.get("name"),
+                     branch.get("street"))
+            return Matched(
+                ean_edi=str(branch.get("ean_edi") or ""), name=branch.get("name", ""),
+                confidence=0.99, rule="store_address",
+                note=(f"Odosielateľ má viac prevádzkových kariet; táto časť súboru je "
+                      f"nadpísaná „{store}“, čo sedí na adresu „{branch.get('street', '')}“."))
+        site = _by_delivery_address(family, delivery_text)
+        if site:
+            parts = [site.get("city", ""), site.get("street", "")]
+            addr_note = ", ".join(p for p in parts if p)
+            log.info("family of %d cards; delivery text picks %s (%s), model gave %s at %.2f",
+                     len(family), site.get("ean_edi"), addr_note, llm.get("ean_edi"), conf)
+            return Matched(
+                ean_edi=str(site.get("ean_edi") or ""), name=site.get("name", ""),
+                confidence=0.95, rule="delivery_address",
+                note=(f"Odosielateľ má viac prevádzkových kariet („rodina“); adresa "
+                      f"doručenia v maile sedí na „{addr_note}“."))
+        # A multi-site family the delivery address cannot pin -> ASK on the board, never the
+        # model's central pick (#435: "bez jednoznačnej zhody -> customer otázka").
+        log.info("family of %d cards but the delivery address decides nothing (model gave "
+                 "%s at %.2f, store hint %r) — asking", len(family), llm.get("ean_edi"),
+                 conf, store)
+        return None
+
     if picked and conf >= GATE_SURE:
         return Matched(ean_edi=str(picked["ean_edi"]), name=picked.get("name", ""),
                        confidence=conf, rule="llm",
                        note=f"Spárované modelom (istota {round(conf * 100)} %).")
 
-    addr = (_addresses(sender_email) or [""])[0]
-    if addr:
-        owners = [c for c in customers if addr in _addresses(c.get("emails"))]
-        if len(owners) == 1:
-            owner = owners[0]
-            log.info("customer by exact address %s -> %s (model gave %s at %.2f)",
-                     addr, owner.get("name"), llm.get("ean_edi"), conf)
-            return Matched(
-                ean_edi=str(owner.get("ean_edi") or ""), name=owner.get("name", ""),
-                confidence=0.99, rule="exact_email",
-                note=(f"E-mail odosielateľa {addr} je v tabuľke zákazníkov zapísaný "
-                      f"práve u „{owner.get('name', '')}“ a u nikoho iného."))
-        if len(owners) > 1:
-            branch = _by_store(owners, store)
-            if branch:
-                # The EAN, not just the name: the live table calls both Gazdovský trh rows
-                # "GT1", so a name-only log line reads as if the wrong branch was picked.
-                log.info("address %s is shared by %d customers; the block header %r picks "
-                         "%s (%s, %s)", addr, len(owners), store, branch.get("ean_edi"),
-                         branch.get("name"), branch.get("street"))
-                return Matched(
-                    ean_edi=str(branch.get("ean_edi") or ""), name=branch.get("name", ""),
-                    confidence=0.99, rule="store_address",
-                    note=(f"E-mail {addr} patrí viacerým predajniam; táto časť súboru je "
-                          f"nadpísaná „{store}“, čo sedí na adresu "
-                          f"„{branch.get('street', '')}“."))
-            # #418: try the delivery address from the mail text before giving up.
-            site = _by_delivery_address(owners, delivery_text)
-            if site:
-                parts = [site.get("city", ""), site.get("street", "")]
-                addr_note = ", ".join(p for p in parts if p)
-                return Matched(
-                    ean_edi=str(site.get("ean_edi") or ""), name=site.get("name", ""),
-                    confidence=0.95, rule="delivery_address",
-                    note=(f"E-mail {addr} patrí viacerým prevádzkovým kartám; "
-                          f"adresa doručenia v maile sedí na „{addr_note}“."))
-            log.info("address %s belongs to %d customers — not guessing (store hint %r)",
-                     addr, len(owners), store)
+    if len(owners) == 1:
+        owner = owners[0]
+        log.info("customer by exact address %s -> %s (model gave %s at %.2f)",
+                 addr, owner.get("name"), llm.get("ean_edi"), conf)
+        return Matched(
+            ean_edi=str(owner.get("ean_edi") or ""), name=owner.get("name", ""),
+            confidence=0.99, rule="exact_email",
+            note=(f"E-mail odosielateľa {addr} je v tabuľke zákazníkov zapísaný "
+                  f"práve u „{owner.get('name', '')}“ a u nikoho iného."))
 
     if picked:
         log.info("customer match refused: %s at %.2f (below %.2f)",

@@ -56,11 +56,17 @@ def test_an_address_shared_by_several_customers_is_never_guessed():
     assert hit is None
 
 
-def test_a_shared_address_still_resolves_when_the_model_names_one_of_them():
+def test_a_shared_address_is_not_resolved_by_a_bare_llm_pick_without_a_confirming_address():
+    """#435 SUPERSEDES the #418 behaviour this test used to pin (a confident llm pick within
+    a shared-address family was accepted). Within a multi-site family (two Tesco branches on
+    one address) the model's pick is unreliable — it keys on the one central EAN it knows —
+    so a bare confident pick with NO delivery address to confirm it now raises the customer
+    question instead of silently shipping to the named branch. This is the same principle as
+    the Košík.sk incident: never silently accept a family member on the model's word alone."""
     hit = customer.resolve(CUSTOMERS, sender_email="faktury@tesco.com", sender_name="",
                            company_name="TESCO Petržalka",
                            llm={"ean_edi": "8589000020002", "confidence": 0.88})
-    assert hit.ean_edi == "8589000020002"
+    assert hit is None
 
 
 # --- candidates handed to the model --------------------------------------
@@ -310,16 +316,19 @@ def test_delivery_address_not_used_when_only_one_card_matches_email():
     assert hit.ean_edi == "2000000000797"
 
 
-def test_delivery_address_llm_still_wins_over_address_when_sure():
-    """A confident model match overrides the delivery-address rung — same priority
-    as the existing hierarchy."""
+def test_delivery_address_overrides_a_confident_llm_pick_naming_the_central_card():
+    """#435 SUPERSEDES the #418 behaviour this test used to pin ("a sure model answer keeps
+    priority even over the delivery address"). Within a multi-site family the delivery
+    address decides ABOVE the llm pick: a confident model pick of the central Košice card
+    is overridden because the mail text (KOSIK_ZILINA_TEXT) names the Žilina site. This is
+    the exact incident fix — the model silently picking the central card was the bug."""
     hit = customer.resolve(
         KOSIK, sender_email="objednavky@kosik.sk", sender_name="",
         company_name="Košík.sk",
         llm={"ean_edi": "2000000000797", "confidence": 0.90},
         delivery_text=KOSIK_ZILINA_TEXT)
-    assert hit.ean_edi == "2000000000797"
-    assert hit.rule == "llm"
+    assert hit.ean_edi == "2000000000798"
+    assert hit.rule == "delivery_address"
 
 
 def test_delivery_address_ambiguous_two_cities_match_returns_none():
@@ -386,3 +395,151 @@ def test_city_word_boundary_prevents_substring_match():
         company_name="", llm={"ean_edi": "", "confidence": 0.2},
         delivery_text=text)
     assert hit is None
+
+
+# --- #435: a multi-site FAMILY overrides a confident llm central pick ------------------
+#
+# #418 shipped the delivery-address rung but LEFT the `llm` rung firing FIRST: a confident
+# model pick of the CENTRAL card (Košice 2000000000797, the only card whose EAN the model
+# knows) short-circuited before the delivery address was ever looked at. The real Košík.sk
+# sender `supply@kosik.sk` is in NO card, so the old email-only family (`owners`) never
+# triggered either. Both are fixed here: within a multi-site family the delivery address
+# decides ABOVE the llm pick, and the family is found by shared sender e-mail OR a shared
+# distinctive name stem (Košík.sk …) — not e-mail alone. Live incident: msg 11298–11303,
+# six Košík orders all `customer_rule="llm"` -> Košice, one was really for MAKRO Žilina.
+
+
+def test_confident_llm_central_is_overridden_by_the_delivery_city_within_a_family():
+    """#435: model is SURE about the central Košice card (2000000000797, 0.90), but the mail
+    text names the Žilina site — the delivery address must win over the llm pick."""
+    hit = customer.resolve(
+        KOSIK, sender_email="objednavky@kosik.sk", sender_name="Košík.sk",
+        company_name="Košík.sk",
+        llm={"ean_edi": "2000000000797", "confidence": 0.90},
+        delivery_text="Doručenie na sklad Prielohy 1, MAKRO store Žilina")
+    assert hit is not None
+    assert hit.ean_edi == "2000000000798"
+    assert hit.rule == "delivery_address"
+
+
+def test_confident_llm_central_overridden_for_zvolen():
+    hit = customer.resolve(
+        KOSIK, sender_email="objednavky@kosik.sk", sender_name="Košík.sk",
+        company_name="Košík.sk",
+        llm={"ean_edi": "2000000000797", "confidence": 0.92},
+        delivery_text="Doručenie: Ulica Stráž 17, Zvolen")
+    assert hit is not None
+    assert hit.ean_edi == "2000000000799"
+    assert hit.rule == "delivery_address"
+
+
+def test_family_with_no_delivery_address_asks_instead_of_the_central_card():
+    """#435 core: a confident llm pick of the central card + NO delivery address in the mail
+    -> a customer question (None), NEVER the silently-picked central card (that was the bug)."""
+    hit = customer.resolve(
+        KOSIK, sender_email="objednavky@kosik.sk", sender_name="Košík.sk",
+        company_name="Košík.sk",
+        llm={"ean_edi": "2000000000797", "confidence": 0.95},
+        delivery_text="Objednávka č. 4500317338, termín 17.09.2026")
+    assert hit is None
+
+
+def test_single_card_family_still_trusts_a_confident_llm_pick():
+    """#435 point 3: a family of ONE card is unchanged — a confident llm pick stands."""
+    single = [KOSIK[0]]
+    hit = customer.resolve(
+        single, sender_email="objednavky@kosik.sk", sender_name="Košík.sk",
+        company_name="Košík.sk",
+        llm={"ean_edi": "2000000000797", "confidence": 0.95},
+        delivery_text="Objednávka č. 4500317338")
+    assert hit is not None
+    assert hit.ean_edi == "2000000000797"
+    assert hit.rule == "llm"
+
+
+# A family whose cards carry DIFFERENT e-mails and whose sender is in NONE of them — the
+# family must still be found by the shared distinctive name stem, and the delivery address
+# must still decide. This is the shape the live incident actually had before the data fix
+# added `supply@kosik.sk` to every card: three cards exist, the sender matches none of them.
+STEMFAM = [
+    {"ean_edi": "2000000000797", "name": "Košík.sk Online Supermarket s. r. o. Košice",
+     "emails": ["accounting@kosik.sk"], "city": "Košice", "street": "Moldavská 32",
+     "zip": ""},
+    {"ean_edi": "2000000000871", "name": "Košík.sk MAKRO store Žilina, Prielohy 1",
+     "emails": ["zilina.sklad@kosik.sk"], "city": "Žilina", "street": "Prielohy 1",
+     "zip": ""},
+    {"ean_edi": "2000000000872", "name": "Košík.sk MAKRO store Zvolen, Ulica Stráž 17",
+     "emails": ["zvolen.sklad@kosik.sk"], "city": "Zvolen", "street": "Ulica Stráž 17",
+     "zip": ""},
+]
+
+
+def test_family_by_name_stem_with_differing_emails_still_resolves_by_address():
+    """#435 point (a): the family is found by the shared name stem even though every card
+    has a DIFFERENT e-mail and the sender (`supply@kosik.sk`) is in none of them."""
+    hit = customer.resolve(
+        STEMFAM, sender_email="supply@kosik.sk", sender_name="Košík.sk",
+        company_name="Košík.sk",
+        llm={"ean_edi": "2000000000797", "confidence": 0.93},
+        delivery_text="Doručenie na sklad Prielohy 1, 010 07 Žilina, MAKRO store Žilina")
+    assert hit is not None
+    assert hit.ean_edi == "2000000000871"
+    assert hit.rule == "delivery_address"
+
+
+def test_family_by_name_stem_no_address_asks_not_central():
+    """Same stem family, sender in no card, confident central pick, but NO delivery address
+    -> question, never the central card."""
+    hit = customer.resolve(
+        STEMFAM, sender_email="supply@kosik.sk", sender_name="Košík.sk",
+        company_name="Košík.sk",
+        llm={"ean_edi": "2000000000797", "confidence": 0.93},
+        delivery_text="Objednávka č. 4500317338")
+    assert hit is None
+
+
+def test_two_distinct_orgs_sharing_a_generic_name_prefix_are_not_one_family():
+    """The stem must be DISTINCTIVE: two genuinely separate orgs that merely share a generic
+    institutional prefix ("Centrum pre deti a rodiny <miesto>") must NOT be treated as a
+    family — otherwise a confident, correct llm pick of one of them would be forced into a
+    needless question. The distinctive stem is the location token, so they don't group.
+    Mirrors the real corpus dedkolinovce case (sender in no card, confident pick 559)."""
+    orgs = [
+        {"ean_edi": "2000000000559", "name": "Centrum pre deti a rodiny Kolinovce 21",
+         "emails": [], "city": "Kolinovce", "street": "Kolinovce 21", "zip": ""},
+        {"ean_edi": "2000000000560",
+         "name": "Centrum pre deti a rodiny, Lipová 6 Spišské Vlachy",
+         "emails": ["dedlipova6@gmail.com"], "city": "Spišské Vlachy", "street": "Lipová 6",
+         "zip": ""},
+    ]
+    hit = customer.resolve(
+        orgs, sender_email="dedkolinovce@gmail.com", sender_name="",
+        company_name="", llm={"ean_edi": "2000000000559", "confidence": 0.90},
+        delivery_text="Objednávka bez adresy")
+    assert hit is not None
+    assert hit.ean_edi == "2000000000559"
+    assert hit.rule == "llm"
+
+
+def test_a_brand_token_collision_falls_back_to_a_question_never_a_silent_wrong_ship():
+    """Review finding (#435, 🔵): the distinctive stem groups on the first non-generic
+    token, so two GENUINELY-UNRELATED orgs that happen to share a brand-ish token
+    ("Fresh …") get welded into one stem family when the sender is on no card and the model
+    is confident. The design is safe-by-default: the delivery address is ground truth, so a
+    resolved address is the TRUE target; and with NO matching delivery address the family
+    branch returns None -> a board question, NEVER the model's silently-picked card. This
+    pins that fallback so the collision can never become a silent wrong-ship."""
+    collision = [
+        {"ean_edi": "4000000000001", "name": "Fresh Foods Bratislava",
+         "emails": ["objednavky@freshfoods.sk"], "city": "Bratislava",
+         "street": "Einsteinova 11", "zip": ""},
+        {"ean_edi": "4000000000002", "name": "Fresh Market Košice",
+         "emails": ["nakup@freshmarket.sk"], "city": "Košice", "street": "Hlavná 5",
+         "zip": ""},
+    ]
+    # Sender in no card, model confident on one, no delivery address in the text at all.
+    hit = customer.resolve(
+        collision, sender_email="objednavky@nieco.sk", sender_name="",
+        company_name="Fresh", llm={"ean_edi": "4000000000001", "confidence": 0.95},
+        delivery_text="Objednávka, termín zajtra, bez adresy")
+    assert hit is None, "a brand-token collision with no address must ask, never ship"
