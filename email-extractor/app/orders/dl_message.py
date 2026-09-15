@@ -134,6 +134,24 @@ def _read_attachments(cfg, message_id: str, conn) -> list[dict]:
     return out
 
 
+# --- #437: honour the classifier's CMR verdict ------------------------------
+
+def _rescued_as_cmr(conn, message_id: str) -> bool:
+    """True when `human_processing` rescued this message with a `cmr` vision verdict —
+    `human_processing._apply_rescue` wrote a durable `rescued` event carrying
+    `detail->>'verdict_category' = 'cmr'` at reclassify time. The DL engine reads it to
+    FORCE the CMR extraction variant from the classifier's own high-confidence decision,
+    so a genuine CMR is handled correctly even when its transcript does not print the
+    literal "CMR" abbreviation (`dl_extract._looks_like_cmr` would then miss it). Reading
+    the durable event (not a per-run flag) covers every re-entry path uniformly, the same
+    way the #339/#400 gates read `messages`/`email_events` at this choke point."""
+    row = conn.execute(
+        "SELECT 1 FROM email_events WHERE message_id = %s "
+        "AND workflow = 'human_processing' AND stage = 'rescued' "
+        "AND detail->>'verdict_category' = 'cmr' LIMIT 1", (message_id,)).fetchone()
+    return row is not None
+
+
 # --- announced-vs-attached (spec §4) ----------------------------------------
 
 def _subject_doc_numbers(subject: str) -> list[str]:
@@ -417,8 +435,19 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                "status": _aggregate_status(documents_out + [this_doc]),
                "documents": documents_out + [this_doc], "items": []}
 
+    # #437 (review finding 1): the human_processing vision classifier already RECOGNISED
+    # this scan as a CMR (a high-confidence `cmr` verdict is what rescued it into
+    # `dodacie_listy` in the first place) — honour that decision instead of re-guessing it
+    # from the transcript. `_rescued_as_cmr` reads the durable `rescued` event the rescue
+    # wrote, so `cmr_mode` is FORCED whenever the classifier said CMR, and
+    # `dl_extract.extract_attachment`'s own `_looks_like_cmr` auto-detection stays as the
+    # belt-and-suspenders fallback for a CMR that arrives some other way (a direct supplier
+    # attachment). Read at the shared `_process_message` choke point so every re-entry path
+    # (claim, shadow peek, release_for_question) is covered uniformly — a corpus/eval message
+    # has no such event, so `cmr_mode` stays False there and the corpus is byte-identical.
+    cmr_mode = _rescued_as_cmr(conn, message["message_id"])
     extraction = dl_extract.extract_email(client, sources,
-                                            invoice_mode=invoice_mode)
+                                            invoice_mode=invoice_mode, cmr_mode=cmr_mode)
 
     # #297: `documents_out` may already carry entries from the empty-spreadsheet
     # flagging above — accumulate into the SAME list, never reset it here.

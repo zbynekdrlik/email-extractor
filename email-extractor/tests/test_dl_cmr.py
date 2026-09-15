@@ -13,9 +13,22 @@ from __future__ import annotations
 import os
 from datetime import UTC, datetime, timedelta
 
+from psycopg.types.json import Json
+
 from app import store
 from app.config import Config
 from app.orders import dl_extract, dl_snapshot, dl_worker
+
+# A CMR transcript WITHOUT the literal "CMR" abbreviation — a real scan can print only
+# "MEDZINÁRODNÝ NÁKLADNÝ LIST" / "LIST PRZEWOZOWY". `_looks_like_cmr` alone MISSES this
+# (it requires the token); only the classifier's forced verdict recovers it (#437 F1).
+_CMR_TEXT_NO_TOKEN = (
+    "MIEDZYNARODOWY SAMOCHODOWY LIST PRZEWOZOWY\n"
+    "1. Nadawca / Odosielatel: Mlyn Kapka Sp. z o.o., Jaroslaw\n"
+    "2. Odbiorca / Prijemca: DUOPACK SLOVAKIA s.r.o.\n"
+    "9. Oznaczenie towaru: Muka pszenna typ 500\n"
+    "12. Waga netto: 1000 kg\n24. Zasielku prevzal: 15.09.2026\n"
+)
 
 # A synthetic Polish-style CMR transcript: the standard "CMR" token + international
 # consignment-note markers no ordinary Slovak delivery note carries.
@@ -137,14 +150,14 @@ def _snapshot(pg):
     return dl_snapshot.import_snapshot(pg, DL_CATALOG_CSV, OBJ_CATALOG_CSV, SUPPLIERS_CSV)
 
 
-def _cmr_msg(pg, tmp_path, mid="cmrmsg"):
+def _cmr_msg(pg, tmp_path, mid="cmrmsg", text=_CMR_TEXT):
     pg.execute(
         """INSERT INTO messages (message_id, category, subject, from_addr,
                                  combined_text, has_attachments, processed)
            VALUES (%s, 'dodacie_listy', 'sken', %s, '', true, false)""", (mid, SCANNER))
     pg.execute(
         """INSERT INTO attachments (message_id, idx, filename, mime, extracted_text, method)
-           VALUES (%s, 0, 'cmr.pdf', 'application/pdf', %s, 'ocr')""", (mid, _CMR_TEXT))
+           VALUES (%s, 0, 'cmr.pdf', 'application/pdf', %s, 'ocr')""", (mid, text))
     d = store.message_dir(str(tmp_path), mid)
     d.mkdir(parents=True, exist_ok=True)
     (d / "att0__cmr.pdf").write_bytes(b"%PDF-1.4 no embedded jpeg here\n")
@@ -233,3 +246,59 @@ def test_non_cmr_dl_still_ships_without_the_cmr_marker(pg, tmp_path):
     assert client.systems["dl_documents"] == dl_extract.extract_prompt()
     assert len(posted) == 1
     assert "(z CMR)" not in posted[0]
+
+
+# --- review finding 1: honour the classifier's CMR verdict (forced, not re-guessed) ------
+
+def test_a_rescued_cmr_forces_the_cmr_prompt_even_without_the_literal_token(pg, tmp_path):
+    """#437 review finding 1: when human_processing rescued a scan as a CMR (a durable
+    `rescued` event with `verdict_category='cmr'`), the DL engine FORCES the CMR extraction
+    variant from that verdict — even when the transcript itself lacks the literal 'CMR'
+    token, so `_looks_like_cmr` alone would miss it and (money gate skipped) a base-prompt
+    misread of the supplier/quantity could ship a wrong EDI. RED before the fix: the base
+    prompt is used because auto-detection fails on `_CMR_TEXT_NO_TOKEN`."""
+    assert dl_extract._looks_like_cmr(_CMR_TEXT_NO_TOKEN) is False   # auto-detect misses it
+    _snapshot(pg)
+    mid = _cmr_msg(pg, tmp_path, mid="cmrnotok", text=_CMR_TEXT_NO_TOKEN)
+    # simulate the human_processing rescue's durable verdict event
+    pg.execute(
+        "INSERT INTO email_events (message_id, workflow, stage, status, outcome, detail, "
+        "rollup) VALUES (%s, 'human_processing', 'rescued', 'ok', 'rescued', %s, false)",
+        (mid, Json({"to": "dodacie_listy", "verdict_category": "cmr"})))
+    client = _CapturingClient({
+        "dl_documents": [_cmr_doc()],
+        "dl_supplier": [{"matched": True, "ean_edi": DUOPACK_EAN,
+                         "name": "DUOPACK SLOVAKIA", "matchConfidence": 0.96,
+                         "matchReason": "x"}],
+        "dl_item": [{"gtin": FLOUR_GTIN, "matchedCatalogName": "Muka psenicna typ 500",
+                     "matchConfidence": 0.97, "matchReason": "x", "mass": 0}]})
+    uploaded, posted = [], []
+    n = dl_worker.tick(
+        pg, _cfg(data_dir=str(tmp_path)), client=client,
+        upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+        post=lambda c, h: posted.append(h))
+    assert n == 1
+    # the classifier's verdict forced the CMR prompt despite the missing token
+    assert client.systems["dl_documents"] == dl_extract.extract_prompt(cmr_mode=True)
+    assert len(uploaded) == 1
+    assert len(posted) == 1 and "(z CMR)" in posted[0]
+
+
+def test_extract_attachment_detects_cmr_from_the_vision_transcript(pg, tmp_path):
+    """#437 review finding 2: a genuinely SCANNED CMR (needs_vision → vision transcript,
+    no machine OCR) still selects the CMR prompt via auto-detection on the transcribed
+    text — the real scanned-CMR path, distinct from the digital-text W13 path the other
+    e2e uses."""
+    class _VisionClient(_CapturingClient):
+        def vision_call(self, *a, **kw):
+            return [_CMR_TEXT]     # the vision transcript itself is a CMR
+
+    doc = {"supplierName": "DUOPACK SLOVAKIA", "supplierCity": "", "supplierEmail": "",
+           "docNumber": "", "deliveryDate": _DELIV,
+           "items": [{"name": "Muka psenicna typ 500", "quantity": 1000, "unit": "kg"}]}
+    client = _VisionClient({"dl_documents": [{"documents": [doc]}]})
+    result = dl_extract.extract_attachment(client, b"%PDF-1.4 no jpeg\n", machine_text="",
+                                           needs_vision=True)
+    assert result["vision_used"] is True
+    assert client.systems["dl_documents"] == dl_extract.extract_prompt(cmr_mode=True)
+    assert result.get("cmr_used") is True
