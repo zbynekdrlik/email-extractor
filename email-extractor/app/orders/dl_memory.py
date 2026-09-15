@@ -173,6 +173,7 @@ def resolve(conn, supplier_ean: str, item: str, catalog_gtins=None,
         """SELECT gtin, max(card) AS card, max(delivered_on) AS last_day, max(created_at) AS at
              FROM dl_item_memory
             WHERE supplier_ean = %s AND item_key = %s AND source = 'human'
+              AND deleted_at IS NULL
             GROUP BY gtin ORDER BY at DESC""",
         (str(supplier_ean), key)).fetchall()
     for gtin, card, last_day, _at in taught_rows:
@@ -184,6 +185,7 @@ def resolve(conn, supplier_ean: str, item: str, catalog_gtins=None,
         """SELECT gtin, delivered_on, max(cnt) AS c, max(card) AS card
              FROM dl_item_memory
             WHERE supplier_ean = %s AND item_key = %s AND source <> 'human'
+              AND deleted_at IS NULL
               AND (%s::date IS NULL OR delivered_on < %s::date)
             GROUP BY gtin, delivered_on""",
         (str(supplier_ean), key, as_of or None, as_of or None)).fetchall()

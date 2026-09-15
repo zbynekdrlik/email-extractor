@@ -270,3 +270,26 @@ def test_an_unknown_tab_is_404():
     c = _client()
     _sklad(c)
     assert c.get("/nastenka/does-not-exist").status_code == 404
+
+
+def test_retire_customer_soft_deletes_and_restore_undeletes_by_id(pg):
+    """#442 finding-2 fix: a customer override retire sets deleted_at (soft, not hard), and
+    audit.restore un-deletes it by its real surrogate id (clears BOTH retired and deleted_at)."""
+    from app.board.services import audit
+    rid = snapshot.upsert_customer(
+        pg, override_id=None, orig_ean_edi=None, orig_street=None,
+        ean_edi="9990000000001", name="Test s.r.o.", emails=[], city="Košice",
+        street="", zip_="")
+    snapshot.rebuild_from_overrides(pg)
+    assert snapshot.retire_customer(pg, override_id=rid,
+                                    orig_ean_edi=None, orig_street=None) is True
+    row = pg.execute(
+        "SELECT retired, deleted_at FROM customer_overrides WHERE id=%s", (rid,)).fetchone()
+    assert row is not None, "the override row was HARD-deleted"
+    assert row[0] is True and row[1] is not None, "retire must set BOTH retired and deleted_at"
+    aid = audit.record(pg, actor="admin", table="customer_overrides", row_id=rid,
+                       action="delete")
+    assert audit.restore(pg, aid) is True
+    row = pg.execute(
+        "SELECT retired, deleted_at FROM customer_overrides WHERE id=%s", (rid,)).fetchone()
+    assert row[0] is False and row[1] is None, "restore must clear retired and deleted_at"

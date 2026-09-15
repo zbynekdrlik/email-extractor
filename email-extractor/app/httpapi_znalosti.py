@@ -247,11 +247,17 @@ def register(app: Flask, deps: Deps) -> None:
                 orig_ean_edi=body.get("orig_ean_edi"), orig_street=body.get("orig_street"))
             if ok:
                 snapshot.rebuild_from_overrides(c)
-                # #442: row_id = the override id when the retirement targeted one, else the
-                # original identity — enough for the audit trail (full Kôš restore lands lane 3).
+                # #442: record the override row's REAL surrogate id (the key restore() uses),
+                # resolving it for an identity-delete so the audit row is always restorable.
+                rid = body.get("override_id")
+                if rid is None:
+                    r = c.execute(
+                        "SELECT id FROM customer_overrides WHERE orig_ean_edi = %s "
+                        "AND orig_street IS NOT DISTINCT FROM %s ORDER BY id DESC LIMIT 1",
+                        (body.get("orig_ean_edi"), body.get("orig_street"))).fetchone()
+                    rid = r[0] if r else body.get("orig_ean_edi")
                 _audit.record(c, actor=_board_actor(), table="customer_overrides",
-                              row_id=(body.get("override_id") or body.get("orig_ean_edi")),
-                              action="delete")
+                              row_id=rid, action="delete")
         return jsonify(ok=True) if ok else (jsonify(error="nenájdené"), 404)
 
     # ---- /znalosti (#221): direct add/edit/retire of the DL catalog cards + suppliers,
@@ -369,7 +375,14 @@ def register(app: Flask, deps: Deps) -> None:
                 orig_ean_edi=body.get("orig_ean_edi"), orig_city=body.get("orig_city"))
             if ok:
                 dl_snapshot.dl_rebuild_from_overrides(c)
+                # #442: record the real surrogate id (restore()'s key), resolving an identity-delete
+                rid = body.get("override_id")
+                if rid is None:
+                    r = c.execute(
+                        "SELECT id FROM dl_supplier_overrides WHERE orig_ean_edi = %s "
+                        "AND orig_city IS NOT DISTINCT FROM %s ORDER BY id DESC LIMIT 1",
+                        (body.get("orig_ean_edi"), body.get("orig_city"))).fetchone()
+                    rid = r[0] if r else body.get("orig_ean_edi")
                 _audit.record(c, actor=_board_actor(), table="dl_supplier_overrides",
-                              row_id=(body.get("override_id") or body.get("orig_ean_edi")),
-                              action="delete")   # #442
+                              row_id=rid, action="delete")
         return jsonify(ok=True) if ok else (jsonify(error="nenájdené"), 404)

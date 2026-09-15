@@ -1094,7 +1094,7 @@ def _mail_rule(conn, sender_email: str, subject: str,
     """
     row = conn.execute(
         "SELECT action, sample_had_attachments FROM mail_rules"
-        " WHERE sender_norm = %s AND subject_key = %s",
+        " WHERE sender_norm = %s AND subject_key = %s AND deleted_at IS NULL",  # #442 soft-delete
         (teach._sender_norm(sender_email), teach.subject_key(subject))).fetchone()
     if not row:
         return None
