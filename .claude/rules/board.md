@@ -273,9 +273,14 @@ already); of a `restore` row itself → refused; of a missing audit id → 404. 
   still refuses a scanner address, and `update_by_id` edits only ean/name (never `sender_email`),
   so it can't turn a genuine address into a scanner identity. A regression pin proves the guard.
 - **Origin link + preview reuse lane 2, don't rebuild it.** A row with a `question_id` links to
-  `/nastenka/otazky-<scope>?q=<message_id>&status=answered` (tab-questions.js now seeds its filter
-  from `location.search` — additive, no-params = unchanged) and offers an inline „Originál" via the
-  EXISTING scope-guarded `/api/board/questions/<qid>/preview`. Only `mail`/`global` carry a
-  `question_id`; the memory kinds (`alias`/`dl_alias`/`supplier`) show source/date origin text only.
+  `/nastenka/otazky-objednavky` / `/nastenka/otazky-sklad` (`?q=<message_id>&status=answered`) —
+  **NOT `/nastenka/otazky-<scope>`**: the tab SLUGS are `otazky-objednavky`/`otazky-sklad`, while
+  the JS `data-scope` is `orders`/`dl`, so `otazky-orders`/`otazky-dl` hard-404 via the
+  `board_tab` `_SLUGS` check (a real 🔴 caught in review — map scope→slug, `OTAZKY_SLUG`). Any
+  future cross-tab board link must map the scope to the real tab slug, never concatenate the raw
+  scope. tab-questions.js now seeds its filter from `location.search` (additive, no-params =
+  unchanged) and offers an inline „Originál" via the EXISTING scope-guarded
+  `/api/board/questions/<qid>/preview`. Only `mail`/`global` carry a `question_id`; the memory
+  kinds (`alias`/`dl_alias`/`supplier`) show source/date origin text only.
 - **`e2e-orders`/`e2e-dl` corpora stay byte-identical** — lane 6 changes only UI + audit + new
   read/soft-delete/update paths, never the resolve/match logic itself, so no corpus expectation moves.
