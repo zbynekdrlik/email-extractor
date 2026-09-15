@@ -47,6 +47,10 @@ _TAB_CONTENT: dict[str, tuple[str, str, str | None]] = {
     "otazky-objednavky": ("board/questions.html", "/static/board/tab-questions.js", "orders"),
     "otazky-sklad": ("board/questions.html", "/static/board/tab-questions.js", "dl"),
     "kos": ("board/trash.html", "/static/board/tab-trash.js", None),
+    # lane 5 (#446): the two partner tabs share ONE template + ONE JS module; the `scope`
+    # (customers|suppliers) picks which board API + field set tab-partners.js drives.
+    "zakaznici": ("board/partners.html", "/static/board/tab-partners.js", "customers"),
+    "dodavatelia": ("board/partners.html", "/static/board/tab-partners.js", "suppliers"),
 }
 
 
@@ -91,9 +95,18 @@ def register_board(app, deps, questions_api=None) -> None:
     questions_orders.register(bp, deps, questions_api)
 
     # #444 lane 3: the Kôš / História zmien audit API (list + restore). The tab PAGE itself is
-    # served by the generic `/nastenka/<tab>` route above via `_TAB_CONTENT["kos"]`; this only
+    # served by the generic `/nastenka/<tab>` route above via _TAB_CONTENT["kos"]; this only
     # registers `/api/board/audit` + `/api/board/audit/<id>/restore`. Same board blueprint.
     from .trash import register_trash
     register_trash(bp, deps)
+
+    # #446 lane 5: the Zákazníci + Dodávatelia tab APIs (list/create/update/delete) — thin
+    # routes over `services/partners.py`, which DELEGATES to the existing snapshot/dl_snapshot
+    # engines. The tab PAGES are served by the generic `/nastenka/<tab>` route via
+    # _TAB_CONTENT["zakaznici"/"dodavatelia"]. Same board blueprint.
+    from .customers import register_customers
+    from .suppliers import register_suppliers
+    register_customers(bp, deps)
+    register_suppliers(bp, deps)
 
     app.register_blueprint(bp)
