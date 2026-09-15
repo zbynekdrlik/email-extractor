@@ -199,9 +199,10 @@ def test_extract_email_forwards_invoice_mode():
     prompts_seen = []
     original_run = dl_extract.run_extraction
 
-    def spy_run(client, text, *, invoice_mode=False):
+    def spy_run(client, text, *, invoice_mode=False, cmr_mode=False):
+        # #437: run_extraction gained a `cmr_mode` kwarg; the spy must accept + forward it.
         prompts_seen.append(invoice_mode)
-        return original_run(client, text, invoice_mode=invoice_mode)
+        return original_run(client, text, invoice_mode=invoice_mode, cmr_mode=cmr_mode)
 
     client = FakeClient(documents=[])
     atts = [{"idx": 0, "filename": "test.pdf", "pdf_bytes": b"",
