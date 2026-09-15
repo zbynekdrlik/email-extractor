@@ -166,6 +166,51 @@ def test_delete_customer_soft_deletes_rebuilds_and_audits(pg):
     assert n == 1
 
 
+def test_delete_customer_then_restore_brings_it_back(pg):
+    """The whole point of the audit: a lane-5 delete is restorable end-to-end via the
+    existing lane-3 restore (no new restore branch needed)."""
+    from app.board.services import audit
+    res = cust.save_customer(pg, _cfg(), "sklad", {
+        "ean_edi": "8590000000301", "name": "Vrátiteľný", "city": "V"})
+    rid = res["id"]
+    cust.delete_customer(pg, _cfg(), "sklad", {"override_id": rid})
+    aid = pg.execute("SELECT id FROM audit_log WHERE table_name='customer_overrides' "
+                     "AND action='delete' AND row_id=%s", (str(rid),)).fetchone()[0]
+    assert audit.restore(pg, aid) is True
+    row = pg.execute("SELECT retired, deleted_at FROM customer_overrides WHERE id=%s",
+                     (rid,)).fetchone()
+    assert row[0] is False and row[1] is None
+    assert any(x["ean_edi"] == "8590000000301" for x in snapshot.customers_for_management(pg))
+
+
+def test_update_customer_then_restore_reverts_the_values(pg):
+    from app.board.services import audit
+    rid = _mk_customer(pg, "8590000000302", "Pôvodné meno", city="Staré")
+    cust.save_customer(pg, _cfg(), "sklad", {
+        "override_id": rid, "ean_edi": "8590000000302", "name": "Nové meno", "city": "Nové"})
+    aid = pg.execute("SELECT id FROM audit_log WHERE table_name='customer_overrides' "
+                     "AND action='update' AND row_id=%s", (str(rid),)).fetchone()[0]
+    assert audit.restore(pg, aid) is True
+    row = pg.execute("SELECT name, city FROM customer_overrides WHERE id=%s", (rid,)).fetchone()
+    assert row[0] == "Pôvodné meno" and row[1] == "Staré"
+
+
+def test_delete_supplier_then_restore_brings_it_back(pg):
+    from app.board.services import audit
+    res = supp.save_supplier(pg, _cfg(), "sklad", {
+        "ean_edi": "8590000000303", "name": "Vrátiteľný dod.", "city": "V"})
+    rid = res["id"]
+    supp.delete_supplier(pg, _cfg(), "sklad", {"override_id": rid})
+    aid = pg.execute("SELECT id FROM audit_log WHERE table_name='dl_supplier_overrides' "
+                     "AND action='delete' AND row_id=%s", (str(rid),)).fetchone()[0]
+    assert audit.restore(pg, aid) is True
+    row = pg.execute("SELECT retired, deleted_at FROM dl_supplier_overrides WHERE id=%s",
+                     (rid,)).fetchone()
+    assert row[0] is False and row[1] is None
+    assert any(x["ean_edi"] == "8590000000303"
+               for x in dl_snapshot.dl_suppliers_for_management(pg))
+
+
 def test_save_customer_duplicate_ean_raises_409(pg):
     _mk_customer(pg, "8598888888888", "Prvý", street="A")
     with pytest.raises(PartnerError) as ei:
