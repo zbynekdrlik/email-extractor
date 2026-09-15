@@ -519,3 +519,27 @@ def test_two_distinct_orgs_sharing_a_generic_name_prefix_are_not_one_family():
     assert hit is not None
     assert hit.ean_edi == "2000000000559"
     assert hit.rule == "llm"
+
+
+def test_a_brand_token_collision_falls_back_to_a_question_never_a_silent_wrong_ship():
+    """Review finding (#435, 🔵): the distinctive stem groups on the first non-generic
+    token, so two GENUINELY-UNRELATED orgs that happen to share a brand-ish token
+    ("Fresh …") get welded into one stem family when the sender is on no card and the model
+    is confident. The design is safe-by-default: the delivery address is ground truth, so a
+    resolved address is the TRUE target; and with NO matching delivery address the family
+    branch returns None -> a board question, NEVER the model's silently-picked card. This
+    pins that fallback so the collision can never become a silent wrong-ship."""
+    collision = [
+        {"ean_edi": "4000000000001", "name": "Fresh Foods Bratislava",
+         "emails": ["objednavky@freshfoods.sk"], "city": "Bratislava",
+         "street": "Einsteinova 11", "zip": ""},
+        {"ean_edi": "4000000000002", "name": "Fresh Market Košice",
+         "emails": ["nakup@freshmarket.sk"], "city": "Košice", "street": "Hlavná 5",
+         "zip": ""},
+    ]
+    # Sender in no card, model confident on one, no delivery address in the text at all.
+    hit = customer.resolve(
+        collision, sender_email="objednavky@nieco.sk", sender_name="",
+        company_name="Fresh", llm={"ean_edi": "4000000000001", "confidence": 0.95},
+        delivery_text="Objednávka, termín zajtra, bez adresy")
+    assert hit is None, "a brand-token collision with no address must ask, never ship"
