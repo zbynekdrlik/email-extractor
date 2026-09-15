@@ -127,3 +127,42 @@ post-filter can skip a row the SQL selected, that skipped row consumes a LIMIT s
 rows the filter would NOT have skipped. Either move the filter INTO the SQL (before the LIMIT)
 or use an ORDER BY that prioritizes actionable rows — never rely on a Python filter running
 after a flat `LIMIT N` to "just work" when the candidate set can grow larger than N.
+
+## The Layer-1 gate is "OCR unusable for DL", NOT `needs_vision` — and scanner alerts go to 243 (#436)
+
+Two #436 root causes, both from the msg-11503 incident (a HK Loan CMR scanned by the warehouse
+printer, OCR "succeeded" with 3609 chars of a foreign transport form, `needs_vision=false`):
+
+1. **`_rescue`'s Layer-1 gate was `needs_vision AND has_attachments`.** `needs_vision` means
+   "OCR came back ~empty" — it is FALSE for a scan whose OCR read plenty of text that is simply
+   UNUSABLE for the DL/order engines (a CMR, a payslip). So the vision second opinion (which
+   looks at the IMAGE, valuable precisely when the OCR text is garbage) never fired. The same
+   gate blocked 17/24 recent printer scans. Fixed: the gate is now `has_attachments AND
+   `_ocr_unusable_for_dl(combined_machine_text)``. "Usable" = a STRONG structural signal only:
+   a product EAN-13, ≥2 quantity+unit item lines, or an SK DL/order keyword (`dodac… list` /
+   `objednávka` / `reklamácia` / `faktúr` — the SK-diacritic `faktúr` ONLY, because a Polish CMR's
+   "Faktura nr" would otherwise falsely mark it "usable" and skip vision = the exact bug). Empty
+   OCR (the old `needs_vision` case) = 0 signals = unusable → vision, so old behaviour is kept.
+   **Leaning towards "unusable" (→ vision) is deliberately the SAFE direction:** the cost of a
+   wrong "unusable" is ONE deduped vision call (bounded by the 2-working-day horizon + the
+   once-per-message dedup), vs. the #436 bug of never looking. Define "usable" NARROWLY.
+
+2. **`_notify` sent EVERY alert to ops (592).** #308's "never 243, it's an operator concern"
+   holds for the catch-all's non-warehouse mail — but NOT for a SCANNER sender
+   (`delivery_notes_scanner_senders`, #399/#407), which is ALWAYS warehouse paper. The warehouse
+   watches 243, not ops, so it never learned its scan wasn't a DL. Fixed: a scanner sender's
+   alert routes to `delivery_notes_channel_id` (243) under a NEW alert kind `scanner_not_dl`
+   (added to `dl_alerts.GROUPED_ITEM_KINDS` with a "rescan the items page" header), carrying the
+   recognised document TYPE ("vyzerá ako CMR/faktúra/…") from the vision verdict's new free-text
+   `doc_type` field. This is a DELIBERATE, SCANNER-SCOPED carve-out from the "never 243" rule
+   above — every non-scanner sender keeps the #308/#310 ops routing unchanged.
+
+**Threading the verdict + the per-message kind — two gotchas any future edit must keep:**
+- The vision verdict is now computed ONCE in `sweep` (`_classify`) and passed to BOTH
+  `_apply_rescue` AND `_notify` (the notify needs its `doc_type`). Don't re-run classification
+  in `_notify`.
+- A message's alert KIND depends on its sender (`scanner_not_dl` vs `human_processing_review`),
+  so the sweep's dedup (`reminder_suppressed`) MUST key on the SAME kind that message would
+  enqueue under — else a scanner message's own alert is invisible to the dedup and re-enqueues
+  every tick. The two #390 SQL guards match `kind IN (both)` (a message's from_addr is fixed, so
+  it only ever carries one kind — the `IN` is exact, never a cross-kind leak).
