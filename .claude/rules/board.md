@@ -186,3 +186,50 @@ already); of a `restore` row itself → refused; of a missing audit id → 404. 
   `(content_template, tab_script, scope)`; `layout.html` `{% include content_template %}`s
   it and loads `tab_script` (falling back to the lane-1 placeholder + `ui.js`). A later lane
   fills in its own tab by adding a row there — no change to `layout.html`.
+
+## Lane 4 — Produkty sklad + Produkty objednávky (#445): delegate to the catalog engines, soft-delete, split the service
+
+- **Tab → scope mapping:** `produkty-objednavky` = scope `orders` (AI-orders catalog,
+  `snapshot.py`); `produkty-sklad` = scope `dl` (delivery-note catalog, `dl_snapshot.py`).
+  The `sklad` role reaches BOTH via the board gate (DL products were admin-only on `/znalosti`
+  before) — decided by the TAB, never the key (spec §6). `scope` is a `?scope=` query-param on
+  EVERY products route, validated in the service (`catalog._scope` → `ValueError` → 400).
+- **Create/update/delete DELEGATE, never copy.** `services/catalog.py` calls the exact engine
+  functions `/znalosti` uses: orders `snapshot.upsert_catalog_card`(alias tri-state) /
+  `retire_catalog_card` + `rebuild_from_overrides`; DL `dl_snapshot.upsert_dl_catalog_card` /
+  `retire_dl_catalog_card` + `dl_rebuild_from_overrides`. `retire_*` already set BOTH
+  `retired`+`deleted_at` (#442), so a board delete is soft by construction. The board ADDS an
+  `audit.record` on create/update/delete/alias-add/alias-remove (the old `/znalosti` endpoints
+  only audited DELETE) — that is the board doctrine (spec §5: every board change is audited).
+- **`catalog_gtin_set` / `rebuild_from_overrides` are a NO-OP without a pre-existing base
+  snapshot.** `rebuild_from_overrides` returns None when `latest_snapshot_id is None`; a fresh
+  test DB has no `order_snapshots` row, so `catalog_for_management` (merges overrides live)
+  shows a newly-created card but `catalog_gtin_set` (reads the frozen snapshot) stays EMPTY. A
+  test asserting "deleted card vanishes from `catalog_gtin_set`" must first
+  `snapshot._freeze(pg, [{"gtin":..,"name":..,"alias":""}], [])` a base snapshot (see
+  `test_board_products._base_snapshot`). In prod there is always a base snapshot, so this is a
+  test-only precondition.
+- **Per-card ALIASES = the wording→gtin memory rows.** Orders: `global_item_memory` (global) +
+  `item_memory` (per-customer, curated sources only); DL: `dl_item_memory` (per-supplier).
+  Add/remove DELEGATE to `memory.add_global_alias`/`add_customer_alias`/`delete_global_row`/
+  `delete_item_memory_row`. DL had NO curated add/soft-delete helper (teach's `_undo_dl_item`
+  hard-DELETEs) — added `dl_memory.add_dl_alias` (source='human', ON CONFLICT DO NOTHING
+  RETURNING id) + `dl_memory.delete_dl_item_memory_row` (soft delete, curated-source +
+  supplier_ean scoped), the exact parallels of the orders `memory.py` helpers. `dl_memory.
+  resolve` already filters `deleted_at IS NULL`, so a soft delete correctly drops the alias
+  from matching. Any FUTURE alias write path must go through these, never a raw INSERT/DELETE.
+- **Search over „aliasy" = a second query.** `catalog_aliases.alias_gtins(conn, tables, needle)`
+  collects DISTINCT (gtin, item_raw) from the scope's memory tables and fold-matches in Python
+  (the fleet `_fold` is Python, not SQL). The table names come ONLY from the trusted hardcoded
+  `_SCOPES[..]["alias_tables"]` tuple — never request input — so the f-string interpolation is
+  safe; keep it that way (never interpolate a user value into the FROM clause).
+- **Split the service to stay ≤200 r.** `catalog.py` (list/detail/upsert/delete) +
+  `catalog_aliases.py` (alias list/add/remove/search). `products_orders.py` is the route layer
+  (all products routes on the ONE board blueprint, `?scope=`); `products_dl.py` is the DL card
+  FIELD descriptor (doplnok/mass/sklad/cena) — a data module, no routes, mirroring
+  `questions_dl.py`. The list response `meta.fields`/`meta.alias` drive the editor form so
+  `tab-products.js` builds each scope from data, no hardcode.
+- **DL name-only edit must not wipe mass/sklad/cena.** `dl_snapshot.upsert_dl_catalog_card`
+  overwrites ALL fields (unlike the orders alias tri-state), so `catalog._dl_upsert` reads the
+  CURRENT card and keeps any field the editor did not send (`_val` fallback) — the JS editor
+  prefills them all, but the fallback stops a name-only programmatic call from clearing them.

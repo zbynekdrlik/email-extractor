@@ -1,0 +1,18 @@
+{# Produkty sklad / Produkty objednávky content (#445). Filled in by tab-products.js, which
+   reads the scope from #board-main[data-scope] and calls /api/board/products. The card
+   editor (fields, alias form) is built from the list response `meta` — one template, both
+   scopes. No HTML in JS strings: every node is built via ui.js `el()`. #}
+<section class="board-products">
+  <div class="p-toolbar">
+    <input id="p-search" class="p-search" type="search" autocomplete="off"
+           placeholder="Hľadať (číslo položky, názov, doplnok, alias…)">
+    <button id="p-new" class="p-btn p-btn--primary" type="button">➕ Nová karta</button>
+  </div>
+  <div id="p-list" class="p-list" aria-live="polite"></div>
+  <p id="p-empty" class="p-empty" hidden>Žiadne karty v tomto filtri.</p>
+  <div class="p-pager">
+    <button id="p-prev" class="p-btn" type="button" hidden>← Predošlé</button>
+    <span id="p-pageinfo" class="p-pageinfo"></span>
+    <button id="p-next" class="p-btn" type="button" hidden>Ďalšie →</button>
+  </div>
+</section>
