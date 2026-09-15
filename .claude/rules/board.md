@@ -233,3 +233,49 @@ already); of a `restore` row itself → refused; of a missing audit id → 404. 
   overwrites ALL fields (unlike the orders alias tri-state), so `catalog._dl_upsert` reads the
   CURRENT card and keeps any field the editor did not send (`_val` fallback) — the JS editor
   prefills them all, but the fallback stops a name-only programmatic call from clearing them.
+
+## Lane 6 — Naučené sklad + Naučené objednávky (#447): one unified row model over 5 „naučené" tables
+
+- **Tab → scope → kinds:** `naucene-objednavky` = scope `orders` = kinds `mail` (`mail_rules`) ·
+  `alias` (`item_memory`, curated) · `global` (`global_item_memory`); `naucene-sklad` = scope `dl`
+  = kinds `dl_alias` (`dl_item_memory`, curated) · `supplier` (`dl_supplier_memory`). The `?kind=`
+  query selects the table; each kind lives in exactly ONE scope, so update/delete derive the scope
+  from the kind server-side (`services.rules.scope_of`) — the client never picks a mismatched
+  scope. `rules.SCOPE_KINDS`/`_KIND_TABLE`/`KIND_LABELS` are the single source; `table_for(kind)`
+  hands `rules_edit` a TRUSTED literal table name for the audit row (never request input).
+- **Read vs write split (≤200 r., like lane 4's `catalog.py`+`catalog_aliases.py`):**
+  `services/rules.py` = the unified ROW model + list/search/paging + origin joins (READ only);
+  `services/rules_edit.py` = update + delete DISPATCH, each DELEGATING to an engine write path.
+  `rules_orders.py` = the route layer (all rules routes on the ONE board blueprint, `?scope=`+
+  `?kind=`) + the ORDERS editor descriptor; `rules_dl.py` = the DL editor descriptor (data module,
+  no routes, mirrors `products_dl.py`). The list `meta` carries `kinds` (chips) + `edit` (the
+  kind's editor fields) + each row's `values` (editor prefill) so `tab-rules.js` builds every kind
+  from data, no hardcode.
+- **Delete is SOFT + audited; matching stops by construction.** Aliases reuse the lane-4 soft-delete
+  helpers (`memory.delete_global_row`/`delete_item_memory_row`, `dl_memory.delete_dl_item_memory_row`
+  — curated-source + ean scoped). `mail_rules` and `dl_supplier_memory` had NO soft-delete helper
+  (teach's `_undo_mail` and `dl_supplier_memory.forget` HARD-delete for the reopen-the-question undo
+  flow — a DIFFERENT semantic), so lane 6 ADDED the canonical soft-delete helpers beside them:
+  `teach.soft_delete_mail_rule`, `dl_supplier_memory.soft_delete`. Every reader
+  (`pipeline._mail_rule`, `memory.resolve`, `dl_memory.resolve`, `dl_supplier_memory.resolve`)
+  already filters `deleted_at IS NULL`, so a soft delete drops the rule from matching immediately —
+  that IS the RED→GREEN proof. The `audit_log` `_SOFT_DELETE_TABLES` whitelist already lists all 5
+  tables, so the lane-3 Kôš restore reverts a lane-6 delete with no audit change.
+- **Update is in-place + delegated; an alias update MUST recompute `item_key`.** New engine helpers
+  (the canonical write path — never raw memory SQL in the board): `teach.update_mail_rule`
+  (validates `action ∈ {ignore,manual}`), `memory.update_global_row`/`update_item_memory_row`,
+  `dl_memory.update_dl_item_memory_row` (each recomputes `item_key` from the new wording — else
+  `resolve()` keeps matching the OLD normalized key, silently), `dl_supplier_memory.update_by_id`.
+  Each returns the PRE-edit `before` dict of REAL column names, recorded as the audit `update`
+  before/after so `audit._restore_update` (writes `before` back by validated columns) reverts it.
+- **NO create path in lane 6 — a rule is only ever born by ANSWERING a question (the engines).** So
+  the #407 scanner-address guard cannot be bypassed from this tab; `dl_supplier_memory.remember`
+  still refuses a scanner address, and `update_by_id` edits only ean/name (never `sender_email`),
+  so it can't turn a genuine address into a scanner identity. A regression pin proves the guard.
+- **Origin link + preview reuse lane 2, don't rebuild it.** A row with a `question_id` links to
+  `/nastenka/otazky-<scope>?q=<message_id>&status=answered` (tab-questions.js now seeds its filter
+  from `location.search` — additive, no-params = unchanged) and offers an inline „Originál" via the
+  EXISTING scope-guarded `/api/board/questions/<qid>/preview`. Only `mail`/`global` carry a
+  `question_id`; the memory kinds (`alias`/`dl_alias`/`supplier`) show source/date origin text only.
+- **`e2e-orders`/`e2e-dl` corpora stay byte-identical** — lane 6 changes only UI + audit + new
+  read/soft-delete/update paths, never the resolve/match logic itself, so no corpus expectation moves.

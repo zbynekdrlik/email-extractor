@@ -357,6 +357,46 @@ def delete_global_row(conn, row_id: int) -> bool:
     return row is not None
 
 
+# --- #447 board lane 6: in-place edit of ONE curated alias from the nástenka „Naučené"
+# tab. Re-pointing a wording→card mapping recomputes `item_key` from the new wording (else
+# `resolve()` would keep matching the OLD normalized key) — the whole reason this lives in
+# the engine module beside `resolve`/`item_key`, never as raw SQL in a route/service. Both
+# return the PRE-edit `before` dict (for the audit trail + a Kôš update-restore), or None
+# when the row does not exist / is deleted / is not curated.
+
+def update_global_row(conn, rid: int, *, item_raw: str, gtin: str, card: str) -> dict | None:
+    """Edit a global alias in place (wording→card). Recomputes `item_key`."""
+    before = conn.execute(
+        "SELECT item_key, item_raw, gtin, card FROM global_item_memory "
+        "WHERE id = %s AND deleted_at IS NULL", (rid,)).fetchone()
+    if not before:
+        return None
+    conn.execute(
+        "UPDATE global_item_memory SET item_key = %s, item_raw = %s, gtin = %s, card = %s "
+        "WHERE id = %s",
+        (item_key(item_raw), str(item_raw), str(gtin), card or "", rid))
+    return {"item_key": before[0], "item_raw": before[1], "gtin": before[2],
+            "card": before[3] or ""}
+
+
+def update_item_memory_row(conn, rid: int, *, item_raw: str, gtin: str,
+                           card: str) -> dict | None:
+    """Edit ONE curated per-customer alias in place (source='human'/'sheet-import' only, so a
+    real delivery record can never be rewritten here). Recomputes `item_key`."""
+    before = conn.execute(
+        "SELECT item_key, item_raw, gtin, card FROM item_memory "
+        "WHERE id = %s AND deleted_at IS NULL AND source = ANY(%s)",
+        (rid, list(CURATED_SOURCES))).fetchone()
+    if not before:
+        return None
+    conn.execute(
+        "UPDATE item_memory SET item_key = %s, item_raw = %s, gtin = %s, card = %s "
+        "WHERE id = %s",
+        (item_key(item_raw), str(item_raw), str(gtin), card or "", rid))
+    return {"item_key": before[0], "item_raw": before[1], "gtin": before[2],
+            "card": before[3] or ""}
+
+
 def _alias_row(r) -> dict:
     return {"id": int(r[0]), "item_key": r[1], "item_raw": r[2] or "", "gtin": r[3],
             "card": r[4] or "", "delivered_on": str(r[5]), "source": r[6] or "",

@@ -275,6 +275,30 @@ def test_update_dl_alias_repoints_and_recomputes(pg):
     assert dl_memory.resolve(pg, "USUP", "staré dl") is None
 
 
+def test_update_mail_rule_normalizes_subject_so_matching_still_works(pg):
+    """A subject typed with caps/dates must be stored NORMALIZED (like the insert paths), or
+    `pipeline._mail_rule` — which matches on subject_key(incoming) — can never find it again."""
+    rid = _seed_mail_rule(pg, "norm@x.sk", "stary predmet", action="ignore")
+    c = _client()
+    _sklad(c)
+    r = c.post(f"/api/board/rules/mail/{rid}",
+               json={"subject_key": "Objednávka 12.8.2026", "action": "ignore"})
+    assert r.status_code == 200
+    # a future mail of the edited shape still matches (normalization applied on both sides)
+    assert pipeline._mail_rule(pg, "norm@x.sk", "Objednávka 99.9.2099") == "ignore"
+
+
+def test_update_global_alias_to_a_colliding_wording_is_409(pg):
+    memory.add_global_alias(pg, "prvé znenie", "C1", "Karta 1", by="t")
+    rid2 = memory.add_global_alias(pg, "druhé znenie", "C2", "Karta 2", by="t")
+    c = _client()
+    _sklad(c)
+    # re-point the 2nd alias onto the 1st's wording (same item_key) → unique collision → 409
+    r = c.post(f"/api/board/rules/global/{rid2}",
+               json={"wording": "prvé znenie", "gtin": "C2", "card": "Karta 2"})
+    assert r.status_code == 409
+
+
 def test_update_supplier_memory_changes_target_and_audits(pg):
     dl_supplier_memory.remember(pg, "up@sup.sk", "OLDEAN", "Staré meno")
     rid = pg.execute("SELECT id FROM dl_supplier_memory WHERE sender_email='up@sup.sk'"

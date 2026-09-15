@@ -786,6 +786,49 @@ def _undo_mail(conn, q: dict) -> dict:
     return get(conn, q["id"]) or {}
 
 
+# --- #447 board lane 6: direct curation of a taught mail rule from the nástenka. The
+# question-scoped `_undo_mail` above HARD-deletes + reopens the question (a different
+# semantic); the board's "zmazať do Koša" / "upraviť" act on ONE rule by id, SOFT-delete
+# only, and never touch the question — the canonical write paths the `board.services.rules`
+# service delegates to (never a raw SQL in the route/service, `board.md`). `_mail_rule`
+# already filters `deleted_at IS NULL`, so a soft delete stops matching by construction.
+
+def soft_delete_mail_rule(conn, rid: int) -> dict | None:
+    """Soft-delete ONE mail rule (spec §5 — recoverable from the Kôš, never a hard DELETE).
+    Returns the row's `before` dict (for the audit trail) or None when nothing matched
+    (already deleted / missing). Idempotent: `deleted_at IS NULL` guards a repeat."""
+    row = conn.execute(
+        "UPDATE mail_rules SET deleted_at = now() "
+        "WHERE id = %s AND deleted_at IS NULL "
+        "RETURNING sender_norm, subject_key, action", (rid,)).fetchone()
+    if not row:
+        return None
+    return {"sender_norm": row[0], "subject_key": row[1], "action": row[2]}
+
+
+def update_mail_rule(conn, rid: int, *, subject: str, action: str) -> dict | None:
+    """Edit a mail rule's subject key + action in place. `subject` is the raw subject text the
+    warehouse typed; it is NORMALIZED through `subject_key()` before storing (see below).
+    `action` must stay within the DB CHECK set (`ignore`/`manual`) — a bad value raises
+    ValueError (the route → 400) rather than hitting the constraint. Returns the PRE-edit
+    `before` dict, or None when the rule does not exist / is deleted."""
+    action = str(action or "").strip()
+    if action not in ("ignore", "manual"):
+        raise ValueError(f"neplatná akcia {action!r} (povolené: ignore/manual)")
+    before = conn.execute(
+        "SELECT subject_key, action FROM mail_rules "
+        "WHERE id = %s AND deleted_at IS NULL", (rid,)).fetchone()
+    if not before:
+        return None
+    # Store the NORMALIZED key, exactly as the INSERT paths do (`subject_key(subject)`), so
+    # `pipeline._mail_rule` (which matches on `subject_key(incoming_subject)`) can still find
+    # the edited rule. `subject_key()` is idempotent on an already-normalized value.
+    conn.execute(
+        "UPDATE mail_rules SET subject_key = %s, action = %s WHERE id = %s",
+        (subject_key(str(subject or "")), action, rid))
+    return {"subject_key": before[0], "action": before[1]}
+
+
 # --- date (#164): "which day is real?" ---
 
 def _present_date(q: dict) -> dict:

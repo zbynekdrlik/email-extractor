@@ -228,3 +228,59 @@ body {
 
 .p-pager { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
 .p-pageinfo { color: var(--muted); font-size: 13px; }
+
+/* --- Naučené sklad / Naučené objednávky (lane 6, #447) --- */
+.board-rules { padding: 12px 16px; max-width: 1000px; }
+.r-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.r-chip {
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  border-radius: 999px; padding: 6px 14px; font-size: 13px; cursor: pointer;
+}
+.r-chip.is-active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.r-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.r-search {
+  flex: 1; min-width: 220px; padding: 9px 12px;
+  border: 1px solid var(--line); border-radius: 8px; font-size: 15px;
+}
+.r-list { display: flex; flex-direction: column; gap: 8px; }
+.r-row {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+}
+.r-row-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.r-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 6px; padding: 2px 7px;
+}
+.r-summary { flex: 1; min-width: 200px; }
+.r-badge { font-size: 12px; color: #b3261e; border: 1px solid #e2b6b3; border-radius: 6px; padding: 2px 6px; }
+.r-origin {
+  margin-top: 6px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center;
+  color: var(--muted); font-size: 13px;
+}
+.r-origin-link { color: var(--accent); text-decoration: none; }
+.r-empty { color: var(--muted); padding: 20px 4px; }
+.r-btn {
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  border-radius: 8px; padding: 6px 12px; font-size: 14px; cursor: pointer;
+}
+.r-btn--primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.r-btn--danger { background: #b3261e; color: #fff; border-color: #b3261e; }
+.r-editor {
+  margin-top: 12px; padding: 12px; background: var(--bg); border-radius: 8px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.r-field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.r-field input, .r-field select {
+  padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 14px;
+  color: var(--ink); background: var(--panel);
+}
+.r-editor-actions, .r-confirm { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.r-confirm { margin-top: 8px; font-size: 13px; color: var(--ink); }
+.r-preview {
+  margin-top: 10px; padding: 10px 12px; background: var(--bg); border-radius: 8px; font-size: 13px;
+}
+.r-pv-line { margin-bottom: 4px; }
+.r-atts { display: flex; gap: 10px; flex-wrap: wrap; }
+.r-att { color: var(--accent); }
+.r-pager { display: flex; gap: 12px; align-items: center; margin-top: 14px; }
+.r-pageinfo { color: var(--muted); font-size: 13px; }
