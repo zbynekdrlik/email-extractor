@@ -9,8 +9,9 @@ in files, not as HTML strings in Python (spec §1/§3). Templates render from
 defaults (`Flask(__name__)` roots both at the `app/` package), so the add-on's
 `COPY app/ ./app/` ships them with no Dockerfile change.
 
-The tabs are lane-1 PLACEHOLDERS ("Pripravujeme") — each later lane fills in its own tab. The
-gate for every board path lives in `board/auth.py` and is delegated to from `httpapi._gate`.
+Each later lane fills in its own tab via `_TAB_CONTENT` (slug -> content template + JS module
++ scope); unfilled tabs keep the lane-1 "Pripravujeme" placeholder. The gate for every board
+path lives in `board/auth.py` and is delegated to from `httpapi._gate`.
 """
 from __future__ import annotations
 
@@ -37,16 +38,19 @@ TABS: list[tuple[str, str]] = [
 _SLUGS = frozenset(s for s, _ in TABS)
 DEFAULT_TAB = TABS[0][0]
 
-# #443 lane 2: each tab may fill in its own content template + JS module; unfilled tabs keep
-# the lane-1 placeholder. `scope` (orders|dl) is what the question tabs pass to the board API.
-# (slug -> (content_template, tab_script, scope|None)). Only the two question tabs are wired
-# in lane 2 — later lanes add their own rows here.
+# Each tab may fill in its own content template + JS module; unfilled tabs keep the lane-1
+# placeholder. `scope` (orders|dl) is what the question tabs pass to the board API.
+# (slug -> (content_template, tab_script, scope|None)). Lane 2 wired the two question tabs;
+# lane 3 (#444) wires the Kôš tab (no scope — its audit view is role-wide). Later lanes add
+# their own rows here.
 _TAB_CONTENT: dict[str, tuple[str, str, str | None]] = {
     "otazky-objednavky": ("board/questions.html", "/static/board/tab-questions.js", "orders"),
     "otazky-sklad": ("board/questions.html", "/static/board/tab-questions.js", "dl"),
     # #445 lane 4: the two product tabs — one template + one JS, scope from the tab.
     "produkty-objednavky": ("board/products.html", "/static/board/tab-products.js", "orders"),
     "produkty-sklad": ("board/products.html", "/static/board/tab-products.js", "dl"),
+    # #444 lane 3: the Kôš tab (no scope — its audit view is role-wide).
+    "kos": ("board/trash.html", "/static/board/tab-trash.js", None),
 }
 
 
@@ -95,5 +99,11 @@ def register_board(app, deps, questions_api=None) -> None:
     # `services/catalog.py` (which DELEGATES to snapshot/dl_snapshot + memory/dl_memory).
     from . import products_orders
     products_orders.register(bp, deps)
+
+    # #444 lane 3: the Kôš / História zmien audit API (list + restore). The tab PAGE itself is
+    # served by the generic `/nastenka/<tab>` route above via `_TAB_CONTENT["kos"]`; this only
+    # registers `/api/board/audit` + `/api/board/audit/<id>/restore`. Same board blueprint.
+    from .trash import register_trash
+    register_trash(bp, deps)
 
     app.register_blueprint(bp)

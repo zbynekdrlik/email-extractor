@@ -92,6 +92,48 @@ until lane 8. Read-only — never click/answer a real question on prod.
   `Architektúra:` header WITH the literal word „štruktúra/topológia" AND a framework word +
   `Shared-benefit:` one-liner-with-value. See `git-commit-hygiene.md` for the full trap list.
 
+## Kôš / História zmien (#444 lane 3) — restore semantics per action
+
+`board/services/audit.py` now holds the FULL `restore(conn, audit_id, by)` (spec §3 names it
+"audit_log zápis + vrátenie" — write + list + restore all live here on purpose). `list_audit`
+(table/action-group/free-text filter + paging) feeds the `/api/board/audit` list; `restore`
+reverts ONE recorded change and ALWAYS appends a NEW append-only `restore` row (history is
+never mutated). It dispatches on the audited row's `action`:
+
+- **delete** → clear `deleted_at` (+ `retired=false` on the 4 override tables) + rebuild the
+  snapshot for an override table (orders → `snapshot.rebuild_from_overrides`, DL →
+  `dl_snapshot.dl_rebuild_from_overrides`). Un-deleting WITHOUT the rebuild leaves the card
+  invisible to matching — the rebuild is load-bearing, not cosmetic.
+- **create** → soft-delete the created row (`deleted_at=now()`, +`retired=true` where the col
+  exists) + rebuild.
+- **update** → write the recorded `before` dict back. Column names are validated against
+  `information_schema.columns` for that table (never interpolate an unknown name); the pk is a
+  bound param, never interpolated; jsonb columns are wrapped in `Json()`.
+- **answer** → `teach.undo(question_id)` (drops the taught mapping, reopens the question) —
+  the SANCTIONED engine path, never a raw status flip.
+- **undo** → re-apply the LAST prior `answer` (its `after` gtin/card) via `teach.answer` — the
+  same teach path a human answer takes.
+- **reopen** → re-expire the question (`status='expired'`), the inverse of the Otázky-tab
+  reopen (lane 2).
+
+Safety invariants (the whole point of the ticket): a restore NEVER uploads to / touches an
+ORION ledger (`edi_sent`/`desadv_sent`/`upload`) — it only reverts curated/override/memory
+rows and `order_questions` state through engine functions. `restore` of an already-reverted
+row → `RestoreError(409)` (a clear no-op, e.g. delete-restore when `deleted_at IS NULL`
+already); of a `restore` row itself → refused; of a missing audit id → 404. The endpoint
+(`board/trash.py`) maps `RestoreError.status` straight to the HTTP code.
+
+- **audit.py is still a LEAF** — the `orders.snapshot`/`dl_snapshot`/`teach` imports inside
+  the restore helpers are LAZY (inside the function body), so no import cycle even though
+  `teach` imports `audit` lazily the other way. Keep any future cross-layer restore import lazy.
+- **A NEW audit `action` that a future lane records must get its own `restore` branch here**
+  (and, if it's a new reversible entity, its pk in `_SOFT_DELETE_TABLES` + a snapshot-rebuild
+  entry in `_SNAPSHOT_TABLES` if it feeds a snapshot). Un-handled action → `RestoreError(400)`.
+- **A new tab fills in its own `/nastenka/<slug>` route** via its own `register_<tab>(bp, deps)`
+  called from `register_board`, rendering `render_board(slug, tab_template="board/<tab>.html")`
+  (module-level helper, reused). A specific slug route out-ranks the generic `/nastenka/<tab>`
+  placeholder — that IS the lane-by-lane rollout (spec §8). Add every new board route to
+  `EXPECTED_ROUTES` in `test_httpapi_characterization.py` in the same commit.
 ## Lane 2 — Otázky sklad + Otázky objednávky (#443): delegate, never re-implement
 
 - **Tab → scope mapping (do NOT get this backwards):** `otazky-objednavky` = scope

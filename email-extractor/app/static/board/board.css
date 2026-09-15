@@ -95,6 +95,32 @@ body {
 }
 .board-toast.is-error { background: #b3261e; }
 
+/* Kôš / História zmien (#442 lane 3) */
+.board-trash { padding: 8px 4px; }
+.trash-toolbar { display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+  margin: 12px 0; }
+.trash-chips { display: flex; gap: 6px; }
+.trash-chip { padding: 6px 12px; border: 1px solid #ccc; background: #f5f5f5;
+  border-radius: 16px; cursor: pointer; font-size: 13px; }
+.trash-chip.is-active { background: #1a73e8; color: #fff; border-color: #1a73e8; }
+.trash-search { flex: 1; min-width: 200px; padding: 7px 10px; border: 1px solid #ccc;
+  border-radius: 6px; font-size: 14px; }
+.trash-table-wrap { overflow-x: auto; }
+.trash-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.trash-table th, .trash-table td { text-align: left; padding: 7px 8px;
+  border-bottom: 1px solid #eee; vertical-align: top; }
+.trash-table th { color: #555; font-weight: 600; white-space: nowrap; }
+.trash-summary { max-width: 360px; word-break: break-word; }
+.trash-ref { color: #666; white-space: nowrap; }
+.trash-restore { padding: 5px 12px; border: 1px solid #1a73e8; background: #fff;
+  color: #1a73e8; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.trash-restore:hover { background: #1a73e8; color: #fff; }
+.trash-empty { color: #888; padding: 16px 4px; }
+.trash-pager { display: flex; gap: 12px; align-items: center; margin-top: 12px; }
+.trash-page-btn { padding: 6px 12px; border: 1px solid #ccc; background: #f5f5f5;
+  border-radius: 6px; cursor: pointer; }
+.trash-page-btn:disabled { opacity: .45; cursor: default; }
+.trash-page-info { color: #666; font-size: 13px; }
 /* --- Otázky sklad / Otázky objednávky (lane 2, #443) --- */
 .board-questions { max-width: 960px; margin: 0 auto; }
 .q-toolbar {
