@@ -127,13 +127,12 @@ _CATEGORY_DOC_LABELS = {
     "no_processing": "iné", "human_processing": "neznámy typ",
 }
 
-# #436: signals that OCR text ALREADY carries order/DL structure a scanner/CMR/payslip
-# would NOT — used ONLY to decide whether a Layer-1 vision second opinion is worth ONE
-# call. Leaning towards "unusable" (→ vision) is the SAFE direction: the cost of a wrong
-# "unusable" is one deduped vision call, vs. the #436 bug of never looking at all.
+# #436: signals that OCR text ALREADY carries slovnormal order/DL structure a scanner /
+# foreign CMR / payslip would NOT — used ONLY to decide whether a Layer-1 vision second
+# opinion is worth ONE call. Leaning towards "unusable" (→ vision) is the SAFE direction:
+# the cost of a wrong "unusable" is one deduped vision call, vs. the #436 bug of never
+# looking at all — so the "usable" signals are deliberately STRONG and order/DL-SPECIFIC.
 _EAN13_RE = re.compile(r"(?<!\d)\d{13}(?!\d)")
-_QTY_UNIT_RE = re.compile(
-    r"\b\d+(?:[.,]\d+)?\s*(?:ks|kus\w*|kg|bal\w*|kart[oó]n\w*|p[áa]r\w*)\b", re.IGNORECASE)
 # SK DL/order keywords a FOREIGN transport form (Polish CMR) does not carry. "nákladný
 # list" (CMR) never matches "dodac… list". `faktúr\w*` is matched ONLY in its SK-diacritic
 # form on purpose: Polish "faktura" (no diacritic) appears on real CMRs, so matching a bare
@@ -143,19 +142,28 @@ _DL_KEYWORD_RE = re.compile(
 
 
 def _ocr_unusable_for_dl(text: str) -> bool:
-    """#436: True when OCR text carries NO order/DL structure — no product EAN-13, fewer
-    than two quantity+unit item lines, and no SK DL/order keyword — the signature of a
-    scanner scan whose OCR "succeeded" with content useless for the DL/order engines (a
-    foreign CMR, a payslip). Empty OCR (the pre-#436 `needs_vision` near-empty case) → 0
-    signals → unusable, so the old rescue behaviour is preserved. Deliberately narrow (only
-    a clear structural signal marks OCR "usable" and skips vision): the safe direction is
-    to spend one deduped vision call, never to skip it — see the module docstring Layer 1."""
+    """#436: True when OCR text carries NO slovnormal order/DL structure — the signature of
+    a scanner scan whose OCR "succeeded" with content useless for the DL/order engines (a
+    foreign CMR, a payslip). "Usable" (→ skip vision) requires a STRONG, order/DL-SPECIFIC
+    signal a foreign transport form would NOT have:
+
+    * two or more DISTINCT product EAN-13 barcodes (a real slovnormal DL/order lists one
+      per line; the catalog is EAN-keyed). A SINGLE 13-digit run is deliberately NOT enough
+      — a CMR's own consignment/reference number can be 13 digits, and a #436-review finding
+      showed a lone number flipping a real CMR to "usable" and skipping vision; OR
+    * an SK DL/order keyword (`dodac… list` / `objednávka` / `reklamácia` / SK-diacritic
+      `faktúr`) — absent from a foreign transport form.
+
+    A quantity+unit signal (`5 ks`, `1500 kg`) was DROPPED (#436 review): a CMR carries gross
+    and net WEIGHT in kg (fields 11/12), so counting kg lines re-opened the exact bug — a
+    weight-bearing CMR looked "usable" and never got vision. Empty OCR → 0 signals →
+    unusable, so the pre-#436 `needs_vision` near-empty behaviour is preserved. See the
+    module docstring Layer 1: the safe direction is to spend one deduped vision call, never
+    to skip it."""
     t = text or ""
-    if _EAN13_RE.search(t):
+    if len(set(_EAN13_RE.findall(t))) >= 2:
         return False
     if _DL_KEYWORD_RE.search(t):
-        return False
-    if len(_QTY_UNIT_RE.findall(t)) >= 2:
         return False
     return True
 

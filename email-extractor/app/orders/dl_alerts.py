@@ -244,8 +244,9 @@ def _format_grouped(kind: str, bodies: list[str], cfg) -> str:
 
 
 def reminder_suppressed(conn, cfg, kind: str, message_id: str, now=None) -> bool:
-    """#336: the re-enqueue cadence for the grouped ops SWEEP kinds
-    (`human_processing_review`, `dl_stuck_classified`) — replaces the old flat
+    """#336: the re-enqueue cadence for the grouped SWEEP kinds
+    (`human_processing_review`, `dl_stuck_classified`, and #436's `scanner_not_dl`) —
+    replaces the old flat
     `already_pending` 4h window that re-swept (and re-posted) the SAME still-stuck message
     every ~4h, producing a repeated wall. Returns True when a fresh enqueue should be
     SUPPRESSED:

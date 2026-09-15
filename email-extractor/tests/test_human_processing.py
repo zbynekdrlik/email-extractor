@@ -411,20 +411,24 @@ def test_usable_dl_ocr_skips_vision(pg):
 
 
 def test_scanner_dedupe_is_kept_one_alert_per_message(pg):
-    """#436: dedupe ostáva — opakované sweepy nesmú enqueovať druhý scanner alert."""
+    """#436: dedupe ostáva — opakované sweepy nesmú enqueovať druhý scanner alert, ANI
+    minúť druhé vision volanie (once-per-message rozpočet)."""
     _hp_msg(pg, "cmr5", needs_vision=False, has_attachments=True)
     _hp_attachment(pg, "cmr5", _CMR_OCR)
     cfg = _cfg(delivery_notes_channel_id=243,
                delivery_notes_scanner_senders="tlaciaren@x.sk")
-    human_processing.sweep(pg, cfg, classify=lambda c, a: {"category": "no_processing",
-                                                           "confidence": 0.2,
-                                                           "doc_type": "CMR"})
-    human_processing.sweep(pg, cfg, classify=lambda c, a: {"category": "no_processing",
-                                                           "confidence": 0.2,
-                                                           "doc_type": "CMR"})
+    calls = []
+
+    def classify(c, a):
+        calls.append(1)
+        return {"category": "no_processing", "confidence": 0.2, "doc_type": "CMR"}
+
+    human_processing.sweep(pg, cfg, classify=classify)
+    human_processing.sweep(pg, cfg, classify=classify)
     assert pg.execute(
         "SELECT count(*) FROM pending_alerts WHERE message_id='cmr5' "
         "AND kind='scanner_not_dl'").fetchone()[0] == 1
+    assert len(calls) == 1, "vision sa smie minúť najviac RAZ na správu (rozpočet)"
 
 
 def test_scanner_doc_type_falls_back_to_category_label_then_neutral():
@@ -439,12 +443,22 @@ def test_scanner_doc_type_falls_back_to_category_label_then_neutral():
 
 
 def test_ocr_unusable_for_dl_signals():
-    """#436: EAN-13, ≥2 quantity+unit lines, or a SK DL/order keyword marks OCR 'usable'
-    (skip vision); a foreign CMR / empty OCR is 'unusable' (→ vision)."""
+    """#436: OCR is 'usable' (skip vision) ONLY on a STRONG order/DL-specific signal — ≥2
+    DISTINCT product EAN-13 codes, or an SK DL/order keyword. Everything else (empty OCR, a
+    foreign CMR, a single reference number, weight-only lines) is 'unusable' → vision."""
     assert human_processing._ocr_unusable_for_dl("") is True
     assert human_processing._ocr_unusable_for_dl(_CMR_OCR) is True
-    assert human_processing._ocr_unusable_for_dl("8586001112223 Mlieko") is False   # EAN
+    assert human_processing._ocr_unusable_for_dl(
+        "8586001112223 Mlieko\n8586004445556 Maslo") is False       # ≥2 distinct EANs
     assert human_processing._ocr_unusable_for_dl("Dodaci list c.5") is False        # keyword
-    assert human_processing._ocr_unusable_for_dl("5 ks\n3 kg\n") is False           # 2 qty+unit
+    # a SINGLE 13-digit run is NOT enough (a CMR consignment number is ~13 digits) — #436
+    # review finding: a lone number must never flip a CMR to 'usable' and skip vision
+    assert human_processing._ocr_unusable_for_dl("8586001112223 iba jeden kod") is True
+    # weight-only lines (kg) are NOT order structure — a CMR carries gross/net weight in kg
+    assert human_processing._ocr_unusable_for_dl("Hrubá hmotnosť 1500 kg\nČistá 1480 kg") is True
+    # #436-review realistic CMR: 2+ kg weight lines AND a 13-digit consignment number → the
+    # exact document class this ticket targets; MUST be unusable (→ vision), not skipped
+    assert human_processing._ocr_unusable_for_dl(
+        "CMR 1234567890123\nBrutto 2100 kg\nNetto 2050 kg\nprzewozowy Katowice") is True
     # a Polish CMR mentioning "Faktura nr" (no diacritic) must NOT be marked usable
     assert human_processing._ocr_unusable_for_dl("Faktura nr 123/2026 przewozowy") is True
