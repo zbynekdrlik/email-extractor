@@ -38,34 +38,47 @@ _SLUGS = frozenset(s for s, _ in TABS)
 DEFAULT_TAB = TABS[0][0]
 
 
-def register_board(app, deps) -> None:
-    # `deps` is accepted for consistency with the other register() modules and for the later
-    # lanes' service calls; lane 1's routes need no DB access of their own.
-    bp = Blueprint("board", __name__)
+def render_board(active: str, *, tab_template: str | None = None):
+    """Render the tabbed layout with `active` selected. A lane fills in its own tab by passing
+    `tab_template` (a Jinja partial included inside `<main>`); with none, `<main>` shows the
+    "Pripravujeme…" placeholder. Module-level (not a `register_board` closure) so each lane's
+    own route module (`trash.py`, later `questions_*.py`) can import and call it — one place
+    builds the tab bar + version, every tab reuses it. Runs inside a request (uses the session
+    for `board_role()`)."""
+    role = board_role()
+    tabs = [{"slug": s, "label": label, "url": f"/nastenka/{s}", "active": s == active}
+            for s, label in TABS]
+    return render_template(
+        "board/layout.html",
+        version=__version__, tabs=tabs, active_tab=active,
+        active_label=dict(TABS).get(active, ""),
+        role=role, is_admin=(role == ADMIN), tab_template=tab_template,
+    )
 
-    def _render(active: str):
-        role = board_role()
-        tabs = [{"slug": s, "label": label, "url": f"/nastenka/{s}", "active": s == active}
-                for s, label in TABS]
-        return render_template(
-            "board/layout.html",
-            version=__version__, tabs=tabs, active_tab=active,
-            active_label=dict(TABS).get(active, ""),
-            role=role, is_admin=(role == ADMIN),
-        )
+
+def register_board(app, deps) -> None:
+    # `deps` is accepted for consistency with the other register() modules and is threaded to
+    # each lane's own route registrar (`register_trash` etc.) for its service DB access.
+    bp = Blueprint("board", __name__)
 
     @bp.get("/nastenka")
     def board_home():
-        return _render(DEFAULT_TAB)
+        return render_board(DEFAULT_TAB)
 
     @bp.get("/nastenka/<tab>")
     def board_tab(tab: str):
         if tab not in _SLUGS:
             abort(404)
-        return _render(tab)
+        return render_board(tab)
 
     @bp.get("/api/board/ping")
     def board_ping():
         return jsonify(ok=True, version=__version__, role=board_role())
+
+    # Lane 3 (#444): the Kôš tab page + its audit list/restore API. Registered on the SAME
+    # blueprint; its specific `/nastenka/kos` GET rule out-ranks the generic `/nastenka/<tab>`
+    # above (a lane fills in one tab, the rest stay placeholders — spec §8 rollout model).
+    from .trash import register_trash
+    register_trash(bp, deps)
 
     app.register_blueprint(bp)

@@ -1,0 +1,39 @@
+{# Kôš / História zmien tab body (#444 lane 3). Included inside layout.html's <main>. No HTML
+   in Python (spec §3); tab-trash.js fills #trash-rows from /api/board/audit and drives Vrátiť. #}
+<section class="board-trash" aria-label="Kôš a história zmien">
+  <h1>Kôš / História zmien</h1>
+  <p class="board-hint">Každá zmena na nástenke (kto, kedy, tabuľka, akcia, pred/po) a všetko
+    zmazané. „Vrátiť" obnoví riadok alebo pôvodné hodnoty.</p>
+
+  <div class="trash-toolbar">
+    <div class="trash-chips" role="group" aria-label="Filter">
+      <button type="button" class="trash-chip is-active" data-action="">Všetko</button>
+      <button type="button" class="trash-chip" data-action="zmazane">Zmazané</button>
+      <button type="button" class="trash-chip" data-action="zmeny">Zmeny</button>
+      <button type="button" class="trash-chip" data-action="odpovede">Odpovede</button>
+    </div>
+    <input type="search" id="trash-search" class="trash-search"
+           placeholder="Hľadať (kto, tabuľka, poznámka, id…)" autocomplete="off">
+  </div>
+
+  <div class="trash-table-wrap">
+    <table class="trash-table">
+      <thead>
+        <tr>
+          <th>Kedy</th><th>Kto</th><th>Čo</th><th>Akcia</th>
+          <th>Zhrnutie</th><th>Odkaz</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="trash-rows"></tbody>
+    </table>
+    <p id="trash-empty" class="trash-empty" hidden>Nič sa nenašlo.</p>
+  </div>
+
+  <div class="trash-pager">
+    <button type="button" id="trash-prev" class="trash-page-btn" disabled>← Novšie</button>
+    <span id="trash-page-info" class="trash-page-info"></span>
+    <button type="button" id="trash-next" class="trash-page-btn" disabled>Staršie →</button>
+  </div>
+</section>
+
+<script type="module" src="/static/board/tab-trash.js"></script>

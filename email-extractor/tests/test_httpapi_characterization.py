@@ -68,6 +68,12 @@ EXPECTED_ROUTES = sorted([
     (("GET",), "/nastenka"),
     (("GET",), "/nastenka/<tab>"),
     (("GET",), "/api/board/ping"),
+    # #444 board redesign lane 3: the Kôš / História zmien tab — a specific `/nastenka/kos`
+    # page route (out-ranks the generic `/nastenka/<tab>`) + the audit change-log JSON API
+    # + the restore ("Vrátiť") endpoint. All on the same `board` blueprint.
+    (("GET",), "/nastenka/kos"),
+    (("GET",), "/api/board/audit"),
+    (("POST",), "/api/board/audit/<int:audit_id>/restore"),
     # #342: the codex-bridge push endpoint (machine X-Token auth) — a legitimate NEW route,
     # not a #268 code-move; added here in the same commit that registers it.
     (("POST",), "/api/codex/orders"),

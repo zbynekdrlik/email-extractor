@@ -27,11 +27,15 @@
   </nav>
 
   <main class="board-main" id="board-main" data-tab="{{ active_tab }}">
+    {% if tab_template %}
+    {% include tab_template %}
+    {% else %}
     <section class="board-placeholder">
       <h1>{{ active_label }}</h1>
       <p class="board-soon">Pripravujeme…</p>
       <p class="board-hint">Táto záložka sa doplní v ďalšej fáze prerábky nástenky.</p>
     </section>
+    {% endif %}
   </main>
 
   <div id="board-toast" class="board-toast" role="status" aria-live="polite" hidden></div>
