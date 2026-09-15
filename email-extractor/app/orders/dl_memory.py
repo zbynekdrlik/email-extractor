@@ -172,7 +172,7 @@ def resolve(conn, supplier_ean: str, item: str, catalog_gtins=None,
     taught_rows = conn.execute(
         """SELECT gtin, max(card) AS card, max(delivered_on) AS last_day, max(created_at) AS at
              FROM dl_item_memory
-            WHERE supplier_ean = %s AND item_key = %s AND source = 'human'
+            WHERE supplier_ean = %s AND item_key = %s AND source IN ('human', 'teachback')
               AND deleted_at IS NULL
             GROUP BY gtin ORDER BY at DESC""",
         (str(supplier_ean), key)).fetchall()
@@ -229,24 +229,27 @@ def resolve(conn, supplier_ean: str, item: str, catalog_gtins=None,
 # Kôš, and `resolve()` already filters `deleted_at IS NULL`). Kept here beside `remember` so
 # every dl_item_memory write path lives in ONE module.
 
-CURATED_SOURCES = ("human", "sheet-import")
+CURATED_SOURCES = ("human", "sheet-import", "teachback")
 
 
-def add_dl_alias(conn, supplier_ean: str, wording: str, gtin: str, card: str) -> int | None:
-    """Teach a wording for ONE supplier directly (nástenka Produkty sklad card), dated today,
-    source='human' — so `resolve()`'s taught-first rung treats it exactly like a warehouse
-    answer. Returns the new row's id, or None when the (supplier, wording, gtin, day, cnt)
-    identity already exists (idempotent) or a required field is missing."""
+def add_dl_alias(conn, supplier_ean: str, wording: str, gtin: str, card: str,
+                 source: str = "human") -> int | None:
+    """Teach a wording for ONE supplier directly (nástenka Produkty sklad card / história
+    teachback), dated today. `source` defaults to 'human' (the card editor); the history
+    teachback passes 'teachback' — BOTH are honoured by `resolve()`'s taught-first rung
+    (`source IN ('human','teachback')`), so either treats it exactly like a warehouse answer.
+    Returns the new row's id, or None when the (supplier, wording, gtin, day, cnt) identity
+    already exists (idempotent) or a required field is missing."""
     key = item_key(wording)
     if not (supplier_ean and key and gtin):
         return None
     row = conn.execute(
         """INSERT INTO dl_item_memory
                (supplier_ean, item_key, item_raw, gtin, card, delivered_on, cnt, source)
-           VALUES (%s, %s, %s, %s, %s, current_date, 1, 'human')
+           VALUES (%s, %s, %s, %s, %s, current_date, 1, %s)
            ON CONFLICT (supplier_ean, item_key, gtin, delivered_on, cnt) DO NOTHING
            RETURNING id""",
-        (str(supplier_ean), key, str(wording), str(gtin), card or "")).fetchone()
+        (str(supplier_ean), key, str(wording), str(gtin), card or "", source)).fetchone()
     return int(row[0]) if row else None
 
 

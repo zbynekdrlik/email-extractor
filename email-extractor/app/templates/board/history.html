@@ -1,0 +1,31 @@
+{# História objednávok / História dodacích listov content (#448 lane 7). ONE template for both
+   history tabs — tab-history.js reads the scope (orders|dl) from #board-main[data-scope] and
+   calls /api/board/history?scope=…. No HTML in Python (spec §3); every row/detail node is built
+   in JS via ui.js el(). Every class is scoped under `.board-history` / `.h-*` so it never
+   collides with another tab's `.p-*` rules (lane-5 CSS-scoping lesson, board.md). #}
+<section class="board-history" aria-label="História">
+  <div class="h-toolbar">
+    <input id="h-search" class="h-search" type="search" autocomplete="off"
+           placeholder="Hľadať (partner, číslo dokladu, predmet, položka…)">
+    <input id="h-from" class="h-date" type="date" aria-label="Dátum od">
+    <span class="h-date-sep">–</span>
+    <input id="h-to" class="h-date" type="date" aria-label="Dátum do">
+  </div>
+  <div id="h-status-chips" class="h-chips" role="group" aria-label="Filter stavu"></div>
+  <div id="h-list" class="h-list" aria-live="polite"></div>
+  <p id="h-empty" class="h-empty" hidden>Nič sa nenašlo.</p>
+  <div class="h-pager">
+    <button type="button" id="h-prev" class="h-page-btn" disabled>← Novšie</button>
+    <span id="h-page-info" class="h-page-info"></span>
+    <button type="button" id="h-next" class="h-page-btn" disabled>Ďalšie →</button>
+  </div>
+
+  {# Detail drawer — hidden until a row is opened. Filled by tab-history.js. #}
+  <div id="h-drawer" class="h-drawer" hidden>
+    <div class="h-drawer-head">
+      <button type="button" id="h-close" class="h-btn h-btn--ghost">← Späť na zoznam</button>
+    </div>
+    <div id="h-detail" class="h-detail"></div>
+  </div>
+</section>
+{# tab-history.js is loaded by layout.html via `tab_script` (_TAB_CONTENT). #}

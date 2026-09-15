@@ -58,6 +58,10 @@ _TAB_CONTENT: dict[str, tuple[str, str, str | None]] = {
     # (customers|suppliers) picks which board API + field set tab-partners.js drives.
     "zakaznici": ("board/partners.html", "/static/board/tab-partners.js", "customers"),
     "dodavatelia": ("board/partners.html", "/static/board/tab-partners.js", "suppliers"),
+    # lane 7 (#448): the two history tabs share ONE template + ONE JS module; the `scope`
+    # (orders|dl) picks which documents /api/board/history lists + which labels/memory apply.
+    "historia-objednavok": ("board/history.html", "/static/board/tab-history.js", "orders"),
+    "historia-dl": ("board/history.html", "/static/board/tab-history.js", "dl"),
 }
 
 
@@ -127,5 +131,12 @@ def register_board(app, deps, questions_api=None) -> None:
     from .suppliers import register_suppliers
     register_customers(bp, deps)
     register_suppliers(bp, deps)
+
+    # #448 lane 7: the História objednávok + História dodacích listov API (list/detail/rerun/
+    # manual/teach + scope-guarded original preview) — a thin route layer over the
+    # `services/history*` + `teachback` services (which delegate to the real engines). The tab
+    # PAGES are served by the generic /nastenka/<tab> route via _TAB_CONTENT. Same blueprint.
+    from . import history_orders
+    history_orders.register(bp, deps)
 
     app.register_blueprint(bp)

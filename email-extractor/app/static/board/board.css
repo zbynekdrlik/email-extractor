@@ -269,6 +269,90 @@ body {
 .board-partners .p-page-btn:disabled { opacity: .45; cursor: default; }
 .board-partners .p-page-info { color: var(--muted); font-size: 13px; }
 
+/* --- Lane 7 (#448): História objednávok + História dodacích listov. Every rule scoped under
+   `.board-history` with `h-*` class names so it never collides with another tab's `p-*`
+   rules (lane-5 CSS-scoping lesson). No CDN, no build step. */
+.board-history { padding: 16px; }
+.board-history .h-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.board-history .h-search { flex: 1 1 260px; padding: 8px 12px; border: 1px solid var(--line);
+  border-radius: 8px; font-size: 14px; }
+.board-history .h-date { padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
+.board-history .h-date-sep { color: var(--muted); }
+.board-history .h-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+.board-history .h-chip { padding: 5px 12px; border: 1px solid var(--line); background: var(--panel);
+  border-radius: 999px; cursor: pointer; font-size: 13px; color: var(--muted); }
+.board-history .h-chip.is-active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.board-history .h-list { display: flex; flex-direction: column; gap: 6px; }
+.board-history .h-row { display: grid; grid-template-columns: 96px 1.4fr 1.2fr 130px 2fr;
+  gap: 10px; align-items: center; text-align: left; width: 100%; padding: 10px 12px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; cursor: pointer;
+  font: inherit; color: inherit; }
+.board-history .h-row:hover { border-color: var(--accent); }
+.board-history .h-c { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.board-history .h-c-date { color: var(--muted); font-size: 13px; }
+.board-history .h-c-partner { font-weight: 600; }
+.board-history .h-c-doc { color: var(--muted); font-size: 13px; }
+.board-history .h-c-subject { color: var(--muted); font-size: 13px; }
+.board-history .h-c-status { font-size: 12px; font-weight: 600; border-radius: 6px; padding: 3px 8px;
+  text-align: center; background: #eef1f5; color: var(--muted); }
+.board-history .h-st-ok { background: #e6f4ea; color: #1e7e34; }
+.board-history .h-st-held { background: #fff4e0; color: #b8860b; }
+.board-history .h-st-review, .board-history .h-st-partial { background: #fdeef0; color: #b0344a; }
+.board-history .h-st-error { background: #fdecea; color: #c0392b; }
+.board-history .h-st-manual { background: #eef1f5; color: #45505c; }
+.board-history .h-st-ignored { background: #f0f0f0; color: #8a8a8a; }
+.board-history .h-empty, .board-history .h-empty2 { color: var(--muted); text-align: center; padding: 24px; }
+.board-history .h-pager { display: flex; gap: 12px; align-items: center; margin-top: 14px; }
+.board-history .h-page-btn { padding: 6px 12px; border: 1px solid var(--line); background: var(--panel);
+  border-radius: 6px; cursor: pointer; }
+.board-history .h-page-btn:disabled { opacity: .45; cursor: default; }
+.board-history .h-page-info { color: var(--muted); font-size: 13px; }
+/* detail drawer */
+.board-history .h-drawer { margin-top: 8px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 12px; padding: 16px; }
+.board-history .h-drawer-head { margin-bottom: 12px; }
+.board-history .h-detail-title { margin: 0 0 10px; font-size: 17px; }
+.board-history .h-detail-meta { display: flex; flex-direction: column; gap: 3px; margin-bottom: 14px; }
+.board-history .h-meta { font-size: 14px; }
+.board-history .h-meta-k { color: var(--muted); }
+.board-history .h-meta-v { font-weight: 500; }
+.board-history .h-actions { display: flex; gap: 16px; flex-wrap: wrap; margin: 8px 0 16px; }
+.board-history .h-action { display: flex; flex-direction: column; gap: 3px; max-width: 320px; }
+.board-history .h-action-hint { font-size: 12px; color: var(--muted); }
+.board-history .h-sec { margin: 18px 0 8px; font-size: 15px; border-top: 1px solid var(--line); padding-top: 12px; }
+.board-history .h-items { display: flex; flex-direction: column; gap: 8px; }
+.board-history .h-item { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.board-history .h-item-main { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.board-history .h-item-name { font-weight: 600; }
+.board-history .h-item-qty { color: var(--muted); font-size: 13px; }
+.board-history .h-item-trace { color: var(--muted); font-size: 12px; margin-top: 3px; }
+.board-history .h-teach { margin-top: 10px; border-top: 1px dashed var(--line); padding-top: 10px; }
+.board-history .h-teach-btn { margin-left: auto; }
+.board-history .h-pick-title { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+.board-history .h-pick-search { width: 100%; padding: 7px 10px; border: 1px solid var(--line);
+  border-radius: 6px; font-size: 14px; }
+.board-history .h-pick-results { display: flex; flex-direction: column; gap: 4px; margin-top: 6px;
+  max-height: 240px; overflow-y: auto; }
+.board-history .h-pick-opt { text-align: left; padding: 7px 10px; border: 1px solid var(--line);
+  background: var(--panel); border-radius: 6px; cursor: pointer; font: inherit; }
+.board-history .h-pick-opt:hover { border-color: var(--accent); background: #f7f9ff; }
+.board-history .h-pick-none { color: var(--muted); font-size: 13px; padding: 6px; }
+.board-history .h-orig { display: flex; gap: 12px; flex-wrap: wrap; }
+.board-history .h-orig-link { color: var(--accent); font-size: 14px; }
+.board-history .h-timeline { display: flex; flex-direction: column; gap: 4px; }
+.board-history .h-tl { display: grid; grid-template-columns: 150px 160px 1fr; gap: 8px; font-size: 13px; }
+.board-history .h-tl-ts { color: var(--muted); }
+.board-history .h-tl-stage { color: var(--muted); }
+.board-history .h-btn { padding: 7px 14px; border: 1px solid var(--line); background: var(--panel);
+  border-radius: 8px; cursor: pointer; font: inherit; }
+.board-history .h-btn:disabled { opacity: .5; cursor: not-allowed; }
+.board-history .h-btn--rerun { border-color: var(--accent); color: var(--accent); }
+.board-history .h-btn--manual { border-color: #b8860b; color: #b8860b; }
+.board-history .h-btn--ghost { color: var(--muted); }
+@media (max-width: 720px) {
+  .board-history .h-row { grid-template-columns: 1fr; gap: 3px; }
+  .board-history .h-tl { grid-template-columns: 1fr; }
+}
 /* --- Naučené sklad / Naučené objednávky (lane 6, #447) (scoped under .board-rules / .r-*) --- */
 .board-rules { padding: 12px 16px; max-width: 1000px; }
 .r-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }

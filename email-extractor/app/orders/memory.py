@@ -98,7 +98,7 @@ def resolve(conn, customer_ean: str, item: str, as_of: str = "") -> Recalled | N
     taught = conn.execute(
         """SELECT gtin, max(card), max(delivered_on)
              FROM item_memory
-            WHERE customer_ean = %s AND item_key = %s AND source = 'human'
+            WHERE customer_ean = %s AND item_key = %s AND source IN ('human', 'teachback')
               AND deleted_at IS NULL
             GROUP BY gtin ORDER BY max(created_at) DESC LIMIT 1""",
         (str(customer_ean), key)).fetchone()
@@ -294,7 +294,7 @@ def list_customer_aliases(conn, customer_ean: str) -> list[dict]:
     return [_alias_row(r) for r in rows]
 
 
-CURATED_SOURCES = ("human", "sheet-import")
+CURATED_SOURCES = ("human", "sheet-import", "teachback")
 
 
 def delete_item_memory_row(conn, row_id: int, customer_ean: str) -> bool:

@@ -108,6 +108,17 @@ EXPECTED_ROUTES = sorted([
     (("GET",), "/api/board/suppliers"),
     (("POST",), "/api/board/suppliers"),
     (("DELETE",), "/api/board/suppliers"),
+    # #448 board redesign lane 7: the História objednávok + História dodacích listov API —
+    # list/detail (scope=orders|dl), the sanctioned rerun/manual actions + teachback, and the
+    # board-gated + history-scoped original file/eml preview. Tab PAGES via the generic
+    # /nastenka/<tab> route (_TAB_CONTENT["historia-objednavok"/"historia-dl"]). Same blueprint.
+    (("GET",), "/api/board/history"),
+    (("GET",), "/api/board/history/<message_id>"),
+    (("POST",), "/api/board/history/<message_id>/rerun"),
+    (("POST",), "/api/board/history/<message_id>/manual"),
+    (("POST",), "/api/board/history/<message_id>/teach"),
+    (("GET",), "/api/board/history/<message_id>/files/<int:idx>"),
+    (("GET",), "/api/board/history/<message_id>/eml"),
     # #342: the codex-bridge push endpoint (machine X-Token auth) — a legitimate NEW route,
     # not a #268 code-move; added here in the same commit that registers it.
     (("POST",), "/api/codex/orders"),
