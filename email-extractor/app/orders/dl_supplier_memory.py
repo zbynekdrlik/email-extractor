@@ -59,7 +59,8 @@ def resolve(conn, sender_email: str) -> dict | None:
     if not email:
         return None
     row = conn.execute(
-        "SELECT ean_edi, name FROM dl_supplier_memory WHERE sender_email = %s",
+        "SELECT ean_edi, name FROM dl_supplier_memory "
+        "WHERE sender_email = %s AND deleted_at IS NULL",  # #442 soft-delete
         (email,)).fetchone()
     return {"ean_edi": row[0], "name": row[1] or ""} if row else None
 

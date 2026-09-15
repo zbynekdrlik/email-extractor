@@ -197,7 +197,7 @@ def test_the_warehouse_answers_who_the_customer_is_from_the_link(live_server, pg
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/otazky")
+    page.goto(f"{live_server}/otazky")  # 442: link now redirects to nastenka; open old board directly
 
     page.wait_for_selector("text=cudzi@nikde.sk")
     page.wait_for_selector("text=Potraviny nie otraviny Žilina")
@@ -230,7 +230,7 @@ def test_the_warehouse_can_say_it_does_not_know_the_customer(live_server, pg, pa
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/otazky")
+    page.goto(f"{live_server}/otazky")  # 442: link now redirects to nastenka; open old board directly
 
     page.wait_for_selector("text=dalsi@nikde.sk")
     page.click('button:has-text("Neviem, kto to je")')
@@ -261,7 +261,7 @@ def test_the_warehouse_adds_a_brand_new_customer_from_the_card(live_server, pg, 
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/otazky")
+    page.goto(f"{live_server}/otazky")  # 442: link now redirects to nastenka; open old board directly
 
     page.wait_for_selector("text=uplnenovy@nikde.sk")
     page.click('button:has-text("Nový zákazník")')
@@ -302,7 +302,7 @@ def test_the_warehouse_answers_a_dl_item_question_from_the_link(live_server, pg,
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/otazky-dl")
+    page.goto(f"{live_server}/otazky-dl")  # 442: link now redirects to nastenka; open old board directly
 
     page.wait_for_selector("text=Ktorá karta je táto DL položka?")
     page.wait_for_selector("text=Múka hladká T512")
@@ -332,7 +332,7 @@ def test_the_warehouse_answers_a_dl_supplier_question_from_the_link(live_server,
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/otazky-dl")
+    page.goto(f"{live_server}/otazky-dl")  # 442: link now redirects to nastenka; open old board directly
 
     page.wait_for_selector("text=Ktorý dodávateľ?")
     page.wait_for_selector("text=obchod@mlynvrbovce.sk")
@@ -363,7 +363,7 @@ def test_the_warehouse_adds_a_brand_new_dl_supplier_from_the_card(live_server, p
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/otazky-dl")
+    page.goto(f"{live_server}/otazky-dl")  # 442: link now redirects to nastenka; open old board directly
 
     page.wait_for_selector("text=gnip@hkloan.eu")
     page.click('button:has-text("Nový dodávateľ")')
@@ -406,7 +406,7 @@ def test_the_warehouse_reclaims_an_existing_dl_supplier_after_a_collision(
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/otazky-dl")
+    page.goto(f"{live_server}/otazky-dl")  # 442: link now redirects to nastenka; open old board directly
 
     page.wait_for_selector("text=iny@x.sk")
     page.click('button:has-text("Nový dodávateľ")')
@@ -452,7 +452,7 @@ def test_the_warehouse_adds_a_brand_new_dl_product_from_the_card(live_server, pg
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/otazky-dl")
+    page.goto(f"{live_server}/otazky-dl")  # 442: link now redirects to nastenka; open old board directly
 
     page.wait_for_selector("text=Soľ jedlá kamenná jódovaná")
     page.click('button:has-text("Nový produkt")')
@@ -492,7 +492,7 @@ def test_the_dl_link_never_shows_an_orders_question(live_server, pg, page):
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/otazky-dl")
+    page.goto(f"{live_server}/otazky-dl")  # 442: link now redirects to nastenka; open old board directly
 
     page.wait_for_selector("text=Múka hrubá")
     assert page.locator("text=Šiška").count() == 0, \
@@ -520,7 +520,7 @@ def test_the_warehouse_answers_from_the_link_with_no_login(live_server, pg, page
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/otazky")
+    page.goto(f"{live_server}/otazky")  # 442: link now redirects to nastenka; open old board directly
 
     backend_ver = page.request.get(f"{live_server}/version").text().strip()
     assert backend_ver in page.locator('[data-testid="version"]').inner_text()
@@ -567,7 +567,7 @@ def test_the_warehouse_can_search_the_whole_catalog_when_no_candidate_fits(live_
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/otazky")
+    page.goto(f"{live_server}/otazky")  # 442: link now redirects to nastenka; open old board directly
 
     backend_ver = page.request.get(f"{live_server}/version").text().strip()
     assert backend_ver in page.locator('[data-testid="version"]').inner_text()
@@ -603,7 +603,7 @@ def test_the_warehouse_link_can_reach_the_knowledge_base_and_teach_a_wording(liv
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/otazky")
+    page.goto(f"{live_server}/otazky")  # 442: link now redirects to nastenka; open old board directly
 
     # reached from the questions page, not typed by hand — pre-filled with the customer
     # and wording the open question was about
@@ -653,7 +653,7 @@ def test_znalosti_lets_the_warehouse_curate_products_and_customers_directly(
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/otazky")
+    page.goto(f"{live_server}/otazky")  # 442: link now redirects to nastenka; open old board directly
     page.goto(f"{live_server}/znalosti")
     page.wait_for_selector("text=Karty výrobkov")
 
@@ -725,7 +725,7 @@ def test_the_dl_board_shows_a_prominent_alert_banner_for_the_reliability_gauges(
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/otazky-dl")
+    page.goto(f"{live_server}/otazky-dl")  # 442: link now redirects to nastenka; open old board directly
 
     page.wait_for_selector("#dlAlertBanner:visible")
     banner_text = page.locator("#dlAlertBanner").inner_text()
@@ -742,7 +742,7 @@ def test_the_dl_alert_banner_stays_hidden_on_a_quiet_day(live_server, pg, page):
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/otazky-dl")
+    page.goto(f"{live_server}/otazky-dl")  # 442: link now redirects to nastenka; open old board directly
     page.wait_for_selector("#dlStats")
     # `state="attached"` proves the banner element genuinely EXISTS in the DOM on a
     # quiet day (not just "no such element", which would also satisfy a bare
@@ -770,7 +770,7 @@ def test_dl_new_product_form_survives_the_5s_auto_refresh(live_server, pg, page)
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/otazky-dl")
+    page.goto(f"{live_server}/otazky-dl")  # 442: link now redirects to nastenka; open old board directly
 
     page.wait_for_selector("text=Soľ jedlá")
     page.click('button:has-text("Nový produkt")')
@@ -803,7 +803,7 @@ def test_the_warehouse_marks_a_dl_question_not_warehouse_from_the_card(live_serv
     console = _collect_console(page)
     page.on("dialog", lambda d: d.accept())        # accept the "naozaj?" confirm
     page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/otazky-dl")
+    page.goto(f"{live_server}/otazky-dl")  # 442: link now redirects to nastenka; open old board directly
 
     page.wait_for_selector("text=faktura@klesc.sk")
     page.click('button:has-text("Netýka sa skladu")')
@@ -814,4 +814,45 @@ def test_the_warehouse_marks_a_dl_question_not_warehouse_from_the_card(live_serv
     assert q["status"] == "not_warehouse"
     assert pg.execute(
         "SELECT processed FROM messages WHERE message_id='e-dl307'").fetchone()[0] is True
+    assert console == [], f"browser console not clean: {console}"
+
+
+def test_board_nastenka_skeleton_loads_via_the_sklad_link(live_server, pg, page):
+    """#442 lane 1: the signed sklad link lands on the unified nástenka, the tab bar and
+    the version label render, and the browser console is clean. The old /otazky board is
+    NOT disabled in lane 1 and stays reachable for the same session."""
+    from app.httpapi import sklad_key
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/nastenka")
+
+    # the version label is present and matches the backend /version
+    backend_ver = page.request.get(f"{live_server}/version").text().strip()
+    assert backend_ver in page.locator('[data-testid="version"]').inner_text()
+
+    # the tab bar renders
+    for label in ("Otázky sklad", "Produkty objednávky", "Zákazníci", "Kôš"):
+        page.wait_for_selector(f"text={label}")
+
+    # the board api ping answers for this session
+    ping = page.request.get(f"{live_server}/api/board/ping")
+    assert ping.ok
+
+    # the old board still works for the same cookie
+    page.goto(f"{live_server}/otazky")
+    assert page.locator('[data-testid="version"]').count() >= 1
+
+    assert console == [], f"browser console not clean: {console}"
+
+
+def test_board_nastenka_reachable_via_the_dl_link_too(live_server, pg, page):
+    """The DL key must NOT lose access — it lands on the SAME unified nástenka (#442 §6)."""
+    from app.httpapi import dl_key
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/nastenka")
+    page.wait_for_selector("text=Otázky sklad")
+    page.wait_for_selector("text=História dodacích listov")
     assert console == [], f"browser console not clean: {console}"

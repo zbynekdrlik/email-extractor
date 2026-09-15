@@ -193,6 +193,56 @@ ADD_HELD_ORDERS_EXPIRED_RELEASE_REASON = [
 ]
 
 
+# #442 (revision 15): board redesign — the audit_log change trail (spec §5). Every change
+# made through the new nástenka, and the existing teach.apply/undo paths, writes one row via
+# app/board/services/audit.py. "Vrátiť" restores `before` (or clears deleted_at) and appends
+# a `restore` row. `row_id` is TEXT because the audited tables key on mixed pk types (int id,
+# gtin, ean) — it is only ever stored/compared as text, never interpolated into SQL.
+AUDIT_LOG = [
+    """
+    CREATE TABLE IF NOT EXISTS audit_log (
+        id          BIGSERIAL PRIMARY KEY,
+        ts          TIMESTAMPTZ NOT NULL DEFAULT now(),
+        actor       TEXT NOT NULL,
+        table_name  TEXT NOT NULL,
+        row_id      TEXT,
+        action      TEXT NOT NULL,
+        before      JSONB,
+        after       JSONB,
+        note        TEXT NOT NULL DEFAULT '',
+        question_id BIGINT,
+        message_id  TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_audit_log_row ON audit_log (table_name, row_id)",
+    "CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log (ts DESC)",
+]
+
+# #442 (revision 16): soft delete — a `deleted_at` column on every curated/override table
+# (spec §5). A deleted row STAYS in the table (recoverable from the Kôš), flagged by
+# deleted_at, and is skipped by every snapshot rebuild / matching read. Where a `retired`
+# boolean already exists (the 4 override tables) it is UNIFIED: retired rows are backfilled
+# to deleted_at, and readers treat `deleted_at IS NOT NULL` exactly like `retired` (both kept
+# in sync going forward; `retired` is NOT dropped). The other 5 tables hard-deleted from the
+# UI before; they now soft-delete too. Transaction-safe (ADD COLUMN / UPDATE only).
+SOFT_DELETE = [
+    "ALTER TABLE catalog_overrides ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ",
+    "ALTER TABLE dl_catalog_overrides ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ",
+    "ALTER TABLE customer_overrides ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ",
+    "ALTER TABLE dl_supplier_overrides ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ",
+    "ALTER TABLE mail_rules ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ",
+    "ALTER TABLE item_memory ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ",
+    "ALTER TABLE global_item_memory ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ",
+    "ALTER TABLE dl_item_memory ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ",
+    "ALTER TABLE dl_supplier_memory ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ",
+    # backfill the 4 tables that already carried a `retired` flag → unify onto deleted_at
+    "UPDATE catalog_overrides SET deleted_at = now() WHERE retired AND deleted_at IS NULL",
+    "UPDATE dl_catalog_overrides SET deleted_at = now() WHERE retired AND deleted_at IS NULL",
+    "UPDATE customer_overrides SET deleted_at = now() WHERE retired AND deleted_at IS NULL",
+    "UPDATE dl_supplier_overrides SET deleted_at = now() WHERE retired AND deleted_at IS NULL",
+]
+
+
 # SCHEMA above is FROZEN as revision 1 (the baseline). NEVER edit those statements for a
 # schema change — append a NEW numbered migrate.Revision to this list instead
 # (immutable-migrations, #269). run_migrations() applies only the unapplied revisions, in
@@ -245,6 +295,8 @@ REVISIONS = [
     ]),
     migrate.Revision(14, "add_held_orders_expired_release_reason",
                      ADD_HELD_ORDERS_EXPIRED_RELEASE_REASON),
+    migrate.Revision(15, "create_audit_log", AUDIT_LOG),
+    migrate.Revision(16, "add_deleted_at_soft_delete", SOFT_DELETE),
 ]
 
 

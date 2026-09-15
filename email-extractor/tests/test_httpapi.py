@@ -150,7 +150,10 @@ def _sklad_client(secret="t", base=""):
 def test_the_signed_warehouse_link_opens_the_questions_page_with_no_password():
     from app import httpapi
     _, c = _sklad_client()
-    assert c.get("/sklad/" + httpapi.sklad_key("t")).status_code == 302
+    # #442: the signed link now lands on the unified nástenka (both keys valid), but the
+    # old /otazky board is NOT disabled in lane 1 and stays reachable for the sklad role.
+    r0 = c.get("/sklad/" + httpapi.sklad_key("t"))
+    assert r0.status_code == 302 and "/nastenka" in r0.headers["Location"]
     r = c.get("/otazky")
     assert r.status_code == 200
     assert b'data-testid="version"' in r.data          # version label (mandatory rule)
@@ -207,7 +210,10 @@ def test_a_login_is_remembered_so_nobody_retypes_the_password():
 def test_the_signed_dl_warehouse_link_opens_the_dl_questions_page_with_no_password():
     from app import httpapi
     _, c = _sklad_client()
-    assert c.get("/sklad-dl/" + httpapi.dl_key("t")).status_code == 302
+    # #442: the DL link also lands on the unified nástenka now (DL key must NOT lose
+    # access), while the old /otazky-dl board stays reachable in lane 1.
+    r0 = c.get("/sklad-dl/" + httpapi.dl_key("t"))
+    assert r0.status_code == 302 and "/nastenka" in r0.headers["Location"]
     r = c.get("/otazky-dl")
     assert r.status_code == 200
     assert b'data-testid="version"' in r.data

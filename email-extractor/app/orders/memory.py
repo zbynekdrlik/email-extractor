@@ -99,6 +99,7 @@ def resolve(conn, customer_ean: str, item: str, as_of: str = "") -> Recalled | N
         """SELECT gtin, max(card), max(delivered_on)
              FROM item_memory
             WHERE customer_ean = %s AND item_key = %s AND source = 'human'
+              AND deleted_at IS NULL
             GROUP BY gtin ORDER BY max(created_at) DESC LIMIT 1""",
         (str(customer_ean), key)).fetchone()
     if taught:
@@ -112,6 +113,7 @@ def resolve(conn, customer_ean: str, item: str, as_of: str = "") -> Recalled | N
                   max(delivered_on)            AS last_day
              FROM item_memory
             WHERE customer_ean = %s AND item_key = %s
+              AND deleted_at IS NULL
               AND (%s::date IS NULL OR delivered_on < %s::date)
             GROUP BY gtin""",
         (str(customer_ean), key, as_of or None, as_of or None)).fetchall()
@@ -177,7 +179,8 @@ def resolve_global(conn, item: str) -> Recalled | None:
     if not key:
         return None
     row = conn.execute(
-        "SELECT gtin, card FROM global_item_memory WHERE item_key = %s", (key,)).fetchone()
+        "SELECT gtin, card FROM global_item_memory "
+        "WHERE item_key = %s AND deleted_at IS NULL", (key,)).fetchone()
     if not row:
         return None
     return Recalled(gtin=str(row[0]), card=row[1] or "", strength=1, unanimous=True,
@@ -286,7 +289,7 @@ def list_customer_aliases(conn, customer_ean: str) -> list[dict]:
     can tell a curated assignment from raw delivery history at a glance."""
     rows = conn.execute(
         """SELECT id, item_key, item_raw, gtin, card, delivered_on, source, created_at
-             FROM item_memory WHERE customer_ean = %s
+             FROM item_memory WHERE customer_ean = %s AND deleted_at IS NULL
             ORDER BY created_at DESC""", (str(customer_ean),)).fetchall()
     return [_alias_row(r) for r in rows]
 
@@ -300,9 +303,12 @@ def delete_item_memory_row(conn, row_id: int, customer_ean: str) -> bool:
     guessing an id, and restricted to curated sources so a real delivery record
     (source='ship'/'archive') can never be deleted here — removing shipment history would
     silently corrupt `resolve()`'s day-count majority for every other wording."""
+    # #442: SOFT delete — flag the row (recoverable from the Kôš), never remove it. Idempotent:
+    # an already-deleted row matches nothing (deleted_at IS NULL) and returns False.
     row = conn.execute(
-        """DELETE FROM item_memory
+        """UPDATE item_memory SET deleted_at = now()
             WHERE id = %s AND customer_ean = %s AND source = ANY(%s)
+              AND deleted_at IS NULL
            RETURNING id""",
         (row_id, str(customer_ean), list(CURATED_SOURCES))).fetchone()
     return row is not None
@@ -330,7 +336,8 @@ def list_global_aliases(conn, limit: int = 500) -> list[dict]:
     """Every globally-taught wording, newest first — the /znalosti page's global section."""
     rows = conn.execute(
         """SELECT id, item_key, item_raw, gtin, card, taught_by, created_at
-             FROM global_item_memory ORDER BY created_at DESC LIMIT %s""",
+             FROM global_item_memory WHERE deleted_at IS NULL
+            ORDER BY created_at DESC LIMIT %s""",
         (limit,)).fetchall()
     return [{"id": int(r[0]), "item_key": r[1], "item_raw": r[2] or "", "gtin": r[3],
              "card": r[4] or "", "taught_by": r[5] or "", "created_at": r[6]} for r in rows]
@@ -342,8 +349,11 @@ def delete_global_row(conn, row_id: int) -> bool:
     owning question, and a /znalosti page must be able to correct ANY global mistake,
     including one originally taught through the ask/answer flow. Does not reopen the
     original order_questions row (out of scope for direct curation)."""
+    # #442: SOFT delete — flag the row (recoverable from the Kôš), never remove it. Idempotent:
+    # an already-deleted row matches nothing (deleted_at IS NULL) and returns False.
     row = conn.execute(
-        "DELETE FROM global_item_memory WHERE id = %s RETURNING id", (row_id,)).fetchone()
+        "UPDATE global_item_memory SET deleted_at = now() "
+        "WHERE id = %s AND deleted_at IS NULL RETURNING id", (row_id,)).fetchone()
     return row is not None
 
 

@@ -61,6 +61,13 @@ def _login(c):
 # automatically to every GET route and every route in general, respectively).
 EXPECTED_ROUTES = sorted([
     (("GET",), "/"),
+    # #442 board redesign lane 1: the unified nástenka skeleton (blueprint `board`) — a
+    # legitimate NEW route set, not a #268 code-move; added here in the same commit that
+    # registers it. `/nastenka` + `/nastenka/<tab>` render the tabbed layout; the board API
+    # lives under `/api/board/*` (lane 1 only exposes the `ping` health probe).
+    (("GET",), "/nastenka"),
+    (("GET",), "/nastenka/<tab>"),
+    (("GET",), "/api/board/ping"),
     # #342: the codex-bridge push endpoint (machine X-Token auth) — a legitimate NEW route,
     # not a #268 code-move; added here in the same commit that registers it.
     (("POST",), "/api/codex/orders"),
