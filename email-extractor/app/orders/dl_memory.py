@@ -221,3 +221,46 @@ def resolve(conn, supplier_ean: str, item: str, catalog_gtins=None,
         gtin=chosen_gtin, card=chosen["card"], strength=chosen["weight"],
         unanimous=unanimous, last_day=chosen["last_day"] or "",
         weight_override=unanimous and chosen["weight"] >= WEIGHT_OVERRIDE_MIN)
+
+
+# --- #445 board lane 4: curated (nástenka) alias management for a DL card. The parallels of
+# memory.add_customer_alias / delete_item_memory_row on the SUPPLIER-keyed dl_item_memory —
+# same soft-delete doctrine (spec §5: never hard-delete; the row stays, recoverable from the
+# Kôš, and `resolve()` already filters `deleted_at IS NULL`). Kept here beside `remember` so
+# every dl_item_memory write path lives in ONE module.
+
+CURATED_SOURCES = ("human", "sheet-import")
+
+
+def add_dl_alias(conn, supplier_ean: str, wording: str, gtin: str, card: str) -> int | None:
+    """Teach a wording for ONE supplier directly (nástenka Produkty sklad card), dated today,
+    source='human' — so `resolve()`'s taught-first rung treats it exactly like a warehouse
+    answer. Returns the new row's id, or None when the (supplier, wording, gtin, day, cnt)
+    identity already exists (idempotent) or a required field is missing."""
+    key = item_key(wording)
+    if not (supplier_ean and key and gtin):
+        return None
+    row = conn.execute(
+        """INSERT INTO dl_item_memory
+               (supplier_ean, item_key, item_raw, gtin, card, delivered_on, cnt, source)
+           VALUES (%s, %s, %s, %s, %s, current_date, 1, 'human')
+           ON CONFLICT (supplier_ean, item_key, gtin, delivered_on, cnt) DO NOTHING
+           RETURNING id""",
+        (str(supplier_ean), key, str(wording), str(gtin), card or "")).fetchone()
+    return int(row[0]) if row else None
+
+
+def delete_dl_item_memory_row(conn, row_id: int, supplier_ean: str) -> bool:
+    """SOFT-delete ONE curated DL alias (source='human'/'sheet-import' only), scoped to
+    `supplier_ean` so a card page can never remove another supplier's row by guessing an id,
+    and restricted to curated sources so real delivery history (source='ship') is never
+    deletable here (that would corrupt `resolve()`'s weighted majority). Idempotent: an
+    already-deleted row matches nothing and returns False. Mirrors
+    `memory.delete_item_memory_row` exactly."""
+    row = conn.execute(
+        """UPDATE dl_item_memory SET deleted_at = now()
+            WHERE id = %s AND supplier_ean = %s AND source = ANY(%s)
+              AND deleted_at IS NULL
+           RETURNING id""",
+        (row_id, str(supplier_ean), list(CURATED_SOURCES))).fetchone()
+    return row is not None

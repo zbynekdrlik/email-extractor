@@ -79,6 +79,14 @@ EXPECTED_ROUTES = sorted([
     (("GET",), "/api/board/questions/<int:qid>/preview"),
     (("GET",), "/api/board/files/<mid>/<int:idx>"),
     (("GET",), "/api/board/eml/<mid>"),
+    # #445 board redesign lane 4: the Produkty sklad + Produkty objednávky API — list (scope
+    # + q + page), create/update (POST), soft delete, per-card detail, and alias add/remove.
+    (("GET",), "/api/board/products"),
+    (("POST",), "/api/board/products"),
+    (("GET",), "/api/board/products/<gtin>"),
+    (("DELETE",), "/api/board/products/<gtin>"),
+    (("POST",), "/api/board/products/<gtin>/aliases"),
+    (("DELETE",), "/api/board/products/<gtin>/aliases"),
     # #342: the codex-bridge push endpoint (machine X-Token auth) — a legitimate NEW route,
     # not a #268 code-move; added here in the same commit that registers it.
     (("POST",), "/api/codex/orders"),

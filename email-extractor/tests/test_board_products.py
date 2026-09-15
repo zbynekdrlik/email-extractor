@@ -42,6 +42,13 @@ def _login(c):
     c.post("/login", data={"password": "secret"})
 
 
+def _base_snapshot(pg):
+    """A real base snapshot must exist for `rebuild_from_overrides` to freeze anything (in
+    prod there always is one). Freeze a minimal base so the raw-snapshot readers
+    (`catalog_gtin_set`) actually see override cards after a rebuild."""
+    snapshot._freeze(pg, [{"gtin": "BASE0", "name": "Base", "alias": ""}], [])
+
+
 def _seed_orders(pg, gtin, name, alias=""):
     snapshot.upsert_catalog_card(pg, gtin, name, alias=alias)
     snapshot.rebuild_from_overrides(pg)
@@ -161,6 +168,7 @@ def test_the_board_products_api_needs_a_session(pg):
 # --- create / update delegate to the SAME snapshot machinery + audit ----------------
 
 def test_create_orders_card_has_the_same_db_effect_as_znalosti_and_audits(pg):
+    _base_snapshot(pg)
     c = _client()
     _sklad(c)
     r = c.post("/api/board/products?scope=orders",
@@ -220,6 +228,7 @@ def test_create_rejects_missing_gtin_or_name(pg):
 # --- delete = SOFT delete (never hard) + audit + vanishes from matching -------------
 
 def test_delete_orders_card_soft_deletes_audits_and_vanishes_from_gtin_set(pg):
+    _base_snapshot(pg)
     _seed_orders(pg, "DEL1", "Na zmazanie")
     assert "DEL1" in snapshot.catalog_gtin_set(pg)
     c = _client()

@@ -44,6 +44,9 @@ DEFAULT_TAB = TABS[0][0]
 _TAB_CONTENT: dict[str, tuple[str, str, str | None]] = {
     "otazky-objednavky": ("board/questions.html", "/static/board/tab-questions.js", "orders"),
     "otazky-sklad": ("board/questions.html", "/static/board/tab-questions.js", "dl"),
+    # #445 lane 4: the two product tabs — one template + one JS, scope from the tab.
+    "produkty-objednavky": ("board/products.html", "/static/board/tab-products.js", "orders"),
+    "produkty-sklad": ("board/products.html", "/static/board/tab-products.js", "dl"),
 }
 
 
@@ -86,5 +89,11 @@ def register_board(app, deps, questions_api=None) -> None:
     # layer over `services/questions.py`. Registered on the SAME single board blueprint.
     from . import questions_orders
     questions_orders.register(bp, deps, questions_api)
+
+    # #445 lane 4: the Produkty sklad + Produkty objednávky API (list/search/paging,
+    # create/update/delete soft+audit, per-card aliases) — a thin route layer over
+    # `services/catalog.py` (which DELEGATES to snapshot/dl_snapshot + memory/dl_memory).
+    from . import products_orders
+    products_orders.register(bp, deps)
 
     app.register_blueprint(bp)
