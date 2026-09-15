@@ -49,6 +49,14 @@ def _base_snapshot(pg):
     snapshot._freeze(pg, [{"gtin": "BASE0", "name": "Base", "alias": ""}], [])
 
 
+def _base_snapshot_dl(pg):
+    """A DL base snapshot so `dl_rebuild_from_overrides` freezes and the frozen DL catalog
+    (what the DL matcher reads) actually reflects override deletes — the DL twin of
+    `_base_snapshot`."""
+    dl_snapshot._freeze(pg, [{"gtin": "DBASE0", "name": "Base", "doplnok": "",
+                              "mass": None, "sklad": "", "cena": None}], [])
+
+
 def _seed_orders(pg, gtin, name, alias=""):
     snapshot.upsert_catalog_card(pg, gtin, name, alias=alias)
     snapshot.rebuild_from_overrides(pg)
@@ -218,6 +226,24 @@ def test_create_dl_card_delegates_and_audits(pg):
     assert n == 1
 
 
+def test_update_dl_card_name_only_keeps_mass_sklad_cena(pg):
+    """A DL card edit that sends ONLY name/gtin must NOT wipe mass/sklad/cena/doplnok —
+    `dl_snapshot.upsert_dl_catalog_card` overwrites all fields, so `_dl_upsert` reads the
+    current card and preserves any field the editor did not send (spec-flagged risk)."""
+    _seed_dl(pg, "DKEEP", "Staré", doplnok="d1", mass=1.5, sklad="100", cena=0.4)
+    c = _client()
+    _sklad(c)
+    r = c.post("/api/board/products?scope=dl", json={"gtin": "DKEEP", "name": "Nové meno"})
+    assert r.status_code == 200
+    assert r.get_json()["action"] == "update"
+    row = next(x for x in dl_snapshot.dl_catalog_for_management(pg) if x["gtin"] == "DKEEP")
+    assert row["name"] == "Nové meno"
+    assert row["mass"] == 1.5
+    assert row["sklad"] == "100"
+    assert row["cena"] == 0.4
+    assert row["doplnok"] == "d1"
+
+
 def test_create_rejects_missing_gtin_or_name(pg):
     c = _client()
     _sklad(c)
@@ -249,7 +275,11 @@ def test_delete_orders_card_soft_deletes_audits_and_vanishes_from_gtin_set(pg):
 
 
 def test_delete_dl_card_soft_deletes_and_vanishes(pg):
+    _base_snapshot_dl(pg)
     _seed_dl(pg, "DDEL", "DL na zmazanie")
+    # the frozen DL catalog the matcher reads carries it before the delete
+    assert "DDEL" in {x["gtin"] for x in
+                      dl_snapshot.load_catalog(pg, dl_snapshot.latest_snapshot_id(pg))}
     c = _client()
     _sklad(c)
     r = c.delete("/api/board/products/DDEL?scope=dl")
@@ -258,6 +288,9 @@ def test_delete_dl_card_soft_deletes_and_vanishes(pg):
                      "WHERE gtin='DDEL'").fetchone()
     assert row[0] is True and row[1] is not None
     assert not any(x["gtin"] == "DDEL" for x in dl_snapshot.dl_catalog_for_management(pg))
+    # gone from the frozen DL catalog too (the DL matcher's gtin source) — parity with orders
+    assert "DDEL" not in {x["gtin"] for x in
+                          dl_snapshot.load_catalog(pg, dl_snapshot.latest_snapshot_id(pg))}
     n = pg.execute("SELECT count(*) FROM audit_log WHERE table_name='dl_catalog_overrides' "
                    "AND action='delete' AND row_id='DDEL'").fetchone()[0]
     assert n == 1

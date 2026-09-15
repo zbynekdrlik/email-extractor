@@ -18,8 +18,10 @@ _CURATED = ("human", "sheet-import")
 
 def alias_gtins(conn, tables: tuple[str, ...], needle: str) -> set[str]:
     """The gtins of cards whose learned wording matches `needle` (fold-compared like every
-    other board search). Bounded to DISTINCT wordings per table (curated tail, not raw
-    per-delivery history rows)."""
+    other board search). Bounded to DISTINCT (gtin, wording) per table — this includes ship
+    history, not only curated aliases, which is desirable for SEARCH (find a card by any
+    wording ever seen for it). The per-card alias LIST (`card_aliases`) is the one that
+    restricts to `_CURATED`."""
     hits: set[str] = set()
     for t in tables:
         for gtin, raw in conn.execute(
