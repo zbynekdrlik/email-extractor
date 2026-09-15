@@ -21,24 +21,51 @@ def _cfg(**kw):
 
 
 def _hp_msg(pg, mid="hp1", needs_vision=True, has_attachments=True, minutes_old=31,
-           created_at=None):
+           created_at=None, from_addr="tlaciaren@x.sk"):
     """A stuck human_processing message. `created_at` (an explicit ISO timestamp) pins
     an exact receive time — used to place a message BEFORE the historical-backlog cutoff;
-    otherwise it defaults to `minutes_old` minutes ago (always today, past the cutoff)."""
+    otherwise it defaults to `minutes_old` minutes ago (always today, past the cutoff).
+    `from_addr` (#436) selects scanner vs non-scanner routing."""
     if created_at is not None:
         pg.execute(
             """INSERT INTO messages (message_id, category, subject, from_addr,
                                      has_attachments, needs_vision, processed, created_at)
-               VALUES (%s, 'human_processing', 'scan', 'tlaciaren@x.sk', %s, %s, false, %s)""",
-            (mid, has_attachments, needs_vision, created_at))
+               VALUES (%s, 'human_processing', 'scan', %s, %s, %s, false, %s)""",
+            (mid, from_addr, has_attachments, needs_vision, created_at))
     else:
         pg.execute(
             """INSERT INTO messages (message_id, category, subject, from_addr,
                                      has_attachments, needs_vision, processed, created_at)
-               VALUES (%s, 'human_processing', 'scan', 'tlaciaren@x.sk', %s, %s, false,
+               VALUES (%s, 'human_processing', 'scan', %s, %s, %s, false,
                        now() - make_interval(mins => %s))""",
-            (mid, has_attachments, needs_vision, minutes_old))
+            (mid, from_addr, has_attachments, needs_vision, minutes_old))
     return mid
+
+
+# #436: OCR text of a foreign CMR transport form — 3600+ chars of "successful" OCR with
+# NO order/DL structure (no EAN, no quantity+unit item lines, no SK DL keyword). This is
+# exactly the msg-11503 signature the old `needs_vision`-only gate never sent to vision.
+_CMR_OCR = (
+    "MEDZINARODNY NAKLADNY LIST\nCMR\n"
+    "1. Odosielatel: HK LOAN Sp. z o.o., Katowice, Polsko\n"
+    "2. Prijemca: DUOPACK SLOVAKIA s.r.o.\n"
+    "3. Miesto nakladky: Jaroslaw, 14.09.\n"
+    "4. Miesto vykladky: Bratislava\n"
+    "16. Dopravca a jeho adresa ...\n"
+    "22. Podpis a peciatka odosielatela\n"
+    "23. Podpis a peciatka dopravcu\n"
+) * 8   # ~3600 znakov, ako reálny sken
+
+
+def _hp_attachment(pg, mid, text, filename="scan.pdf", mime="application/pdf",
+                   needs_vision=False):
+    """One attachment row for a stuck message (#436) — `text` becomes its OCR
+    `extracted_text`, which the new `_rescue` gate reads to decide DL-usability."""
+    pg.execute(
+        """INSERT INTO attachments (message_id, idx, filename, mime, method,
+                                    needs_vision, extracted_text)
+           VALUES (%s, 0, %s, %s, 'ocr', %s, %s)""",
+        (mid, filename, mime, needs_vision, text))
 
 
 # --- Vrstva 1: vision-asistovaná záchrana ----------------------------------
@@ -297,3 +324,104 @@ def test_sweep_processes_new_message_despite_suppressed_backlog(pg):
         f"new message was NOT rescued (still {new_cat!r}) — FIFO starvation bug #390")
     assert handled >= 1, "sweep must handle at least the new message"
     assert len(rescued) >= 1, "vision classify must have been called for the new message"
+
+
+# --- #436: „úspešný" OCR (CMR/iný papier) tiež dostane vision + scanner routing ---
+
+def test_scanner_scan_with_usable_looking_but_unusable_ocr_still_gets_vision(pg):
+    """#436 root cause 1: sken z tlačiarne s „úspešným" OCR (CMR, ~3600 zn., bez
+    položiek/EAN/SK-DL kľúčových slov) mal `needs_vision=False`, takže stará brána
+    `needs_vision and has_attachments` vision NIKDY nespustila. Nová brána spustí vision
+    pre ĽUBOVOĽNÝ mail s prílohou, ktorého OCR je pre DL/objednávku nepoužiteľné."""
+    _hp_msg(pg, "cmr1", needs_vision=False, has_attachments=True)
+    _hp_attachment(pg, "cmr1", _CMR_OCR)
+    called = []
+
+    def classify(cfg, atts):
+        called.append(atts)
+        return {"category": "no_processing", "confidence": 0.2,
+                "reason": "prepravný list", "doc_type": "CMR"}
+
+    human_processing.sweep(
+        pg, _cfg(ops_channel_id=888, delivery_notes_channel_id=243,
+                 delivery_notes_scanner_senders="tlaciaren@x.sk"),
+        classify=classify)
+    assert called, "vision sa MUSÍ pokúsiť aj pri needs_vision=False, keď je OCR nepoužiteľné"
+
+
+def test_scanner_alert_goes_to_delivery_notes_channel_with_doc_type(pg):
+    """#436 root cause 2: pre scanner odosielateľa (`delivery_notes_scanner_senders`) musí
+    Layer-2 alert ísť na SKLADOVÝ kanál 243 (`delivery_notes_channel_id`), nie ops 592, a
+    niesť rozpoznaný typ dokladu z vision klasifikátora — aby sklad vedel, že jeho sken
+    nebol dodací list."""
+    _hp_msg(pg, "cmr2", needs_vision=False, has_attachments=True)
+    _hp_attachment(pg, "cmr2", _CMR_OCR)
+    human_processing.sweep(
+        pg, _cfg(ops_channel_id=592, delivery_notes_channel_id=243,
+                 delivery_notes_scanner_senders="tlaciaren@x.sk"),
+        classify=lambda cfg, atts: {"category": "no_processing", "confidence": 0.2,
+                                    "reason": "prepravný list", "doc_type": "CMR"})
+    channel, kind, body = pg.execute(
+        "SELECT channel_id, kind, body_html FROM pending_alerts "
+        "WHERE message_id='cmr2'").fetchone()
+    assert channel == 243                    # skladový kanál, NIE ops
+    assert channel not in (592, 0)           # nie ops, nie held
+    assert kind == "scanner_not_dl"
+    assert "CMR" in body                     # rozpoznaný typ dokladu je v texte
+
+
+def test_non_scanner_unusable_ocr_routes_to_ops_unchanged(pg):
+    """#436: ne-skenerový odosielateľ s nepoužiteľným OCR ostáva na starom ops routingu
+    (#308/#310 nezmenené) — kanál 243 sa týka LEN skenerov."""
+    _hp_msg(pg, "cmr3", from_addr="uctaren@firma.sk", needs_vision=False,
+            has_attachments=True)
+    _hp_attachment(pg, "cmr3", _CMR_OCR)
+    human_processing.sweep(
+        pg, _cfg(ops_channel_id=888, delivery_notes_channel_id=243,
+                 delivery_notes_scanner_senders="tlaciaren@x.sk"),
+        classify=lambda cfg, atts: {"category": "human_processing", "confidence": 0.1,
+                                    "doc_type": "výplatná páska"})
+    channel, kind = pg.execute(
+        "SELECT channel_id, kind FROM pending_alerts WHERE message_id='cmr3'").fetchone()
+    assert channel == 888                    # ops, nezmenené
+    assert kind == "human_processing_review"
+    assert channel not in (243, 152)         # NIKDY skladový/predajný kanál
+
+
+def test_usable_dl_ocr_skips_vision(pg):
+    """#436: ak OCR má jasnú DL štruktúru (produktové EAN-13 kódy + položkové riadky),
+    klasifikátor už mal dobrý vstup — vision sa nevolá (šetríme jedno LLM volanie),
+    správa ide rovno do Layer-2 siete."""
+    usable = ("Dodaci list c. 12345\n"
+              "8586001112223 Mlieko polotucne 5 ks\n"
+              "8586004445556 Maslo 250g 3 ks\n"
+              "8586007778889 Jogurt biely 12 ks\n")
+    _hp_msg(pg, "usable1", needs_vision=False, has_attachments=True)
+    _hp_attachment(pg, "usable1", usable)
+    called = []
+    human_processing.sweep(
+        pg, _cfg(ops_channel_id=888,
+                 delivery_notes_scanner_senders="tlaciaren@x.sk"),
+        classify=lambda cfg, atts: called.append(1) or None)
+    assert not called, "pri použiteľnom DL OCR (EAN + položky) sa vision nevolá"
+    # sieť aj tak notifikuje (žiadna tichá jama) — skener → 243
+    kind = pg.execute(
+        "SELECT kind FROM pending_alerts WHERE message_id='usable1'").fetchone()[0]
+    assert kind == "scanner_not_dl"
+
+
+def test_scanner_dedupe_is_kept_one_alert_per_message(pg):
+    """#436: dedupe ostáva — opakované sweepy nesmú enqueovať druhý scanner alert."""
+    _hp_msg(pg, "cmr5", needs_vision=False, has_attachments=True)
+    _hp_attachment(pg, "cmr5", _CMR_OCR)
+    cfg = _cfg(delivery_notes_channel_id=243,
+               delivery_notes_scanner_senders="tlaciaren@x.sk")
+    human_processing.sweep(pg, cfg, classify=lambda c, a: {"category": "no_processing",
+                                                           "confidence": 0.2,
+                                                           "doc_type": "CMR"})
+    human_processing.sweep(pg, cfg, classify=lambda c, a: {"category": "no_processing",
+                                                           "confidence": 0.2,
+                                                           "doc_type": "CMR"})
+    assert pg.execute(
+        "SELECT count(*) FROM pending_alerts WHERE message_id='cmr5' "
+        "AND kind='scanner_not_dl'").fetchone()[0] == 1
