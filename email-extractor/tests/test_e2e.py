@@ -949,3 +949,50 @@ def test_board_dl_question_tab_shows_only_dl_kinds(live_server, pg, page):
     # the orders-only question must NOT appear on the DL tab
     assert page.get_by_text("rožok orders only").count() == 0
     assert console == [], f"browser console not clean: {console}"
+
+
+def test_board_kos_delete_a_card_then_restore_it_in_the_browser(live_server, pg, page):
+    """#444 lane 3: an admin deletes a product card via the existing /znalosti API, the delete
+    shows up in the Kôš tab, „Vrátiť" restores it (through the real confirm dialog), and the
+    card is back in /api/znalosti/catalog — all in the real browser, clean console, version
+    label matching the backend."""
+    from app.orders import snapshot
+
+    # a real base snapshot so the card shows in /api/znalosti/catalog (the search endpoint,
+    # which reads the frozen snapshot — an override-only card would never appear there)
+    snapshot.import_snapshot(
+        pg,
+        "GTIN,Názov,doplnok\nE2EKOS,Karta Kôš E2E,\n",
+        "Názov organizácie,EAN kód EDI,E-mail\nZákazník E2E,2000000000042,z@e2e.sk\n")
+
+    console = _collect_console(page)
+    page.on("dialog", lambda d: d.accept())   # accept the „Vrátiť" confirm() prompt
+
+    # admin login — reaches BOTH the /znalosti delete API and the Kôš tab
+    page.goto(f"{live_server}/login")
+    page.fill("input[name=password]", "secret")
+    page.click("button[type=submit]")
+
+    # delete the card via the existing /znalosti API (same session cookie) → soft delete + audit
+    resp = page.request.delete(f"{live_server}/api/znalosti/products/E2EKOS")
+    assert resp.ok, resp.status
+    assert not any(it["gtin"] == "E2EKOS"
+                   for it in page.request.get(f"{live_server}/api/znalosti/catalog?q=E2EKOS")
+                   .json()["items"]), "card should be gone from the catalog after delete"
+
+    # it shows up in the Kôš tab; the version label matches the backend
+    page.goto(f"{live_server}/nastenka/kos")
+    backend_ver = page.request.get(f"{live_server}/version").text().strip()
+    assert backend_ver in page.locator('[data-testid="version"]').inner_text()
+    page.fill("#trash-search", "E2EKOS")
+    page.wait_for_selector('#trash-rows tr:has-text("E2EKOS")')
+
+    # „Vrátiť" restores it
+    page.click('button:has-text("Vrátiť")')
+    page.wait_for_selector("text=Vrátené")
+
+    # the card is back in the effective catalog
+    back = page.request.get(f"{live_server}/api/znalosti/catalog?q=E2EKOS").json()["items"]
+    assert any(it["gtin"] == "E2EKOS" for it in back), "card was not restored to the catalog"
+
+    assert console == [], f"browser console not clean: {console}"
