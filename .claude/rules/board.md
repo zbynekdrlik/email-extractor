@@ -323,3 +323,54 @@ already); of a `restore` row itself → refused; of a missing audit id → 404. 
   kinds (`alias`/`dl_alias`/`supplier`) show source/date origin text only.
 - **`e2e-orders`/`e2e-dl` corpora stay byte-identical** — lane 6 changes only UI + audit + new
   read/soft-delete/update paths, never the resolve/match logic itself, so no corpus expectation moves.
+
+## Lane 7 — História objednávok + História dodacích listov (#448): thin READ over order_runs, safe actions
+
+- **Tab → scope mapping + slug:** the tab slugs are `historia-objednavok` (scope `orders` =
+  `ai_orders`+`static_orders`) and `historia-dl` (scope `dl` = `dodacie_listy`) — note
+  `historia-objednavok` (NOT `-objednavky`; it must match `board/__init__.TABS`). ONE route
+  module `history_orders.py` (`?scope=` on every route, vzor lane 4) + `history_dl.py`
+  (DL column-label descriptor, data module like `products_dl.py`); services split
+  `services/{history,history_detail,history_actions,teachback}.py` to stay ≤200 r.
+- **BOTH engines write `order_runs`+`order_items` UNMODIFIED (#200)** — so the detail (items +
+  match trace: card/rule/confidence) is UNIFORM for orders and DL from `order_items` of the
+  latest NON-shadow run. The list/detail partner + doc numbers come from `order_runs.result`
+  (`history.partner_and_docs`): orders = top-level `customer_ean`/`customer_name` + the EDI
+  filenames; DL = `result.documents[*].supplier_ean`/`supplier_name`/`doc_number`.
+- **SAFETY — `rerun` (spustiť znova) never re-ships (the whole point, #51/#239).** Allowed ONLY
+  when the doc provably never uploaded: (1) not busy (`db.active_claim`); (2) proc_status is the
+  safe-without-exception `error` (ok/partial=shipped, manual=hand-entered, review/held=human may
+  have acted — all refuse 409); (3) no confirmed `edi_sent`/`desadv_sent` row (`uploaded_at IS
+  NOT NULL`); (4) live ORION presence read (`upload.list_dirs` + `desadv_edi.already_landed`
+  for DL / `matches_wire_name` for orders), FAIL-SAFE refuse if ORION unreachable. Reset uses
+  `attempts=0` (#431).
+- **The orders ORION check must use EVERY recoverable EDI filename, never just
+  `messages.edi_file` (review 🔴, fixed in-lane).** `messages.edi_file` is set ONLY on a
+  CONFIRMED upload — an upload-FAILURE error state has it NULL yet its bytes may have landed.
+  The EDI filename IS in `order_runs.result.order_results[*].edi_filename` (set the moment the
+  EDI is BUILT, before upload). `history.orders_edi_names(result, edi_file)` collects all of
+  them (message edi_file + top-level + per-order); `_orion_has_document`/`_ledger_uploaded`
+  check the whole set, and refuse fail-safe when no name exists yet `result.would_ship` is true.
+  Any future orders "did this reach ORION" check MUST use this helper, never edi_file alone.
+- **`manual` (zadané ručne)** = release held orders WITHOUT ship via `hold._resolve_one_manually`
+  (message-scoped by construction — avoids the cross-message question-dedup hazard of a bare
+  per-qid release). Orders-only (DL has no `held_orders`) → 409 for dl scope.
+- **`teachback` writes ONLY memory + audit, never the shipped doc/ledger/ORION.** Writes
+  `item_memory` (orders, per customer_ean) / `dl_item_memory` (dl, per supplier_ean) with
+  `source='teachback'`. For it to be AUTHORITATIVE like a real answer, the taught-first rung of
+  BOTH `memory.resolve` and `dl_memory.resolve` was widened `source = 'human'` →
+  `source IN ('human','teachback')` (corpus-NEUTRAL — no teachback rows in the fixtures) and
+  `'teachback'` added to both `CURATED_SOURCES`; `dl_memory.add_dl_alias` gained a `source=`
+  param. The card picker reuses the lane-4 `/api/board/products?scope=&q=` search — no new endpoint.
+- **New audit actions `teach`/`rerun`/`manual` each get their own `restore` branch** (`audit.py`):
+  `teach` → soft-delete the taught memory row (like reverting a create; memory tables have no
+  snapshot so `_rebuild_snapshot` is a no-op); `rerun`/`manual` → explicit `RestoreError(400)`
+  (irreversible operations). board.md rule: every new audit action needs its own branch.
+- **Original preview:** NEW board-gated + history-scoped routes `/api/board/history/<mid>/files/
+  <idx>` + `/eml` (guard `history.is_history_document` = message category ∈ scope) — same
+  mechanism/pattern as lane-2 `/api/board/files`, kept separate so its guard is single-purpose
+  (history docs vs questions), lane 2 untouched.
+- **CSS scoping (lane-5 lesson, obeyed):** all rules scoped under `.board-history` with `.h-*`
+  class names — NEVER reuse another tab's `.p-*`/`.r-*` names in the ONE global `board.css`.
+- **`e2e-orders`/`e2e-dl` corpora stay green** — the resolve-widening is the only matching-adjacent
+  change and is corpus-neutral (no teachback rows in fixtures); everything else is UI/read/audit.
