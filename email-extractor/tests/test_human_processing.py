@@ -425,3 +425,26 @@ def test_scanner_dedupe_is_kept_one_alert_per_message(pg):
     assert pg.execute(
         "SELECT count(*) FROM pending_alerts WHERE message_id='cmr5' "
         "AND kind='scanner_not_dl'").fetchone()[0] == 1
+
+
+def test_scanner_doc_type_falls_back_to_category_label_then_neutral():
+    """#436: an older/degraded verdict without a free-text `doc_type` names the type from a
+    Slovak category label; a missing verdict degrades to a neutral 'neznámy typ' rather than
+    crashing the notify path."""
+    assert human_processing._scanner_doc_type({"doc_type": "CMR"}) == "CMR"
+    assert human_processing._scanner_doc_type({"category": "invoices"}) == "faktúra"
+    assert human_processing._scanner_doc_type({"category": "dodacie_listy"}) == "dodací list"
+    assert human_processing._scanner_doc_type({"category": "zzz"}) == "neznámy typ"
+    assert human_processing._scanner_doc_type(None) == "neznámy typ"
+
+
+def test_ocr_unusable_for_dl_signals():
+    """#436: EAN-13, ≥2 quantity+unit lines, or a SK DL/order keyword marks OCR 'usable'
+    (skip vision); a foreign CMR / empty OCR is 'unusable' (→ vision)."""
+    assert human_processing._ocr_unusable_for_dl("") is True
+    assert human_processing._ocr_unusable_for_dl(_CMR_OCR) is True
+    assert human_processing._ocr_unusable_for_dl("8586001112223 Mlieko") is False   # EAN
+    assert human_processing._ocr_unusable_for_dl("Dodaci list c.5") is False        # keyword
+    assert human_processing._ocr_unusable_for_dl("5 ks\n3 kg\n") is False           # 2 qty+unit
+    # a Polish CMR mentioning "Faktura nr" (no diacritic) must NOT be marked usable
+    assert human_processing._ocr_unusable_for_dl("Faktura nr 123/2026 przewozowy") is True
