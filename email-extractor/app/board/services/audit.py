@@ -114,7 +114,8 @@ def _table_columns(conn, table: str) -> dict[str, str]:
     keys against the REAL schema (so only genuine columns are ever interpolated) and to know
     which columns are jsonb (wrapped in Json())."""
     return {r[0]: r[1] for r in conn.execute(
-        "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = %s",
+        "SELECT column_name, data_type FROM information_schema.columns "
+        "WHERE table_name = %s AND table_schema = 'public'",
         (table,)).fetchall()}
 
 
@@ -188,9 +189,9 @@ def restore(conn, audit_id: int, by: str = "admin") -> bool:
     elif action == "update":
         _restore_update(conn, table_name, row_id, before)
     elif action == "answer":
-        _restore_answer(conn, qid, by)
+        _restore_answer(conn, qid)
     elif action == "undo":
-        _restore_undo(conn, qid, by)
+        _restore_undo(conn, qid, by, audit_id)
     elif action == "reopen":
         _restore_reopen(conn, qid)
     else:
@@ -233,26 +234,38 @@ def _restore_update(conn, table_name, row_id, before) -> None:
         raise RestoreError(409, "chýbajú pôvodné hodnoty (before)")
     pk_col, _ = spec
     cols = _table_columns(conn, table_name)
+    # Only columns that both exist and are not the pk are restorable (validated names).
+    restorable = {k: v for k, v in before.items() if k != pk_col and k in cols}
+    if not restorable:
+        raise RestoreError(409, "žiadne obnoviteľné stĺpce v 'before'")
+    # Idempotency guard, consistent with the other branches' 409 (review #444 finding 1): read
+    # the live values first — if they ALL already equal `before`, this update was already
+    # reverted (or never changed), so a repeat restore is a clean no-op, never a silent second
+    # write / duplicate `restore` row. (Admin-driven manual action on an autocommit connection —
+    # this is idempotency against a double-click / re-run, not a concurrency lock.)
+    sel_cols = ", ".join(restorable)  # keys validated against `cols` above — safe to inline
+    live = conn.execute(
+        f"SELECT {sel_cols} FROM {table_name} WHERE {pk_col}::text = %s",
+        (str(row_id),)).fetchone()
+    if live is None:
+        raise RestoreError(409, "pôvodný riadok neexistuje")
+    if all(live[i] == v for i, v in enumerate(restorable.values())):
+        raise RestoreError(409, "riadok už má pôvodné hodnoty (už vrátené?)")
     sets, values = [], []
-    for key, val in before.items():
-        if key == pk_col or key not in cols:
-            continue
+    for key, val in restorable.items():
         sets.append(f"{key} = %s")
         values.append(Json(val) if cols[key] == "jsonb" and val is not None else val)
-    if not sets:
-        raise RestoreError(409, "žiadne obnoviteľné stĺpce v 'before'")
     values.append(str(row_id))
-    updated = conn.execute(
-        f"UPDATE {table_name} SET {', '.join(sets)} WHERE {pk_col}::text = %s "
-        f"RETURNING {pk_col}", values).fetchone()
-    if not updated:
-        raise RestoreError(409, "pôvodný riadok neexistuje")
+    conn.execute(
+        f"UPDATE {table_name} SET {', '.join(sets)} WHERE {pk_col}::text = %s", values)
     _rebuild_snapshot(conn, table_name)
 
 
-def _restore_answer(conn, qid, by) -> None:
+def _restore_answer(conn, qid) -> None:
     """Revert a teach `answer`: run `teach.undo` (removes the mapping, reopens the question).
-    Lazy import — audit is a leaf; `teach` imports `audit` lazily too, so no cycle."""
+    Lazy import — audit is a leaf; `teach` imports `audit` lazily too, so no cycle. (`teach.undo`
+    takes no actor, so the synthetic `undo` row it appends is `auto:teach`-attributed; the outer
+    `restore` row this restore appends carries the real actor.)"""
     if qid is None:
         raise RestoreError(400, "audit riadok nemá otázku")
     from ...orders import teach
@@ -264,9 +277,19 @@ def _restore_answer(conn, qid, by) -> None:
     teach.undo(conn, int(qid))
 
 
-def _restore_undo(conn, qid, by) -> None:
-    """Revert a teach `undo`: re-apply the LAST prior `answer` for this question, via the same
-    sanctioned `teach.answer` path (which re-teaches the mapping). Nothing ships."""
+def _restore_undo(conn, qid, by, audit_id) -> None:
+    """Revert a teach `undo`: re-apply the prior `answer` for this question, via the same
+    sanctioned `teach.answer` path (which re-teaches the mapping). Nothing ships.
+
+    The prior answer is the last `answer` audit row STRICTLY BEFORE this undo's own audit id
+    (review #444 finding 2) — so in an answer(A)→undo→answer(B)→undo chain, restoring the FIRST
+    undo re-teaches A, not the globally-latest B. Only item `answer`s write an `answer` audit
+    row (a `customer`-kind question is settled via `answer_customer`, which writes none), so a
+    customer-question undo finds no prior answer here and is safely refused with a 409 rather
+    than mis-applied — reverting it is a lane-2 concern (review #444 finding). The confirmed
+    quantity/unit_price (#360) live on the question row (undo does not null them); pass them
+    through explicitly so the re-answer preserves them rather than relying on teach.answer's
+    COALESCE (review #444 finding 3)."""
     if qid is None:
         raise RestoreError(400, "audit riadok nemá otázku")
     from ...orders import teach
@@ -277,7 +300,8 @@ def _restore_undo(conn, qid, by) -> None:
         raise RestoreError(409, "otázka nie je otvorená")
     prior = conn.execute(
         "SELECT after FROM audit_log WHERE question_id = %s AND action = 'answer' "
-        "AND after IS NOT NULL ORDER BY id DESC LIMIT 1", (int(qid),)).fetchone()
+        "AND after IS NOT NULL AND id < %s ORDER BY id DESC LIMIT 1",
+        (int(qid), audit_id)).fetchone()
     if not prior or not prior[0]:
         raise RestoreError(409, "niet predošlej odpovede na obnovenie")
     after = prior[0]
@@ -286,7 +310,8 @@ def _restore_undo(conn, qid, by) -> None:
     if not gtin:
         raise RestoreError(409, "predošlá odpoveď nemá kartu")
     try:
-        teach.answer(conn, int(qid), gtin, card, by=by)
+        teach.answer(conn, int(qid), gtin, card, by=by,
+                     quantity=q.get("quantity"), unit_price=q.get("unit_price"))
     except Exception as e:  # NotACandidate / AlreadyAnswered — cannot re-apply cleanly
         raise RestoreError(409, f"nedá sa znovu odpovedať: {e}") from e
 

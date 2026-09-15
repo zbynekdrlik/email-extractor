@@ -315,3 +315,33 @@ def test_the_kos_tab_renders_the_trash_view(pg):
     # the trash tab loads its own module + a filter/search surface, not "Pripravujeme"
     assert "tab-trash.js" in body
     assert 'data-tab="kos"' in body
+
+
+# --- review #444 finding fixes: update idempotency + undo id-scoping ---------------------
+
+def test_double_restore_of_an_update_is_409(pg):
+    snapshot.upsert_catalog_card(pg, "GUPD2", "Novy")
+    aid = audit.record(pg, actor="admin", table="catalog_overrides", row_id="GUPD2",
+                       action="update", before={"name": "Stary"}, after={"name": "Novy"})
+    assert audit.restore(pg, aid) is True
+    assert pg.execute(
+        "SELECT name FROM catalog_overrides WHERE gtin='GUPD2'").fetchone()[0] == "Stary"
+    # a second restore must be a clean 409 no-op (values already == before), not a re-write
+    with pytest.raises(audit.RestoreError) as e:
+        audit.restore(pg, aid)
+    assert e.value.status == 409
+
+
+def test_restore_undo_is_scoped_to_that_undos_own_prior_answer(pg):
+    qid = _ask(pg)
+    teach.answer(pg, qid, "SLI50", "Šiška 50g", by="test")   # answer A
+    teach.undo(pg, qid)                                       # undo #1 (of A)
+    undo1 = pg.execute(
+        "SELECT id FROM audit_log WHERE question_id=%s AND action='undo' "
+        "ORDER BY id DESC LIMIT 1", (qid,)).fetchone()[0]
+    teach.answer(pg, qid, "SLI90", "Šiška 90g", by="test")   # answer B
+    teach.undo(pg, qid)                                       # undo #2 (of B)
+    # restoring undo #1 must re-apply A (SLI50), never the globally-latest B (SLI90)
+    assert audit.restore(pg, undo1) is True
+    q = teach.get(pg, qid)
+    assert q["status"] == "answered" and q["answer_gtin"] == "SLI50"
