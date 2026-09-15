@@ -949,3 +949,64 @@ def test_board_dl_question_tab_shows_only_dl_kinds(live_server, pg, page):
     # the orders-only question must NOT appear on the DL tab
     assert page.get_by_text("rožok orders only").count() == 0
     assert console == [], f"browser console not clean: {console}"
+
+
+def test_board_products_orders_tab_search_edit_delete_in_the_browser(live_server, pg, page):
+    """#445 lane 4: the Produkty objednávky tab — search a card, open it, rename + save
+    (toast), then delete (soft) with the „Vrátiť v Koši" toast — all through the real
+    browser from the signed sklad link, clean console, version label present."""
+    from app.httpapi import sklad_key
+    from app.orders import snapshot
+
+    snapshot.upsert_catalog_card(pg, "E2EPROD1", "Rožok e2e produkt")
+    snapshot.rebuild_from_overrides(pg)
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/nastenka")
+    page.goto(f"{live_server}/nastenka/produkty-objednavky")
+
+    backend_ver = page.request.get(f"{live_server}/version").text().strip()
+    assert backend_ver in page.locator('[data-testid="version"]').inner_text()
+
+    page.wait_for_selector("text=Rožok e2e produkt")
+    page.fill("#p-search", "Rožok e2e")
+    page.wait_for_selector("text=Rožok e2e produkt")
+
+    page.click('.p-row:has-text("Rožok e2e produkt") .p-edit')
+    page.wait_for_selector(".p-editor .p-name")
+    page.fill(".p-editor .p-name", "Rožok e2e premenovaný")
+    page.click(".p-editor .p-save")
+    page.wait_for_selector("text=Uložené")
+    page.wait_for_selector("text=Rožok e2e premenovaný")
+
+    page.click('.p-row:has-text("Rožok e2e premenovaný") .p-edit')
+    page.wait_for_selector(".p-editor .p-del")
+    page.click(".p-editor .p-del")
+    page.click(".p-editor .p-del-yes")
+    page.wait_for_selector("text=Vrátiť v Koši")
+    assert page.get_by_text("Rožok e2e premenovaný").count() == 0
+
+    assert console == [], f"browser console not clean: {console}"
+
+
+def test_board_products_sklad_tab_renders_dl_cards_for_the_dl_key(live_server, pg, page):
+    """The Produkty sklad tab lists DL catalog cards (admin-only before lane 4), reachable
+    via the DL key, clean console, version label present."""
+    from app.httpapi import dl_key
+    from app.orders import dl_snapshot
+
+    dl_snapshot.upsert_dl_catalog_card(pg, "E2EDL1", "Múka e2e dl", doplnok="muka",
+                                       mass=1.0, sklad="100", cena=0.4)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/nastenka")
+    page.goto(f"{live_server}/nastenka/produkty-sklad")
+
+    backend_ver = page.request.get(f"{live_server}/version").text().strip()
+    assert backend_ver in page.locator('[data-testid="version"]').inner_text()
+
+    page.wait_for_selector("text=Múka e2e dl")
+    assert console == [], f"browser console not clean: {console}"
