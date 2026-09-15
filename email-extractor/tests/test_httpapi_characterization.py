@@ -87,6 +87,12 @@ EXPECTED_ROUTES = sorted([
     (("DELETE",), "/api/board/products/<gtin>"),
     (("POST",), "/api/board/products/<gtin>/aliases"),
     (("DELETE",), "/api/board/products/<gtin>/aliases"),
+    # #447 board redesign lane 6: the Naučené sklad + Naučené objednávky API — list per kind
+    # (scope+kind query, origin joins, search/paging) + update/delete (soft + audit) delegating
+    # to the engine write paths.
+    (("GET",), "/api/board/rules"),
+    (("POST",), "/api/board/rules/<kind>/<int:rid>"),
+    (("DELETE",), "/api/board/rules/<kind>/<int:rid>"),
     # #444 board redesign lane 3: the Kôš / História zmien audit API — the change-log JSON
     # list + the restore ("Vrátiť") endpoint. The tab PAGE is served by the generic
     # `/nastenka/<tab>` route (via _TAB_CONTENT["kos"]), so no separate page route. Same blueprint.
