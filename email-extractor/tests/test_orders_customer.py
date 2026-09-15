@@ -56,11 +56,17 @@ def test_an_address_shared_by_several_customers_is_never_guessed():
     assert hit is None
 
 
-def test_a_shared_address_still_resolves_when_the_model_names_one_of_them():
+def test_a_shared_address_is_not_resolved_by_a_bare_llm_pick_without_a_confirming_address():
+    """#435 SUPERSEDES the #418 behaviour this test used to pin (a confident llm pick within
+    a shared-address family was accepted). Within a multi-site family (two Tesco branches on
+    one address) the model's pick is unreliable — it keys on the one central EAN it knows —
+    so a bare confident pick with NO delivery address to confirm it now raises the customer
+    question instead of silently shipping to the named branch. This is the same principle as
+    the Košík.sk incident: never silently accept a family member on the model's word alone."""
     hit = customer.resolve(CUSTOMERS, sender_email="faktury@tesco.com", sender_name="",
                            company_name="TESCO Petržalka",
                            llm={"ean_edi": "8589000020002", "confidence": 0.88})
-    assert hit.ean_edi == "8589000020002"
+    assert hit is None
 
 
 # --- candidates handed to the model --------------------------------------
@@ -310,16 +316,19 @@ def test_delivery_address_not_used_when_only_one_card_matches_email():
     assert hit.ean_edi == "2000000000797"
 
 
-def test_delivery_address_llm_still_wins_over_address_when_sure():
-    """A confident model match overrides the delivery-address rung — same priority
-    as the existing hierarchy."""
+def test_delivery_address_overrides_a_confident_llm_pick_naming_the_central_card():
+    """#435 SUPERSEDES the #418 behaviour this test used to pin ("a sure model answer keeps
+    priority even over the delivery address"). Within a multi-site family the delivery
+    address decides ABOVE the llm pick: a confident model pick of the central Košice card
+    is overridden because the mail text (KOSIK_ZILINA_TEXT) names the Žilina site. This is
+    the exact incident fix — the model silently picking the central card was the bug."""
     hit = customer.resolve(
         KOSIK, sender_email="objednavky@kosik.sk", sender_name="",
         company_name="Košík.sk",
         llm={"ean_edi": "2000000000797", "confidence": 0.90},
         delivery_text=KOSIK_ZILINA_TEXT)
-    assert hit.ean_edi == "2000000000797"
-    assert hit.rule == "llm"
+    assert hit.ean_edi == "2000000000798"
+    assert hit.rule == "delivery_address"
 
 
 def test_delivery_address_ambiguous_two_cities_match_returns_none():
