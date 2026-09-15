@@ -1,0 +1,18 @@
+{# Naučené sklad / Naučené objednávky content (#447). Filled in by tab-rules.js, which reads
+   the scope from #board-main[data-scope] and calls /api/board/rules?scope=&kind=. The kind
+   chips, each row's inline editor (fields from the list response `meta.edit`) and the origin
+   link/preview are all built via ui.js `el()` — no HTML in JS strings (spec §3). #}
+<section class="board-rules">
+  <div id="r-chips" class="r-chips" role="tablist" aria-label="Druh pravidla"></div>
+  <div class="r-toolbar">
+    <input id="r-search" class="r-search" type="search" autocomplete="off"
+           placeholder="Hľadať (znenie, e-mail, predmet, karta, dodávateľ…)">
+  </div>
+  <div id="r-list" class="r-list" aria-live="polite"></div>
+  <p id="r-empty" class="r-empty" hidden>Žiadne pravidlá v tomto filtri.</p>
+  <div class="r-pager">
+    <button id="r-prev" class="r-btn" type="button" hidden>← Predošlé</button>
+    <span id="r-pageinfo" class="r-pageinfo"></span>
+    <button id="r-next" class="r-btn" type="button" hidden>Ďalšie →</button>
+  </div>
+</section>
