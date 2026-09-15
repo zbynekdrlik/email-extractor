@@ -985,7 +985,9 @@ def test_board_products_orders_tab_search_edit_delete_in_the_browser(live_server
     page.click(".p-editor .p-del")
     page.click(".p-editor .p-del-yes")
     page.wait_for_selector("text=Vrátiť v Koši")
-    assert page.get_by_text("Rožok e2e premenovaný").count() == 0
+    # the reload after a soft delete is async — wait for the row to actually detach rather
+    # than snapshot-count immediately after the toast (which races load()'s rebuild).
+    page.wait_for_selector('.p-row:has-text("Rožok e2e premenovaný")', state="detached")
 
     assert console == [], f"browser console not clean: {console}"
 

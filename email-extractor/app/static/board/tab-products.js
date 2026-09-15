@@ -71,16 +71,15 @@ function row(card) {
 function toggleEditor(box, card) {
   const open = box.querySelector(".p-editor");
   if (open) { open.remove(); return; }
-  buildEditor(card).then((ed) => box.appendChild(ed));
+  // Append the editor SYNCHRONOUSLY — `.p-editor` (with its save/delete buttons) is in the DOM
+  // immediately, so `editingOpen()` sees it on the very next refresh tick and never rebuilds
+  // the list out from under it. Aliases (a network round-trip) fill in afterwards. Appending
+  // AFTER the await (the old shape) let a 15s refresh detach `box` mid-fetch → the editor was
+  // appended to a detached node and never became visible (a real race, caught by CI #445).
+  box.appendChild(buildEditor(card));
 }
 
-async function buildEditor(card) {
-  let aliases = [];
-  try {
-    const d = await apiGet(`/products/${encodeURIComponent(card.gtin)}?scope=${SCOPE}`);
-    aliases = d.aliases || [];
-  } catch (e) { toast(e.message, { error: true }); }
-
+function buildEditor(card) {
   const { inputs, rows } = fieldInputs(card);
   const ed = el("div", { class: "p-editor" }, rows);
   ed.appendChild(el("div", { class: "p-editor-actions" }, [
@@ -89,7 +88,17 @@ async function buildEditor(card) {
     el("button", { class: "p-btn p-del", type: "button",
       onclick: () => confirmDelete(ed, card.gtin) }, "Zmazať"),
   ]));
-  ed.appendChild(aliasSection(card.gtin, aliases));
+  // A placeholder alias block appended NOW keeps the editor a stable node; the real alias
+  // section swaps in once its fetch resolves.
+  const placeholder = el("div", { class: "p-alias-block" },
+    [el("div", { class: "p-alias-loading" }, "Načítavam aliasy…")]);
+  ed.appendChild(placeholder);
+  apiGet(`/products/${encodeURIComponent(card.gtin)}?scope=${SCOPE}`)
+    .then((d) => placeholder.replaceWith(aliasSection(card.gtin, d.aliases || [])))
+    .catch((e) => {
+      placeholder.replaceWith(aliasSection(card.gtin, []));
+      toast(e.message, { error: true });
+    });
   return ed;
 }
 
