@@ -233,3 +233,42 @@ already); of a `restore` row itself → refused; of a missing audit id → 404. 
   overwrites ALL fields (unlike the orders alias tri-state), so `catalog._dl_upsert` reads the
   CURRENT card and keeps any field the editor did not send (`_val` fallback) — the JS editor
   prefills them all, but the fallback stops a name-only programmatic call from clearing them.
+## Lane 5 — Zákazníci (spoločné) + Dodávatelia (sklad) (#446): reuse the partner engines, one JS per two tabs
+
+- **Tab → API + scope mapping:** `zakaznici` → `/api/board/customers`, scope `customers`;
+  `dodavatelia` → `/api/board/suppliers`, scope `suppliers`. Both share ONE template
+  (`board/partners.html`) + ONE JS module (`static/board/tab-partners.js`) — `tab-partners.js`
+  reads `#board-main[data-scope]` and drives the field set / grouping / API from a `CFG` object.
+  Registered via `_TAB_CONTENT` rows + `register_customers`/`register_suppliers` on the ONE board
+  blueprint (never a second app).
+- **DELEGATE to the existing engines, never copy the /znalosti route logic (and never touch
+  `httpapi_znalosti.py` — lane 4 refactors it in parallel).** The board services call the SAME
+  functions the /znalosti routes call: `snapshot.customers_for_management`/`upsert_customer`/
+  `retire_customer` (customers) and `dl_snapshot.dl_suppliers_for_management`/`upsert_dl_supplier`/
+  `retire_dl_supplier` (suppliers). All are keyword-only; the surrogate `id` is the pk (NOT the EAN,
+  which repeats across branches). `upsert_*`/`retire_*` do NOT rebuild the snapshot or write audit —
+  the CALLER does both (as /znalosti does): `snapshot.rebuild_from_overrides` / `dl_snapshot.
+  dl_rebuild_from_overrides`, then `audit.record`.
+- **The board audits create/update TOO (the legacy /znalosti create/update did NOT).** Spec §5
+  wants every change in the Kôš, so `save_*` classifies `create` vs `update` by whether an override
+  row already existed for the identity (`override_id`, else `(orig_ean_edi, orig_city|street)`),
+  captures the business-column `before` dict, and records `action=create|update` with `before`/`after`.
+  Both override tables are already in `audit._SOFT_DELETE_TABLES` + `_SNAPSHOT_TABLES` (r16 added
+  `deleted_at`), so the existing lane-3 restore reverts a board create/update/delete with no new
+  restore branch. **No migration needed** — highest revision is 16.
+- **Scanner-address strip (#407) lives in the SUPPLIER service, before any save** — reuse
+  `dl_questions.is_scanner_sender(cfg, email)` (the single guard), never re-parse the config list.
+  Customers have NO scanner concept (that guard is DL-only).
+- **Family grouping (#435) reuses `customer.name_stem`** (public alias added for #446 — a pure
+  re-export of `_name_stem`, corpus-neutral, never re-derive the diacritic folding, #265). An EMPTY
+  stem (all-generic name) NEVER groups — it becomes its own singleton family, so two unrelated
+  all-generic orgs are never welded together. Customers page over FAMILIES; suppliers are a flat list.
+- **`services/partners.py` stays a SHARED-helper leaf** (PartnerError, name+EAN validation, a generic
+  single-row read, folded match) so each entity service (`services/customers.py`,
+  `services/suppliers.py`) stays ≤200 lines (spec §3). A single combined partners service hit 282
+  lines — split by entity, not by trimming docstrings.
+- **`edi_sent.customer_ean` / `desadv_sent.supplier_ean` are the „used by" counters** (orders shipped
+  / DLs shipped) — a `GROUP BY <ean>` map joined onto each card. There is no FK table; count by EAN.
+- **`_retry_unknown_customer_questions` / `release_for_supplier_card` are called best-effort** after a
+  save (same as /znalosti — a saved card may unstick an open question), wrapped in try/except so a
+  reprocess failure never fails the save (#323).

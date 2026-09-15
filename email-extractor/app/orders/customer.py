@@ -73,6 +73,12 @@ def _name_stem(name) -> str:
     return ""
 
 
+# Public alias: the board Zákazníci tab groups cards into families by the SAME stem the
+# resolver uses (#446) — reuse this ONE definition, never re-derive the folding/stop-word
+# logic elsewhere (#265). A pure re-export: no behaviour change, corpus-neutral.
+name_stem = _name_stem
+
+
 def _stem_family(customers: list[dict], anchor: dict) -> list[dict]:
     """Cards sharing `anchor`'s distinctive name stem (#435). Empty stem -> no family."""
     key = _name_stem(anchor.get("name"))

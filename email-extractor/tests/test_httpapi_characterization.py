@@ -92,6 +92,16 @@ EXPECTED_ROUTES = sorted([
     # `/nastenka/<tab>` route (via _TAB_CONTENT["kos"]), so no separate page route. Same blueprint.
     (("GET",), "/api/board/audit"),
     (("POST",), "/api/board/audit/<int:audit_id>/restore"),
+    # #446 board redesign lane 5: the Zákazníci + Dodávatelia tab APIs — list (grouped into
+    # multi-site families for customers) + create/update (POST) + delete (soft, DELETE),
+    # delegating to the snapshot/dl_snapshot engines. Tab PAGES via the generic /nastenka/<tab>
+    # route (_TAB_CONTENT["zakaznici"/"dodavatelia"]). Same board blueprint.
+    (("GET",), "/api/board/customers"),
+    (("POST",), "/api/board/customers"),
+    (("DELETE",), "/api/board/customers"),
+    (("GET",), "/api/board/suppliers"),
+    (("POST",), "/api/board/suppliers"),
+    (("DELETE",), "/api/board/suppliers"),
     # #342: the codex-bridge push endpoint (machine X-Token auth) — a legitimate NEW route,
     # not a #268 code-move; added here in the same commit that registers it.
     (("POST",), "/api/codex/orders"),
