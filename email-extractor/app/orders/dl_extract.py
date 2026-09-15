@@ -39,6 +39,7 @@ log = logging.getLogger("orders.dl_extract")
 PROMPTS_DIR = Path(__file__).with_name("prompts")
 EXTRACT_PROMPT_PATH = PROMPTS_DIR / "dl_extract.md"
 EXTRACT_INVOICE_PROMPT_PATH = PROMPTS_DIR / "dl_extract_invoice.md"
+EXTRACT_CMR_PROMPT_PATH = PROMPTS_DIR / "dl_extract_cmr.md"
 VISION_PROMPT_PATH = PROMPTS_DIR / "dl_vision.md"
 
 # R40: the largest embedded JPEG over this size classifies the PDF as a scan.
@@ -87,6 +88,34 @@ _LT_PREFIX = re.compile(r"^\d*LT(\d+)$", re.IGNORECASE)
 _DMY_DATE = re.compile(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$")
 _ISO_DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
+# #437: signals that a transcript is a CMR (medzinárodný nákladný list) — an international
+# consignment note whose supplier is the CONSIGNEE (kol. 2), items sit in the goods column
+# (kol. 9) with NETTO kg, and which carries no prices. Two signals are REQUIRED together (a
+# lone "CMR" mention in an otherwise ordinary DL must not flip extraction to the CMR
+# variant): the standalone "CMR" token AND a consignment-note structural phrase no plain
+# Slovak delivery note carries. Deliberately conservative — a false positive would misread
+# a normal DL's supplier from the wrong party, so the detector demands the transport-form
+# structure, not just the abbreviation.
+_CMR_TOKEN_RE = re.compile(r"\bCMR\b", re.IGNORECASE)
+_CMR_PHRASE_RE = re.compile(
+    r"n[áa]kladn\w*\s+list"          # SK "nákladný list"
+    r"|list\s+przewozow\w*"          # PL "list przewozowy"
+    r"|mi[ęe]dzynarodow\w*"          # PL "międzynarodowy"
+    r"|consignment\s+note"           # EN
+    r"|\bnadawca\b|\bodbiorca\b",    # PL sender/consignee field labels
+    re.IGNORECASE)
+
+
+def _looks_like_cmr(text: str) -> bool:
+    """True when `text` is (a transcript of) a CMR international consignment note — the
+    standalone "CMR" token AND at least one transport-form structural phrase. Used by
+    `extract_attachment` to select the CMR extraction variant from the transcribed text
+    itself (the classifier's `cmr` verdict got the message into `dodacie_listy`, but that
+    verdict is not carried through the reclassify — the transcript is the single source of
+    truth in the DL engine, so a CMR is handled correctly however it arrives)."""
+    t = text or ""
+    return bool(_CMR_TOKEN_RE.search(t) and _CMR_PHRASE_RE.search(t))
+
 # The multi-document extraction schema (fixes W1b) — one entry per SEPARATE delivery note
 # found in the (possibly cross-checked, R43) source text.
 DL_SCHEMA = {
@@ -122,8 +151,18 @@ DL_SCHEMA = {
 }
 
 
-def extract_prompt(invoice_mode: bool = False) -> str:
-    path = EXTRACT_INVOICE_PROMPT_PATH if invoice_mode else EXTRACT_PROMPT_PATH
+def extract_prompt(invoice_mode: bool = False, cmr_mode: bool = False) -> str:
+    """The extraction system prompt. `invoice_mode` (#406) and `cmr_mode` (#437) select a
+    variant; they are mutually exclusive (invoice wins if both were somehow set). The CMR
+    variant reads the supplier from the consignee (kol. 2), items from the goods column
+    (kol. 9) in NETTO kg, and carries no prices (the money gate is skipped, catalog price
+    fills in) — see `dl_extract_cmr.md`."""
+    if invoice_mode:
+        path = EXTRACT_INVOICE_PROMPT_PATH
+    elif cmr_mode:
+        path = EXTRACT_CMR_PROMPT_PATH
+    else:
+        path = EXTRACT_PROMPT_PATH
     return path.read_text(encoding="utf-8")
 
 
@@ -516,17 +555,21 @@ def validate_document(document: dict) -> dict:
 
 # --- 7) the LLM extraction call (multi-document schema, fixes W1b) ---------
 
-def run_extraction(client, source_text: str, *, invoice_mode: bool = False) -> dict:
+def run_extraction(client, source_text: str, *, invoice_mode: bool = False,
+                   cmr_mode: bool = False) -> dict:
     """One multi-document extraction call over `source_text` (already cross-checked by
     `combine_transcripts`, if applicable). `client` is an `llm.Client` (or any object
     exposing `json_call`).
 
     When `invoice_mode` is True (#406), uses the invoice-specific extraction prompt that
     lifts the invoice exclusion and instructs the model to derive DL fields from the
-    invoice (delivery-note number, delivery date, základ dane)."""
+    invoice (delivery-note number, delivery date, základ dane). When `cmr_mode` is True
+    (#437), uses the CMR extraction prompt (supplier = consignee kol. 2, items = kol. 9 in
+    NETTO kg, no prices → money gate skipped, catalog price fills in)."""
     user = f"--- DELIVERY NOTE TEXT ---\n{source_text}\n--- END ---"
-    extracted = client.json_call(extract_prompt(invoice_mode=invoice_mode), user,
-                                 DL_SCHEMA, name="dl_documents")
+    extracted = client.json_call(
+        extract_prompt(invoice_mode=invoice_mode, cmr_mode=cmr_mode), user,
+        DL_SCHEMA, name="dl_documents")
     documents = []
     for raw_doc in extracted.get("documents") or []:
         doc = dict(raw_doc)
@@ -551,7 +594,7 @@ def _is_vision_placeholder(text: str) -> bool:
 
 def extract_attachment(client, pdf_bytes: bytes, machine_text: str = "",
                        needs_vision: bool = False, *,
-                       invoice_mode: bool = False) -> dict:
+                       invoice_mode: bool = False, cmr_mode: bool = False) -> dict:
     """Scan detection -> vision (only when actually needed, R42/W13) -> R43 cross-check
     -> multi-document extraction -> R50-R52 validation, for ONE attachment.
 
@@ -561,6 +604,12 @@ def extract_attachment(client, pdf_bytes: bytes, machine_text: str = "",
     ``[needs AI Vision: ...]``, the vision/render path is forced regardless of
     ``is_scanned()``'s JPEG heuristic — the DB already knows this attachment needs
     vision, and the placeholder is never real document content.
+
+    #437: the CMR extraction variant is chosen either explicitly (`cmr_mode=True`) or
+    AUTO-DETECTED from the final transcribed ``source_text`` (`_looks_like_cmr`) — a CMR
+    is handled correctly however it arrives (scanner rescue or a direct supplier
+    attachment). Mutually exclusive with `invoice_mode` (invoice wins). The returned dict
+    carries ``cmr_used`` so `extract_email` can tag the produced documents.
     """
     jpegs = extract_embedded_jpegs(pdf_bytes)
     scanned = is_scanned(jpegs)
@@ -623,16 +672,23 @@ def extract_attachment(client, pdf_bytes: bytes, machine_text: str = "",
     primary_text = choose_source_text(effective_scanned, machine_text, vision_primary)
     source_text = combine_transcripts(cross_check_text, primary_text, vision_secondary)
 
-    extraction = run_extraction(client, source_text, invoice_mode=invoice_mode)
+    # #437: choose the CMR variant from the final transcript (unless invoice_mode already
+    # owns this attachment). `cmr_mode` is an explicit override; otherwise auto-detect.
+    use_cmr = (not invoice_mode) and (cmr_mode or _looks_like_cmr(source_text))
+    if use_cmr:
+        log.info("DL attachment: recognised as a CMR (medzinárodný nákladný list) "
+                 "— using the CMR extraction variant (#437)")
+    extraction = run_extraction(client, source_text, invoice_mode=invoice_mode,
+                                cmr_mode=use_cmr)
     return {"documents": extraction["documents"], "scanned": scanned,
             "vision_used": vision_used, "prompt_hash": extraction["prompt_hash"],
-            "source_text": source_text}
+            "source_text": source_text, "cmr_used": use_cmr}
 
 
 # --- 9) every attachment of the mail (fixes W1a) ----------------------------
 
 def extract_email(client, attachments: list[dict], *,
-                   invoice_mode: bool = False) -> dict:
+                   invoice_mode: bool = False, cmr_mode: bool = False) -> dict:
     """Every attachment of the message (fixes W1a — n8n's own `LIMIT 1` attachment pick).
     Each attachment can itself carry more than one delivery note (fixes W1b, via
     `extract_attachment`'s multi-document schema); every returned document is tagged with
@@ -659,16 +715,20 @@ def extract_email(client, attachments: list[dict], *,
             result = extract_attachment(client, att.get("pdf_bytes") or b"",
                                         att.get("machine_text") or "",
                                         needs_vision=bool(att.get("needs_vision")),
-                                        invoice_mode=invoice_mode)
+                                        invoice_mode=invoice_mode, cmr_mode=cmr_mode)
         except Exception as e:
             log.exception("DL attachment idx=%s filename=%r failed to extract — "
                           "continuing with the rest of this mail's attachments", idx, filename)
             per_attachment.append({"idx": idx, "filename": filename, "scanned": None,
                                    "vision_used": None, "error": str(e)})
             continue
+        # #437: tag every document from a CMR-detected attachment so a later phase
+        # (dl_document → dl_report) can mark its Odoo message "(z CMR)".
+        tag = {"source_attachment_idx": idx, "source_attachment_filename": filename}
+        if result.get("cmr_used"):
+            tag["source_kind"] = "cmr"
         for doc in result["documents"]:
-            documents.append(dict(doc, source_attachment_idx=idx,
-                                  source_attachment_filename=filename))
+            documents.append(dict(doc, **tag))
         per_attachment.append({"idx": idx, "filename": filename,
                                "scanned": result["scanned"], "vision_used": result["vision_used"],
                                "error": None})

@@ -108,12 +108,14 @@ _CLASSIFY_PROMPT = (
     "často nečitateľný alebo slabý scan. Rozhodni, do ktorej kategórie príloha patrí, a "
     "odpovedz IBA jedným JSON objektom, bez akéhokoľvek iného textu:\n"
     '{"category": "<jedna z: dodacie_listy, invoices, reklamacie, ai_orders, '
-    'static_orders, human_processing, no_processing>", "confidence": <0.0 az 1.0>, '
+    'static_orders, cmr, human_processing, no_processing>", "confidence": <0.0 az 1.0>, '
     '"reason": "<kratke zdovodnenie>", '
     '"doc_type": "<kratky ludsky nazov typu dokumentu, napr. CMR, faktura, objednavka, '
     'dodaci list, vyplatna paska, ine>"}\n'
     "dodacie_listy = dodaci list; invoices = faktura; reklamacie = reklamacia; "
-    "ai_orders alebo static_orders = objednavka; human_processing = nevies rozhodnut; "
+    "ai_orders alebo static_orders = objednavka; "
+    "cmr = medzinarodny nakladny list (CMR) — prepravny doklad k dodavke tovaru "
+    "(ocislovane kolonky 1-24, casto dvojjazycny); human_processing = nevies rozhodnut; "
     "no_processing = nic na spracovanie. Ak je scan uplne necitatelny, daj nizku "
     "confidence a category human_processing."
 )
@@ -124,8 +126,18 @@ _CLASSIFY_PROMPT = (
 _CATEGORY_DOC_LABELS = {
     "dodacie_listy": "dodací list", "invoices": "faktúra", "reklamacie": "reklamácia",
     "ai_orders": "objednávka", "static_orders": "objednávka",
-    "no_processing": "iné", "human_processing": "neznámy typ",
+    "cmr": "CMR", "no_processing": "iné", "human_processing": "neznámy typ",
 }
+
+# #437: the vision classifier's `cmr` verdict (a medzinárodný nákladný list) is NOT a real
+# message category with its own processor — it is REMAPPED, for a SCANNER sender only, to
+# `dodacie_listy` so the DL engine (which auto-detects the CMR from the transcript and uses
+# the CMR extraction variant) picks it up. `PROCESSOR_CATEGORIES` stays unchanged: the
+# rescue TARGET is `dodacie_listy`, which has a live processor, so the "a rescue target must
+# have a processor" invariant holds. A CMR from a non-scanner sender is never auto-rescued
+# (it falls to the Layer-2 ops net), because a CMR is warehouse paper that arrives via the
+# scanner — see `_rescue_target`.
+CMR_CATEGORY = "cmr"
 
 # #436: signals that OCR text ALREADY carries slovnormal order/DL structure a scanner /
 # foreign CMR / payslip would NOT — used ONLY to decide whether a Layer-1 vision second
@@ -262,31 +274,49 @@ def _classify(conn, cfg, message: dict, classify) -> dict | None:
     return classify(cfg, attachments)
 
 
-def _apply_rescue(conn, message: dict, verdict: dict | None) -> bool:
-    """Reclassify iff the vision verdict is a confident processor category. Returns True iff
+def _rescue_target(cfg, message: dict, new_cat: str) -> str | None:
+    """The message category a `new_cat` vision verdict rescues INTO, or None when the
+    verdict is not rescuable. A real processor category (`PROCESSOR_CATEGORIES`) rescues to
+    itself. The `cmr` verdict (#437) rescues to `dodacie_listy` — but ONLY for a SCANNER
+    sender (a CMR is warehouse paper that arrives through the scanner); a CMR-looking
+    verdict from any other sender is left for the Layer-2 ops net, never auto-reclassified
+    onto the warehouse pipeline."""
+    if new_cat in PROCESSOR_CATEGORIES:
+        return new_cat
+    if new_cat == CMR_CATEGORY and dl_questions.is_scanner_sender(
+            cfg, message.get("from_addr")):
+        return "dodacie_listy"
+    return None
+
+
+def _apply_rescue(conn, cfg, message: dict, verdict: dict | None) -> bool:
+    """Reclassify iff the vision verdict is a confident, rescuable category (a real
+    processor category, or #437's scanner `cmr` → `dodacie_listy` remap). Returns True iff
     the message was rescued (reclassified out of human_processing)."""
     if not verdict:
         return False
     new_cat = str(verdict.get("category") or "")
     conf = float(verdict.get("confidence") or 0)
-    if new_cat not in PROCESSOR_CATEGORIES or conf < RESCUE_CONFIDENCE:
+    target = _rescue_target(cfg, message, new_cat)
+    if target is None or conf < RESCUE_CONFIDENCE:
         return False
     # Mirror /api/message/<id>/reclassify: keep the original for audit, re-open for the
     # engine that owns the new category. The category-change trigger logs its own
     # timeline event; this one records WHY (vision), rollup=False so it never overwrites
-    # the pipeline-owned proc_status.
+    # the pipeline-owned proc_status. For a `cmr` verdict `target` is `dodacie_listy` (the
+    # remap), while `verdict['doc_type']`/`new_cat` still record it was recognised as a CMR.
     conn.execute(
         """UPDATE messages
               SET original_category = COALESCE(original_category, category),
                   category = %s, processed = false, processed_at = NULL,
                   processed_by = NULL, processing_at = NULL, error = NULL
-            WHERE message_id = %s""", (new_cat, message["message_id"]))
+            WHERE message_id = %s""", (target, message["message_id"]))
     db.log_event(conn, message["message_id"], "human_processing", "rescued", "ok",
-                 outcome=f"vision preklasifikovalo nečitateľný scan → {new_cat}",
-                 detail={"to": new_cat, "confidence": conf,
+                 outcome=f"vision preklasifikovalo nečitateľný scan → {target}",
+                 detail={"to": target, "verdict_category": new_cat, "confidence": conf,
                          "reason": verdict.get("reason", "")}, rollup=False)
-    log.info("human_processing rescue: %s → %s (conf %.2f)",
-             message["message_id"], new_cat, conf)
+    log.info("human_processing rescue: %s → %s (verdict %s, conf %.2f)",
+             message["message_id"], target, new_cat, conf)
     return True
 
 
@@ -447,7 +477,7 @@ def sweep(conn, cfg, classify=None, now=None) -> int:
                    "needs_vision": bool(needs_vision), "created_at": created_at}
         try:
             verdict = _classify(conn, cfg, message, classify)
-            if _apply_rescue(conn, message, verdict):
+            if _apply_rescue(conn, cfg, message, verdict):
                 handled += 1
                 continue
             _notify(conn, cfg, message, verdict)

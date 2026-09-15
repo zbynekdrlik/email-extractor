@@ -84,7 +84,8 @@ def build_success(supplier_name: str, doc_number: str, delivery_date: str,
                   borderline_notes: list[str] | None = None,
                   history_notes: list[str] | None = None,
                   price_substitutions: list[str] | None = None,
-                  filename: str = "", partial: bool = False, link: str = "") -> str:
+                  filename: str = "", partial: bool = False, link: str = "",
+                  cmr: bool = False) -> str:
     """`shipped_items`: `[{"name", "quantity", "unit"}]` — only what actually shipped in
     the EDI. The other four lists are already-human-readable Slovak sentences (mirrors
     `report.build_summary`'s own "never a trace/JSON, only short prose" discipline).
@@ -111,6 +112,10 @@ def build_success(supplier_name: str, doc_number: str, delivery_date: str,
     else:
         headline = (f"{_OUTCOME_ICON['ok']} Dodací list {escape(doc_number or '?')} "
                    f"spracovaný a nahratý do ORIONu ({n_items} položiek)")
+    if cmr:
+        # #437: mark that this delivery note was derived from a CMR (medzinárodný
+        # nákladný list) — so the warehouse knows the source doc was a transport form.
+        headline += " (z CMR)"
     parts = [f"<p><b>{headline}</b></p>"]
     parts.append(_meta_lines(**{"Od": from_addr, "Predmet": subject,
                                 "Dodávateľ": supplier_name,
@@ -148,11 +153,12 @@ def build_success(supplier_name: str, doc_number: str, delivery_date: str,
 
 def build_review(reason: str, supplier_name: str = "", doc_number: str = "",
                  delivery_date: str = "", from_addr: str = "", subject: str = "",
-                 link: str = "") -> str:
+                 link: str = "", cmr: bool = False) -> str:
     """#229 follow-up: `link` is rendered whenever given — a review outcome ALWAYS means
     a human has something to check, unlike `build_success` where the link is
-    conditional on there being real board action."""
-    parts = ["<p><b>&#10071; Dodací list potrebuje kontrolu</b></p>"]
+    conditional on there being real board action. #437: `cmr` marks the source as a CMR."""
+    suffix = " (z CMR)" if cmr else ""
+    parts = [f"<p><b>&#10071; Dodací list potrebuje kontrolu{suffix}</b></p>"]
     parts.append(_meta_lines(**{"Od": from_addr, "Predmet": subject,
                                 "Dodávateľ": supplier_name, "Číslo DL": doc_number,
                                 "Dátum dodania": delivery_date}))
