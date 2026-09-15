@@ -37,11 +37,11 @@ _NORMAL_DL_TEXT = (
 
 _DELIV = (datetime.now(UTC) - timedelta(days=1)).strftime("%d.%m.%Y")
 
-DL_CATALOG_CSV = ("GTIN,Nazov,doplnok,hmotnost,Sklad,Cena\n"
+DL_CATALOG_CSV = ("GTIN,Názov,doplnok,hmotnost,Sklad,Cena\n"
                   "8588000001557,Muka psenicna typ 500,,,100,0.368\n")
-OBJ_CATALOG_CSV = "GTIN,Sklad,Nazov,doplnok\n"
-SUPPLIERS_CSV = ("Nazov organizacie,EAN kod EDI,Obec,Ulica,Meno pre fakturaciu,"
-                 "Cislo mobilu,E-mail\n"
+OBJ_CATALOG_CSV = "GTIN,Sklad,Názov,doplnok\n"
+SUPPLIERS_CSV = ("Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,"
+                 "Číslo mobilu,E-mail\n"
                  "DUOPACK SLOVAKIA,2000000000655,Granc-Petrovce,,,,gnip@hkloan.eu\n")
 
 DUOPACK_EAN = "2000000000655"
@@ -97,7 +97,7 @@ def test_extract_prompt_has_a_distinct_cmr_variant():
     assert cmr != base
     low = cmr.lower()
     assert "cmr" in low
-    assert "prijemc" in low          # supplier = consignee (kol. 2) rule present
+    assert "kol. 2" in low           # supplier = consignee (kol. 2) rule present
     assert "netto" in low            # NETTO kg rule present
 
 

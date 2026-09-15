@@ -133,6 +133,11 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     subject, from_addr = message.get("subject", ""), message.get("from_addr", "")
     doc_number = doc.get("docNumber") or ""
     delivery_date = doc.get("deliveryDate", "")
+    # #437: this document was derived from a CMR (medzinárodný nákladný list) — tagged by
+    # `dl_extract.extract_email` when the CMR extraction variant was used. Every Odoo
+    # success/review message for it carries a "(z CMR)" marker so the warehouse knows the
+    # source doc was a transport form. Captured by `_finish_shipped` from this scope.
+    cmr = bool(doc.get("source_kind") == "cmr")
     # #240: computed once, reused both for the memory-rescue lookup in `_match_supplier`
     # and for the `teach.ask_dl_supplier` call below — the SAME address must key both,
     # or a taught mapping would never actually match what a later ask/resolve looks up.
@@ -149,7 +154,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         reason = doc.get("reviewReason") or "Dokument potrebuje kontrolu"
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, doc.get("supplierName", ""), doc_number, delivery_date, from_addr,
-            subject, link=link), post=post)
+            subject, link=link, cmr=cmr), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, detail={"doc_number": doc_number}, rollup=False,
               workflow=dl_report.WORKFLOW)
@@ -171,7 +176,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                            else f"{date_reason} (DL {doc_number}).")
             _post(cfg, shadow, lambda: dl_report.build_review(
                 full_reason, supplier_name, doc_number, delivery_date, from_addr,
-                subject, link=link), post=post)
+                subject, link=link, cmr=cmr), post=post)
             _event(conn, shadow, message["message_id"], stage="review",
                   status="review", outcome=full_reason,
                   detail={"doc_number": doc_number}, rollup=False,
@@ -191,7 +196,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                     message["message_id"], doc_number, e)
         reason = "Nepodarilo sa priradiť dodávateľa — over dodací list ručne."
         _post(cfg, shadow, lambda: dl_report.build_review(
-            reason, "", doc_number, delivery_date, from_addr, subject, link=link),
+            reason, "", doc_number, delivery_date, from_addr, subject, link=link, cmr=cmr),
             post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="error",
               outcome=reason, detail={"doc_number": doc_number, "error": str(e)},
@@ -225,7 +230,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                                   supplier_city=doc.get("supplierCity", ""))
         _post(cfg, shadow, lambda: dl_report.build_review(
             supplier_decision.note, "", doc_number, delivery_date, from_addr, subject,
-            link=link), post=post)
+            link=link, cmr=cmr), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=supplier_decision.note, detail={"doc_number": doc_number},
               rollup=False, workflow=dl_report.WORKFLOW)
@@ -400,7 +405,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                       "vybav ručne v CODEXe): " + ", ".join(retired_names) + ".")
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, supplier_decision.name, built.doc_number, delivery_date,
-            from_addr, subject, link=link), post=post)
+            from_addr, subject, link=link, cmr=cmr), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, detail={"doc_number": built.doc_number},
               rollup=False, workflow=dl_report.WORKFLOW)
@@ -442,7 +447,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         reason = _hold_review_reason(held_names)
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, supplier_decision.name, built.doc_number, delivery_date, from_addr,
-            subject, link=link), post=post)
+            subject, link=link, cmr=cmr), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, detail={"doc_number": built.doc_number, "held": True,
               "held_items": held_names}, rollup=False, workflow=dl_report.WORKFLOW)
@@ -524,7 +529,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             supplier_decision.name, built.doc_number, delivery_date, from_addr, subject,
             shipped, unmatched_items=unmatched_notes, borderline_notes=borderline_notes,
             history_notes=history_notes, price_substitutions=built.price_substitutions,
-            filename=built.filename, partial=built.partial, link=link),
+            filename=built.filename, partial=built.partial, link=link, cmr=cmr),
             post=post)
         _event(conn, shadow, message["message_id"], stage="uploaded_orion", status="ok",
               outcome=f"EDI vytvorené: {built.filename}",
