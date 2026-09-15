@@ -94,3 +94,54 @@ body {
   font-size: 14px;
 }
 .board-toast.is-error { background: #b3261e; }
+
+/* --- Otázky sklad / Otázky objednávky (lane 2, #443) --- */
+.board-questions { max-width: 960px; margin: 0 auto; }
+.q-toolbar {
+  display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px;
+}
+.q-filters { display: flex; gap: 4px; }
+.q-chip {
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  padding: 6px 12px; border-radius: 999px; cursor: pointer; font-size: 14px;
+}
+.q-chip.is-active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.q-search {
+  flex: 1; min-width: 180px; padding: 7px 12px; border: 1px solid var(--line);
+  border-radius: 8px; font-size: 14px;
+}
+.q-list { display: flex; flex-direction: column; gap: 12px; }
+.q-empty { color: var(--muted); text-align: center; padding: 24px; }
+.q-card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px;
+}
+.q-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.q-kind {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+  background: #eef1f5; border-radius: 6px; padding: 2px 8px;
+}
+.q-title { font-weight: 600; }
+.q-cust { color: var(--muted); font-size: 13px; }
+.q-answer { color: var(--muted); margin-bottom: 10px; }
+.q-cands, .q-actions, .q-lineedit, .q-freecard, .q-inline-form {
+  display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px;
+}
+.q-lineedit label, .q-freecard { font-size: 13px; color: var(--muted); }
+.q-in, .q-freein, .q-qty, .q-price {
+  padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 14px;
+}
+.q-qty, .q-price { width: 90px; }
+.q-btn {
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  padding: 6px 12px; border-radius: 8px; cursor: pointer; font-size: 14px;
+}
+.q-btn:hover { background: #eef1f5; }
+.q-btn--cand, .q-btn--primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.q-btn--reopen { background: #0a7d33; color: #fff; border-color: #0a7d33; }
+.q-btn--undo { color: #b3261e; border-color: #e2b6b3; }
+.q-preview {
+  margin-top: 12px; padding: 12px; background: var(--bg); border-radius: 8px; font-size: 13px;
+}
+.q-pv-line { margin-bottom: 4px; }
+.q-atts { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
+.q-att { color: var(--accent); }

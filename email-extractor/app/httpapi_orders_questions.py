@@ -108,7 +108,15 @@ def _classify_manual_target(conn, qid: int):
     return "held", cur
 
 
-def register(app: Flask, deps: Deps) -> None:
+# #443: sentinel so `_answer_dispatch`/`_undo_dispatch` can tell "no `allowed_kinds`
+# argument passed → derive the kind-gate from the session role, exactly as the legacy
+# endpoint always has" apart from an explicit `allowed_kinds=None` ("unrestricted", what
+# the unified board passes — its own `board_gate` already authorized the session, and spec
+# §6 lets a warehouse session answer any tab regardless of which key logged in).
+_UNSET = object()
+
+
+def register(app: Flask, deps: Deps) -> dict:
     @app.get("/api/orders/questions")
     def api_orders_questions():
         """The wordings waiting for the warehouse (#88) — one per (customer, wording).
@@ -711,8 +719,7 @@ def register(app: Flask, deps: Deps) -> None:
             answered = teach.get(c3, qid)
         return jsonify(ok=True, question=answered, resolved_manually=resolved, released=[])
 
-    @app.post("/api/orders/question/<int:qid>/answer")
-    def api_orders_answer(qid: int):
+    def _answer_dispatch(qid: int, allowed_kinds=_UNSET):
         """One click: this wording IS this card. Taught for that customer, forever. Or,
         for a `kind='customer'` question (#159), this order belongs to THIS customer.
 
@@ -740,7 +747,11 @@ def register(app: Flask, deps: Deps) -> None:
         # #231: a SKLAD_ROLE/SKLAD_DL_ROLE session may answer only ITS OWN kinds — the
         # id-based endpoint is otherwise shared, so this is the real boundary that keeps
         # the two nástenka links from reaching each other's agenda by guessing an id.
-        allowed = _role_kinds(session.get("role"))
+        # #443: the unified board delegates here with allowed_kinds=None (unrestricted) —
+        # board_gate already authorized the session and spec §6 makes the TAB, not the key,
+        # decide scope, so a warehouse session answers any kind from the board.
+        allowed = (_role_kinds(session.get("role"))
+                   if allowed_kinds is _UNSET else allowed_kinds)
         if allowed is not None and q0.get("kind", "item") not in allowed:
             abort(403)
         # #307: "netýka sa skladu" — the whole mail is not a warehouse delivery note
@@ -795,6 +806,14 @@ def register(app: Flask, deps: Deps) -> None:
             released = hold.release_for_question(c2, deps.cfg, qid)
         return jsonify(ok=True, question=q, released=released)
 
+    @app.post("/api/orders/question/<int:qid>/answer")
+    def api_orders_answer(qid: int):
+        """The legacy AI-orders board endpoint — a thin wrapper over `_answer_dispatch`
+        (#443), which the unified nástenka also calls. `allowed_kinds` defaults to the
+        session-role kinds here, so this endpoint's behaviour is byte-identical to before
+        the extraction."""
+        return _answer_dispatch(qid)
+
     @app.get("/api/orders/held")
     def api_orders_held():
         """Orders waiting on an answer, with their delivery date (#93) — so nothing waits
@@ -819,8 +838,7 @@ def register(app: Flask, deps: Deps) -> None:
         with deps.db() as c:
             return jsonify(items=teach.recently_taught(c, kinds=_role_kinds(session.get("role"))))
 
-    @app.post("/api/orders/question/<int:qid>/undo")
-    def api_orders_undo(qid: int):
+    def _undo_dispatch(qid: int, allowed_kinds=_UNSET):
         """Take a mistaken teaching back — it would otherwise decide that line forever.
 
         Routed through the SAME `teach.KINDS[kind].undo` every OTHER dispatch in this file
@@ -840,7 +858,9 @@ def register(app: Flask, deps: Deps) -> None:
                 if not q0:
                     return jsonify(error="otázka neexistuje"), 404
                 # #231: same role/kind boundary as the answer endpoint above.
-                allowed = _role_kinds(session.get("role"))
+                # #443: allowed_kinds=None (from the unified board) is unrestricted, §6.
+                allowed = (_role_kinds(session.get("role"))
+                           if allowed_kinds is _UNSET else allowed_kinds)
                 if allowed is not None and q0.get("kind", "item") not in allowed:
                     abort(403)
                 kind = teach.KINDS.get(q0.get("kind", "item"))
@@ -848,3 +868,11 @@ def register(app: Flask, deps: Deps) -> None:
         except teach.NotACandidate as e:
             return jsonify(error=str(e)), 404
         return jsonify(ok=True, question=q)
+
+    @app.post("/api/orders/question/<int:qid>/undo")
+    def api_orders_undo(qid: int):
+        """The legacy undo endpoint — a thin wrapper over `_undo_dispatch` (#443), which the
+        unified nástenka also calls. Behaviour is byte-identical for every existing kind."""
+        return _undo_dispatch(qid)
+
+    return {"answer": _answer_dispatch, "undo": _undo_dispatch}

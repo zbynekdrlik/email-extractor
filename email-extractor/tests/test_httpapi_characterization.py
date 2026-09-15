@@ -68,6 +68,17 @@ EXPECTED_ROUTES = sorted([
     (("GET",), "/nastenka"),
     (("GET",), "/nastenka/<tab>"),
     (("GET",), "/api/board/ping"),
+    # #443 board redesign lane 2: the Otázky sklad + Otázky objednávky API — list (scope
+    # param), answer/undo (delegating to the shared orders dispatch), reopen, original
+    # preview, and the scope-guarded /files, /eml serving (only for messages that carry a
+    # question). A legitimate NEW route set, added in the same commit that registers it.
+    (("GET",), "/api/board/questions"),
+    (("POST",), "/api/board/questions/<int:qid>/answer"),
+    (("POST",), "/api/board/questions/<int:qid>/undo"),
+    (("POST",), "/api/board/questions/<int:qid>/reopen"),
+    (("GET",), "/api/board/questions/<int:qid>/preview"),
+    (("GET",), "/api/board/files/<mid>/<int:idx>"),
+    (("GET",), "/api/board/eml/<mid>"),
     # #342: the codex-bridge push endpoint (machine X-Token auth) — a legitimate NEW route,
     # not a #268 code-move; added here in the same commit that registers it.
     (("POST",), "/api/codex/orders"),

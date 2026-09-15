@@ -148,7 +148,7 @@ def test_reopen_expired_reopens_puts_hold_back_and_audits(pg):
     assert pg.execute("SELECT status FROM order_questions WHERE id=%s",
                       (q,)).fetchone()[0] == "open"
     held = pg.execute("SELECT status, release_reason FROM held_orders "
-                      "WHERE %s = ANY(question_ids)", ([q],)).fetchone()
+                      "WHERE %s = ANY(question_ids)", (q,)).fetchone()
     assert held[0] == "held" and held[1] is None
     n = pg.execute("SELECT count(*) FROM audit_log WHERE question_id=%s AND action='reopen'",
                    (q,)).fetchone()[0]

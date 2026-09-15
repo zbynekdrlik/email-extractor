@@ -37,6 +37,7 @@ from .hold_close import (  # noqa: F401 (facade re-export)
     release_for_question,
     release_to_review,
     release_unknown_customer,
+    reopen_expired,
     resolve_manually,
     retry_unknown_customer_questions,
     set_customer,

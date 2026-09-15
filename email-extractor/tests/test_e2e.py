@@ -856,3 +856,96 @@ def test_board_nastenka_reachable_via_the_dl_link_too(live_server, pg, page):
     page.wait_for_selector("text=Otázky sklad")
     page.wait_for_selector("text=História dodacích listov")
     assert console == [], f"browser console not clean: {console}"
+
+
+def _board_seed_item_question(pg, mid="be2e-1", wording="rožok e2e",
+                              gtin="E2EGTIN", name="Karta E2E", status="open"):
+    import json
+    pg.execute("INSERT INTO messages (message_id, from_addr, from_name, subject) "
+               "VALUES (%s, 'cust@e2e.sk', 'Pekáreň E2E', 'Objednávka E2E')", (mid,))
+    row = pg.execute(
+        """INSERT INTO order_questions
+               (message_id, customer_ean, customer_name, wording, item_key, kind,
+                candidates, delivery_date, reason, context, payload, status)
+           VALUES (%s, '2000000000009', 'Zákazník E2E', %s, %s, 'item',
+                   %s::jsonb, '', '', '{}'::jsonb, '{}'::jsonb, %s) RETURNING id""",
+        (mid, wording, f"item:{wording}",
+         json.dumps([{"gtin": gtin, "name": name}]), status)).fetchone()
+    return int(row[0])
+
+
+def test_board_question_tab_answer_undo_and_reopen_in_the_browser(live_server, pg, page):
+    """#443 lane 2: the Otázky objednávky tab — answer an item question with a candidate,
+    see it under „Zodpovedané", vrátiť the answer (back to open), and znovu-otvoriť an
+    expired one — all through the real browser, from the signed sklad link, no login,
+    with a clean console and the version label present."""
+    from app.httpapi import sklad_key
+
+    _board_seed_item_question(pg, mid="be2e-open", wording="rožok e2e",
+                              gtin="E2EGTIN", name="Karta E2E", status="open")
+    exp = _board_seed_item_question(pg, mid="be2e-exp", wording="chlieb e2e",
+                                    gtin="E2EGTIN2", name="Karta EXP", status="expired")
+    pg.execute("UPDATE order_questions SET answer='{\"expired\": true}'::jsonb, "
+               "answered_by='auto-expiry', answered_at=now() WHERE id=%s", (exp,))
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/nastenka")
+    page.goto(f"{live_server}/nastenka/otazky-objednavky")
+
+    # version label matches the backend
+    backend_ver = page.request.get(f"{live_server}/version").text().strip()
+    assert backend_ver in page.locator('[data-testid="version"]').inner_text()
+
+    # the open item question renders; answer it with its candidate
+    page.wait_for_selector("text=Karta E2E")
+    page.click('button:has-text("Karta E2E")')
+    page.wait_for_selector("text=Uložené")
+
+    # under „Zodpovedané" it shows with a „Vrátiť odpoveď" button
+    page.click('button:has-text("Zodpovedané")')
+    page.wait_for_selector('button:has-text("Vrátiť odpoveď")')
+    page.click('button:has-text("Vrátiť odpoveď")')
+    page.wait_for_selector("text=Odpoveď vrátená")
+
+    # back under „Otvorené"
+    page.click('button:has-text("Otvorené")')
+    page.wait_for_selector("text=Karta E2E")
+
+    # expired filter → „Znovu otvoriť" moves it to open
+    page.click('button:has-text("Expirované")')
+    page.wait_for_selector("text=chlieb e2e")
+    page.click('button:has-text("Znovu otvoriť")')
+    page.wait_for_selector("text=Znovu otvorené")
+
+    assert console == [], f"browser console not clean: {console}"
+
+
+def test_board_dl_question_tab_shows_only_dl_kinds(live_server, pg, page):
+    """The Otázky sklad tab is DL-scoped — it shows dl_item/dl_supplier, never the orders
+    kinds (spec §6 scope-by-tab). Reachable via the DL key, clean console."""
+    import json
+
+    from app.httpapi import dl_key
+
+    pg.execute("INSERT INTO messages (message_id, from_addr, from_name, subject) "
+               "VALUES ('be2e-dl', 'dodavatel@e2e.sk', 'Dodávateľ E2E', 'DL E2E')")
+    pg.execute(
+        """INSERT INTO order_questions
+               (message_id, customer_ean, customer_name, wording, item_key, kind,
+                candidates, delivery_date, reason, context, payload, status)
+           VALUES ('be2e-dl', '', '', 'múka e2e dl', 'dlitem:x:muka', 'dl_item',
+                   %s::jsonb, '', '', '{}'::jsonb, '{}'::jsonb, 'open')""",
+        (json.dumps([{"value": "DLGTIN", "label": "DL karta"}]),))
+    _board_seed_item_question(pg, mid="be2e-ord", wording="rožok orders only",
+                              status="open")
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
+    page.wait_for_url(f"{live_server}/nastenka")
+    page.goto(f"{live_server}/nastenka/otazky-sklad")
+
+    page.wait_for_selector("text=múka e2e dl")
+    # the orders-only question must NOT appear on the DL tab
+    assert page.get_by_text("rožok orders only").count() == 0
+    assert console == [], f"browser console not clean: {console}"

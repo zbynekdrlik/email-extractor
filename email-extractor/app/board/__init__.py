@@ -37,21 +37,34 @@ TABS: list[tuple[str, str]] = [
 _SLUGS = frozenset(s for s, _ in TABS)
 DEFAULT_TAB = TABS[0][0]
 
+# #443 lane 2: each tab may fill in its own content template + JS module; unfilled tabs keep
+# the lane-1 placeholder. `scope` (orders|dl) is what the question tabs pass to the board API.
+# (slug -> (content_template, tab_script, scope|None)). Only the two question tabs are wired
+# in lane 2 — later lanes add their own rows here.
+_TAB_CONTENT: dict[str, tuple[str, str, str | None]] = {
+    "otazky-objednavky": ("board/questions.html", "/static/board/tab-questions.js", "orders"),
+    "otazky-sklad": ("board/questions.html", "/static/board/tab-questions.js", "dl"),
+}
 
-def register_board(app, deps) -> None:
-    # `deps` is accepted for consistency with the other register() modules and for the later
-    # lanes' service calls; lane 1's routes need no DB access of their own.
+
+def register_board(app, deps, questions_api=None) -> None:
+    # `deps` carries the shared DB/cfg the tab SERVICES use; `questions_api` is the
+    # answer/undo dispatch that `httpapi_orders_questions.register` returned, so the board
+    # DELEGATES to the exact same logic instead of duplicating it (#443, spec §3).
     bp = Blueprint("board", __name__)
 
     def _render(active: str):
         role = board_role()
         tabs = [{"slug": s, "label": label, "url": f"/nastenka/{s}", "active": s == active}
                 for s, label in TABS]
+        content_template, tab_script, scope = _TAB_CONTENT.get(
+            active, ("board/_placeholder.html", None, None))
         return render_template(
             "board/layout.html",
             version=__version__, tabs=tabs, active_tab=active,
             active_label=dict(TABS).get(active, ""),
             role=role, is_admin=(role == ADMIN),
+            content_template=content_template, tab_script=tab_script, tab_scope=scope,
         )
 
     @bp.get("/nastenka")
@@ -67,5 +80,11 @@ def register_board(app, deps) -> None:
     @bp.get("/api/board/ping")
     def board_ping():
         return jsonify(ok=True, version=__version__, role=board_role())
+
+    # #443 lane 2: the Otázky sklad + Otázky objednávky API (list/filter/search, answer/undo
+    # delegated to `questions_api`, reopen, scope-guarded original preview) — a thin route
+    # layer over `services/questions.py`. Registered on the SAME single board blueprint.
+    from . import questions_orders
+    questions_orders.register(bp, deps, questions_api)
 
     app.register_blueprint(bp)
