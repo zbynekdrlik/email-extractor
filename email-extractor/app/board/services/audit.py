@@ -194,6 +194,15 @@ def restore(conn, audit_id: int, by: str = "admin") -> bool:
         _restore_undo(conn, qid, by, audit_id)
     elif action == "reopen":
         _restore_reopen(conn, qid)
+    elif action == "teach":
+        # #448 teachback: revert by soft-deleting the taught memory row (same as reverting a
+        # create). Memory tables carry no snapshot, so _rebuild_snapshot is a no-op for them.
+        _restore_soft_delete(conn, table_name, row_id, undelete=False)
+    elif action in ("rerun", "manual"):
+        # #448: a requeue / a hand-entered-into-CODEX release is an irreversible operation —
+        # there is nothing to "un-run" or "un-release" safely. Explicit refusal (not the
+        # generic else), so the reason is clear in the Kôš.
+        raise RestoreError(400, f"akciu '{action}' nemožno vrátiť (nezvratná operácia)")
     else:
         raise RestoreError(400, f"akciu '{action}' nevieme vrátiť")
     record(conn, actor=by, table=table_name, row_id=row_id, action="restore",

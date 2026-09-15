@@ -234,13 +234,39 @@ def test_rerun_refuses_a_shipped_order(pg):
 
 
 def test_rerun_refuses_when_edi_sent_uploaded_row_exists(pg):
-    _msg(pg, "e2", proc_status="review", subject="čiastočne", edi_file="ORDER_5.txt")
+    # proc_status='error' is otherwise the ONLY rerun-safe state, so the 409 here proves the
+    # edi_sent ledger check is the sole refusal reason (not the status).
+    _msg(pg, "e2", proc_status="error", subject="zlyhalo ale nahrané", edi_file="ORDER_5.txt")
     pg.execute(
         "INSERT INTO edi_sent (customer_ean, delivery_date, content_sha256, filename, uploaded_at) "
         "VALUES ('EANX','2026-09-15','sha', 'ORDER_5.txt', now())")
     c = _client()
     _sklad(c)
     assert c.post("/api/board/history/e2/rerun").status_code == 409
+
+
+def test_rerun_refuses_when_orion_has_the_file(pg, monkeypatch):
+    """No ledger row, but the EDI file IS present in ORION (reply lost / crash before ledger) —
+    the live ORION presence check must still refuse."""
+    from app.orders import upload
+    _msg(pg, "orio", proc_status="error", subject="nahrané do ORIONu", edi_file="ORDER_7.txt")
+    monkeypatch.setattr(upload, "list_dirs", lambda cfg: {"in": {"ORDER_7.txt"}})
+    c = _client()
+    _sklad(c)
+    assert c.post("/api/board/history/orio/rerun").status_code == 409
+
+
+def test_rerun_fail_safe_refuses_when_orion_unreachable(pg, monkeypatch):
+    """If ORION cannot be read AND there is a document identity to check, refuse (fail-safe)."""
+    from app.orders import upload
+
+    def _boom(cfg):
+        raise OSError("SFTP down")
+    _msg(pg, "unr", proc_status="error", subject="nedostupný ORION", edi_file="ORDER_8.txt")
+    monkeypatch.setattr(upload, "list_dirs", _boom)
+    c = _client()
+    _sklad(c)
+    assert c.post("/api/board/history/unr/rerun").status_code == 409
 
 
 def test_rerun_refuses_when_manually_resolved(pg):
@@ -261,8 +287,9 @@ def test_rerun_refuses_a_busy_message(pg):
 
 
 def test_rerun_dl_refuses_when_desadv_uploaded(pg):
-    _msg(pg, "dl1", category="dodacie_listy", proc_status="ok", subject="DL")
-    _run(pg, "dl1", status="ok",
+    # proc_status='error' so the 409 proves the desadv_sent ledger check is the sole reason.
+    _msg(pg, "dl1", category="dodacie_listy", proc_status="error", subject="DL")
+    _run(pg, "dl1", status="error",
          result={"documents": [{"doc_number": "DOC7", "supplier_ean": "SUP1"}]})
     pg.execute("INSERT INTO desadv_sent (supplier_ean, doc_number, filename, uploaded_at) "
                "VALUES ('SUP1','DOC7','DESADV.txt', now())")
