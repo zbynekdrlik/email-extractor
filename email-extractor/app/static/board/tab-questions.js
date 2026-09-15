@@ -15,8 +15,18 @@ const searchEl = document.getElementById("q-search");
 const state = { status: "open", q: "", cardActions: {} };
 
 function editingOpen() {
-  return !!(listEl && listEl.querySelector('[data-open="1"]')) ||
-    (searchEl && document.activeElement === searchEl);
+  // Skip the periodic refresh only while something is ACTIVELY being edited — never freeze
+  // the whole list on a stale marker. An open inline form, the search box focused, or any
+  // qty/price/free input that is focused OR already holds text all count; an abandoned
+  // (empty, blurred) focus does not, so the list resumes refreshing on its own.
+  if (searchEl && document.activeElement === searchEl) return true;
+  if (!listEl) return false;
+  if (listEl.querySelector(".q-inline-form")) return true;
+  for (const inp of listEl.querySelectorAll(".q-qty, .q-price, .q-freein, .q-in")) {
+    if (document.activeElement === inp) return true;
+    if (inp.value && inp.value.trim()) return true;
+  }
+  return false;
 }
 
 // ---- answer-body shapers per kind (candidate click) -------------------------------
@@ -135,17 +145,15 @@ function card(q) {
   if (q.kind === "item") {
     box.appendChild(el("div", { class: "q-lineedit" }, [
       el("label", {}, ["Množstvo ", el("input", { class: "q-qty", type: "text",
-        value: q.quantity != null ? String(q.quantity) : "",
-        onfocus: () => box.setAttribute("data-open", "1") })]),
+        value: q.quantity != null ? String(q.quantity) : "" })]),
       el("label", {}, ["Cena/ks ", el("input", { class: "q-price", type: "text",
-        value: q.unit_price != null ? String(q.unit_price) : "",
-        onfocus: () => box.setAttribute("data-open", "1") })]),
+        value: q.unit_price != null ? String(q.unit_price) : "" })]),
     ]));
   }
   if (q.kind === "item" || q.kind === "dl_item") {
     box.appendChild(el("div", { class: "q-freecard" }, [
       el("input", { class: "q-freein", type: "text", placeholder: "Iné číslo položky (GTIN)",
-        autocomplete: "off", onfocus: () => box.setAttribute("data-open", "1") }),
+        autocomplete: "off" }),
       el("button", { class: "q-btn", type: "button", onclick: () => {
         const g = box.querySelector(".q-freein").value.trim();
         if (!g) { toast("Zadaj číslo položky", { error: true }); return; }

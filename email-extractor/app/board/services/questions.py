@@ -52,9 +52,13 @@ def list_questions(conn, *, scope: str, status: str = "open", q: str = "") -> li
 
 
 def _matches(row: dict, needle: str) -> bool:
-    hay = _fold(" ".join(str(row.get(k) or "") for k in
-                         ("wording", "customer_name", "customer_ean", "message_id")))
-    return needle in hay
+    parts = [str(row.get(k) or "") for k in
+             ("wording", "customer_name", "customer_ean", "message_id")]
+    # honour the „e-mail" the search box promises: a customer/mail question carries the
+    # sender address in its context/payload, not a top-level column.
+    ctx, pl = row.get("context") or {}, row.get("payload") or {}
+    parts += [str(ctx.get("sender_email") or ""), str(pl.get("sender_email") or "")]
+    return needle in _fold(" ".join(parts))
 
 
 def reopen(conn, cfg, qid: int, actor: str) -> dict | None:

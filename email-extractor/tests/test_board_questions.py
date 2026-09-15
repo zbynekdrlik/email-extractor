@@ -118,6 +118,20 @@ def test_search_filters_by_wording(pg):
     assert b in ids and a not in ids
 
 
+def test_search_matches_sender_email_in_context(pg):
+    _msg(pg)
+    a = _q(pg, kind="customer", customer_ean="", wording="", item_key="cust:a",
+           context={"sender_email": "hladany@dodavatel.sk"})
+    b = _q(pg, kind="customer", customer_ean="", wording="", item_key="cust:b",
+           context={"sender_email": "iny@nikde.sk"})
+    c = _client()
+    _sklad(c)
+    ids = {x["id"] for x in
+           c.get("/api/board/questions?scope=orders&status=open&q=hladany")
+           .get_json()["items"]}
+    assert a in ids and b not in ids
+
+
 def test_bad_scope_is_rejected(pg):
     c = _client()
     _sklad(c)
