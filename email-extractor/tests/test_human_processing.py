@@ -462,3 +462,53 @@ def test_ocr_unusable_for_dl_signals():
         "CMR 1234567890123\nBrutto 2100 kg\nNetto 2050 kg\nprzewozowy Katowice") is True
     # a Polish CMR mentioning "Faktura nr" (no diacritic) must NOT be marked usable
     assert human_processing._ocr_unusable_for_dl("Faktura nr 123/2026 przewozowy") is True
+
+
+# --- #437: a scanner CMR verdict is rescued into dodacie_listy (never a dead end) -------
+
+def test_scanner_cmr_verdict_is_rescued_to_dodacie_listy(pg):
+    """#437: the vision classifier can now recognise a `cmr` (medzinarodny nakladny list).
+    For a SCANNER sender (warehouse paper) that verdict reclassifies the message to
+    `dodacie_listy` — the SAME rescue shape a processor category takes — so the DL engine
+    picks it up instead of the message dead-ending as a 243 alert. RED before #437: `cmr`
+    is not a rescuable category, so the message stays in human_processing."""
+    _hp_msg(pg, "cmr1", from_addr="tlaciaren@slovnormal.sk")
+    _hp_attachment(pg, "cmr1", _CMR_OCR)
+    human_processing.sweep(
+        pg, _cfg(delivery_notes_scanner_senders="tlaciaren@slovnormal.sk"),
+        classify=lambda cfg, atts: {"category": "cmr", "confidence": 0.92,
+                                    "reason": "medzinarodny nakladny list",
+                                    "doc_type": "CMR"})
+    cat, processed, orig = pg.execute(
+        "SELECT category, processed, original_category FROM messages "
+        "WHERE message_id='cmr1'").fetchone()
+    assert cat == "dodacie_listy"        # the DL engine will now see it
+    assert processed is False            # let it flow through the DL engine's own claim
+    assert orig == "human_processing"    # audit: where it was rescued from
+    # a rescued message needs NO warehouse notification (no human burden)
+    assert pg.execute(
+        "SELECT count(*) FROM pending_alerts WHERE message_id='cmr1'").fetchone()[0] == 0
+    # the rescue is recorded in the timeline (event), never silent
+    assert pg.execute(
+        "SELECT count(*) FROM email_events WHERE message_id='cmr1' AND stage='rescued'"
+        ).fetchone()[0] == 1
+
+
+def test_non_scanner_cmr_verdict_is_not_rescued(pg):
+    """#437: a `cmr` verdict rescues ONLY a scanner sender (a CMR is warehouse paper that
+    arrives through the scanner). A CMR-looking verdict from a NON-scanner sender is NOT
+    auto-reclassified — it falls to the Layer-2 ops net exactly like any unclassifiable
+    catch-all mail, never onto the warehouse 243 channel via a spurious reclassify."""
+    _hp_msg(pg, "cmr2", from_addr="ktosi@dodavatel.sk")
+    _hp_attachment(pg, "cmr2", _CMR_OCR)
+    human_processing.sweep(
+        pg, _cfg(ops_channel_id=888),   # no scanner senders configured
+        classify=lambda cfg, atts: {"category": "cmr", "confidence": 0.92,
+                                    "doc_type": "CMR"})
+    cat = pg.execute(
+        "SELECT category FROM messages WHERE message_id='cmr2'").fetchone()[0]
+    assert cat == "human_processing"     # cmr rescues a SCANNER sender only
+    channel, kind = pg.execute(
+        "SELECT channel_id, kind FROM pending_alerts WHERE message_id='cmr2'").fetchone()
+    assert kind == "human_processing_review"
+    assert channel == 888                # ops, never the warehouse 243
