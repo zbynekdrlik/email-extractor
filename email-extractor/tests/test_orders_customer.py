@@ -386,3 +386,127 @@ def test_city_word_boundary_prevents_substring_match():
         company_name="", llm={"ean_edi": "", "confidence": 0.2},
         delivery_text=text)
     assert hit is None
+
+
+# --- #435: a multi-site FAMILY overrides a confident llm central pick ------------------
+#
+# #418 shipped the delivery-address rung but LEFT the `llm` rung firing FIRST: a confident
+# model pick of the CENTRAL card (Košice 2000000000797, the only card whose EAN the model
+# knows) short-circuited before the delivery address was ever looked at. The real Košík.sk
+# sender `supply@kosik.sk` is in NO card, so the old email-only family (`owners`) never
+# triggered either. Both are fixed here: within a multi-site family the delivery address
+# decides ABOVE the llm pick, and the family is found by shared sender e-mail OR a shared
+# distinctive name stem (Košík.sk …) — not e-mail alone. Live incident: msg 11298–11303,
+# six Košík orders all `customer_rule="llm"` -> Košice, one was really for MAKRO Žilina.
+
+
+def test_confident_llm_central_is_overridden_by_the_delivery_city_within_a_family():
+    """#435: model is SURE about the central Košice card (2000000000797, 0.90), but the mail
+    text names the Žilina site — the delivery address must win over the llm pick."""
+    hit = customer.resolve(
+        KOSIK, sender_email="objednavky@kosik.sk", sender_name="Košík.sk",
+        company_name="Košík.sk",
+        llm={"ean_edi": "2000000000797", "confidence": 0.90},
+        delivery_text="Doručenie na sklad Prielohy 1, MAKRO store Žilina")
+    assert hit is not None
+    assert hit.ean_edi == "2000000000798"
+    assert hit.rule == "delivery_address"
+
+
+def test_confident_llm_central_overridden_for_zvolen():
+    hit = customer.resolve(
+        KOSIK, sender_email="objednavky@kosik.sk", sender_name="Košík.sk",
+        company_name="Košík.sk",
+        llm={"ean_edi": "2000000000797", "confidence": 0.92},
+        delivery_text="Doručenie: Ulica Stráž 17, Zvolen")
+    assert hit is not None
+    assert hit.ean_edi == "2000000000799"
+    assert hit.rule == "delivery_address"
+
+
+def test_family_with_no_delivery_address_asks_instead_of_the_central_card():
+    """#435 core: a confident llm pick of the central card + NO delivery address in the mail
+    -> a customer question (None), NEVER the silently-picked central card (that was the bug)."""
+    hit = customer.resolve(
+        KOSIK, sender_email="objednavky@kosik.sk", sender_name="Košík.sk",
+        company_name="Košík.sk",
+        llm={"ean_edi": "2000000000797", "confidence": 0.95},
+        delivery_text="Objednávka č. 4500317338, termín 17.09.2026")
+    assert hit is None
+
+
+def test_single_card_family_still_trusts_a_confident_llm_pick():
+    """#435 point 3: a family of ONE card is unchanged — a confident llm pick stands."""
+    single = [KOSIK[0]]
+    hit = customer.resolve(
+        single, sender_email="objednavky@kosik.sk", sender_name="Košík.sk",
+        company_name="Košík.sk",
+        llm={"ean_edi": "2000000000797", "confidence": 0.95},
+        delivery_text="Objednávka č. 4500317338")
+    assert hit is not None
+    assert hit.ean_edi == "2000000000797"
+    assert hit.rule == "llm"
+
+
+# A family whose cards carry DIFFERENT e-mails and whose sender is in NONE of them — the
+# family must still be found by the shared distinctive name stem, and the delivery address
+# must still decide. This is the shape the live incident actually had before the data fix
+# added `supply@kosik.sk` to every card: three cards exist, the sender matches none of them.
+STEMFAM = [
+    {"ean_edi": "2000000000797", "name": "Košík.sk Online Supermarket s. r. o. Košice",
+     "emails": ["accounting@kosik.sk"], "city": "Košice", "street": "Moldavská 32",
+     "zip": ""},
+    {"ean_edi": "2000000000871", "name": "Košík.sk MAKRO store Žilina, Prielohy 1",
+     "emails": ["zilina.sklad@kosik.sk"], "city": "Žilina", "street": "Prielohy 1",
+     "zip": ""},
+    {"ean_edi": "2000000000872", "name": "Košík.sk MAKRO store Zvolen, Ulica Stráž 17",
+     "emails": ["zvolen.sklad@kosik.sk"], "city": "Zvolen", "street": "Ulica Stráž 17",
+     "zip": ""},
+]
+
+
+def test_family_by_name_stem_with_differing_emails_still_resolves_by_address():
+    """#435 point (a): the family is found by the shared name stem even though every card
+    has a DIFFERENT e-mail and the sender (`supply@kosik.sk`) is in none of them."""
+    hit = customer.resolve(
+        STEMFAM, sender_email="supply@kosik.sk", sender_name="Košík.sk",
+        company_name="Košík.sk",
+        llm={"ean_edi": "2000000000797", "confidence": 0.93},
+        delivery_text="Doručenie na sklad Prielohy 1, 010 07 Žilina, MAKRO store Žilina")
+    assert hit is not None
+    assert hit.ean_edi == "2000000000871"
+    assert hit.rule == "delivery_address"
+
+
+def test_family_by_name_stem_no_address_asks_not_central():
+    """Same stem family, sender in no card, confident central pick, but NO delivery address
+    -> question, never the central card."""
+    hit = customer.resolve(
+        STEMFAM, sender_email="supply@kosik.sk", sender_name="Košík.sk",
+        company_name="Košík.sk",
+        llm={"ean_edi": "2000000000797", "confidence": 0.93},
+        delivery_text="Objednávka č. 4500317338")
+    assert hit is None
+
+
+def test_two_distinct_orgs_sharing_a_generic_name_prefix_are_not_one_family():
+    """The stem must be DISTINCTIVE: two genuinely separate orgs that merely share a generic
+    institutional prefix ("Centrum pre deti a rodiny <miesto>") must NOT be treated as a
+    family — otherwise a confident, correct llm pick of one of them would be forced into a
+    needless question. The distinctive stem is the location token, so they don't group.
+    Mirrors the real corpus dedkolinovce case (sender in no card, confident pick 559)."""
+    orgs = [
+        {"ean_edi": "2000000000559", "name": "Centrum pre deti a rodiny Kolinovce 21",
+         "emails": [], "city": "Kolinovce", "street": "Kolinovce 21", "zip": ""},
+        {"ean_edi": "2000000000560",
+         "name": "Centrum pre deti a rodiny, Lipová 6 Spišské Vlachy",
+         "emails": ["dedlipova6@gmail.com"], "city": "Spišské Vlachy", "street": "Lipová 6",
+         "zip": ""},
+    ]
+    hit = customer.resolve(
+        orgs, sender_email="dedkolinovce@gmail.com", sender_name="",
+        company_name="", llm={"ean_edi": "2000000000559", "confidence": 0.90},
+        delivery_text="Objednávka bez adresy")
+    assert hit is not None
+    assert hit.ean_edi == "2000000000559"
+    assert hit.rule == "llm"
