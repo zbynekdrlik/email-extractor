@@ -108,6 +108,15 @@ GROUPED_ITEM_KINDS = {
     "mail_no_attachment":
         "&#9888;&#65039; E-maily bez príloh ({n}) &mdash; AI nenašla objednávku a mail "
         "nemá žiadnu prílohu; chýba príloha alebo zlyhala extrakcia.",
+    # #436: a scanner/printer scan (delivery_notes_scanner_senders) that human_processing
+    # could NOT classify as a delivery note — routed to the WAREHOUSE delivery-notes channel
+    # (243), unlike the ops-bound `human_processing_review`. Each per-message item line names
+    # the recognised document type ("vyzerá ako CMR/faktúra/…"); the constant instruction +
+    # dashboard link live here in the header. The warehouse rescans the items page if it was
+    # really a DL.
+    "scanner_not_dl":
+        "&#128444;&#65039; Skeny z tlačiarne, ktoré sa nepodarilo zaradiť ako dodací list "
+        "({n}) &mdash; ak to bol dodací list, naskenujte znova stranu s položkami.",
 }
 
 # #239 finding 1 (reopened): production calls flush_pending() on almost every worker
@@ -235,8 +244,9 @@ def _format_grouped(kind: str, bodies: list[str], cfg) -> str:
 
 
 def reminder_suppressed(conn, cfg, kind: str, message_id: str, now=None) -> bool:
-    """#336: the re-enqueue cadence for the grouped ops SWEEP kinds
-    (`human_processing_review`, `dl_stuck_classified`) — replaces the old flat
+    """#336: the re-enqueue cadence for the grouped SWEEP kinds
+    (`human_processing_review`, `dl_stuck_classified`, and #436's `scanner_not_dl`) —
+    replaces the old flat
     `already_pending` 4h window that re-swept (and re-posted) the SAME still-stuck message
     every ~4h, producing a repeated wall. Returns True when a fresh enqueue should be
     SUPPRESSED:
