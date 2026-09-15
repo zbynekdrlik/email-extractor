@@ -74,3 +74,41 @@ def forget(conn, sender_email: str) -> bool:
         "DELETE FROM dl_supplier_memory WHERE sender_email = %s RETURNING id",
         (email,)).fetchone()
     return row is not None
+
+
+# --- #447 board lane 6: curate a taught supplier mapping from the nástenka „Naučené sklad"
+# tab. Unlike `forget()` (a HARD delete for the reopen-the-question undo flow), the board must
+# SOFT-delete (spec §5 — recoverable from the Kôš); `resolve()` already filters
+# `deleted_at IS NULL`, so a soft delete stops the mapping by construction. `update_by_id`
+# edits the target (ean_edi/name) of one existing row without changing its sender_email key,
+# so it can never turn a genuine address into a scanner identity (#407) — the address is
+# fixed. Both return the PRE-edit `before` dict (audit + Kôš restore) or None when nothing
+# matched.
+
+def soft_delete(conn, rid: int) -> dict | None:
+    """Soft-delete ONE supplier-memory row by id. Idempotent (`deleted_at IS NULL` guard)."""
+    row = conn.execute(
+        "UPDATE dl_supplier_memory SET deleted_at = now() "
+        "WHERE id = %s AND deleted_at IS NULL "
+        "RETURNING sender_email, ean_edi, name", (rid,)).fetchone()
+    if not row:
+        return None
+    return {"sender_email": row[0], "ean_edi": row[1], "name": row[2] or ""}
+
+
+def update_by_id(conn, rid: int, *, ean_edi: str, name: str) -> dict | None:
+    """Edit the taught target (EAN + name) of one row in place. `ean_edi` is required (the
+    mapping is meaningless without it) — a blank raises ValueError (route → 400). Returns the
+    PRE-edit `before` dict, or None when the row does not exist / is deleted."""
+    ean_edi = str(ean_edi or "").strip()
+    if not ean_edi:
+        raise ValueError("chýba EAN dodávateľa")
+    before = conn.execute(
+        "SELECT ean_edi, name FROM dl_supplier_memory "
+        "WHERE id = %s AND deleted_at IS NULL", (rid,)).fetchone()
+    if not before:
+        return None
+    conn.execute(
+        "UPDATE dl_supplier_memory SET ean_edi = %s, name = %s WHERE id = %s",
+        (ean_edi, name or "", rid))
+    return {"ean_edi": before[0], "name": before[1] or ""}

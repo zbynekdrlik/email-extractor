@@ -267,3 +267,23 @@ def delete_dl_item_memory_row(conn, row_id: int, supplier_ean: str) -> bool:
            RETURNING id""",
         (row_id, str(supplier_ean), list(CURATED_SOURCES))).fetchone()
     return row is not None
+
+
+def update_dl_item_memory_row(conn, row_id: int, *, item_raw: str, gtin: str,
+                              card: str) -> dict | None:
+    """#447 board lane 6: edit ONE curated DL alias in place (source='human'/'sheet-import'
+    only). Recomputes `item_key` from the new wording (else `resolve()` keeps matching the
+    OLD key). Returns the PRE-edit `before` dict (audit + Kôš update-restore) or None when the
+    row does not exist / is deleted / is not curated. Mirrors `memory.update_item_memory_row`."""
+    before = conn.execute(
+        "SELECT item_key, item_raw, gtin, card FROM dl_item_memory "
+        "WHERE id = %s AND deleted_at IS NULL AND source = ANY(%s)",
+        (row_id, list(CURATED_SOURCES))).fetchone()
+    if not before:
+        return None
+    conn.execute(
+        "UPDATE dl_item_memory SET item_key = %s, item_raw = %s, gtin = %s, card = %s "
+        "WHERE id = %s",
+        (item_key(item_raw), str(item_raw), str(gtin), card or "", row_id))
+    return {"item_key": before[0], "item_raw": before[1], "gtin": before[2],
+            "card": before[3] or ""}

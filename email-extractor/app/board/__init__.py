@@ -49,6 +49,9 @@ _TAB_CONTENT: dict[str, tuple[str, str, str | None]] = {
     # #445 lane 4: the two product tabs — one template + one JS, scope from the tab.
     "produkty-objednavky": ("board/products.html", "/static/board/tab-products.js", "orders"),
     "produkty-sklad": ("board/products.html", "/static/board/tab-products.js", "dl"),
+    # #447 lane 6: the two „Naučené" tabs — one template + one JS, scope from the tab.
+    "naucene-objednavky": ("board/rules.html", "/static/board/tab-rules.js", "orders"),
+    "naucene-sklad": ("board/rules.html", "/static/board/tab-rules.js", "dl"),
     # #444 lane 3: the Kôš tab (no scope — its audit view is role-wide).
     "kos": ("board/trash.html", "/static/board/tab-trash.js", None),
     # lane 5 (#446): the two partner tabs share ONE template + ONE JS module; the `scope`
@@ -107,6 +110,12 @@ def register_board(app, deps, questions_api=None) -> None:
     # `services/catalog.py` (which DELEGATES to snapshot/dl_snapshot + memory/dl_memory).
     from . import products_orders
     products_orders.register(bp, deps)
+
+    # #447 lane 6: the Naučené sklad + Naučené objednávky API (list per kind with origin joins,
+    # search/paging, update/delete soft+audit) — a thin route layer over `services/rules.py` +
+    # `services/rules_edit.py` (which DELEGATE to the engine write paths). Same board blueprint.
+    from . import rules_orders
+    rules_orders.register(bp, deps)
 
     # #444 lane 3: the Kôš / História zmien audit API (list + restore). The tab PAGE itself is
     # served by the generic `/nastenka/<tab>` route above via _TAB_CONTENT["kos"]; this only

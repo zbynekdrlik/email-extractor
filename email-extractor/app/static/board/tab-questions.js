@@ -244,5 +244,19 @@ if (searchEl) {
   searchEl.addEventListener("input", debounce(() => { state.q = searchEl.value.trim(); load(); }, 300));
 }
 
+// #447: honour a deep link from the „Naučené" tab origin link
+// (/nastenka/otazky-<scope>?q=<message_id>&status=answered) — seed the filter + search box so
+// the tab opens already filtered to that rule's originating question. Additive: no params =
+// unchanged default (open questions, empty search).
+const _init = new URLSearchParams(location.search);
+const _initStatus = _init.get("status");
+const _initQ = _init.get("q");
+if (["open", "expired", "answered"].includes(_initStatus)) state.status = _initStatus;
+if (_initQ) state.q = _initQ;
+if (searchEl && state.q) searchEl.value = state.q;
+document.querySelectorAll(".q-chip").forEach((c) => {
+  c.classList.toggle("is-active", c.dataset.status === state.status);
+});
+
 setInterval(() => { if (!editingOpen()) load(); }, 8000);
 load();
