@@ -68,10 +68,20 @@ EXPECTED_ROUTES = sorted([
     (("GET",), "/nastenka"),
     (("GET",), "/nastenka/<tab>"),
     (("GET",), "/api/board/ping"),
-    # #444 board redesign lane 3: the Kôš / História zmien tab — a specific `/nastenka/kos`
-    # page route (out-ranks the generic `/nastenka/<tab>`) + the audit change-log JSON API
-    # + the restore ("Vrátiť") endpoint. All on the same `board` blueprint.
-    (("GET",), "/nastenka/kos"),
+    # #443 board redesign lane 2: the Otázky sklad + Otázky objednávky API — list (scope
+    # param), answer/undo (delegating to the shared orders dispatch), reopen, original
+    # preview, and the scope-guarded /files, /eml serving (only for messages that carry a
+    # question). A legitimate NEW route set, added in the same commit that registers it.
+    (("GET",), "/api/board/questions"),
+    (("POST",), "/api/board/questions/<int:qid>/answer"),
+    (("POST",), "/api/board/questions/<int:qid>/undo"),
+    (("POST",), "/api/board/questions/<int:qid>/reopen"),
+    (("GET",), "/api/board/questions/<int:qid>/preview"),
+    (("GET",), "/api/board/files/<mid>/<int:idx>"),
+    (("GET",), "/api/board/eml/<mid>"),
+    # #444 board redesign lane 3: the Kôš / História zmien audit API — the change-log JSON
+    # list + the restore ("Vrátiť") endpoint. The tab PAGE is served by the generic
+    # `/nastenka/<tab>` route (via _TAB_CONTENT["kos"]), so no separate page route. Same blueprint.
     (("GET",), "/api/board/audit"),
     (("POST",), "/api/board/audit/<int:audit_id>/restore"),
     # #342: the codex-bridge push endpoint (machine X-Token auth) — a legitimate NEW route,

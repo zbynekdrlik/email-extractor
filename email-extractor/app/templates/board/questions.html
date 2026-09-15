@@ -1,0 +1,15 @@
+{# Otázky sklad / Otázky objednávky content (#443). Filled in by tab-questions.js, which
+   reads the scope from #board-main[data-scope] and calls /api/board/questions. #}
+<section class="board-questions">
+  <div class="q-toolbar">
+    <div class="q-filters" role="group" aria-label="Filter otázok">
+      <button class="q-chip is-active" type="button" data-status="open">Otvorené</button>
+      <button class="q-chip" type="button" data-status="expired">Expirované</button>
+      <button class="q-chip" type="button" data-status="answered">Zodpovedané</button>
+    </div>
+    <input id="q-search" class="q-search" type="search" autocomplete="off"
+           placeholder="Hľadať (znenie, zákazník, e-mail…)">
+  </div>
+  <div id="q-list" class="q-list" aria-live="polite"></div>
+  <p id="q-empty" class="q-empty" hidden>Žiadne otázky v tomto filtri.</p>
+</section>

@@ -290,6 +290,26 @@ def undo(conn, qid: int) -> dict:
     return get(conn, qid) or {}
 
 
+def expired_questions(conn, limit: int = 100, kinds: tuple[str, ...] | None = None) -> list[dict]:
+    """Questions auto-expired by `question_alerts.expire_stale` (#341), newest first.
+
+    The old boards never showed these (they read only `open`/`answered`), so a stale
+    question that timed out vanished with no way to bring it back — the gap the unified
+    nástenka's „expirované" filter + „Znovu otvoriť" (#443) closes. Same optional
+    `kinds` kind-restriction as `open_questions`/`recently_taught`."""
+    if kinds is not None:
+        rows = conn.execute(
+            f"""SELECT {_COLS} FROM order_questions WHERE status = 'expired'
+                AND kind = ANY(%s) ORDER BY answered_at DESC NULLS LAST, created_at DESC
+                LIMIT %s""", (list(kinds), limit)).fetchall()
+    else:
+        rows = conn.execute(
+            f"""SELECT {_COLS} FROM order_questions WHERE status = 'expired'
+                ORDER BY answered_at DESC NULLS LAST, created_at DESC LIMIT %s""",
+            (limit,)).fetchall()
+    return [_row(r) for r in rows]
+
+
 def _row(r) -> dict:
     return {"id": int(r[0]), "message_id": r[1], "customer_ean": r[2],
             "customer_name": r[3] or "", "wording": r[4], "quantity": r[5],

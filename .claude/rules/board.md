@@ -134,3 +134,55 @@ already); of a `restore` row itself → refused; of a missing audit id → 404. 
   (module-level helper, reused). A specific slug route out-ranks the generic `/nastenka/<tab>`
   placeholder — that IS the lane-by-lane rollout (spec §8). Add every new board route to
   `EXPECTED_ROUTES` in `test_httpapi_characterization.py` in the same commit.
+## Lane 2 — Otázky sklad + Otázky objednávky (#443): delegate, never re-implement
+
+- **Tab → scope mapping (do NOT get this backwards):** `otazky-objednavky` = scope
+  `orders` = `ORDERS_KINDS` (item/customer/mail/date/line); `otazky-sklad` = scope `dl`
+  = `DL_KINDS` (dl_item/dl_supplier — dodacie listy are the warehouse-inbound flow). The
+  partition itself is owned by `httpapi_security.ORDERS_KINDS/DL_KINDS` (import-time
+  completeness assert) and reused via `services.questions.SCOPE_KINDS` — never re-derive it.
+- **Answer/undo DELEGATE to the legacy dispatch — the fleet's "no duplicated business
+  logic" rule made mechanical.** `httpapi_orders_questions.register()` now RETURNS
+  `{"answer": _answer_dispatch, "undo": _undo_dispatch}` (its two former route bodies,
+  lifted to nested functions that take an `allowed_kinds=_UNSET` param); the legacy
+  `/api/orders/question/<qid>/answer|undo` routes are thin wrappers that pass nothing
+  (so `allowed_kinds` derives from the session role — byte-identical behaviour). `create_app`
+  captures that return and hands it to `register_board(app, deps, questions_api=...)`, which
+  passes it to `questions_orders.register(bp, deps, questions_api)`. The board's
+  answer/undo routes call `questions_api["answer"](qid, allowed_kinds=None)` — **`None` =
+  unrestricted**, because spec §6 makes the TAB (not the key) decide scope and `board_gate`
+  already authorized the session. A DL-key board session may therefore answer an ORDERS
+  question; the legacy endpoint still refuses it (its own per-key kind gate is unchanged).
+  When adding a NEW board action that mirrors a legacy one, extract-and-delegate the SAME
+  way — never copy the dispatch.
+- **`teach.answer`/`teach.KINDS[..].undo` already write the `audit_log` row** (via
+  `teach._audit_change`, lazy import of the leaf `board.services.audit`). So the board's
+  answer/undo need NO extra audit write; only the genuinely-new `reopen` writes its own
+  `audit.record(action="reopen", ...)`.
+- **Reopen an EXPIRED question** = `services.questions.reopen`: an atomic
+  `UPDATE ... SET status='open', answer=NULL, ..., reminder_sent_at=NULL, escalated_at=NULL
+  WHERE id=%s AND status='expired' RETURNING id` (loser of a race matches 0 rows → 409),
+  then `hold.reopen_expired(conn, qid)` puts a held order that `close_expired_holds` closed
+  with `release_reason='expired'` back to `held` (a DL/no-hold question matches nothing →
+  no-op). It deliberately does NOT reset `messages.processed` (the held order kept its
+  stored decisions; a reopen must never trigger an LLM re-run) — unlike `unresolve_manually`,
+  which DOES reset the message because a manual resolve shipped nothing.
+- **`teach.expired_questions(conn, limit, kinds)`** is the new sibling of
+  `open_questions`/`recently_taught` — the three status buckets the tab reads (open /
+  expired / answered). Add any future status getter the same way, in `teach`, so the
+  `_COLS`/`_row` shape lives in ONE place.
+- **Original preview WITHOUT widening the legacy `/files` gate:** a pure `sklad` browser
+  session cannot open `/files`/`/eml` (they are admin/token-only via `httpapi_files._auth`).
+  The board serves its OWN `/api/board/files/<mid>/<int:idx>` + `/api/board/eml/<mid>`,
+  gated by `board_gate` PLUS an in-service scope check (`services.questions.file_path`/
+  `eml_path` return `None` unless the `mid` CARRIES a question) → the route 404s. This
+  reaches an original for the warehouse without touching the legacy token-only routes.
+- **`questions.py` (route layer) holds the scope-INDEPENDENT endpoints once** (answer/undo/
+  reopen/preview/files/eml act on a qid/mid); `scope` is a `?scope=` query-param on the LIST
+  only. `questions_dl.py` carries the DL card-affordance descriptor (the genuinely
+  scope-specific part), merged with `questions_orders.ORDERS_CARD_ACTIONS` into the list
+  response `meta.card_actions` so `tab-questions.js` renders each kind's buttons from data.
+- **Per-tab content template + script:** `board/__init__._TAB_CONTENT` maps a tab slug →
+  `(content_template, tab_script, scope)`; `layout.html` `{% include content_template %}`s
+  it and loads `tab_script` (falling back to the lane-1 placeholder + `ui.js`). A later lane
+  fills in its own tab by adding a row there — no change to `layout.html`.
