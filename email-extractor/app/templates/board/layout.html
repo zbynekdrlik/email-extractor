@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="sk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nástenka — {{ active_label }}</title>
+  <link rel="stylesheet" href="/static/board/board.css">
+</head>
+<body>
+  <header class="board-header">
+    <div class="board-title">Nástenka</div>
+    <div class="board-meta">
+      <span class="board-role">{% if is_admin %}admin{% else %}sklad{% endif %}</span>
+      <span class="board-version" data-testid="version">v{{ version }}</span>
+      <a class="board-logout" href="/logout">Odhlásiť</a>
+    </div>
+  </header>
+
+  <nav class="board-tabs" aria-label="Záložky">
+    {% for tab in tabs %}
+    <a class="board-tab{% if tab.active %} is-active{% endif %}"
+       href="{{ tab.url }}"{% if tab.active %} aria-current="page"{% endif %}>{{ tab.label }}</a>
+    {% endfor %}
+    {% if is_admin %}
+    <a class="board-tab board-tab--maily" href="/">Maily</a>
+    {% endif %}
+  </nav>
+
+  <main class="board-main" id="board-main" data-tab="{{ active_tab }}">
+    <section class="board-placeholder">
+      <h1>{{ active_label }}</h1>
+      <p class="board-soon">Pripravujeme…</p>
+      <p class="board-hint">Táto záložka sa doplní v ďalšej fáze prerábky nástenky.</p>
+    </section>
+  </main>
+
+  <div id="board-toast" class="board-toast" role="status" aria-live="polite" hidden></div>
+
+  <script type="module" src="/static/board/ui.js"></script>
+</body>
+</html>

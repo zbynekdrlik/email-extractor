@@ -118,6 +118,8 @@ from . import (
     httpapi_znalosti,
     linkutil,
 )
+from .board import register_board
+from .board.auth import board_gate
 from .httpapi_common import Deps
 from .httpapi_security import (
     SKLAD_ACTION,
@@ -214,6 +216,13 @@ def create_app(cfg) -> Flask:
                 or p.startswith("/files") or p.startswith("/eml")
                 or p.startswith("/api/codex")):     # #342: machine push, own X-Token check
             return None
+        # #442: the unified nástenka has its OWN single gate (board/auth.py) covering
+        # /nastenka* and /api/board/* — role `sklad` from EITHER signed key, or admin from the
+        # session; anyone else → /login (page) or 401 (api). Delegated here because _gate is
+        # the ONE before_request that runs for every path (a blueprint before_request would
+        # never see a request this app-level gate has already redirected).
+        if p == "/nastenka" or p.startswith("/nastenka/") or p.startswith("/api/board/"):
+            return board_gate()
         # Dashboard surface ("/", "/api/*"): session only — login requires a
         # configured dash_password, so an unconfigured add-on is closed, not open.
         if session.get("auth"):
@@ -267,7 +276,9 @@ def create_app(cfg) -> Flask:
             abort(403)
         session["role"] = SKLAD_ROLE
         session.permanent = True
-        return redirect("/otazky")
+        # #442: both signed keys now land on the unified nástenka (the old /otazky board
+        # stays reachable for this role until the pages are retired in lane 8).
+        return redirect("/nastenka")
 
     @app.get("/otazky")
     def questions_page():
@@ -285,7 +296,9 @@ def create_app(cfg) -> Flask:
             abort(403)
         session["role"] = SKLAD_DL_ROLE
         session.permanent = True
-        return redirect("/otazky-dl")
+        # #442: the DL key must NOT lose access — it lands on the SAME unified nástenka as the
+        # orders key (the tab, not the key, decides the agenda); old /otazky-dl stays reachable.
+        return redirect("/nastenka")
 
     @app.get("/otazky-dl")
     def dl_questions_page():
@@ -353,6 +366,12 @@ def create_app(cfg) -> Flask:
     # verbatim into httpapi_reports.py, registered here at api_orders_spend's old
     # position (see the design comment on #268).
     httpapi_reports.register(app, deps)
+
+    # #442 board redesign lane 1: the unified nástenka. Unlike every register() module above,
+    # this is a Flask BLUEPRINT (owner-approved for the new subsystem — spec §3) owning
+    # /nastenka* + /api/board/*; its own gate lives in board/auth.py and is delegated to from
+    # _gate above. Templates + static assets ship from app/templates/board/ + app/static/board/.
+    register_board(app, deps)
 
     @app.get("/")
     def dashboard():

@@ -254,3 +254,19 @@ def test_restore_undeletes_a_soft_deleted_row_and_audits(pg):
         "SELECT count(*) FROM audit_log WHERE table_name='global_item_memory' "
         "AND action='restore' AND row_id=%s", (str(rid),)).fetchone()[0]
     assert n == 1
+
+
+def test_a_named_tab_renders_the_layout_with_that_tab_active():
+    c = _client()
+    _sklad(c)
+    r = c.get("/nastenka/zakaznici")
+    assert r.status_code == 200
+    body = r.data.decode()
+    assert 'aria-current="page"' in body   # the active tab is marked
+    assert "Zákazníci" in body             # its own heading renders
+
+
+def test_an_unknown_tab_is_404():
+    c = _client()
+    _sklad(c)
+    assert c.get("/nastenka/does-not-exist").status_code == 404

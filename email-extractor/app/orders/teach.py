@@ -29,6 +29,20 @@ from . import dl_memory, dl_supplier_memory, memory, snapshot
 log = logging.getLogger("orders.teach")
 
 
+def _audit_change(conn, *, action, qid, message_id, by="", after=None):
+    """#442: thin, best-effort audit-log hook for the teach answer/undo paths — every human
+    teaching decision lands one `audit_log` row. Imported LAZILY (audit is a leaf module in
+    app.board.services, no import cycle) and wrapped so a failed audit write can NEVER break
+    the teaching operation it merely records."""
+    try:
+        from ..board.services import audit
+        audit.record(conn, actor=(by or "auto:teach"), table="order_questions",
+                     row_id=qid, action=action, question_id=qid,
+                     message_id=message_id, after=after)
+    except Exception:
+        log.exception("audit hook failed (%s, question %s)", action, qid)
+
+
 def has_real_attachments(conn, message_id: str) -> bool:
     """#404: whether a message has at least one REAL (non-decorative) attachment.
 
@@ -211,6 +225,8 @@ def answer(conn, qid: int, gtin: str, card: str, by: str = "",
     memory.remember_global(conn, q["wording"], str(gtin), card or "", question_id=qid,
                            taught_by=by)
     log.info("taught %r -> %s for %s (by %s)", q["wording"], gtin, q["customer_ean"], by)
+    _audit_change(conn, action="answer", qid=qid, message_id=q.get("message_id"), by=by,
+                  after={"gtin": str(gtin), "card": card or ""})
     return get(conn, qid) or {}
 
 
@@ -257,6 +273,7 @@ def undo(conn, qid: int) -> dict:
                 WHERE id = %s""", (qid,))
         log.warning("customer teaching taken back for question %s (%s)", qid,
                     (q.get("context") or {}).get("sender_email", ""))
+        _audit_change(conn, action="undo", qid=qid, message_id=q.get("message_id"))
         return get(conn, qid) or {}
     conn.execute(
         "DELETE FROM item_memory WHERE customer_ean = %s AND item_key = %s"
@@ -269,6 +286,7 @@ def undo(conn, qid: int) -> dict:
                   reminder_sent_at = NULL, escalated_at = NULL
             WHERE id = %s""", (qid,))
     log.warning("teaching taken back for %r (%s)", q["wording"], q["customer_ean"])
+    _audit_change(conn, action="undo", qid=qid, message_id=q.get("message_id"))
     return get(conn, qid) or {}
 
 

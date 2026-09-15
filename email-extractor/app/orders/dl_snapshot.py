@@ -260,7 +260,8 @@ def load_suppliers(conn, snapshot_id: int) -> list[dict]:
 
 def _load_dl_catalog_overrides(conn) -> dict[str, dict]:
     rows = conn.execute(
-        "SELECT gtin, name, doplnok, mass, sklad, cena, retired FROM dl_catalog_overrides"
+        "SELECT gtin, name, doplnok, mass, sklad, cena, "
+        "(retired OR deleted_at IS NOT NULL) FROM dl_catalog_overrides"  # #442 soft-delete
     ).fetchall()
     return {r[0]: {"name": r[1], "doplnok": r[2] or "",
                    "mass": float(r[3]) if r[3] is not None else None, "sklad": r[4] or "",
@@ -344,10 +345,12 @@ def retire_dl_catalog_card(conn, gtin: str) -> bool:
     current = {r["gtin"] for r in dl_catalog_for_management(conn)}
     if gtin not in current:
         return False
+    # #442: set BOTH retired and deleted_at (soft-delete marker authoritative, retired synced)
     conn.execute(
-        """INSERT INTO dl_catalog_overrides (gtin, name, retired, updated_at)
-           VALUES (%s, '', true, now())
-           ON CONFLICT (gtin) DO UPDATE SET retired = true, updated_at = now()""",
+        """INSERT INTO dl_catalog_overrides (gtin, name, retired, deleted_at, updated_at)
+           VALUES (%s, '', true, now(), now())
+           ON CONFLICT (gtin) DO UPDATE SET retired = true, deleted_at = now(),
+                                            updated_at = now()""",
         (gtin,))
     return True
 
@@ -361,7 +364,8 @@ def retire_dl_catalog_card(conn, gtin: str) -> bool:
 
 def _load_dl_supplier_overrides(conn) -> list[dict]:
     rows = conn.execute(
-        """SELECT id, orig_ean_edi, orig_city, ean_edi, name, emails, city, retired,
+        """SELECT id, orig_ean_edi, orig_city, ean_edi, name, emails, city,
+                  (retired OR deleted_at IS NOT NULL),
                   invoice_is_delivery_note
            FROM dl_supplier_overrides ORDER BY id""").fetchall()
     return [{"id": r[0], "orig_ean_edi": r[1], "orig_city": r[2], "ean_edi": r[3] or "",
@@ -571,8 +575,9 @@ def retire_dl_supplier(conn, *, override_id: int | None, orig_ean_edi: str | Non
     (orig_ean_edi, orig_city) identity. False when neither identity is given, or the named
     override id does not exist."""
     if override_id is not None:
+        # #442: set BOTH retired and deleted_at (soft-delete marker authoritative, retired synced)
         row = conn.execute(
-            "UPDATE dl_supplier_overrides SET retired=true, updated_at=now() "
+            "UPDATE dl_supplier_overrides SET retired=true, deleted_at=now(), updated_at=now() "
             "WHERE id=%s RETURNING id", (override_id,)).fetchone()
         return row is not None
     if orig_ean_edi is None:
@@ -583,10 +588,11 @@ def retire_dl_supplier(conn, *, override_id: int | None, orig_ean_edi: str | Non
     # supplier that legitimately has both ean_edi and city blank, not just the one retired.
     conn.execute(
         """INSERT INTO dl_supplier_overrides
-               (orig_ean_edi, orig_city, ean_edi, name, emails, city, retired, updated_at)
-           VALUES (%s,%s,%s,%s,%s,%s,true,now())
+               (orig_ean_edi, orig_city, ean_edi, name, emails, city, retired, deleted_at,
+                updated_at)
+           VALUES (%s,%s,%s,%s,%s,%s,true,now(),now())
            ON CONFLICT (orig_ean_edi, orig_city) WHERE orig_ean_edi IS NOT NULL
-           DO UPDATE SET retired=true, updated_at=now()""",
+           DO UPDATE SET retired=true, deleted_at=now(), updated_at=now()""",
         (orig_ean_edi, orig_city, orig_ean_edi, "", [], orig_city or ""))
     return True
 

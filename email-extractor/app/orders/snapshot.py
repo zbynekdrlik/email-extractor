@@ -306,7 +306,13 @@ def import_files(conn, catalog_path: str, customers_path: str) -> int:
 # snapshot row still carries; a non-NULL one (incl "") wins ("" = an explicit clear).
 
 def _load_catalog_overrides(conn) -> dict[str, dict]:
-    rows = conn.execute("SELECT gtin, name, retired, alias FROM catalog_overrides").fetchall()
+    # #442: `deleted_at IS NOT NULL` is treated EXACTLY like `retired` (spec §5) — a
+    # soft-deleted override is skipped by the merge just as a retired one is. `retired` is kept
+    # in sync by the DELETE endpoint, so this OR is belt-and-suspenders + makes deleted_at
+    # authoritative (a row flagged only by deleted_at, retired still false, is still excluded).
+    rows = conn.execute(
+        "SELECT gtin, name, (retired OR deleted_at IS NOT NULL), alias "
+        "FROM catalog_overrides").fetchall()
     return {r[0]: {"name": r[1], "retired": r[2], "alias": r[3]} for r in rows}
 
 
@@ -381,10 +387,13 @@ def retire_catalog_card(conn, gtin: str) -> bool:
     current = {r["gtin"] for r in catalog_for_management(conn)}
     if gtin not in current:
         return False
+    # #442: set BOTH retired and deleted_at — the soft-delete marker is authoritative for the
+    # Kôš/restore, `retired` is kept in sync so every legacy reader still behaves.
     conn.execute(
-        """INSERT INTO catalog_overrides (gtin, name, retired, updated_at)
-           VALUES (%s, '', true, now())
-           ON CONFLICT (gtin) DO UPDATE SET retired = true, updated_at = now()""",
+        """INSERT INTO catalog_overrides (gtin, name, retired, deleted_at, updated_at)
+           VALUES (%s, '', true, now(), now())
+           ON CONFLICT (gtin) DO UPDATE SET retired = true, deleted_at = now(),
+                                            updated_at = now()""",
         (gtin,))
     return True
 
@@ -402,7 +411,7 @@ def retire_catalog_card(conn, gtin: str) -> bool:
 def _load_customer_overrides(conn) -> list[dict]:
     rows = conn.execute(
         """SELECT id, orig_ean_edi, orig_street, ean_edi, name, emails, city, street, zip,
-                  retired
+                  (retired OR deleted_at IS NOT NULL)
            FROM customer_overrides ORDER BY id""").fetchall()
     return [{"id": r[0], "orig_ean_edi": r[1], "orig_street": r[2], "ean_edi": r[3] or "",
              "name": r[4], "emails": list(r[5] or []), "city": r[6] or "",
@@ -666,8 +675,9 @@ def retire_customer(conn, *, override_id: int | None, orig_ean_edi: str | None,
     (orig_ean_edi, orig_street) identity. False when neither identity is given, or the
     named override id does not exist."""
     if override_id is not None:
+        # #442: set BOTH retired and deleted_at (soft-delete marker authoritative, retired synced)
         row = conn.execute(
-            "UPDATE customer_overrides SET retired=true, updated_at=now() "
+            "UPDATE customer_overrides SET retired=true, deleted_at=now(), updated_at=now() "
             "WHERE id=%s RETURNING id", (override_id,)).fetchone()
         return row is not None
     if orig_ean_edi is None:
@@ -683,10 +693,10 @@ def retire_customer(conn, *, override_id: int | None, orig_ean_edi: str | None,
     conn.execute(
         """INSERT INTO customer_overrides
                (orig_ean_edi, orig_street, ean_edi, name, emails, city, street, zip,
-                retired, updated_at)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,true,now())
+                retired, deleted_at, updated_at)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,true,now(),now())
            ON CONFLICT (orig_ean_edi, orig_street) WHERE orig_ean_edi IS NOT NULL
-           DO UPDATE SET retired=true, updated_at=now()""",
+           DO UPDATE SET retired=true, deleted_at=now(), updated_at=now()""",
         (orig_ean_edi, orig_street, orig_ean_edi, "", [], "", orig_street or "", ""))
     return True
 

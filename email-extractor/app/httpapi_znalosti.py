@@ -20,6 +20,8 @@ from __future__ import annotations
 from flask import Flask, jsonify, request, session
 
 from . import __version__
+from .board.auth import actor as _board_actor
+from .board.services import audit as _audit
 from .httpapi_common import _EAN_STRIP_RE, Deps, _fold, _parse_emails_field
 from .httpapi_templates import ZNALOSTI_HTML
 from .orders import dl_snapshot, dl_worker, memory, snapshot
@@ -99,6 +101,9 @@ def register(app: Flask, deps: Deps) -> None:
     def api_znalosti_global_delete(rid: int):
         with deps.db() as c:
             ok = memory.delete_global_row(c, rid)
+            if ok:   # #442: soft delete now — record the audit row (recoverable from the Kôš)
+                _audit.record(c, actor=_board_actor(), table="global_item_memory",
+                              row_id=rid, action="delete")
         return jsonify(ok=True) if ok else (jsonify(error="nenájdené"), 404)
 
     @app.get("/api/znalosti/customer/<ean>")
@@ -128,6 +133,9 @@ def register(app: Flask, deps: Deps) -> None:
     def api_znalosti_customer_delete(ean: str, rid: int):
         with deps.db() as c:
             ok = memory.delete_item_memory_row(c, rid, ean)
+            if ok:   # #442: soft delete now — record the audit row (recoverable from the Kôš)
+                _audit.record(c, actor=_board_actor(), table="item_memory",
+                              row_id=rid, action="delete", note=f"customer {ean}")
         return jsonify(ok=True) if ok else (jsonify(error="nenájdené"), 404)
 
     # ---- /znalosti (#127/#128): direct add/edit/retire of the product cards and
@@ -175,6 +183,8 @@ def register(app: Flask, deps: Deps) -> None:
             ok = snapshot.retire_catalog_card(c, gtin)
             if ok:
                 snapshot.rebuild_from_overrides(c)
+                _audit.record(c, actor=_board_actor(), table="catalog_overrides",
+                              row_id=gtin, action="delete")   # #442
         return jsonify(ok=True) if ok else (jsonify(error="nenájdené"), 404)
 
     @app.get("/api/znalosti/clients")
@@ -237,6 +247,11 @@ def register(app: Flask, deps: Deps) -> None:
                 orig_ean_edi=body.get("orig_ean_edi"), orig_street=body.get("orig_street"))
             if ok:
                 snapshot.rebuild_from_overrides(c)
+                # #442: row_id = the override id when the retirement targeted one, else the
+                # original identity — enough for the audit trail (full Kôš restore lands lane 3).
+                _audit.record(c, actor=_board_actor(), table="customer_overrides",
+                              row_id=(body.get("override_id") or body.get("orig_ean_edi")),
+                              action="delete")
         return jsonify(ok=True) if ok else (jsonify(error="nenájdené"), 404)
 
     # ---- /znalosti (#221): direct add/edit/retire of the DL catalog cards + suppliers,
@@ -275,6 +290,8 @@ def register(app: Flask, deps: Deps) -> None:
             ok = dl_snapshot.retire_dl_catalog_card(c, gtin)
             if ok:
                 dl_snapshot.dl_rebuild_from_overrides(c)
+                _audit.record(c, actor=_board_actor(), table="dl_catalog_overrides",
+                              row_id=gtin, action="delete")   # #442
         return jsonify(ok=True) if ok else (jsonify(error="nenájdené"), 404)
 
     @app.get("/api/znalosti/dl-suppliers")
@@ -352,4 +369,7 @@ def register(app: Flask, deps: Deps) -> None:
                 orig_ean_edi=body.get("orig_ean_edi"), orig_city=body.get("orig_city"))
             if ok:
                 dl_snapshot.dl_rebuild_from_overrides(c)
+                _audit.record(c, actor=_board_actor(), table="dl_supplier_overrides",
+                              row_id=(body.get("override_id") or body.get("orig_ean_edi")),
+                              action="delete")   # #442
         return jsonify(ok=True) if ok else (jsonify(error="nenájdené"), 404)
