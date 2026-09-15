@@ -1,0 +1,20 @@
+{# Zákazníci (spoločné) / Dodávatelia (sklad) content (#446 lane 5). ONE template for both
+   partner tabs — tab-partners.js reads the scope (customers|suppliers) from
+   #board-main[data-scope] and calls /api/board/customers or /api/board/suppliers. No HTML
+   in Python (spec §3); every row/card is built in JS via ui.js el(). #}
+<section class="board-partners" aria-label="Partneri">
+  <div class="p-toolbar">
+    <input id="p-search" class="p-search" type="search" autocomplete="off"
+           placeholder="Hľadať (názov, EAN, mesto, e-mail…)">
+    <button id="p-add" class="p-btn p-btn--primary" type="button">➕ Pridať</button>
+  </div>
+  <div id="p-editor" class="p-editor" hidden></div>
+  <div id="p-list" class="p-list" aria-live="polite"></div>
+  <p id="p-empty" class="p-empty" hidden>Nič sa nenašlo.</p>
+  <div class="p-pager">
+    <button type="button" id="p-prev" class="p-page-btn" disabled>← Novšie</button>
+    <span id="p-page-info" class="p-page-info"></span>
+    <button type="button" id="p-next" class="p-page-btn" disabled>Ďalšie →</button>
+  </div>
+</section>
+{# tab-partners.js is loaded by layout.html via `tab_script` (_TAB_CONTENT). #}
