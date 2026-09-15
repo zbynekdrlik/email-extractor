@@ -353,7 +353,9 @@ def create_app(cfg) -> Flask:
     # boundary, moved verbatim as ONE indivisible unit into
     # httpapi_orders_questions.py, registered here at api_orders_questions's old
     # position.
-    httpapi_orders_questions.register(app, deps)
+    # #443: register() returns its answer/undo dispatch callables so the unified board can
+    # DELEGATE to the exact same logic (no duplicated business logic — spec §3 / board.md).
+    questions_api = httpapi_orders_questions.register(app, deps)
 
     # #268 krok 9: znalosti_page + all 12 knowledge-DB CRUD routes (products/
     # clients/global/customer-alias/dl-products/dl-suppliers), moved verbatim into
@@ -371,7 +373,7 @@ def create_app(cfg) -> Flask:
     # this is a Flask BLUEPRINT (owner-approved for the new subsystem — spec §3) owning
     # /nastenka* + /api/board/*; its own gate lives in board/auth.py and is delegated to from
     # _gate above. Templates + static assets ship from app/templates/board/ + app/static/board/.
-    register_board(app, deps)
+    register_board(app, deps, questions_api=questions_api)
 
     @app.get("/")
     def dashboard():

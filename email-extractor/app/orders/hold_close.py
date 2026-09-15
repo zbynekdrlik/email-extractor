@@ -370,6 +370,24 @@ def unresolve_manually(conn, qid: int) -> list[str]:
     return message_ids
 
 
+def reopen_expired(conn, qid: int) -> list[str]:
+    """#443 („Znovu otvoriť" on the board): a held order that `close_expired_holds` closed
+    with `release_reason='expired'` (nothing shipped, #421) goes back to 'held' when its
+    gating question is reopened. Mirror of `unresolve_manually` but scoped to the EXPIRED
+    reason — and, unlike it, it does NOT reset the message: the held order kept its stored
+    decisions, so a reopen must never make `worker._claim` re-run the LLM. The question
+    simply becomes open again (the caller flips it) and a later answer ships from those
+    stored decisions via `release_for_question`. A DL/orders question with no held order
+    (dl_item/dl_supplier, or an order never held) matches nothing → returns []. Returns the
+    affected message ids."""
+    rows = conn.execute(
+        """UPDATE held_orders SET status = 'held', release_reason = NULL, released_at = NULL
+            WHERE %s = ANY(question_ids) AND status = 'released'
+              AND release_reason = 'expired'
+            RETURNING message_id""", (qid,)).fetchall()
+    return list({r[0] for r in rows})
+
+
 def close_expired_holds(conn, cfg, post=None) -> list[dict]:
     """#421: a held order whose gating board question(s) expired (#341) must not stay
     `held` forever. Scan for any still-`held` row whose gating questions are ALL terminal
