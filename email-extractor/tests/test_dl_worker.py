@@ -4401,3 +4401,108 @@ def test_real_age_guard_path_then_sibling_release_returns_zero(pg, tmp_path):
     # Now: sibling release must NOT pick up this message
     n = dl_worker._release_stuck_siblings(pg, "other-msg", sender)
     assert n == 0, "the real age-guard path must make the message immune to sibling release"
+
+
+# --- #462: kg-tracked card, blank mass, delivered in pieces -> HOLD + dl_mass question -----
+
+DROZDIE_GTIN = "8588000000462"
+DROZDIE_DL_CSV = ("GTIN,Názov,doplnok,hmotnost,Sklad,Cena\n"
+                  "8588000000462,Drozdie Rekord,Rekord 10 kg drevo,,100,0.93\n")
+DROZDIE_MATCHED = {"gtin": DROZDIE_GTIN, "matchedCatalogName": "Drozdie Rekord",
+                   "matchConfidence": 0.97, "matchReason": "presná zhoda"}
+
+
+def _drozdie_doc(doc_number="0100000462", wording="Rekord 1 kg drevo", qty=7, unit="KS"):
+    # unitPrice 0 mirrors the live Lesaffre incident (R85 fills the catalog €/kg cena).
+    items = [{"name": wording, "quantity": qty, "unit": unit, "unitPrice": 0,
+              "totalPrice": 0, "vatRate": 10}]
+    return {"documents": [{
+        "supplierName": "Pekáreň Lunys", "supplierCity": "Prešov",
+        "supplierEmail": "dodavatel@lunys.sk", "docNumber": doc_number,
+        "deliveryDate": _DL_DELIVERY_DATE, "documentTotalWithoutVAT": 0, "items": items}]}
+
+
+def _dl_mass_question_count(pg):
+    return int(pg.execute(
+        "SELECT count(*) FROM order_questions WHERE kind='dl_mass'").fetchone()[0])
+
+
+def test_a_kg_tracked_card_with_blank_mass_delivered_in_pieces_holds_and_asks_the_mass(
+        pg, tmp_path):
+    """#462 core: a kg-tracked card (sklad=100) with blank mass, delivered in pieces, whose
+    DL wording (1 kg block) disagrees with the card doplnok (10 kg carton) must NEVER ship a
+    silent x10 (7 kg instead of 70). The document is HELD — no claim, no upload — and a
+    dl_mass board question asks the warehouse the kg-per-piece."""
+    dl_snapshot.import_snapshot(pg, DROZDIE_DL_CSV, OBJ_CATALOG_CSV, SUPPLIERS_CSV)
+    _msg(pg, mid="dz1")
+    _attach(pg, tmp_path, "dz1")
+    client = FakeClient({"dl_documents": [_drozdie_doc()],
+                         "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [DROZDIE_MATCHED]})
+    uploaded, posted = [], []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path),
+               dashboard_base_url="http://board.test")
+    n = dl_worker.tick(pg, cfg, client=client,
+                       upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+                       post=lambda c, h: posted.append(h))
+    assert n == 1
+    assert uploaded == [], "#462: blank-mass kg card in pieces is HELD, never a silent x10"
+    assert int(pg.execute("SELECT count(*) FROM desadv_sent").fetchone()[0]) == 0, \
+        "no claim is taken while held"
+    assert _dl_mass_question_count(pg) == 1, "a dl_mass question is raised for the kg-per-piece"
+    row = pg.execute(
+        "SELECT processed, proc_status FROM messages WHERE message_id='dz1'").fetchone()
+    assert row[0] is True and row[1] == "review", "held = processed review, revisited on answer"
+    assert posted and "potrebuje kontrolu" in posted[-1], "the ❗ hold message is posted"
+
+
+def test_answering_the_dl_mass_question_writes_the_card_mass_and_ships_70kg(pg, tmp_path):
+    """#462: the warehouse answers the kg-per-piece (10) → the card gets mass=10 (override) →
+    `release_for_question` reprocesses → the COMPLETE EDI ships 7 KS as 70.000 kg."""
+    dl_snapshot.import_snapshot(pg, DROZDIE_DL_CSV, OBJ_CATALOG_CSV, SUPPLIERS_CSV)
+    _msg(pg, mid="dz1")
+    _attach(pg, tmp_path, "dz1")
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    client1 = FakeClient({"dl_documents": [_drozdie_doc()],
+                          "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [DROZDIE_MATCHED]})
+    up1 = []
+    dl_worker.tick(pg, cfg, client=client1,
+                   upload=lambda c, name, content, dir_override=None: up1.append((name, content)))
+    assert up1 == [], "held on the first pass"
+    qid = pg.execute("SELECT id FROM order_questions WHERE kind='dl_mass'").fetchone()[0]
+    # The sklad answers the kg-per-piece — the answer writes `mass` on the card (override),
+    # exactly what the /nastenka dl_mass answer path does.
+    dl_snapshot.set_dl_card_mass(pg, DROZDIE_GTIN, 10.0)
+    pg.execute("UPDATE order_questions SET status='answered', answer=%s WHERE id=%s",
+               (Json({"choice": "10"}), qid))
+    card = next(r for r in dl_snapshot.dl_catalog_for_management(pg)
+                if r["gtin"] == DROZDIE_GTIN)
+    assert card["mass"] == 10.0, "the mass answer lands on the card, learned once"
+    client2 = FakeClient({"dl_documents": [_drozdie_doc()],
+                          "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [DROZDIE_MATCHED]})
+    up2 = []
+    released = dl_worker.release_for_question(
+        pg, cfg, qid, client=client2,
+        upload=lambda c, name, content, dir_override=None: up2.append((name, content)))
+    assert len(up2) == 1, "#462: the COMPLETE EDI ships once the mass is known"
+    assert released and released[0]["outcome"] == "ok"
+    lin = [ln for ln in up2[0][1].split("\r\n") if ln.startswith("LIN")][0]
+    assert lin[96:108] == "      70.000", "7 KS x 10 kg = 70.000 kg, not 7"
+
+
+def test_a_kg_tracked_card_delivered_in_kg_with_blank_mass_still_ships_no_hold(pg, tmp_path):
+    """#462 no-regression: a kg-tracked card with blank mass delivered IN KG (unit='kg') is
+    never held — the mass is not used at all (generate ships the qty as printed)."""
+    dl_snapshot.import_snapshot(pg, DROZDIE_DL_CSV, OBJ_CATALOG_CSV, SUPPLIERS_CSV)
+    _msg(pg, mid="dz2")
+    _attach(pg, tmp_path, "dz2")
+    doc = _drozdie_doc(doc_number="0100000463", wording="Rekord droždie", qty=180, unit="kg")
+    client = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [DROZDIE_MATCHED]})
+    up = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    dl_worker.tick(pg, cfg, client=client,
+                   upload=lambda c, name, content, dir_override=None: up.append((name, content)))
+    assert len(up) == 1, "a kg delivery ships immediately — never held on mass"
+    assert _dl_mass_question_count(pg) == 0, "no dl_mass question for a kg delivery"
+    lin = [ln for ln in up[0][1].split("\r\n") if ln.startswith("LIN")][0]
+    assert lin[96:108] == "     180.000", "kg qty shipped as printed"

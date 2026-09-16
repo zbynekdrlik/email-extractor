@@ -690,3 +690,19 @@ def test_gtin14_to_gtin13_returns_none_for_a_13char_or_non_numeric_input():
     assert desadv_edi.gtin14_to_gtin13("1234567890ABCD") is None  # non-numeric
     assert desadv_edi.gtin14_to_gtin13("²²²²²²²²²²²²²²") is None   # Unicode digit look-alikes
 
+
+
+# --- #462: a kg-tracked card with a resolved per-piece mass ships qty x mass in kg --------
+
+def test_kg_tracked_card_mass_10_ships_seven_pieces_as_seventy_kg():
+    """#462: once the Droždie card carries mass=10, a delivery of 7 KS ships 70 kg (not 7).
+    The line price 0/10 = 0 falls back to the catalog €/kg cena (0.93) via R85. Synthetic."""
+    data = {"customerEanEdi": "2000000000099", "customerName": "X", "docNumber": "1",
+            "orderNumber": "1", "deliveryDate": "01.08.2026",
+            "items": [{"gtin": "G462", "name": "Drozdie Rekord",
+                       "supplierName": "Rekord 1 kg drevo", "quantity": 7, "mass": 10,
+                       "unit": "KS", "totalPrice": 0, "unitPrice": 0}]}
+    got = desadv_edi.generate(data, {"G462": "100"}, {"G462": 0.93})
+    lin = [ln for ln in got.content.split("\r\n") if ln.startswith("LIN")][0]
+    assert lin[96:108] == "      70.000"
+    assert lin[82:91] == "    0.930"

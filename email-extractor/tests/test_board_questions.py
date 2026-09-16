@@ -308,3 +308,67 @@ def test_preview_404_for_unknown_question(pg):
     c = _client()
     _sklad(c)
     assert c.get("/api/board/questions/999999/preview").status_code == 404
+
+
+# --- #462: the dl_mass question (kg-per-piece) on the Otázky sklad tab ---------------------
+
+from app.orders import dl_snapshot as _dl_snapshot_462  # noqa: E402
+
+_DROZDIE_DL_CSV_462 = ("GTIN,Názov,doplnok,hmotnost,Sklad,Cena\n"
+                       "8588000000462,Drozdie Rekord,Rekord 10 kg drevo,,100,0.93\n")
+_OBJ_CSV_462 = "GTIN,Sklad,Názov,doplnok\n"
+_SUP_CSV_462 = ("Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,"
+                "Číslo mobilu,E-mail\n"
+                "Pekáreň Lunys,2000000000864,Prešov,Košútka 1,,,dodavatel@lunys.sk\n")
+
+
+def test_a_dl_mass_question_appears_in_the_dl_scoped_tab(pg):
+    """#462: a dl_mass question belongs to the Otázky sklad (DL) tab, not the orders tab."""
+    _msg(pg)
+    qm = _q(pg, kind="dl_mass", customer_ean="", wording="Rekord 1 kg drevo",
+            item_key="dlmass:8588000000462",
+            payload={"gtin": "8588000000462", "supplier_name": "Pekáreň Lunys"})
+    c = _client()
+    _dl(c)
+    dl_ids = {x["id"] for x in
+              c.get("/api/board/questions?scope=dl&status=open").get_json()["items"]}
+    assert qm in dl_ids
+    orders_ids = {x["id"] for x in
+                  c.get("/api/board/questions?scope=orders&status=open").get_json()["items"]}
+    assert qm not in orders_ids
+
+
+def test_answering_a_dl_mass_question_writes_the_mass_onto_the_card(pg):
+    """#462: answering the kg-per-piece (10) writes `mass` onto the kg-tracked card (an
+    override, the same path the Produkty sklad tab uses) so it is learned once, not per
+    document."""
+    _dl_snapshot_462.import_snapshot(pg, _DROZDIE_DL_CSV_462, _OBJ_CSV_462, _SUP_CSV_462)
+    _msg(pg)
+    qm = _q(pg, kind="dl_mass", customer_ean="", wording="Rekord 1 kg drevo",
+            item_key="dlmass:8588000000462",
+            payload={"gtin": "8588000000462", "supplier_name": "Pekáreň Lunys"})
+    c = _client()
+    _dl(c)
+    r = c.post(f"/api/board/questions/{qm}/answer", json={"choice": "10"})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    card = next(x for x in _dl_snapshot_462.dl_catalog_for_management(pg)
+                if x["gtin"] == "8588000000462")
+    assert card["mass"] == 10.0
+    row = pg.execute("SELECT status FROM order_questions WHERE id=%s", (qm,)).fetchone()
+    assert row[0] == "answered"
+
+
+def test_a_dl_mass_answer_must_be_a_positive_number(pg):
+    """#462: a non-numeric or non-positive kg-per-piece answer is refused (never written)."""
+    _dl_snapshot_462.import_snapshot(pg, _DROZDIE_DL_CSV_462, _OBJ_CSV_462, _SUP_CSV_462)
+    _msg(pg)
+    qm = _q(pg, kind="dl_mass", customer_ean="", wording="Rekord 1 kg drevo",
+            item_key="dlmass:8588000000462",
+            payload={"gtin": "8588000000462", "supplier_name": "Pekáreň Lunys"})
+    c = _client()
+    _dl(c)
+    r = c.post(f"/api/board/questions/{qm}/answer", json={"choice": "0"})
+    assert r.status_code == 400, r.get_data(as_text=True)
+    card = next(x for x in _dl_snapshot_462.dl_catalog_for_management(pg)
+                if x["gtin"] == "8588000000462")
+    assert card["mass"] is None, "a rejected answer never touches the card"
