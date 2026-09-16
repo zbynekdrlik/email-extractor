@@ -968,7 +968,7 @@ R84 ladder normalizes a kg-tracked line (`sklad == "100"`) to kg. #462 is the OT
 such a card is delivered in PIECES (unit `KS`/`KAR`, not kg/tonne), the per-piece mass is
 load-bearing — `generate()`'s `elif mass > 0: out_qty = qty * mass` rung, and its `else`
 rung that ships the piece count UNCONVERTED. Live incident: LESAFFRE droždie (card gtin
-`4820001610147`, name „Droždie", doplnok „Rekord 10 kg, drevo", `sklad=100`, `mass=NULL`)
+the real Droždie card (its gtin is kept OUT of git — public repo), doplnok „Rekord 10 kg, drevo", `sklad=100`, `mass=NULL`)
 shipped **7 kg instead of 70** — `dl_match._mass_kg` fell back to `mass_grams(<DL wording
 „Rekord 1 kg, drevo">)/1000 = 1.0` (the BLOCK weight on the paper, not the 10 kg carton).
 Price was fine (0/1.0 → R85 filled the €/kg cena), so the money gate never caught it.
