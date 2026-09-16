@@ -957,3 +957,72 @@ Missing the third site means the new field is `None` on every reprocessed messag
 and any gate that falls back to a substitute (e.g. `datetime.now(UTC)`) silently uses
 a wrong value — the #400 review caught exactly this (F1: the delivery-date gate
 compared against "now" instead of the real received date on a board-answer reprocess).
+
+
+## A kg-tracked card with a BLANK `mass`, delivered in PIECES, is a silent ×N — never
+## guess the per-piece mass from the DL wording; HOLD + ask (#462, 2026-09-16)
+
+The #366 section above fixed the tonne→kg rung and warned that `desadv_edi.generate()`'s
+R84 ladder normalizes a kg-tracked line (`sklad == "100"`) to kg. #462 is the OTHER blank-
+`mass` hole in that ladder: **244 of 252 kg-tracked cards have `mass IS NULL`**, and when
+such a card is delivered in PIECES (unit `KS`/`KAR`, not kg/tonne), the per-piece mass is
+load-bearing — `generate()`'s `elif mass > 0: out_qty = qty * mass` rung, and its `else`
+rung that ships the piece count UNCONVERTED. Live incident: LESAFFRE droždie (card gtin
+`4820001610147`, name „Droždie", doplnok „Rekord 10 kg, drevo", `sklad=100`, `mass=NULL`)
+shipped **7 kg instead of 70** — `dl_match._mass_kg` fell back to `mass_grams(<DL wording
+„Rekord 1 kg, drevo">)/1000 = 1.0` (the BLOCK weight on the paper, not the 10 kg carton).
+Price was fine (0/1.0 → R85 filled the €/kg cena), so the money gate never caught it.
+
+Reusable rules this fix established — apply them to ANY future per-piece-mass work:
+
+- **`dl_match._mass_kg` returns `float | None`.** For a kg-tracked card with a blank
+  `mass`, it trusts a value ONLY when the DL wording weight AND the card's own
+  `doplnok`/alias weight both parse and AGREE (`_weights_disagree` / `WEIGHT_TOLERANCE`);
+  a disagreement (1 kg vs 10 kg), or either weight missing, returns `None` = "mass
+  unresolved". A card that is NOT kg-tracked keeps its historical float unchanged (its mass
+  is never used downstream). **Mirror generate()'s `is_kg_tracked` exactly, including the
+  „vajcia" (eggs) exclusion** — eggs are `sklad=100` but ship per-piece, so `_mass_kg` must
+  NOT return `None` for an eggs card or every eggs-in-pieces delivery is spuriously held.
+
+- **The HOLD lives in `dl_document._process_document` (LIVE-path only, `if not shadow`),
+  the SAME #365 shape** — a matched item (`decision.gtin`) with `decision.mass is None`
+  whose unit would actually reach generate()'s per-piece-mass rung (`_needs_piece_mass`:
+  not kg, not tonne, not a liquid multipack, not eggs — mirrors generate()'s rung order)
+  is HELD: no claim, no upload, ❗ `build_review`, and a new `dl_mass` board question. The
+  answer writes `mass` onto the CARD (an override via `dl_snapshot.set_dl_card_mass`,
+  learned once, NOT per document) and `release_for_question` re-runs the message so the
+  COMPLETE, correctly-converted EDI ships (7 KS → 70.000 kg).
+
+- **`_needs_piece_mass` reads the multipack wording from `item.get("name")`, NOT
+  `supplierName`** — the raw extraction item has no per-line `supplierName` (that is a
+  document-level field); `desadv_edi.build()` sets the per-line `supplierName` from the
+  item `name` before generate() runs its multipack check. A gate that read
+  `item.get("supplierName")` would never detect a multipack and would falsely hold a
+  kg-tracked liquid-multipack card.
+
+- **`None` is NOT a byte-safe degrade at generate().** `build()` re-derives the line mass
+  from the wording (`_num(mass) or _extract_mass(name)`), so a `None` line that somehow
+  reached generate() would still convert by the guessed weight. The dl_document HOLD is the
+  SOLE protection against the silent ×N — the `None` signal exists only to trigger it.
+
+- **A new board question kind is wired in EIGHT places** (checklist for any future kind):
+  `teach.KINDS` (present/validate/apply/undo + the `learns` completeness assert),
+  `httpapi_security.DL_KINDS` (the import-time partition assert), the generic answer
+  dispatch tuple in `httpapi_orders_questions._answer_dispatch`, the still-open + close +
+  sibling gates in `dl_questions.py` (`release_for_question`/`close_message_not_warehouse`/
+  `close_message_sklad_unknown`), `question_alerts._DL_KINDS` + `_WHAT` (or reminders route
+  to the WRONG channel/board — a held doc never nudged, drifts to auto-expiry),
+  `board/questions_dl.DL_CARD_ACTIONS` (card buttons), `static/board/tab-questions.js` (the
+  card render — here a numeric kg-per-piece input) + its `editingOpen()` refresh guard, and
+  `tests/test_orders_teach_kinds.py`'s KINDS-set/deadline_shippable/`_ask_one_of_each_kind`
+  completeness pins.
+
+- **generate() stays byte-identical** (its `desadv_reference.json` parity fixture + the
+  e2e-dl corpus): the hold is live-path only, the corpus has no `sklad=100` case and scores
+  RAW quantity (not converted), and `_mass_kg` returns `None` only for a kg-tracked card
+  the corpus never exercises.
+
+- **The DATA half (mass on the ONE incident card) is applied through the app's own path,
+  never raw SQL** — `POST /api/board/products?scope=dl` (the Produkty sklad tab's own
+  `catalog._dl_upsert`, preserves name/doplnok/sklad/cena), read back from
+  `dl_catalog_overrides`. The already-imported incident DESADV is NEVER re-shipped (#239).
