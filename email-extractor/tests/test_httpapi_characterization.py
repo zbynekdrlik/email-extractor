@@ -327,3 +327,23 @@ def test_orders_digest_happy_path_returns_todays_and_yesterdays_provenance_stats
     # totally empty table would also correctly report.
     assert isinstance(body["days_since_incident"], int)
     assert body["days_since_incident"] >= 3
+
+
+# ---- lane 8 (#449): the retired warehouse pages are redirects, not HTML ------------
+
+def test_the_retired_warehouse_pages_are_redirects_not_html():
+    """Lane 8 retires /otazky, /otazky-dl, /znalosti(/<ean>): the routes stay registered
+    (they remain in EXPECTED_ROUTES) but now 302 to the matching board tab instead of
+    rendering ASK_HTML/ASK_DL_HTML/ZNALOSTI_HTML."""
+    c = _client()
+    for path, tail in (
+        ("/otazky", "/nastenka/otazky-objednavky"),
+        ("/otazky-dl", "/nastenka/otazky-sklad"),
+        ("/znalosti", "/nastenka/produkty-objednavky"),
+    ):
+        r = c.get(path)
+        assert r.status_code == 302, path
+        assert r.headers["Location"].endswith(tail), (path, r.headers["Location"])
+    r = c.get("/znalosti/2000000000777")
+    assert r.status_code == 302
+    assert "/nastenka/zakaznici" in r.headers["Location"], r.headers["Location"]

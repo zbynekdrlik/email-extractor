@@ -279,3 +279,62 @@ def test_the_dashboard_shows_the_warehouse_link_to_copy():
     # #231: the DL-only nástenka link is shown alongside it, same operator-host rule
     assert "http://46.224.130.35:8099/sklad-dl/" + httpapi.dl_key("t") in body
     assert "e0ac7775-email-extractor:8099/sklad-dl/" not in body
+
+
+# --- lane 8 (#449): the old warehouse pages are RETIRED -> they 302 to the board ------
+# /otazky, /otazky-dl, /znalosti, /znalosti/<ean> used to render ASK_HTML/ASK_DL_HTML/
+# ZNALOSTI_HTML; the unified nastenka (epic #441, lane 1-7) now owns every one of those
+# surfaces, so the old routes stay registered but return a redirect to the matching tab,
+# for EVERY role (the signed-key cookies stay valid). See the design comment on #449.
+
+def _role_client(secret="t", role=None):
+    """A test client, optionally pre-seeded with a warehouse role cookie (no signed-key
+    round-trip needed - we set the session directly)."""
+    cfg = Config(api_token="secret", dash_password="pw", secret_key=secret,
+                 pg_dsn="postgresql://unused", data_dir="/tmp")
+    app = create_app(cfg)
+    app.testing = True
+    c = app.test_client()
+    if role:
+        with c.session_transaction() as s:
+            s["role"] = role
+    return app, c
+
+
+def test_the_old_otazky_pages_redirect_to_the_board_for_every_role():
+    from app.httpapi_security import SKLAD_DL_ROLE, SKLAD_ROLE
+    for role in (None, SKLAD_ROLE, SKLAD_DL_ROLE):
+        _, c = _role_client(role=role)
+        r = c.get("/otazky")
+        assert r.status_code == 302, role
+        assert r.headers["Location"].endswith("/nastenka/otazky-objednavky"), r.headers["Location"]
+        r = c.get("/otazky-dl")
+        assert r.status_code == 302, role
+        assert r.headers["Location"].endswith("/nastenka/otazky-sklad"), r.headers["Location"]
+    _, c = _role_client()
+    c.post("/login", data={"password": "pw"})
+    assert c.get("/otazky").status_code == 302
+    assert c.get("/otazky-dl").status_code == 302
+
+
+def test_the_old_znalosti_pages_redirect_to_the_board_for_every_role():
+    from app.httpapi_security import SKLAD_DL_ROLE, SKLAD_ROLE
+    for role in (None, SKLAD_ROLE, SKLAD_DL_ROLE):
+        _, c = _role_client(role=role)
+        r = c.get("/znalosti")
+        assert r.status_code == 302, role
+        assert r.headers["Location"].endswith("/nastenka/produkty-objednavky"), r.headers["Location"]
+        r = c.get("/znalosti/2000000000777")
+        assert r.status_code == 302, role
+        loc = r.headers["Location"]
+        assert "/nastenka/zakaznici" in loc and "q=2000000000777" in loc, loc
+
+
+def test_a_retired_page_ultimately_lands_on_login_for_an_anon_session():
+    """No-cookie -> the old page redirects to the board tab, and the board gate then
+    sends an unauthenticated visitor to /login (the whole redirect chain)."""
+    _, c = _role_client(role=None)
+    r = c.get("/otazky", follow_redirects=True)
+    assert r.request.path == "/login", r.request.path
+    r = c.get("/znalosti", follow_redirects=True)
+    assert r.request.path == "/login", r.request.path
