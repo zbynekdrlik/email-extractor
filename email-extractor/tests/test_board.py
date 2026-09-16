@@ -52,14 +52,17 @@ def test_the_dl_sklad_link_redirects_to_nastenka():
     assert "/nastenka" in r.headers["Location"], r.headers["Location"]
 
 
-def test_the_old_boards_still_work_after_the_redirect_change():
-    """Lane 1 runs the new nástenka ALONGSIDE the old pages — they are NOT disabled."""
+def test_the_old_boards_are_retired_and_redirect_to_the_nastenka():
+    """#449 lane 8: the old pages are RETIRED — /otazky and /otazky-dl now 302 to the
+    matching nástenka tab (they ran alongside the board through lanes 1-7)."""
     c = _client()
     _sklad(c)
-    assert c.get("/otazky").status_code == 200
+    r = c.get("/otazky")
+    assert r.status_code == 302 and r.headers["Location"].endswith("/nastenka/otazky-objednavky")
     c2 = _client()
     _sklad_dl(c2)
-    assert c2.get("/otazky-dl").status_code == 200
+    r2 = c2.get("/otazky-dl")
+    assert r2.status_code == 302 and r2.headers["Location"].endswith("/nastenka/otazky-sklad")
 
 
 # --- the one gate: /nastenka* + /api/board/* -------------------------------------------

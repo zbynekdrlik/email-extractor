@@ -12,8 +12,10 @@ sklad · Produkty objednávky · Naučené sklad · Naučené objednávky · Zá
 Dodávatelia · História objednávok · História dodacích listov · Kôš; admin also „Maily"),
 replacing the three old entrypoints (`/otazky`, `/otazky-dl`, `/znalosti`). Approach A
 (owner-approved): Flask + Jinja templates IN FILES + vanilla JS ES modules, no build step,
-no CDN, no new runtime dependency. Rolled out lane-by-lane (spec §8); the new board runs
-ALONGSIDE the old pages until the warehouse confirms, then lane 8 retires them.
+no CDN, no new runtime dependency. Rolled out lane-by-lane (spec §8); the new board ran
+ALONGSIDE the old pages through lanes 1-7, and **lane 8 (#449) RETIRED them** — `/otazky`,
+`/otazky-dl`, `/znalosti`, `/znalosti/<ean>` are now pure 302 redirects to the board (see
+the lane-8 section at the bottom of this file).
 
 ## Architecture rules (spec §3) — obey when adding any tab/route/service
 
@@ -76,8 +78,9 @@ first), so the delegation, not a blueprint hook, is the guard.
 key-derivation recipe, or use the known live key), then in Playwright: `clearCookies()` →
 prove `/` redirects to `/login` (clean session) → navigate `/sklad/<key>` (must 302 →
 `/nastenka`) → assert `[data-testid="version"]` == `/version`, the tab bar renders, and the
-console has ZERO errors/warnings. Confirm the old `/otazky`/`/otazky-dl` still return 200
-until lane 8. Read-only — never click/answer a real question on prod.
+console has ZERO errors/warnings. Since lane 8 (#449) the old `/otazky`/`/otazky-dl`/
+`/znalosti` are RETIRED — confirm they now **302 to the matching board tab** (never 200).
+Read-only — never click/answer a real question on prod.
 
 ## Reusable gotchas from lane 1
 
@@ -404,3 +407,41 @@ already); of a `restore` row itself → refused; of a missing audit id → 404. 
   Žiadny generátor nemá čistý jediný `question_id` v čase stavby (per-email/grupované; `on_new`
   len zbiera) → `?q` deep-link je schopnosť testovaná priamym `board_link`/URL, generátori posielajú
   `question_id=None`.
+
+## Lane 8 — vypnutie starých stránok (#449, 0.9.168): redirect, nie odregistrovanie
+
+- **Staré stránky OSTÁVAJÚ zaregistrované ako routy, len telo je `redirect()`** — `/otazky`
+  → `board_links.ORDERS_TAB` (`/nastenka/otazky-objednavky`), `/otazky-dl` →
+  `board_links.DL_TAB` (`/nastenka/otazky-sklad`), `/znalosti` →
+  `/nastenka/produkty-objednavky`, `/znalosti/<ean>` (per-zákazník) →
+  `/nastenka/zakaznici?q=<ean>`. Preto route-map char-test + `EXPECTED_ROUTES` ostávajú
+  nezmenené (routy stále existujú); pridal sa len test, že sú to REDIRECTY
+  (`test_the_retired_warehouse_pages_are_redirects_not_html`). Odregistrovanie by dalo
+  staré bookmarky 404 — zámerne nie.
+- **Presmerovanie platí pre KAŽDÚ rolu.** `_gate` má tie 4 cesty v OPEN-bypasse (`p in
+  ("/otazky","/otazky-dl","/znalosti") or p.startswith("/znalosti/")`), takže 302 padne aj
+  pre anon (board si prihlásenie vynúti na cieli). Kľúčové cookies ostávajú platné; rolový
+  fallback v `_gate` (bounce zo `/` pre sklad rolu) teraz vedie na `board_links.ORDERS_TAB`/
+  `DL_TAB`, nie na staré `/otazky`.
+- **Šablóny `ASK_HTML`/`ASK_DL_HTML`/`ZNALOSTI_HTML` + `_ASK_HTML_TEMPLATE` ZMAZANÉ** z
+  `httpapi_templates.py` (ostávajú len `LOGIN_HTML`+`DASH_HTML`); ich sha256 piny +
+  `_TEMPLATE_CONSTANTS` v `test_httpapi_characterization.py` odstránené (DASH/LOGIN piny sa
+  NEMENILI — tie literály sú nedotknuté). Staré Playwright testy starých stránok zmazané —
+  otázky/produkty/naučené/zákazníci funkčnosť pokrývajú board-tab testy (lane 2-7); pribudli
+  redirect testy per rola + `?q=` seed test. **VÝNIMKA:** stará `/otazky-dl` stránka mala
+  DL-reliability banner (`#dlAlertBanner`, kŕmený `/api/orders/dl/stats`: zaseknuté DL, čakajúce
+  alerty, otvorené import-incidenty) — NEBOL portovaný na žiadnu board záložku počas lane 1-7, a
+  lane 8 ho retiruje spolu so stránkou. Operačný signál NIE JE stratený (`pending_alerts` stále
+  tečú do ops kanála; import-incidenty do denného Odoo digestu cez `reliability.py`), ale
+  warehouse-facing banner na nástenke chýba. Endpoint `/api/orders/dl/stats` + jeho
+  `SKLAD_DL_PATHS` položka SÚ ponechané (neškodné, gated; prípadný budúci port ich reuse-ne).
+  Doportovanie bannera na „Otázky sklad" záložku je samostatný follow-up (nová UI, mimo scope
+  lane 8 = „vypnutie starých stránok").
+- **`httpapi_security.py`: zahodený LEN `SKLAD_ZNALOSTI_PAGE`** (page-only regex) + stránkové
+  položky (`/otazky` z `SKLAD_PATHS`, `/otazky-dl` z `SKLAD_DL_PATHS`). API allowlisty
+  (`/api/orders/*`, `SKLAD_ACTION`, `SKLAD_ZNALOSTI_API`, `SKLAD_DL_ZNALOSTI_API`) OSTÁVAJÚ —
+  board na tie stroje deleguje a `/api/znalosti/*`+`/api/orders/question/*` musia zostať
+  dostupné pre sklad rolu (dôkaz: `test_znalosti_api_still_reachable_via_the_warehouse_link`).
+- **Admin `/` dashboard OSTÁVA** (záložka „Maily"); jeho `__SKLADLINK__`/`__DLSKLADLINK__`
+  teraz nesú `?next=<board tab>` (tvar #459 `board_link`, ale na host-base operátora, nie
+  `dashboard_base_url` — kvôli 0.9.10 pravidlu). `board_link` (#459) je nezmenený.

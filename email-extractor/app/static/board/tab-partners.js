@@ -161,4 +161,10 @@ searchEl.addEventListener("input", debounce(() => {
 $("p-prev").addEventListener("click", () => { if (state.page > 0) { state.page -= 1; load(); } });
 $("p-next").addEventListener("click", () => { state.page += 1; load(); });
 setInterval(() => { if (!editorOpen()) load(); }, 15000);
+
+// #449 lane 8: honour a `?q=<term>` deep link (the retired /znalosti/<ean> page now
+// redirects to /nastenka/zakaznici?q=<ean>) — seed the search box + filter so the tab
+// opens already narrowed to that customer. Additive: no param = the unchanged default.
+const _initQ = new URLSearchParams(location.search).get("q");
+if (_initQ) { state.q = _initQ.trim(); if (searchEl) searchEl.value = state.q; }
 load();

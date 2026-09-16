@@ -22,9 +22,12 @@ Ciabatta 3636/3643 incident: two cards added to the sheet only → 2 orders held
   The effective catalog the pipeline matches against is `snapshot.catalog_for_management` /
   `load_catalog` + overrides. DL has its own parallel line (`dl_catalog_snapshot` +
   `dl_catalog_overrides`).
-- **Cards are added/edited ONLY via `/znalosti`** → `POST /api/znalosti/products`
-  (`snapshot.upsert_catalog_card`); DL cards via `/znalosti` DL-products. Retire a card via
+- **Cards are added/edited via the nástenka „Produkty" tab** (`/nastenka/produkty-objednavky`
+  / `produkty-sklad`), which delegates to `POST /api/znalosti/products`
+  (`snapshot.upsert_catalog_card`); DL cards via the DL-products endpoint. Retire a card via
   `DELETE /api/znalosti/products/<gtin>` (`retire_catalog_card`, a `retired=true` override).
+  (#449 lane 8: the old `/znalosti` PAGE is retired — it 302s to the Produkty tab; the
+  `/api/znalosti/*` API stays and is what the board tab delegates to.)
 - `snapshot.import_snapshot`/`import_files`/`parse_catalog`/`parse_customers` are kept ONLY
   because the offline eval corpus (`eval_run.py`/`dl_eval_run.py`) seeds its frozen snapshot
   from a CSV fixture that way. They are pure network-free CSV-text importers; nothing in the

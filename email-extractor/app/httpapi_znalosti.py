@@ -17,13 +17,13 @@ was before the move.
 """
 from __future__ import annotations
 
-from flask import Flask, jsonify, request, session
+from urllib.parse import quote
 
-from . import __version__
+from flask import Flask, jsonify, redirect, request
+
 from .board.auth import actor as _board_actor
 from .board.services import audit as _audit
 from .httpapi_common import _EAN_STRIP_RE, Deps, _fold, _parse_emails_field
-from .httpapi_templates import ZNALOSTI_HTML
 from .orders import dl_snapshot, dl_worker, memory, snapshot
 
 
@@ -35,17 +35,13 @@ def register(app: Flask, deps: Deps) -> None:
     @app.get("/znalosti")
     @app.get("/znalosti/<ean>")
     def znalosti_page(ean: str = ""):
-        # #235: the DL product/supplier boxes call `/api/znalosti/dl-products`/
-        # `dl-suppliers` — SKLAD_ROLE (the orders-only warehouse link) no longer has API
-        # access to those (SKLAD_ZNALOSTI_API narrowed, see this ticket's own boundary
-        # requirement). Rendering the boxes anyway would fire two 401s the instant the
-        # page loads for that role (a real, dirty browser-console failure, caught by the
-        # existing Playwright coverage) — so a non-admin session gets the page WITHOUT
-        # them; a real dash_password login (`session["auth"]`) is unaffected.
-        dl_boxes = ("    W.appendChild(dlProductsBox());\n"
-                   "    W.appendChild(dlSuppliersBox());\n") if session.get("auth") else ""
-        return (ZNALOSTI_HTML.replace("__VERSION__", __version__)
-               .replace("__DL_BOXES__", dl_boxes))
+        # #449 lane 8: the knowledge-DB PAGE is retired — its curation now lives on the
+        # unified nástenka. `/znalosti` → the „Produkty objednávky" tab; the per-customer
+        # `/znalosti/<ean>` → the „Zákazníci" tab, seeded with that EAN. The `/api/znalosti/*`
+        # CRUD endpoints below STAY (the board + the admin dashboard delegate to them).
+        if ean:
+            return redirect(f"/nastenka/zakaznici?q={quote(ean, safe='')}")
+        return redirect("/nastenka/produkty-objednavky")
 
     def _current_catalog(c):
         sid = snapshot.latest_snapshot_id(c)

@@ -325,3 +325,16 @@ writes in `deps.db_tx()` (atomic — safe because there is no external side effe
 autocommit `deps.db()`. The "Neviem" follow-up will ship its own sibling terminal close —
 reuse this exact shape (a distinct status + a `proc_status='review'`-flavoured event so
 Marek sees it needs attention, vs the "done" flavour here).
+
+## #449 lane 8 — the three warehouse templates are RETIRED (0.9.168)
+
+`ASK_HTML`/`ASK_DL_HTML`/`ZNALOSTI_HTML` (+ the shared `_ASK_HTML_TEMPLATE`) were DELETED
+from `httpapi_templates.py` — the unified nástenka (`app/board/`) owns those surfaces now
+and `/otazky`/`/otazky-dl`/`/znalosti(/<ean>)` are pure 302 redirects to it. So the sections
+above that talk about re-pinning ASK/ASK_DL/ZNALOSTI checksums are HISTORICAL — the
+`EXPECTED_TEMPLATE_SHA256` / `_TEMPLATE_CONSTANTS` dicts in `test_httpapi_characterization.py`
+now carry ONLY `LOGIN_HTML` + `DASH_HTML` (their literals were NOT touched, so those two pins
+did not change). The route-map test is UNCHANGED: the four old routes stay registered (they
+still appear in `EXPECTED_ROUTES`) because they still exist — as redirects — proven by the new
+`test_the_retired_warehouse_pages_are_redirects_not_html`. The template-checksum trap
+(`block-sensitive-staging.sh` on a re-pin) therefore no longer applies to those three names.

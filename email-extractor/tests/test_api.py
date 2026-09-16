@@ -683,9 +683,10 @@ def test_legacy_rows_and_the_sklad_boundary_survive_the_new_kind_register(pg, mo
     from app.httpapi import SKLAD_ACTION, SKLAD_PATHS, sklad_key
     from app.orders import memory, snapshot, teach
 
-    # SKLAD_PATHS itself is the whole security boundary for the unauthenticated warehouse
-    # link — it must be byte-identical to before the register existed.
-    assert SKLAD_PATHS == ("/otazky", "/api/orders/questions", "/api/orders/taught",
+    # SKLAD_PATHS is the API-surface security boundary for the unauthenticated warehouse
+    # link. #449 lane 8 dropped the retired `/otazky` PAGE entry (it is now an open redirect
+    # to the board); the API endpoints the board delegates to are byte-identical.
+    assert SKLAD_PATHS == ("/api/orders/questions", "/api/orders/taught",
                            "/api/orders/held")
     assert SKLAD_ACTION.match("/api/orders/question/123/answer")
     assert SKLAD_ACTION.match("/api/orders/question/123/undo")

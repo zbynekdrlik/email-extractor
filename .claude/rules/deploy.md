@@ -40,11 +40,13 @@ warning; both alias the same command.)
 ## Post-deploy verification
 
 - Liveness: `curl http://<ha-host>:8099/health` → `{"ok":true,"version":"<x.y.z>"}`.
-- Version-on-DOM: any page (`/otazky`, `/otazky-dl`, the main dashboard) shows `v<x.y.z>`
-  in the header — read it with Playwright, not curl.
-- Functional: `/otazky`/`/otazky-dl` list live open warehouse questions — a real, current
-  cross-check for whatever the ticket changed in the matching ladder (`app/orders/match.py`)
-  or the `/sklad`/`/sklad-dl` role boundary (`app/httpapi.py`'s `_role_kinds`, #231).
+- Version-on-DOM: any page (the unified nástenka `/nastenka`, the main dashboard) shows
+  `v<x.y.z>` in the header — read it with Playwright, not curl. (#449 lane 8: the old
+  `/otazky`/`/otazky-dl`/`/znalosti` are retired — they 302 to the board now.)
+- Functional: the nástenka „Otázky objednávky"/„Otázky sklad" tabs list live open warehouse
+  questions — a real, current cross-check for whatever the ticket changed in the matching
+  ladder (`app/orders/match.py`) or the `/sklad`/`/sklad-dl` role boundary (`app/board/auth.py`'s
+  `board_gate`, and `app/httpapi_security.py`'s `_role_kinds`, #231/#442).
 
 **Verifying an unauthenticated-link/session boundary with the Playwright MCP browser —
 clear cookies FIRST, every time.** The MCP browser profile (`.playwright-mcp/`) is
@@ -290,7 +292,8 @@ actually redirects to `/login` first as proof the session is genuinely clean.
   print('dl:', dl_key(app.secret_key))"
   ```
   Then, per role, in Playwright: `clearCookies()` → navigate to
-  `/sklad/<key>`/`/sklad-dl/<key>` (redirects to `/otazky`/`/otazky-dl`) →
+  `/sklad/<key>`/`/sklad-dl/<key>` (redirect to `/nastenka/otazky-objednavky`/`-sklad`; the
+  retired `/otazky`/`/otazky-dl` themselves also 302 to the board, #449 lane 8) →
   `fetch('/api/orders/questions', {credentials:'include'})` and check the returned
   `kind` values are the expected subset (`customer`/`mail` for orders,
   `dl_item`/`dl_supplier` for DL) — proves the role-boundary filter, not just a 200

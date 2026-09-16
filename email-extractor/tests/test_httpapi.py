@@ -150,20 +150,22 @@ def _sklad_client(secret="t", base=""):
 def test_the_signed_warehouse_link_opens_the_questions_page_with_no_password():
     from app import httpapi
     _, c = _sklad_client()
-    # #442: the signed link now lands on the unified nástenka (both keys valid), but the
-    # old /otazky board is NOT disabled in lane 1 and stays reachable for the sklad role.
+    # #442: the signed link lands on the unified nástenka (both keys valid). #449 lane 8:
+    # the old /otazky board is RETIRED — it now 302s to the board's orders questions tab.
     r0 = c.get("/sklad/" + httpapi.sklad_key("t"))
     assert r0.status_code == 302 and "/nastenka" in r0.headers["Location"]
     r = c.get("/otazky")
-    assert r.status_code == 200
-    assert b'data-testid="version"' in r.data          # version label (mandatory rule)
-    assert b"/api/orders/questions" in r.data          # it talks to the questions API
+    assert r.status_code == 302
+    assert r.headers["Location"].endswith("/nastenka/otazky-objednavky"), r.headers["Location"]
 
 
 def test_a_wrong_warehouse_link_is_refused():
     _, c = _sklad_client()
     assert c.get("/sklad/" + "0" * 32).status_code == 403
-    assert c.get("/otazky").status_code == 302         # and nothing was granted
+    # #449 lane 8: /otazky is now an open redirect to the board for everyone (the board
+    # itself gates the target tab) — nothing about the mail archive is granted here.
+    r = c.get("/otazky")
+    assert r.status_code == 302 and r.headers["Location"].endswith("/nastenka/otazky-objednavky")
 
 
 def test_the_key_differs_per_install():
@@ -184,7 +186,8 @@ def test_the_warehouse_link_opens_ONLY_the_questions_surface():
     assert c.get("/api/fix-queue").status_code == 401
     assert c.get("/eml/e1").status_code == 403
     r = c.get("/")
-    assert r.status_code == 302 and "/otazky" in r.headers["Location"]
+    # #449 lane 8: the sklad role is bounced from the admin dashboard to the board.
+    assert r.status_code == 302 and "/nastenka" in r.headers["Location"]
 
 
 def test_the_warehouse_link_can_also_see_held_orders():
@@ -210,20 +213,22 @@ def test_a_login_is_remembered_so_nobody_retypes_the_password():
 def test_the_signed_dl_warehouse_link_opens_the_dl_questions_page_with_no_password():
     from app import httpapi
     _, c = _sklad_client()
-    # #442: the DL link also lands on the unified nástenka now (DL key must NOT lose
-    # access), while the old /otazky-dl board stays reachable in lane 1.
+    # #442: the DL link also lands on the unified nástenka (DL key must NOT lose access).
+    # #449 lane 8: the old /otazky-dl board is RETIRED — it now 302s to the board's
+    # „Otázky sklad" (DL questions) tab.
     r0 = c.get("/sklad-dl/" + httpapi.dl_key("t"))
     assert r0.status_code == 302 and "/nastenka" in r0.headers["Location"]
     r = c.get("/otazky-dl")
-    assert r.status_code == 200
-    assert b'data-testid="version"' in r.data
-    assert b"/api/orders/questions" in r.data
+    assert r.status_code == 302
+    assert r.headers["Location"].endswith("/nastenka/otazky-sklad"), r.headers["Location"]
 
 
 def test_a_wrong_dl_warehouse_link_is_refused():
     _, c = _sklad_client()
     assert c.get("/sklad-dl/" + "0" * 32).status_code == 403
-    assert c.get("/otazky-dl").status_code == 302        # and nothing was granted
+    # #449 lane 8: /otazky-dl is now an open redirect to the board for everyone.
+    r = c.get("/otazky-dl")
+    assert r.status_code == 302 and r.headers["Location"].endswith("/nastenka/otazky-sklad")
 
 
 def test_the_orders_link_does_not_open_the_dl_key_and_vice_versa():
@@ -248,7 +253,8 @@ def test_the_dl_warehouse_link_opens_ONLY_the_dl_questions_surface():
         "held orders are an AI-orders concept — outside the DL role's own path allowlist"
     assert c.get("/eml/e1").status_code == 403
     r = c.get("/")
-    assert r.status_code == 302 and "/otazky-dl" in r.headers["Location"]
+    # #449 lane 8: the DL sklad role is bounced from the admin dashboard to the board.
+    assert r.status_code == 302 and "/nastenka" in r.headers["Location"]
 
 
 def test_the_dl_role_can_reach_dl_stats_but_the_orders_role_cannot():
@@ -279,3 +285,62 @@ def test_the_dashboard_shows_the_warehouse_link_to_copy():
     # #231: the DL-only nástenka link is shown alongside it, same operator-host rule
     assert "http://46.224.130.35:8099/sklad-dl/" + httpapi.dl_key("t") in body
     assert "e0ac7775-email-extractor:8099/sklad-dl/" not in body
+
+
+# --- lane 8 (#449): the old warehouse pages are RETIRED -> they 302 to the board ------
+# /otazky, /otazky-dl, /znalosti, /znalosti/<ean> used to render ASK_HTML/ASK_DL_HTML/
+# ZNALOSTI_HTML; the unified nastenka (epic #441, lane 1-7) now owns every one of those
+# surfaces, so the old routes stay registered but return a redirect to the matching tab,
+# for EVERY role (the signed-key cookies stay valid). See the design comment on #449.
+
+def _role_client(secret="t", role=None):
+    """A test client, optionally pre-seeded with a warehouse role cookie (no signed-key
+    round-trip needed - we set the session directly)."""
+    cfg = Config(api_token="secret", dash_password="pw", secret_key=secret,
+                 pg_dsn="postgresql://unused", data_dir="/tmp")
+    app = create_app(cfg)
+    app.testing = True
+    c = app.test_client()
+    if role:
+        with c.session_transaction() as s:
+            s["role"] = role
+    return app, c
+
+
+def test_the_old_otazky_pages_redirect_to_the_board_for_every_role():
+    from app.httpapi_security import SKLAD_DL_ROLE, SKLAD_ROLE
+    for role in (None, SKLAD_ROLE, SKLAD_DL_ROLE):
+        _, c = _role_client(role=role)
+        r = c.get("/otazky")
+        assert r.status_code == 302, role
+        assert r.headers["Location"].endswith("/nastenka/otazky-objednavky"), r.headers["Location"]
+        r = c.get("/otazky-dl")
+        assert r.status_code == 302, role
+        assert r.headers["Location"].endswith("/nastenka/otazky-sklad"), r.headers["Location"]
+    _, c = _role_client()
+    c.post("/login", data={"password": "pw"})
+    assert c.get("/otazky").status_code == 302
+    assert c.get("/otazky-dl").status_code == 302
+
+
+def test_the_old_znalosti_pages_redirect_to_the_board_for_every_role():
+    from app.httpapi_security import SKLAD_DL_ROLE, SKLAD_ROLE
+    for role in (None, SKLAD_ROLE, SKLAD_DL_ROLE):
+        _, c = _role_client(role=role)
+        r = c.get("/znalosti")
+        assert r.status_code == 302, role
+        assert r.headers["Location"].endswith("/nastenka/produkty-objednavky"), r.headers["Location"]
+        r = c.get("/znalosti/2000000000777")
+        assert r.status_code == 302, role
+        loc = r.headers["Location"]
+        assert "/nastenka/zakaznici" in loc and "q=2000000000777" in loc, loc
+
+
+def test_a_retired_page_ultimately_lands_on_login_for_an_anon_session():
+    """No-cookie -> the old page redirects to the board tab, and the board gate then
+    sends an unauthenticated visitor to /login (the whole redirect chain)."""
+    _, c = _role_client(role=None)
+    r = c.get("/otazky", follow_redirects=True)
+    assert r.request.path == "/login", r.request.path
+    r = c.get("/znalosti", follow_redirects=True)
+    assert r.request.path == "/login", r.request.path

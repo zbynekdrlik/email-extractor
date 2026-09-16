@@ -19,18 +19,20 @@ from flask import session
 from .orders import teach as _teach
 
 SKLAD_ROLE = "sklad"
-# What the warehouse link may reach — the questions surface, nothing else. It is an
+# What the warehouse link may reach — the questions API surface, nothing else. It is an
 # UNAUTHENTICATED link, so this list is the whole security boundary: never widen it to
 # anything that reads mails, files or spend. `/api/orders/held` (#93) is order metadata of
 # the same shape as questions/taught (customer name, delivery date, question ids) — no mail
-# body, no attachment, no spend — and IS meant to be sklad-visible: the `/otazky` panel
-# fetches it so the warehouse sees what it is holding up, review finding on PR #116 (the
-# panel silently 401'd and never rendered for the sklad role without this).
-SKLAD_PATHS = ("/otazky", "/api/orders/questions", "/api/orders/taught", "/api/orders/held")
+# body, no attachment, no spend — and IS meant to be sklad-visible (review finding on PR
+# #116 — the panel silently 401'd without this).
+# #449 lane 8: the retired `/otazky` PAGE is gone from this list (it is now an open
+# redirect to the board, gated by `board_gate`); only the API endpoints the board and the
+# admin dashboard still delegate to remain.
+SKLAD_PATHS = ("/api/orders/questions", "/api/orders/taught", "/api/orders/held")
 SKLAD_ACTION = re.compile(r"^/api/orders/question/\d+/(answer|undo)$")
-# #104: the same warehouse link also reaches the knowledge-base page. Same boundary rule as
-# SKLAD_PATHS above — wording/gtin/card metadata only, never a mail body or an attachment.
-SKLAD_ZNALOSTI_PAGE = re.compile(r"^/znalosti(/[^/]+)?$")
+# #104: the knowledge-base CRUD API. Same boundary rule as SKLAD_PATHS above —
+# wording/gtin/card metadata only, never a mail body or an attachment. (#449 lane 8: the
+# `/znalosti` PAGE regex was dropped — the page is now an open redirect; the API stays.)
 # #235: narrowed to the ORDERS-only knowledge (global/catalog/customers/products/clients) —
 # `dl-products`/`dl-suppliers` used to be alternatives here too (since #223's dashboard-
 # editing rollout), which meant the orders SKLAD_ROLE already had a real, unintended write
@@ -57,8 +59,9 @@ SKLAD_DL_ZNALOSTI_API = re.compile(r"^/api/znalosti/(dl-products(/[^/]+)?|dl-sup
 ORDERS_KINDS = ("item", "customer", "mail", "date", "line")
 DL_KINDS = ("dl_item", "dl_supplier")
 SKLAD_DL_ROLE = "sklad_dl"
-SKLAD_DL_PATHS = ("/otazky-dl", "/api/orders/questions", "/api/orders/taught",
-                  "/api/orders/dl/stats")
+# #449 lane 8: the retired `/otazky-dl` PAGE is gone from this list (now an open redirect
+# to the board's „Otázky sklad" tab); only the DL API endpoints remain.
+SKLAD_DL_PATHS = ("/api/orders/questions", "/api/orders/taught", "/api/orders/dl/stats")
 # Review finding on the #231 PR: nothing enforced that these two tuples actually
 # partition EVERY registered `teach.KINDS` entry. A future kind added to that registry
 # but forgotten here would silently NEVER reach either unauthenticated nástenka link
