@@ -4506,3 +4506,35 @@ def test_a_kg_tracked_card_delivered_in_kg_with_blank_mass_still_ships_no_hold(p
     assert _dl_mass_question_count(pg) == 0, "no dl_mass question for a kg delivery"
     lin = [ln for ln in up[0][1].split("\r\n") if ln.startswith("LIN")][0]
     assert lin[96:108] == "     180.000", "kg qty shipped as printed"
+
+
+def test_a_kg_tracked_liquid_multipack_with_blank_mass_ships_via_the_L_rung_no_hold(
+        pg, tmp_path):
+    """#462 review finding: a kg-tracked card with a blank mass whose wording is a liquid
+    multipack (e.g. '6x1l') must ship via generate()'s L rung, NEVER be held on mass — the
+    per-piece mass is not used at all. Guards the `_needs_piece_mass` supplierName->name
+    fallback (the raw extraction item has no supplierName key)."""
+    csv = ("GTIN,Názov,doplnok,hmotnost,Sklad,Cena\n"
+           "8588000000470,Ocot liehovy,,,100,0.80\n")
+    dl_snapshot.import_snapshot(pg, csv, OBJ_CATALOG_CSV, SUPPLIERS_CSV)
+    _msg(pg, mid="dz3")
+    _attach(pg, tmp_path, "dz3")
+    items = [{"name": "Ocot 6x1l", "quantity": 2, "unit": "ks", "unitPrice": 0,
+              "totalPrice": 0, "vatRate": 10}]
+    doc = {"documents": [{
+        "supplierName": "Pekáreň Lunys", "supplierCity": "Prešov",
+        "supplierEmail": "dodavatel@lunys.sk", "docNumber": "0100000470",
+        "deliveryDate": _DL_DELIVERY_DATE, "documentTotalWithoutVAT": 0, "items": items}]}
+    matched = {"gtin": "8588000000470", "matchedCatalogName": "Ocot liehovy",
+               "matchConfidence": 0.97, "matchReason": "zhoda"}
+    client = FakeClient({"dl_documents": [doc], "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [matched]})
+    up = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    dl_worker.tick(pg, cfg, client=client,
+                   upload=lambda c, name, content, dir_override=None: up.append((name, content)))
+    assert len(up) == 1, "a liquid multipack ships via the L rung — never held on mass"
+    assert _dl_mass_question_count(pg) == 0, "no dl_mass question for a liquid multipack"
+    lin = [ln for ln in up[0][1].split("\r\n") if ln.startswith("LIN")][0]
+    assert lin[108:111] == "L  ", "unit label is L (multipack rung), qty 2 x 6 = 12 L"
+    assert lin[96:108] == "      12.000"

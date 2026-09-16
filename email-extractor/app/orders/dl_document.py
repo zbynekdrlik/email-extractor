@@ -142,8 +142,14 @@ def _needs_piece_mass(item: dict) -> bool:
     — a kg-tracked card (a `decision.mass is None` already guarantees kg-tracked) delivered
     in pieces: not kg, not tonnes, not a liquid multipack (each of which `generate()` handles
     WITHOUT the per-piece mass). Mirrors `generate()`'s own rung order so a HELD line is
-    exactly one that would otherwise ship qty x mass with an unresolved mass."""
-    if desadv_edi._detect_liquid_multipack(item.get("supplierName")):
+    exactly one that would otherwise ship qty x mass with an unresolved mass.
+
+    NB: the RAW extraction item has no `supplierName` key — that is a DOCUMENT-level field;
+    `desadv_edi.build()` populates the per-line `supplierName` from the item's own `name`
+    (the original wording) before `generate()` runs its multipack check. So the fallback to
+    `name` here reproduces exactly what `generate()` actually sees, or a kg-tracked liquid
+    multipack with a blank mass would be falsely held instead of shipping via the L rung."""
+    if desadv_edi._detect_liquid_multipack(item.get("supplierName") or item.get("name")):
         return False
     unit = str(item.get("unit") or "").strip().lower()
     if unit == "kg" or desadv_edi._is_ton_unit(item.get("unit")):
