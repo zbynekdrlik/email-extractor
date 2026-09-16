@@ -22,7 +22,7 @@ function editingOpen() {
   if (searchEl && document.activeElement === searchEl) return true;
   if (!listEl) return false;
   if (listEl.querySelector(".q-inline-form")) return true;
-  for (const inp of listEl.querySelectorAll(".q-qty, .q-price, .q-freein, .q-in")) {
+  for (const inp of listEl.querySelectorAll(".q-qty, .q-price, .q-freein, .q-in, .q-massin")) {
     if (document.activeElement === inp) return true;
     if (inp.value && inp.value.trim()) return true;
   }
@@ -160,6 +160,19 @@ function card(q) {
         submit(q.id, q.kind === "item"
           ? { gtin: g, card: "", ...lineEdits(q) } : { choice: g });
       } }, "Priradiť"),
+    ]));
+  }
+  // #462: a dl_mass question is answered with a plain number (kg per piece), not a card.
+  if (q.kind === "dl_mass") {
+    box.appendChild(el("div", { class: "q-massedit" }, [
+      el("label", {}, ["Koľko kg má 1 kus/kartón? ",
+        el("input", { class: "q-massin", type: "text", inputmode: "decimal",
+          placeholder: "napr. 10", autocomplete: "off" })]),
+      el("button", { class: "q-btn q-btn--primary", type: "button", onclick: () => {
+        const v = box.querySelector(".q-massin").value.trim();
+        if (!v) { toast("Zadaj hmotnosť za kus (kg)", { error: true }); return; }
+        submit(q.id, { choice: v });
+      } }, "Uložiť hmotnosť"),
     ]));
   }
 

@@ -125,6 +125,32 @@ def _hold_review_reason(item_names: list[str]) -> str:
             f"potvrdíš „pošli bez tejto položky“), aby doklad odišiel KOMPLETNÝ: {listed}.")
 
 
+def _mass_hold_reason(item_names: list[str]) -> str:
+    """#462: the ❗ body for a document HELD because a kg-tracked card has no known
+    per-piece mass and the delivery is in pieces — a guessed value would ship a silent xN
+    (Lesaffre droždie 7 kg vs 70). Tells the sklad to enter the kg-per-piece on the board so
+    the correct quantity ships, never the ⚠️ partial-upload wording (nothing was uploaded)."""
+    n = len(item_names)
+    listed = ", ".join(name for name in item_names if name) or "neznáme položky"
+    return (f"Dodací list má {n} kg-sledovanú/é položku/y bez známej hmotnosti za "
+            f"kus/kartón — z bezpečnosti sa NEnahráva do ORIONu, kým na nástenke nezadáš "
+            f"koľko kg má 1 kus/kartón (aby sa množstvo neprepočítalo zle): {listed}.")
+
+
+def _needs_piece_mass(item: dict) -> bool:
+    """#462: True when `desadv_edi.generate()` WOULD convert this line by the per-piece mass
+    — a kg-tracked card (a `decision.mass is None` already guarantees kg-tracked) delivered
+    in pieces: not kg, not tonnes, not a liquid multipack (each of which `generate()` handles
+    WITHOUT the per-piece mass). Mirrors `generate()`'s own rung order so a HELD line is
+    exactly one that would otherwise ship qty x mass with an unresolved mass."""
+    if desadv_edi._detect_liquid_multipack(item.get("supplierName")):
+        return False
+    unit = str(item.get("unit") or "").strip().lower()
+    if unit == "kg" or desadv_edi._is_ton_unit(item.get("unit")):
+        return False
+    return True
+
+
 # --- one document (R60-R97) -------------------------------------------------
 
 def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list[dict],
@@ -376,6 +402,29 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             if qid is not None:
                 held_items.append(item)
 
+    # #462: a MATCHED kg-tracked card whose per-piece mass could not be safely resolved
+    # (`decision.mass is None` — `dl_match._mass_kg` refused a guessed value), delivered in
+    # pieces, must NEVER ship a silent xN (Lesaffre droždie 7 kg vs 70). Ask the warehouse
+    # the kg-per-piece and HOLD the document; the answer writes `mass` onto the card and
+    # `release_for_question` re-runs the message so the COMPLETE, correct EDI ships. LIVE-path
+    # only (shadow/e2e-dl corpus byte-identical, same #365 pattern) — `decision.mass is None`
+    # already implies kg-tracked, so `_needs_piece_mass` only excludes the kg/tonne/liquid
+    # units `generate()` handles without the per-piece mass.
+    mass_hold_items: list[dict] = []
+    if not shadow:
+        for item, decision in decisions:
+            if (decision.gtin and decision.mass is None and _needs_piece_mass(item)):
+                log.warning("DL mass hold: message %s card %s (%r) is kg-tracked with an "
+                            "unresolved per-piece mass — holding, asking the warehouse",
+                            message["message_id"], decision.gtin, decision.item_name)
+                qid = teach.ask_dl_mass(
+                    conn, message["message_id"], supplier_decision.ean_edi,
+                    supplier_decision.name, str(decision.gtin), decision.card,
+                    item.get("name", ""), item.get("quantity"), item.get("unit", ""),
+                    delivery_date=delivery_date)
+                if qid is not None:
+                    mass_hold_items.append(item)
+
     header = {"customerName": supplier_decision.name,
              "customerEanEdi": supplier_decision.ean_edi}
     # #262: an informal delivery announcement (mail body text, no printed document)
@@ -441,16 +490,26 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # is a read-only check (the same one the shadow branch above uses). A document whose only
     # unmatched items are all skip-answered (or ask-refused) has an empty `held_items` and
     # falls straight through to the normal ship/duplicate handling below.
-    if held_items and not desadv.already_sent(conn, supplier_decision.ean_edi,
-                                              built.doc_number):
+    # #462: a mass-hold (kg-tracked card, unknown per-piece mass) triggers the SAME hold as a
+    # #365 unmatched-item hold — combine both categories into ONE review message so a document
+    # carrying both is held once with both reasons.
+    if (held_items or mass_hold_items) and not desadv.already_sent(
+            conn, supplier_decision.ean_edi, built.doc_number):
         held_names = [item.get("name", "") for item in held_items]
-        reason = _hold_review_reason(held_names)
+        reasons = []
+        if held_items:
+            reasons.append(_hold_review_reason(held_names))
+        if mass_hold_items:
+            reasons.append(_mass_hold_reason(
+                [item.get("name", "") for item in mass_hold_items]))
+        reason = " ".join(reasons)
+        all_held_names = held_names + [item.get("name", "") for item in mass_hold_items]
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, supplier_decision.name, built.doc_number, delivery_date, from_addr,
             subject, link=link, cmr=cmr), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, detail={"doc_number": built.doc_number, "held": True,
-              "held_items": held_names}, rollup=False, workflow=dl_report.WORKFLOW)
+              "held_items": all_held_names}, rollup=False, workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": built.doc_number,
                "supplier_name": supplier_decision.name, "reason": reason, "held": True}
 

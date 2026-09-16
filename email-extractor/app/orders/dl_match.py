@@ -156,15 +156,32 @@ def _weights_disagree(ordered: float | None, card: float | None) -> bool:
     return ratio > 1 + WEIGHT_TOLERANCE or ratio < 1 - WEIGHT_TOLERANCE
 
 
-def _mass_kg(card: dict | None, ordered_grams: float | None) -> float:
-    """R67's own mass precedence: the matched catalog entry's own `mass` (kg) first, else
-    parsed from the wording itself, else 0 — this is what a later phase's kg-conversion (R84)
-    will read straight off the `Decision`, no re-derivation needed."""
+def _mass_kg(card: dict | None, ordered_grams: float | None) -> float | None:
+    """R67's own mass precedence + #462's safety guard for a kg-tracked card with a blank
+    `mass`.
+
+    - The matched catalog entry's own `mass` (kg) wins, unchanged.
+    - A card that is NOT kg-tracked (`sklad != "100"`) never uses `mass` downstream —
+      `desadv_edi.generate()` ships its quantity as printed — so its historical best-effort
+      value (wording weight, else 0) is preserved exactly as before.
+    - A KG-TRACKED card (`sklad == "100"`) with a blank `mass` is the #462 hazard: the
+      per-piece mass is load-bearing (R84 converts pieces -> kg by it), and a guessed value
+      ships a silent xN into ORION (Lesaffre droždie: wording "1 kg" block weight vs a 10 kg
+      carton -> 7 kg instead of 70). So the value is trusted ONLY when the DL wording weight
+      AND the card's own `doplnok`/alias weight both parse and AGREE (`_weights_disagree` /
+      `WEIGHT_TOLERANCE`); a disagreement (1 kg vs 10 kg), or either weight missing, returns
+      `None` = "mass unresolved — the caller (dl_document) must HOLD, never ship". `None`
+      flows to `generate()` as 0 via `_num`, so it is also byte-safe if a hold is ever
+      bypassed (it degrades to the #366 unconverted `else` rung, never a wrong conversion)."""
     if card is not None and card.get("mass") is not None:
         return float(card["mass"])
-    if ordered_grams:
+    kg_tracked = card is not None and str(card.get("sklad") or "") == "100"
+    if not kg_tracked:
+        return round(ordered_grams / 1000.0, 4) if ordered_grams else 0.0
+    doplnok_grams = mass_grams((card or {}).get("doplnok", ""))
+    if ordered_grams and doplnok_grams and not _weights_disagree(ordered_grams, doplnok_grams):
         return round(ordered_grams / 1000.0, 4)
-    return 0.0
+    return None
 
 
 # --- item candidate scoring (R65) -----------------------------------------
@@ -457,7 +474,7 @@ class Decision:
     item_name: str
     gtin: str | None
     card: str
-    mass: float
+    mass: float | None
     confidence: float
     rule: str
     note: str

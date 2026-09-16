@@ -771,7 +771,7 @@ def register(app: Flask, deps: Deps) -> dict:
             return jsonify(ok=True, not_warehouse=True, closed=res.get("closed", 0))
         if q0.get("kind") == "customer":
             return _api_orders_answer_customer(qid, q0, body)
-        if q0.get("kind") in ("mail", "date", "line", "dl_item", "dl_supplier"):
+        if q0.get("kind") in ("mail", "date", "line", "dl_item", "dl_supplier", "dl_mass"):
             return _api_orders_answer_generic(qid, q0, body)
         # #426: „➕ Nová karta" on an item question — create the catalog card + answer +
         # release in one click, dispatched BEFORE the existing-card gtin check below
