@@ -659,3 +659,13 @@ def test_decide_item_carries_mass_None_for_a_kg_tracked_blank_mass_ambiguous_car
                              {"gtin": "8588000000462", "confidence": 0.97}, catalog)
     assert d.rule == "llm_sure" and d.gtin == "8588000000462"
     assert d.mass is None
+
+
+def test_mass_kg_treats_a_vajcia_card_as_non_kg_tracked():
+    """#462 review 🟡-2: an eggs card is sklad=100 but generate() never uses its mass (eggs
+    ship per-piece), so `_mass_kg` must NOT return the ambiguous None for it — it keeps the
+    historical float path, mirroring generate()'s own 'vajcia' exclusion."""
+    card = {"gtin": "G", "name": "Vajcia M 10ks", "doplnok": "", "mass": None,
+            "sklad": "100"}
+    assert dl_match._mass_kg(card, None) == 0.0
+    assert dl_match._mass_kg(card, 600.0) == 0.6

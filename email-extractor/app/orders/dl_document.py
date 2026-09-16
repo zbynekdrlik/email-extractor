@@ -151,6 +151,12 @@ def _needs_piece_mass(item: dict) -> bool:
     multipack with a blank mass would be falsely held instead of shipping via the L rung."""
     if desadv_edi._detect_liquid_multipack(item.get("supplierName") or item.get("name")):
         return False
+    # generate()'s `is_kg_tracked` also excludes eggs ("vajcia") — they ship per-piece and
+    # never use the mass, so a blank-mass eggs card must NOT be held (belt-and-suspenders:
+    # `_mass_kg` already returns a non-None value for a vajcia card, so this is rarely
+    # reached, but it keeps the gate a faithful mirror of generate()'s own rung guard).
+    if "vajcia" in str(item.get("name") or "").lower():
+        return False
     unit = str(item.get("unit") or "").strip().lower()
     if unit == "kg" or desadv_edi._is_ton_unit(item.get("unit")):
         return False

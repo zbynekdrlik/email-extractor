@@ -164,18 +164,26 @@ def _mass_kg(card: dict | None, ordered_grams: float | None) -> float | None:
     - A card that is NOT kg-tracked (`sklad != "100"`) never uses `mass` downstream —
       `desadv_edi.generate()` ships its quantity as printed — so its historical best-effort
       value (wording weight, else 0) is preserved exactly as before.
-    - A KG-TRACKED card (`sklad == "100"`) with a blank `mass` is the #462 hazard: the
-      per-piece mass is load-bearing (R84 converts pieces -> kg by it), and a guessed value
-      ships a silent xN into ORION (Lesaffre droždie: wording "1 kg" block weight vs a 10 kg
-      carton -> 7 kg instead of 70). So the value is trusted ONLY when the DL wording weight
-      AND the card's own `doplnok`/alias weight both parse and AGREE (`_weights_disagree` /
+    - A KG-TRACKED card (`sklad == "100"`, and NOT a "vajcia" eggs card — the same exclusion
+      `desadv_edi.generate()`'s own `is_kg_tracked` applies, since eggs ship per-piece and
+      never use the mass) with a blank `mass` is the #462 hazard: the per-piece mass is
+      load-bearing (R84 converts pieces -> kg by it), and a guessed value ships a silent xN
+      into ORION (Lesaffre droždie: wording "1 kg" block weight vs a 10 kg carton -> 7 kg
+      instead of 70). So the value is trusted ONLY when the DL wording weight AND the card's
+      own `doplnok`/alias weight both parse and AGREE (`_weights_disagree` /
       `WEIGHT_TOLERANCE`); a disagreement (1 kg vs 10 kg), or either weight missing, returns
-      `None` = "mass unresolved — the caller (dl_document) must HOLD, never ship". `None`
-      flows to `generate()` as 0 via `_num`, so it is also byte-safe if a hold is ever
-      bypassed (it degrades to the #366 unconverted `else` rung, never a wrong conversion)."""
+      `None` = "mass unresolved — the caller (dl_document) must HOLD, never ship".
+
+    NB: `None` is NOT a byte-safe degrade if a hold is ever bypassed — `desadv_edi.build()`
+    re-derives the line mass from the wording (`_num(mass) or _extract_mass(name)`), so a
+    shipped `None` line would still convert by the guessed weight. The dl_document hold is
+    therefore the SOLE protection against the silent xN; this signal exists only to trigger
+    it, never as defense-in-depth at generate()."""
     if card is not None and card.get("mass") is not None:
         return float(card["mass"])
-    kg_tracked = card is not None and str(card.get("sklad") or "") == "100"
+    name = str((card or {}).get("name") or "").lower()
+    kg_tracked = (card is not None and str(card.get("sklad") or "") == "100"
+                  and "vajcia" not in name)
     if not kg_tracked:
         return round(ordered_grams / 1000.0, 4) if ordered_grams else 0.0
     doplnok_grams = mass_grams((card or {}).get("doplnok", ""))

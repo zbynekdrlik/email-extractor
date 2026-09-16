@@ -59,7 +59,7 @@ EXPIRED_BY = "auto-expiry"
 # Kinds answered on the DELIVERY-NOTES-only nástenka (`/sklad-dl`, `report.dl_sklad_link`)
 # and routed to `delivery_notes_channel_id` — every other kind is an AI-orders question,
 # routed to `orders_channel_id`. Mirrors `confirm.py`'s own `_channel_for` split.
-_DL_KINDS = ("dl_item", "dl_supplier")
+_DL_KINDS = ("dl_item", "dl_supplier", "dl_mass")
 
 _WHAT = {
     "item": "neznáme znenie položky — treba priradiť kartu",
@@ -70,6 +70,8 @@ _WHAT = {
     "dl_item": "neznáme znenie položky na dodacom liste — treba priradiť kartu",
     "dl_supplier": "dodávateľ dodacích listov nie je v databáze — treba ho priradiť "
                   "alebo pridať",
+    "dl_mass": "kg-sledovaná karta bez hmotnosti za kus — treba zadať koľko kg má 1 "
+              "kus/kartón",
 }
 
 _COLS = ("id, kind, customer_ean, customer_name, wording, item_key, context, payload, "
