@@ -393,7 +393,7 @@ already); of a `restore` row itself → refused; of a missing audit id → 404. 
 - **`?next` open-redirect guard = `links.safe_next`:** honoruje LEN `/nastenka` / `/nastenka/…`
   / `/nastenka?…`; všetko iné (`//host`, `scheme://`, `\`, ne-board cesta) → `None` → default
   podľa druhu kľúča (orders→`ORDERS_TAB`, dl→`DL_TAB`). Kľúčové routy `/sklad/<k>`,`/sklad-dl/<k>`
-  presmerujú `safe_next(request.args['next']) or default_tab` — HMAC kontrola sa NEMENÍ.
+  presmerujú `safe_next(request.args["next"]) or ORDERS_TAB/DL_TAB` — HMAC kontrola sa NEMENÍ.
 - **`?q` KOLÍZIA s #447:** `tab-questions.js` už používa `?q=` ako SEARCH-seed (message_id z
   „Naučené" origin linku). #459 `?q=<question_id>` je ČÍSLO → deep-link (scroll+`.q-card--focus`
   na `#q-card-<id>`, BEZ filtrovania — číslo by search odfiltroval naprázdno). Rozlíšenie:

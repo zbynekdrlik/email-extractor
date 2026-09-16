@@ -32,11 +32,6 @@ _KINDS = {
 }
 
 
-def default_tab(kind: str) -> str:
-    """The tab a key of this kind lands on when no (valid) `?next` is given."""
-    return _KINDS[kind][2]
-
-
 def safe_next(nxt: str | None) -> str | None:
     """The `?next` a signed key route may honour, or `None` to fall back to the default.
 
