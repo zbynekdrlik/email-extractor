@@ -430,3 +430,21 @@ def test_expiry_closes_a_hold_whose_last_open_sibling_is_answered_after_an_older
     assert (status, reason) == ("released", "expired")
     assert int(pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0]) == 0
     assert len(_pending(pg, "held_order_expired")) == 1
+
+
+def test_a_dl_mass_reminder_routes_to_the_delivery_notes_channel_not_orders(pg):
+    """#462 review 🟡-3: a dl_mass reminder must reach the DELIVERY-NOTES channel + DL board
+    (like dl_item/dl_supplier), never the orders channel — otherwise a held delivery is
+    never nudged on the board the warehouse actually watches and drifts to auto-expiry."""
+    qid = _ask(pg, kind="dl_mass", customer_ean="", item_key="dlmass:8588000000462",
+               wording="Rekord 1 kg drevo",
+               payload={"supplier_name": "Pekáreň Lunys", "gtin": "8588000000462"},
+               created_at=TUE)
+    n = question_alerts.sweep(pg, _cfg(), now=WED)
+    assert n == 1
+    rows = _pending(pg, "question_reminder")
+    assert len(rows) == 1
+    channel, kind, html = rows[0]
+    assert channel == 243, "dl_mass -> delivery_notes_channel_id, not orders (152)"
+    assert "hmotnos" in html.lower()
+    assert _reminder_sent_at(pg, qid) is not None

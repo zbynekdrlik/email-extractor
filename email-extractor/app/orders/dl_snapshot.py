@@ -338,6 +338,22 @@ def upsert_dl_catalog_card(conn, gtin: str, name: str, *, doplnok: str = "",
         (gtin, name, doplnok, mass, sklad, cena))
 
 
+def set_dl_card_mass(conn, gtin: str, mass: float | None) -> bool:
+    """#462: set ONLY the per-piece `mass` on an existing DL catalog card (an override),
+    preserving every other field — the exact preserve-others upsert the board „Produkty
+    sklad" tab does (`board/services/catalog._dl_upsert`), exposed as ONE engine function so
+    the `dl_mass` board answer and any future caller share a single write path (board.md:
+    „call the existing engines, never copy them"). Returns False if the gtin is not in the
+    current effective catalog (never creates a phantom card)."""
+    cur = next((r for r in dl_catalog_for_management(conn) if r["gtin"] == str(gtin)), None)
+    if cur is None:
+        return False
+    upsert_dl_catalog_card(conn, str(gtin), cur["name"], doplnok=cur.get("doplnok") or "",
+                           mass=mass, sklad=cur.get("sklad") or "", cena=cur.get("cena"))
+    dl_rebuild_from_overrides(conn)
+    return True
+
+
 def retire_dl_catalog_card(conn, gtin: str) -> bool:
     """True iff `gtin` was a real card in the CURRENT effective DL catalog (snapshot or
     override) — retiring a gtin that never existed is refused rather than silently

@@ -1140,6 +1140,105 @@ def _undo_dl_supplier(conn, q: dict) -> dict:
     return get(conn, q["id"]) or {}
 
 
+
+# --- #462: dl_mass — the kg-per-piece a kg-tracked card is missing --------------------------
+# A kg-tracked card (`sklad=100`) with a blank `mass`, delivered in pieces, cannot be safely
+# converted to kg (a guessed value ships a silent xN — Lesaffre droždie 7 kg vs 70). The
+# document is HELD (dl_document, #462) and THIS question asks the warehouse the kg per piece.
+# The answer writes `mass` onto the CARD (an override) — learned once, not per document — via
+# the shared engine write path `dl_snapshot.set_dl_card_mass`, then reprocesses the held
+# message (`release_for_question`) so the COMPLETE, correctly-converted EDI ships. Keyed on
+# the CARD (`dlmass:{gtin}`), since the mass is a property of the card, not the wording, so
+# two wordings of the same card share ONE question. There are no candidate options — the
+# answer is a plain positive number (kg), validated as such and parsed with the same
+# `dl_snapshot.parse_number` the /nastenka product editor uses (lazy import: dl_snapshot is
+# heavy and only needed on the answer path, mirroring the dl_worker lazy imports below).
+
+
+def dl_mass_key(gtin) -> str:
+    """The synthetic `order_questions.item_key` a `dl_mass` question is stored under —
+    `dlmass:{gtin}`. Keyed on the card, so a second delivery of the same still-massless card
+    reuses the SAME open question (`ask_generic`'s ON CONFLICT dedupe)."""
+    return f"dlmass:{gtin}"
+
+
+def ask_dl_mass(conn, message_id: str, supplier_ean: str, supplier_name: str, gtin: str,
+                card: str, wording: str, quantity, unit: str, delivery_date: str = "",
+                on_new=None) -> int | None:
+    """Raise ONE 'koľko kg má 1 kus/kartón tejto položky?' question for a kg-tracked card
+    whose per-piece `mass` is unknown/ambiguous (#462). Returns the qid (fresh, or the
+    existing open one it deduped onto), or `None` when `message_id`/`gtin` is missing."""
+    if not (message_id and gtin):
+        return None
+    reason = (f"Karta „{card or wording}“ je kg-sledovaná, ale nemá zadanú hmotnosť za "
+              f"kus/kartón — dodávka je v kusoch ({quantity} {unit or 'ks'}), takže bez "
+              f"hmotnosti by sa množstvo do ORIONu prepočítalo zle. Zadaj, koľko kg má 1 "
+              f"kus/kartón tejto položky (napr. 10).")
+    return ask_generic(
+        conn, "dl_mass", message_id, dl_mass_key(gtin), wording or card, [], reason,
+        {"supplier_ean": supplier_ean, "supplier_name": supplier_name or "",
+         "gtin": str(gtin), "card": card or "", "quantity": quantity, "unit": unit or "ks"},
+        delivery_date=delivery_date, on_new=on_new)
+
+
+def _dl_mass_value(choice: str) -> float | None:
+    """The positive kg value a `dl_mass` answer carries, or None for a blank/non-numeric/
+    non-positive answer. Uses the SAME numeric parser the /nastenka product editor uses so
+    '10', '10,5' and '10.5' all parse identically."""
+    from . import dl_snapshot
+    value = dl_snapshot.parse_number(choice)
+    return value if (value is not None and value > 0) else None
+
+
+def _present_dl_mass(q: dict) -> dict:
+    payload = q.get("payload") or {}
+    who = payload.get("supplier_name") or payload.get("supplier_ean") or ""
+    body = f"{who} · dodanie {q.get('delivery_date') or '?'}\n{q.get('reason') or ''}"
+    return _present(q, q.get("wording", ""), body, [])
+
+
+def _validate_dl_mass(q: dict, choice: str, by: str) -> None:
+    # A blank choice is the universal "neviem" escape (the question stays open) — handled by
+    # the caller; only a NON-blank answer is validated here, and it must be a positive number.
+    if choice and _dl_mass_value(choice) is None:
+        raise NotACandidate("Zadaj kladné číslo — koľko kg má 1 kus/kartón.")
+
+
+def _apply_dl_mass(conn, cfg, q: dict, choice: str, by: str) -> dict:
+    """Write the answered kg-per-piece onto the CARD (an override, learned once) and give the
+    held document its second chance to finish. A blank/invalid choice teaches nothing (the
+    same honesty as `_apply_dl_item`'s blank path). Lazy `dl_worker` import, same deadlock
+    reason as `_apply_dl_item`."""
+    mass = _dl_mass_value(choice)
+    if mass is None:
+        return {}
+    payload = q.get("payload") or {}
+    gtin = str(payload.get("gtin") or "")
+    if not gtin:
+        return {}
+    from . import dl_snapshot
+    dl_snapshot.set_dl_card_mass(conn, gtin, mass)
+    from . import dl_worker
+    released = dl_worker.release_for_question(conn, cfg, q["id"])
+    return {"released": released}
+
+
+def _undo_dl_mass(conn, q: dict) -> dict:
+    """Take back a mass answer — clear the `mass` we wrote (back to NULL, the state that
+    prompted the question) and reopen it. `set_dl_card_mass(..., None)` preserves every
+    other field on the card, so undo never touches name/doplnok/sklad/cena."""
+    from . import dl_snapshot
+    payload = q.get("payload") or {}
+    gtin = str(payload.get("gtin") or "")
+    if gtin:
+        dl_snapshot.set_dl_card_mass(conn, gtin, None)
+    conn.execute(
+        """UPDATE order_questions
+              SET status = 'open', answer = NULL, answered_by = NULL, answered_at = NULL,
+                  reminder_sent_at = NULL, escalated_at = NULL
+            WHERE id = %s""", (q["id"],))
+    return get(conn, q["id"]) or {}
+
 KINDS: dict[str, QuestionKind] = {
     "item": QuestionKind(
         name="item", present=_present_item, validate=_validate_item, apply=_apply_item,
@@ -1173,6 +1272,11 @@ KINDS: dict[str, QuestionKind] = {
         name="dl_supplier", present=_present_dl_supplier, validate=_validate_dl_supplier,
         apply=_apply_dl_supplier, undo=_undo_dl_supplier,
         learns="dl_supplier_memory (real pick); nothing: znovu sa spýtať je čestné (\"neviem\")",
+        deadline_shippable=False),
+    "dl_mass": QuestionKind(
+        name="dl_mass", present=_present_dl_mass, validate=_validate_dl_mass,
+        apply=_apply_dl_mass, undo=_undo_dl_mass,
+        learns="dl_catalog_overrides.mass (per-piece kg on the card, learned once)",
         deadline_shippable=False),
 }
 for _k, _v in KINDS.items():

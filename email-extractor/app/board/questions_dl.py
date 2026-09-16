@@ -22,4 +22,8 @@ DL_CARD_ACTIONS: dict[str, list[dict]] = {
     "dl_supplier": [{"op": "new_supplier", "label": "➕ Nový dodávateľ"},
                     {"op": "not_warehouse", "label": "Netýka sa skladu"},
                     {"op": "dl_unknown", "label": "Neviem"}],
+    # #462: the kg-per-piece is answered with the numeric input the JS renders for dl_mass;
+    # „Neviem" ({choice: "unknown"}) keeps the question OPEN (the universal escape — dl_mass
+    # is NOT in the terminal-defer branch, so it never marks the whole document handled).
+    "dl_mass": [{"op": "dl_unknown", "label": "Neviem"}],
 }

@@ -57,7 +57,7 @@ SKLAD_DL_ZNALOSTI_API = re.compile(r"^/api/znalosti/(dl-products(/[^/]+)?|dl-sup
 # `_role_kinds()` below decides what each role is actually allowed to see/touch, so the
 # security boundary never depends on which URL a client happens to call.
 ORDERS_KINDS = ("item", "customer", "mail", "date", "line")
-DL_KINDS = ("dl_item", "dl_supplier")
+DL_KINDS = ("dl_item", "dl_supplier", "dl_mass")
 SKLAD_DL_ROLE = "sklad_dl"
 # #449 lane 8: the retired `/otazky-dl` PAGE is gone from this list (now an open redirect
 # to the board's „Otázky sklad" tab); only the DL API endpoints remain.

@@ -125,7 +125,7 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
         lock_tx.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (message_id,))
         still_open = conn.execute(
             """SELECT 1 FROM order_questions
-                WHERE message_id = %s AND kind IN ('dl_item', 'dl_supplier')
+                WHERE message_id = %s AND kind IN ('dl_item', 'dl_supplier', 'dl_mass')
                   AND status = 'open' LIMIT 1""", (message_id,)).fetchone()
         if still_open:
             return []
@@ -162,7 +162,7 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
         # re-runs the deterministic rung on the REAL document (now with the just-taught
         # memory), so a false-positive from_addr match never ships a wrong EDI, and the
         # `desadv.claim_send_or_identify` claim still refuses any already-shipped re-upload.
-        if kind in ("dl_supplier", "dl_item"):
+        if kind in ("dl_supplier", "dl_item", "dl_mass"):
             from_addr = message.get("from_addr", "")
             # #399: a scanner sender (tlaciaren@) forwards mail from EVERY supplier,
             # so from_addr correlation is meaningless — skip the by-addr sibling release.
@@ -212,7 +212,7 @@ def close_message_not_warehouse(conn, qid: int) -> dict:
         """UPDATE order_questions
               SET status = 'not_warehouse', answer = '{"not_warehouse": true}'::jsonb,
                   answered_by = %s, answered_at = now()
-            WHERE message_id = %s AND kind IN ('dl_item', 'dl_supplier')
+            WHERE message_id = %s AND kind IN ('dl_item', 'dl_supplier', 'dl_mass')
               AND status = 'open'
             RETURNING id""", ("sklad", message_id)).fetchall()
     conn.execute(
@@ -265,7 +265,7 @@ def close_message_sklad_unknown(conn, qid: int) -> dict:
         """UPDATE order_questions
               SET status = 'sklad_unknown', answer = '{"sklad_unknown": true}'::jsonb,
                   answered_by = %s, answered_at = now()
-            WHERE message_id = %s AND kind IN ('dl_item', 'dl_supplier')
+            WHERE message_id = %s AND kind IN ('dl_item', 'dl_supplier', 'dl_mass')
               AND status = 'open'
             RETURNING id""", ("sklad", message_id)).fetchall()
     conn.execute(

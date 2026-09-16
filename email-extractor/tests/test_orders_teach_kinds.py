@@ -29,7 +29,7 @@ def _cfg(**kw):
 
 def test_every_kind_declares_a_non_empty_learns_and_an_escape_option():
     assert set(teach.KINDS) == {"item", "customer", "mail", "date", "line",
-                                "dl_item", "dl_supplier"}
+                                "dl_item", "dl_supplier", "dl_mass"}
     for name, kind in teach.KINDS.items():
         assert kind.name == name
         assert kind.learns and kind.learns.strip(), f"{name} must state what it learns"
@@ -44,7 +44,7 @@ def test_only_item_is_deadline_shippable():
     matched at the deadline. Every NEW kind (customer/mail/date/line) must NOT — shipping
     an unconfirmed customer/date/line is exactly what this ticket exists to prevent."""
     assert teach.KINDS["item"].deadline_shippable is True
-    for name in ("customer", "mail", "date", "line", "dl_item", "dl_supplier"):
+    for name in ("customer", "mail", "date", "line", "dl_item", "dl_supplier", "dl_mass"):
         assert teach.KINDS[name].deadline_shippable is False, name
 
 
@@ -69,6 +69,10 @@ def _ask_one_of_each_kind(pg):
                                      quantity=1, unit="ks", candidates=[]),
         "dl_supplier": teach.ask_dl_supplier(pg, message_id="mkX",
                                              sender_email="e@f.sk", candidates=[]),
+        "dl_mass": teach.ask_dl_mass(pg, message_id="mkX", supplier_ean="9000000000001",
+                                     supplier_name="Dodávateľ X", gtin="9000000000462",
+                                     card="Karta X", wording="Great mass", quantity=1,
+                                     unit="ks"),
     }
 
 

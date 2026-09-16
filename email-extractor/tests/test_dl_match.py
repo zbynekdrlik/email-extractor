@@ -606,3 +606,66 @@ def test_resolve_supplier_from_cards_email_still_matches_when_name_agrees_or_is_
         {"supplierName": "", "supplierEmail": "a@alpha.sk"}, cards).ean_edi == "111"
     assert dl_match.resolve_supplier_from_cards(
         {"supplierName": "Alpha s.r.o.", "supplierEmail": "a@alpha.sk"}, cards).ean_edi == "111"
+
+
+# --- #462: kg-tracked card with blank mass + pieces must never ship a silent xN -----------
+
+_DROZDIE_CARD_NULL_MASS = {"gtin": "8588000000462", "name": "Drozdie Rekord",
+                           "doplnok": "Rekord 10 kg drevo", "mass": None, "sklad": "100",
+                           "cena": 0.93}
+
+
+def test_mass_kg_prefers_the_card_mass_over_the_wording_fallback():
+    """#462: once the card carries an explicit `mass`, `_mass_kg` uses it — never the
+    weight parsed out of the DL wording (the 1 kg block weight)."""
+    card = dict(_DROZDIE_CARD_NULL_MASS, mass=10.0)
+    assert dl_match._mass_kg(card, 1000.0) == 10.0
+
+
+def test_mass_kg_returns_None_when_wording_and_doplnok_disagree_on_a_kg_tracked_card():
+    """#462 core: NULL card mass, kg-tracked, wording says 1 kg but the card's doplnok says
+    10 kg — the guessed 1.0 kg fallback would ship a silent x10, so `_mass_kg` refuses
+    (returns None = 'hold, don't ship')."""
+    assert dl_match._mass_kg(_DROZDIE_CARD_NULL_MASS, 1000.0) is None
+
+
+def test_mass_kg_uses_the_agreed_weight_when_wording_and_doplnok_agree():
+    """#462: when the DL wording weight AND the card's doplnok weight agree, the value is
+    trustworthy — use it (here both say 10 kg)."""
+    assert dl_match._mass_kg(_DROZDIE_CARD_NULL_MASS, 10000.0) == 10.0
+
+
+def test_mass_kg_returns_None_when_neither_wording_nor_doplnok_parse_on_kg_tracked():
+    """#462: the #366 `else` rung — a kg-tracked card with no parseable weight anywhere must
+    HOLD (None), never ship pieces as kg unconverted."""
+    card = {"gtin": "G", "name": "Drozdie", "doplnok": "drevena debna", "mass": None,
+            "sklad": "100"}
+    assert dl_match._mass_kg(card, None) is None
+
+
+def test_mass_kg_keeps_the_historical_float_for_a_non_kg_tracked_card():
+    """#462 no-regression: a card that is NOT kg-tracked never uses mass downstream
+    (generate() ships qty as-is), so its historical best-effort wording float is unchanged."""
+    card = {"gtin": "G", "name": "Maslo cerstve", "doplnok": "", "mass": None, "sklad": "1"}
+    assert dl_match._mass_kg(card, 2000.0) == 2.0
+
+
+def test_decide_item_carries_mass_None_for_a_kg_tracked_blank_mass_ambiguous_card():
+    """#462: the whole decision for the Lesaffre droždie shape — matched card, but mass is
+    unresolved (wording 1 kg vs doplnok 10 kg) — carries `mass is None`, the signal
+    dl_document uses to HOLD instead of shipping a silent x10."""
+    catalog = [_DROZDIE_CARD_NULL_MASS]
+    d = dl_match.decide_item("Rekord 1 kg drevo",
+                             {"gtin": "8588000000462", "confidence": 0.97}, catalog)
+    assert d.rule == "llm_sure" and d.gtin == "8588000000462"
+    assert d.mass is None
+
+
+def test_mass_kg_treats_a_vajcia_card_as_non_kg_tracked():
+    """#462 review 🟡-2: an eggs card is sklad=100 but generate() never uses its mass (eggs
+    ship per-piece), so `_mass_kg` must NOT return the ambiguous None for it — it keeps the
+    historical float path, mirroring generate()'s own 'vajcia' exclusion."""
+    card = {"gtin": "G", "name": "Vajcia M 10ks", "doplnok": "", "mass": None,
+            "sklad": "100"}
+    assert dl_match._mass_kg(card, None) == 0.0
+    assert dl_match._mass_kg(card, 600.0) == 0.6
