@@ -426,8 +426,17 @@ already); of a `restore` row itself → refused; of a missing audit id → 404. 
 - **Šablóny `ASK_HTML`/`ASK_DL_HTML`/`ZNALOSTI_HTML` + `_ASK_HTML_TEMPLATE` ZMAZANÉ** z
   `httpapi_templates.py` (ostávajú len `LOGIN_HTML`+`DASH_HTML`); ich sha256 piny +
   `_TEMPLATE_CONSTANTS` v `test_httpapi_characterization.py` odstránené (DASH/LOGIN piny sa
-  NEMENILI — tie literály sú nedotknuté). Staré Playwright testy starých stránok zmazané
-  (board tab testy pokrývajú tú istú funkčnosť); pribudli redirect testy per rola.
+  NEMENILI — tie literály sú nedotknuté). Staré Playwright testy starých stránok zmazané —
+  otázky/produkty/naučené/zákazníci funkčnosť pokrývajú board-tab testy (lane 2-7); pribudli
+  redirect testy per rola + `?q=` seed test. **VÝNIMKA:** stará `/otazky-dl` stránka mala
+  DL-reliability banner (`#dlAlertBanner`, kŕmený `/api/orders/dl/stats`: zaseknuté DL, čakajúce
+  alerty, otvorené import-incidenty) — NEBOL portovaný na žiadnu board záložku počas lane 1-7, a
+  lane 8 ho retiruje spolu so stránkou. Operačný signál NIE JE stratený (`pending_alerts` stále
+  tečú do ops kanála; import-incidenty do denného Odoo digestu cez `reliability.py`), ale
+  warehouse-facing banner na nástenke chýba. Endpoint `/api/orders/dl/stats` + jeho
+  `SKLAD_DL_PATHS` položka SÚ ponechané (neškodné, gated; prípadný budúci port ich reuse-ne).
+  Doportovanie bannera na „Otázky sklad" záložku je samostatný follow-up (nová UI, mimo scope
+  lane 8 = „vypnutie starých stránok").
 - **`httpapi_security.py`: zahodený LEN `SKLAD_ZNALOSTI_PAGE`** (page-only regex) + stránkové
   položky (`/otazky` z `SKLAD_PATHS`, `/otazky-dl` z `SKLAD_DL_PATHS`). API allowlisty
   (`/api/orders/*`, `SKLAD_ACTION`, `SKLAD_ZNALOSTI_API`, `SKLAD_DL_ZNALOSTI_API`) OSTÁVAJÚ —

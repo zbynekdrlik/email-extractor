@@ -445,3 +445,39 @@ def test_a_deep_link_from_an_odoo_message_opens_the_right_tab_and_highlights_the
     page.wait_for_selector("text=Karta INÁ")
 
     assert console == [], f"browser console not clean: {console}"
+
+
+def test_the_retired_znalosti_ean_link_seeds_the_customers_tab_search(live_server, pg, page):
+    """#449 lane 8: the retired /znalosti/<ean> page now redirects to
+    /nastenka/zakaznici?q=<ean>, and the Zákazníci tab seeds its search box + filters
+    to that customer — through the real browser, from the signed sklad link, clean
+    console. Proves the ?q= deep-link is FUNCTIONAL (not just present in the URL)."""
+    from app.httpapi import sklad_key
+    from app.orders import snapshot
+
+    ean = "8590000000449"
+    snapshot.upsert_customer(
+        pg, override_id=None, orig_ean_edi=None, orig_street=None,
+        ean_edi=ean, name="Pekáreň Lane8 E2E", emails=["l8@e2e.sk"],
+        city="Košice", street="", zip_="")
+    snapshot.rebuild_from_overrides(pg)
+    # a second customer so the seed is provably a FILTER, not the only row
+    snapshot.upsert_customer(
+        pg, override_id=None, orig_ean_edi=None, orig_street=None,
+        ean_edi="8590000000998", name="Iná Firma E2E", emails=[],
+        city="Žilina", street="", zip_="")
+    snapshot.rebuild_from_overrides(pg)
+
+    console = _collect_console(page)
+    # arrive through the retired page so the whole redirect chain is exercised
+    page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
+    page.wait_for_url(re.compile(r"/nastenka"))
+    page.goto(f"{live_server}/znalosti/{ean}")
+    page.wait_for_url(re.compile(r"/nastenka/zakaznici"))
+
+    # the search box is pre-seeded with the EAN and the list is filtered to that customer
+    assert page.locator("#p-search").input_value() == ean
+    page.wait_for_selector("text=Pekáreň Lane8 E2E")
+    assert page.get_by_text("Iná Firma E2E").count() == 0
+
+    assert console == [], f"browser console not clean: {console}"
