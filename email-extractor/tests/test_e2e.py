@@ -4,6 +4,8 @@ login -> list -> search -> open detail -> reclassify -> fix modal, asserting a
 clean browser console (zero errors/warnings) and a version label that matches
 the backend /version (the mandatory web rules).
 """
+import re
+
 from app import db
 
 
@@ -825,7 +827,7 @@ def test_board_nastenka_skeleton_loads_via_the_sklad_link(live_server, pg, page)
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/nastenka")
+    page.wait_for_url(re.compile(r"/nastenka"))
 
     # the version label is present and matches the backend /version
     backend_ver = page.request.get(f"{live_server}/version").text().strip()
@@ -852,7 +854,7 @@ def test_board_nastenka_reachable_via_the_dl_link_too(live_server, pg, page):
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/nastenka")
+    page.wait_for_url(re.compile(r"/nastenka"))
     page.wait_for_selector("text=Otázky sklad")
     page.wait_for_selector("text=História dodacích listov")
     assert console == [], f"browser console not clean: {console}"
@@ -890,7 +892,7 @@ def test_board_question_tab_answer_undo_and_reopen_in_the_browser(live_server, p
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/nastenka")
+    page.wait_for_url(re.compile(r"/nastenka"))
     page.goto(f"{live_server}/nastenka/otazky-objednavky")
 
     # version label matches the backend
@@ -942,7 +944,7 @@ def test_board_dl_question_tab_shows_only_dl_kinds(live_server, pg, page):
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/nastenka")
+    page.wait_for_url(re.compile(r"/nastenka"))
     page.goto(f"{live_server}/nastenka/otazky-sklad")
 
     page.wait_for_selector("text=múka e2e dl")
@@ -963,7 +965,7 @@ def test_board_products_orders_tab_search_edit_delete_in_the_browser(live_server
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/nastenka")
+    page.wait_for_url(re.compile(r"/nastenka"))
     page.goto(f"{live_server}/nastenka/produkty-objednavky")
 
     backend_ver = page.request.get(f"{live_server}/version").text().strip()
@@ -1004,7 +1006,7 @@ def test_board_products_sklad_tab_renders_dl_cards_for_the_dl_key(live_server, p
 
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
-    page.wait_for_url(f"{live_server}/nastenka")
+    page.wait_for_url(re.compile(r"/nastenka"))
     page.goto(f"{live_server}/nastenka/produkty-sklad")
 
     backend_ver = page.request.get(f"{live_server}/version").text().strip()
@@ -1055,5 +1057,33 @@ def test_board_kos_delete_a_card_then_restore_it_in_the_browser(live_server, pg,
     # the card is back in the effective catalog
     back = page.request.get(f"{live_server}/api/znalosti/catalog?q=E2EKOS").json()["items"]
     assert any(it["gtin"] == "E2EKOS" for it in back), "card was not restored to the catalog"
+
+    assert console == [], f"browser console not clean: {console}"
+
+
+def test_a_deep_link_from_an_odoo_message_opens_the_right_tab_and_highlights_the_question(
+        live_server, pg, page):
+    """#459: the new warehouse link `.../sklad/<k>?next=/nastenka/otazky-objednavky?q=<id>`
+    (the exact `board_link` shape) lands on the Otázky objednávky tab AND scrolls to /
+    highlights that one question — through the real browser, no login, clean console."""
+    from app.httpapi import sklad_key
+
+    qid = _board_seed_item_question(pg, mid="be2e-deep", wording="deep-link rožok",
+                                    gtin="E2EDEEP", name="Karta DEEP", status="open")
+    # a second open question so the highlight is provably a SELECTION, not the only card
+    _board_seed_item_question(pg, mid="be2e-deep2", wording="iný rožok",
+                              gtin="E2EDEEP2", name="Karta INÁ", status="open")
+
+    console = _collect_console(page)
+    # the encoded shape board_link emits (%3F/%3D keep `?q=` inside the `next` VALUE)
+    page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}"
+              f"?next=/nastenka/otazky-objednavky%3Fq%3D{qid}")
+    page.wait_for_url(re.compile(r"/nastenka/otazky-objednavky"))
+
+    # the target question card is highlighted (the deep-link focus)
+    page.wait_for_selector(f"#q-card-{qid}.q-card--focus")
+    # both open questions still render — the deep link focuses, it does not filter the list away
+    page.wait_for_selector("text=Karta DEEP")
+    page.wait_for_selector("text=Karta INÁ")
 
     assert console == [], f"browser console not clean: {console}"
