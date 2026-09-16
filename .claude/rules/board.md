@@ -374,3 +374,33 @@ already); of a `restore` row itself → refused; of a missing audit id → 404. 
   class names — NEVER reuse another tab's `.p-*`/`.r-*` names in the ONE global `board.css`.
 - **`e2e-orders`/`e2e-dl` corpora stay green** — the resolve-widening is the only matching-adjacent
   change and is corpus-neutral (no teachback rows in fixtures); everything else is UI/read/audit.
+
+## #459 — Odoo správy vedú rovno na správnu záložku (`board/links.py::board_link`)
+
+- **JEDEN builder `board.links.board_link(cfg, kind, question_id=None)`** stavia warehouse
+  odkaz `<base>/sklad/<key>?next=/nastenka/otazky-objednavky[%3Fq%3D<id>]` (orders) resp.
+  `/sklad-dl/<key>?next=/nastenka/otazky-sklad` (dl). `links.py` je **LEAF** (importuje LEN
+  `linkutil`) — `orders.report.sklad_link`/`dl_sklad_link` naň volajú **LAZY** (žiadny
+  orders→board cyklus). Kľúč + base sa berú z `linkutil` (`sklad_key`/`dl_key`/`resolve_secret`
+  + `dashboard_base_url`), **NIKDY `public_base_url`** (machine adresa, 0.9.10 bug).
+- **Nemeň call-site, prepni funnel:** všetci warehouse-link generátori idú cez
+  `report.sklad_link`/`report.dl_sklad_link` (pipeline/hold_close/hold_redecide/question_alerts/
+  dl_message/dl_document/dl_report), takže preroutovanie TÝCH DVOCH funkcií na `board_link` zmení
+  všetkých naraz. Text „📋 Rieš na nástenke" (v `report.link_line`) sa NEMENÍ.
+- **`dashboard_link` (operátorský „Otvor dashboard" na `/` v `dl_alerts`/`human_processing`) NIE JE
+  warehouse odkaz** a #459 sa ho NETÝKA — je to fix-queue pre operátora, nie otázková záložka;
+  prepnúť ho by bola funkčná regresia + zmena textu správy.
+- **`?next` open-redirect guard = `links.safe_next`:** honoruje LEN `/nastenka` / `/nastenka/…`
+  / `/nastenka?…`; všetko iné (`//host`, `scheme://`, `\`, ne-board cesta) → `None` → default
+  podľa druhu kľúča (orders→`ORDERS_TAB`, dl→`DL_TAB`). Kľúčové routy `/sklad/<k>`,`/sklad-dl/<k>`
+  presmerujú `safe_next(request.args['next']) or default_tab` — HMAC kontrola sa NEMENÍ.
+- **`?q` KOLÍZIA s #447:** `tab-questions.js` už používa `?q=` ako SEARCH-seed (message_id z
+  „Naučené" origin linku). #459 `?q=<question_id>` je ČÍSLO → deep-link (scroll+`.q-card--focus`
+  na `#q-card-<id>`, BEZ filtrovania — číslo by search odfiltroval naprázdno). Rozlíšenie:
+  `/^\d+$/.test(q)` → focus; ne-číslo → #447 search-seed ostáva (message_id nie je holé číslo).
+  Highlight sa re-aplikuje po každom 8s refreshi (scroll len raz).
+- **Redirect cieľ sa zmenil z holého `/nastenka` na konkrétnu záložku** → existujúce E2E
+  `wait_for_url(f"{live}/nastenka")` (exact) sa MUSELI zmeniť na `re.compile(r"/nastenka")`.
+  Žiadny generátor nemá čistý jediný `question_id` v čase stavby (per-email/grupované; `on_new`
+  len zbiera) → `?q` deep-link je schopnosť testovaná priamym `board_link`/URL, generátori posielajú
+  `question_id=None`.

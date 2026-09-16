@@ -141,6 +141,10 @@ body {
 .q-card {
   background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px;
 }
+/* #459: the question a deep link (?q=<id>) points at — a clear, non-jarring highlight. */
+.q-card--focus {
+  border-color: #2d7ef7; box-shadow: 0 0 0 3px rgba(45, 126, 247, .25);
+}
 .q-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 .q-kind {
   font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);

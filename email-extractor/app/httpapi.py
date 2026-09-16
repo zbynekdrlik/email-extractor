@@ -118,6 +118,7 @@ from . import (
     httpapi_znalosti,
     linkutil,
 )
+from .board import links as board_links
 from .board import register_board
 from .board.auth import board_gate
 from .httpapi_common import Deps
@@ -276,9 +277,12 @@ def create_app(cfg) -> Flask:
             abort(403)
         session["role"] = SKLAD_ROLE
         session.permanent = True
-        # #442: both signed keys now land on the unified nástenka (the old /otazky board
-        # stays reachable for this role until the pages are retired in lane 8).
-        return redirect("/nastenka")
+        # #442: both signed keys land on the unified nástenka (the old /otazky board stays
+        # reachable for this role until the pages are retired in lane 8).
+        # #459: route straight to the ORDERS questions tab, honouring a valid internal
+        # `?next` (a deep link to one question) — anything else falls back to the default.
+        return redirect(board_links.safe_next(request.args.get("next"))
+                        or board_links.ORDERS_TAB)
 
     @app.get("/otazky")
     def questions_page():
@@ -298,7 +302,9 @@ def create_app(cfg) -> Flask:
         session.permanent = True
         # #442: the DL key must NOT lose access — it lands on the SAME unified nástenka as the
         # orders key (the tab, not the key, decides the agenda); old /otazky-dl stays reachable.
-        return redirect("/nastenka")
+        # #459: default straight to the DL questions tab, honouring a valid internal `?next`.
+        return redirect(board_links.safe_next(request.args.get("next"))
+                        or board_links.DL_TAB)
 
     @app.get("/otazky-dl")
     def dl_questions_page():
