@@ -28,11 +28,8 @@ from psycopg.types.json import Json
 
 from app.config import Config
 from app.httpapi import (
-    ASK_DL_HTML,
-    ASK_HTML,
     DASH_HTML,
     LOGIN_HTML,
-    ZNALOSTI_HTML,
     create_app,
 )
 
@@ -208,45 +205,30 @@ def test_route_table_matches_the_pre_split_baseline():
 # ---- 2. HTML template constant checksums ---------------------------------------------
 
 # sha256 of the fully-rendered constant (module-level string, before the request-time
-# `.replace("__VERSION__", ...)` substitution) captured from HEAD `bd9e28e`.
+# `.replace("__VERSION__", ...)` substitution).
 #
-# ASK_HTML / ASK_DL_HTML are hashed instead of the shared `_ASK_HTML_TEMPLATE` they are
-# both built from (`_ASK_HTML_TEMPLATE.replace(...)` x5 placeholders each): any mutation
-# to `_ASK_HTML_TEMPLATE` itself changes both derived hashes too (it is their strict
-# superset of content), AND this also catches a bug in the five-`.replace()` chain that
-# builds each derived page (e.g. a mistyped placeholder that leaves `__TITLE__` literally
-# in the response) — which hashing `_ASK_HTML_TEMPLATE` alone would miss. Hashing all
-# three together would just be checking the same shared bytes a third time for zero
-# additional protection, so `_ASK_HTML_TEMPLATE` is deliberately NOT in this dict.
+# #449 lane 8: ASK_HTML / ASK_DL_HTML / ZNALOSTI_HTML (+ the shared `_ASK_HTML_TEMPLATE`)
+# were RETIRED — the unified nástenka owns those surfaces now and the old pages are pure
+# redirects (see test_the_retired_warehouse_pages_are_redirects_not_html below). Only the
+# two constants that still exist are pinned here.
 EXPECTED_TEMPLATE_SHA256 = {
     "LOGIN_HTML": "d1eb57ea9d855df8d1b580ce2fcdc8135329c9ada4eb47bc2ec78bce9e20313c",
     # #376: re-pinned — DASH_HTML gained the "Zahodené AI" tab + its loadDiscarded/doRestore
-    # table (the AI-not-order discard review section). Only DASH_HTML changed; the two
-    # _ASK_HTML_TEMPLATE-derived hashes below are untouched.
+    # table (the AI-not-order discard review section).
     "DASH_HTML": "1f5c1a6ea1ceda7043ec24b583094a2e25ace6bbfa2fcf6cc57263793bb3885f",  # airuleset:secret-ok SHA256 template-checksum re-pin (added discardedBadge refresh), not a credential
-    # #426 re-pin: _ASK_HTML_TEMPLATE gained newProductForm() + itemQuestionCard() (the
-    # „➕ Nová karta" form on the orders item question), and load()'s inline item branch was
-    # extracted into itemQuestionCard(). Both ASK-derived hashes change (the two share the
-    # template); ZNALOSTI_HTML/DASH_HTML/LOGIN_HTML untouched.
-    "ASK_HTML": "dd85de5e49966772df1d0337b027b63f87fec134b97677f7cbb4caaabf349958",  # airuleset:secret-ok SHA256 template-checksum re-pin, not a credential
-    "ASK_DL_HTML": "5f7699b3a819febfe54895b3b935f9748e1d38acf7513c6d4b5e36056efd60cb",  # airuleset:secret-ok SHA256 template-checksum re-pin, not a credential
-    "ZNALOSTI_HTML": "a83c51190cc84aa28f9bb93ec027fe45e263c9627699f8358bde67da81bc5569",  # airuleset:secret-ok SHA256 template-checksum re-pin, not a credential
 }
 
 _TEMPLATE_CONSTANTS = {
     "LOGIN_HTML": LOGIN_HTML,
     "DASH_HTML": DASH_HTML,
-    "ASK_HTML": ASK_HTML,
-    "ASK_DL_HTML": ASK_DL_HTML,
-    "ZNALOSTI_HTML": ZNALOSTI_HTML,
 }
 
 
 def test_html_template_constants_match_their_pre_split_checksum():
-    """A retyped-instead-of-copied character in one of these five constants during the
-    #268 step-4 move (1226 lines, pure string relocation) is invisible to every other
-    test in this suite — none of them assert on raw response bytes, only on DOM
-    behaviour. This is the byte-parity proof the plan explicitly asks for."""
+    """A retyped-instead-of-copied character in one of these constants (originally a
+    #268 step-4 pure string relocation) is invisible to every other test in this suite —
+    none of them assert on raw response bytes, only on DOM behaviour. This is the
+    byte-parity proof the plan explicitly asks for."""
     mismatches = []
     for name, value in _TEMPLATE_CONSTANTS.items():
         actual = hashlib.sha256(value.encode("utf-8")).hexdigest()

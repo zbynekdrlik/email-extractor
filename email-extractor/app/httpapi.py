@@ -5,8 +5,8 @@ Machine endpoints (token, used by n8n):
 - /files/<mid>/<idx>, /eml/<mid>            (originals for n8n AI-Vision / forwarding)
 
 Warehouse link (no password — a signed, unguessable URL):
-- /sklad/<key>                               (grants the questions surface only)
-- /otazky                                    (answer a wording with one click)
+- /sklad/<key>, /sklad-dl/<key>              (302 to the unified nástenka /nastenka)
+- /otazky, /otazky-dl, /znalosti(/<ean>)     (#449 lane 8: RETIRED — 302 to the board)
 
 Dashboard (session login):
 - /                                          (single-page dashboard)
@@ -51,9 +51,11 @@ mechanism for zero behavioural gain). What actually lives HERE, and why it never
 The role/security boundary (#233/#235) is enforced in exactly TWO places, both meant to
 stay auditable on their own:
 - `_gate()` (this file, `before_request`) — matches `request.path` against the
-  `SKLAD_ROLE`/`SKLAD_PATHS`/`SKLAD_ACTION`/`SKLAD_ZNALOSTI_PAGE`/`SKLAD_ZNALOSTI_API`
-  and `SKLAD_DL_ROLE`/`SKLAD_DL_PATHS`/`SKLAD_DL_ZNALOSTI_API` constants — all DEFINED in
-  `httpapi_security.py`, imported back here, never duplicated.
+  `SKLAD_ROLE`/`SKLAD_PATHS`/`SKLAD_ACTION`/`SKLAD_ZNALOSTI_API` and
+  `SKLAD_DL_ROLE`/`SKLAD_DL_PATHS`/`SKLAD_DL_ZNALOSTI_API` constants — all DEFINED in
+  `httpapi_security.py`, imported back here, never duplicated. (#449 lane 8 dropped the
+  page-only `SKLAD_ZNALOSTI_PAGE`; `/nastenka*`+`/api/board/*` are delegated to
+  `board.auth.board_gate()`.)
 - `_role_kinds()` (`httpapi_security.py`) — the second, independent layer: filters WHICH
   question `kind`s a session may answer even when the path itself is allowed (stops a DL
   session from guessing an `item`-kind question id). Called from
@@ -63,12 +65,10 @@ The nine split modules (all `register(app, deps)`, all leaf modules — none of 
 imports `httpapi.py`, so there is no circular-import risk):
 - `httpapi_common.py`    — `Deps`, string/date helpers with no Flask/DB dependency.
 - `httpapi_security.py`  — the role/path constants + `_role_kinds()` (see above).
-- `httpapi_templates.py` — `LOGIN_HTML`/`DASH_HTML`/`ASK_HTML`/`ASK_DL_HTML`/
-                            `ZNALOSTI_HTML` (+ the internal `_ASK_HTML_TEMPLATE` they're
-                            built from) — 1230 lines of HTML/CSS/JS as Python strings,
-                            deliberately kept as ONE module (krok 4: splitting one HTML
-                            document from the sibling constants it shares an origin with
-                            gives nothing).
+- `httpapi_templates.py` — `LOGIN_HTML`/`DASH_HTML` as Python strings. (#449 lane 8
+                            deleted the three warehouse templates `ASK_HTML`/`ASK_DL_HTML`/
+                            `ZNALOSTI_HTML` + `_ASK_HTML_TEMPLATE` — the board owns those
+                            surfaces now and the old pages are redirects.)
 - `httpapi_files.py`          — `/files`, `/eml` (token-guarded originals for n8n).
 - `httpapi_dashboard_data.py` — the dashboard's list/detail + operator actions.
 - `httpapi_fixqueue.py`       — the fix queue (`api_fix`/`api_fix_queue`/
@@ -77,7 +77,8 @@ imports `httpapi.py`, so there is no circular-import risk):
 - `httpapi_orders_questions.py` — the AI-orders question board; the RISKIEST split step
                                    (krok 10) because it carries all four two-connection
                                    pairs above, moved as ONE indivisible block on purpose.
-- `httpapi_znalosti.py`   — the `/znalosti` knowledge-DB page + its 12 CRUD routes.
+- `httpapi_znalosti.py`   — the `/znalosti` route (now a 302 redirect, #449 lane 8) + its
+                             knowledge-DB CRUD routes (the board delegates to these).
 - `httpapi_reports.py`    — read-only aggregate/reporting endpoints (spend, digest,
                              dl-stats, imap-failures).
 
@@ -93,6 +94,7 @@ import threading
 import time
 from datetime import timedelta
 from pathlib import Path
+from urllib.parse import quote
 
 import psycopg
 import waitress
@@ -130,17 +132,10 @@ from .httpapi_security import (
     SKLAD_PATHS,
     SKLAD_ROLE,
     SKLAD_ZNALOSTI_API,
-    SKLAD_ZNALOSTI_PAGE,
 )
 from .httpapi_templates import (
-    ASK_DL_HTML,
-    ASK_HTML,
     DASH_HTML,
     LOGIN_HTML,
-    ZNALOSTI_HTML,  # noqa: F401 — no longer rendered here (krok 9 moved znalosti_page
-    # into httpapi_znalosti.py), kept re-exported because
-    # tests/test_httpapi_characterization.py imports it straight off `app.httpapi`
-    # (krok 1's checksum test) — same shape as `db` above.
 )
 
 log = logging.getLogger("email_extractor.httpapi")
@@ -214,6 +209,11 @@ def create_app(cfg) -> Flask:
                 or p.startswith("/static")
                 or p.startswith("/sklad/")          # the route verifies its own signature
                 or p.startswith("/sklad-dl/")       # ditto, the DL nástenka link (#231)
+                # #449 lane 8: the retired pages are pure redirects to the board — open to
+                # every role (the board itself gates the target tab); the redirect leaks
+                # nothing, so it needs no role check of its own.
+                or p in ("/otazky", "/otazky-dl", "/znalosti")
+                or p.startswith("/znalosti/")
                 or p.startswith("/files") or p.startswith("/eml")
                 or p.startswith("/api/codex")):     # #342: machine push, own X-Token check
             return None
@@ -229,20 +229,22 @@ def create_app(cfg) -> Flask:
         if session.get("auth"):
             return None
         if session.get("role") == SKLAD_ROLE:
-            if (p in SKLAD_PATHS or SKLAD_ACTION.match(p)
-                    or SKLAD_ZNALOSTI_PAGE.match(p) or SKLAD_ZNALOSTI_API.match(p)):
+            # The API allowlist the board delegates to stays (SKLAD_PATHS/SKLAD_ACTION for
+            # the questions endpoints, SKLAD_ZNALOSTI_API for the knowledge CRUD); only the
+            # retired PAGE regex (SKLAD_ZNALOSTI_PAGE) is gone — /znalosti is now an open
+            # redirect handled above, before this branch (#449 lane 8).
+            if (p in SKLAD_PATHS or SKLAD_ACTION.match(p) or SKLAD_ZNALOSTI_API.match(p)):
                 return None
-            # Not an error: send the warehouse back to the one page it owns.
+            # Not an error: send the warehouse to the unified nástenka (its home now).
             if not p.startswith("/api/"):
-                return redirect("/otazky")
+                return redirect(board_links.ORDERS_TAB)
         if session.get("role") == SKLAD_DL_ROLE:
             if (p in SKLAD_DL_PATHS or SKLAD_ACTION.match(p)
                     or SKLAD_DL_ZNALOSTI_API.match(p)):
                 return None
-            # Not an error: send the warehouse back to the ONE page IT owns — never
-            # /otazky, which is the orders-only board (#231's whole point).
+            # Not an error: send the warehouse to the unified nástenka (DL questions tab).
             if not p.startswith("/api/"):
-                return redirect("/otazky-dl")
+                return redirect(board_links.DL_TAB)
         if p.startswith("/api/"):
             return jsonify(error="auth required"), 401
         return redirect("/login")
@@ -286,7 +288,9 @@ def create_app(cfg) -> Flask:
 
     @app.get("/otazky")
     def questions_page():
-        return ASK_HTML.replace("__VERSION__", __version__)
+        # #449 lane 8: retired — the orders questions surface now lives on the unified
+        # nástenka's „Otázky objednávky" tab. The signed-key cookie stays valid.
+        return redirect(board_links.ORDERS_TAB)
 
     @app.get("/sklad-dl/<k>")
     def dl_sklad_link_route(k: str):
@@ -308,7 +312,9 @@ def create_app(cfg) -> Flask:
 
     @app.get("/otazky-dl")
     def dl_questions_page():
-        return ASK_DL_HTML.replace("__VERSION__", __version__)
+        # #449 lane 8: retired — the DL questions surface now lives on the unified
+        # nástenka's „Otázky sklad" tab. The signed-key cookie stays valid.
+        return redirect(board_links.DL_TAB)
 
     @app.get("/logout")
     def logout():
@@ -386,9 +392,14 @@ def create_app(cfg) -> Flask:
         # The address the operator is ON, never cfg.public_base_url — that one is the MACHINE
         # base (n8n fetches /files over the docker network) and is unopenable in a browser.
         base = request.host_url.rstrip("/")
+        # #449 lane 8: the warehouse links land on the unified nástenka (the retired
+        # /otazky/-dl pages are gone). Same `board_link` shape #459 emits for Odoo — a
+        # signed key + `?next=` to the right tab — but on the operator's own host base.
+        sklad_link = f"{base}/sklad/{key}?next={quote(board_links.ORDERS_TAB, safe='/')}"
+        dl_sklad_link = f"{base}/sklad-dl/{dl_link_key}?next={quote(board_links.DL_TAB, safe='/')}"
         return (DASH_HTML.replace("__VERSION__", __version__)
-                .replace("__SKLADLINK__", f"{base}/sklad/{key}")
-                .replace("__DLSKLADLINK__", f"{base}/sklad-dl/{dl_link_key}"))
+                .replace("__SKLADLINK__", sklad_link)
+                .replace("__DLSKLADLINK__", dl_sklad_link))
 
     return app
 

@@ -381,10 +381,12 @@ def test_the_dl_role_cannot_reach_orders_znalosti_endpoints(pg):
     assert c.get("/api/znalosti/customers").status_code == 401
 
 
-def test_the_dl_role_still_cannot_reach_the_znalosti_page(pg):
+def test_the_znalosti_page_is_retired_for_the_dl_role_too(pg):
+    """#449 lane 8: the /znalosti PAGE is retired — every role (the DL role included) is
+    redirected to the unified nástenka; the board's tabs decide scope, not the key."""
     c = _dl_client()
     r = c.get("/znalosti")
-    assert r.status_code == 302 and "/otazky-dl" in r.headers["Location"]
+    assert r.status_code == 302 and r.headers["Location"].endswith("/nastenka/produkty-objednavky")
 
 
 def test_the_dl_role_cannot_add_a_dl_supplier_via_the_orders_new_customer_route(pg):

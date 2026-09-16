@@ -150,20 +150,22 @@ def _sklad_client(secret="t", base=""):
 def test_the_signed_warehouse_link_opens_the_questions_page_with_no_password():
     from app import httpapi
     _, c = _sklad_client()
-    # #442: the signed link now lands on the unified nástenka (both keys valid), but the
-    # old /otazky board is NOT disabled in lane 1 and stays reachable for the sklad role.
+    # #442: the signed link lands on the unified nástenka (both keys valid). #449 lane 8:
+    # the old /otazky board is RETIRED — it now 302s to the board's orders questions tab.
     r0 = c.get("/sklad/" + httpapi.sklad_key("t"))
     assert r0.status_code == 302 and "/nastenka" in r0.headers["Location"]
     r = c.get("/otazky")
-    assert r.status_code == 200
-    assert b'data-testid="version"' in r.data          # version label (mandatory rule)
-    assert b"/api/orders/questions" in r.data          # it talks to the questions API
+    assert r.status_code == 302
+    assert r.headers["Location"].endswith("/nastenka/otazky-objednavky"), r.headers["Location"]
 
 
 def test_a_wrong_warehouse_link_is_refused():
     _, c = _sklad_client()
     assert c.get("/sklad/" + "0" * 32).status_code == 403
-    assert c.get("/otazky").status_code == 302         # and nothing was granted
+    # #449 lane 8: /otazky is now an open redirect to the board for everyone (the board
+    # itself gates the target tab) — nothing about the mail archive is granted here.
+    r = c.get("/otazky")
+    assert r.status_code == 302 and r.headers["Location"].endswith("/nastenka/otazky-objednavky")
 
 
 def test_the_key_differs_per_install():
@@ -184,7 +186,8 @@ def test_the_warehouse_link_opens_ONLY_the_questions_surface():
     assert c.get("/api/fix-queue").status_code == 401
     assert c.get("/eml/e1").status_code == 403
     r = c.get("/")
-    assert r.status_code == 302 and "/otazky" in r.headers["Location"]
+    # #449 lane 8: the sklad role is bounced from the admin dashboard to the board.
+    assert r.status_code == 302 and "/nastenka" in r.headers["Location"]
 
 
 def test_the_warehouse_link_can_also_see_held_orders():
@@ -210,20 +213,22 @@ def test_a_login_is_remembered_so_nobody_retypes_the_password():
 def test_the_signed_dl_warehouse_link_opens_the_dl_questions_page_with_no_password():
     from app import httpapi
     _, c = _sklad_client()
-    # #442: the DL link also lands on the unified nástenka now (DL key must NOT lose
-    # access), while the old /otazky-dl board stays reachable in lane 1.
+    # #442: the DL link also lands on the unified nástenka (DL key must NOT lose access).
+    # #449 lane 8: the old /otazky-dl board is RETIRED — it now 302s to the board's
+    # „Otázky sklad" (DL questions) tab.
     r0 = c.get("/sklad-dl/" + httpapi.dl_key("t"))
     assert r0.status_code == 302 and "/nastenka" in r0.headers["Location"]
     r = c.get("/otazky-dl")
-    assert r.status_code == 200
-    assert b'data-testid="version"' in r.data
-    assert b"/api/orders/questions" in r.data
+    assert r.status_code == 302
+    assert r.headers["Location"].endswith("/nastenka/otazky-sklad"), r.headers["Location"]
 
 
 def test_a_wrong_dl_warehouse_link_is_refused():
     _, c = _sklad_client()
     assert c.get("/sklad-dl/" + "0" * 32).status_code == 403
-    assert c.get("/otazky-dl").status_code == 302        # and nothing was granted
+    # #449 lane 8: /otazky-dl is now an open redirect to the board for everyone.
+    r = c.get("/otazky-dl")
+    assert r.status_code == 302 and r.headers["Location"].endswith("/nastenka/otazky-sklad")
 
 
 def test_the_orders_link_does_not_open_the_dl_key_and_vice_versa():
@@ -248,7 +253,8 @@ def test_the_dl_warehouse_link_opens_ONLY_the_dl_questions_surface():
         "held orders are an AI-orders concept — outside the DL role's own path allowlist"
     assert c.get("/eml/e1").status_code == 403
     r = c.get("/")
-    assert r.status_code == 302 and "/otazky-dl" in r.headers["Location"]
+    # #449 lane 8: the DL sklad role is bounced from the admin dashboard to the board.
+    assert r.status_code == 302 and "/nastenka" in r.headers["Location"]
 
 
 def test_the_dl_role_can_reach_dl_stats_but_the_orders_role_cannot():

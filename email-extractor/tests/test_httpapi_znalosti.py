@@ -33,30 +33,33 @@ def _snap(pg):
 
 # ---- pages ------------------------------------------------------------------------------
 
-def test_znalosti_page_requires_login(pg):
+def test_znalosti_page_is_retired_and_redirects_to_the_board(pg):
+    """#449 lane 8: the /znalosti PAGE is retired — it 302s to the board (the „Produkty
+    objednávky" tab; the per-customer /znalosti/<ean> to „Zákazníci"), for every role."""
     _snap(pg)
-    assert _client().get("/znalosti").status_code == 302
-    assert _client().get("/znalosti/111").status_code == 302
+    r = _client().get("/znalosti")
+    assert r.status_code == 302
+    assert r.headers["Location"].endswith("/nastenka/produkty-objednavky"), r.headers["Location"]
+    r2 = _client().get("/znalosti/111")
+    assert r2.status_code == 302
+    assert "/nastenka/zakaznici" in r2.headers["Location"] and "q=111" in r2.headers["Location"]
 
 
-def test_znalosti_page_served_after_login(pg):
+def test_znalosti_page_redirects_after_login_too(pg):
     _snap(pg)
     c = _client()
     _login(c)
-    r = c.get("/znalosti")
-    assert r.status_code == 200
-    assert b'data-testid="version"' in r.data
-    r2 = c.get("/znalosti/111")
-    assert r2.status_code == 200
+    assert c.get("/znalosti").status_code == 302
+    assert c.get("/znalosti/111").status_code == 302
 
 
-def test_znalosti_reachable_via_the_warehouse_link(pg):
-    """The whole point of #104: reachable from the same signed sklad link as /otazky."""
+def test_znalosti_api_still_reachable_via_the_warehouse_link(pg):
+    """#449 lane 8: the /znalosti PAGE is a redirect now, but the `/api/znalosti/*` CRUD
+    the board delegates to MUST stay reachable for the sklad role (SKLAD_ZNALOSTI_API)."""
     _snap(pg)
     c = _client()
     c.get("/sklad/" + sklad_key("test-secret"))
-    assert c.get("/znalosti").status_code == 200
-    assert c.get("/znalosti/111").status_code == 200
+    assert c.get("/znalosti").status_code == 302          # page retired -> board
     assert c.get("/api/znalosti/global").status_code == 200
     assert c.get("/api/znalosti/customer/111").status_code == 200
     # the security boundary is unchanged everywhere else
