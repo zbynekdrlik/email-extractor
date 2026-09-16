@@ -23,8 +23,6 @@ from html import escape
 
 from psycopg.types.json import Json
 
-from .. import linkutil
-
 log = logging.getLogger("orders.report")
 
 WORKFLOW = "ai_orders"
@@ -46,19 +44,29 @@ STATUS_LABEL = {"ok": "nahraté do ORIONu", "partial": "neúplných (chýba čas
                 "ignored": "ignorované podľa naučeného pravidla"}
 
 
-def sklad_link(cfg) -> str:
-    """The warehouse's `/sklad/<key>` link, built with no HTTP request (the order worker
-    runs on its own thread) — see `linkutil.sklad_url`'s docstring for why this is NOT
-    `cfg.public_base_url`. Returns "" when `dashboard_base_url` is unset."""
-    return linkutil.sklad_url(cfg)
+def sklad_link(cfg, question_id: int | None = None) -> str:
+    """The warehouse's link to the AI-ORDERS questions tab, built with no HTTP request (the
+    order worker runs on its own thread) — see `linkutil.sklad_url`'s docstring for why this
+    is NOT `cfg.public_base_url`. Returns "" when `dashboard_base_url` is unset.
+
+    #459: now routes straight to `/nastenka/otazky-objednavky` (optionally `?q=<id>` for one
+    question) via the shared `board.links.board_link` builder — the warehouse no longer lands
+    on a default tab and has to click across. Lazy import keeps `board.links` a leaf
+    (no orders→board import cycle)."""
+    from ..board.links import board_link
+    return board_link(cfg, "orders", question_id=question_id)
 
 
-def dl_sklad_link(cfg) -> str:
-    """The DELIVERY-NOTES-ONLY nástenka link (#231) — `/sklad-dl/<key>`, a genuinely
-    separate signed link/page from `sklad_link` above, so a DL Odoo review message never
-    sends the warehouse to a page mixed with unrelated AI-orders questions. Same "no HTTP
-    request" reasoning and the same "" fallback as `sklad_link`."""
-    return linkutil.dl_url(cfg)
+def dl_sklad_link(cfg, question_id: int | None = None) -> str:
+    """The DELIVERY-NOTES-ONLY nástenka link (#231) — a genuinely separate signed link from
+    `sklad_link` above, so a DL Odoo review message never sends the warehouse to a page mixed
+    with unrelated AI-orders questions. Same "no HTTP request" reasoning and the same ""
+    fallback as `sklad_link`.
+
+    #459: routes straight to the DL questions tab `/nastenka/otazky-sklad` (optionally
+    `?q=<id>`) via the shared `board.links.board_link` builder. Lazy import keeps the leaf."""
+    from ..board.links import board_link
+    return board_link(cfg, "dl", question_id=question_id)
 
 
 def dashboard_link(cfg) -> str:

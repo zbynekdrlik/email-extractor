@@ -228,7 +228,20 @@ async function load() {
     const items = data.items || [];
     emptyEl.hidden = items.length > 0;
     for (const q of items) listEl.appendChild(card(q));
+    focusQuestion(false);   // re-apply the deep-link highlight after a refresh (no re-scroll)
   } catch (e) { toast(e.message, { error: true }); }
+}
+
+// #459: a deep link from an Odoo message — `?q=<question_id>` — scrolls to + highlights that
+// ONE question card. Distinct from the #447 search-seed below (a NON-numeric `q`, e.g. a
+// message_id from the „Naučené" origin link, still seeds the search box). `scroll` is true
+// only on the first load, so a periodic refresh keeps the highlight without re-scrolling.
+function focusQuestion(scroll) {
+  if (!_focusId) return;
+  const el2 = document.getElementById(`q-card-${_focusId}`);
+  if (!el2) return;
+  el2.classList.add("q-card--focus");
+  if (scroll) el2.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 // ---- wiring -----------------------------------------------------------------------
@@ -251,12 +264,17 @@ if (searchEl) {
 const _init = new URLSearchParams(location.search);
 const _initStatus = _init.get("status");
 const _initQ = _init.get("q");
+// #459: a purely-numeric `q` is a question-id DEEP LINK (scroll + highlight), never a search
+// filter — seeding it into the search box would filter the list empty (search matches wording/
+// message_id, not the DB id). A non-numeric `q` stays the #447 search-seed (a message_id is
+// never a bare integer, so that path is unchanged).
+const _focusId = _initQ && /^\d+$/.test(_initQ) ? _initQ : null;
 if (["open", "expired", "answered"].includes(_initStatus)) state.status = _initStatus;
-if (_initQ) state.q = _initQ;
+if (_initQ && !_focusId) state.q = _initQ;
 if (searchEl && state.q) searchEl.value = state.q;
 document.querySelectorAll(".q-chip").forEach((c) => {
   c.classList.toggle("is-active", c.dataset.status === state.status);
 });
 
 setInterval(() => { if (!editingOpen()) load(); }, 8000);
-load();
+load().then(() => focusQuestion(true));
