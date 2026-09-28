@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 from psycopg.types.json import Json
 
-from . import dl_memory, dl_supplier_memory, memory, snapshot
+from . import dl_item_conflict, dl_memory, dl_supplier_memory, memory, snapshot
 
 log = logging.getLogger("orders.teach")
 
@@ -939,8 +939,9 @@ def dl_item_key(supplier_ean: str, wording: str) -> str:
     and `dl_document`'s #365 skip lookup (which reconstructs it on reprocess), so the two can
     never drift on the diacritic-folding normalization (`memory.item_key`) — the same
     "never re-derive the folding" discipline `orders-corpus.md` documents for
-    `supplier_name_key`."""
-    return f"dlitem:{supplier_ean}:{memory.item_key(wording)}"
+    `supplier_name_key`. #465: the one implementation lives in `dl_memory` (which cannot
+    import `teach`), so `dl_memory.resolve()` reads the board's answers under the SAME key."""
+    return dl_memory.dl_item_question_key(supplier_ean, wording)
 
 
 def _offered_values(q: dict) -> set[str]:
@@ -949,7 +950,8 @@ def _offered_values(q: dict) -> set[str]:
 
 def ask_dl_item(conn, message_id: str, supplier_ean: str, supplier_name: str, wording: str,
                 quantity, unit: str, candidates: list[dict], delivery_date: str = "",
-                reason: str = "", catalog_gtins=None, on_new=None) -> int | None:
+                reason: str = "", catalog_gtins=None, on_new=None,
+                memory_conflict: bool = False) -> int | None:
     """Raise ONE 'ktorá karta je táto DL položka?' question, scoped per (supplier, wording) —
     a second DL from the same supplier with the same still-unresolved wording reuses the SAME
     open question, exactly like `ask()`'s own per-(customer, wording) dedupe.
@@ -974,21 +976,36 @@ def ask_dl_item(conn, message_id: str, supplier_ean: str, supplier_name: str, wo
     permanent silent hang: the exact failure class this whole ticket exists to close,
     just for a taught-then-retired card instead of a never-taught one. `None` (the
     default) preserves the OLD, unfiltered behaviour for any caller with no catalog
-    handy (e.g. a direct test)."""
+    handy (e.g. a direct test).
+
+    #465 `memory_conflict=True`: the line is unmatched BECAUSE `dl_match.decide_item` refused
+    a silent memory rescue on an ambiguous history — the wording IS human-taught, so the
+    `recalled.human` pre-check above must NOT refuse (it would leave the line ask-refused →
+    the doc ships PARTIAL without it instead of being held). The flag is stored on the payload
+    so the answer supersedes the losing human answers (`_apply_dl_item`) and counts as the
+    sklad's explicit confirmation (`dl_memory._board_confirmed`) — asked once, never a loop."""
     key = memory.item_key(wording)
     if not (message_id and supplier_ean and key):
         return None
-    recalled = dl_memory.resolve(conn, supplier_ean, wording, catalog_gtins=catalog_gtins)
-    if recalled is not None and recalled.human:
-        return None
-    options = [{"value": str(c.get("gtin")), "label": c.get("name") or str(c.get("gtin"))}
+    if not memory_conflict:
+        recalled = dl_memory.resolve(conn, supplier_ean, wording, catalog_gtins=catalog_gtins)
+        if recalled is not None and recalled.human:
+            return None
+    # #465: the card alias rides along so the board's lexical misclick check sees it too.
+    options = [{"value": str(c.get("gtin")), "label": c.get("name") or str(c.get("gtin")),
+                **({"alias": c["doplnok"]} if c.get("doplnok") else {})}
               for c in (candidates or [])]
-    return ask_generic(
+    payload = {"supplier_ean": supplier_ean, "supplier_name": supplier_name or "",
+               "quantity": quantity, "unit": unit or "ks"}
+    if memory_conflict:
+        payload["memory_conflict"] = True
+    qid = ask_generic(
         conn, "dl_item", message_id, dl_item_key(supplier_ean, wording), wording,
-        options, reason or "Neznáme znenie položky na dodacom liste",
-        {"supplier_ean": supplier_ean, "supplier_name": supplier_name or "",
-         "quantity": quantity, "unit": unit or "ks"},
+        options, reason or "Neznáme znenie položky na dodacom liste", payload,
         delivery_date=delivery_date, on_new=on_new)
+    if memory_conflict and qid is not None:
+        dl_item_conflict.flag_question(conn, qid, options, reason)
+    return qid
 
 
 def _present_dl_item(q: dict) -> dict:
@@ -1037,6 +1054,12 @@ def _apply_dl_item(conn, cfg, q: dict, choice: str, by: str) -> dict:
                 if str(c.get("value")) == str(choice)), "")
     dl_memory.remember(conn, supplier_ean, q.get("wording", ""), str(choice), card,
                        _today(conn), source="human")
+    if payload.get("memory_conflict"):
+        # #465: the sklad settled a memory conflict — the losing human answers for this
+        # wording go (soft, audited, restorable), so 'the latest misclick wins' never returns.
+        dl_memory.supersede_taught(conn, supplier_ean, q.get("wording", ""), str(choice),
+                                   actor=by or "auto:teach", question_id=q.get("id"),
+                                   message_id=q.get("message_id"))
     from . import dl_worker
     released = dl_worker.release_for_question(conn, cfg, q["id"])
     return {"released": released}
@@ -1052,10 +1075,13 @@ def _undo_dl_item(conn, q: dict) -> dict:
     Acceptable for a hotfix (rare: requires same-day, same-gtin collision + undo); a
     demote-instead-of-delete would be the structural fix if this proves problematic."""
     payload = q.get("payload") or {}
-    conn.execute(
-        "DELETE FROM dl_item_memory WHERE supplier_ean = %s AND item_key = %s "
-        "AND source = 'human'", (payload.get("supplier_ean", ""), memory.item_key(
-            q.get("wording", ""))))
+    if payload.get("memory_conflict"):
+        dl_item_conflict.undo_answer(conn, q)   # #465: remove only its own teach + restore
+    else:
+        conn.execute(
+            "DELETE FROM dl_item_memory WHERE supplier_ean = %s AND item_key = %s "
+            "AND source = 'human' AND deleted_at IS NULL",   # #465: never a Kôš row
+            (payload.get("supplier_ean", ""), memory.item_key(q.get("wording", ""))))
     conn.execute(
         """UPDATE order_questions
               SET status = 'open', answer = NULL, answered_by = NULL, answered_at = NULL,

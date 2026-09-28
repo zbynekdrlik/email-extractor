@@ -55,6 +55,12 @@ MAJORITY = 0.6
 WEIGHT_OVERRIDE_MIN = 3
 
 
+# #465: a later non-human ship history for ANOTHER card only contradicts a human answer when
+# it carries at least this weight (sum of per-day max(cnt), same measure as R66) — one stray
+# delivery is not a majority.
+NEWER_CONTRARY_MIN = 2
+
+
 @dataclass(frozen=True)
 class Recalled:
     gtin: str
@@ -64,10 +70,27 @@ class Recalled:
     last_day: str
     weight_override: bool   # may override the R74 weight-conflict guard
     human: bool = False     # a warehouse answer (nástenka), outranks every weighted rung
+    # #465 — the history VERDICT `dl_match.decide_item`'s R73 rescue checks before it may
+    # substitute this gtin silently (see `resolve()`): every DISTINCT still-in-catalog human
+    # answer for the wording (>1 = the sklad contradicted itself), the card a strictly-NEWER
+    # non-human ship history mostly went to when that is a DIFFERENT card, and whether the
+    # sklad already explicitly settled this wording on the board (a resolved memory-conflict
+    # question, or a question of the very message being reprocessed).
+    human_gtins: tuple[str, ...] = ()
+    newer_gtin: str = ""
+    confirmed: bool = False
 
     @property
     def note(self) -> str:
         return f"{self.strength}x, naposledy {self.last_day}"
+
+
+def dl_item_question_key(supplier_ean: str, wording: str) -> str:
+    """The synthetic `order_questions.item_key` a `dl_item` question is stored under —
+    `dlitem:{supplier_ean}:{item_key(wording)}`. Lives HERE (not in `teach`, which imports
+    this module) so `resolve()` can read the board's own answers for a wording without an
+    import cycle; `teach.dl_item_key` delegates to it, so the two can never drift."""
+    return f"dlitem:{supplier_ean}:{item_key(wording)}"
 
 
 def remember(conn, supplier_ean: str, item: str, gtin: str | None, card: str,
@@ -96,13 +119,19 @@ def remember(conn, supplier_ean: str, item: str, gtin: str | None, card: str,
     # only when the incoming source IS 'human' and the stored row is NOT already 'human'.
     # The WHERE clause makes a same-source duplicate behave like DO NOTHING (no row returned
     # by RETURNING, so the function returns False — preserving the existing dedup semantics).
+    # #465: a human answer that collides with its own SOFT-DELETED row (superseded by a
+    # resolved memory conflict, or removed in the Kôš) revives it — the UNIQUE identity is not
+    # partial, so without this the new answer would be silently swallowed.
     row = conn.execute(
         """INSERT INTO dl_item_memory
                (supplier_ean, item_key, item_raw, gtin, card, delivered_on, cnt, source)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
            ON CONFLICT (supplier_ean, item_key, gtin, delivered_on, cnt) DO UPDATE
-              SET source = 'human', item_raw = EXCLUDED.item_raw, card = EXCLUDED.card
-            WHERE EXCLUDED.source = 'human' AND dl_item_memory.source IS DISTINCT FROM 'human'
+              SET source = 'human', item_raw = EXCLUDED.item_raw, card = EXCLUDED.card,
+                  deleted_at = NULL
+            WHERE EXCLUDED.source = 'human'
+              AND (dl_item_memory.source IS DISTINCT FROM 'human'
+                   OR dl_item_memory.deleted_at IS NOT NULL)
            RETURNING id""",
         (str(supplier_ean), key, str(item), str(gtin), card or "", delivered_on,
          cnt_val, source),
@@ -140,7 +169,7 @@ def import_n8n_rows(conn, rows: list[dict]) -> int:
 
 
 def resolve(conn, supplier_ean: str, item: str, catalog_gtins=None,
-           as_of: str = "") -> Recalled | None:
+           as_of: str = "", message_id: str = "") -> Recalled | None:
     """R66: what we have on record shipping this SUPPLIER for this wording, or `None` when
     the history does not speak clearly. Silence is a valid answer — `dl_match.decide_item`'s
     MEMORY RESCUE simply does not fire, and the line is decided (or asked about) some other
@@ -165,6 +194,15 @@ def resolve(conn, supplier_ean: str, item: str, catalog_gtins=None,
     still-valid OLDER human teach is not silently skipped in favour of falling through to
     machine-inferred ship history just because the MOST RECENT teach happens to name a gtin
     that has since left the catalog (review finding on this issue's PR).
+
+    #465: the human rung ALSO reports the history verdict (`Recalled.human_gtins`/
+    `newer_gtin`/`confirmed`) — the newest human answer still LEADS, but it no longer speaks
+    alone: `dl_match.decide_item` refuses to rescue with it silently when the sklad
+    contradicted itself, when later deliveries mostly went to another card, or when the card
+    shares no word with the wording (a board misclick poisoned every later below-threshold
+    match of one Dobrota roll wording onto a fruit card). `message_id` is the message being
+    matched — its OWN answered question counts as confirmation (the reprocess right after the
+    sklad answered it), never another message's plain answer (which is exactly the misclick).
     """
     key = item_key(item)
     if not (supplier_ean and key):
@@ -176,10 +214,21 @@ def resolve(conn, supplier_ean: str, item: str, catalog_gtins=None,
               AND deleted_at IS NULL
             GROUP BY gtin ORDER BY at DESC""",
         (str(supplier_ean), key)).fetchall()
-    for gtin, card, last_day, _at in taught_rows:
-        if catalog_gtins is None or str(gtin) in catalog_gtins:
-            return Recalled(gtin=str(gtin), card=card or "", strength=1, unanimous=True,
-                            last_day=str(last_day), weight_override=True, human=True)
+    valid_taught = [r for r in taught_rows
+                    if catalog_gtins is None or str(r[0]) in catalog_gtins]
+    if valid_taught:
+        gtin, card, last_day, _at = valid_taught[0]
+        human_gtins = tuple(str(r[0]) for r in valid_taught)
+        newer_gtin = _newer_contrary_gtin(conn, supplier_ean, key, str(gtin), last_day,
+                                          catalog_gtins, as_of)
+        confirmed = _board_confirmed(conn, supplier_ean, item, str(gtin), message_id)
+        if len(human_gtins) > 1 or newer_gtin:
+            log.warning("dl memory verdict for %r (%s): newest human answer %s, all human "
+                        "answers %s, newer contrary history %r, confirmed=%s", item,
+                        supplier_ean, gtin, human_gtins, newer_gtin, confirmed)
+        return Recalled(gtin=str(gtin), card=card or "", strength=1, unanimous=True,
+                        last_day=str(last_day), weight_override=True, human=True,
+                        human_gtins=human_gtins, newer_gtin=newer_gtin, confirmed=confirmed)
 
     rows = conn.execute(
         """SELECT gtin, delivered_on, max(cnt) AS c, max(card) AS card
@@ -221,6 +270,117 @@ def resolve(conn, supplier_ean: str, item: str, catalog_gtins=None,
         gtin=chosen_gtin, card=chosen["card"], strength=chosen["weight"],
         unanimous=unanimous, last_day=chosen["last_day"] or "",
         weight_override=unanimous and chosen["weight"] >= WEIGHT_OVERRIDE_MIN)
+
+
+def _newer_contrary_gtin(conn, supplier_ean: str, key: str, human_gtin: str, human_day,
+                         catalog_gtins, as_of: str) -> str:
+    """#465: the card that non-human ship history delivered STRICTLY AFTER the human answer's
+    day mostly went to, when that is a DIFFERENT card than the human answer and carries at
+    least `NEWER_CONTRARY_MIN` weight (R66's own per-day max(cnt) measure) — else "". A
+    single stray delivery, or later history agreeing with the human answer, is no conflict."""
+    rows = conn.execute(
+        """SELECT gtin, delivered_on, max(cnt)
+             FROM dl_item_memory
+            WHERE supplier_ean = %s AND item_key = %s
+              AND source NOT IN ('human', 'teachback') AND deleted_at IS NULL
+              AND delivered_on > %s
+              AND (%s::date IS NULL OR delivered_on < %s::date)
+            GROUP BY gtin, delivered_on""",
+        (str(supplier_ean), key, human_day, as_of or None, as_of or None)).fetchall()
+    weight: dict[str, int] = {}
+    for gtin, _day, cnt in rows:
+        if catalog_gtins is not None and str(gtin) not in catalog_gtins:
+            continue
+        weight[str(gtin)] = weight.get(str(gtin), 0) + int(cnt)
+    if not weight:
+        return ""
+    top = sorted(weight, key=lambda g: (-weight[g], g))[0]
+    if (top != str(human_gtin) and weight[top] >= NEWER_CONTRARY_MIN
+            and weight[top] > weight.get(str(human_gtin), 0)):
+        return top
+    return ""
+
+
+def _board_confirmed(conn, supplier_ean: str, item: str, gtin: str, message_id: str) -> bool:
+    """#465: did the sklad EXPLICITLY settle this wording on the nástenka with `gtin`? The
+    newest answered `dl_item` question for the (supplier, wording) that is EITHER a resolved
+    memory-conflict question (`payload.memory_conflict`, both cards were on screen) OR a
+    question of the very message being matched now (the reprocess right after the answer).
+    A plain answer from ANOTHER message never counts — that is exactly the q189 misclick,
+    which must not keep shipping silently on every later delivery."""
+    row = conn.execute(
+        """SELECT answer->>'choice' FROM order_questions
+            WHERE kind = 'dl_item' AND status = 'answered' AND customer_ean = ''
+              AND item_key = %s
+              AND (payload->>'memory_conflict' = 'true' OR message_id = %s)
+            ORDER BY answered_at DESC NULLS LAST, id DESC LIMIT 1""",
+        (dl_item_question_key(supplier_ean, item), message_id or "")).fetchone()
+    return bool(row) and str(row[0] or "") == str(gtin)
+
+
+def supersede_taught(conn, supplier_ean: str, wording: str, keep_gtin: str, *,
+                     actor: str = "auto:teach", question_id=None,
+                     message_id=None) -> list[int]:
+    """#465: the sklad resolved a memory conflict for this wording with `keep_gtin` — SOFT-
+    delete every OTHER live human/teachback answer for the SAME (supplier, wording), so the
+    contradiction is gone for good (never 'the latest wins' again). Soft delete only (spec §5
+    — the row stays, recoverable from the Kôš); real ship history (source='ship'/n8n) is
+    evidence and is never touched. Each superseded row gets a `dl_item_memory` `delete` audit
+    row tied to `question_id` — the SAME shape the board's alias delete writes, so the Kôš
+    lists it, 'Vrátiť' restores it, and undoing the answer restores it
+    (`restore_superseded`). Returns the superseded row ids."""
+    key = item_key(wording)
+    if not (supplier_ean and key and keep_gtin):
+        return []
+    rows = conn.execute(
+        """UPDATE dl_item_memory SET deleted_at = now()
+            WHERE supplier_ean = %s AND item_key = %s AND gtin <> %s
+              AND source IN ('human', 'teachback') AND deleted_at IS NULL
+           RETURNING id""",
+        (str(supplier_ean), key, str(keep_gtin))).fetchall()
+    ids = [int(r[0]) for r in rows]
+    (log.warning if ids else log.info)(
+        "dl memory conflict resolved for %r (%s): kept %s, superseded human rows %s",
+        wording, supplier_ean, keep_gtin, ids)
+    for rid in ids:
+        _audit(conn, actor=actor, row_id=rid, action="delete", question_id=question_id,
+               message_id=message_id, note="#465 memory conflict resolved on the board")
+    return ids
+
+
+def restore_superseded(conn, question_id: int, by: str = "auto:teach") -> list[int]:
+    """#465: undo of a resolved memory-conflict answer brings back every human answer that
+    answer superseded — through the Kôš's own sanctioned restore (`audit.restore` on each
+    `delete` audit row of this question), never a bespoke UPDATE. Rows already restored by
+    hand are skipped. Returns the restored `dl_item_memory` ids."""
+    rows = conn.execute(
+        """SELECT DISTINCT ON (m.id) a.id, m.id FROM audit_log a
+             JOIN dl_item_memory m ON m.id::text = a.row_id
+            WHERE a.table_name = 'dl_item_memory' AND a.action = 'delete'
+              AND a.question_id = %s AND m.deleted_at IS NOT NULL
+            ORDER BY m.id, a.id DESC""", (question_id,)).fetchall()   # newest per row
+    from ..board.services import audit  # lazy: a leaf module, no import cycle
+    restored = []
+    for audit_id, mem_id in rows:
+        try:
+            audit.restore(conn, int(audit_id), by=by)
+            restored.append(int(mem_id))
+        except Exception:
+            log.exception("restoring superseded dl_item_memory row %s (audit %s) failed",
+                          mem_id, audit_id)
+    log.info("dl memory conflict answer %s undone: restored superseded rows %s",
+             question_id, restored)
+    return restored
+
+
+def _audit(conn, **kw) -> None:
+    """Best-effort `dl_item_memory` audit row (lazy import of the leaf audit module); an
+    audit failure never breaks the memory write it records."""
+    try:
+        from ..board.services import audit
+        audit.record(conn, table="dl_item_memory", **kw)
+    except Exception:
+        log.exception("audit of dl_item_memory row %s failed", kw.get("row_id"))
 
 
 # --- #445 board lane 4: curated (nástenka) alias management for a DL card. The parallels of

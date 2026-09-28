@@ -44,7 +44,38 @@ function candidateButton(q, cand) {
     body = () => ({ choice: cand.value });
   }
   return el("button", { class: "q-btn q-btn--cand", type: "button",
-    onclick: () => submit(q.id, body()) }, label);
+    onclick: () => {
+      if (kind === "dl_item" && !confirmUnrelated(q.wording, label, cand.alias)) return;
+      submit(q.id, body());
+    } }, label);
+}
+
+// ---- #465: a dl_item pick sharing NO word with the delivery-note line --------------------
+// One misclick („Rožok oravský" answered as „Ovocie – Zlaté jablko pražené") used to teach the
+// matcher a wrong card that then shipped silently on later deliveries. Mirrors the server's
+// R75 lexical measure (dl_match._distinctive_words/_lexical_overlap, card name + alias —
+// the alias rides on the candidate as `alias`): diacritics folded,
+// weights + non-letters dropped, words of 4+ letters minus generic bread words, 4-letter stem.
+const GENERIC_WORDS = new Set(["chlieb", "chleba", "chlebom", "chlebu"]);
+
+function distinctiveWords(text) {
+  const s = String(text || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+    .replace(/\d+(?:[.,]\d+)?\s*(kg|gr|g|ml|l)\b/g, " ").replace(/[^a-z\s]/g, " ");
+  return s.split(/\s+/).filter((w) => w.length >= 4 && !GENERIC_WORDS.has(w));
+}
+
+function sharesWord(wording, cardName, alias) {
+  const item = distinctiveWords(wording);
+  const card = distinctiveWords(cardName).concat(distinctiveWords(alias));
+  if (!item.length || !card.length) return true;  // nothing to compare — never block
+  return item.some((w) => card.some((c) => w.slice(0, 4) === c.slice(0, 4)));
+}
+
+function confirmUnrelated(wording, cardName, alias) {
+  if (sharesWord(wording, cardName, alias)) return true;
+  return window.confirm(`Naozaj priradiť „${wording}“ ku karte „${cardName}“?\n\n`
+    + "Názvy nemajú ani jedno spoločné slovo — skontroluj, či si neklikol vedľa. "
+    + "Toto priradenie sa naučí aj pre ďalšie dodacie listy.");
 }
 
 function lineEdits(q) {

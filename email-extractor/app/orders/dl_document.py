@@ -280,7 +280,9 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # #314: (item, recalled, note) per unmatched item — the dl_item asks are DEFERRED to
     # after the loop, so a remembered non-warehouse supplier with no catalog match can be
     # short-circuited (terminal skip, zero questions) before any question is raised.
-    unmatched_asks: list[tuple[dict, dl_memory.Recalled | None, str]] = []
+    # #465: plus the memory-conflict candidate gtins (empty unless the R73 rescue refused a
+    # silent pick on an ambiguous history) — those go FIRST on the question, flagged.
+    unmatched_asks: list[tuple[dict, dl_memory.Recalled | None, str, list[str]]] = []
     catalog_gtins = {str(c.get("gtin")) for c in catalog}
     # #337: the RETIRED override cards (absent from the frozen catalog, so NOT in
     # `catalog_gtins` — the memory-rescue filter stays intact). Used ONLY to recognize an
@@ -288,9 +290,12 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     retired_cards = dl_snapshot.retired_dl_cards(conn)
     retired_gtins = {str(c["gtin"]) for c in retired_cards}
     for item in doc.get("items") or []:
+        # #465: `message_id` — this message's OWN answered question confirms its wording
+        # (the reprocess right after the sklad answered it), never another message's.
         recalled = dl_memory.resolve(conn, supplier_decision.ean_edi, item.get("name", ""),
                                      catalog_gtins=catalog_gtins,
-                                     as_of=message.get("today", ""))
+                                     as_of=message.get("today", ""),
+                                     message_id=message["message_id"])
         try:
             decision = _match_item(client, item, catalog, recalled, supplier_decision.name)
         except Exception as e:
@@ -358,7 +363,9 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         # #337: a `retired_manual` item is a KNOWN retired card — route it to review via
         # its note (below), but NEVER raise a per-delivery board question for it.
         if not decision.gtin and decision.rule != "retired_manual":
-            unmatched_asks.append((item, recalled, decision.note))
+            unmatched_asks.append((item, recalled, decision.note,
+                                   list((decision.trace.get("memory_conflict") or {})
+                                        .get("candidates") or [])))
 
     # #314: a remembered non-warehouse supplier whose document produced NO catalog GTIN
     # match is handled terminally — no dl_item questions, no upload (req 2). A document WITH
@@ -369,7 +376,11 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # `except` branch in the loop above), NOT a genuine "no match" — never skip on it, or a
     # model outage on a remembered supplier's mail would become a silent drop. Fall through
     # to the normal review+ask path (mirrors case B's now-fail-safe _document_has_catalog_match).
-    has_match_failure = any(d.rule == "match_failed" for _, d in decisions)
+    # #465 review finding: a `memory_conflict` line positively points at a catalog card (the
+    # memory and/or the model named one) — it is an UNDECIDED warehouse item, never evidence
+    # the mail is not a warehouse delivery. Same fail-safe: fall through to hold + ask.
+    has_match_failure = any(d.rule in ("match_failed", "memory_conflict")
+                            for _, d in decisions)
     if nw_remembered and not has_catalog_match and not has_match_failure:
         return _skip_not_warehouse(conn, shadow, message, doc_number,
                                    supplier_decision.name)
@@ -383,8 +394,8 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # ("partial" = shippable-but-incomplete), never the live HOLD policy layered on top.
     skipped_keys = (_skip_answered_item_keys(conn, message["message_id"])
                     if not shadow else set())
-    pending_asks = [(item, recalled, note) for item, recalled, note in unmatched_asks
-                    if teach.dl_item_key(supplier_decision.ean_edi, item.get("name", ""))
+    pending_asks = [ask for ask in unmatched_asks
+                    if teach.dl_item_key(supplier_decision.ean_edi, ask[0].get("name", ""))
                     not in skipped_keys]
 
     # Fire the deferred dl_item questions. For a non-remembered supplier this is byte-for-
@@ -403,14 +414,17 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # excluded from the EDI and the document ships partial exactly as before.
     held_items: list[dict] = []
     if not shadow:
-        for item, recalled, note in pending_asks:
+        for item, recalled, note, conflict_gtins in pending_asks:
             cands = dl_match.candidates(item.get("name", ""), catalog,
                                         memory_gtin=(recalled.gtin if recalled else ""))
+            if conflict_gtins:
+                cands = dl_match.conflict_first(conflict_gtins, cands, catalog)
             qid = teach.ask_dl_item(conn, message["message_id"], supplier_decision.ean_edi,
                                     supplier_decision.name, item.get("name", ""),
                                     item.get("quantity"), item.get("unit", ""), cands,
                                     delivery_date=delivery_date, reason=note,
-                                    catalog_gtins=catalog_gtins)
+                                    catalog_gtins=catalog_gtins,
+                                    memory_conflict=bool(conflict_gtins))
             if qid is not None:
                 held_items.append(item)
 

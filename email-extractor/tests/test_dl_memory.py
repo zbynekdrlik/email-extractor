@@ -285,3 +285,111 @@ def test_human_answer_same_day_as_ship_resolves_via_taught_rung(pg):
     assert r is not None, "human-taught row from today must resolve via taught rung"
     assert r.human is True, "resolved row must be the human-taught one"
     assert r.gtin == "G99"
+
+
+# --- #465: the history VERDICT carried on Recalled (conflict signals for R73) -----------
+
+def _answered_dl_item(pg, supplier, wording, choice, message_id="m-x", conflict=False):
+    import json
+
+    from app.orders import teach
+    pg.execute(
+        """INSERT INTO order_questions
+               (message_id, customer_ean, customer_name, wording, item_key, kind,
+                candidates, delivery_date, reason, context, payload, status, answer,
+                answered_by, answered_at)
+           VALUES (%s, '', '', %s, %s, 'dl_item', '[]'::jsonb, '', '', '{}'::jsonb,
+                   %s::jsonb, 'answered', %s::jsonb, 'sklad', now())""",
+        (message_id, wording, teach.dl_item_key(supplier, wording),
+         json.dumps({"supplier_ean": supplier, "memory_conflict": conflict}),
+         json.dumps({"choice": choice})))
+
+
+def test_resolve_reports_every_distinct_human_answer_for_the_wording(pg):
+    """#465: two DIFFERENT human answers for one wording (the q175 → roll / q189 → fruit
+    shape) — the newest still leads, but `human_gtins` exposes the conflict."""
+    _ship(pg, "C1", "rožok oravský 50g", "GROZ", "Rožok štandart", "2026-09-08", src="human")
+    _ship(pg, "C1", "rožok oravský 50g", "GFRUIT", "Ovocie", "2026-09-09", src="human")
+    r = dl_memory.resolve(pg, "C1", "rožok oravský 50g")
+    assert r.gtin == "GFRUIT" and r.human is True
+    assert set(r.human_gtins) == {"GFRUIT", "GROZ"}
+
+
+def test_resolve_human_gtins_are_catalog_filtered(pg):
+    _ship(pg, "C1b", "rožok", "GROZ", "Rožok", "2026-09-08", src="human")
+    _ship(pg, "C1b", "rožok", "GGONE", "Retired", "2026-09-09", src="human")
+    r = dl_memory.resolve(pg, "C1b", "rožok", catalog_gtins={"GROZ"})
+    assert r.gtin == "GROZ" and r.human_gtins == ("GROZ",)
+
+
+def test_resolve_newer_gtin_names_a_later_ship_plurality_on_another_card(pg):
+    """One human answer, then ship history AFTER it mostly on a DIFFERENT card."""
+    _ship(pg, "C2", "rožok", "GFRUIT", "Ovocie", "2026-09-09", src="human")
+    _ship(pg, "C2", "rožok", "GROZ", "Rožok", "2026-09-10")
+    _ship(pg, "C2", "rožok", "GROZ", "Rožok", "2026-09-11")
+    _ship(pg, "C2", "rožok", "GFRUIT", "Ovocie", "2026-09-15")
+    _ship(pg, "C2", "rožok", "GROZ", "Rožok", "2026-08-01")  # OLDER than the teach — ignored
+    r = dl_memory.resolve(pg, "C2", "rožok")
+    assert r.gtin == "GFRUIT" and r.newer_gtin == "GROZ"
+
+
+def test_resolve_newer_gtin_empty_without_a_real_contrary_plurality(pg):
+    # a single newer delivery on another card is not a majority
+    _ship(pg, "C3", "rožok", "GFRUIT", "Ovocie", "2026-09-09", src="human")
+    _ship(pg, "C3", "rožok", "GROZ", "Rožok", "2026-09-10")
+    assert dl_memory.resolve(pg, "C3", "rožok").newer_gtin == ""
+    # newer history agreeing with the human answer is not a conflict either
+    _ship(pg, "C4", "rožok", "GROZ", "Rožok", "2026-09-09", src="human")
+    _ship(pg, "C4", "rožok", "GROZ", "Rožok", "2026-09-10")
+    _ship(pg, "C4", "rožok", "GROZ", "Rožok", "2026-09-11")
+    assert dl_memory.resolve(pg, "C4", "rožok").newer_gtin == ""
+
+
+def test_resolve_confirmed_only_by_a_resolved_conflict_question_or_this_message(pg):
+    """`confirmed` = the sklad explicitly settled THIS wording: a memory-conflict question
+    answered with the remembered card, OR a question of the SAME message (the reprocess right
+    after the answer). A plain old answer from another message (the misclick) never is."""
+    _ship(pg, "C5", "rožok", "GFRUIT", "Ovocie", "2026-09-09", src="human")
+    _answered_dl_item(pg, "C5", "rožok", "GFRUIT", message_id="m-old")
+    assert dl_memory.resolve(pg, "C5", "rožok").confirmed is False
+    assert dl_memory.resolve(pg, "C5", "rožok", message_id="m-old").confirmed is True
+    _answered_dl_item(pg, "C5", "rožok", "GFRUIT", message_id="m-c", conflict=True)
+    assert dl_memory.resolve(pg, "C5", "rožok").confirmed is True
+
+
+def test_resolve_a_conflict_answer_for_another_card_does_not_confirm(pg):
+    _ship(pg, "C6", "rožok", "GFRUIT", "Ovocie", "2026-09-09", src="human")
+    _answered_dl_item(pg, "C6", "rožok", "GROZ", message_id="m-c", conflict=True)
+    assert dl_memory.resolve(pg, "C6", "rožok").confirmed is False
+
+
+def test_supersede_taught_soft_deletes_only_the_other_human_answers(pg):
+    _ship(pg, "C7", "rožok", "GROZ", "Rožok", "2026-09-08", src="human")
+    _ship(pg, "C7", "rožok", "GFRUIT", "Ovocie", "2026-09-09", src="human")
+    _ship(pg, "C7", "rožok", "GFRUIT", "Ovocie", "2026-09-15")          # ship evidence stays
+    _ship(pg, "C7", "iné", "GFRUIT", "Ovocie", "2026-09-09", src="human")  # other wording
+    ids = dl_memory.supersede_taught(pg, "C7", "rožok", keep_gtin="GROZ")
+    assert len(ids) == 1
+    live = pg.execute(
+        "SELECT item_key, gtin, source FROM dl_item_memory WHERE supplier_ean='C7' "
+        "AND deleted_at IS NULL ORDER BY id").fetchall()
+    assert ("rozok", "GROZ", "human") in live
+    assert ("rozok", "GFRUIT", "ship") in live
+    assert ("ine", "GFRUIT", "human") in live
+    assert ("rozok", "GFRUIT", "human") not in live
+    r = dl_memory.resolve(pg, "C7", "rožok")
+    assert r.gtin == "GROZ" and r.human_gtins == ("GROZ",)
+
+
+def test_a_human_answer_revives_its_own_soft_deleted_row_instead_of_vanishing(pg):
+    """Review 🟡 (#465): a superseded (soft-deleted) human row shares the UNIQUE identity
+    (supplier, wording, gtin, day, cnt) with a later same-day human answer for the SAME
+    card — the new answer must revive it, never be silently swallowed by ON CONFLICT."""
+    _ship(pg, "C8", "rožok", "GFRUIT", "Ovocie", "2026-09-09", src="human")
+    _ship(pg, "C8", "rožok", "GROZ", "Rožok", "2026-09-09", src="human")
+    dl_memory.supersede_taught(pg, "C8", "rožok", keep_gtin="GROZ")   # fruit soft-deleted
+    assert dl_memory.remember(pg, "C8", "rožok", "GFRUIT", "Ovocie", "2026-09-09",
+                              source="human") is True
+    live = pg.execute("SELECT gtin FROM dl_item_memory WHERE supplier_ean='C8' "
+                      "AND deleted_at IS NULL ORDER BY gtin").fetchall()
+    assert live == [("GFRUIT",), ("GROZ",)]
