@@ -216,6 +216,8 @@ def test_a_conflict_ask_upgrades_an_already_open_plain_question_for_the_wording(
     _snapshot(pg)
     _poison_history(pg)
     _msg(pg, mid="dl0")
+    # dl0 is an already-processed (held) message — else tick() would claim it before dl1
+    pg.execute("UPDATE messages SET processed = true WHERE message_id = 'dl0'")
     qid0 = teach.ask_generic(pg, "dl_item", "dl0", teach.dl_item_key(SUPPLIER_EAN, ROLL), ROLL,
                              [{"value": "9999", "label": "Niečo iné"}], "stará otázka",
                              {"supplier_ean": SUPPLIER_EAN, "supplier_name": "Pekáreň Lunys"})
