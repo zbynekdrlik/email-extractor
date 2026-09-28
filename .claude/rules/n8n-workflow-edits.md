@@ -1026,3 +1026,50 @@ Reusable rules this fix established — apply them to ANY future per-piece-mass 
   never raw SQL** — `POST /api/board/products?scope=dl` (the Produkty sklad tab's own
   `catalog._dl_upsert`, preserves name/doplnok/sklad/cena), read back from
   `dl_catalog_overrides`. The already-imported incident DESADV is NEVER re-shipped (#239).
+
+## The R73 memory rescue must not SILENTLY trust an ambiguous history — one board misclick
+## poisoned every later below-threshold match (#465, 2026-09-28)
+
+`dl_match.decide_item`'s R73 MEMORY RESCUE used to substitute the remembered gtin
+unconditionally whenever the model was below the sure gate (0.85) or said NO_MATCH, and
+`dl_memory.resolve()`'s taught rung returned the NEWEST human answer alone. One misclick on the
+board (a Dobrota roll wording answered with a fruit card — a day after the same wording was
+answered correctly) therefore shipped the fruit card on every later delivery whose model
+confidence happened to land below 0.85 (3 DESADVs in CODEX; the SAME run shipped the correct
+card for a sibling DL where the model scored 0.87 — pure lottery). Reusable rules:
+
+- **`resolve()` carries a history VERDICT on `Recalled`** — `human_gtins` (every still-in-catalog
+  human answer), `newer_gtin` (non-human ship plurality STRICTLY after the human answer's day on a
+  DIFFERENT card, weight ≥ `NEWER_CONTRARY_MIN`=2) and `confirmed` (the sklad settled it on the
+  board). `decide_item` rescues silently ONLY when the memory agrees with the model's pick, or is
+  `confirmed`, or has none of: >1 human answer / a newer contrary majority / zero lexical overlap
+  item↔card (name + alias, the R75 4-char stem measure — applies to a ship-history recall too).
+  Otherwise → rule `memory_conflict`, `gtin=None`, both cards in `trace["memory_conflict"]
+  ["candidates"]`, `log.warning`. Never "the latest human answer wins".
+- **A human-taught line that must be ASKED needs `teach.ask_dl_item(memory_conflict=True)`** —
+  the default refuses to ask for a human-taught wording (that refusal makes the #365 hold ship
+  the doc PARTIAL instead). The flag bypasses it, puts the conflicting cards first
+  (`dl_match.conflict_first`) and marks `payload.memory_conflict`; `dl_item_conflict.
+  flag_question` upgrades an already-open plain question the ask DEDUPED onto.
+- **A conflict must be asked ONCE, never on every delivery.** `confirmed` = the newest answered
+  `dl_item` question for the key is a memory-conflict question OR a question of the very message
+  being reprocessed (the reprocess right after the answer), and its choice == the remembered gtin.
+  A plain answer from ANOTHER message never confirms — that is exactly the misclick. Answering a
+  conflict question soft-deletes the losing human answers (`dl_memory.supersede_taught`, audited
+  per row, Kôš-restorable); undo restores them (`restore_superseded` → `audit.restore`).
+- **`memory_conflict` is an undecided WAREHOUSE item** — it must be counted like `match_failed`
+  in the #314 remembered-non-warehouse skip guard, or real goods are dropped with no question.
+- **A soft-deleted memory row still holds the (non-partial) UNIQUE identity** — `remember()`
+  revives it on a later human answer (`deleted_at = NULL`), else ON CONFLICT swallows the answer.
+- **Board side (`tab-questions.js`):** a `dl_item` pick sharing no 4-letter stem with the line
+  (name OR the candidate's `alias`) asks `window.confirm` first. Playwright handles it via
+  `page.on("dialog", ...)` — `dismiss()` must leave the question open.
+- **Expected one-time cost after deploy:** existing lexically-unrelated human mappings (e.g. a
+  „Veka …" wording taught as „Sendvič celý", „kajzerka" vs „Kaiserka" — `kajz`≠`kais`) each get
+  ONE conflict question on their next below-threshold delivery, then are confirmed. The e2e-dl
+  corpus stayed byte-identical (no human history in the fixtures).
+- **Data repair is via the board, never SQL:** `DELETE /api/board/rules/dl_alias/<id>` (admin
+  session from `POST /login`) soft-deletes a curated human row + audit. Ship rows (`source='ship'`)
+  written by the poisoned rescues are evidence and are NOT deletable there — the new verdict
+  neutralizes them (contrary majority / lexical gap), and an already-imported DESADV is NEVER
+  re-shipped (#239) — list it on the ticket for the warehouse's manual CODEX correction.
