@@ -354,11 +354,11 @@ def restore_superseded(conn, question_id: int, by: str = "auto:teach") -> list[i
     `delete` audit row of this question), never a bespoke UPDATE. Rows already restored by
     hand are skipped. Returns the restored `dl_item_memory` ids."""
     rows = conn.execute(
-        """SELECT a.id, m.id FROM audit_log a
+        """SELECT DISTINCT ON (m.id) a.id, m.id FROM audit_log a
              JOIN dl_item_memory m ON m.id::text = a.row_id
             WHERE a.table_name = 'dl_item_memory' AND a.action = 'delete'
               AND a.question_id = %s AND m.deleted_at IS NOT NULL
-            ORDER BY a.id""", (question_id,)).fetchall()
+            ORDER BY m.id, a.id DESC""", (question_id,)).fetchall()   # newest per row
     from ..board.services import audit  # lazy: a leaf module, no import cycle
     restored = []
     for audit_id, mem_id in rows:

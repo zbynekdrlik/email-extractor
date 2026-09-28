@@ -26,9 +26,10 @@ from . import dl_memory, memory
 log = logging.getLogger("orders.teach")
 
 
-def flag_question(conn, qid: int, options: list[dict]) -> None:
+def flag_question(conn, qid: int, options: list[dict], reason: str = "") -> None:
     """Flag an OPEN `dl_item` question `memory_conflict` and put the conflicting cards
-    (`options`, already conflict-first) ahead of its old candidates, which are kept. A no-op
+    (`options`, already conflict-first) ahead of its old candidates, which are kept, and show
+    the conflict `reason` (why both cards are offered) instead of the stale plain one. A no-op
     on a row that is already flagged (the fresh-insert case) or no longer open."""
     row = conn.execute("SELECT payload, candidates FROM order_questions "
                        "WHERE id = %s AND status = 'open'", (qid,)).fetchone()
@@ -36,22 +37,27 @@ def flag_question(conn, qid: int, options: list[dict]) -> None:
         return
     seen = {str(o["value"]) for o in options}
     merged = options + [c for c in (row[1] or []) if str(c.get("value")) not in seen]
-    conn.execute("UPDATE order_questions SET payload = payload || %s::jsonb, candidates = %s "
-                 "WHERE id = %s AND status = 'open'",
-                 (Json({"memory_conflict": True}), Json(merged), qid))
+    conn.execute("UPDATE order_questions SET payload = payload || %s::jsonb, candidates = %s, "
+                 "reason = COALESCE(NULLIF(%s, ''), reason) WHERE id = %s AND status = 'open'",
+                 (Json({"memory_conflict": True}), Json(merged), reason or "", qid))
     log.warning("dl_item question %s upgraded to a memory conflict (candidates %s)",
                 qid, [str(c.get("value")) for c in merged])
 
 
 def undo_answer(conn, q: dict) -> None:
-    """Remove the human answer this conflict question taught — only rows created since it was
-    answered (the older human answers predate the question and stay), never a soft-deleted
-    (Kôš) row — then restore every answer it superseded. The caller reopens the question."""
+    """Remove the human answer this conflict question taught — only rows of the ANSWERED card
+    created since it was answered (older human answers predate the question and stay; a later
+    answer for another card is not ours), never a soft-deleted (Kôš) row — then restore every
+    answer it superseded. The caller reopens the question. Known residual: a same-day row the
+    answer PROMOTED/REVIVED keeps its old created_at and stays taught — never a silent ship,
+    the restored superseded answers re-open the conflict on the next delivery."""
     payload = q.get("payload") or {}
+    choice = str((q.get("answer") or {}).get("choice") or "")
     removed = conn.execute(
         "DELETE FROM dl_item_memory WHERE supplier_ean = %s AND item_key = %s "
-        "AND source = 'human' AND deleted_at IS NULL AND created_at >= %s RETURNING id",
-        (payload.get("supplier_ean", ""), memory.item_key(q.get("wording", "")),
+        "AND gtin = %s AND source = 'human' AND deleted_at IS NULL AND created_at >= %s "
+        "RETURNING id",
+        (payload.get("supplier_ean", ""), memory.item_key(q.get("wording", "")), choice,
          q.get("answered_at"))).fetchall()
     restored = dl_memory.restore_superseded(conn, q["id"])
     log.info("dl_item conflict answer %s undone: removed %s, restored %s", q["id"],

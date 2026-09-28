@@ -1004,9 +1004,8 @@ def ask_dl_item(conn, message_id: str, supplier_ean: str, supplier_name: str, wo
         options, reason or "Neznáme znenie položky na dodacom liste", payload,
         delivery_date=delivery_date, on_new=on_new)
     if memory_conflict and qid is not None:
-        dl_item_conflict.flag_question(conn, qid, options)
+        dl_item_conflict.flag_question(conn, qid, options, reason)
     return qid
-
 
 
 def _present_dl_item(q: dict) -> dict:
