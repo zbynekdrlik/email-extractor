@@ -534,6 +534,79 @@ def _lexical_overlap(item_words: set[str], card_words: set[str]) -> set[str]:
            if any(w[:_STEM_PREFIX] == c[:_STEM_PREFIX] for c in card_words)}
 
 
+# --- #465: R73 memory-rescue conflict verdict ----------------------------------------------
+# The rescue used to substitute the remembered gtin UNCONDITIONALLY below the sure gate — so a
+# single board misclick (a roll wording answered with a fruit card) silently re-shipped the
+# wrong card on every later delivery whose model confidence happened to land below 0.85. The
+# rescue is silent now only when the history is UNAMBIGUOUS; otherwise the line is left
+# unmatched with both candidates, which the live path turns into a #365 HOLD + board question.
+
+_CONFLICT_REASON_SK = {
+    "conflicting_human_answers": "sklad pre toto znenie odpovedal rôzne",
+    "newer_history_majority": "novšie dodávky išli na inú kartu",
+    "lexical_gap": "karta nemá so znením položky žiadne spoločné slovo",
+}
+
+
+def _memory_conflict(item_name: str, recalled, rec_card: dict, llm_gtin) -> list[str]:
+    """Why the remembered card must NOT be substituted silently — `[]` when it may. Silent
+    when the model independently picked the SAME card (agreement is unambiguous) or when the
+    sklad already explicitly settled this wording on the board (`recalled.confirmed` — else a
+    deliberate decision would be re-asked on every delivery). Otherwise any of: two DIFFERENT
+    human answers for the wording (never 'the latest wins'), a human answer contradicted by a
+    newer ship-history majority, or zero lexical overlap item↔card (name + alias, the R75
+    tripwire's own 4-char stem measure — it applies to a ship-history recall too)."""
+    if llm_gtin and str(llm_gtin) == str(recalled.gtin):
+        return []
+    if recalled.confirmed:
+        return []
+    reasons = []
+    if len(set(recalled.human_gtins)) > 1:
+        reasons.append("conflicting_human_answers")
+    if recalled.human and recalled.newer_gtin and recalled.newer_gtin != str(recalled.gtin):
+        reasons.append("newer_history_majority")
+    item_words = _distinctive_words(item_name)
+    card_words = (_distinctive_words(rec_card.get("name", ""))
+                  | _distinctive_words(rec_card.get("doplnok", "") or ""))
+    if item_words and card_words and not _lexical_overlap(item_words, card_words):
+        reasons.append("lexical_gap")
+    return reasons
+
+
+def _conflict_candidates(catalog: list[dict], recalled, llm_gtin) -> list[str]:
+    """The cards the sklad must choose between, most relevant first: the remembered one, the
+    model's pick, every other human answer, the newer-history card. Deduped; only cards still
+    in `catalog` that can ship (a #245 overflowing GTIN never is offered)."""
+    out: list[str] = []
+    for g in (recalled.gtin, llm_gtin, *recalled.human_gtins, recalled.newer_gtin):
+        g = str(g or "")
+        if g and g not in out and _card(catalog, g) and not _gtin_edi_overflow(g):
+            out.append(g)
+    return out
+
+
+def conflict_first(gtins: list[str], shortlist: list[dict], catalog: list[dict]) -> list[dict]:
+    """#465: the dl_item question's candidate list for a memory conflict — the conflicting
+    cards FIRST (in `gtins` order, so both the remembered card and the model's pick are on
+    screen even if the R65 shortlist ranked them low), then the rest of the shortlist."""
+    head = [c for c in (_card(catalog, g) for g in gtins) if c is not None]
+    seen = {str(c.get("gtin")) for c in head}
+    return head + [c for c in shortlist if str(c.get("gtin")) not in seen]
+
+
+def _memory_conflict_note(item_name: str, rec_card: dict, llm_card: dict | None, conf: float,
+                          reasons: list[str], newer_card: dict | None) -> str:
+    """The warehouse-facing reason on the held line / board question (plain Slovak)."""
+    model = (f"model navrhuje „{llm_card['name']}“ ({round(conf * 100)} %)" if llm_card
+             else "model nenašiel zhodu")
+    why = "; ".join(_CONFLICT_REASON_SK[r] for r in reasons)
+    newer = (f" Novšie dodávky: „{newer_card['name']}“."
+             if newer_card and "newer_history_majority" in reasons else "")
+    return (f"Pamäť dodávok pre „{item_name}“ hovorí „{rec_card['name']}“, ale {model} — "
+            f"história nie je jednoznačná ({why}).{newer} Vyber správnu kartu, doklad čaká "
+            "a do ORIONu nejde, kým to nepotvrdíš.")
+
+
 def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
                 partner_name: str = "") -> Decision:
     """R70-R76's post-match gate ladder. `recalled` is a `dl_memory.Recalled` (or `None`) — see
@@ -623,6 +696,23 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
                        rec_card["name"], recalled.gtin, len(str(recalled.gtin)),
                        GTIN_FIELD_WIDTH)
             rec_card = None
+        conflict = (_memory_conflict(item_name, recalled, rec_card, llm_gtin)
+                    if rec_card else [])
+        if rec_card and conflict:
+            cands = _conflict_candidates(catalog, recalled, llm_gtin)
+            trace["memory_conflict"] = {
+                "memory_gtin": str(recalled.gtin), "llm_gtin": llm_gtin,
+                "human_gtins": list(recalled.human_gtins),
+                "newer_gtin": recalled.newer_gtin,
+                "reasons": conflict, "candidates": cands}
+            log.warning("dl memory conflict: %r memory -> %s (%s) vs model -> %s (%.2f), "
+                        "reasons=%s — NOT rescuing silently, asking the warehouse "
+                        "(candidates %s)", item_name, recalled.gtin, rec_card["name"],
+                        llm_gtin or "NO_MATCH", conf, conflict, cands)
+            return done("memory_conflict", None, "", 0.0, conf,
+                        _memory_conflict_note(item_name, rec_card, llm_card, conf, conflict,
+                                              _card(catalog, recalled.newer_gtin)),
+                        review=True)
         if rec_card:
             log.info("dl memory rescue: %r -> %s (%s)", item_name, recalled.gtin, recalled.note)
             return done("memory_rescue", recalled.gtin, recalled.card,
