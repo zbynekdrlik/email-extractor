@@ -260,3 +260,33 @@ def test_a_conflict_question_offers_the_card_alias_to_the_board(pg, tmp_path):
     cands = _open_question(pg)[0][1]
     fruit = next(c for c in cands if c["value"] == G_FRUIT)
     assert fruit.get("alias") == "jablko pražené balené"
+
+
+def test_an_upgraded_question_shows_the_conflict_reason(pg, tmp_path):
+    """Review 🔵: the upgraded (formerly plain) question must carry the conflict explanation,
+    not its stale old reason — the sklad needs to see why both cards are offered."""
+    _snapshot(pg)
+    _poison_history(pg)
+    _msg(pg, mid="dl0")
+    pg.execute("UPDATE messages SET processed = true WHERE message_id = 'dl0'")
+    teach.ask_generic(pg, "dl_item", "dl0", teach.dl_item_key(SUPPLIER_EAN, ROLL), ROLL,
+                      [], "stará otázka", {"supplier_ean": SUPPLIER_EAN})
+    _run(pg, tmp_path, "dl1", _doc("0100000112"), _llm(G_ROLL, 0.81))
+    reason = pg.execute("SELECT reason FROM order_questions WHERE status='open'").fetchone()[0]
+    assert "nie je jednoznačná" in reason and reason != "stará otázka"
+
+
+def test_a_repeated_conflict_undo_restores_cleanly(pg, tmp_path, monkeypatch, caplog):
+    """Review 🔵: answer → undo → answer → undo must restore without a spurious ERROR (the
+    same superseded row has two delete audit rows by then)."""
+    _snapshot(pg)
+    _poison_history(pg)
+    _run(pg, tmp_path, "dl1", _doc("0100000113"), _llm(G_ROLL, 0.81))
+    qid = _open_question(pg)[0][0]
+    for _ in range(2):
+        _answer_through_the_app_path(pg, monkeypatch, qid, G_ROLL)
+        teach.KINDS["dl_item"].undo(pg, teach.get(pg, qid))
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    live = pg.execute("SELECT gtin FROM dl_item_memory WHERE source='human' "
+                      "AND deleted_at IS NULL").fetchall()
+    assert {g for (g,) in live} == {G_ROLL, G_FRUIT}
