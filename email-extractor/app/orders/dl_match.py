@@ -555,7 +555,16 @@ def _memory_conflict(item_name: str, recalled, rec_card: dict, llm_gtin) -> list
     deliberate decision would be re-asked on every delivery). Otherwise any of: two DIFFERENT
     human answers for the wording (never 'the latest wins'), a human answer contradicted by a
     newer ship-history majority, or zero lexical overlap item↔card (name + alias, the R75
-    tripwire's own 4-char stem measure — it applies to a ship-history recall too)."""
+    tripwire's own 4-char stem measure — it applies to a ship-history recall too).
+
+    Deliberate trade-offs: a weighted SHIP-history recall (no human answer) stays silent
+    unless the lexical check fails — R66's own ≥60 % majority already makes it unambiguous,
+    and the e2e-dl corpus stays byte-identical. `confirmed` never expires: once the sklad
+    settled a conflict on the board it is honoured on every later delivery ("ask once"); a
+    NEW contradicting human answer makes the newest human gtin differ from the confirmed
+    choice, which re-opens the conflict. Silent rescues write ship rows for the remembered
+    card, so they add weight on its side of `newer_gtin` — acceptable, the conflict signals
+    are OR-ed (a misclick is still caught by the lexical or conflicting-answer signal)."""
     if llm_gtin and str(llm_gtin) == str(recalled.gtin):
         return []
     if recalled.confirmed:

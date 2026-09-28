@@ -376,7 +376,11 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # `except` branch in the loop above), NOT a genuine "no match" — never skip on it, or a
     # model outage on a remembered supplier's mail would become a silent drop. Fall through
     # to the normal review+ask path (mirrors case B's now-fail-safe _document_has_catalog_match).
-    has_match_failure = any(d.rule == "match_failed" for _, d in decisions)
+    # #465 review finding: a `memory_conflict` line positively points at a catalog card (the
+    # memory and/or the model named one) — it is an UNDECIDED warehouse item, never evidence
+    # the mail is not a warehouse delivery. Same fail-safe: fall through to hold + ask.
+    has_match_failure = any(d.rule in ("match_failed", "memory_conflict")
+                            for _, d in decisions)
     if nw_remembered and not has_catalog_match and not has_match_failure:
         return _skip_not_warehouse(conn, shadow, message, doc_number,
                                    supplier_decision.name)

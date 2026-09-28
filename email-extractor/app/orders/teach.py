@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 from psycopg.types.json import Json
 
-from . import dl_memory, dl_supplier_memory, memory, snapshot
+from . import dl_item_conflict, dl_memory, dl_supplier_memory, memory, snapshot
 
 log = logging.getLogger("orders.teach")
 
@@ -991,16 +991,22 @@ def ask_dl_item(conn, message_id: str, supplier_ean: str, supplier_name: str, wo
         recalled = dl_memory.resolve(conn, supplier_ean, wording, catalog_gtins=catalog_gtins)
         if recalled is not None and recalled.human:
             return None
-    options = [{"value": str(c.get("gtin")), "label": c.get("name") or str(c.get("gtin"))}
+    # #465: the card alias rides along so the board's lexical misclick check sees it too.
+    options = [{"value": str(c.get("gtin")), "label": c.get("name") or str(c.get("gtin")),
+                **({"alias": c["doplnok"]} if c.get("doplnok") else {})}
               for c in (candidates or [])]
     payload = {"supplier_ean": supplier_ean, "supplier_name": supplier_name or "",
                "quantity": quantity, "unit": unit or "ks"}
     if memory_conflict:
         payload["memory_conflict"] = True
-    return ask_generic(
+    qid = ask_generic(
         conn, "dl_item", message_id, dl_item_key(supplier_ean, wording), wording,
         options, reason or "Neznáme znenie položky na dodacom liste", payload,
         delivery_date=delivery_date, on_new=on_new)
+    if memory_conflict and qid is not None:
+        dl_item_conflict.flag_question(conn, qid, options)
+    return qid
+
 
 
 def _present_dl_item(q: dict) -> dict:
@@ -1051,27 +1057,13 @@ def _apply_dl_item(conn, cfg, q: dict, choice: str, by: str) -> dict:
                        _today(conn), source="human")
     if payload.get("memory_conflict"):
         # #465: the sklad settled a memory conflict — the losing human answers for this
-        # wording go (soft, restorable from the Kôš with an audit row), so the contradiction
-        # can never re-trigger and 'the latest misclick wins' can never come back.
-        for rid in dl_memory.supersede_taught(conn, supplier_ean, q.get("wording", ""),
-                                              str(choice)):
-            _audit_memory_supersede(conn, rid, q, by)
+        # wording go (soft, audited, restorable), so 'the latest misclick wins' never returns.
+        dl_memory.supersede_taught(conn, supplier_ean, q.get("wording", ""), str(choice),
+                                   actor=by or "auto:teach", question_id=q.get("id"),
+                                   message_id=q.get("message_id"))
     from . import dl_worker
     released = dl_worker.release_for_question(conn, cfg, q["id"])
     return {"released": released}
-
-
-def _audit_memory_supersede(conn, row_id: int, q: dict, by: str) -> None:
-    """#465: one `dl_item_memory` `delete` audit row per superseded human answer — the SAME
-    shape the board's own alias delete writes, so the Kôš lists it and 'Vrátiť' restores it.
-    Best-effort, like `_audit_change`: an audit failure never breaks the answer."""
-    try:
-        from ..board.services import audit
-        audit.record(conn, actor=(by or "auto:teach"), table="dl_item_memory", row_id=row_id,
-                     action="delete", note="#465 memory conflict resolved on the board",
-                     question_id=q.get("id"), message_id=q.get("message_id"))
-    except Exception:
-        log.exception("audit of superseded dl_item_memory row %s failed", row_id)
 
 
 def _undo_dl_item(conn, q: dict) -> dict:
@@ -1084,10 +1076,13 @@ def _undo_dl_item(conn, q: dict) -> dict:
     Acceptable for a hotfix (rare: requires same-day, same-gtin collision + undo); a
     demote-instead-of-delete would be the structural fix if this proves problematic."""
     payload = q.get("payload") or {}
-    conn.execute(
-        "DELETE FROM dl_item_memory WHERE supplier_ean = %s AND item_key = %s "
-        "AND source = 'human'", (payload.get("supplier_ean", ""), memory.item_key(
-            q.get("wording", ""))))
+    if payload.get("memory_conflict"):
+        dl_item_conflict.undo_answer(conn, q)   # #465: remove only its own teach + restore
+    else:
+        conn.execute(
+            "DELETE FROM dl_item_memory WHERE supplier_ean = %s AND item_key = %s "
+            "AND source = 'human' AND deleted_at IS NULL",   # #465: never a Kôš row
+            (payload.get("supplier_ean", ""), memory.item_key(q.get("wording", ""))))
     conn.execute(
         """UPDATE order_questions
               SET status = 'open', answer = NULL, answered_by = NULL, answered_at = NULL,

@@ -119,13 +119,19 @@ def remember(conn, supplier_ean: str, item: str, gtin: str | None, card: str,
     # only when the incoming source IS 'human' and the stored row is NOT already 'human'.
     # The WHERE clause makes a same-source duplicate behave like DO NOTHING (no row returned
     # by RETURNING, so the function returns False — preserving the existing dedup semantics).
+    # #465: a human answer that collides with its own SOFT-DELETED row (superseded by a
+    # resolved memory conflict, or removed in the Kôš) revives it — the UNIQUE identity is not
+    # partial, so without this the new answer would be silently swallowed.
     row = conn.execute(
         """INSERT INTO dl_item_memory
                (supplier_ean, item_key, item_raw, gtin, card, delivered_on, cnt, source)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
            ON CONFLICT (supplier_ean, item_key, gtin, delivered_on, cnt) DO UPDATE
-              SET source = 'human', item_raw = EXCLUDED.item_raw, card = EXCLUDED.card
-            WHERE EXCLUDED.source = 'human' AND dl_item_memory.source IS DISTINCT FROM 'human'
+              SET source = 'human', item_raw = EXCLUDED.item_raw, card = EXCLUDED.card,
+                  deleted_at = NULL
+            WHERE EXCLUDED.source = 'human'
+              AND (dl_item_memory.source IS DISTINCT FROM 'human'
+                   OR dl_item_memory.deleted_at IS NOT NULL)
            RETURNING id""",
         (str(supplier_ean), key, str(item), str(gtin), card or "", delivered_on,
          cnt_val, source),
@@ -312,12 +318,17 @@ def _board_confirmed(conn, supplier_ean: str, item: str, gtin: str, message_id: 
     return bool(row) and str(row[0] or "") == str(gtin)
 
 
-def supersede_taught(conn, supplier_ean: str, wording: str, keep_gtin: str) -> list[int]:
+def supersede_taught(conn, supplier_ean: str, wording: str, keep_gtin: str, *,
+                     actor: str = "auto:teach", question_id=None,
+                     message_id=None) -> list[int]:
     """#465: the sklad resolved a memory conflict for this wording with `keep_gtin` — SOFT-
     delete every OTHER live human/teachback answer for the SAME (supplier, wording), so the
     contradiction is gone for good (never 'the latest wins' again). Soft delete only (spec §5
     — the row stays, recoverable from the Kôš); real ship history (source='ship'/n8n) is
-    evidence and is never touched. Returns the superseded row ids (the caller audits them)."""
+    evidence and is never touched. Each superseded row gets a `dl_item_memory` `delete` audit
+    row tied to `question_id` — the SAME shape the board's alias delete writes, so the Kôš
+    lists it, 'Vrátiť' restores it, and undoing the answer restores it
+    (`restore_superseded`). Returns the superseded row ids."""
     key = item_key(wording)
     if not (supplier_ean and key and keep_gtin):
         return []
@@ -328,9 +339,48 @@ def supersede_taught(conn, supplier_ean: str, wording: str, keep_gtin: str) -> l
            RETURNING id""",
         (str(supplier_ean), key, str(keep_gtin))).fetchall()
     ids = [int(r[0]) for r in rows]
-    log.warning("dl memory conflict resolved for %r (%s): kept %s, superseded human rows %s",
-                wording, supplier_ean, keep_gtin, ids)
+    (log.warning if ids else log.info)(
+        "dl memory conflict resolved for %r (%s): kept %s, superseded human rows %s",
+        wording, supplier_ean, keep_gtin, ids)
+    for rid in ids:
+        _audit(conn, actor=actor, row_id=rid, action="delete", question_id=question_id,
+               message_id=message_id, note="#465 memory conflict resolved on the board")
     return ids
+
+
+def restore_superseded(conn, question_id: int, by: str = "auto:teach") -> list[int]:
+    """#465: undo of a resolved memory-conflict answer brings back every human answer that
+    answer superseded — through the Kôš's own sanctioned restore (`audit.restore` on each
+    `delete` audit row of this question), never a bespoke UPDATE. Rows already restored by
+    hand are skipped. Returns the restored `dl_item_memory` ids."""
+    rows = conn.execute(
+        """SELECT a.id, m.id FROM audit_log a
+             JOIN dl_item_memory m ON m.id::text = a.row_id
+            WHERE a.table_name = 'dl_item_memory' AND a.action = 'delete'
+              AND a.question_id = %s AND m.deleted_at IS NOT NULL
+            ORDER BY a.id""", (question_id,)).fetchall()
+    from ..board.services import audit  # lazy: a leaf module, no import cycle
+    restored = []
+    for audit_id, mem_id in rows:
+        try:
+            audit.restore(conn, int(audit_id), by=by)
+            restored.append(int(mem_id))
+        except Exception:
+            log.exception("restoring superseded dl_item_memory row %s (audit %s) failed",
+                          mem_id, audit_id)
+    log.info("dl memory conflict answer %s undone: restored superseded rows %s",
+             question_id, restored)
+    return restored
+
+
+def _audit(conn, **kw) -> None:
+    """Best-effort `dl_item_memory` audit row (lazy import of the leaf audit module); an
+    audit failure never breaks the memory write it records."""
+    try:
+        from ..board.services import audit
+        audit.record(conn, table="dl_item_memory", **kw)
+    except Exception:
+        log.exception("audit of dl_item_memory row %s failed", kw.get("row_id"))
 
 
 # --- #445 board lane 4: curated (nástenka) alias management for a DL card. The parallels of
