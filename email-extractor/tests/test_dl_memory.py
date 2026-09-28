@@ -379,3 +379,17 @@ def test_supersede_taught_soft_deletes_only_the_other_human_answers(pg):
     assert ("rozok", "GFRUIT", "human") not in live
     r = dl_memory.resolve(pg, "C7", "rožok")
     assert r.gtin == "GROZ" and r.human_gtins == ("GROZ",)
+
+
+def test_a_human_answer_revives_its_own_soft_deleted_row_instead_of_vanishing(pg):
+    """Review 🟡 (#465): a superseded (soft-deleted) human row shares the UNIQUE identity
+    (supplier, wording, gtin, day, cnt) with a later same-day human answer for the SAME
+    card — the new answer must revive it, never be silently swallowed by ON CONFLICT."""
+    _ship(pg, "C8", "rožok", "GFRUIT", "Ovocie", "2026-09-09", src="human")
+    _ship(pg, "C8", "rožok", "GROZ", "Rožok", "2026-09-09", src="human")
+    dl_memory.supersede_taught(pg, "C8", "rožok", keep_gtin="GROZ")   # fruit soft-deleted
+    assert dl_memory.remember(pg, "C8", "rožok", "GFRUIT", "Ovocie", "2026-09-09",
+                              source="human") is True
+    live = pg.execute("SELECT gtin FROM dl_item_memory WHERE supplier_ean='C8' "
+                      "AND deleted_at IS NULL ORDER BY gtin").fetchall()
+    assert live == [("GFRUIT",), ("GROZ",)]

@@ -560,4 +560,15 @@ def test_board_dl_item_answer_unrelated_to_the_wording_asks_for_confirmation(
     assert _wait_answered(oil)
     assert len(dialogs) == 2
 
+    # a card whose NAME shares no word but whose ALIAS does is not a misclick — no dialog
+    mode["accept"] = False
+    yeast = _board_seed_dl_item_question(pg, "be2e-465c", "Rekord 1 kg, drevo", [])
+    pg.execute("UPDATE order_questions SET candidates = %s::jsonb WHERE id = %s",
+               ('[{"value": "E2EYEAST", "label": "Droždie", '
+                '"alias": "Rekord 10 kg, drevo"}]', yeast))
+    page.reload()
+    page.locator(f"#q-card-{yeast}").locator('button:has-text("Droždie")').click()
+    assert _wait_answered(yeast)
+    assert len(dialogs) == 2, "an alias-backed pick must not ask for confirmation"
+
     assert console == [], f"browser console not clean: {console}"

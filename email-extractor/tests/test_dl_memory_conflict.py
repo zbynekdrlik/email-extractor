@@ -189,3 +189,72 @@ def test_confirming_the_remembered_card_sticks_no_loop(pg, tmp_path, monkeypatch
                _llm(G_ROLL, 0.6))
     assert len(nxt) == 1 and G_FRUIT in nxt[0]
     assert _open_question(pg) == []
+
+
+# --- review findings (same branch) ------------------------------------------------------
+
+def test_a_conflict_on_a_remembered_non_warehouse_supplier_is_held_not_skipped(pg, tmp_path):
+    """Review 🔴: a memory_conflict line positively points at a catalog card — it must NOT
+    fall into the #314 'remembered non-warehouse supplier, no catalog match' terminal skip
+    (that would silently drop real goods with no question). Held + asked instead."""
+    from app.orders import dl_nonwarehouse
+    _snapshot(pg)
+    _poison_history(pg)
+    dl_nonwarehouse.remember(pg, SUPPLIER_EAN, "Pekáreň Lunys", "")
+    uploaded = _run(pg, tmp_path, "dl1", _doc("0100000108"), _llm(G_ROLL, 0.81))
+    assert uploaded == []
+    assert len(_open_question(pg)) == 1, "asked, never skipped as not-warehouse"
+    assert pg.execute("SELECT proc_status FROM messages WHERE message_id='dl1'"
+                      ).fetchone()[0] != "not_warehouse"
+
+
+def test_a_conflict_ask_upgrades_an_already_open_plain_question_for_the_wording(pg, tmp_path):
+    """Review 🟡: a plain open dl_item question for the same (supplier, wording) already
+    exists (dedupe target). The conflict ask must upgrade it — flag it `memory_conflict`
+    and put both conflicting cards first — or its answer would neither supersede the
+    misclick nor count as the sklad's confirmation."""
+    _snapshot(pg)
+    _poison_history(pg)
+    _msg(pg, mid="dl0")
+    qid0 = teach.ask_generic(pg, "dl_item", "dl0", teach.dl_item_key(SUPPLIER_EAN, ROLL), ROLL,
+                             [{"value": "9999", "label": "Niečo iné"}], "stará otázka",
+                             {"supplier_ean": SUPPLIER_EAN, "supplier_name": "Pekáreň Lunys"})
+    _run(pg, tmp_path, "dl1", _doc("0100000109"), _llm(G_ROLL, 0.81))
+    rows = _open_question(pg)
+    assert [r[0] for r in rows] == [qid0], "deduped onto the existing open question"
+    _qid, cands, payload = rows[0]
+    assert payload.get("memory_conflict") is True
+    assert [c["value"] for c in cands[:2]] == [G_FRUIT, G_ROLL]
+    assert "9999" in [c["value"] for c in cands], "the old candidates are kept"
+
+
+def test_undoing_a_conflict_answer_restores_what_it_superseded(pg, tmp_path, monkeypatch):
+    """Review 🟡: undo of a conflict answer must bring back the human answers it superseded
+    (never hard-delete them — their Kôš audit rows would point at nothing) and must not
+    wipe the OLDER human answers that predate the question."""
+    _snapshot(pg)
+    _poison_history(pg)
+    _run(pg, tmp_path, "dl1", _doc("0100000110"), _llm(G_ROLL, 0.81))
+    qid = _open_question(pg)[0][0]
+    _answer_through_the_app_path(pg, monkeypatch, qid, G_ROLL)
+    teach.KINDS["dl_item"].undo(pg, teach.get(pg, qid))
+    live = pg.execute(
+        "SELECT gtin, delivered_on::text FROM dl_item_memory WHERE source='human' "
+        "AND deleted_at IS NULL ORDER BY delivered_on").fetchall()
+    assert live == [(G_ROLL, "2026-09-08"), (G_FRUIT, "2026-09-09")], \
+        "the superseded fruit answer is back, the pre-existing roll answer survived"
+    assert teach.get(pg, qid)["status"] == "open"
+
+
+def test_a_conflict_question_offers_the_card_alias_to_the_board(pg, tmp_path):
+    """Review 🔵: the board's lexical confirm must see the card's alias too (a wording that
+    only matches a card through its doplnok is not a misclick) — the stored candidates carry
+    it."""
+    _snapshot(pg)
+    pg.execute("UPDATE dl_catalog_snapshot SET doplnok = 'jablko pražené balené' "
+               "WHERE gtin = %s", (G_FRUIT,))
+    _poison_history(pg)
+    _run(pg, tmp_path, "dl1", _doc("0100000111"), _llm(G_ROLL, 0.81))
+    cands = _open_question(pg)[0][1]
+    fruit = next(c for c in cands if c["value"] == G_FRUIT)
+    assert fruit.get("alias") == "jablko pražené balené"
