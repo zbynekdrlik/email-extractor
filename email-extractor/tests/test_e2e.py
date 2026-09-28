@@ -481,3 +481,83 @@ def test_the_retired_znalosti_ean_link_seeds_the_customers_tab_search(live_serve
     assert page.get_by_text("Iná Firma E2E").count() == 0
 
     assert console == [], f"browser console not clean: {console}"
+
+
+def _board_seed_dl_item_question(pg, mid, wording, cands):
+    import json
+    pg.execute("INSERT INTO messages (message_id, from_addr, from_name, subject) "
+               "VALUES (%s, 'dodavatel@e2e.sk', 'Dodávateľ E2E', 'DL E2E')", (mid,))
+    return int(pg.execute(
+        """INSERT INTO order_questions
+               (message_id, customer_ean, customer_name, wording, item_key, kind,
+                candidates, delivery_date, reason, context, payload, status)
+           VALUES (%s, '', '', %s, %s, 'dl_item', %s::jsonb, '', '', '{}'::jsonb,
+                   '{"supplier_ean": "2000000000009"}'::jsonb, 'open') RETURNING id""",
+        (mid, wording, f"dlitem:2000000000009:{mid}",
+         json.dumps([{"value": v, "label": lbl} for v, lbl in cands]))).fetchone()[0])
+
+
+def test_board_dl_item_answer_unrelated_to_the_wording_asks_for_confirmation(
+        live_server, pg, page):
+    """#465: on Otázky sklad, picking a card that shares NO word with the delivery-note line
+    (the 'rožok' answered as 'jablko pražené' misclick) pops a confirmation first — cancel
+    keeps the question open, confirm answers it. A lexically plausible pick answers straight
+    away with no dialog. Clean console."""
+    from app.httpapi import dl_key
+
+    roll = _board_seed_dl_item_question(
+        pg, "be2e-465a", "Rožok oravský bez E 50g",
+        [("E2EFRUIT", "Ovocie - Zlaté jablko pražené"), ("E2EROLL", "Rožok štandart 50g")])
+    oil = _board_seed_dl_item_question(
+        pg, "be2e-465b", "Olej olivový z výliskov 1l",
+        [("E2EFRUIT", "Ovocie - Zlaté jablko pražené")])
+
+    dialogs, mode = [], {"accept": False}
+
+    def _on_dialog(d):
+        dialogs.append(d.message)
+        if mode["accept"]:
+            d.accept()
+        else:
+            d.dismiss()
+
+    page.on("dialog", _on_dialog)
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
+    page.wait_for_url(re.compile(r"/nastenka"))
+    page.goto(f"{live_server}/nastenka/otazky-sklad")
+    page.wait_for_selector("text=Rožok oravský bez E 50g")
+
+    def _status(qid):
+        return pg.execute("SELECT status FROM order_questions WHERE id=%s",
+                          (qid,)).fetchone()[0]
+
+    def _wait_answered(qid):
+        for _ in range(50):
+            if _status(qid) == "answered":
+                return True
+            page.wait_for_timeout(100)
+        return False
+
+    roll_card = page.locator(f"#q-card-{roll}")
+    # unrelated pick → confirmation; cancelled → nothing answered
+    roll_card.locator('button:has-text("Ovocie - Zlaté jablko pražené")').click()
+    page.wait_for_timeout(500)
+    assert len(dialogs) == 1, "an unrelated pick must ask for confirmation first"
+    assert "Rožok oravský bez E 50g" in dialogs[0]
+    assert "Ovocie - Zlaté jablko pražené" in dialogs[0]
+    assert _status(roll) == "open", "a cancelled confirmation must not answer the question"
+
+    # plausible pick (shares 'rožok') → answered straight away, no second dialog
+    roll_card.locator('button:has-text("Rožok štandart 50g")').click()
+    assert _wait_answered(roll)
+    assert len(dialogs) == 1
+
+    # unrelated pick confirmed → answered
+    mode["accept"] = True
+    page.locator(f"#q-card-{oil}").locator(
+        'button:has-text("Ovocie - Zlaté jablko pražené")').click()
+    assert _wait_answered(oil)
+    assert len(dialogs) == 2
+
+    assert console == [], f"browser console not clean: {console}"

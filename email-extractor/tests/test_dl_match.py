@@ -669,3 +669,129 @@ def test_mass_kg_treats_a_vajcia_card_as_non_kg_tracked():
             "sklad": "100"}
     assert dl_match._mass_kg(card, None) == 0.0
     assert dl_match._mass_kg(card, 600.0) == 0.6
+
+
+# --- #465: R73 MEMORY RESCUE must not silently override on an AMBIGUOUS history ----------
+# Synthetic cards mirroring the incident SHAPE (a bakery roll wording taught by one misclick
+# onto an unrelated fruit card) — never the real prod gtins.
+
+CONFLICT_CATALOG = [
+    {"gtin": "GROZ", "name": "Rožok štandart 50g", "doplnok": "", "mass": 0.05,
+     "sklad": "1", "cena": 0.1},
+    {"gtin": "GFRUIT", "name": "Ovocie - Zlaté jablko pražené", "doplnok": "", "mass": None,
+     "sklad": "1", "cena": 2.0},
+    {"gtin": "GROZ2", "name": "Rožok cereálny 50g", "doplnok": "", "mass": 0.05,
+     "sklad": "1", "cena": 0.12},
+]
+ROLL = "Rožok oravský bez E 50g"
+
+
+def _human(gtin, card, human_gtins=None, newer_gtin="", confirmed=False):
+    return dl_memory.Recalled(
+        gtin=gtin, card=card, strength=1, unanimous=True, last_day="2026-09-09",
+        weight_override=True, human=True,
+        human_gtins=tuple(human_gtins or (gtin,)), newer_gtin=newer_gtin, confirmed=confirmed)
+
+
+def test_memory_conflict_the_incident_shape_holds_with_both_candidates():
+    """#465 core: 1 human answer onto the fruit card, an EARLIER human answer onto the roll
+    card, a newer ship-history majority on the roll card, and the model itself picks the roll
+    (0.81, below the sure gate). The rescue must NOT silently ship the fruit card — it is a
+    conflict: no gtin (never ships), review, and BOTH cards named as candidates."""
+    recalled = _human("GFRUIT", "Ovocie - Zlaté jablko pražené",
+                      human_gtins=("GFRUIT", "GROZ"), newer_gtin="GROZ")
+    d = dl_match.decide_item(ROLL, {"gtin": "GROZ", "confidence": 0.81}, CONFLICT_CATALOG,
+                             recalled=recalled)
+    assert d.gtin is None, "a conflicted memory must never ship silently"
+    assert d.rule == "memory_conflict" and d.review is True
+    assert d.trace["memory_conflict"]["candidates"] == ["GFRUIT", "GROZ"]
+    assert set(d.trace["memory_conflict"]["reasons"]) >= {
+        "conflicting_human_answers", "newer_history_majority", "lexical_gap"}
+    assert "Ovocie - Zlaté jablko pražené" in d.note and "Rožok štandart 50g" in d.note
+
+
+def test_memory_conflict_conflicting_human_answers_alone_is_a_conflict():
+    """Two different human answers for the SAME wording = always a conflict, never
+    'the latest wins' — even when the latest one is lexically plausible."""
+    recalled = _human("GROZ2", "Rožok cereálny 50g", human_gtins=("GROZ2", "GROZ"))
+    d = dl_match.decide_item(ROLL, {"gtin": "GROZ", "confidence": 0.5}, CONFLICT_CATALOG,
+                             recalled=recalled)
+    assert d.gtin is None and d.rule == "memory_conflict"
+    assert d.trace["memory_conflict"]["reasons"] == ["conflicting_human_answers"]
+
+
+def test_memory_conflict_one_human_answer_against_a_newer_majority():
+    recalled = _human("GROZ2", "Rožok cereálny 50g", newer_gtin="GROZ")
+    d = dl_match.decide_item(ROLL, {"gtin": "GROZ", "confidence": 0.6}, CONFLICT_CATALOG,
+                             recalled=recalled)
+    assert d.gtin is None and d.rule == "memory_conflict"
+    assert d.trace["memory_conflict"]["reasons"] == ["newer_history_majority"]
+
+
+def test_memory_conflict_lexical_gap_with_a_model_no_match_is_not_rescued_silently():
+    """The olej-olivový shape: ONE human answer onto an unrelated card, the model found
+    nothing (NO_MATCH) — zero shared word between the wording and the card → ask, never a
+    silent ship. Candidates: just the remembered card (the model offered none)."""
+    recalled = _human("GFRUIT", "Ovocie - Zlaté jablko pražené")
+    d = dl_match.decide_item("Olej olivový z výliskov 1l", {"gtin": "NO_MATCH",
+                             "confidence": 0.74}, CONFLICT_CATALOG, recalled=recalled)
+    assert d.gtin is None and d.rule == "memory_conflict"
+    assert d.trace["memory_conflict"]["reasons"] == ["lexical_gap"]
+    assert d.trace["memory_conflict"]["candidates"] == ["GFRUIT"]
+
+
+def test_memory_rescue_still_silent_when_memory_agrees_with_the_model():
+    """Agreement is unambiguous by definition — even a lexically unrelated remembered card
+    ships when the model independently picked the SAME card."""
+    recalled = _human("GFRUIT", "Ovocie - Zlaté jablko pražené",
+                      human_gtins=("GFRUIT", "GROZ"), newer_gtin="GROZ")
+    d = dl_match.decide_item(ROLL, {"gtin": "GFRUIT", "confidence": 0.5}, CONFLICT_CATALOG,
+                             recalled=recalled)
+    assert d.rule == "memory_rescue" and d.gtin == "GFRUIT"
+
+
+def test_memory_rescue_still_silent_for_a_single_plausible_human_answer():
+    """No regression: ONE human answer, lexically plausible, no newer contrary majority →
+    the rescue keeps working exactly as before (the model's own lower pick is outranked)."""
+    recalled = _human("GROZ", "Rožok štandart 50g")
+    d = dl_match.decide_item(ROLL, {"gtin": "GROZ2", "confidence": 0.4}, CONFLICT_CATALOG,
+                             recalled=recalled)
+    assert d.rule == "memory_rescue" and d.gtin == "GROZ"
+
+
+def test_memory_rescue_silent_when_the_warehouse_already_confirmed_the_conflict():
+    """A conflict the sklad already resolved on the board (`confirmed`) is never re-asked —
+    otherwise the same line would hold on EVERY delivery (a loop)."""
+    recalled = _human("GFRUIT", "Ovocie - Zlaté jablko pražené", confirmed=True)
+    d = dl_match.decide_item(ROLL, {"gtin": "GROZ", "confidence": 0.81}, CONFLICT_CATALOG,
+                             recalled=recalled)
+    assert d.rule == "memory_rescue" and d.gtin == "GFRUIT"
+
+
+def test_memory_conflict_lexical_gap_also_guards_a_ship_history_recall():
+    """The lexical plausibility check is not human-only: a weighted ship-history recall onto
+    a card sharing no word with the wording, with the model disagreeing, is ambiguous too."""
+    recalled = _recall(gtin="GFRUIT", card="Ovocie - Zlaté jablko pražené", strength=2,
+                       unanimous=True, last_day="2026-09-20")
+    d = dl_match.decide_item(ROLL, {"gtin": "NO_MATCH", "confidence": 0.2}, CONFLICT_CATALOG,
+                             recalled=recalled)
+    assert d.gtin is None and d.rule == "memory_conflict"
+
+
+def test_memory_conflict_never_touches_a_sure_model_match():
+    """R73's invariant is unchanged: a >=0.85 model pick is decided by the sure band."""
+    recalled = _human("GFRUIT", "Ovocie - Zlaté jablko pražené",
+                      human_gtins=("GFRUIT", "GROZ"), newer_gtin="GROZ")
+    d = dl_match.decide_item(ROLL, {"gtin": "GROZ", "confidence": 0.9}, CONFLICT_CATALOG,
+                             recalled=recalled)
+    assert d.rule == "llm_sure" and d.gtin == "GROZ"
+
+
+def test_memory_conflict_logs_a_warning(caplog):
+    recalled = _human("GFRUIT", "Ovocie - Zlaté jablko pražené",
+                      human_gtins=("GFRUIT", "GROZ"))
+    with caplog.at_level("WARNING", logger="orders.dl_match"):
+        dl_match.decide_item(ROLL, {"gtin": "GROZ", "confidence": 0.81}, CONFLICT_CATALOG,
+                             recalled=recalled)
+    assert any("memory conflict" in r.getMessage() for r in caplog.records
+               if r.levelname == "WARNING")
