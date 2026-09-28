@@ -163,7 +163,8 @@ def test_resolving_the_conflict_ships_the_pick_and_never_asks_again(pg, tmp_path
     live_human = pg.execute(
         "SELECT gtin FROM dl_item_memory WHERE source='human' AND deleted_at IS NULL"
     ).fetchall()
-    assert live_human == [(G_ROLL,)], "the conflicting fruit answer is superseded"
+    # the older roll answer + today's roll answer stay; the fruit misclick is gone
+    assert {g for (g,) in live_human} == {G_ROLL}, "the conflicting fruit answer is superseded"
     shipped = _release(pg, tmp_path, qid, _doc("0100000104"), _llm(G_ROLL, 0.81))
     assert len(shipped) == 1 and G_ROLL in shipped[0] and G_FRUIT not in shipped[0]
     nxt = _run(pg, tmp_path, "dl2", _doc("0100000105"), _llm("NO_MATCH", 0.5))
