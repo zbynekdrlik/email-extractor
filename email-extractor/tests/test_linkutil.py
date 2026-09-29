@@ -51,11 +51,11 @@ def test_sklad_url_is_empty_without_dashboard_base_url(tmp_path):
 
 def test_sklad_url_strips_trailing_slash_and_signs_the_key(tmp_path):
     class Cfg:
-        dashboard_base_url = "http://46.224.130.35:8099/"
+        dashboard_base_url = "https://email-pz.newlevel.media/"
         secret_key = "s3cret"
         data_dir = str(tmp_path)
     url = linkutil.sklad_url(Cfg())
-    assert url == f"http://46.224.130.35:8099/sklad/{linkutil.sklad_key('s3cret')}"
+    assert url == f"https://email-pz.newlevel.media/sklad/{linkutil.sklad_key('s3cret')}"
 
 
 # --- cross-module consistency: httpapi's dashboard link and the worker's link agree -----
@@ -92,11 +92,11 @@ def test_dl_url_is_empty_without_dashboard_base_url(tmp_path):
 
 def test_dl_url_strips_trailing_slash_and_signs_the_key(tmp_path):
     class Cfg:
-        dashboard_base_url = "http://46.224.130.35:8099/"
+        dashboard_base_url = "https://email-pz.newlevel.media/"
         secret_key = "s3cret"
         data_dir = str(tmp_path)
     url = linkutil.dl_url(Cfg())
-    assert url == f"http://46.224.130.35:8099/sklad-dl/{linkutil.dl_key('s3cret')}"
+    assert url == f"https://email-pz.newlevel.media/sklad-dl/{linkutil.dl_key('s3cret')}"
 
 
 def test_httpapi_dl_key_is_the_same_function_as_linkutil():

@@ -256,7 +256,7 @@ def test_a_change_request_gets_its_own_wording_and_no_board_link(pg, env):
     must say "žiadosť o zmenu" and never point at the board."""
     rec = Recorder()
     result = pipeline.run(
-        pg, _cfg(dashboard_base_url="http://46.224.130.35:8099", secret_key="s"), MAIL, env,
+        pg, _cfg(dashboard_base_url="https://email-pz.newlevel.media", secret_key="s"), MAIL, env,
         client=ScriptedClient(_answers(change=True)), upload=rec.upload, post=rec.post)
     assert result["status"] == "review"
     assert len(rec.posts) == 1

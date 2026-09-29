@@ -277,13 +277,13 @@ def test_the_dashboard_shows_the_warehouse_link_to_copy():
     """
     from app import httpapi
     _, c = _sklad_client(base="http://e0ac7775-email-extractor:8099")
-    host = "http://46.224.130.35:8099"           # the operator's own address
+    host = "https://email-pz.newlevel.media"     # the operator's own address
     c.post("/login", data={"password": "pw"}, base_url=host)
     body = c.get("/", base_url=host).data.decode()
-    assert "http://46.224.130.35:8099/sklad/" + httpapi.sklad_key("t") in body
+    assert "https://email-pz.newlevel.media/sklad/" + httpapi.sklad_key("t") in body
     assert "e0ac7775-email-extractor:8099/sklad/" not in body
     # #231: the DL-only nástenka link is shown alongside it, same operator-host rule
-    assert "http://46.224.130.35:8099/sklad-dl/" + httpapi.dl_key("t") in body
+    assert "https://email-pz.newlevel.media/sklad-dl/" + httpapi.dl_key("t") in body
     assert "e0ac7775-email-extractor:8099/sklad-dl/" not in body
 
 

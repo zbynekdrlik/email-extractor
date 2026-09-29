@@ -4,6 +4,7 @@ paths:
   - "email-extractor/app/httpapi_*.py"
   - "email-extractor/tests/test_httpapi_characterization.py"
   - "email-extractor/tests/test_httpapi_waitress.py"
+  - "email-extractor/tests/test_httpapi_proxy.py"
 ---
 
 # Characterization tests protecting the `app/httpapi.py` split (#268)
@@ -338,3 +339,21 @@ did not change). The route-map test is UNCHANGED: the four old routes stay regis
 still appear in `EXPECTED_ROUTES`) because they still exist — as redirects — proven by the new
 `test_the_retired_warehouse_pages_are_redirects_not_html`. The template-checksum trap
 (`block-sensitive-staging.sh` on a re-pin) therefore no longer applies to those three names.
+
+## Behind the Cloudflare tunnel — ProxyFix + waitress must BOTH let the headers through (#470)
+
+`create_app` wraps `app.wsgi_app` in werkzeug `ProxyFix(x_for=1, x_proto=1, x_host=1)` (one
+trusted hop — the tunnel `https://email-pz.newlevel.media`), and `start()` passes
+`clear_untrusted_proxy_headers=False` to `waitress.serve`. **Both are load-bearing:** waitress
+3.x defaults to stripping EVERY `X-Forwarded-*` header from the environ when no
+`trusted_proxy` is set, so ProxyFix alone passes every Flask-test-client test and does nothing
+in production. `tests/test_httpapi_proxy.py`'s real-waitress test builds the server with the
+exact kwargs `start()` passes (captured by patching `waitress.serve`) — keep that shape if you
+ever touch `start()`'s kwargs. `before_request` order is `_stamp` → `_force_https` → `_gate`:
+the https 301 (only when `X-Forwarded-Proto` is present and says `http`; internal n8n calls
+carry no header) runs before any auth decision, sends `Cache-Control: no-store`, and 400s an
+invalid forwarded host (werkzeug empties `request.host`, a redirect to `https:///x` would be
+resolved by browsers to the first path segment). Any NEW absolute link built inside a request
+can use `request.host_url` (it is the public https base now); a link built OUTSIDE a request
+(worker threads, Odoo posts) keeps using `cfg.dashboard_base_url` via `report.dashboard_link`/
+`linkutil`/`board.links`.

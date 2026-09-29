@@ -41,8 +41,8 @@ def test_a_clean_run_names_what_arrived():
 
 def test_a_held_order_gets_the_link():
     html = report.build_summary("Pekáreň X", [_order(status="held", item_count=2)],
-                                link="http://46.224.130.35:8099/sklad/abc123")
-    assert "http://46.224.130.35:8099/sklad/abc123" in html
+                                link="https://email-pz.newlevel.media/sklad/abc123")
+    assert "https://email-pz.newlevel.media/sklad/abc123" in html
     assert "čaká" in html.lower()
 
 
@@ -197,9 +197,9 @@ def test_the_fallback_line_carries_a_clickable_dashboard_link_when_configured():
     dashboard — and it must be a CLICKABLE <a href> when dashboard_base_url is configured, not
     a dead sentence (every actionable Odoo message carries its functional URL)."""
     class Cfg:
-        dashboard_base_url = "http://46.224.130.35:8099"
+        dashboard_base_url = "https://email-pz.newlevel.media"
     html = report.build_summary("Pekáreň X", [_order(status="review")], cfg=Cfg())
-    assert '<a href="http://46.224.130.35:8099">http://46.224.130.35:8099</a>' in html
+    assert '<a href="https://email-pz.newlevel.media">https://email-pz.newlevel.media</a>' in html
     assert "Treba doriešiť" in html
 
 
@@ -252,12 +252,12 @@ def test_sklad_link_is_empty_when_dashboard_base_url_is_unset():
 
 def test_sklad_link_builds_from_dashboard_base_url_not_public_base_url():
     class Cfg:
-        dashboard_base_url = "http://46.224.130.35:8099"
+        dashboard_base_url = "https://email-pz.newlevel.media"
         public_base_url = "http://e0ac7775-email-extractor:8099"
         secret_key = "s"
         data_dir = "/tmp"
     link = report.sklad_link(Cfg())
-    assert link.startswith("http://46.224.130.35:8099/sklad/")
+    assert link.startswith("https://email-pz.newlevel.media/sklad/")
     assert "e0ac7775" not in link
 
 
@@ -273,12 +273,12 @@ def test_dl_sklad_link_is_empty_when_dashboard_base_url_is_unset():
 
 def test_dl_sklad_link_points_at_sklad_dl_not_sklad():
     class Cfg:
-        dashboard_base_url = "http://46.224.130.35:8099"
+        dashboard_base_url = "https://email-pz.newlevel.media"
         public_base_url = "http://e0ac7775-email-extractor:8099"
         secret_key = "s"
         data_dir = "/tmp"
     link = report.dl_sklad_link(Cfg())
-    assert link.startswith("http://46.224.130.35:8099/sklad-dl/")
+    assert link.startswith("https://email-pz.newlevel.media/sklad-dl/")
     assert "e0ac7775" not in link
     # a genuinely different key from the orders link for the SAME secret (#231)
     assert link != report.sklad_link(Cfg())

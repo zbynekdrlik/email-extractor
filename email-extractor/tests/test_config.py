@@ -72,9 +72,9 @@ def test_dashboard_base_url_defaults_empty(monkeypatch):
 
 def test_dashboard_base_url_is_kept_when_configured(monkeypatch):
     from app import config
-    monkeypatch.setenv("DASHBOARD_BASE_URL", "http://46.224.130.35:8099")
+    monkeypatch.setenv("DASHBOARD_BASE_URL", "https://email-pz.newlevel.media")
     monkeypatch.setattr(config, "OPTIONS_PATH", config.Path("/nonexistent/options.json"))
-    assert config.Config.load().dashboard_base_url == "http://46.224.130.35:8099"
+    assert config.Config.load().dashboard_base_url == "https://email-pz.newlevel.media"
 
 
 # --- #200 F1: delivery-notes (DL) engine trio — same shape as ai_orders_engine/

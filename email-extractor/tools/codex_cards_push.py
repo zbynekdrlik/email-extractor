@@ -24,7 +24,9 @@ sklad). The snapshot time comes from `meta.etl_runs` (`table_name='sm002'`, naiv
 
 Config (the SAME EnvironmentFile as the orders push, so no new secret):
   CODEX_CARDS_PUSH_URL  optional; default = CODEX_PUSH_URL with its last path segment -> cards
-  CODEX_PUSH_URL        e.g. http://<addon-host>:8099/api/codex/orders
+  CODEX_PUSH_URL        e.g. https://email-pz.newlevel.media/api/codex/orders (the add-on
+                        behind its Cloudflare tunnel, #470 — Cloudflare caps a body at
+                        100 MB / a request at 100 s; this list is ~1 MB)
   CODEX_PUSH_TOKEN      the add-on's api_token
   CODEX_DUCKDB_PATH     default /var/lib/codex-bridge/codex.duckdb
 """
@@ -35,6 +37,7 @@ import datetime
 import os
 import re
 import sys
+from urllib.parse import urlsplit
 
 DEFAULT_DB_PATH = "/var/lib/codex-bridge/codex.duckdb"
 DEFAULT_TIMEOUT = 60
@@ -181,6 +184,18 @@ def run(url: str, token: str, db_path: str = DEFAULT_DB_PATH, query=None, as_of=
             "codes": int(resp.get("codes", 0) or 0)}
 
 
+def pushed_line(res: dict, url: str) -> str:
+    """The journal line of a successful push. Ends with the TARGET (scheme + host[:port] only
+    — never the path, a query token or userinfo) so journalctl proves which address the push
+    reached: the Cloudflare tunnel, not the raw add-on port (#470)."""
+    # netloc minus any userinfo — keeps an IPv6 host's brackets and the port as written, and
+    # (unlike `.hostname`/`.port`) never raises, so a pushed batch always gets its line.
+    parts = urlsplit(url)
+    target = f"{parts.scheme}://{parts.netloc.rpartition('@')[2]}"
+    return (f"pushed: fetched={res['fetched']} cards={res['cards']} rows={res['rows']} "
+            f"codes={res['codes']} to={target}")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Push the CODEX stock-card list to the add-on (#467)")
     orders_url = os.environ.get("CODEX_PUSH_URL", "")
@@ -205,8 +220,7 @@ def main(argv=None) -> int:
     if res.get("error"):
         print(f"error: {res['error']} (fetched={res['fetched']})", file=sys.stderr)
         return 1
-    print(f"pushed: fetched={res['fetched']} cards={res['cards']} rows={res['rows']} "
-          f"codes={res['codes']}")
+    print(pushed_line(res, args.url))
     return 0
 
 

@@ -41,6 +41,11 @@ mechanism for zero behavioural gain). What actually lives HERE, and why it never
   (see below). `before_request` REGISTRATION ORDER is load-bearing: `_stamp` before
   `_gate`, so a request `_gate` rejects still gets `request.environ["_t0"]` and
   `_access_log` never logs a bogus `-1 ms`. No split step has ever touched this order.
+  #470 put `_force_https` between them (after `_stamp`, before `_gate`): a Cloudflare-tunnel
+  visitor on plain http is 301'd to https before any auth decision.
+- The `ProxyFix` wrap in `create_app` (#470, one trusted hop — the tunnel) + waitress's
+  `clear_untrusted_proxy_headers=False` in `start()`: together they make `request.host_url`
+  the visitor's public https address. Either one alone does nothing in production.
 - The auth surface (`login_page`/`login_submit`/`sklad_link`/`dl_sklad_link_route`/
   `questions_page`/`dl_questions_page`/`logout`/`favicon`/`health`/`version`) — small,
   tightly bound to `create_app`'s own `app.secret_key`/`key`/`dl_link_key` scope, so it
@@ -100,6 +105,7 @@ import psycopg
 import waitress
 from flask import Flask, abort, jsonify, redirect, request, session
 from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 # `db` is no longer CALLED from this module (krok 6 moved its only caller, `_busy`,
 # into httpapi_dashboard_data.py) — but it stays imported below (noqa'd) so
@@ -150,6 +156,17 @@ dl_key = linkutil.dl_key
 
 def create_app(cfg) -> Flask:
     app = Flask(__name__)
+    # #470: the public way in is the Cloudflare tunnel (https://email-pz.newlevel.media) —
+    # TLS ends at Cloudflare's edge and the tunnel talks plain http to this port, naming the
+    # visitor's scheme/address in X-Forwarded-Proto/-For (and the public name in Host or
+    # X-Forwarded-Host). Trust exactly ONE hop, so `request.host_url` (the dashboard's
+    # warehouse links) and `request.remote_addr` (the auth log lines) are the visitor's.
+    # n8n's internal docker-network calls send no such header and are unaffected. Until the
+    # raw port is firewalled a direct client could spoof these — which only changes that
+    # client's own rendered links/log line, never an auth decision. Production serves this
+    # through waitress, which must be told NOT to strip the headers first (`start()`).
+    app.wsgi_app = ProxyFix(  # type: ignore[method-assign]
+        app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     data_dir = Path(cfg.data_dir)
     app.secret_key = cfg.secret_key or _persistent_secret(data_dir)
     # A year: the warehouse must never be asked to log in again, and neither must the
@@ -178,6 +195,29 @@ def create_app(cfg) -> Flask:
     @app.before_request
     def _stamp():
         request.environ["_t0"] = time.monotonic()
+
+    @app.before_request
+    def _force_https():
+        # #470: a visitor who reached the tunnel over plain http is sent to https. Keyed on
+        # the header being PRESENT (only the tunnel sends it), never on the bare scheme: an
+        # internal call (n8n over the docker network) is plain http with no header and must
+        # get its normal answer. Registered before `_gate`, so even a gated page moves to
+        # https first instead of bouncing to /login over http. (SESSION_COOKIE_SECURE stays
+        # off until the raw port is closed — the owner flips it then, not here.)
+        if request.headers.get("X-Forwarded-Proto") and request.scheme.lower() == "http":
+            if not request.host:
+                # werkzeug empties `host` for an invalid (forwarded) host value — a redirect
+                # built from it (`https:///evil.example/x`) is resolved by browsers to the
+                # first path segment. Refuse instead (review finding on #470).
+                abort(400)
+            resp = redirect("https://" + request.url.split("://", 1)[1], code=301)
+            # The target host comes from headers the visitor can send (Cloudflare passes an
+            # unknown X-Forwarded-Host through) and Cloudflare's edge caches a 301 on a
+            # cacheable path (/static/*.js) by default — never let one visitor's redirect
+            # be stored and served to everyone.
+            resp.headers["Cache-Control"] = "no-store"
+            return resp
+        return None
 
     @app.after_request
     def _access_log(resp):
@@ -433,6 +473,11 @@ def start(cfg) -> None:
         try:
             waitress.serve(
                 app, host="0.0.0.0", port=cfg.http_port, threads=HTTP_SERVER_THREADS,
+                # #470: waitress 3.x DELETES every X-Forwarded-* header from the environ by
+                # default (no `trusted_proxy` set) — the ProxyFix in `create_app` would then
+                # never see the Cloudflare tunnel's headers. ProxyFix (one hop) stays the ONE
+                # place that interprets them; waitress just passes them through.
+                clear_untrusted_proxy_headers=False,
             )
         except Exception:
             # A bind failure (port already in use) or any other startup error used to
