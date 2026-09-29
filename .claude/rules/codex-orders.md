@@ -176,8 +176,11 @@ forever). Reusable rules:
     `POST /api/znalosti/dl-products`. The one-click pick sends `catalog_gtin` (OUR exact
     number), never the normalized CODEX code. „Nová karta" with a number we ALREADY have →
     409 `existing` (it used to UPSERT with blank mass/sklad/cena); with a number of a card
-    deleted to the Kôš → 409 „obnov ju na záložke Kôš"; with leading zeros → 409 (CODEX
-    stores the code as a number — „0"+code would be a second card for one CODEX code). ONE gate
+    deleted to the Kôš → 409 „obnov ju na záložke Kôš"; written unlike CODEX (leading zeros,
+    „.0") → 409 naming our card with that code (CODEX stores the code as a number — „0"+code
+    would be a second card for one CODEX code); `refuse_code_variant` guards EVERY write of a
+    NEW DL number (legacy API, board POST without `new` too), and the taken/Kôš checks compare
+    by normalized code both ways (prod had 0 non-canonical DL numbers on 2026-09-29). ONE gate
     for both „Nová karta" paths: `app/orders/card_guard.guard_new_dl_card` (catalog rules live
     there, CODEX rules in `codex_cards`). Produkty „Nová karta" sends `new: true` →
     `card_guard.taken()` 409 in the orders scope too (the orders form would clear the alias).

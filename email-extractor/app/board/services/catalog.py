@@ -138,7 +138,8 @@ def upsert(conn, scope: str, body: dict, actor: str) -> dict:
     Raises `ValueError` (→ 400) when gtin/name are missing, `codex_cards.CardRefused` (→ 409)
     for a `new: true` card whose number already has one (never an overwrite — the orders form
     would clear the alias, the DL one mass/sklad/cena) and for a DL number `card_guard` / CODEX
-    refuses (leading zeros, CODEX lacks it, in the Kôš; an edit is CODEX-checked only)."""
+    refuses (a number written unlike CODEX, CODEX lacks it, in the Kôš; an edit is
+    CODEX-checked only)."""
     cfg = _scope(scope)
     gtin = str(body.get("gtin") or "").strip()
     name = str(body.get("name") or "").strip()
@@ -153,7 +154,10 @@ def upsert(conn, scope: str, body: dict, actor: str) -> dict:
     elif body.get("new") and current is not None:
         raise card_guard.taken(current)
     elif scope == "dl":
-        # #467: an edit of a DL card whose number CODEX lacks is refused too (fail-open)
+        # #467: a NEW number without the flag is never written unlike CODEX (a duplicate for
+        # one code); an edit of a DL card whose number CODEX lacks is refused too (fail-open)
+        if current is None:
+            card_guard.refuse_code_variant(gtin, rows)
         codex_cards.check_card_code(conn, gtin, name, catalog=rows)
     cfg["upsert"](conn, gtin, name, body)
     action = "update" if existed else "create"

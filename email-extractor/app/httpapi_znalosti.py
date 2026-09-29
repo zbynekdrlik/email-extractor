@@ -24,7 +24,7 @@ from flask import Flask, jsonify, redirect, request
 from .board.auth import actor as _board_actor
 from .board.services import audit as _audit
 from .httpapi_common import _EAN_STRIP_RE, Deps, _fold, _parse_emails_field
-from .orders import codex_cards, dl_snapshot, dl_worker, memory, snapshot
+from .orders import card_guard, codex_cards, dl_snapshot, dl_worker, memory, snapshot
 
 
 def register(app: Flask, deps: Deps) -> None:
@@ -278,12 +278,15 @@ def register(app: Flask, deps: Deps) -> None:
         if not (gtin and name):
             return jsonify(error="chýba GTIN alebo názov"), 400
         with deps.db() as c:
-            # #467: the same CODEX card-code guard as the board — a legacy API write must not
-            # be the back door for a code CODEX rejects the whole delivery note for.
+            # #467: the same card-code guards as the board — a legacy API write must not be
+            # the back door for a code CODEX rejects the whole delivery note for, nor for a new
+            # number written unlike CODEX (a second card for one CODEX code).
+            catalog = dl_snapshot.dl_catalog_for_management(c)
             try:
-                codex_cards.check_card_code(
-                    c, gtin, name, catalog=dl_snapshot.dl_catalog_for_management(c))
-            except codex_cards.CodexRefusal as e:
+                if not any(str(r.get("gtin")) == gtin for r in catalog):
+                    card_guard.refuse_code_variant(gtin, catalog)
+                codex_cards.check_card_code(c, gtin, name, catalog=catalog)
+            except codex_cards.CardRefused as e:
                 return jsonify(**e.payload), 409
             dl_snapshot.upsert_dl_catalog_card(
                 c, gtin, name, doplnok=str(body.get("doplnok") or "").strip(),

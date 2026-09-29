@@ -322,13 +322,16 @@ def retired_dl_cards(conn) -> list[dict]:
             for r in rows]
 
 
-def deleted_dl_card(conn, gtin: str) -> dict | None:
+def deleted_dl_card(conn, gtin: str, code: str | None = None) -> dict | None:
     """#467: the DL card override for `gtin` that the loader HIDES (`retired OR deleted_at IS
     NOT NULL` — the exact rule of `_load_dl_catalog_overrides`), i.e. a number sitting in the
-    Kôš; None when there is none. (`retired_dl_cards` keys on `retired` alone, for #337.)"""
+    Kôš; None when there is none. `code` (the normalized CODEX code) also finds that code
+    written with leading zeros / „.0". (`retired_dl_cards` keys on `retired` alone, for #337.)"""
     row = conn.execute(
         "SELECT gtin, name FROM dl_catalog_overrides "
-        "WHERE gtin = %s AND (retired OR deleted_at IS NOT NULL)", (str(gtin),)).fetchone()
+        "WHERE (gtin = %s OR (%s::text IS NOT NULL "
+        "AND regexp_replace(gtin, '^0*([0-9]+)(\\.0+)?$', '\\1') = %s)) "
+        "AND (retired OR deleted_at IS NOT NULL)", (str(gtin), code, code)).fetchone()
     return {"gtin": row[0], "name": row[1]} if row else None
 
 
