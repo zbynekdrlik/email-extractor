@@ -311,6 +311,86 @@ def test_restoring_a_deleted_card_whose_code_codex_lacks_is_refused(pg):
                       ).fetchone()[0] is True
 
 
+def _restore_id(pg, table, row_id):
+    return pg.execute("SELECT id FROM audit_log WHERE table_name=%s AND row_id=%s "
+                      "AND action='delete'", (table, row_id)).fetchone()[0]
+
+
+def test_a_code_format_refusal_offers_our_card_with_that_code(pg):
+    """Review 4 🔵: the refusal of a number written unlike CODEX names OUR card with that code
+    (the board offers it with one click), and „.0" gets wording that fits it."""
+    _base(pg)
+    _codex(pg)
+    _seed(pg, G_MUKA, "Múka pšeničná T650", sklad="100", cena=0.37)
+    c = _client()
+    r = c.post("/api/board/products?scope=dl", json={
+        "gtin": "00" + G_MUKA, "name": "Múka", "new": True})
+    assert r.status_code == 409
+    assert r.get_json()["existing"] == {"gtin": G_MUKA, "name": "Múka pšeničná T650"}
+    r = c.post("/api/board/products?scope=dl", json={
+        "gtin": G_MUKA + ".0", "name": "Múka", "new": True})
+    assert r.status_code == 409 and "desatinn" in r.get_json()["error"]
+
+
+def test_a_new_number_is_taken_when_our_card_holds_its_code_with_leading_zeros(pg):
+    """Review 4 🔵: the duplicate check goes by CODEX code in BOTH directions — a card created
+    before the gate as „0"+code makes the bare code taken, and in the Kôš makes it deleted."""
+    _base(pg)
+    _codex(pg)
+    _seed(pg, "0" + G_MUKA, "Múka pšeničná T650", sklad="100")
+    c = _client()
+    r = c.post("/api/board/products?scope=dl", json={
+        "gtin": G_MUKA, "name": "Múka", "new": True})
+    assert r.status_code == 409
+    assert r.get_json()["existing"] == {"gtin": "0" + G_MUKA, "name": "Múka pšeničná T650"}
+    dl_snapshot.retire_dl_catalog_card(pg, "0" + G_MUKA)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    qid = _question(pg)
+    r = c.post(f"/api/board/questions/{qid}/answer", json={"new_item": {
+        "gtin": G_MUKA, "name": "Múka"}})
+    assert r.status_code == 409 and "Kôš" in r.get_json()["error"]
+    assert pg.execute("SELECT count(*) FROM dl_catalog_overrides WHERE gtin=%s",
+                      (G_MUKA,)).fetchone()[0] == 0
+
+
+def test_no_write_path_creates_a_new_number_written_unlike_codex(pg):
+    """Review 4 🔵: the source of such duplicates is closed too — the legacy API and a board
+    POST without `new` refuse a NEW number with leading zeros like the „Nová karta" does."""
+    _base(pg)
+    _codex(pg)
+    c = _client()
+    c.post("/login", data={"password": "secret"})
+    r = c.post("/api/znalosti/dl-products", json={"gtin": "0" + G_MUKA, "name": "Múka"})
+    assert r.status_code == 409 and G_MUKA in r.get_json()["error"]
+    r = c.post("/api/board/products?scope=dl", json={"gtin": "0" + G_MUKA, "name": "Múka"})
+    assert r.status_code == 409 and G_MUKA in r.get_json()["error"]
+    assert pg.execute("SELECT count(*) FROM dl_catalog_overrides WHERE gtin=%s",
+                      ("0" + G_MUKA,)).fetchone()[0] == 0
+
+
+def test_the_restore_guard_refuses_only_dead_dl_codes(pg):
+    """Review 4 🔵: with a live CODEX list, restoring a DL card whose code CODEX has works, and a
+    deleted ORDERS card (customer GTINs, never CODEX codes) is not CODEX-checked at all."""
+    _base(pg)
+    _codex(pg)
+    _seed(pg, G_MUKA, "Múka pšeničná T650", sklad="100")
+    from app.orders import snapshot
+    snapshot.upsert_catalog_card(pg, "3698", "Rožok grahamový")
+    snapshot.rebuild_from_overrides(pg)
+    c = _client()
+    c.post("/login", data={"password": "secret"})
+    assert c.delete(f"/api/board/products/{G_MUKA}?scope=dl").status_code == 200
+    assert c.delete("/api/board/products/3698?scope=orders").status_code == 200
+    r = c.post(f"/api/board/audit/{_restore_id(pg, 'dl_catalog_overrides', G_MUKA)}/restore")
+    assert r.status_code == 200
+    assert pg.execute("SELECT retired, deleted_at FROM dl_catalog_overrides WHERE gtin=%s",
+                      (G_MUKA,)).fetchone() == (False, None)
+    r = c.post(f"/api/board/audit/{_restore_id(pg, 'catalog_overrides', '3698')}/restore")
+    assert r.status_code == 200
+    assert pg.execute("SELECT deleted_at FROM catalog_overrides WHERE gtin='3698'"
+                      ).fetchone()[0] is None
+
+
 def test_a_refused_free_pick_is_not_added_to_the_offered_cards(pg):
     """Review 🔵: the CODEX check runs BEFORE the free/search pick is legitimised, so a refused
     dead code never lingers as an offered button on the question."""
