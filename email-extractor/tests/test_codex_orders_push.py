@@ -97,3 +97,31 @@ def test_the_pushed_line_names_the_target_host_but_never_the_path_or_credentials
     assert leaky.endswith("to=https://host.example:8443")
     assert "pw" not in leaky and "token" not in leaky
 
+
+def test_the_pushed_line_keeps_an_ipv6_host_and_never_raises_on_a_bad_port():
+    """Review round 2: `urlsplit().hostname` drops IPv6 brackets and `.port` raises on a bad
+    port — after a successful POST the tool must still print a sane line, never a traceback."""
+    res = {"fetched": 0, "orders": 0, "upserted": 0}
+    assert push.pushed_line(res, "http://[::1]:8099/api/codex/orders").endswith(
+        "to=http://[::1]:8099")
+    assert push.pushed_line(res, "http://host.example:99999/api/codex/orders").endswith(
+        "to=http://host.example:99999")
+
+
+def test_main_prints_the_pushed_line_with_the_target(monkeypatch, capsys):
+    """The journal line #470 relies on is what main() actually prints on success. Only the two
+    external boundaries are replaced: the codex-bridge DuckDB read and the HTTP POST."""
+    rows = [{"order_number": 260051617, "customer_nico": 12345, "customer_ean": EAN,
+             "customer_name": "Zákazník A", "issue_date": datetime.date(2026, 9, 1),
+             "delivery_date": datetime.date(2026, 9, 2), "line_count": 3}]
+    posted = []
+    monkeypatch.setattr(push, "query_duckdb", lambda db_path, days: rows)
+    monkeypatch.setattr(push, "_requests_post",
+                        lambda url, headers, body: posted.append(url)
+                        or {"upserted": len(body["orders"])})
+    url = "https://email-pz.newlevel.media/api/codex/orders"
+    assert push.main(["--url", url, "--token", "tok-not-for-the-log"]) == 0
+    out = capsys.readouterr().out.strip()
+    assert out == "pushed: fetched=1 orders=1 upserted=1 to=https://email-pz.newlevel.media"
+    assert "tok-not-for-the-log" not in out
+    assert posted == [url]
