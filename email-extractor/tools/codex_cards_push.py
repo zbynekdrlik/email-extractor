@@ -24,7 +24,9 @@ sklad). The snapshot time comes from `meta.etl_runs` (`table_name='sm002'`, naiv
 
 Config (the SAME EnvironmentFile as the orders push, so no new secret):
   CODEX_CARDS_PUSH_URL  optional; default = CODEX_PUSH_URL with its last path segment -> cards
-  CODEX_PUSH_URL        e.g. http://<addon-host>:8099/api/codex/orders
+  CODEX_PUSH_URL        e.g. https://email-pz.newlevel.media/api/codex/orders (the add-on
+                        behind its Cloudflare tunnel, #470 — Cloudflare caps a body at
+                        100 MB / a request at 100 s; this list is ~1 MB)
   CODEX_PUSH_TOKEN      the add-on's api_token
   CODEX_DUCKDB_PATH     default /var/lib/codex-bridge/codex.duckdb
 """

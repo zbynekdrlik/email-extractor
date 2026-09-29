@@ -55,7 +55,9 @@ class Config:
     # background thread with no Flask `request.host_url` to read the operator's address
     # from. Deliberately separate from public_base_url, which is the MACHINE address n8n
     # uses over the docker network (see `linkutil.sklad_url`'s docstring — 0.9.10 fixed
-    # exactly this confusion once already, never repeat it).
+    # exactly this confusion once already, never repeat it). Live value since #470: the
+    # public Cloudflare-tunnel address `https://email-pz.newlevel.media` (never the raw
+    # server IP:port — that port is being firewalled).
     dashboard_base_url: str = ""
     # #129/#235: catalog_sheet_id/catalog_gid/customer_gid/catalog_refresh_minutes (the
     # AI-orders sheet) and dl_catalog_gid (the DL sheet, below) are UNREAD — #129

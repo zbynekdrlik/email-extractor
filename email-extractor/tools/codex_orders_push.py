@@ -20,7 +20,8 @@ The firma dedup keeps ONE EAN per NICO (`MAX`) — a rare multi-branch NICO simp
 match a specific branch's card, which is a SAFE miss (the board question just stays open).
 
 Config (env / EnvironmentFile, so the token is never committed):
-  CODEX_PUSH_URL    e.g. http://<addon-host>:8099/api/codex/orders
+  CODEX_PUSH_URL    e.g. https://email-pz.newlevel.media/api/codex/orders (the add-on behind
+                    its Cloudflare tunnel, #470 — Cloudflare caps a body at 100 MB / 100 s)
   CODEX_PUSH_TOKEN  the add-on's api_token
   CODEX_PUSH_DAYS   lookback window (default 7)
   CODEX_DUCKDB_PATH default /var/lib/codex-bridge/codex.duckdb

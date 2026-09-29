@@ -165,7 +165,8 @@ def create_app(cfg) -> Flask:
     # raw port is firewalled a direct client could spoof these — which only changes that
     # client's own rendered links/log line, never an auth decision. Production serves this
     # through waitress, which must be told NOT to strip the headers first (`start()`).
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)  # type: ignore[method-assign]
+    app.wsgi_app = ProxyFix(  # type: ignore[method-assign]
+        app.wsgi_app, x_for=1, x_proto=1, x_host=1)
     data_dir = Path(cfg.data_dir)
     app.secret_key = cfg.secret_key or _persistent_secret(data_dir)
     # A year: the warehouse must never be asked to log in again, and neither must the
