@@ -100,6 +100,17 @@ def test_the_redirect_is_never_stored_by_a_shared_cache():
     assert "no-store" in r.headers.get("Cache-Control", "")
 
 
+def test_an_unusable_forwarded_host_is_refused_not_redirected_to_an_empty_host():
+    """werkzeug empties `request.host` for an invalid host value; a redirect built from it
+    would read `https:///evil.example/x`, which browsers resolve to evil.example (review
+    finding on #470). Refuse the request instead."""
+    c = _client()
+    r = c.get("/health", base_url=f"http://{PUBLIC}",
+              headers={**PLAIN, "X-Forwarded-Host": "evil.example/@x"})
+    assert r.status_code == 400
+    assert "Location" not in r.headers
+
+
 def test_the_redirect_keeps_the_path_and_query_and_runs_before_the_auth_gate():
     c = _client()
     # A gated page: the visitor is sent to https FIRST (not to /login over http).
