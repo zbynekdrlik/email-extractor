@@ -205,6 +205,11 @@ def create_app(cfg) -> Flask:
         # https first instead of bouncing to /login over http. (SESSION_COOKIE_SECURE stays
         # off until the raw port is closed — the owner flips it then, not here.)
         if request.headers.get("X-Forwarded-Proto") and request.scheme.lower() == "http":
+            if not request.host:
+                # werkzeug empties `host` for an invalid (forwarded) host value — a redirect
+                # built from it (`https:///evil.example/x`) is resolved by browsers to the
+                # first path segment. Refuse instead (review finding on #470).
+                abort(400)
             resp = redirect("https://" + request.url.split("://", 1)[1], code=301)
             # The target host comes from headers the visitor can send (Cloudflare passes an
             # unknown X-Forwarded-Host through) and Cloudflare's edge caches a 301 on a
