@@ -330,7 +330,11 @@ def test_board_products_orders_tab_search_edit_delete_in_the_browser(live_server
     assert backend_ver in page.locator('[data-testid="version"]').inner_text()
 
     page.wait_for_selector("text=Rožok e2e produkt")
-    page.fill("#p-search", "Rožok e2e")
+    # wait for the debounced SEARCH response itself — the row text is already on screen from
+    # the first load, so waiting for it raced the search reload, which then rebuilt the list
+    # under the just-opened editor (flaky „element was detached")
+    with page.expect_response(lambda r: "/api/board/products" in r.url and "q=" in r.url):
+        page.fill("#p-search", "Rožok e2e")
     page.wait_for_selector("text=Rožok e2e produkt")
 
     page.click('.p-row:has-text("Rožok e2e produkt") .p-edit')
