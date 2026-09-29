@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from urllib.parse import urlsplit
 
 DEFAULT_DB_PATH = "/var/lib/codex-bridge/codex.duckdb"
 DEFAULT_DAYS = 7
@@ -156,6 +157,17 @@ def run(url: str, token: str, days: int = DEFAULT_DAYS, db_path: str = DEFAULT_D
     return {"fetched": len(rows), "orders": len(orders), "upserted": upserted}
 
 
+def pushed_line(res: dict, url: str) -> str:
+    """The journal line of a successful push. Ends with the TARGET (scheme + host[:port] only
+    — never the path, a query token or userinfo) so journalctl proves which address the push
+    reached: the Cloudflare tunnel, not the raw add-on port (#470)."""
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    target = f"{parts.scheme}://{host}" + (f":{parts.port}" if parts.port else "")
+    return (f"pushed: fetched={res['fetched']} orders={res['orders']} "
+            f"upserted={res['upserted']} to={target}")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Push CODEX order headers to the add-on (#342)")
     ap.add_argument("--url", default=os.environ.get("CODEX_PUSH_URL", ""))
@@ -176,8 +188,7 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 2
     res = run(args.url, args.token, days=args.days, db_path=args.db)
-    print(f"pushed: fetched={res['fetched']} orders={res['orders']} "
-          f"upserted={res['upserted']}")
+    print(pushed_line(res, args.url))
     return 0
 
 

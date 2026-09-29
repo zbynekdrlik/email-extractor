@@ -37,6 +37,7 @@ import datetime
 import os
 import re
 import sys
+from urllib.parse import urlsplit
 
 DEFAULT_DB_PATH = "/var/lib/codex-bridge/codex.duckdb"
 DEFAULT_TIMEOUT = 60
@@ -183,6 +184,17 @@ def run(url: str, token: str, db_path: str = DEFAULT_DB_PATH, query=None, as_of=
             "codes": int(resp.get("codes", 0) or 0)}
 
 
+def pushed_line(res: dict, url: str) -> str:
+    """The journal line of a successful push. Ends with the TARGET (scheme + host[:port] only
+    — never the path, a query token or userinfo) so journalctl proves which address the push
+    reached: the Cloudflare tunnel, not the raw add-on port (#470)."""
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    target = f"{parts.scheme}://{host}" + (f":{parts.port}" if parts.port else "")
+    return (f"pushed: fetched={res['fetched']} cards={res['cards']} rows={res['rows']} "
+            f"codes={res['codes']} to={target}")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Push the CODEX stock-card list to the add-on (#467)")
     orders_url = os.environ.get("CODEX_PUSH_URL", "")
@@ -207,8 +219,7 @@ def main(argv=None) -> int:
     if res.get("error"):
         print(f"error: {res['error']} (fetched={res['fetched']})", file=sys.stderr)
         return 1
-    print(f"pushed: fetched={res['fetched']} cards={res['cards']} rows={res['rows']} "
-          f"codes={res['codes']}")
+    print(pushed_line(res, args.url))
     return 0
 
 
