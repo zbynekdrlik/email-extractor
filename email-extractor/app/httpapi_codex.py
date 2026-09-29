@@ -11,16 +11,25 @@ push is a harmless no-op.
 """
 from __future__ import annotations
 
+import hmac
+
 from flask import Flask, jsonify, request
 
 from .httpapi_common import Deps
 from .orders import codex_cards, codex_orders
 
+# #467: the cards push is one ~1 MB body (~6k rows); anything past this is not a CODEX list.
+MAX_CARDS_BODY = 16 * 1024 * 1024
+
 
 def register(app: Flask, deps: Deps) -> None:
-    def _token_ok() -> bool:
-        tok = request.args.get("token") or request.headers.get("X-Token")
-        return bool(deps.cfg.api_token) and tok == deps.cfg.api_token
+    def _token_ok(allow_query: bool = True) -> bool:
+        # constant-time compare; the cards replace takes the header only (a URL token ends up
+        # in proxy/access logs, and that endpoint swaps a whole table)
+        tok = request.headers.get("X-Token") or (
+            request.args.get("token") if allow_query else None) or ""
+        want = deps.cfg.api_token or ""
+        return bool(want) and hmac.compare_digest(tok.encode(), want.encode())
 
     @app.post("/api/codex/orders")
     def codex_orders_upsert():
@@ -50,8 +59,10 @@ def register(app: Flask, deps: Deps) -> None:
         # CODEX must leave here too; an empty or drastically smaller push is refused (a
         # half-loaded ETL snapshot would otherwise hold every delivery note), `?force=1`
         # overrides the shrink guard for a genuine mass removal.
-        if not _token_ok():
+        if not _token_ok(allow_query=False):
             return jsonify(error="forbidden"), 403
+        if (request.content_length or 0) > MAX_CARDS_BODY:
+            return jsonify(error="body too large"), 413
         payload = request.get_json(silent=True)
         if not isinstance(payload, dict) or not isinstance(payload.get("cards"), list):
             return jsonify(error="body must be {\"cards\": [...]}"), 400

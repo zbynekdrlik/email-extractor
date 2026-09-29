@@ -413,6 +413,12 @@ def register(app: Flask, deps: Deps) -> dict:
                 error=f"Číslo položky {gtin} už má karta „{hit.get('name', '')}“ — nová karta "
                       f"sa nezakladá, vyber túto (Použiť kartu).",
                 existing={"gtin": gtin, "name": hit.get("name", "")}), 409
+        with deps.db() as cret:
+            gone = next((r for r in dl_snapshot.retired_dl_cards(cret)
+                         if str(r.get("gtin") or "") == gtin), None)
+        if gone:
+            return jsonify(error=f"Číslo položky {gtin} patrí zmazanej karte — obnov ju na "
+                                 f"záložke Kôš (nová karta by ju prepísala prázdnymi údajmi)."), 409
         with deps.db_tx() as c:
             dl_snapshot.upsert_dl_catalog_card(c, gtin, name)
             dl_snapshot.dl_rebuild_from_overrides(c)
@@ -522,6 +528,21 @@ def register(app: Flask, deps: Deps) -> dict:
         # Mirrors what `_api_orders_answer_customer` already does for its OWN search box
         # (legitimise server-side before validating) — scoped to the two DL kinds only;
         # mail/date/line have no search box and keep the strict offered-only check as-is.
+        # #467: a dl_item pick (an offered candidate OR a free/search catalog code) whose code
+        # CODEX has no stock card for would teach a mapping that can never ship — refused with
+        # the similar CODEX cards — checked BEFORE a free/search pick is legitimised below, so
+        # a refused dead code never lingers as an offered button. "Pošli bez tejto položky" /
+        # a blank „Neviem" are no card at all: never checked.
+        if (q.get("kind") == "dl_item" and choice
+                and choice != teach.DL_ITEM_SHIP_WITHOUT):
+            from .orders import codex_cards
+            with deps.db() as cchk:
+                try:
+                    codex_cards.check_card_code(
+                        cchk, choice, q.get("wording", ""),
+                        catalog=dl_snapshot.dl_catalog_for_management(cchk))
+                except codex_cards.CodexRefusal as e:
+                    return jsonify(**e.payload), 409
         offered = {str(c.get("value")) for c in (q.get("candidates") or [])}
         if choice and choice not in offered and q.get("kind") in ("dl_supplier", "dl_item"):
             with deps.db() as clook:
@@ -554,18 +575,6 @@ def register(app: Flask, deps: Deps) -> dict:
                     res = dl_worker.close_message_sklad_unknown(c, qid)
                 return jsonify(ok=True, sklad_unknown=True, closed=res.get("closed", 0))
             return jsonify(ok=True, question=q, released=[])
-        # #467: a dl_item pick (an offered candidate OR a free/search catalog code) whose code
-        # CODEX has no stock card for would teach a mapping that can never ship — refused with
-        # the similar CODEX cards. "Pošli bez tejto položky" is no card at all: never checked.
-        if q.get("kind") == "dl_item" and choice != teach.DL_ITEM_SHIP_WITHOUT:
-            from .orders import codex_cards
-            with deps.db() as cchk:
-                try:
-                    codex_cards.check_card_code(
-                        cchk, choice, q.get("wording", ""),
-                        catalog=dl_snapshot.dl_catalog_for_management(cchk))
-                except codex_cards.CodexRefusal as e:
-                    return jsonify(**e.payload), 409
         # Same split as the item/customer branches above (review finding on PR #116,
         # reused here): the answer itself commits in its own transaction; `apply` (which
         # for `date` releases a held order — a REAL external upload) runs afterward on an

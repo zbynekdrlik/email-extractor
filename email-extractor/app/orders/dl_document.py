@@ -135,7 +135,7 @@ def _codex_hold_reason(item_names: list[str]) -> str:
     return (f"Dodací list má {n} položku/y na karte, ktorej kód v CODEXe neexistuje — CODEX "
             f"by celý dodací list pri importe odmietol, preto sa NEnahráva do ORIONu, kým na "
             f"nástenke nevyberieš správnu kartu (alebo nepotvrdíš „pošli bez tejto položky“): "
-            f"{listed}.")
+            f"{listed}. Kartu s neplatným kódom potom zmaž v Produkty sklad.")
 
 
 def _mass_hold_reason(item_names: list[str]) -> str:
@@ -176,6 +176,32 @@ def _needs_piece_mass(item: dict) -> bool:
     return True
 
 
+def _codex_guard(conn, shadow: bool, catalog: list[dict]):
+    """#467: `(codex, catalog_gtins)` for one document. `codex` is the live CODEX stock-card
+    guard — None (checks OFF) in shadow (the e2e-dl corpus measures MATCHING, never a live ship
+    policy) and when the pushed list is missing/stale (fail-open: `codex_cards.live_guard` warns,
+    the worker's `stale_sweep` alerts ops). A card whose code CODEX lacks is not a real card for
+    memory recall or the ask pre-check either (`catalog_gtins`): a human answer that taught such
+    a code must neither rescue nor block re-asking the line."""
+    catalog_gtins = {str(c.get("gtin")) for c in catalog}
+    codex = None if shadow else codex_cards.live_guard(conn)
+    if codex is not None:
+        catalog_gtins = {g for g in catalog_gtins if codex.has(g)}
+    return codex, catalog_gtins
+
+
+def _held_reason(held_items: list[dict], codex_held_items: list[dict],
+                 mass_hold_items: list[dict]) -> tuple[str, list[str]]:
+    """The ONE ❗ review body for a HELD document + the held line names: #365 unmatched lines,
+    #467 lines on a card whose code CODEX lacks, #462 kg-tracked lines with no per-piece mass —
+    a document carrying several kinds is held once with every reason."""
+    names = [[i.get("name", "") for i in items]
+             for items in (held_items, codex_held_items, mass_hold_items)]
+    reasons = [fn(n) for fn, n in zip((_hold_review_reason, _codex_hold_reason,
+                                        _mass_hold_reason), names, strict=True) if n]
+    return " ".join(reasons), [n for group in names for n in group]
+
+
 def _ask_pending_lines(conn, message_id: str, supplier_decision, pending_asks: list,
                        catalog: list[dict], catalog_gtins: set[str], codex,
                        delivery_date: str) -> tuple[list[dict], list[dict]]:
@@ -202,7 +228,9 @@ def _ask_pending_lines(conn, message_id: str, supplier_decision, pending_asks: l
                                 item.get("quantity"), item.get("unit", ""), cands,
                                 delivery_date=delivery_date, reason=note,
                                 catalog_gtins=catalog_gtins,
-                                memory_conflict=bool(conflict_gtins))
+                                memory_conflict=bool(conflict_gtins),
+                                codex_missing=rule == "codex_missing",
+                                keep=codex.has if codex is not None else None)
         if qid is not None:
             (codex_held if rule == "codex_missing" else held).append(item)
     return held, codex_held
@@ -330,15 +358,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # #467: + the decision rule, so a line held because its card's code is missing in CODEX
     # gets its own honest hold reason.
     unmatched_asks: list[tuple[dict, dl_memory.Recalled | None, str, list[str], str]] = []
-    catalog_gtins = {str(c.get("gtin")) for c in catalog}
-    # #467: the live CODEX stock-card guard — None (checks OFF) in shadow (the e2e-dl corpus
-    # measures MATCHING, never a live ship policy) and when the pushed list is missing/stale
-    # (fail-open, `codex_cards.live_guard` warns; the worker's stale_sweep alerts ops). A card
-    # CODEX has no stock card for is not a real card for memory recall or the ask pre-check
-    # either: a human answer that taught such a code must not block re-asking the line.
-    codex = None if shadow else codex_cards.live_guard(conn)
-    if codex is not None:
-        catalog_gtins = {g for g in catalog_gtins if codex.has(g)}
+    codex, catalog_gtins = _codex_guard(conn, shadow, catalog)
     # #337: the RETIRED override cards (absent from the frozen catalog, so NOT in
     # `catalog_gtins` — the memory-rescue filter stays intact). Used ONLY to recognize an
     # item that failed to match the ACTIVE catalog as a known-but-manual retired product.
@@ -530,10 +550,8 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             reason = ((reason + " " if reason else "")
                       + "Vyradené skladové karty (automatický EDI nemá bezpečný cieľ, "
                       "vybav ručne v CODEXe): " + ", ".join(retired_names) + ".")
-        if codex_held_items:
-            # #467: say WHY the only card(s) were refused, not just "no items with GTIN".
-            reason = ((reason + " " if reason else "")
-                      + _codex_hold_reason([i.get("name", "") for i in codex_held_items]))
+        if codex_held_items:   # #467: say WHY the only card(s) were refused
+            reason = " ".join(filter(None, [reason, _held_reason([], codex_held_items, [])[0]]))
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, supplier_decision.name, built.doc_number, delivery_date,
             from_addr, subject, link=link, cmr=cmr), post=post)
@@ -579,19 +597,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # file CODEX would reject whole never reaches ORION.
     if (held_items or codex_held_items or mass_hold_items) and not desadv.already_sent(
             conn, supplier_decision.ean_edi, built.doc_number):
-        held_names = [item.get("name", "") for item in held_items]
-        codex_names = [item.get("name", "") for item in codex_held_items]
-        reasons = []
-        if held_items:
-            reasons.append(_hold_review_reason(held_names))
-        if codex_held_items:
-            reasons.append(_codex_hold_reason(codex_names))
-        if mass_hold_items:
-            reasons.append(_mass_hold_reason(
-                [item.get("name", "") for item in mass_hold_items]))
-        reason = " ".join(reasons)
-        all_held_names = (held_names + codex_names
-                          + [item.get("name", "") for item in mass_hold_items])
+        reason, all_held_names = _held_reason(held_items, codex_held_items, mass_hold_items)
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, supplier_decision.name, built.doc_number, delivery_date, from_addr,
             subject, link=link, cmr=cmr), post=post)

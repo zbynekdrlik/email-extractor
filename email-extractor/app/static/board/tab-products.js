@@ -77,7 +77,7 @@ function codexHint(ed, data, gtinIn) {
     let btn = null;
     if (s.in_catalog) {
       btn = el("button", { class: "p-btn p-codex-find", type: "button", "data-code": s.code,
-        onclick: () => findCard(ed, s.code) }, "Nájsť kartu v zozname");
+        onclick: () => findCard(ed, s.catalog_gtin || s.code) }, "Nájsť kartu v zozname");
     } else if (gtinIn) {
       btn = el("button", { class: "p-btn p-codex-use", type: "button", "data-code": s.code,
         onclick: () => {

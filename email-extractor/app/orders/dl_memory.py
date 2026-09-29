@@ -304,7 +304,8 @@ def _newer_contrary_gtin(conn, supplier_ean: str, key: str, human_gtin: str, hum
 def _board_confirmed(conn, supplier_ean: str, item: str, gtin: str, message_id: str) -> bool:
     """#465: did the sklad EXPLICITLY settle this wording on the nástenka with `gtin`? The
     newest answered `dl_item` question for the (supplier, wording) that is EITHER a resolved
-    memory-conflict question (`payload.memory_conflict`, both cards were on screen) OR a
+    memory-conflict question (`payload.memory_conflict`, both cards were on screen) or #467
+    codex question (`payload.codex_missing`, the dead card was refused on screen) OR a
     question of the very message being matched now (the reprocess right after the answer).
     A plain answer from ANOTHER message never counts — that is exactly the q189 misclick,
     which must not keep shipping silently on every later delivery."""
@@ -312,7 +313,8 @@ def _board_confirmed(conn, supplier_ean: str, item: str, gtin: str, message_id: 
         """SELECT answer->>'choice' FROM order_questions
             WHERE kind = 'dl_item' AND status = 'answered' AND customer_ean = ''
               AND item_key = %s
-              AND (payload->>'memory_conflict' = 'true' OR message_id = %s)
+              AND (payload->>'memory_conflict' = 'true' OR payload->>'codex_missing' = 'true'
+                   OR message_id = %s)
             ORDER BY answered_at DESC NULLS LAST, id DESC LIMIT 1""",
         (dl_item_question_key(supplier_ean, item), message_id or "")).fetchone()
     return bool(row) and str(row[0] or "") == str(gtin)

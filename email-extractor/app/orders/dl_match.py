@@ -548,7 +548,8 @@ _CONFLICT_REASON_SK = {
 }
 
 
-def _memory_conflict(item_name: str, recalled, rec_card: dict, llm_gtin) -> list[str]:
+def _memory_conflict(item_name: str, recalled, rec_card: dict, llm_gtin,
+                     alt_name: str = "") -> list[str]:
     """Why the remembered card must NOT be substituted silently — `[]` when it may. Silent
     when the model independently picked the SAME card (agreement is unambiguous) or when the
     sklad already explicitly settled this wording on the board (`recalled.confirmed` — else a
@@ -575,8 +576,11 @@ def _memory_conflict(item_name: str, recalled, rec_card: dict, llm_gtin) -> list
     if recalled.human and recalled.newer_gtin and recalled.newer_gtin != str(recalled.gtin):
         reasons.append("newer_history_majority")
     item_words = _distinctive_words(item_name)
+    # #467 `alt_name`: the card's CODEX name — a card whose OUR name went stale is not a
+    # lexically unrelated misclick when CODEX's name for it matches the wording
     card_words = (_distinctive_words(rec_card.get("name", ""))
-                  | _distinctive_words(rec_card.get("doplnok", "") or ""))
+                  | _distinctive_words(rec_card.get("doplnok", "") or "")
+                  | _distinctive_words(alt_name))
     if item_words and card_words and not _lexical_overlap(item_words, card_words):
         reasons.append("lexical_gap")
     return reasons
@@ -604,10 +608,17 @@ def conflict_first(gtins: list[str], shortlist: list[dict], catalog: list[dict])
 
 
 def _memory_conflict_note(item_name: str, rec_card: dict, llm_card: dict | None, conf: float,
-                          reasons: list[str], newer_card: dict | None) -> str:
-    """The warehouse-facing reason on the held line / board question (plain Slovak)."""
-    model = (f"model navrhuje „{llm_card['name']}“ ({round(conf * 100)} %)" if llm_card
-             else "model nenašiel zhodu")
+                          reasons: list[str], newer_card: dict | None,
+                          codex_missing: dict | None = None) -> str:
+    """The warehouse-facing reason on the held line / board question (plain Slovak). #467: a
+    model pick nulled because CODEX lacks its code is named as such, never "found nothing"."""
+    if llm_card:
+        model = f"model navrhuje „{llm_card['name']}“ ({round(conf * 100)} %)"
+    elif codex_missing:
+        model = (f"model navrhuje „{codex_missing['card']}“, ktorej kód "
+                 f"{codex_missing['gtin']} v CODEXe neexistuje")
+    else:
+        model = "model nenašiel zhodu"
     why = "; ".join(_CONFLICT_REASON_SK[r] for r in reasons)
     newer = (f" Novšie dodávky: „{newer_card['name']}“."
              if newer_card and "newer_history_majority" in reasons else "")
@@ -619,7 +630,8 @@ def _memory_conflict_note(item_name: str, rec_card: dict, llm_card: dict | None,
 def _codex_missing_note(card_name: str, gtin: str) -> str:
     return (f"Karta „{card_name}“ (kód {gtin}) v CODEXe neexistuje — žiadna skladová karta "
             "nemá tento EAN kód, takže CODEX by celý dodací list pri importe odmietol. Vyber "
-            "správnu kartu (ponúkame len karty, ktoré CODEX má) alebo pošli bez tejto položky.")
+            "správnu kartu (ponúkame len karty, ktoré CODEX má) alebo pošli bez tejto položky; "
+            "kartu s neplatným kódom potom zmaž v Produkty sklad.")
 
 
 def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
@@ -739,7 +751,9 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
             log.warning("dl memory rescue skipped: %r card %r code %s has no CODEX stock "
                         "card", item_name, rec_card["name"], recalled.gtin)
             rec_card = None
-        conflict = (_memory_conflict(item_name, recalled, rec_card, llm_gtin)
+        codex_name = (getattr(codex, "name_for", lambda _g: "")(recalled.gtin)
+                      if codex is not None else "")
+        conflict = (_memory_conflict(item_name, recalled, rec_card, llm_gtin, codex_name)
                     if rec_card else [])
         if rec_card and conflict:
             cands = _conflict_candidates(catalog, recalled, llm_gtin)
@@ -754,7 +768,8 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
                         llm_gtin or "NO_MATCH", conf, conflict, cands)
             return done("memory_conflict", None, "", 0.0, conf,
                         _memory_conflict_note(item_name, rec_card, llm_card, conf, conflict,
-                                              _card(catalog, recalled.newer_gtin)),
+                                              _card(catalog, recalled.newer_gtin),
+                                              codex_missing),
                         review=True)
         if rec_card:
             log.info("dl memory rescue: %r -> %s (%s)", item_name, recalled.gtin, recalled.note)

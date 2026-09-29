@@ -12,7 +12,9 @@ const listEl = document.getElementById("q-list");
 const emptyEl = document.getElementById("q-empty");
 const searchEl = document.getElementById("q-search");
 
-const state = { status: "open", q: "", cardActions: {} };
+// #467: `codexHints` — the CODEX refusal help per question id, re-rendered by every refresh
+// (a hint never freezes the list, and the list never wipes a hint).
+const state = { status: "open", q: "", cardActions: {}, codexHints: {} };
 
 function editingOpen() {
   // Skip the periodic refresh only while something is ACTIVELY being edited — never freeze
@@ -21,7 +23,7 @@ function editingOpen() {
   // (empty, blurred) focus does not, so the list resumes refreshing on its own.
   if (searchEl && document.activeElement === searchEl) return true;
   if (!listEl) return false;
-  if (listEl.querySelector(".q-inline-form, .q-codex-hint")) return true;
+  if (listEl.querySelector(".q-inline-form")) return true;
   for (const inp of listEl.querySelectorAll(".q-qty, .q-price, .q-freein, .q-in, .q-massin")) {
     if (document.activeElement === inp) return true;
     if (inp.value && inp.value.trim()) return true;
@@ -57,11 +59,16 @@ function candidateButton(q, cand) {
 
 // ---- #467: a card number CODEX has no stock card for — the server refuses it (409) and
 // names CODEX cards with a similar name + code; one click uses the right card -------------
-function codexHint(q, data) {
+function showCodexHint(q, data) {
+  state.codexHints[q.id] = data;
   const card = document.getElementById(`q-card-${q.id}`);
   if (!card) return;
   const old = card.querySelector(".q-codex-hint");
   if (old) old.remove();
+  card.appendChild(codexHint(q, data));
+}
+
+function codexHint(q, data) {
   const pick = (code, cardName, codexName) => {
     if (!confirmUnrelated(q.wording, cardName, codexName)) return;
     submit(q.id, { choice: code }, q);
@@ -79,7 +86,8 @@ function codexHint(q, data) {
   for (const s of similar) {
     const btn = s.in_catalog
       ? el("button", { class: "q-btn q-codex-use", type: "button", "data-code": s.code,
-        onclick: () => pick(s.code, s.catalog_name, s.name) }, `Použiť kartu „${s.catalog_name}“`)
+        onclick: () => pick(s.catalog_gtin || s.code, s.catalog_name, s.name) },
+      `Použiť kartu „${s.catalog_name}“`)
       : el("button", { class: "q-btn q-codex-new", type: "button", "data-code": s.code,
         onclick: () => prefillNewItem(q, s.code, s.name) }, "Založiť kartu s týmto kódom");
     rows.push(el("div", { class: "q-codex-row" }, [
@@ -89,12 +97,11 @@ function codexHint(q, data) {
     rows.push(el("div", { class: "q-codex-row" },
       "V CODEXe sme nenašli kartu s podobným názvom — skontroluj EAN kód karty v CODEXe."));
   }
-  card.appendChild(el("div", { class: "q-codex-hint" }, [
-    el("div", { class: "q-codex-msg" }, data.error || ""), ...rows,
-    el("button", { class: "q-btn q-codex-close", type: "button",
-      onclick: () => { const h = card.querySelector(".q-codex-hint"); if (h) h.remove(); } },
-    "Zavrieť"),
-  ]));
+  const hint = el("div", { class: "q-codex-hint" }, [
+    el("div", { class: "q-codex-msg" }, data.error || ""), ...rows]);
+  hint.appendChild(el("button", { class: "q-btn q-codex-close", type: "button",
+    onclick: () => { delete state.codexHints[q.id]; hint.remove(); } }, "Zavrieť"));
+  return hint;
 }
 
 // Open (or reuse) the „➕ Nová karta" form of this card, prefilled with a CODEX card's code.
@@ -273,6 +280,7 @@ function card(q) {
   }
   actionsRow.appendChild(previewButton(q));
   box.appendChild(actionsRow);
+  if (state.codexHints[q.id]) box.appendChild(codexHint(q, state.codexHints[q.id]));
   return box;
 }
 
@@ -306,13 +314,14 @@ async function togglePreview(q) {
 async function submit(qid, body, q = null) {
   try {
     await apiPost(`/questions/${qid}/answer`, body);
+    delete state.codexHints[qid];
     toast("Uložené");
     await load();
   } catch (e) {
     // #467: a dl_item refusal with structured help (a card number CODEX lacks / a number we
     // already have) is shown on the card with one-click fixes, not only as a toast.
     if (q && q.kind === "dl_item" && e.data && (e.data.codex || e.data.existing)) {
-      codexHint(q, e.data);
+      showCodexHint(q, e.data);
     }
     toast(e.message, { error: true });
   }

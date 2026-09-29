@@ -53,7 +53,8 @@ STALE_HOURS = 30
 # overrides it for a genuine mass removal.
 MIN_KEEP_RATIO = 0.5
 ALERT_KIND = "codex_cards_stale"
-# pending_alerts.message_id dedup key — there is no mail behind this alert.
+# pending_alerts.message_id dedup key PREFIX (+ ":<stale snapshot time>", one per episode) —
+# there is no mail behind this alert.
 ALERT_KEY = "codex-cards"
 SIMILAR_LIMIT = 5
 # `dl_match._score_item` scale (0-99): 30 ≈ half the words shared — below that a "similar"
@@ -135,6 +136,13 @@ def _local(dt: datetime | None) -> str:
 
 # --- the push: a full, atomic replace ----------------------------------------------------
 
+def _data_as_of(sync: dict) -> datetime:
+    """The CODEX data-age anchor: the ETL snapshot time, never later than when the push reached
+    us — a future `source_as_of` (a clock/timezone bug in the push) must not pin it fresh."""
+    src, got = sync["source_as_of"], sync["synced_at"]
+    return min(src, got) if src else got
+
+
 def latest_sync(conn) -> dict | None:
     row = conn.execute(
         "SELECT id, synced_at, source_as_of, row_count, code_count FROM codex_card_syncs "
@@ -162,6 +170,8 @@ def replace_cards(conn, cards: list, *, source_as_of=None, force: bool = False) 
         rows[key] = (str(c.get("name") or "").strip()[:300], bool(c.get("inactive")),
                      _ts(c.get("changed_at")))
     if not rows:
+        log.warning("codex cards push refused: no usable row among %d received",
+                    len(cards or []))
         raise ReplaceRefused("zoznam kariet z CODEXu je prázdny — nič sa nenahrádza", 400)
     codes = len({k[0] for k in rows})
     with conn.transaction():
@@ -169,6 +179,8 @@ def replace_cards(conn, cards: list, *, source_as_of=None, force: bool = False) 
         conn.execute("LOCK TABLE codex_stock_cards IN EXCLUSIVE MODE")
         prev = latest_sync(conn)
         if prev and not force and codes < prev["code_count"] * MIN_KEEP_RATIO:
+            log.warning("codex cards push refused: %d codes vs %d last time (shrink guard)",
+                        codes, prev["code_count"])
             raise ReplaceRefused(
                 f"push má len {codes} kódov oproti {prev['code_count']} naposledy — pravdepodobne "
                 f"neúplný export z CODEXu, zoznam sa nenahrádza (force=1 ak je to zámer)", 409)
@@ -258,7 +270,7 @@ def load(conn, now: datetime | None = None) -> CodexCards | None:
         bucket = names.setdefault(code, [])
         if name and name not in bucket:
             bucket.append(name)
-    as_of = sync["source_as_of"] or sync["synced_at"]
+    as_of = _data_as_of(sync)
     now = now or datetime.now(UTC)
     return CodexCards(names={k: tuple(v) for k, v in names.items()}, as_of=as_of,
                       synced_at=sync["synced_at"],
@@ -291,12 +303,15 @@ def check_card_code(conn, code, *texts: str, catalog=None, now=None) -> None:
     cards = live_guard(conn, now)
     if cards is None or cards.has(code):
         return
-    ours = {normalize_code(r.get("gtin")): r.get("name", "") for r in (catalog or [])}
+    # our card per normalized code — `catalog_gtin` is OUR exact number (what the answer path
+    # and the catalog key on), never the normalized CODEX code
+    ours = {normalize_code(r.get("gtin")): r for r in (catalog or [])}
     similar = []
     for s in cards.similar(*texts):
         entry = dict(s, in_catalog=s["code"] in ours)
         if entry["in_catalog"]:
-            entry["catalog_name"] = ours[s["code"]]
+            entry["catalog_gtin"] = str(ours[s["code"]].get("gtin"))
+            entry["catalog_name"] = ours[s["code"]].get("name", "")
         similar.append(entry)
     log.warning("card code %s refused — no CODEX stock card has it (similar: %s)", code,
                 [s["code"] for s in similar])
@@ -370,10 +385,13 @@ def stale_sweep(conn, cfg, now: datetime | None = None) -> bool:
     from . import dl_alerts, report
     now = now or datetime.now(UTC)
     sync = latest_sync(conn)
-    anchor = (sync["source_as_of"] or sync["synced_at"]) if sync else _installed_at(conn)
+    anchor = _data_as_of(sync) if sync else _installed_at(conn)
     if anchor is None or now - anchor <= timedelta(hours=STALE_HOURS):
         return False
-    if dl_alerts.reminder_suppressed(conn, cfg, ALERT_KIND, ALERT_KEY, now=now):
+    # one dedup key per stale EPISODE (the snapshot it is stuck on): a later episode alerts at
+    # once instead of waiting for the next morning as a "reminder" of an old delivered alert
+    key = f"{ALERT_KEY}:{anchor.isoformat()}"
+    if dl_alerts.reminder_suppressed(conn, cfg, ALERT_KIND, key, now=now):
         return False
     hours = int((now - anchor).total_seconds() // 3600)
     state = (f"je zastaraný (údaje z CODEXu k {escape(_local(anchor))}, pred {hours} h)"
@@ -382,6 +400,6 @@ def stale_sweep(conn, cfg, now: datetime | None = None) -> bool:
             "kódov kariet dodacích listov (#467) je dočasne VYPNUTÁ: nástenka prijme aj kód, "
             "ktorý v CODEXe neexistuje, a dodací list s takou kartou CODEX pri importe odmietne. "
             "Skontroluj na dev2 <code>codex-cards-push.timer</code> a codex-bridge ETL.</p>")
-    dl_alerts.enqueue(conn, report.ops_channel(cfg), ALERT_KIND, body, message_id=ALERT_KEY)
+    dl_alerts.enqueue(conn, report.ops_channel(cfg), ALERT_KIND, body, message_id=key)
     log.warning("CODEX stock-card list %s — ops alert enqueued", "stale" if sync else "missing")
     return True
