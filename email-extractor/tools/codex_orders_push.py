@@ -161,9 +161,10 @@ def pushed_line(res: dict, url: str) -> str:
     """The journal line of a successful push. Ends with the TARGET (scheme + host[:port] only
     — never the path, a query token or userinfo) so journalctl proves which address the push
     reached: the Cloudflare tunnel, not the raw add-on port (#470)."""
+    # netloc minus any userinfo — keeps an IPv6 host's brackets and the port as written, and
+    # (unlike `.hostname`/`.port`) never raises, so a pushed batch always gets its line.
     parts = urlsplit(url)
-    host = parts.hostname or ""
-    target = f"{parts.scheme}://{host}" + (f":{parts.port}" if parts.port else "")
+    target = f"{parts.scheme}://{parts.netloc.rpartition('@')[2]}"
     return (f"pushed: fetched={res['fetched']} orders={res['orders']} "
             f"upserted={res['upserted']} to={target}")
 
