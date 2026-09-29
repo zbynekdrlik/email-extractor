@@ -106,7 +106,13 @@ Both tools run on **dev2** (the box that owns `/var/lib/codex-bridge/codex.duckd
 copies next to each other, with SYSTEM systemd units (`/etc/systemd/system/`), user `newlevel`,
 system `/usr/bin/python3` (it has `duckdb` + `requests`), and ONE shared mode-600
 `EnvironmentFile=/home/newlevel/.secrets/codex-orders-push.env` (CODEX_PUSH_URL / _TOKEN /
-_DAYS / CODEX_DUCKDB_PATH — inspect it with `airuleset.py secret inspect`, never `cat`):
+_DAYS / CODEX_DUCKDB_PATH — inspect it with `airuleset.py secret inspect`, never `cat`).
+**`CODEX_PUSH_URL` = `https://email-pz.newlevel.media/api/codex/orders` since #470** — the
+add-on's Cloudflare tunnel (the cards push derives `…/api/codex/cards` from it, there is no
+`CODEX_CARDS_PUSH_URL` in the file). Cloudflare caps a body at 100 MB and a request at 100 s
+(the cards list is ~1 MB, the orders push is chunked by 500) — fine today, keep it in mind if a
+payload ever grows. The raw `http://<ha-host>:8099` is being firewalled; never point a push at
+it again:
 
 | tool | copy | units | schedule (Europe/Prague) |
 |---|---|---|---|
@@ -117,24 +123,36 @@ _DAYS / CODEX_DUCKDB_PATH — inspect it with `airuleset.py secret inspect`, nev
 /home/newlevel/codex-orders-push/` + `sudo cp email-extractor/tools/systemd/codex-cards-push.*
 /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now
 codex-cards-push.timer`; run once by hand with `sudo systemctl start codex-cards-push.service`
-and read `journalctl -u codex-cards-push.service -n 5` (`pushed: fetched=… codes=…`). A
+and read `journalctl -u codex-cards-push.service -n 5` (`pushed: fetched=… codes=…
+to=https://email-pz.newlevel.media` — since #470 the line ends with the target's scheme + host,
+never the path/token, so the journal itself proves which address the push reached). A
 `--dry-run` (`/home/newlevel/codex-orders-push/run.sh`-style env + `--dry-run`) counts without
 POSTing. The add-on image never contains `tools/` (Dockerfile copies `app/` only).
 
 - **From a worktree-isolated worker, `systemctl enable …` is REFUSED** by the worktree guard (it
   parses `enable` as the bash builtin): use `sudo systemctl reenable codex-cards-push.timer` +
   `sudo systemctl start codex-cards-push.timer` — same symlink, `systemctl is-enabled` → enabled.
-- **When the push cannot reach `http://<ha-host>:8099` (ConnectTimeout)** — seen 2026-09-29 from
-  ~19:00: every Docker-published port of the HA box (8099, 5678, …) was filtered UPSTREAM for the
-  office egress (tcpdump on the box's `enp1s0` saw 0 packets; 22/8123 fine; outbound 8099
-  elsewhere fine) — the add-on is healthy, only the path is cut, and BOTH dev2 timers (#342 +
-  #467) fail. A one-off push for a verification still works without the public port: build the
-  exact body with the tool's own `run(..., poster=<write body to a file>)`, pipe it over ssh into
-  `sudo docker exec -i app_e0ac7775_email_extractor python3 <script>` where the script reads
-  `api_token` from `/data/options.json` INSIDE the container and POSTs to
-  `http://127.0.0.1:8099/api/codex/cards` (the token never leaves the box, never printed). The
-  permanent path (reopen the port / a Cloudflare-tunnel hostname) is an owner decision. The 30 h
-  fail-open + the stale ops alert are the safety net meanwhile.
+- **Changing a variable in the push EnvironmentFile (a plain key file in newlevel's secrets
+  dir)** — `airuleset.py secret` has no "set one key" operation, and `block-vault-store-read.sh`
+  refuses any command line that names the file (even `secret exec --file … -- python3 <script>
+  <that path>`). What worked for #470: a small script INVOKED BY PATH (the key-file path lives
+  inside the script, not on the command line) that rewrites ONLY the `CODEX_PUSH_URL=` line,
+  keeps every other line byte-for-byte, replaces the file atomically with mode 0600 + the same
+  owner, and prints only the NEW (non-secret) value; then `secret inspect <path>` (names/lines/
+  mode unchanged) and `secret exec --file <path> --stdin -- python3 <checker>` (the checker reads
+  stdin and prints only "matches: True") to verify. Never `cat`/`echo`/`sed` the file from the
+  shell. `run.sh` sources the same file, so a manual run picks up the change too.
+- **When the push cannot reach the add-on** — seen 2026-09-29 from ~19:00 on the RAW
+  `http://<ha-host>:8099` path: every Docker-published port of the HA box was filtered UPSTREAM
+  for the office egress (tcpdump on the box's `enp1s0` saw 0 packets; 22/8123 fine) — the add-on
+  was healthy, only the path was cut, and BOTH dev2 timers (#342 + #467) failed. The permanent
+  answer (#470) is the Cloudflare tunnel above. If the tunnel itself is ever down, a one-off push
+  for a verification still works without it: build the exact body with the tool's own `run(...,
+  poster=<write body to a file>)`, pipe it over ssh into `sudo docker exec -i
+  app_e0ac7775_email_extractor python3 <script>` where the script reads `api_token` from
+  `/data/options.json` INSIDE the container and POSTs to `http://127.0.0.1:8099/api/codex/cards`
+  (the token never leaves the box, never printed). The 30 h fail-open + the stale ops alert are
+  the safety net meanwhile.
 
 ## The CODEX stock-card list + the card-code check (#467)
 

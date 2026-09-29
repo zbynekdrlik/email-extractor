@@ -39,19 +39,47 @@ warning; both alias the same command.)
 
 ## Post-deploy verification
 
-**If `http://<ha-host>:8099` times out from the dev boxes** (2026-09-29: all Docker-published
-ports were filtered upstream for the office egress while 22/8123 still worked — tcpdump on the
-box's `enp1s0` saw 0 packets), read `/health`/`/version` over ssh on the box
-(`curl -4 -s http://127.0.0.1:8099/health`). For the Playwright DOM checks the SSH add-on has
-`AllowTcpForwarding no` (so `ssh -L` accepts locally but every connection dies with curl exit
-56); a small local forwarder works instead — a Python listener on `127.0.0.1:18099` that, per
-connection, spawns `ssh -S <ctl> <ha> "nc 127.0.0.1 8099"` over ONE `ssh -M -f -N` control
-master (control-socket path SHORT, e.g. `/tmp/ha.ctl` — a scratchpad path exceeds the unix
-socket limit), password via `sshpass -e` / `SSHPASS` env (value from memory, never inline in a
-committed file). Then drive the board at `http://127.0.0.1:18099` (never hand that URL to the
-user). The Produkty lists render only the first 50 rows — use the search box to reach a card.
+**The public way in is the Cloudflare tunnel `https://email-pz.newlevel.media` (#470)** — the
+`84b25f81_cloudflared` add-on on the same HA box forwards it to the add-on's internal `:8099`.
+Use it for every check (curl, Playwright, the dev2 push); it is also the `dashboard_base_url`
+the Odoo links are built from. The raw `http://<ha-host>:8099` port is being firewalled — do
+not build a check or a link on it.
 
-- Liveness: `curl http://<ha-host>:8099/health` → `{"ok":true,"version":"<x.y.z>"}`.
+- `curl -s https://email-pz.newlevel.media/health` → `{"ok":true,"version":"<x.y.z>"}`;
+  `curl -s https://email-pz.newlevel.media/version` → the bare version.
+- `curl -s -o /dev/null -w '%{http_code} %{redirect_url}' http://email-pz.newlevel.media/health`
+  → `301 https://email-pz.newlevel.media/health` (the app's `_force_https`, keyed on the tunnel's
+  `X-Forwarded-Proto: http`; Cloudflare's zone does NOT force https itself).
+- An internal call with no forwarded header must stay 200, never redirected — from the box:
+  `sudo docker exec app_e0ac7775_email_extractor python3 -c "import urllib.request;
+  print(urllib.request.urlopen('http://127.0.0.1:8099/health').status)"`.
+- Playwright: log in on `https://email-pz.newlevel.media/login` (`dash_password`, memory), the
+  dashboard's two warehouse links (`sklad_link`/`dl_sklad_link` — built from `request.host_url`)
+  must start with `https://email-pz.newlevel.media/`.
+
+**Why the https links need TWO pieces (#470):** Flask trusts the tunnel's `X-Forwarded-*` via
+`ProxyFix(x_for=1, x_proto=1, x_host=1)` in `create_app`, AND `start()` passes
+`clear_untrusted_proxy_headers=False` to waitress — waitress 3.x otherwise DELETES every
+`X-Forwarded-*` header before the app sees it (a Flask-test-client test passes either way; only
+`tests/test_httpapi_proxy.py`'s real-waitress test catches a missing kwarg). The redirect sends
+`Cache-Control: no-store` (its host comes from visitor-controllable headers; Cloudflare caches a
+301 on `/static/*.js` by default) and refuses an invalid forwarded host with 400.
+`SESSION_COOKIE_SECURE` is still OFF — the owner turns it on once `:8099` is closed (then every
+login MUST come over https; the internal n8n calls use no session, so they are unaffected).
+
+**Fallback when the tunnel itself is down** (or you must reach the raw add-on): read
+`/health`/`/version` over ssh on the box (`curl -4 -s http://127.0.0.1:8099/health`). For the
+Playwright DOM checks the SSH add-on has `AllowTcpForwarding no` (so `ssh -L` accepts locally
+but every connection dies with curl exit 56); a small local forwarder works instead — a Python
+listener on `127.0.0.1:18099` that, per connection, spawns `ssh -S <ctl> <ha> "nc 127.0.0.1
+8099"` over ONE `ssh -M -f -N` control master (control-socket path SHORT, e.g. `/tmp/ha.ctl` — a
+scratchpad path exceeds the unix socket limit), password via `sshpass -e` / `SSHPASS` env (value
+from memory, never inline in a committed file). Then drive the board at `http://127.0.0.1:18099`
+(never hand that URL to the user). (2026-09-29 background: all Docker-published ports were
+filtered upstream for the office egress while 22/8123 still worked.) The Produkty lists render
+only the first 50 rows — use the search box to reach a card.
+
+- Liveness: `curl https://email-pz.newlevel.media/health` → `{"ok":true,"version":"<x.y.z>"}`.
 - Version-on-DOM: any page (the unified nástenka `/nastenka`, the main dashboard) shows
   `v<x.y.z>` in the header — read it with Playwright, not curl. (#449 lane 8: the old
   `/otazky`/`/otazky-dl`/`/znalosti` are retired — they 302 to the board now.)
