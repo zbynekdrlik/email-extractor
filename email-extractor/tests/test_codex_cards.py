@@ -172,7 +172,8 @@ def test_check_card_code_refuses_a_missing_code_with_similar_codex_cards(pg):
     assert payload["codex"]["code"] == "3698" and payload["codex"]["missing"] is True
     top = payload["codex"]["similar"][0]
     assert top == {"code": "9990000000017", "name": "Rožok so slaninou a syrom 70g",
-                   "in_catalog": True, "catalog_name": "Bagetka s kečupom a syrom 80 gr"}
+                   "in_catalog": True, "catalog_gtin": "9990000000017",
+                   "catalog_name": "Bagetka s kečupom a syrom 80 gr"}
 
 
 def test_check_card_code_fails_open_on_a_stale_list(pg):
@@ -244,6 +245,35 @@ def test_stale_sweep_is_quiet_for_a_fresh_list(pg):
     _push(pg)
     assert codex_cards.stale_sweep(pg, _cfg()) is False
     assert _alerts(pg) == []
+
+
+def test_a_new_stale_episode_alerts_at_once_even_after_an_earlier_delivered_alert(pg):
+    """Review 🔵: one constant dedup key turned the FIRST alert of a later stale episode into a
+    'reminder' held until the next workday morning (a Friday-evening push failure alerted on
+    Monday). Each episode (anchored on the stale snapshot time) alerts immediately."""
+    _push(pg, as_of=NOW - timedelta(hours=codex_cards.STALE_HOURS + 2))
+    assert codex_cards.stale_sweep(pg, _cfg()) is True
+    pg.execute("UPDATE pending_alerts SET delivered_at = now()")
+    # a fresh push, then that one goes stale too — a NEW episode
+    _push(pg, as_of=NOW - timedelta(hours=codex_cards.STALE_HOURS + 1), force=True)
+    assert codex_cards.stale_sweep(pg, _cfg()) is True
+    assert len(_alerts(pg)) == 2
+
+
+def test_a_future_source_time_can_never_keep_the_list_fresh_forever(pg):
+    """Review 🔵: a clock/timezone bug in the push must not pin the list 'fresh' — the data age
+    is measured from the earlier of the CODEX snapshot time and our receive time."""
+    _push(pg, as_of=NOW + timedelta(days=30))
+    pg.execute("UPDATE codex_card_syncs SET synced_at = now() - interval '40 hours'")
+    assert codex_cards.load(pg).stale is True
+    assert codex_cards.live_guard(pg) is None
+
+
+def test_a_refused_push_is_logged_on_the_add_on_side(pg, caplog):
+    with caplog.at_level(logging.WARNING, logger="orders.codex_cards"):
+        with pytest.raises(codex_cards.ReplaceRefused):
+            _push(pg, cards=[])
+    assert any("refused" in r.getMessage().lower() for r in caplog.records)
 
 
 def test_stale_sweep_gives_a_never_pushed_list_the_same_grace_from_install(pg):

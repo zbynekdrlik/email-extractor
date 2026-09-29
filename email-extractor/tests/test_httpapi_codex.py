@@ -140,3 +140,19 @@ def test_cards_endpoint_refuses_a_drastic_shrink_unless_forced(pg):
     assert pg.execute("SELECT count(*) FROM codex_stock_cards").fetchone()[0] == 3
     assert c.post("/api/codex/cards?force=1", json=shrunk, headers=h).status_code == 200
     assert pg.execute("SELECT count(*) FROM codex_stock_cards").fetchone()[0] == 1
+
+
+def test_cards_endpoint_takes_the_token_from_the_header_only(pg):
+    """Review 🔵: a full-table replace must not accept the token from the URL (proxies and
+    access logs keep query strings) — X-Token header only."""
+    r = _client().post("/api/codex/cards?token=tok", json=_CARDS)
+    assert r.status_code == 403
+    assert pg.execute("SELECT count(*) FROM codex_stock_cards").fetchone()[0] == 0
+
+
+def test_cards_endpoint_refuses_an_oversized_body(pg):
+    big = {"cards": [dict(_CARDS["cards"][1], name="x" * 1000, card_code=str(i))
+                     for i in range(20000)]}
+    r = _client().post("/api/codex/cards", json=big, headers={"X-Token": "tok"})
+    assert r.status_code == 413
+    assert pg.execute("SELECT count(*) FROM codex_stock_cards").fetchone()[0] == 0

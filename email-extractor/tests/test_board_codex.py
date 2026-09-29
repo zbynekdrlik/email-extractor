@@ -208,3 +208,76 @@ def test_ship_without_is_never_codex_checked(pg):
     qid = _question(pg)
     r = _client().post(f"/api/board/questions/{qid}/answer", json={"choice": "ship_without"})
     assert r.status_code == 200
+
+
+# --- review findings (same branch) ------------------------------------------------------
+
+def test_a_new_card_flag_never_overwrites_an_existing_card_in_either_scope(pg):
+    """The Produkty „Nová karta" sends `new: true`: a number that already has a card is
+    refused (409 + the card), never an overwrite — the orders form would otherwise CLEAR the
+    card's alias (tri-state `doplnok: ""`), the DL one its mass/sklad/cena."""
+    _base(pg)
+    _codex(pg)
+    _seed(pg, G_MUKA, "Múka pšeničná T650", sklad="100", cena=0.37)
+    from app.orders import snapshot
+    snapshot.upsert_catalog_card(pg, "G-ORD-1", "Rožok grahamový", alias="graham")
+    snapshot.rebuild_from_overrides(pg)
+    c = _client()
+    r = c.post("/api/board/products?scope=dl", json={
+        "gtin": G_MUKA, "name": "Iný názov", "sklad": "", "cena": "", "new": True})
+    assert r.status_code == 409
+    assert r.get_json()["existing"] == {"gtin": G_MUKA, "name": "Múka pšeničná T650"}
+    row = pg.execute("SELECT name, sklad, cena FROM dl_catalog_overrides WHERE gtin=%s",
+                     (G_MUKA,)).fetchone()
+    assert row[0] == "Múka pšeničná T650" and row[1] == "100" and float(row[2]) == 0.37
+    r = c.post("/api/board/products?scope=orders", json={
+        "gtin": "G-ORD-1", "name": "Iný", "doplnok": "", "new": True})
+    assert r.status_code == 409 and r.get_json()["existing"]["gtin"] == "G-ORD-1"
+    assert pg.execute("SELECT name, alias FROM catalog_overrides WHERE gtin='G-ORD-1'"
+                      ).fetchone() == ("Rožok grahamový", "graham")
+    # without the flag (the editor of an existing card) it is a normal update
+    assert c.post("/api/board/products?scope=orders", json={
+        "gtin": "G-ORD-1", "name": "Rožok grahamový 60g"}).status_code == 200
+
+
+def test_the_new_card_on_a_question_refuses_a_deleted_cards_number(pg):
+    """Review 🔵: a number of a card deleted to the Kôš is not free either — upserting it
+    would resurrect the card with blank mass/sklad/cena. Refused; restore it from the Kôš."""
+    _base(pg)
+    _codex(pg)
+    _seed(pg, G_MUKA, "Múka pšeničná T650", sklad="100", cena=0.37)
+    dl_snapshot.retire_dl_catalog_card(pg, G_MUKA)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    qid = _question(pg)
+    r = _client().post(f"/api/board/questions/{qid}/answer", json={"new_item": {
+        "gtin": G_MUKA, "name": "Múka hladká"}})
+    assert r.status_code == 409 and "Kôš" in r.get_json()["error"]
+    row = pg.execute("SELECT retired, sklad FROM dl_catalog_overrides WHERE gtin=%s",
+                     (G_MUKA,)).fetchone()
+    assert row == (True, "100"), "the deleted card stays deleted and untouched"
+    assert teach.get(pg, qid)["status"] == "open"
+
+
+def test_a_refused_free_pick_is_not_added_to_the_offered_cards(pg):
+    """Review 🔵: the CODEX check runs BEFORE the free/search pick is legitimised, so a refused
+    dead code never lingers as an offered button on the question."""
+    _base(pg)
+    _codex(pg)
+    _seed(pg, "3698", "Rožok so slaninou a syrom 70g")
+    qid = _question(pg)
+    r = _client().post(f"/api/board/questions/{qid}/answer", json={"choice": "3698"})
+    assert r.status_code == 409
+    assert [c["value"] for c in teach.get(pg, qid)["candidates"]] == []
+
+
+def test_a_similar_card_we_already_have_carries_our_own_number(pg):
+    """Review 🔵: the one-click „Použiť kartu" must send OUR gtin (exact string the catalog
+    and the answer path use), not the normalized CODEX code."""
+    _base(pg)
+    _codex(pg)
+    _seed(pg, G_GOOD, "Bagetka s kečupom a syrom 80 gr")
+    qid = _question(pg)
+    r = _client().post(f"/api/board/questions/{qid}/answer", json={"new_item": {
+        "gtin": "3698", "name": "Rožok so slaninou a syrom 70g"}})
+    top = r.get_json()["codex"]["similar"][0]
+    assert top["catalog_gtin"] == G_GOOD

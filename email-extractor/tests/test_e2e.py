@@ -640,11 +640,19 @@ def test_board_products_sklad_refuses_a_code_codex_lacks_and_offers_the_codex_ca
     page.locator('.p-row[data-gtin="9990000000017"] .p-codex-take').click()
     assert page.locator('.p-row[data-gtin="9990000000017"] .p-editor .p-name').input_value() \
         == "Rožok so slaninou a syrom 70g"
+    row.locator(".p-edit").click()   # close the editor again (refresh-safety)
+
+    # „Len rozdiely s CODEXom" keeps only the drifted / CODEX-missing cards
+    page.check("#p-codex-issues")
+    page.wait_for_selector('.p-row[data-gtin="9990000000093"]', state="detached")
+    gtins = page.locator(".p-row").evaluate_all("rs => rs.map(r => r.dataset.gtin)")
+    assert "9990000000017" in gtins and "9990000000093" not in gtins
 
     # the refusal IS a deliberate 409 — Chromium logs every non-2xx fetch as "Failed to load
-    # resource" (no app console.error); tolerate exactly that one entry, nothing else (#235 shape)
-    real_errors = [m for m in console
-                   if "Failed to load resource" not in m or "status of 409" not in m]
+    # resource" (no app console.error); tolerate exactly that ONE entry, nothing else (#235 shape)
+    tolerated = [m for m in console if "Failed to load resource" in m and "status of 409" in m]
+    assert len(tolerated) == 1, f"exactly one deliberate refusal: {console}"
+    real_errors = [m for m in console if m not in tolerated]
     assert real_errors == [], f"browser console not clean: {real_errors}"
 
 
@@ -676,7 +684,20 @@ def test_board_dl_item_new_card_refuses_a_code_codex_lacks_and_answers_with_the_
     assert pg.execute("SELECT count(*) FROM dl_catalog_overrides WHERE gtin='3698'"
                       ).fetchone()[0] == 0
 
-    hint.locator('.q-codex-use[data-code="9990000000017"]').click()
+    # the hint does NOT freeze the board: close the form, let the 8 s refresh run (a question
+    # added meanwhile appears) — the hint is re-rendered on its card, not wiped. The new
+    # question's candidate is a card whose OUR name drifted: its button shows the CODEX name.
+    drift_q = _board_seed_dl_item_question(pg, "be2e-467b", "Rožok so slaninou 70g", [])
+    pg.execute("UPDATE order_questions SET candidates = %s::jsonb WHERE id = %s",
+               ('[{"value": "9990000000017", "label": "Bagetka s kečupom a syrom 80 gr", '
+                '"codex_name": "Rožok so slaninou a syrom 70g"}]', drift_q))
+    card.locator('.q-inline-form button:has-text("Zrušiť")').click()
+    btn = page.locator(f"#q-card-{drift_q} .q-btn--cand")
+    btn.wait_for(timeout=15000)
+    assert "CODEX: Rožok so slaninou a syrom 70g" in btn.inner_text()
+    assert card.locator(".q-codex-hint").count() == 1
+
+    card.locator('.q-codex-use[data-code="9990000000017"]').click()
     for _ in range(50):
         row = pg.execute("SELECT status, answer->>'choice' FROM order_questions WHERE id=%s",
                          (qid,)).fetchone()
@@ -686,7 +707,8 @@ def test_board_dl_item_new_card_refuses_a_code_codex_lacks_and_answers_with_the_
     assert row == ("answered", "9990000000017")
 
     # the refusal IS a deliberate 409 — Chromium logs every non-2xx fetch as "Failed to load
-    # resource" (no app console.error); tolerate exactly that one entry, nothing else (#235 shape)
-    real_errors = [m for m in console
-                   if "Failed to load resource" not in m or "status of 409" not in m]
+    # resource" (no app console.error); tolerate exactly that ONE entry, nothing else (#235 shape)
+    tolerated = [m for m in console if "Failed to load resource" in m and "status of 409" in m]
+    assert len(tolerated) == 1, f"exactly one deliberate refusal: {console}"
+    real_errors = [m for m in console if m not in tolerated]
     assert real_errors == [], f"browser console not clean: {real_errors}"

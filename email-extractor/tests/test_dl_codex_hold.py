@@ -236,3 +236,81 @@ def test_shadow_is_byte_identical_whatever_the_codex_list_says(pg, tmp_path):
     assert {i["gtin"] for i in res["items"]} == {G_BAD, G_BREAD}
     assert {i["rule"] for i in items} == {"llm_sure"}
     assert _open_questions(pg) == []
+
+
+# --- review findings (same branch) ------------------------------------------------------
+
+def _rename_good_card(pg, name):
+    pg.execute("UPDATE dl_catalog_snapshot SET name = %s WHERE gtin = %s", (name, G_GOOD))
+
+
+def test_the_answer_is_honoured_on_later_deliveries_even_when_names_share_no_word(
+        pg, tmp_path, monkeypatch):
+    """Review 🟡: the drifted-name case this ticket targets — OUR name for the valid card
+    shares no word with the wording („Bagetka kečupová" vs „Rožok so slaninou…"). The sklad's
+    answer on the codex question must count as the board's explicit confirmation, or the next
+    delivery trips the #465 lexical-gap conflict and is held AGAIN with a second question."""
+    _snapshot(pg)
+    _rename_good_card(pg, "Bagetka kečupová 80 gr")
+    _codex(pg)
+    _run(pg, tmp_path, "dl1", _doc("0100000211"))
+    qid = _open_questions(pg)[0][0]
+    _answer_through_the_app_path(pg, monkeypatch, qid, G_GOOD)
+    shipped = _release(pg, tmp_path, qid, _doc("0100000211"))
+    assert len(shipped) == 1 and G_GOOD in shipped[0]
+    nxt = _run(pg, tmp_path, "dl2", _doc("0100000212"))
+    assert len(nxt) == 1 and G_GOOD in nxt[0] and G_BAD not in nxt[0]
+    assert _open_questions(pg) == [], "the sklad already settled this line — never re-asked"
+
+
+def test_the_answer_supersedes_the_dead_human_answer_and_undo_restores_it(
+        pg, tmp_path, monkeypatch):
+    """Answering the codex question retires the human answer that taught the dead code
+    (soft, audited, Kôš-restorable) — the same board-settled semantics as #465; undo brings it
+    back and reopens the question."""
+    _snapshot(pg)
+    _codex(pg)
+    dl_memory.remember(pg, SUPPLIER_EAN, ROLL, G_BAD, BAD_CARD, "2026-09-24", source="human")
+    _run(pg, tmp_path, "dl1", _doc("0100000213"))
+    qid, _w, _c, _r = _open_questions(pg)[0]
+    assert teach.get(pg, qid)["payload"].get("codex_missing") is True
+    _answer_through_the_app_path(pg, monkeypatch, qid, G_GOOD)
+    live = {g for (g,) in pg.execute("SELECT gtin FROM dl_item_memory WHERE source='human' "
+                                     "AND deleted_at IS NULL").fetchall()}
+    assert live == {G_GOOD}, "the human answer to the dead code is superseded"
+    teach.KINDS["dl_item"].undo(pg, teach.get(pg, qid))
+    live = {g for (g,) in pg.execute("SELECT gtin FROM dl_item_memory WHERE source='human' "
+                                     "AND deleted_at IS NULL").fetchall()}
+    assert live == {G_BAD} and teach.get(pg, qid)["status"] == "open"
+
+
+def test_an_older_open_question_the_codex_ask_dedupes_onto_is_upgraded(pg, tmp_path):
+    """Review 🔵: a plain question for the same (supplier, wording) raised earlier (e.g. while
+    the list was stale) is the dedupe target. It must get the CODEX-valid cards first, lose the
+    dead ones, and show the CODEX reason — not keep offering the dead card."""
+    _snapshot(pg)
+    _codex(pg)
+    _msg(pg, mid="dl0")
+    pg.execute("UPDATE messages SET processed = true WHERE message_id = 'dl0'")
+    qid0 = teach.ask_generic(pg, "dl_item", "dl0", teach.dl_item_key(SUPPLIER_EAN, ROLL), ROLL,
+                             [{"value": G_BAD, "label": BAD_CARD}], "stará otázka",
+                             {"supplier_ean": SUPPLIER_EAN, "supplier_name": "Pekáreň Lunys"})
+    _run(pg, tmp_path, "dl1", _doc("0100000214"))
+    rows = _open_questions(pg)
+    assert [r[0] for r in rows] == [qid0], "deduped onto the existing open question"
+    _qid, _w, cands, reason = rows[0]
+    values = [c["value"] for c in cands]
+    assert values[0] == G_GOOD and G_BAD not in values
+    assert "CODEX" in reason and reason != "stará otázka"
+    assert teach.get(pg, qid0)["payload"].get("codex_missing") is True
+
+
+def test_the_hold_message_tells_the_sklad_to_delete_the_dead_card(pg, tmp_path):
+    """Review 🔵: the dead card stays in our catalog and keeps pulling the model (and would ship
+    again the moment the list goes stale) — the hold reason says to delete it on Produkty sklad."""
+    _snapshot(pg)
+    _codex(pg)
+    _run(pg, tmp_path, "dl1", _doc("0100000215"))
+    outcome = pg.execute("SELECT outcome FROM email_events WHERE message_id='dl1' "
+                         "AND detail->>'held' = 'true'").fetchone()[0]
+    assert "Produkty sklad" in outcome and "zmaž" in outcome

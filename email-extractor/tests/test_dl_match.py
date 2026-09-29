@@ -835,6 +835,37 @@ def test_a_memory_of_a_card_codex_lacks_is_never_rescued():
     assert d.gtin is None and d.rule != "memory_rescue"
 
 
+class _NamedCodex(_Codex):
+    def __init__(self, names):
+        super().__init__(names)
+        self.names = names
+
+    def name_for(self, code):
+        return self.names.get(str(code), "")
+
+
+def test_a_memory_conflict_note_names_the_model_pick_codex_lacks():
+    """Review 🟡: when the invalid pick was nulled, the conflict note must not claim the
+    model 'found nothing' — it names the card and says CODEX has no such code."""
+    recalled = _human("GFRUIT", "Ovocie - Zlaté jablko pražené",
+                      human_gtins=("GFRUIT", "GROZ2"))
+    d = dl_match.decide_item(ROLL, {"gtin": "GROZ", "confidence": 0.97}, CONFLICT_CATALOG,
+                             recalled=recalled, codex=_Codex({"GFRUIT", "GROZ2"}))
+    assert d.rule == "memory_conflict"
+    assert "Rožok štandart 50g" in d.note and "CODEX" in d.note
+    assert "nenašiel zhodu" not in d.note
+
+
+def test_the_codex_name_counts_for_the_lexical_plausibility_of_a_remembered_card():
+    """A card whose OUR name went stale (no word shared with the wording) but whose CODEX name
+    matches the wording is not a lexically unrelated misclick — rescued silently."""
+    recalled = _human("GFRUIT", "Ovocie - Zlaté jablko pražené")
+    codex = _NamedCodex({"GFRUIT": "Rožok oravský 50g", "GROZ2": "Rožok cereálny 50g"})
+    d = dl_match.decide_item(ROLL, {"gtin": "NO_MATCH", "confidence": 0.2}, CONFLICT_CATALOG,
+                             recalled=recalled, codex=codex)
+    assert d.rule == "memory_rescue" and d.gtin == "GFRUIT"
+
+
 def test_without_a_codex_guard_the_ladder_is_unchanged():
     """Shadow / the e2e-dl corpus / a stale list pass no guard — byte-identical decisions."""
     d = dl_match.decide_item(ROLL, {"gtin": "GROZ", "confidence": 0.97}, CONFLICT_CATALOG)
