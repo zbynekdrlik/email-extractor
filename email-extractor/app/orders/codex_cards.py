@@ -43,7 +43,7 @@ from datetime import UTC, datetime, timedelta
 from html import escape
 from zoneinfo import ZoneInfo
 
-from . import dl_match, dl_snapshot
+from . import dl_match
 
 log = logging.getLogger("orders.codex_cards")
 
@@ -329,26 +329,6 @@ def check_card_code(conn, code, *texts: str, catalog=None, now=None) -> None:
         "codex": {"code": str(code), "missing": True,
                   "as_of": cards.as_of.isoformat() if cards.as_of else None,
                   "similar": similar}})
-
-
-def guard_new_dl_card(conn, gtin, *texts: str, now=None) -> None:
-    """The ONE gate for a brand-new DL card number (the board's Produkty „Nová karta" and the
-    inline „➕ Nová karta" on a dl_item question): a number CODEX lacks → `CodexRefusal`; a
-    number that already has a card → `CardRefused` with `existing` (upserting it would wipe the
-    card's mass/sklad/cena — a kg card losing sklad=100); a number of a card in the Kôš (hidden
-    by the loader's own rule) → `CardRefused` (a restore would bring back a wiped card)."""
-    catalog = dl_snapshot.dl_catalog_for_management(conn)
-    check_card_code(conn, gtin, *texts, catalog=catalog, now=now)
-    hit = next((r for r in catalog if str(r.get("gtin") or "") == str(gtin)), None)
-    if hit:
-        raise CardRefused({
-            "error": (f"Číslo položky {gtin} už má karta „{hit.get('name', '')}“ — nová karta "
-                      f"sa nezakladá, použi túto existujúcu."),
-            "existing": {"gtin": str(gtin), "name": hit.get("name", "")}})
-    if dl_snapshot.deleted_dl_card(conn, gtin):
-        raise CardRefused({
-            "error": (f"Číslo položky {gtin} patrí zmazanej karte — obnov ju na záložke Kôš "
-                      f"(nová karta by ju prepísala prázdnymi údajmi).")})
 
 
 def question_candidates(wording: str, catalog: list[dict], codex: CodexCards,

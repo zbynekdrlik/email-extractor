@@ -13,23 +13,13 @@ the leaf `audit.record` (spec §5).
 from __future__ import annotations
 
 from ...httpapi_common import _fold
-from ...orders import codex_cards, dl_snapshot, snapshot
+from ...orders import card_guard, codex_cards, dl_snapshot, snapshot
 from . import audit, catalog_aliases
 
 PAGE_SIZE = 50
 # #467: `?codex=issues` on Produkty sklad lists only the cards whose name drifted from CODEX's
 # or whose number CODEX has no stock card for.
 _CODEX_ISSUES = ("drift", "missing")
-
-
-class CardExists(Exception):
-    """A „Nová karta" (`new: true`) for a number that already has a card (→ 409 + `existing`)
-    — never a silent overwrite of its name/fields."""
-
-    def __init__(self, card: dict):
-        super().__init__(f"Číslo položky {card.get('gtin')} už má karta „{card.get('name', '')}“ "
-                         "— uprav tú kartu v zozname, nová sa nezakladá.")
-        self.card = card
 
 
 def _orders_upsert(conn, gtin, name, body):
@@ -145,9 +135,10 @@ def card_detail(conn, scope: str, gtin: str) -> dict | None:
 
 def upsert(conn, scope: str, body: dict, actor: str) -> dict:
     """Create or edit a card via the SAME snapshot machinery /znalosti uses, + an audit row.
-    Raises `ValueError` (→ 400) when gtin/name are missing, `CardExists` (→ 409) for an orders
-    `new: true` card whose number already has one, `codex_cards.CardRefused` (→ 409) for a DL
-    number CODEX lacks / already taken / in the Kôš."""
+    Raises `ValueError` (→ 400) when gtin/name are missing, `codex_cards.CardRefused` (→ 409)
+    for a `new: true` card whose number already has one (never an overwrite — the orders form
+    would clear the alias, the DL one mass/sklad/cena) and for a DL number `card_guard` / CODEX
+    refuses (leading zeros, CODEX lacks it, in the Kôš; an edit is CODEX-checked only)."""
     cfg = _scope(scope)
     gtin = str(body.get("gtin") or "").strip()
     name = str(body.get("name") or "").strip()
@@ -157,10 +148,10 @@ def upsert(conn, scope: str, body: dict, actor: str) -> dict:
     current = next((r for r in rows if r["gtin"] == gtin), None)
     existed = current is not None
     if body.get("new") and scope == "dl":
-        # #467: the ONE new-DL-card gate (CODEX + a number we have + a number in the Kôš)
-        codex_cards.guard_new_dl_card(conn, gtin, name)
+        # #467: the ONE new-DL-card gate (zeros, CODEX, a number we have, one in the Kôš)
+        card_guard.guard_new_dl_card(conn, gtin, name)
     elif body.get("new") and current is not None:
-        raise CardExists(current)
+        raise card_guard.taken(current)
     elif scope == "dl":
         # #467: an edit of a DL card whose number CODEX lacks is refused too (fail-open)
         codex_cards.check_card_code(conn, gtin, name, catalog=rows)

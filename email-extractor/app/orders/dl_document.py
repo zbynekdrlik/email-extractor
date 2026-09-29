@@ -221,8 +221,8 @@ def _ask_pending_lines(conn, message_id: str, supplier_decision, pending_asks: l
             conflict_gtins = [g for g in conflict_gtins if codex.has(g)]
         else:
             cands = dl_match.candidates(item.get("name", ""), catalog, memory_gtin=memory_gtin)
-        if conflict_gtins:
-            cands = dl_match.conflict_first(conflict_gtins, cands, catalog)
+        if conflict_gtins:   # the heads prefer the `cands` copies (#467: keep codex_name)
+            cands = dl_match.conflict_first(conflict_gtins, cands, cands + catalog)
         qid = teach.ask_dl_item(conn, message_id, supplier_decision.ean_edi,
                                 supplier_decision.name, item.get("name", ""),
                                 item.get("quantity"), item.get("unit", ""), cands,

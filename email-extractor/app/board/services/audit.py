@@ -183,6 +183,7 @@ def restore(conn, audit_id: int, by: str = "admin") -> bool:
     table_name, row_id, action, before, question_id = row
     qid = question_id if question_id is not None else row_id
     if action == "delete":
+        _refuse_dead_dl_code(conn, table_name, row_id)
         _restore_soft_delete(conn, table_name, row_id, undelete=True)
     elif action == "create":
         _restore_soft_delete(conn, table_name, row_id, undelete=False)
@@ -208,6 +209,19 @@ def restore(conn, audit_id: int, by: str = "admin") -> bool:
     record(conn, actor=by, table=table_name, row_id=row_id, action="restore",
            note=f"vrátené z audit #{audit_id}", question_id=question_id)
     return True
+
+
+def _refuse_dead_dl_code(conn, table_name, row_id) -> None:
+    """#467: un-deleting a DL card makes its number live again — a number CODEX has no stock
+    card for (the incident's 3698) must not come back (409). A missing/stale CODEX list passes
+    (fail-open). Lazy import keeps this module a leaf."""
+    if table_name != "dl_catalog_overrides" or row_id is None:
+        return
+    from ...orders import codex_cards
+    try:
+        codex_cards.check_card_code(conn, str(row_id))
+    except codex_cards.CardRefused as e:
+        raise RestoreError(409, str(e)) from e
 
 
 def _restore_soft_delete(conn, table_name, row_id, *, undelete: bool) -> None:

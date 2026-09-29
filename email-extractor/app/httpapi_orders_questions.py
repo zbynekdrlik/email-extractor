@@ -123,11 +123,11 @@ def _dl_card_refusal(deps: Deps, gtin: str, *texts: str, new: bool = False):
     pick) only the CODEX check: a pick of a code CODEX has no stock card for would teach a
     mapping that can never ship. The 409 carries `codex.similar` / `existing` for the board's
     one-click help; a missing/stale CODEX list passes (fail-open)."""
-    from .orders import codex_cards
+    from .orders import card_guard, codex_cards
     with deps.db() as c:
         try:
             if new:
-                codex_cards.guard_new_dl_card(c, gtin, *texts)
+                card_guard.guard_new_dl_card(c, gtin, *texts)
             else:
                 codex_cards.check_card_code(
                     c, gtin, *texts, catalog=dl_snapshot.dl_catalog_for_management(c))

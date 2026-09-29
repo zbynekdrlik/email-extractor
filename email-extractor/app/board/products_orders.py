@@ -72,9 +72,6 @@ def register(bp, deps) -> None:
                 res = catalog.upsert(c, scope, body, actor())
         except ValueError as e:
             return jsonify(error=str(e)), 400
-        except catalog.CardExists as e:
-            return jsonify(error=str(e), existing={"gtin": e.card.get("gtin"),
-                                                   "name": e.card.get("name", "")}), 409
         except codex_cards.CardRefused as e:   # #467: CODEX lacks it / taken / in the Kôš
             return jsonify(**e.payload), 409
         return jsonify(ok=True, **res)

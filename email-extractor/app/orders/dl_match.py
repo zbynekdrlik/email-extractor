@@ -641,8 +641,8 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
     "PARTNER ON THIS DOCUMENT" — R72's alias rescue checks the card's alias against tokens of
     THIS name, mirroring `match.py`'s customer-naming alias rung).
 
-    #467 `codex`: the live CODEX stock-card guard (`codex_cards.CodexCards`, anything with
-    `.has(code)`), or None — shadow / the e2e-dl corpus / a missing or stale list, where the
+    #467 `codex`: the live CODEX stock-card guard (`codex_cards.CodexCards`: `.has(code)` +
+    `.name_for(code)`), or None — shadow / the e2e-dl corpus / a missing or stale list, where the
     ladder is byte-identical. A card whose code CODEX has no stock card for can never ship
     (CODEX rejects the WHOLE delivery-note import), exactly like a #245 GTIN that overflows the
     DESADV field: a model pick of it is treated as "no card" (rule `codex_missing`, the code in

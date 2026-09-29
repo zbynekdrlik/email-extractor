@@ -985,8 +985,9 @@ def ask_dl_item(conn, message_id: str, supplier_ean: str, supplier_name: str, wo
     the doc ships PARTIAL without it instead of being held). The flag is stored on the payload
     so the answer supersedes the losing human answers (`_apply_dl_item`) and counts as the
     sklad's explicit confirmation (`dl_memory._board_confirmed`) — asked once, never a loop.
-    #467 `codex_missing=True` (the line's card has a code CODEX lacks) carries the SAME
-    board-settled semantics (`dl_item_conflict`); `keep` drops dead cards from a deduped one."""
+    #467 `codex_missing=True` (the line's card has a code CODEX lacks) shares the question-row
+    half (`dl_item_conflict`: supersede + undo + upgrade a deduped question, `keep` dropping dead
+    cards) but is NOT a standing confirmation in `dl_memory._board_confirmed`."""
     key = memory.item_key(wording)
     if not (message_id and supplier_ean and key):
         return None

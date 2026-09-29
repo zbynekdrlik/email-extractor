@@ -176,8 +176,12 @@ forever). Reusable rules:
     `POST /api/znalosti/dl-products`. The one-click pick sends `catalog_gtin` (OUR exact
     number), never the normalized CODEX code. „Nová karta" with a number we ALREADY have →
     409 `existing` (it used to UPSERT with blank mass/sklad/cena); with a number of a card
-    deleted to the Kôš → 409 „obnov ju na záložke Kôš"; Produkty „Nová karta" sends
-    `new: true` → `CardExists` 409 in BOTH scopes (the orders form would clear the alias).
+    deleted to the Kôš → 409 „obnov ju na záložke Kôš"; with leading zeros → 409 (CODEX
+    stores the code as a number — „0"+code would be a second card for one CODEX code). ONE gate
+    for both „Nová karta" paths: `app/orders/card_guard.guard_new_dl_card` (catalog rules live
+    there, CODEX rules in `codex_cards`). Produkty „Nová karta" sends `new: true` →
+    `card_guard.taken()` 409 in the orders scope too (the orders form would clear the alias).
+    The Kôš restore of a DL card whose code CODEX lacks → 409 (`audit._refuse_dead_dl_code`).
   - the questions tab keeps a refusal hint in `state.codexHints` and re-renders it on every
     refresh — a hint never freezes the 8 s refresh (only an open inline form does).
   - `/api/codex/cards` takes the token from the `X-Token` header ONLY (constant-time compare),
