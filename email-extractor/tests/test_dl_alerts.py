@@ -434,7 +434,7 @@ def test_format_grouped_builds_one_header_capped_lines_and_a_dashboard_link(pg):
     explanation), up to DISPLAY_ITEM_CAP short item lines, „…a N ďalších", and a dashboard
     action link — never 12 repeated explanation sentences (the pre-#336 3000-char wall)."""
     class Cfg:
-        dashboard_base_url = "http://46.224.130.35:8099/"
+        dashboard_base_url = "https://email-pz.newlevel.media/"
         ops_channel_id = 592
     for i in range(12):
         dl_alerts.enqueue(pg, 592, "human_processing_review",
@@ -449,7 +449,7 @@ def test_format_grouped_builds_one_header_capped_lines_and_a_dashboard_link(pg):
     assert "Nezaradené e-maily (12)" in html
     assert html.count("&#8226;") == dl_alerts.DISPLAY_ITEM_CAP, "cap displayed lines at 10"
     assert "a 2 ďalších" in html
-    assert 'href="http://46.224.130.35:8099"' in html   # trailing slash stripped
+    assert 'href="https://email-pz.newlevel.media"' in html   # trailing slash stripped
     # the explanation sentence appears ONCE (in the header), never repeated per item
     assert html.count("skontroluj ich na dashboarde") == 1
 
