@@ -243,6 +243,41 @@ SOFT_DELETE = [
 ]
 
 
+# #467 (revision 17): the CODEX stock-card list. CODEX rejects a WHOLE delivery-note import
+# when one DESADV line carries an EAN kód (NEANKOD) no stock card has (DL 126049732: code 3698,
+# which card 27 carried only 24.-28.9.). `tools/codex_cards_push.py` (dev2 systemd timer) reads
+# `raw.sm002` read-only from the codex-bridge DuckDB and POSTs the FULL list to
+# `POST /api/codex/cards`; `app/orders/codex_cards.py` REPLACES it atomically (a code that left
+# CODEX leaves here too — the incident class). One row per (code, stock card, stredisko, sklad)
+# — the same code can sit on several sklad rows of one card, and NEANKOD itself is not unique
+# across cards. `code` is the integer text of NEANKOD, exactly what our DL catalog `gtin` is.
+# `codex_card_syncs` is the append-only push ledger: `source_as_of` = when the codex-bridge ETL
+# loaded sm002 (the data age the staleness check measures), `synced_at` = when it arrived here.
+CODEX_STOCK_CARDS = [
+    """
+    CREATE TABLE IF NOT EXISTS codex_stock_cards (
+        code        TEXT NOT NULL,
+        card_code   TEXT NOT NULL DEFAULT '',
+        stredisko   INTEGER NOT NULL DEFAULT 0,
+        sklad       INTEGER NOT NULL DEFAULT 0,
+        name        TEXT NOT NULL DEFAULT '',
+        inactive    BOOLEAN NOT NULL DEFAULT false,
+        changed_at  TIMESTAMPTZ,
+        PRIMARY KEY (code, card_code, stredisko, sklad)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS codex_card_syncs (
+        id            BIGSERIAL PRIMARY KEY,
+        synced_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        source_as_of  TIMESTAMPTZ,
+        row_count     INTEGER NOT NULL,
+        code_count    INTEGER NOT NULL
+    )
+    """,
+]
+
+
 # SCHEMA above is FROZEN as revision 1 (the baseline). NEVER edit those statements for a
 # schema change — append a NEW numbered migrate.Revision to this list instead
 # (immutable-migrations, #269). run_migrations() applies only the unapplied revisions, in
@@ -297,6 +332,7 @@ REVISIONS = [
                      ADD_HELD_ORDERS_EXPIRED_RELEASE_REASON),
     migrate.Revision(15, "create_audit_log", AUDIT_LOG),
     migrate.Revision(16, "add_deleted_at_soft_delete", SOFT_DELETE),
+    migrate.Revision(17, "add_codex_stock_cards", CODEX_STOCK_CARDS),
 ]
 
 

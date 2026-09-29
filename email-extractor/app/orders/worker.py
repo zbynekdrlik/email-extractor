@@ -407,6 +407,10 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None, connect=None) -
                 # discipline confirm.sweep above already uses (shadow/n8n modes never
                 # write to messages the way this sweep's own query expects).
                 dl_worker.stuck_classified_sweep(conn, cfg)
+                # #467: the CODEX stock-card list is missing/stale → the card-code checks fail
+                # OPEN; this raises ONE ops alert for it (durable outbox, once per morning).
+                from . import codex_cards
+                codex_cards.stale_sweep(conn, cfg)
             handled = tick(conn, cfg, pipeline=pipeline)
             handled = static_worker.tick(conn, cfg) or handled
             # #204: shadow ALSO needs a tick (it never claims, but it does need to be

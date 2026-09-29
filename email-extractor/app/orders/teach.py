@@ -992,8 +992,10 @@ def ask_dl_item(conn, message_id: str, supplier_ean: str, supplier_name: str, wo
         if recalled is not None and recalled.human:
             return None
     # #465: the card alias rides along so the board's lexical misclick check sees it too.
+    # #467: so does the CODEX name of a card whose OUR name drifted from CODEX's.
     options = [{"value": str(c.get("gtin")), "label": c.get("name") or str(c.get("gtin")),
-                **({"alias": c["doplnok"]} if c.get("doplnok") else {})}
+                **({"alias": c["doplnok"]} if c.get("doplnok") else {}),
+                **({"codex_name": c["codex_name"]} if c.get("codex_name") else {})}
               for c in (candidates or [])]
     payload = {"supplier_ean": supplier_ean, "supplier_name": supplier_name or "",
                "quantity": quantity, "unit": unit or "ks"}

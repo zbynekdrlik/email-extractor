@@ -616,12 +616,27 @@ def _memory_conflict_note(item_name: str, rec_card: dict, llm_card: dict | None,
             "a do ORIONu nejde, kým to nepotvrdíš.")
 
 
+def _codex_missing_note(card_name: str, gtin: str) -> str:
+    return (f"Karta „{card_name}“ (kód {gtin}) v CODEXe neexistuje — žiadna skladová karta "
+            "nemá tento EAN kód, takže CODEX by celý dodací list pri importe odmietol. Vyber "
+            "správnu kartu (ponúkame len karty, ktoré CODEX má) alebo pošli bez tejto položky.")
+
+
 def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
-                partner_name: str = "") -> Decision:
+                partner_name: str = "", codex=None) -> Decision:
     """R70-R76's post-match gate ladder. `recalled` is a `dl_memory.Recalled` (or `None`) — see
     `dl_memory.resolve()` (R66); `partner_name` is the ALREADY-matched supplier's name (R67's
     "PARTNER ON THIS DOCUMENT" — R72's alias rescue checks the card's alias against tokens of
-    THIS name, mirroring `match.py`'s customer-naming alias rung)."""
+    THIS name, mirroring `match.py`'s customer-naming alias rung).
+
+    #467 `codex`: the live CODEX stock-card guard (`codex_cards.CodexCards`, anything with
+    `.has(code)`), or None — shadow / the e2e-dl corpus / a missing or stale list, where the
+    ladder is byte-identical. A card whose code CODEX has no stock card for can never ship
+    (CODEX rejects the WHOLE delivery-note import), exactly like a #245 GTIN that overflows the
+    DESADV field: a model pick of it is treated as "no card" (rule `codex_missing`, the code in
+    the note → the live #365 hold + question), and a memory of it is never rescued — while a
+    memory of a VALID card still rescues, which is what makes the sklad's board answer ship on
+    the reprocess instead of looping on the model's invalid pick."""
     item_name = apply_ocr_fix(item_name)
     raw_conf = llm.get("matchConfidence")
     if raw_conf is None:
@@ -656,6 +671,18 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
                    llm_card["name"], llm_gtin, len(llm_gtin), GTIN_FIELD_WIDTH)
         llm_gtin, llm_card = None, None
 
+    # #467: a card CODEX has no stock card for is as unshippable as an overflowing one —
+    # capture it for the note/trace, then treat the pick as "no card" (R73 may still rescue a
+    # VALID remembered card below; nothing else can resurrect this one).
+    codex_missing = None
+    if (codex is not None and llm_card is not None and llm_gtin is not None
+            and not codex.has(llm_gtin)):
+        codex_missing = {"gtin": llm_gtin, "card": llm_card["name"]}
+        log.warning("dl codex missing: %r -> card %r code %s has no CODEX stock card — "
+                    "never shipping it, asking the warehouse", item_name, llm_card["name"],
+                    llm_gtin)
+        llm_gtin, llm_card = None, None
+
     ordered_w = mass_grams(item_name)
     card_w = mass_grams((llm_card or {}).get("name", "")) if llm_card else None
     weight_conflict = _weights_disagree(ordered_w, card_w)
@@ -671,6 +698,8 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
             "gtin": recalled.gtin, "unanimous": recalled.unanimous,
             "weight_override": recalled.weight_override, "note": recalled.note},
     }
+    if codex_missing:
+        trace["codex_missing"] = codex_missing
 
     def done(rule, gtin, card, mass, confidence, note, review=False) -> Decision:
         trace["rule"] = rule
@@ -704,6 +733,11 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
                        "LIN field is %d — cannot ship, routing to review", item_name,
                        rec_card["name"], recalled.gtin, len(str(recalled.gtin)),
                        GTIN_FIELD_WIDTH)
+            rec_card = None
+        # #467: never resurrect a remembered card whose code CODEX has no stock card for.
+        if rec_card and codex is not None and not codex.has(recalled.gtin):
+            log.warning("dl memory rescue skipped: %r card %r code %s has no CODEX stock "
+                        "card", item_name, rec_card["name"], recalled.gtin)
             rec_card = None
         conflict = (_memory_conflict(item_name, recalled, rec_card, llm_gtin)
                     if rec_card else [])
@@ -747,6 +781,10 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
                     f"(kandidát „{llm_card['name']}“).")
 
     if not llm_gtin:
+        if codex_missing:
+            return done("codex_missing", None, "", 0.0, conf,
+                        _codex_missing_note(codex_missing["card"], codex_missing["gtin"]),
+                        review=True)
         if gtin_overflow_card:
             # #246: if the overflowing code is a VALID GTIN-14, hand the warehouse its
             # computed 13-digit GS1 sibling to verify in CODEX — the exact manual step the

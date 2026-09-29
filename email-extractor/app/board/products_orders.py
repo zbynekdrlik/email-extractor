@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from flask import jsonify, request
 
+from ..orders import codex_cards
 from . import products_dl
 from .auth import actor
 from .services import catalog, catalog_aliases
@@ -40,12 +41,13 @@ def register(bp, deps) -> None:
             page = 0
         try:
             with deps.db() as c:
-                res = catalog.list_products(c, scope=scope, q=q, page=page)
+                res = catalog.list_products(c, scope=scope, q=q, page=page,
+                                            codex=request.args.get("codex", ""))
         except ValueError as e:
             return jsonify(error=str(e)), 400
         res["meta"] = {"scope": scope, "page": res.pop("page"),
                        "page_size": res.pop("page_size"), "total": res.pop("total"),
-                       "has_more": res.pop("has_more"),
+                       "has_more": res.pop("has_more"), "codex": res.pop("codex"),
                        "fields": _FIELDS.get(scope, []), "alias": _ALIAS.get(scope, {})}
         return jsonify(**res)
 
@@ -70,6 +72,11 @@ def register(bp, deps) -> None:
                 res = catalog.upsert(c, scope, body, actor())
         except ValueError as e:
             return jsonify(error=str(e)), 400
+        except catalog.CardExists as e:
+            return jsonify(error=str(e), existing={"gtin": e.card.get("gtin"),
+                                                   "name": e.card.get("name", "")}), 409
+        except codex_cards.CodexRefusal as e:   # #467: a DL number CODEX has no card for
+            return jsonify(**e.payload), 409
         return jsonify(ok=True, **res)
 
     @bp.delete("/api/board/products/<gtin>")

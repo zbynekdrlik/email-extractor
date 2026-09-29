@@ -93,7 +93,10 @@ def provenance_stats_for_day(conn, day: str = "") -> dict:
 # dl_match.py's own review-worthy rule names (mirrors pipeline.ASK_THE_WAREHOUSE, but a
 # DIFFERENT rule vocabulary — DL's `llm_sure` would otherwise collide with orders' own
 # rule of the same name, see the module docstring's #204 section).
-DL_ASK_THE_WAREHOUSE = ("unmatched", "llm_borderline", "llm_sure_lexical_gap")
+# #465 `memory_conflict` / #467 `codex_missing` leave the line cardless and ASK the warehouse
+# too — without them here they fell into the subtraction-computed "deterministic" bucket.
+DL_ASK_THE_WAREHOUSE = ("unmatched", "llm_borderline", "llm_sure_lexical_gap",
+                        "memory_conflict", "codex_missing")
 
 
 def dl_provenance_stats_for_day(conn, day: str = "",

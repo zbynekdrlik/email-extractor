@@ -394,6 +394,25 @@ def register(app: Flask, deps: Deps) -> dict:
         name = str(ni.get("name") or "").strip()
         if not name:
             return jsonify(error="chýba názov"), 400
+        # #467: never create a card whose number CODEX has no stock card for (CODEX would
+        # reject every delivery note carrying it — the 3698 incident began right here); the
+        # 409 names CODEX cards with a similar name + their code. And never OVERWRITE a card
+        # we already have: `upsert_dl_catalog_card`'s defaults would wipe its mass/sklad/cena
+        # (a kg-tracked card silently losing sklad=100) — the sklad picks the existing card.
+        from .orders import codex_cards
+        with deps.db() as cchk:
+            catalog = dl_snapshot.dl_catalog_for_management(cchk)
+            try:
+                codex_cards.check_card_code(cchk, gtin, name, q.get("wording", ""),
+                                            catalog=catalog)
+            except codex_cards.CodexRefusal as e:
+                return jsonify(**e.payload), 409
+        hit = next((r for r in catalog if str(r.get("gtin") or "") == gtin), None)
+        if hit:
+            return jsonify(
+                error=f"Číslo položky {gtin} už má karta „{hit.get('name', '')}“ — nová karta "
+                      f"sa nezakladá, vyber túto (Použiť kartu).",
+                existing={"gtin": gtin, "name": hit.get("name", "")}), 409
         with deps.db_tx() as c:
             dl_snapshot.upsert_dl_catalog_card(c, gtin, name)
             dl_snapshot.dl_rebuild_from_overrides(c)
@@ -535,6 +554,18 @@ def register(app: Flask, deps: Deps) -> dict:
                     res = dl_worker.close_message_sklad_unknown(c, qid)
                 return jsonify(ok=True, sklad_unknown=True, closed=res.get("closed", 0))
             return jsonify(ok=True, question=q, released=[])
+        # #467: a dl_item pick (an offered candidate OR a free/search catalog code) whose code
+        # CODEX has no stock card for would teach a mapping that can never ship — refused with
+        # the similar CODEX cards. "Pošli bez tejto položky" is no card at all: never checked.
+        if q.get("kind") == "dl_item" and choice != teach.DL_ITEM_SHIP_WITHOUT:
+            from .orders import codex_cards
+            with deps.db() as cchk:
+                try:
+                    codex_cards.check_card_code(
+                        cchk, choice, q.get("wording", ""),
+                        catalog=dl_snapshot.dl_catalog_for_management(cchk))
+                except codex_cards.CodexRefusal as e:
+                    return jsonify(**e.payload), 409
         # Same split as the item/customer branches above (review finding on PR #116,
         # reused here): the answer itself commits in its own transaction; `apply` (which
         # for `date` releases a held order — a REAL external upload) runs afterward on an

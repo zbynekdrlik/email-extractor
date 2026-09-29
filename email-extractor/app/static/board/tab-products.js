@@ -5,6 +5,8 @@
 // create/update/delete delegate to /api/board/products* (which delegate to the real
 // snapshot/dl_snapshot + memory machinery). No HTML strings — all nodes via ui.js `el()`.
 // Refresh-safety: an OPEN editor (or the focused search box) is never wiped by the refresh.
+// #467 (Produkty sklad): a card number CODEX has no stock card for is refused by the server —
+// the editor then lists CODEX cards with a similar name + code; drifted names get a badge.
 import { apiDelete, apiGet, apiPost, clear, debounce, el, toast } from "./ui.js";
 
 const main = document.getElementById("board-main");
@@ -16,8 +18,13 @@ const newBtn = document.getElementById("p-new");
 const prevBtn = document.getElementById("p-prev");
 const nextBtn = document.getElementById("p-next");
 const pageInfo = document.getElementById("p-pageinfo");
+// #467: Produkty sklad only — the CODEX stock-card list status + the "only CODEX mismatches"
+// filter (drifted name / number CODEX has no stock card for).
+const codexFilterEl = document.querySelector(".p-codex-filter");
+const codexIssuesEl = document.getElementById("p-codex-issues");
+const codexStatusEl = document.getElementById("p-codex-status");
 
-const state = { q: "", page: 0, meta: {} };
+const state = { q: "", page: 0, meta: {}, codexIssues: false };
 
 function editingOpen() {
   if (searchEl && document.activeElement === searchEl) return true;
@@ -29,10 +36,98 @@ function editingOpen() {
   return false;
 }
 
-function upsert(body) {
-  return apiPost(`/products?scope=${SCOPE}`, body)
-    .then(() => { toast("Uložené"); load(); })
-    .catch((e) => toast(e.message, { error: true }));
+// Resolves true when saved. A refusal that carries structured help (#467: `codex.similar` — the
+// number is not a CODEX stock card; `existing` — the number already has a card) is rendered
+// into the editor that sent it, so the editor (and what was typed) stays open.
+async function upsert(body, ed = null, gtinIn = null) {
+  try {
+    await apiPost(`/products?scope=${SCOPE}`, body);
+    toast("Uložené");
+    load();
+    return true;
+  } catch (e) {
+    if (ed && e.data && (e.data.codex || e.data.existing)) codexHint(ed, e.data, gtinIn);
+    toast(e.message, { error: true });
+    return false;
+  }
+}
+
+// ---- #467: CODEX help inside an editor --------------------------------------------
+function findCard(ed, code) {
+  if (ed.classList.contains("p-new-editor")) ed.remove();
+  if (searchEl) searchEl.value = code;
+  state.q = code;
+  state.page = 0;
+  load();
+}
+
+function codexHint(ed, data, gtinIn) {
+  const old = ed.querySelector(".p-codex-hint");
+  if (old) old.remove();
+  const rows = [];
+  if (data.existing) {
+    rows.push(el("div", { class: "p-codex-row" }, [
+      el("span", {}, `${data.existing.gtin} — ${data.existing.name}`),
+      el("button", { class: "p-btn p-codex-find", type: "button", "data-code": data.existing.gtin,
+        onclick: () => findCard(ed, data.existing.gtin) }, "Nájsť kartu v zozname"),
+    ]));
+  }
+  const similar = (data.codex && data.codex.similar) || [];
+  for (const s of similar) {
+    let btn = null;
+    if (s.in_catalog) {
+      btn = el("button", { class: "p-btn p-codex-find", type: "button", "data-code": s.code,
+        onclick: () => findCard(ed, s.code) }, "Nájsť kartu v zozname");
+    } else if (gtinIn) {
+      btn = el("button", { class: "p-btn p-codex-use", type: "button", "data-code": s.code,
+        onclick: () => {
+          gtinIn.value = s.code;
+          const nameIn = ed.querySelector(".p-name");
+          if (nameIn && !nameIn.value.trim()) nameIn.value = s.name;
+        } }, "Použiť kód");
+    }
+    const ours = s.in_catalog ? ` (u nás: ${s.catalog_name})` : "";
+    rows.push(el("div", { class: "p-codex-row" }, [
+      el("span", {}, `${s.code} — ${s.name}${ours}`), btn]));
+  }
+  if (data.codex && !similar.length) {
+    rows.push(el("div", { class: "p-codex-row" },
+      "V CODEXe sme nenašli kartu s podobným názvom — skontroluj EAN kód karty v CODEXe."));
+  }
+  ed.appendChild(el("div", { class: "p-codex-hint" }, [
+    el("div", { class: "p-codex-msg" }, data.error || ""), ...rows]));
+}
+
+function codexBadge(card) {
+  const cx = card.codex || {};
+  if (cx.status === "drift") {
+    return el("span", { class: "p-codex p-codex--drift",
+      title: "Názov karty v CODEXe je iný — skontroluj, či je to tá istá karta" },
+    `CODEX: ${cx.name}`);
+  }
+  if (cx.status === "missing") {
+    return el("span", { class: "p-codex p-codex--missing",
+      title: "CODEX nemá skladovú kartu s týmto EAN kódom — dodací list s ňou odmietne" },
+    "⚠ kód v CODEXe neexistuje");
+  }
+  return null;
+}
+
+function renderCodexStatus() {
+  if (SCOPE !== "dl") return;
+  const m = state.meta.codex || {};
+  if (codexFilterEl) codexFilterEl.hidden = false;
+  if (!codexStatusEl) return;
+  codexStatusEl.hidden = false;
+  codexStatusEl.classList.toggle("is-warn", !m.active);
+  if (m.never) {
+    codexStatusEl.textContent = "Zoznam kariet z CODEXu ešte neprišiel — kontrola kódov je vypnutá";
+  } else if (m.stale) {
+    codexStatusEl.textContent =
+      `⚠ Zoznam kariet z CODEXu je zastaraný (stav k ${m.as_of_local}) — kontrola kódov je vypnutá`;
+  } else {
+    codexStatusEl.textContent = `Karty z CODEXu: stav k ${m.as_of_local} (${m.codes} kódov)`;
+  }
 }
 
 // build the scope's field inputs (name + doplnok [+ mass/sklad/cena for DL]) from meta.fields.
@@ -61,6 +156,7 @@ function row(card) {
   box.appendChild(el("div", { class: "p-row-head" }, [
     el("span", { class: "p-gtin-label" }, card.gtin),
     el("span", { class: "p-name-label" }, card.name || ""),
+    codexBadge(card),
     el("span", { class: "p-extra" }, extra ? `doplnok: ${extra}` : "—"),
     el("button", { class: "p-btn p-edit", type: "button",
       onclick: () => toggleEditor(box, card) }, "Upraviť"),
@@ -82,9 +178,15 @@ function toggleEditor(box, card) {
 function buildEditor(card) {
   const { inputs, rows } = fieldInputs(card);
   const ed = el("div", { class: "p-editor" }, rows);
+  const cx = card.codex || {};
   ed.appendChild(el("div", { class: "p-editor-actions" }, [
     el("button", { class: "p-btn p-btn--primary p-save", type: "button",
-      onclick: () => upsert(collect(card.gtin, inputs)) }, "Uložiť"),
+      onclick: () => upsert(collect(card.gtin, inputs), ed) }, "Uložiť"),
+    // #467: one click takes CODEX's name for a card whose name drifted (then „Uložiť").
+    cx.status === "drift" && inputs.name
+      ? el("button", { class: "p-btn p-codex-take", type: "button",
+        onclick: () => { inputs.name.value = cx.name; } }, "Prevziať názov z CODEXu")
+      : null,
     el("button", { class: "p-btn p-del", type: "button",
       onclick: () => confirmDelete(ed, card.gtin) }, "Zmazať"),
   ]));
@@ -168,10 +270,12 @@ function newCard() {
     el("label", { class: "p-field" }, ["Číslo položky ", gtinIn]),
     ...rows,
     el("div", { class: "p-editor-actions" }, [
-      el("button", { class: "p-btn p-btn--primary p-save", type: "button", onclick: () => {
+      el("button", { class: "p-btn p-btn--primary p-save", type: "button", onclick: async () => {
         const gtin = gtinIn.value.trim();
         if (!gtin) { toast("Zadaj číslo položky", { error: true }); return; }
-        upsert(collect(gtin, inputs)).then(() => ed.remove());
+        // `new: true` — a number that already has a card is refused (never overwritten); the
+        // editor stays open on any refusal so the hint + what was typed are not lost (#467).
+        if (await upsert({ ...collect(gtin, inputs), new: true }, ed, gtinIn)) ed.remove();
       } }, "Uložiť"),
       el("button", { class: "p-btn", type: "button", onclick: () => ed.remove() }, "Zrušiť"),
     ]),
@@ -185,8 +289,10 @@ async function load() {
   try {
     const params = new URLSearchParams({ scope: SCOPE, page: String(state.page) });
     if (state.q) params.set("q", state.q);
+    if (SCOPE === "dl" && state.codexIssues) params.set("codex", "issues");
     const data = await apiGet(`/products?${params.toString()}`);
     state.meta = data.meta || {};
+    renderCodexStatus();
     clear(listEl);
     const items = data.items || [];
     emptyEl.hidden = items.length > 0;
@@ -213,6 +319,11 @@ if (searchEl) {
   }, 300));
 }
 if (newBtn) newBtn.addEventListener("click", newCard);
+if (codexIssuesEl) {
+  codexIssuesEl.addEventListener("change", () => {
+    state.codexIssues = codexIssuesEl.checked; state.page = 0; load();
+  });
+}
 if (prevBtn) prevBtn.addEventListener("click", () => {
   if (state.page > 0) { state.page -= 1; load(); }
 });

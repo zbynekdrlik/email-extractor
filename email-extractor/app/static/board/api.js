@@ -22,6 +22,7 @@ async function request(path, { method = "GET", body = null } = {}) {
     const msg = (data && data.error) || `Chyba servera (${resp.status})`;
     const err = new Error(msg);
     err.status = resp.status;
+    err.data = data; // #467: a 409 carries structured help (codex.similar / existing)
     throw err;
   }
   return data;

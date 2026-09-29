@@ -7,6 +7,12 @@
     <input id="p-search" class="p-search" type="search" autocomplete="off"
            placeholder="Hľadať (číslo položky, názov, doplnok, alias…)">
     <button id="p-new" class="p-btn p-btn--primary" type="button">➕ Nová karta</button>
+    {# #467 (Produkty sklad only — tab-products.js hides it for the orders scope): the CODEX
+       stock-card list status + a filter to the cards whose name/number disagrees with CODEX. #}
+    <label class="p-codex-filter" hidden>
+      <input id="p-codex-issues" type="checkbox"> Len rozdiely s CODEXom
+    </label>
+    <span id="p-codex-status" class="p-codex-status" hidden></span>
   </div>
   <div id="p-list" class="p-list" aria-live="polite"></div>
   <p id="p-empty" class="p-empty" hidden>Žiadne karty v tomto filtri.</p>
