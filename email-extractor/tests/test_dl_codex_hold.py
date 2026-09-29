@@ -247,9 +247,10 @@ def _rename_good_card(pg, name):
 def test_the_answer_is_honoured_on_later_deliveries_even_when_names_share_no_word(
         pg, tmp_path, monkeypatch):
     """Review 🟡: the drifted-name case this ticket targets — OUR name for the valid card
-    shares no word with the wording („Bagetka kečupová" vs „Rožok so slaninou…"). The sklad's
-    answer on the codex question must count as the board's explicit confirmation, or the next
-    delivery trips the #465 lexical-gap conflict and is held AGAIN with a second question."""
+    shares no word with the wording („Bagetka kečupová" vs „Rožok so slaninou…"). The next
+    delivery must not trip the #465 lexical-gap conflict and be held AGAIN: the card's CODEX
+    name counts for the lexical check (a codex answer itself is NOT a standing confirmation —
+    see the misclick test below)."""
     _snapshot(pg)
     _rename_good_card(pg, "Bagetka kečupová 80 gr")
     _codex(pg)
@@ -321,6 +322,22 @@ def test_an_older_open_question_the_codex_ask_dedupes_onto_is_upgraded(pg, tmp_p
     assert values[0] == G_GOOD and G_BAD not in values
     assert "CODEX" in reason and reason != "stará otázka"
     assert teach.get(pg, qid0)["payload"].get("codex_missing") is True
+
+
+def test_a_memory_conflict_question_keeps_the_codex_name_on_its_head_cards(pg, tmp_path):
+    """Review 3 🔵: the conflicting cards put first on a #465 question must keep the CODEX
+    name of a drifted card (the board shows it and its misclick check uses it)."""
+    _snapshot(pg)
+    _rename_good_card(pg, "Bagetka kečupová 80 gr")
+    _codex(pg)
+    dl_memory.remember(pg, SUPPLIER_EAN, ROLL, G_GOOD, "Bagetka kečupová 80 gr", "2026-09-08",
+                       source="human")
+    dl_memory.remember(pg, SUPPLIER_EAN, ROLL, G_BREAD, BREAD_CARD, "2026-09-09",
+                       source="human")
+    _run(pg, tmp_path, "dl1", _doc("0100000218"), roll_pick=G_BAD)
+    cands = _open_questions(pg)[0][2]
+    good = next(c for c in cands if c["value"] == G_GOOD)
+    assert good.get("codex_name") == GOOD_CARD_CODEX
 
 
 def test_the_hold_message_tells_the_sklad_to_delete_the_dead_card(pg, tmp_path):

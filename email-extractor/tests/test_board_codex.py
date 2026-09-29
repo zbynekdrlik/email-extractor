@@ -275,6 +275,42 @@ def test_the_produkty_new_card_refuses_a_deleted_cards_number_too(pg):
     assert row[:3] == ("Múka pšeničná T650", True, "100") and float(row[3]) == 0.37
 
 
+def test_a_new_card_number_with_leading_zeros_is_refused_never_a_duplicate(pg):
+    """Review 3 🔵: CODEX stores NEANKOD as a number (no leading zeros) — „0" + an existing
+    code passed the CODEX check (normalized) but not the exact-string taken check, leaving a
+    DUPLICATE card for one CODEX code without sklad/cena. Refused, in both „Nová karta" paths."""
+    _base(pg)
+    _codex(pg)
+    _seed(pg, G_MUKA, "Múka pšeničná T650", sklad="100", cena=0.37)
+    c = _client()
+    r = c.post("/api/board/products?scope=dl", json={
+        "gtin": "0" + G_MUKA, "name": "Múka", "new": True})
+    assert r.status_code == 409 and G_MUKA in r.get_json()["error"]
+    qid = _question(pg)
+    r = c.post(f"/api/board/questions/{qid}/answer", json={"new_item": {
+        "gtin": "0" + G_MUKA, "name": "Múka"}})
+    assert r.status_code == 409
+    assert pg.execute("SELECT count(*) FROM dl_catalog_overrides WHERE gtin=%s",
+                      ("0" + G_MUKA,)).fetchone()[0] == 0
+
+
+def test_restoring_a_deleted_card_whose_code_codex_lacks_is_refused(pg):
+    """Review 3 🔵: the Kôš restore is the one other way a DL card number goes live again — a
+    dead code (the incident's 3698, deleted by the sklad) must not come back."""
+    _base(pg)
+    _codex(pg)
+    _seed(pg, "3698", "Rožok so slaninou a syrom 70g")
+    c = _client()
+    c.post("/login", data={"password": "secret"})
+    assert c.delete("/api/board/products/3698?scope=dl").status_code == 200
+    aid = pg.execute("SELECT id FROM audit_log WHERE table_name='dl_catalog_overrides' "
+                     "AND row_id='3698' AND action='delete'").fetchone()[0]
+    r = c.post(f"/api/board/audit/{aid}/restore")
+    assert r.status_code == 409 and "3698" in r.get_json()["error"]
+    assert pg.execute("SELECT retired FROM dl_catalog_overrides WHERE gtin='3698'"
+                      ).fetchone()[0] is True
+
+
 def test_a_refused_free_pick_is_not_added_to_the_offered_cards(pg):
     """Review 🔵: the CODEX check runs BEFORE the free/search pick is legitimised, so a refused
     dead code never lingers as an offered button on the question."""
