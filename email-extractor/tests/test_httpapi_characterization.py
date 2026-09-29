@@ -119,6 +119,8 @@ EXPECTED_ROUTES = sorted([
     # #342: the codex-bridge push endpoint (machine X-Token auth) — a legitimate NEW route,
     # not a #268 code-move; added here in the same commit that registers it.
     (("POST",), "/api/codex/orders"),
+    # #467: the CODEX stock-card list push (same machine X-Token auth, full replace).
+    (("POST",), "/api/codex/cards"),
     (("GET",), "/api/fix-queue"),
     (("POST",), "/api/fix/<int:fid>/resolve"),
     (("GET",), "/api/imap-failures"),

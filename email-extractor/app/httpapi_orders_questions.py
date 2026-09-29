@@ -116,6 +116,26 @@ def _classify_manual_target(conn, qid: int):
 _UNSET = object()
 
 
+def _dl_card_refusal(deps: Deps, gtin: str, *texts: str, new: bool = False):
+    """#467: the 409 response for a DL card number the board must not use, else None. `new`
+    (the inline „➕ Nová karta") runs the ONE new-card gate — CODEX lacks it / we already have
+    it (never overwritten: blank mass/sklad/cena) / it is in the Kôš; otherwise (a dl_item
+    pick) only the CODEX check: a pick of a code CODEX has no stock card for would teach a
+    mapping that can never ship. The 409 carries `codex.similar` / `existing` for the board's
+    one-click help; a missing/stale CODEX list passes (fail-open)."""
+    from .orders import card_guard, codex_cards
+    with deps.db() as c:
+        try:
+            if new:
+                card_guard.guard_new_dl_card(c, gtin, *texts)
+            else:
+                codex_cards.check_card_code(
+                    c, gtin, *texts, catalog=dl_snapshot.dl_catalog_for_management(c))
+        except codex_cards.CardRefused as e:
+            return jsonify(**e.payload), 409
+    return None
+
+
 def register(app: Flask, deps: Deps) -> dict:
     @app.get("/api/orders/questions")
     def api_orders_questions():
@@ -394,6 +414,9 @@ def register(app: Flask, deps: Deps) -> dict:
         name = str(ni.get("name") or "").strip()
         if not name:
             return jsonify(error="chýba názov"), 400
+        refused = _dl_card_refusal(deps, gtin, name, q.get("wording", ""), new=True)  # #467
+        if refused:
+            return refused
         with deps.db_tx() as c:
             dl_snapshot.upsert_dl_catalog_card(c, gtin, name)
             dl_snapshot.dl_rebuild_from_overrides(c)
@@ -503,6 +526,12 @@ def register(app: Flask, deps: Deps) -> dict:
         # Mirrors what `_api_orders_answer_customer` already does for its OWN search box
         # (legitimise server-side before validating) — scoped to the two DL kinds only;
         # mail/date/line have no search box and keep the strict offered-only check as-is.
+        # #467: checked BEFORE a free/search pick is legitimised (a dead code never lingers as
+        # an offered button); „pošli bez nej" / a blank „Neviem" are no card — never checked.
+        if q.get("kind") == "dl_item" and choice and choice != teach.DL_ITEM_SHIP_WITHOUT:
+            refused = _dl_card_refusal(deps, choice, q.get("wording", ""))
+            if refused:
+                return refused
         offered = {str(c.get("value")) for c in (q.get("candidates") or [])}
         if choice and choice not in offered and q.get("kind") in ("dl_supplier", "dl_item"):
             with deps.db() as clook:

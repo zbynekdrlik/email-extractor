@@ -307,7 +307,10 @@ def _board_confirmed(conn, supplier_ean: str, item: str, gtin: str, message_id: 
     memory-conflict question (`payload.memory_conflict`, both cards were on screen) OR a
     question of the very message being matched now (the reprocess right after the answer).
     A plain answer from ANOTHER message never counts — that is exactly the q189 misclick,
-    which must not keep shipping silently on every later delivery."""
+    which must not keep shipping silently on every later delivery. #467: a `codex_missing`
+    question is deliberately NOT a standing confirmation either (it is just a list of cards,
+    a misclick there must be caught the same way); its drifted-name case is covered by the
+    CODEX name counting for the R73 lexical check instead (`dl_match._memory_conflict`)."""
     row = conn.execute(
         """SELECT answer->>'choice' FROM order_questions
             WHERE kind = 'dl_item' AND status = 'answered' AND customer_ean = ''

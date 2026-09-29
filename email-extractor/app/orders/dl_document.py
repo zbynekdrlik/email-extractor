@@ -5,6 +5,7 @@ import logging
 from datetime import UTC, datetime
 
 from . import (
+    codex_cards,
     desadv,
     desadv_edi,
     dl_alerts,
@@ -125,6 +126,18 @@ def _hold_review_reason(item_names: list[str]) -> str:
             f"potvrdíš „pošli bez tejto položky“), aby doklad odišiel KOMPLETNÝ: {listed}.")
 
 
+def _codex_hold_reason(item_names: list[str]) -> str:
+    """#467: the ❗ body for a document HELD because a line matched a card whose code CODEX has
+    no stock card for — CODEX would reject the WHOLE delivery note on import (DL 126049732,
+    code 3698). Nothing was uploaded; the sklad picks the right card on the board."""
+    n = len(item_names)
+    listed = ", ".join(name for name in item_names if name) or "neznáme položky"
+    return (f"Dodací list má {n} položku/y na karte, ktorej kód v CODEXe neexistuje — CODEX "
+            f"by celý dodací list pri importe odmietol, preto sa NEnahráva do ORIONu, kým na "
+            f"nástenke nevyberieš správnu kartu (alebo nepotvrdíš „pošli bez tejto položky“): "
+            f"{listed}. Kartu s neplatným kódom potom zmaž v Produkty sklad.")
+
+
 def _mass_hold_reason(item_names: list[str]) -> str:
     """#462: the ❗ body for a document HELD because a kg-tracked card has no known
     per-piece mass and the delivery is in pieces — a guessed value would ship a silent xN
@@ -161,6 +174,66 @@ def _needs_piece_mass(item: dict) -> bool:
     if unit == "kg" or desadv_edi._is_ton_unit(item.get("unit")):
         return False
     return True
+
+
+def _codex_guard(conn, shadow: bool, catalog: list[dict]):
+    """#467: `(codex, catalog_gtins)` for one document. `codex` is the live CODEX stock-card
+    guard — None (checks OFF) in shadow (the e2e-dl corpus measures MATCHING, never a live ship
+    policy) and when the pushed list is missing/stale (fail-open: `codex_cards.live_guard` warns,
+    the worker's `stale_sweep` alerts ops). A card whose code CODEX lacks is not a real card for
+    memory recall or the ask pre-check either (`catalog_gtins`): a human answer that taught such
+    a code must neither rescue nor block re-asking the line."""
+    catalog_gtins = {str(c.get("gtin")) for c in catalog}
+    codex = None if shadow else codex_cards.live_guard(conn)
+    if codex is not None:
+        catalog_gtins = {g for g in catalog_gtins if codex.has(g)}
+    return codex, catalog_gtins
+
+
+def _held_reason(held_items: list[dict], codex_held_items: list[dict],
+                 mass_hold_items: list[dict]) -> tuple[str, list[str]]:
+    """The ONE ❗ review body for a HELD document + the held line names: #365 unmatched lines,
+    #467 lines on a card whose code CODEX lacks, #462 kg-tracked lines with no per-piece mass —
+    a document carrying several kinds is held once with every reason."""
+    names = [[i.get("name", "") for i in items]
+             for items in (held_items, codex_held_items, mass_hold_items)]
+    reasons = [fn(n) for fn, n in zip((_hold_review_reason, _codex_hold_reason,
+                                        _mass_hold_reason), names, strict=True) if n]
+    return " ".join(reasons), [n for group in names for n in group]
+
+
+def _ask_pending_lines(conn, message_id: str, supplier_decision, pending_asks: list,
+                       catalog: list[dict], catalog_gtins: set[str], codex,
+                       delivery_date: str) -> tuple[list[dict], list[dict]]:
+    """Raise the deferred dl_item board questions (LIVE path only) and return the lines that
+    got a real question — `(held_items, codex_held_items)`: the #365 hold keys on a line having
+    a qid (fresh or deduped-onto), never on the raw match verdict; a `codex_missing` line
+    (#467) is returned separately for its own hold reason. With a live CODEX guard the
+    question offers ONLY cards CODEX has, ranked by the CODEX name too (a card whose OUR name
+    went stale still surfaces first); without one it is the plain R65 shortlist."""
+    held: list[dict] = []
+    codex_held: list[dict] = []
+    for item, recalled, note, conflict_gtins, rule in pending_asks:
+        memory_gtin = recalled.gtin if recalled else ""
+        if codex is not None:
+            cands = codex_cards.question_candidates(item.get("name", ""), catalog, codex,
+                                                    memory_gtin=memory_gtin)
+            conflict_gtins = [g for g in conflict_gtins if codex.has(g)]
+        else:
+            cands = dl_match.candidates(item.get("name", ""), catalog, memory_gtin=memory_gtin)
+        if conflict_gtins:   # the heads prefer the `cands` copies (#467: keep codex_name)
+            cands = dl_match.conflict_first(conflict_gtins, cands, cands + catalog)
+        qid = teach.ask_dl_item(conn, message_id, supplier_decision.ean_edi,
+                                supplier_decision.name, item.get("name", ""),
+                                item.get("quantity"), item.get("unit", ""), cands,
+                                delivery_date=delivery_date, reason=note,
+                                catalog_gtins=catalog_gtins,
+                                memory_conflict=bool(conflict_gtins),
+                                codex_missing=rule == "codex_missing",
+                                keep=codex.has if codex is not None else None)
+        if qid is not None:
+            (codex_held if rule == "codex_missing" else held).append(item)
+    return held, codex_held
 
 
 # --- one document (R60-R97) -------------------------------------------------
@@ -282,8 +355,10 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # short-circuited (terminal skip, zero questions) before any question is raised.
     # #465: plus the memory-conflict candidate gtins (empty unless the R73 rescue refused a
     # silent pick on an ambiguous history) — those go FIRST on the question, flagged.
-    unmatched_asks: list[tuple[dict, dl_memory.Recalled | None, str, list[str]]] = []
-    catalog_gtins = {str(c.get("gtin")) for c in catalog}
+    # #467: + the decision rule, so a line held because its card's code is missing in CODEX
+    # gets its own honest hold reason.
+    unmatched_asks: list[tuple[dict, dl_memory.Recalled | None, str, list[str], str]] = []
+    codex, catalog_gtins = _codex_guard(conn, shadow, catalog)
     # #337: the RETIRED override cards (absent from the frozen catalog, so NOT in
     # `catalog_gtins` — the memory-rescue filter stays intact). Used ONLY to recognize an
     # item that failed to match the ACTIVE catalog as a known-but-manual retired product.
@@ -297,7 +372,8 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                                      as_of=message.get("today", ""),
                                      message_id=message["message_id"])
         try:
-            decision = _match_item(client, item, catalog, recalled, supplier_decision.name)
+            decision = _match_item(client, item, catalog, recalled, supplier_decision.name,
+                                   codex=codex)
         except Exception as e:
             _check_retry(message.get("attempts", 0), str(e))
             # #312: the item note is warehouse-facing (it becomes the dl_item board
@@ -318,7 +394,10 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         # catalog match) + an honest manual-only note, and its board question is SKIPPED
         # below. The history signal uses an UNFILTERED `dl_memory.resolve` (catalog_gtins=
         # None) purely to IDENTIFY the retired GTIN — never to ship it (gtin stays None).
-        if retired_cards and not decision.gtin and decision.rule != "match_failed":
+        # #467: a `codex_missing` line positively points at an ACTIVE card (only its code is
+        # dead in CODEX) — never re-read as some retired card's product; it is asked below.
+        if (retired_cards and not decision.gtin
+                and decision.rule not in ("match_failed", "codex_missing")):
             retired_recall = dl_memory.resolve(
                 conn, supplier_decision.ean_edi, item.get("name", ""),
                 catalog_gtins=None, as_of=message.get("today", ""))
@@ -365,7 +444,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         if not decision.gtin and decision.rule != "retired_manual":
             unmatched_asks.append((item, recalled, decision.note,
                                    list((decision.trace.get("memory_conflict") or {})
-                                        .get("candidates") or [])))
+                                        .get("candidates") or []), decision.rule))
 
     # #314: a remembered non-warehouse supplier whose document produced NO catalog GTIN
     # match is handled terminally — no dl_item questions, no upload (req 2). A document WITH
@@ -379,7 +458,9 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # #465 review finding: a `memory_conflict` line positively points at a catalog card (the
     # memory and/or the model named one) — it is an UNDECIDED warehouse item, never evidence
     # the mail is not a warehouse delivery. Same fail-safe: fall through to hold + ask.
-    has_match_failure = any(d.rule in ("match_failed", "memory_conflict")
+    # #467: a `codex_missing` line points at a catalog card too — same undecided-warehouse-item
+    # treatment (hold + ask), never the silent not-warehouse skip.
+    has_match_failure = any(d.rule in ("match_failed", "memory_conflict", "codex_missing")
                             for _, d in decisions)
     if nw_remembered and not has_catalog_match and not has_match_failure:
         return _skip_not_warehouse(conn, shadow, message, doc_number,
@@ -413,20 +494,11 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # question, OR an existing open one it deduped onto) is `held`; an ask-refused line is
     # excluded from the EDI and the document ships partial exactly as before.
     held_items: list[dict] = []
+    codex_held_items: list[dict] = []
     if not shadow:
-        for item, recalled, note, conflict_gtins in pending_asks:
-            cands = dl_match.candidates(item.get("name", ""), catalog,
-                                        memory_gtin=(recalled.gtin if recalled else ""))
-            if conflict_gtins:
-                cands = dl_match.conflict_first(conflict_gtins, cands, catalog)
-            qid = teach.ask_dl_item(conn, message["message_id"], supplier_decision.ean_edi,
-                                    supplier_decision.name, item.get("name", ""),
-                                    item.get("quantity"), item.get("unit", ""), cands,
-                                    delivery_date=delivery_date, reason=note,
-                                    catalog_gtins=catalog_gtins,
-                                    memory_conflict=bool(conflict_gtins))
-            if qid is not None:
-                held_items.append(item)
+        held_items, codex_held_items = _ask_pending_lines(
+            conn, message["message_id"], supplier_decision, pending_asks, catalog,
+            catalog_gtins, codex, delivery_date)
 
     # #462: a MATCHED kg-tracked card whose per-piece mass could not be safely resolved
     # (`decision.mass is None` — `dl_match._mass_kg` refused a guessed value), delivered in
@@ -478,6 +550,8 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             reason = ((reason + " " if reason else "")
                       + "Vyradené skladové karty (automatický EDI nemá bezpečný cieľ, "
                       "vybav ručne v CODEXe): " + ", ".join(retired_names) + ".")
+        if codex_held_items:   # #467: say WHY the only card(s) were refused
+            reason = " ".join(filter(None, [reason, _held_reason([], codex_held_items, [])[0]]))
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, supplier_decision.name, built.doc_number, delivery_date,
             from_addr, subject, link=link, cmr=cmr), post=post)
@@ -519,17 +593,11 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # #462: a mass-hold (kg-tracked card, unknown per-piece mass) triggers the SAME hold as a
     # #365 unmatched-item hold — combine both categories into ONE review message so a document
     # carrying both is held once with both reasons.
-    if (held_items or mass_hold_items) and not desadv.already_sent(
+    # #467: a line on a card whose code CODEX lacks holds the SAME way (its own reason) — a
+    # file CODEX would reject whole never reaches ORION.
+    if (held_items or codex_held_items or mass_hold_items) and not desadv.already_sent(
             conn, supplier_decision.ean_edi, built.doc_number):
-        held_names = [item.get("name", "") for item in held_items]
-        reasons = []
-        if held_items:
-            reasons.append(_hold_review_reason(held_names))
-        if mass_hold_items:
-            reasons.append(_mass_hold_reason(
-                [item.get("name", "") for item in mass_hold_items]))
-        reason = " ".join(reasons)
-        all_held_names = held_names + [item.get("name", "") for item in mass_hold_items]
+        reason, all_held_names = _held_reason(held_items, codex_held_items, mass_hold_items)
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, supplier_decision.name, built.doc_number, delivery_date, from_addr,
             subject, link=link, cmr=cmr), post=post)

@@ -1,10 +1,17 @@
 ---
 paths:
   - "email-extractor/app/orders/codex_orders.py"
+  - "email-extractor/app/orders/codex_cards.py"
   - "email-extractor/tools/codex_orders_push.py"
+  - "email-extractor/tools/codex_cards_push.py"
+  - "email-extractor/tools/systemd/**"
   - "email-extractor/app/httpapi_codex.py"
   - "email-extractor/tests/test_codex_orders.py"
   - "email-extractor/tests/test_codex_orders_push.py"
+  - "email-extractor/tests/test_codex_cards.py"
+  - "email-extractor/tests/test_codex_cards_push.py"
+  - "email-extractor/tests/test_dl_codex_hold.py"
+  - "email-extractor/tests/test_board_codex.py"
 ---
 
 # CODEX order evidence + the auto-resolve sweep (#342)
@@ -92,3 +99,105 @@ the manual line reveals the card they actually use. Steps, all read-only:
 and capture the POST (`build_orders` is the pure normalization core). Keep that shape for any
 future addition; never import duckdb/requests at module top. The token comes from an
 `EnvironmentFile` (`CODEX_PUSH_TOKEN`), never committed.
+
+## How the push tools are installed on dev2 (not in the add-on image)
+
+Both tools run on **dev2** (the box that owns `/var/lib/codex-bridge/codex.duckdb`) as plain
+copies next to each other, with SYSTEM systemd units (`/etc/systemd/system/`), user `newlevel`,
+system `/usr/bin/python3` (it has `duckdb` + `requests`), and ONE shared mode-600
+`EnvironmentFile=/home/newlevel/.secrets/codex-orders-push.env` (CODEX_PUSH_URL / _TOKEN /
+_DAYS / CODEX_DUCKDB_PATH — inspect it with `airuleset.py secret inspect`, never `cat`):
+
+| tool | copy | units | schedule (Europe/Prague) |
+|---|---|---|---|
+| `codex_orders_push.py` (#342) | `/home/newlevel/codex-orders-push/` | `codex-orders-push.{service,timer}` (not in git) | 14:40 / 18:25 |
+| `codex_cards_push.py` (#467) | same dir | `email-extractor/tools/systemd/codex-cards-push.{service,timer}` | 14:42 / 18:27 |
+
+(Re)install after a change: `cp email-extractor/tools/codex_cards_push.py
+/home/newlevel/codex-orders-push/` + `sudo cp email-extractor/tools/systemd/codex-cards-push.*
+/etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now
+codex-cards-push.timer`; run once by hand with `sudo systemctl start codex-cards-push.service`
+and read `journalctl -u codex-cards-push.service -n 5` (`pushed: fetched=… codes=…`). A
+`--dry-run` (`/home/newlevel/codex-orders-push/run.sh`-style env + `--dry-run`) counts without
+POSTing. The add-on image never contains `tools/` (Dockerfile copies `app/` only).
+
+## The CODEX stock-card list + the card-code check (#467)
+
+CODEX rejects a WHOLE delivery-note import when ONE DESADV line carries an EAN kód no stock card
+has (DL 126049732 stuck in `in_DL` on code 3698, which card 27 carried only 24.-28.9.; the
+board's „➕ Nová karta" had accepted it). `codex_cards_push.py` sends every `raw.sm002` row
+with `NEANKOD > 0` (grouped per code × card × stredisko × sklad, ~6k rows / ~2.7k codes, ~1 MB,
+ONE POST) + `source_as_of` = `max(meta.etl_runs.finished_at WHERE table_name='sm002')`
+(naive UTC). `POST /api/codex/cards` → `codex_cards.replace_cards` REPLACES the table in one
+transaction (a code that left CODEX leaves here too — a merge/upsert would keep 3698 "valid"
+forever). Reusable rules:
+
+- **`NEANKOD` is a DOUBLE** — compare codes only through `codex_cards.normalize_code`
+  (canonical integer text, strips `.0` + leading zeros); the push tool mirrors it (`_code`) since
+  it runs standalone on dev2 and cannot import the add-on.
+- **"Exists" = NEANKOD on ANY pushed row** (any stredisko/sklad, active or inactive). Measured
+  2026-09-29: 480 of our 483 DL cards match that way (477 on the same sklad as our card's
+  `sklad`); a per-sklad rule would falsely hold cards whose NEANKOD sits on another sklad row.
+  NEANKOD itself is not unique (17 codes on 2+ cards) and one card carries it only on SOME of its
+  sklad rows (card 27: sklad 1/1 yes, 4 and 600 no).
+- **Fail OPEN, never closed**: `codex_cards.live_guard` returns None (checks OFF, `log.warning`)
+  when nothing was ever pushed or the CODEX data is older than `STALE_HOURS = 30` (ETL 14:15 /
+  18:00 → longest normal age ~20.5 h; one missed slot tolerated). `stale_sweep` (worker tick,
+  `if dl_python:`) enqueues ONE ops alert per stale episode (`pending_alerts` kind
+  `codex_cards_stale`, key `codex-cards:<as_of>`, `reminder_suppressed` cadence: the first alert
+  of an episode at once, reminders once per workday morning); a never-pushed list gets the same
+  30 h grace from the revision-17 `schema_version.applied_at` (no alert right after a deploy).
+- **Shrink guard**: an empty push → 400, a push with < 50 % of the previous codes → 409 (a
+  half-loaded ETL would otherwise hold every DL); `?force=1` for a genuine mass removal.
+- **Where it bites** — all LIVE only (shadow / the e2e-dl corpus pass no guard, byte-identical):
+  - `dl_match.decide_item(codex=)`: a model pick of a code CODEX lacks is nulled like a #245
+    overflow (rule `codex_missing`, code in the note), a remembered one is never rescued, but a
+    remembered VALID card still rescues — that is what makes the sklad's answer ship on the
+    reprocess instead of looping on the model's (still sure) invalid pick.
+  - `_process_document` drops dead codes from `catalog_gtins`, so a human answer that taught
+    3698 neither rescues nor blocks re-asking (`ask_dl_item`'s human-taught pre-check).
+  - the dl_item question offers ONLY CODEX cards, ranked by the better of our name and the
+    CODEX name (`codex_cards.question_candidates`) — the right card surfaces even under a stale
+    name — and carries `codex_name` for the board; the doc is HELD with `_codex_hold_reason`
+    (which also says to delete the dead card on Produkty sklad).
+  - **the codex question shares the #465 question-row mechanics** (`payload.codex_missing`,
+    `dl_item_conflict.board_settled`): its answer supersedes the human answer that taught the
+    dead code (undo restores it) and a deduped older plain question is upgraded
+    (`flag_question(flag=, keep=codex.has)`: CODEX cards first, dead ones dropped, new reason).
+    It is deliberately **NOT a standing confirmation** in `dl_memory._board_confirmed` (review 2
+    🟡, probe-reproduced: that made a misclick on a codex question ship silently on every later
+    delivery) — only the reprocess of the answered message trusts it. The drifted-name case
+    (our name shares no word with the wording) is solved instead by the CODEX name counting for
+    the R73 lexical plausibility (`_memory_conflict(alt_name=codex.name_for(...))`).
+  - board: `check_card_code` → 409 `{error, codex:{code, missing, as_of, similar:[{code, name,
+    in_catalog, catalog_gtin?, catalog_name?}]}}` on Produkty sklad create/edit, the inline
+    „➕ Nová karta", any dl_item pick (checked BEFORE a free/search pick is legitimised — a
+    refused dead code never lingers as an offered button), and legacy
+    `POST /api/znalosti/dl-products`. The one-click pick sends `catalog_gtin` (OUR exact
+    number), never the normalized CODEX code. „Nová karta" with a number we ALREADY have →
+    409 `existing` (it used to UPSERT with blank mass/sklad/cena); with a number of a card
+    deleted to the Kôš → 409 „obnov ju na záložke Kôš"; written unlike CODEX (leading zeros,
+    „.0") → 409 naming our card with that code (CODEX stores the code as a number — „0"+code
+    would be a second card for one CODEX code); `refuse_code_variant` guards EVERY write of a
+    NEW DL number (legacy API, board POST without `new` too), and the taken/Kôš checks compare
+    by normalized code both ways (prod had 0 non-canonical DL numbers on 2026-09-29). ONE gate
+    for both „Nová karta" paths: `app/orders/card_guard.guard_new_dl_card` (catalog rules live
+    there, CODEX rules in `codex_cards`). Produkty „Nová karta" sends `new: true` →
+    `card_guard.taken()` 409 in the orders scope too (the orders form would clear the alias).
+    The Kôš restore of a DL card whose code CODEX lacks → 409 (`audit._refuse_dead_dl_code`).
+  - the questions tab keeps a refusal hint in `state.codexHints` and re-renders it on every
+    refresh — a hint never freezes the 8 s refresh (only an open inline form does).
+  - `/api/codex/cards` takes the token from the `X-Token` header ONLY (constant-time compare),
+    refuses a body > 16 MB (413); a refused push is `log.warning`ed; the data age is
+    `min(source_as_of, synced_at)` (a future push time can never pin the list fresh); the
+    stale ops alert keys on the stuck snapshot (`codex-cards:<as_of>`) — one episode, one
+    first alert at once + morning reminders.
+- **A card created in CODEX this morning is refused until the next ETL+push** — by design the
+  refusal text says the list is as of X and refreshes ~14:45 / ~18:30; never add a bypass.
+- **Name drift** (`codex_cards.name_key`: fold + `gr`→`g` + word ORDER ignored + 1-letter words
+  dropped) — on 2026-09-29 63 of 480 cards differed by plain fold, most cosmetic; the key keeps
+  real renames (e.g. „Bagetka s kečupom…" vs CODEX „Rožok so slaninou…"). Fix a drifted name via
+  Produkty sklad („Prevziať názov z CODEXu" → Uložiť) — the app path, audited, never SQL.
+- **Live check** (dev2, read-only): `SELECT count(*), count(DISTINCT code) FROM
+  codex_stock_cards` + `SELECT * FROM codex_card_syncs ORDER BY id DESC LIMIT 1` on the add-on
+  DB; the Produkty sklad toolbar shows „Karty z CODEXu: stav k …".

@@ -13,10 +13,13 @@ the leaf `audit.record` (spec §5).
 from __future__ import annotations
 
 from ...httpapi_common import _fold
-from ...orders import dl_snapshot, snapshot
+from ...orders import card_guard, codex_cards, dl_snapshot, snapshot
 from . import audit, catalog_aliases
 
 PAGE_SIZE = 50
+# #467: `?codex=issues` on Produkty sklad lists only the cards whose name drifted from CODEX's
+# or whose number CODEX has no stock card for.
+_CODEX_ISSUES = ("drift", "missing")
 
 
 def _orders_upsert(conn, gtin, name, body):
@@ -87,11 +90,22 @@ def _scope(scope: str) -> dict:
     return _SCOPES[scope]
 
 
-def list_products(conn, *, scope: str, q: str = "", page: int = 0) -> dict:
+def list_products(conn, *, scope: str, q: str = "", page: int = 0, codex: str = "") -> dict:
     """One scope's effective catalog, search-filtered (číslo položky / názov / doplnok /
-    aliasy) and paged. Raises `ValueError` for an unknown scope (the route → 400)."""
+    aliasy) and paged. Raises `ValueError` for an unknown scope (the route → 400).
+
+    #467: the DL scope annotates every card with its CODEX status (ok / drift + the CODEX name /
+    missing) and returns the list's freshness as `codex`; `codex="issues"` keeps only drift and
+    missing cards."""
     cfg = _scope(scope)
     rows = cfg["for_management"](conn)
+    codex_meta = None
+    if scope == "dl":
+        cards = codex_cards.load(conn)
+        rows = codex_cards.annotate(rows, cards)
+        codex_meta = codex_cards.meta_for(cards)
+        if codex == "issues":
+            rows = [r for r in rows if r["codex"]["status"] in _CODEX_ISSUES]
     if q:
         needle = _fold(q)
         alias_gtins = catalog_aliases.alias_gtins(conn, cfg["alias_tables"], needle)
@@ -105,7 +119,7 @@ def list_products(conn, *, scope: str, q: str = "", page: int = 0) -> dict:
     start = page * PAGE_SIZE
     window = rows[start:start + PAGE_SIZE]
     return {"items": window, "page": page, "page_size": PAGE_SIZE, "total": total,
-            "has_more": start + PAGE_SIZE < total}
+            "has_more": start + PAGE_SIZE < total, "codex": codex_meta}
 
 
 def card_detail(conn, scope: str, gtin: str) -> dict | None:
@@ -121,13 +135,30 @@ def card_detail(conn, scope: str, gtin: str) -> dict | None:
 
 def upsert(conn, scope: str, body: dict, actor: str) -> dict:
     """Create or edit a card via the SAME snapshot machinery /znalosti uses, + an audit row.
-    Raises `ValueError` (→ 400) when gtin/name are missing."""
+    Raises `ValueError` (→ 400) when gtin/name are missing, `codex_cards.CardRefused` (→ 409)
+    for a `new: true` card whose number already has one (never an overwrite — the orders form
+    would clear the alias, the DL one mass/sklad/cena) and for a DL number `card_guard` / CODEX
+    refuses (a number written unlike CODEX, CODEX lacks it, in the Kôš; an edit is
+    CODEX-checked only)."""
     cfg = _scope(scope)
     gtin = str(body.get("gtin") or "").strip()
     name = str(body.get("name") or "").strip()
     if not (gtin and name):
         raise ValueError("chýba číslo položky alebo názov")
-    existed = any(r["gtin"] == gtin for r in cfg["for_management"](conn))
+    rows = cfg["for_management"](conn)
+    current = next((r for r in rows if r["gtin"] == gtin), None)
+    existed = current is not None
+    if body.get("new") and scope == "dl":
+        # #467: the ONE new-DL-card gate (zeros, CODEX, a number we have, one in the Kôš)
+        card_guard.guard_new_dl_card(conn, gtin, name)
+    elif body.get("new") and current is not None:
+        raise card_guard.taken(current)
+    elif scope == "dl":
+        # #467: a NEW number without the flag is never written unlike CODEX (a duplicate for
+        # one code); an edit of a DL card whose number CODEX lacks is refused too (fail-open)
+        if current is None:
+            card_guard.refuse_code_variant(gtin, rows)
+        codex_cards.check_card_code(conn, gtin, name, catalog=rows)
     cfg["upsert"](conn, gtin, name, body)
     action = "update" if existed else "create"
     audit.record(conn, actor=actor, table=cfg["override_table"], row_id=gtin, action=action,

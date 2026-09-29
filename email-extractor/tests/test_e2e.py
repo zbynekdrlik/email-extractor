@@ -330,7 +330,13 @@ def test_board_products_orders_tab_search_edit_delete_in_the_browser(live_server
     assert backend_ver in page.locator('[data-testid="version"]').inner_text()
 
     page.wait_for_selector("text=Rožok e2e produkt")
+    # wait until the debounced SEARCH reload has actually REBUILT the list (the old row node is
+    # detached) — the row text is already on screen from the first load, so waiting for it
+    # raced the search reload, which then rebuilt the list under the just-opened editor
+    # (flaky „element was detached")
+    old_row = page.query_selector('.p-row:has-text("Rožok e2e produkt")')
     page.fill("#p-search", "Rožok e2e")
+    page.wait_for_function("el => !el.isConnected", arg=old_row)
     page.wait_for_selector("text=Rožok e2e produkt")
 
     page.click('.p-row:has-text("Rožok e2e produkt") .p-edit')
@@ -572,3 +578,177 @@ def test_board_dl_item_answer_unrelated_to_the_wording_asks_for_confirmation(
     assert len(dialogs) == 2, "an alias-backed pick must not ask for confirmation"
 
     assert console == [], f"browser console not clean: {console}"
+
+
+# --- #467: the board refuses a card number CODEX has no stock card for ------------------
+
+_E2E_CODEX = [
+    {"code": "9990000000017", "card_code": "27", "stredisko": 1, "sklad": 1,
+     "name": "Rožok so slaninou a syrom 70g"},
+    {"code": "9990000000093", "card_code": "93", "stredisko": 1, "sklad": 100,
+     "name": "Mak modrý mletý e2e"},
+]
+
+
+def _e2e_codex_and_catalog(pg):
+    from app.orders import codex_cards, dl_snapshot
+    codex_cards.replace_cards(pg, _E2E_CODEX)
+    dl_snapshot._freeze(pg, [{"gtin": "DBASE0", "name": "Base", "doplnok": "", "mass": None,
+                              "sklad": "", "cena": None}], [])
+    # our card for the CODEX code still carries an OLD, unrelated name (the incident)
+    dl_snapshot.upsert_dl_catalog_card(pg, "9990000000017", "Bagetka s kečupom a syrom 80 gr",
+                                       sklad="1")
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+
+
+def test_board_products_sklad_refuses_a_code_codex_lacks_and_offers_the_codex_card(
+        live_server, pg, page):
+    """Produkty sklad: the stale-named card shows its CODEX name; a „Nová karta" with a code
+    CODEX lacks is NOT saved — the editor lists CODEX cards with a similar name + code, one
+    click puts the right code in, and the save goes through. Clean console, version label."""
+    from app.httpapi import dl_key
+
+    _e2e_codex_and_catalog(pg)
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
+    page.wait_for_url(re.compile(r"/nastenka"))
+    page.goto(f"{live_server}/nastenka/produkty-sklad")
+    backend_ver = page.request.get(f"{live_server}/version").text().strip()
+    assert backend_ver in page.locator('[data-testid="version"]').inner_text()
+
+    # name drift is visible on the row, and the CODEX status line is shown
+    row = page.locator('.p-row[data-gtin="9990000000017"]')
+    row.wait_for()
+    assert "Rožok so slaninou a syrom 70g" in row.locator(".p-codex").inner_text()
+    assert "CODEX" in page.locator("#p-codex-status").inner_text()
+
+    # new card with a code CODEX does not have → refused, nothing saved, suggestions shown
+    page.click("#p-new")
+    page.fill(".p-new-editor .p-gtin", "3698")
+    page.fill(".p-new-editor .p-name", "Mak modrý mletý e2e")
+    page.click(".p-new-editor .p-save")
+    hint = page.locator(".p-new-editor .p-codex-hint")
+    hint.wait_for()
+    assert "3698" in hint.inner_text() and "CODEX" in hint.inner_text()
+    assert pg.execute("SELECT count(*) FROM dl_catalog_overrides WHERE gtin='3698'"
+                      ).fetchone()[0] == 0
+
+    # one click takes the CODEX card's code → save succeeds
+    hint.locator('.p-codex-use[data-code="9990000000093"]').click()
+    assert page.locator(".p-new-editor .p-gtin").input_value() == "9990000000093"
+    page.click(".p-new-editor .p-save")
+    page.wait_for_selector('.p-row[data-gtin="9990000000093"]')
+    assert pg.execute("SELECT name FROM dl_catalog_overrides WHERE gtin='9990000000093'"
+                      ).fetchone()[0] == "Mak modrý mletý e2e"
+
+    # a „Nová karta" with a number we ALREADY have is refused (never overwritten) — one click
+    # finds that card in the list instead
+    page.click("#p-new")
+    page.fill(".p-new-editor .p-gtin", "9990000000017")
+    page.fill(".p-new-editor .p-name", "Iný názov e2e")
+    page.click(".p-new-editor .p-save")
+    page.locator('.p-new-editor .p-codex-find[data-code="9990000000017"]').click()
+    page.wait_for_selector('.p-row[data-gtin="9990000000093"]', state="detached")
+    assert page.locator("#p-search").input_value() == "9990000000017"
+    assert pg.execute("SELECT name FROM dl_catalog_overrides WHERE gtin='9990000000017'"
+                      ).fetchone()[0] == "Bagetka s kečupom a syrom 80 gr"
+    page.fill("#p-search", "")
+    page.wait_for_selector('.p-row[data-gtin="9990000000093"]')
+
+    # the drifted card's editor offers „Prevziať názov z CODEXu"
+    row.locator(".p-edit").click()
+    page.locator('.p-row[data-gtin="9990000000017"] .p-codex-take').click()
+    assert page.locator('.p-row[data-gtin="9990000000017"] .p-editor .p-name').input_value() \
+        == "Rožok so slaninou a syrom 70g"
+    row.locator(".p-edit").click()   # close the editor again (refresh-safety)
+
+    # „Len rozdiely s CODEXom" keeps only the drifted / CODEX-missing cards
+    page.check("#p-codex-issues")
+    page.wait_for_selector('.p-row[data-gtin="9990000000093"]', state="detached")
+    gtins = page.locator(".p-row").evaluate_all("rs => rs.map(r => r.dataset.gtin)")
+    assert "9990000000017" in gtins and "9990000000093" not in gtins
+
+    # the refusals ARE deliberate 409s — Chromium logs every non-2xx fetch as "Failed to load
+    # resource" (no app console.error); tolerate exactly those TWO entries, nothing else (#235)
+    tolerated = [m for m in console if "Failed to load resource" in m and "status of 409" in m]
+    assert len(tolerated) == 2, f"exactly the two deliberate refusals: {console}"
+    real_errors = [m for m in console if m not in tolerated]
+    assert real_errors == [], f"browser console not clean: {real_errors}"
+
+
+def test_board_dl_item_new_card_refuses_a_code_codex_lacks_and_answers_with_the_codex_card(
+        live_server, pg, page):
+    """Otázky sklad, the incident's entry point: „➕ Nová karta" with 3698 is refused, the card
+    shows which CODEX card has that name (our card under its old name) — one click answers the
+    question with it. Nothing is written for 3698. Clean console."""
+    from app.httpapi import dl_key
+
+    _e2e_codex_and_catalog(pg)
+    qid = _board_seed_dl_item_question(pg, "be2e-467", "Rožok so slaninou a syrom 70g", [])
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
+    page.wait_for_url(re.compile(r"/nastenka"))
+    page.goto(f"{live_server}/nastenka/otazky-sklad")
+    card = page.locator(f"#q-card-{qid}")
+    card.wait_for()
+
+    card.locator('button:has-text("➕ Nová karta")').click()
+    card.locator(".q-in-gtin").fill("3698")
+    card.locator(".q-in-name").fill("Rožok so slaninou a syrom 70g")
+    card.locator('.q-inline-form button:has-text("Uložiť")').click()
+    hint = card.locator(".q-codex-hint")
+    hint.wait_for()
+    assert "3698" in hint.inner_text() and "CODEX" in hint.inner_text()
+    assert pg.execute("SELECT status FROM order_questions WHERE id=%s",
+                      (qid,)).fetchone()[0] == "open"
+    assert pg.execute("SELECT count(*) FROM dl_catalog_overrides WHERE gtin='3698'"
+                      ).fetchone()[0] == 0
+
+    # the hint does NOT freeze the board: close the form, let the 8 s refresh run (a question
+    # added meanwhile appears) — the hint is re-rendered on its card, not wiped. The new
+    # question's candidate is a card whose OUR name drifted: its button shows the CODEX name.
+    drift_q = _board_seed_dl_item_question(pg, "be2e-467b", "Rožok so slaninou 70g", [])
+    pg.execute("UPDATE order_questions SET candidates = %s::jsonb WHERE id = %s",
+               ('[{"value": "9990000000017", "label": "Bagetka s kečupom a syrom 80 gr", '
+                '"codex_name": "Rožok so slaninou a syrom 70g"}]', drift_q))
+    card.locator('.q-inline-form button:has-text("Zrušiť")').click()
+    btn = page.locator(f"#q-card-{drift_q} .q-btn--cand")
+    btn.wait_for(timeout=15000)
+    assert "CODEX: Rožok so slaninou a syrom 70g" in btn.inner_text()
+    assert card.locator(".q-codex-hint").count() == 1
+
+    card.locator('.q-codex-use[data-code="9990000000017"]').click()
+    for _ in range(50):
+        row = pg.execute("SELECT status, answer->>'choice' FROM order_questions WHERE id=%s",
+                         (qid,)).fetchone()
+        if row[0] == "answered":
+            break
+        page.wait_for_timeout(100)
+    assert row == ("answered", "9990000000017")
+
+    # „Nová karta" with a number we ALREADY have → refused (never overwritten), one click answers
+    # the question with that existing card
+    taken_q = _board_seed_dl_item_question(pg, "be2e-467c", "Bagetka so syrom 80g", [])
+    tcard = page.locator(f"#q-card-{taken_q}")
+    tcard.wait_for(timeout=15000)
+    tcard.locator('button:has-text("➕ Nová karta")').click()
+    tcard.locator(".q-in-gtin").fill("9990000000017")
+    tcard.locator(".q-in-name").fill("Bagetka so syrom 80g")
+    tcard.locator('.q-inline-form button:has-text("Uložiť")').click()
+    tcard.locator('.q-codex-use[data-code="9990000000017"]').click()
+    for _ in range(50):
+        row = pg.execute("SELECT status, answer->>'choice' FROM order_questions WHERE id=%s",
+                         (taken_q,)).fetchone()
+        if row[0] == "answered":
+            break
+        page.wait_for_timeout(100)
+    assert row == ("answered", "9990000000017")
+    assert pg.execute("SELECT name FROM dl_catalog_overrides WHERE gtin='9990000000017'"
+                      ).fetchone()[0] == "Bagetka s kečupom a syrom 80 gr"
+
+    # the refusals ARE deliberate 409s — Chromium logs every non-2xx fetch as "Failed to load
+    # resource" (no app console.error); tolerate exactly those TWO entries, nothing else (#235)
+    tolerated = [m for m in console if "Failed to load resource" in m and "status of 409" in m]
+    assert len(tolerated) == 2, f"exactly the two deliberate refusals: {console}"
+    real_errors = [m for m in console if m not in tolerated]
+    assert real_errors == [], f"browser console not clean: {real_errors}"

@@ -14,6 +14,14 @@ the already-oversized `teach.py`:
   the human answers it superseded (`dl_memory.restore_superseded`, via the Kôš's own restore).
 
 The memory side (verdict, supersede, restore) lives in `dl_memory`.
+
+#467 reuses the question-row half for a `codex_missing` question (the line's card has a code
+CODEX has no stock card for): its answer supersedes the human answer that taught the dead code,
+undo restores it, and a deduped older question is upgraded — `board_settled()` is the predicate
+for "either flag", `flag_question(flag=...)` the one upgrade path (with `keep` dropping cards
+CODEX lacks from the old candidate list). DELIBERATELY NOT shared: only a memory CONFLICT
+answer is a standing confirmation in `dl_memory._board_confirmed` — a codex answer is a plain
+list pick, so a misclick there is caught on the next delivery like any other.
 """
 from __future__ import annotations
 
@@ -26,22 +34,40 @@ from . import dl_memory, memory
 log = logging.getLogger("orders.teach")
 
 
-def flag_question(conn, qid: int, options: list[dict], reason: str = "") -> None:
-    """Flag an OPEN `dl_item` question `memory_conflict` and put the conflicting cards
-    (`options`, already conflict-first) ahead of its old candidates, which are kept, and show
-    the conflict `reason` (why both cards are offered) instead of the stale plain one. A no-op
-    on a row that is already flagged (the fresh-insert case) or no longer open."""
+BOARD_SETTLED_FLAGS = ("memory_conflict", "codex_missing")
+
+
+def board_settled(payload: dict | None) -> bool:
+    """A `dl_item` question whose answer is the sklad's explicit, superseding decision."""
+    return any((payload or {}).get(f) for f in BOARD_SETTLED_FLAGS)
+
+
+def option(card: dict) -> dict:
+    """A catalog card -> the stored `{value, label}` candidate; the card alias (#465) and a
+    drifted card's CODEX name (#467) ride along for the board's lexical misclick check."""
+    return {"value": str(card.get("gtin")), "label": card.get("name") or str(card.get("gtin")),
+            **({"alias": card["doplnok"]} if card.get("doplnok") else {}),
+            **({"codex_name": card["codex_name"]} if card.get("codex_name") else {})}
+
+
+def flag_question(conn, qid: int, options: list[dict], reason: str = "",
+                  flag: str = "memory_conflict", keep=None) -> None:
+    """Flag an OPEN `dl_item` question (`flag`) and put `options` (already ordered) ahead of its
+    old candidates — kept, except those `keep(value)` rejects (#467: cards CODEX lacks) — and
+    show `reason` instead of the stale plain one. A no-op on a row that already carries the
+    flag (the fresh-insert case) or is no longer open."""
     row = conn.execute("SELECT payload, candidates FROM order_questions "
                        "WHERE id = %s AND status = 'open'", (qid,)).fetchone()
-    if not row or (row[0] or {}).get("memory_conflict"):
+    if not row or (row[0] or {}).get(flag):
         return
     seen = {str(o["value"]) for o in options}
-    merged = options + [c for c in (row[1] or []) if str(c.get("value")) not in seen]
+    merged = options + [c for c in (row[1] or []) if str(c.get("value")) not in seen
+                        and (keep is None or keep(str(c.get("value"))))]
     conn.execute("UPDATE order_questions SET payload = payload || %s::jsonb, candidates = %s, "
                  "reason = COALESCE(NULLIF(%s, ''), reason) WHERE id = %s AND status = 'open'",
-                 (Json({"memory_conflict": True}), Json(merged), reason or "", qid))
-    log.warning("dl_item question %s upgraded to a memory conflict (candidates %s)",
-                qid, [str(c.get("value")) for c in merged])
+                 (Json({flag: True}), Json(merged), reason or "", qid))
+    log.warning("dl_item question %s upgraded (%s, candidates %s)",
+                qid, flag, [str(c.get("value")) for c in merged])
 
 
 def undo_answer(conn, q: dict) -> None:

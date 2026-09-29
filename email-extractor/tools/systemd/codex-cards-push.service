@@ -1,0 +1,19 @@
+[Unit]
+Description=Push the CODEX stock-card list to the email-extractor add-on (#467)
+Documentation=https://github.com/zbynekdrlik/email-extractor/issues/467
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=newlevel
+Group=newlevel
+# The SAME EnvironmentFile as codex-orders-push (mode-600, never committed): CODEX_PUSH_URL /
+# CODEX_PUSH_TOKEN / CODEX_DUCKDB_PATH. The cards URL is derived from CODEX_PUSH_URL
+# (.../api/codex/orders -> .../api/codex/cards) unless CODEX_CARDS_PUSH_URL is set.
+EnvironmentFile=/home/newlevel/.secrets/codex-orders-push.env
+ExecStart=/usr/bin/python3 /home/newlevel/codex-orders-push/codex_cards_push.py
+# Read-only DuckDB + one HTTP POST of the whole list; a failed slot is retried by the next one
+# (the add-on's staleness check fails OPEN + alerts ops after 30 h without a fresh list).
+TimeoutStartSec=300
+Nice=10

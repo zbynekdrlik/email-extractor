@@ -951,7 +951,8 @@ def _offered_values(q: dict) -> set[str]:
 def ask_dl_item(conn, message_id: str, supplier_ean: str, supplier_name: str, wording: str,
                 quantity, unit: str, candidates: list[dict], delivery_date: str = "",
                 reason: str = "", catalog_gtins=None, on_new=None,
-                memory_conflict: bool = False) -> int | None:
+                memory_conflict: bool = False, codex_missing: bool = False,
+                keep=None) -> int | None:
     """Raise ONE 'ktorá karta je táto DL položka?' question, scoped per (supplier, wording) —
     a second DL from the same supplier with the same still-unresolved wording reuses the SAME
     open question, exactly like `ask()`'s own per-(customer, wording) dedupe.
@@ -983,28 +984,27 @@ def ask_dl_item(conn, message_id: str, supplier_ean: str, supplier_name: str, wo
     `recalled.human` pre-check above must NOT refuse (it would leave the line ask-refused →
     the doc ships PARTIAL without it instead of being held). The flag is stored on the payload
     so the answer supersedes the losing human answers (`_apply_dl_item`) and counts as the
-    sklad's explicit confirmation (`dl_memory._board_confirmed`) — asked once, never a loop."""
+    sklad's explicit confirmation (`dl_memory._board_confirmed`) — asked once, never a loop.
+    #467 `codex_missing=True` (the line's card has a code CODEX lacks) shares the question-row
+    half (`dl_item_conflict`: supersede + undo + upgrade a deduped question, `keep` dropping dead
+    cards) but is NOT a standing confirmation in `dl_memory._board_confirmed`."""
     key = memory.item_key(wording)
     if not (message_id and supplier_ean and key):
         return None
-    if not memory_conflict:
+    flag = "memory_conflict" if memory_conflict else ("codex_missing" if codex_missing else "")
+    if not flag:
         recalled = dl_memory.resolve(conn, supplier_ean, wording, catalog_gtins=catalog_gtins)
         if recalled is not None and recalled.human:
             return None
-    # #465: the card alias rides along so the board's lexical misclick check sees it too.
-    options = [{"value": str(c.get("gtin")), "label": c.get("name") or str(c.get("gtin")),
-                **({"alias": c["doplnok"]} if c.get("doplnok") else {})}
-              for c in (candidates or [])]
+    options = [dl_item_conflict.option(c) for c in (candidates or [])]
     payload = {"supplier_ean": supplier_ean, "supplier_name": supplier_name or "",
-               "quantity": quantity, "unit": unit or "ks"}
-    if memory_conflict:
-        payload["memory_conflict"] = True
+               "quantity": quantity, "unit": unit or "ks", **({flag: True} if flag else {})}
     qid = ask_generic(
         conn, "dl_item", message_id, dl_item_key(supplier_ean, wording), wording,
         options, reason or "Neznáme znenie položky na dodacom liste", payload,
         delivery_date=delivery_date, on_new=on_new)
-    if memory_conflict and qid is not None:
-        dl_item_conflict.flag_question(conn, qid, options, reason)
+    if flag and qid is not None:
+        dl_item_conflict.flag_question(conn, qid, options, reason, flag=flag, keep=keep)
     return qid
 
 
@@ -1054,7 +1054,7 @@ def _apply_dl_item(conn, cfg, q: dict, choice: str, by: str) -> dict:
                 if str(c.get("value")) == str(choice)), "")
     dl_memory.remember(conn, supplier_ean, q.get("wording", ""), str(choice), card,
                        _today(conn), source="human")
-    if payload.get("memory_conflict"):
+    if dl_item_conflict.board_settled(payload):
         # #465: the sklad settled a memory conflict — the losing human answers for this
         # wording go (soft, audited, restorable), so 'the latest misclick wins' never returns.
         dl_memory.supersede_taught(conn, supplier_ean, q.get("wording", ""), str(choice),
@@ -1075,7 +1075,7 @@ def _undo_dl_item(conn, q: dict) -> dict:
     Acceptable for a hotfix (rare: requires same-day, same-gtin collision + undo); a
     demote-instead-of-delete would be the structural fix if this proves problematic."""
     payload = q.get("payload") or {}
-    if payload.get("memory_conflict"):
+    if dl_item_conflict.board_settled(payload):
         dl_item_conflict.undo_answer(conn, q)   # #465: remove only its own teach + restore
     else:
         conn.execute(

@@ -106,6 +106,15 @@ def test_dl_lexical_gap_counts_as_review_too(pg):
     assert stats["review"] == 1 and stats["llm"] == 0
 
 
+def test_dl_held_lines_the_warehouse_decides_count_as_review_not_deterministic(pg):
+    """#467 `codex_missing` (a card whose code CODEX lacks) and #465 `memory_conflict` both
+    leave the line cardless and ASK the warehouse — they are review, never 'deterministic'
+    (the subtraction bucket a new rung would otherwise silently fall into)."""
+    _run(pg, "2026-08-05", rules=("codex_missing", "memory_conflict"), kind="dl")
+    stats = reliability.dl_provenance_stats_for_day(pg, "2026-08-05")
+    assert stats["review"] == 2 and stats["deterministic"] == 0
+
+
 def test_dl_errors_are_counted_at_the_run_level(pg):
     _run(pg, "2026-08-05", status="error", kind="dl")
     _run(pg, "2026-08-05", status="ok", kind="dl")

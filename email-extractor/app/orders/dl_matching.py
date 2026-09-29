@@ -131,10 +131,13 @@ def _match_supplier(conn, client, doc: dict, suppliers: list[dict],
 
 
 def _match_item(client, item: dict, catalog: list[dict], recalled,
-                partner_name: str) -> dl_match.Decision:
+                partner_name: str, codex=None) -> dl_match.Decision:
+    """`codex` (#467): the live CODEX stock-card guard, or None (shadow / stale list) — see
+    `dl_match.decide_item`. The model still sees the SAME candidates either way (matching is
+    unchanged); only the decision refuses to ship a card CODEX has no stock card for."""
     cands = dl_match.candidates(item.get("name", ""), catalog,
                                 memory_gtin=(recalled.gtin if recalled else ""))
     answer = client.json_call(_item_prompt(), _item_input(item, cands, partner_name),
                               ITEM_SCHEMA, name="dl_item")
     return dl_match.decide_item(item.get("name", ""), answer, catalog, recalled=recalled,
-                                partner_name=partner_name)
+                                partner_name=partner_name, codex=codex)

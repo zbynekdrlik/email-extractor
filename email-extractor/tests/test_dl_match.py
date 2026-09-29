@@ -795,3 +795,84 @@ def test_memory_conflict_logs_a_warning(caplog):
                              recalled=recalled)
     assert any("memory conflict" in r.getMessage() for r in caplog.records
                if r.levelname == "WARNING")
+
+
+# --- #467: a card whose code CODEX has no stock card for can never ship -----------------
+
+class _Codex:
+    """The CODEX guard decide_item takes (`codex_cards.CodexCards`: `has` + `name_for`)."""
+
+    def __init__(self, codes):
+        self.codes = set(codes)
+
+    def has(self, code):
+        return str(code) in self.codes
+
+    def name_for(self, code):
+        return ""
+
+
+def test_a_sure_pick_of_a_card_codex_lacks_is_left_without_a_card():
+    """The 3698 incident: the model is SURE, but CODEX rejects the whole DL for that code —
+    the line must come back cardless (→ #365 hold + question), with the code in the note."""
+    d = dl_match.decide_item(ROLL, {"gtin": "GROZ", "confidence": 0.97}, CONFLICT_CATALOG,
+                             codex=_Codex({"GFRUIT", "GROZ2"}))
+    assert d.gtin is None and d.rule == "codex_missing" and d.review is True
+    assert "GROZ" in d.note and "CODEX" in d.note and "Rožok štandart 50g" in d.note
+    assert d.trace["codex_missing"] == {"gtin": "GROZ", "card": "Rožok štandart 50g"}
+
+
+def test_a_confirmed_memory_of_a_valid_card_rescues_after_the_sklad_answered():
+    """No loop: the reprocess right after the sklad picked a CODEX-valid card — the model
+    keeps naming the invalid card, the confirmed memory ships the valid one."""
+    recalled = _human("GROZ2", "Rožok cereálny 50g", confirmed=True)
+    d = dl_match.decide_item(ROLL, {"gtin": "GROZ", "confidence": 0.97}, CONFLICT_CATALOG,
+                             recalled=recalled, codex=_Codex({"GROZ2", "GFRUIT"}))
+    assert d.rule == "memory_rescue" and d.gtin == "GROZ2"
+
+
+def test_a_memory_of_a_card_codex_lacks_is_never_rescued():
+    recalled = _human("GROZ", "Rožok štandart 50g")
+    d = dl_match.decide_item(ROLL, {"gtin": "NO_MATCH", "confidence": 0.2}, CONFLICT_CATALOG,
+                             recalled=recalled, codex=_Codex({"GFRUIT", "GROZ2"}))
+    assert d.gtin is None and d.rule != "memory_rescue"
+
+
+class _NamedCodex(_Codex):
+    def __init__(self, names):
+        super().__init__(names)
+        self.names = names
+
+    def name_for(self, code):
+        return self.names.get(str(code), "")
+
+
+def test_a_memory_conflict_note_names_the_model_pick_codex_lacks():
+    """Review 🟡: when the invalid pick was nulled, the conflict note must not claim the
+    model 'found nothing' — it names the card and says CODEX has no such code."""
+    recalled = _human("GFRUIT", "Ovocie - Zlaté jablko pražené",
+                      human_gtins=("GFRUIT", "GROZ2"))
+    d = dl_match.decide_item(ROLL, {"gtin": "GROZ", "confidence": 0.97}, CONFLICT_CATALOG,
+                             recalled=recalled, codex=_Codex({"GFRUIT", "GROZ2"}))
+    assert d.rule == "memory_conflict"
+    assert "Rožok štandart 50g" in d.note and "CODEX" in d.note
+    assert "nenašiel zhodu" not in d.note
+
+
+def test_the_codex_name_counts_for_the_lexical_plausibility_of_a_remembered_card():
+    """A card whose OUR name went stale (no word shared with the wording) but whose CODEX name
+    matches the wording is not a lexically unrelated misclick — rescued silently."""
+    recalled = _human("GFRUIT", "Ovocie - Zlaté jablko pražené")
+    codex = _NamedCodex({"GFRUIT": "Rožok oravský 50g", "GROZ2": "Rožok cereálny 50g"})
+    d = dl_match.decide_item(ROLL, {"gtin": "NO_MATCH", "confidence": 0.2}, CONFLICT_CATALOG,
+                             recalled=recalled, codex=codex)
+    assert d.rule == "memory_rescue" and d.gtin == "GFRUIT"
+
+
+def test_without_a_codex_guard_the_ladder_is_unchanged():
+    """Shadow / the e2e-dl corpus / a stale list pass no guard — byte-identical decisions."""
+    d = dl_match.decide_item(ROLL, {"gtin": "GROZ", "confidence": 0.97}, CONFLICT_CATALOG)
+    assert d.rule == "llm_sure" and d.gtin == "GROZ"
+    d2 = dl_match.decide_item(ROLL, {"gtin": "GROZ", "confidence": 0.97}, CONFLICT_CATALOG,
+                              codex=_Codex({"GROZ"}))
+    assert d2.rule == "llm_sure" and d2.gtin == "GROZ"
