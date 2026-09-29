@@ -509,7 +509,7 @@ def run_live(conn, cfg, message: dict, snapshot_id: int, pipeline=None, upload=N
     try:
         parsed = static_parse.parse_static_order(
             text, has_attachments=bool(message.get("has_attachments")),
-            dashboard_url=getattr(cfg, "dashboard_base_url", "") or "")
+            dashboard_url=report.dashboard_link(cfg))
     except _PARSE_ERRORS as e:
         # No recognized template to diff against — the whole message (extraction AND
         # its own notification) becomes the AI pipeline's job.
@@ -662,6 +662,6 @@ def tick(conn, cfg, pipeline=None, upload=None, post=None, llm_client=None,
         return 0
     run_id = worker._start_run(conn, message["message_id"], snapshot_id, shadow=True)
     result = run_shadow(conn, message, snapshot_id,
-                        dashboard_url=getattr(cfg, "dashboard_base_url", "") or "")
+                        dashboard_url=report.dashboard_link(cfg))
     worker._finish_run(conn, run_id, result.get("status", "ok"), result)
     return 1
