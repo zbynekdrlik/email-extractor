@@ -148,14 +148,16 @@ def _diff_against_n8n(conn, built, delivery_date: str) -> tuple[str, str]:
     return "mismatch", f"iný obsah než n8n (súbor n8n: {real['filename']!r})"
 
 
-def run_shadow(conn, message: dict, snapshot_id: int) -> dict:
+def run_shadow(conn, message: dict, snapshot_id: int, dashboard_url: str = "") -> dict:
     """Parse + build for ONE message. Never uploads, never posts, never writes message
     state — the caller (`tick`) only ever records the result into `order_runs`/`order_items`.
+    `dashboard_url` (`cfg.dashboard_base_url`) only feeds the photo-guard note (#470).
     """
     text = message.get("combined_text", "")
     try:
         parsed = static_parse.parse_static_order(
-            text, has_attachments=bool(message.get("has_attachments")))
+            text, has_attachments=bool(message.get("has_attachments")),
+            dashboard_url=dashboard_url)
     except _PARSE_ERRORS as e:
         return {"status": "review", "items": [], "reject_reason": str(e),
                 "shadow_verdict": "would_fallback", "shadow_note": str(e)}
@@ -506,7 +508,8 @@ def run_live(conn, cfg, message: dict, snapshot_id: int, pipeline=None, upload=N
     text = message.get("combined_text", "")
     try:
         parsed = static_parse.parse_static_order(
-            text, has_attachments=bool(message.get("has_attachments")))
+            text, has_attachments=bool(message.get("has_attachments")),
+            dashboard_url=getattr(cfg, "dashboard_base_url", "") or "")
     except _PARSE_ERRORS as e:
         # No recognized template to diff against — the whole message (extraction AND
         # its own notification) becomes the AI pipeline's job.
@@ -658,6 +661,7 @@ def tick(conn, cfg, pipeline=None, upload=None, post=None, llm_client=None,
     if not message:
         return 0
     run_id = worker._start_run(conn, message["message_id"], snapshot_id, shadow=True)
-    result = run_shadow(conn, message, snapshot_id)
+    result = run_shadow(conn, message, snapshot_id,
+                        dashboard_url=getattr(cfg, "dashboard_base_url", "") or "")
     worker._finish_run(conn, run_id, result.get("status", "ok"), result)
     return 1

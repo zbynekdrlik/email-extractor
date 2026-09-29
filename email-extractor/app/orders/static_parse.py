@@ -288,16 +288,27 @@ def extract_order_data(text: str) -> dict:
     return result
 
 
-def parse_static_order(text: str, has_attachments: bool = False) -> dict:
+def photo_order_message(dashboard_url: str = "") -> str:
+    """The operator-facing text of `PhotoOrderNeedsVision`. Names the dashboard by the
+    configured public address (`cfg.dashboard_base_url`, #470 — the add-on moved behind a
+    Cloudflare tunnel and the raw server port is being closed), never a baked-in host; with
+    no address configured the instruction simply names no address."""
+    base = (dashboard_url or "").rstrip("/")
+    where = f"otvor dashboard ({base})" if base else "otvor dashboard"
+    return ("Príloha je FOTKA — automat ju nevie prečítať. Môže to byť objednávka aj "
+            f"vratka/doklad: {where}, pozri fotku a vybav ručne.")
+
+
+def parse_static_order(text: str, has_attachments: bool = False,
+                       dashboard_url: str = "") -> dict:
     """The n8n MAIN section: clean invisible chars, guard against a photo-only order with
     no OCR'able body, then run the real extraction. `has_attachments` mirrors
-    `$('Normalize').first().json.hasAttachments` in the n8n node."""
+    `$('Normalize').first().json.hasAttachments` in the n8n node; `dashboard_url` (the
+    caller's `cfg.dashboard_base_url`) only feeds the photo-guard message."""
     input_text = clean_invisible(text)
     if not input_text:
         raise MissingInputText('Chýba vstupný text! Očakáva sa pole "text" s objednávkou.')
     bare = re.sub(r"Subject:|From:[^\n]*|Body:", "", input_text).strip()
     if has_attachments and len(bare) < 30:
-        raise PhotoOrderNeedsVision(
-            "Príloha je FOTKA — automat ju nevie prečítať. Môže to byť objednávka aj "
-            "vratka/doklad: otvor dashboard (46.224.130.35:8099), pozri fotku a vybav ručne.")
+        raise PhotoOrderNeedsVision(photo_order_message(dashboard_url))
     return extract_order_data(input_text)
