@@ -122,7 +122,9 @@ def test_the_dl_list_flags_name_drift_and_missing_codes_and_filters_them(pg):
     meta = data["meta"]["codex"]
     assert meta["active"] is True and meta["codes"] == 3 and meta["as_of"]
     issues = c.get("/api/board/products?scope=dl&codex=issues").get_json()
-    assert sorted(i["gtin"] for i in issues["items"]) == ["3698", G_GOOD]
+    # the `_base` fixture card DBASE0 is not a CODEX card either — it is listed as missing too
+    assert sorted(i["gtin"] for i in issues["items"]) == ["3698", G_GOOD, "DBASE0"]
+    assert G_MUKA not in {i["gtin"] for i in issues["items"]}
 
 
 def test_the_legacy_dl_products_api_is_checked_too(pg):
