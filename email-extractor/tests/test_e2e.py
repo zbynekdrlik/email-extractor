@@ -572,3 +572,113 @@ def test_board_dl_item_answer_unrelated_to_the_wording_asks_for_confirmation(
     assert len(dialogs) == 2, "an alias-backed pick must not ask for confirmation"
 
     assert console == [], f"browser console not clean: {console}"
+
+
+# --- #467: the board refuses a card number CODEX has no stock card for ------------------
+
+_E2E_CODEX = [
+    {"code": "9990000000017", "card_code": "27", "stredisko": 1, "sklad": 1,
+     "name": "Rožok so slaninou a syrom 70g"},
+    {"code": "9990000000093", "card_code": "93", "stredisko": 1, "sklad": 100,
+     "name": "Mak modrý mletý e2e"},
+]
+
+
+def _e2e_codex_and_catalog(pg):
+    from app.orders import codex_cards, dl_snapshot
+    codex_cards.replace_cards(pg, _E2E_CODEX)
+    dl_snapshot._freeze(pg, [{"gtin": "DBASE0", "name": "Base", "doplnok": "", "mass": None,
+                              "sklad": "", "cena": None}], [])
+    # our card for the CODEX code still carries an OLD, unrelated name (the incident)
+    dl_snapshot.upsert_dl_catalog_card(pg, "9990000000017", "Bagetka s kečupom a syrom 80 gr",
+                                       sklad="1")
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+
+
+def test_board_products_sklad_refuses_a_code_codex_lacks_and_offers_the_codex_card(
+        live_server, pg, page):
+    """Produkty sklad: the stale-named card shows its CODEX name; a „Nová karta" with a code
+    CODEX lacks is NOT saved — the editor lists CODEX cards with a similar name + code, one
+    click puts the right code in, and the save goes through. Clean console, version label."""
+    from app.httpapi import dl_key
+
+    _e2e_codex_and_catalog(pg)
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
+    page.wait_for_url(re.compile(r"/nastenka"))
+    page.goto(f"{live_server}/nastenka/produkty-sklad")
+    backend_ver = page.request.get(f"{live_server}/version").text().strip()
+    assert backend_ver in page.locator('[data-testid="version"]').inner_text()
+
+    # name drift is visible on the row, and the CODEX status line is shown
+    row = page.locator('.p-row[data-gtin="9990000000017"]')
+    row.wait_for()
+    assert "Rožok so slaninou a syrom 70g" in row.locator(".p-codex").inner_text()
+    assert "CODEX" in page.locator("#p-codex-status").inner_text()
+
+    # new card with a code CODEX does not have → refused, nothing saved, suggestions shown
+    page.click("#p-new")
+    page.fill(".p-new-editor .p-gtin", "3698")
+    page.fill(".p-new-editor .p-name", "Mak modrý mletý e2e")
+    page.click(".p-new-editor .p-save")
+    hint = page.locator(".p-new-editor .p-codex-hint")
+    hint.wait_for()
+    assert "3698" in hint.inner_text() and "CODEX" in hint.inner_text()
+    assert pg.execute("SELECT count(*) FROM dl_catalog_overrides WHERE gtin='3698'"
+                      ).fetchone()[0] == 0
+
+    # one click takes the CODEX card's code → save succeeds
+    hint.locator('.p-codex-use[data-code="9990000000093"]').click()
+    assert page.locator(".p-new-editor .p-gtin").input_value() == "9990000000093"
+    page.click(".p-new-editor .p-save")
+    page.wait_for_selector('.p-row[data-gtin="9990000000093"]')
+    assert pg.execute("SELECT name FROM dl_catalog_overrides WHERE gtin='9990000000093'"
+                      ).fetchone()[0] == "Mak modrý mletý e2e"
+
+    # the drifted card's editor offers „Prevziať názov z CODEXu"
+    row.locator(".p-edit").click()
+    page.locator('.p-row[data-gtin="9990000000017"] .p-codex-take').click()
+    assert page.locator('.p-row[data-gtin="9990000000017"] .p-editor .p-name').input_value() \
+        == "Rožok so slaninou a syrom 70g"
+
+    assert console == [], f"browser console not clean: {console}"
+
+
+def test_board_dl_item_new_card_refuses_a_code_codex_lacks_and_answers_with_the_codex_card(
+        live_server, pg, page):
+    """Otázky sklad, the incident's entry point: „➕ Nová karta" with 3698 is refused, the card
+    shows which CODEX card has that name (our card under its old name) — one click answers the
+    question with it. Nothing is written for 3698. Clean console."""
+    from app.httpapi import dl_key
+
+    _e2e_codex_and_catalog(pg)
+    qid = _board_seed_dl_item_question(pg, "be2e-467", "Rožok so slaninou a syrom 70g", [])
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
+    page.wait_for_url(re.compile(r"/nastenka"))
+    page.goto(f"{live_server}/nastenka/otazky-sklad")
+    card = page.locator(f"#q-card-{qid}")
+    card.wait_for()
+
+    card.locator('button:has-text("➕ Nová karta")').click()
+    card.locator(".q-in-gtin").fill("3698")
+    card.locator(".q-in-name").fill("Rožok so slaninou a syrom 70g")
+    card.locator('.q-inline-form button:has-text("Uložiť")').click()
+    hint = card.locator(".q-codex-hint")
+    hint.wait_for()
+    assert "3698" in hint.inner_text() and "CODEX" in hint.inner_text()
+    assert pg.execute("SELECT status FROM order_questions WHERE id=%s",
+                      (qid,)).fetchone()[0] == "open"
+    assert pg.execute("SELECT count(*) FROM dl_catalog_overrides WHERE gtin='3698'"
+                      ).fetchone()[0] == 0
+
+    hint.locator('.q-codex-use[data-code="9990000000017"]').click()
+    for _ in range(50):
+        row = pg.execute("SELECT status, answer->>'choice' FROM order_questions WHERE id=%s",
+                         (qid,)).fetchone()
+        if row[0] == "answered":
+            break
+        page.wait_for_timeout(100)
+    assert row == ("answered", "9990000000017")
+
+    assert console == [], f"browser console not clean: {console}"

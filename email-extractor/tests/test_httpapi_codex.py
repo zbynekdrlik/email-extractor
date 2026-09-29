@@ -1,5 +1,6 @@
 """#342: the machine endpoint POST /api/codex/orders (X-Token auth + idempotent upsert)."""
 import os
+from datetime import UTC, datetime
 
 from app.config import Config
 from app.httpapi import create_app
@@ -78,3 +79,64 @@ def test_rows_missing_identity_are_dropped_not_upserted(pg):
     body = r.get_json()
     assert body["upserted"] == 1 and body["received"] == 4
     assert pg.execute("SELECT count(*) FROM codex_orders").fetchone()[0] == 1
+
+
+# --- #467: POST /api/codex/cards — the CODEX stock-card list (full replace) -------------
+
+_CARDS = {"source_as_of": "2026-09-29T12:23:34+00:00", "cards": [
+    {"code": "9990000000017", "card_code": "27", "stredisko": 1, "sklad": 1,
+     "name": "Rožok so slaninou a syrom 70g", "inactive": False,
+     "changed_at": "2026-09-28T09:00:48+02:00"},
+    {"code": "9990000000031", "card_code": "40", "stredisko": 1, "sklad": 100,
+     "name": "Múka pšeničná T650", "inactive": False, "changed_at": None},
+    {"code": "9990000000048", "card_code": "41", "stredisko": 1, "sklad": 100,
+     "name": "Múka ražná T930", "inactive": True, "changed_at": None}]}
+
+
+def test_cards_endpoint_needs_the_token(pg):
+    r = _client().post("/api/codex/cards", json=_CARDS)
+    assert r.status_code == 403
+    assert pg.execute("SELECT count(*) FROM codex_stock_cards").fetchone()[0] == 0
+
+
+def test_cards_endpoint_is_closed_without_a_configured_token(pg):
+    r = _client(api_token="").post("/api/codex/cards", json=_CARDS, headers={"X-Token": ""})
+    assert r.status_code == 403
+
+
+def test_cards_endpoint_replaces_the_list_and_records_the_sync(pg):
+    c = _client()
+    r = c.post("/api/codex/cards", json=_CARDS, headers={"X-Token": "tok"})
+    assert r.status_code == 200
+    assert r.get_json() == {"rows": 3, "codes": 3, "received": 3}
+    # a second push without the first card REPLACES the list (the code leaves it)
+    second = {"source_as_of": _CARDS["source_as_of"], "cards": _CARDS["cards"][1:]}
+    r = c.post("/api/codex/cards", json=second, headers={"X-Token": "tok"})
+    assert r.status_code == 200
+    codes = sorted(x[0] for x in pg.execute("SELECT code FROM codex_stock_cards").fetchall())
+    assert codes == ["9990000000031", "9990000000048"]
+    syncs = pg.execute("SELECT row_count, code_count, source_as_of FROM codex_card_syncs "
+                       "ORDER BY id").fetchall()
+    assert [s[:2] for s in syncs] == [(3, 3), (2, 2)]
+    assert syncs[0][2] == datetime(2026, 9, 29, 12, 23, 34, tzinfo=UTC)   # as pushed
+
+
+def test_cards_endpoint_refuses_a_bad_body_or_an_empty_list(pg):
+    c = _client()
+    h = {"X-Token": "tok"}
+    assert c.post("/api/codex/cards", json={"nope": 1}, headers=h).status_code == 400
+    assert c.post("/api/codex/cards", data="not json", headers=h).status_code == 400
+    assert c.post("/api/codex/cards", json={"cards": []}, headers=h).status_code == 400
+    assert pg.execute("SELECT count(*) FROM codex_card_syncs").fetchone()[0] == 0
+
+
+def test_cards_endpoint_refuses_a_drastic_shrink_unless_forced(pg):
+    c = _client()
+    h = {"X-Token": "tok"}
+    c.post("/api/codex/cards", json=_CARDS, headers=h)
+    shrunk = {"cards": _CARDS["cards"][:1]}
+    r = c.post("/api/codex/cards", json=shrunk, headers=h)
+    assert r.status_code == 409
+    assert pg.execute("SELECT count(*) FROM codex_stock_cards").fetchone()[0] == 3
+    assert c.post("/api/codex/cards?force=1", json=shrunk, headers=h).status_code == 200
+    assert pg.execute("SELECT count(*) FROM codex_stock_cards").fetchone()[0] == 1
