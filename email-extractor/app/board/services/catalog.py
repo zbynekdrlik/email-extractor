@@ -145,9 +145,9 @@ def card_detail(conn, scope: str, gtin: str) -> dict | None:
 
 def upsert(conn, scope: str, body: dict, actor: str) -> dict:
     """Create or edit a card via the SAME snapshot machinery /znalosti uses, + an audit row.
-    Raises `ValueError` (→ 400) when gtin/name are missing, `CardExists` (→ 409) for a
-    `new: true` card whose number already has one, `codex_cards.CodexRefusal` (→ 409) for a DL
-    number CODEX has no stock card for."""
+    Raises `ValueError` (→ 400) when gtin/name are missing, `CardExists` (→ 409) for an orders
+    `new: true` card whose number already has one, `codex_cards.CardRefused` (→ 409) for a DL
+    number CODEX lacks / already taken / in the Kôš."""
     cfg = _scope(scope)
     gtin = str(body.get("gtin") or "").strip()
     name = str(body.get("name") or "").strip()
@@ -156,11 +156,13 @@ def upsert(conn, scope: str, body: dict, actor: str) -> dict:
     rows = cfg["for_management"](conn)
     current = next((r for r in rows if r["gtin"] == gtin), None)
     existed = current is not None
-    if body.get("new") and current is not None:
+    if body.get("new") and scope == "dl":
+        # #467: the ONE new-DL-card gate (CODEX + a number we have + a number in the Kôš)
+        codex_cards.guard_new_dl_card(conn, gtin, name)
+    elif body.get("new") and current is not None:
         raise CardExists(current)
-    if scope == "dl":
-        # #467: a DL card number CODEX has no stock card for is never saved (create OR edit) —
-        # `CodexRefusal` → 409 with the similar CODEX cards; a stale list passes (fail-open).
+    elif scope == "dl":
+        # #467: an edit of a DL card whose number CODEX lacks is refused too (fail-open)
         codex_cards.check_card_code(conn, gtin, name, catalog=rows)
     cfg["upsert"](conn, gtin, name, body)
     action = "update" if existed else "create"

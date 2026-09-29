@@ -751,8 +751,7 @@ def decide_item(item_name: str, llm: dict, catalog: list[dict], recalled=None,
             log.warning("dl memory rescue skipped: %r card %r code %s has no CODEX stock "
                         "card", item_name, rec_card["name"], recalled.gtin)
             rec_card = None
-        codex_name = (getattr(codex, "name_for", lambda _g: "")(recalled.gtin)
-                      if codex is not None else "")
+        codex_name = codex.name_for(recalled.gtin) if codex is not None else ""
         conflict = (_memory_conflict(item_name, recalled, rec_card, llm_gtin, codex_name)
                     if rec_card else [])
         if rec_card and conflict:

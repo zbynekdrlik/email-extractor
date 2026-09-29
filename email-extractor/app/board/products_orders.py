@@ -75,7 +75,7 @@ def register(bp, deps) -> None:
         except catalog.CardExists as e:
             return jsonify(error=str(e), existing={"gtin": e.card.get("gtin"),
                                                    "name": e.card.get("name", "")}), 409
-        except codex_cards.CodexRefusal as e:   # #467: a DL number CODEX has no card for
+        except codex_cards.CardRefused as e:   # #467: CODEX lacks it / taken / in the Kôš
             return jsonify(**e.payload), 409
         return jsonify(ok=True, **res)
 

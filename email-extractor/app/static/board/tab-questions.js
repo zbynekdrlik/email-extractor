@@ -336,11 +336,14 @@ async function act(qid, op) {
 }
 
 // ---- load + render ----------------------------------------------------------------
-async function load() {
+async function load({ periodic = false } = {}) {
   try {
     const params = new URLSearchParams({ scope: SCOPE, status: state.status });
     if (state.q) params.set("q", state.q);
     const data = await apiGet(`/questions?${params.toString()}`);
+    // a PERIODIC refresh whose fetch was in flight when an editor/form opened must not
+    // rebuild the list under it (the „element was detached" race)
+    if (periodic && editingOpen()) return;
     state.cardActions = (data.meta && data.meta.card_actions) || {};
     clear(listEl);
     const items = data.items || [];
@@ -394,5 +397,5 @@ document.querySelectorAll(".q-chip").forEach((c) => {
   c.classList.toggle("is-active", c.dataset.status === state.status);
 });
 
-setInterval(() => { if (!editingOpen()) load(); }, 8000);
+setInterval(() => { if (!editingOpen()) load({ periodic: true }); }, 8000);
 load().then(() => focusQuestion(true));

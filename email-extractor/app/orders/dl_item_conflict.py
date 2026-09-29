@@ -15,11 +15,13 @@ the already-oversized `teach.py`:
 
 The memory side (verdict, supersede, restore) lives in `dl_memory`.
 
-#467 reuses the SAME board-settled semantics for a `codex_missing` question (the line's card has
-a code CODEX has no stock card for): its answer counts as the sklad's confirmation, supersedes
-the human answer that taught the dead code, undo restores it, and a deduped older question is
-upgraded — `board_settled()` is the one predicate for "either flag", `flag_question(flag=...)`
-the one upgrade path (with `keep` dropping cards CODEX lacks from the old candidate list).
+#467 reuses the question-row half for a `codex_missing` question (the line's card has a code
+CODEX has no stock card for): its answer supersedes the human answer that taught the dead code,
+undo restores it, and a deduped older question is upgraded — `board_settled()` is the predicate
+for "either flag", `flag_question(flag=...)` the one upgrade path (with `keep` dropping cards
+CODEX lacks from the old candidate list). DELIBERATELY NOT shared: only a memory CONFLICT
+answer is a standing confirmation in `dl_memory._board_confirmed` — a codex answer is a plain
+list pick, so a misclick there is caught on the next delivery like any other.
 """
 from __future__ import annotations
 

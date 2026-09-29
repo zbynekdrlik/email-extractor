@@ -143,9 +143,10 @@ forever). Reusable rules:
 - **Fail OPEN, never closed**: `codex_cards.live_guard` returns None (checks OFF, `log.warning`)
   when nothing was ever pushed or the CODEX data is older than `STALE_HOURS = 30` (ETL 14:15 /
   18:00 → longest normal age ~20.5 h; one missed slot tolerated). `stale_sweep` (worker tick,
-  `if dl_python:`) enqueues ONE ops alert (`pending_alerts` kind `codex_cards_stale`, key
-  `codex-cards`, `reminder_suppressed` cadence); a never-pushed list gets the same 30 h grace
-  from the revision-17 `schema_version.applied_at` (no alert right after a deploy).
+  `if dl_python:`) enqueues ONE ops alert per stale episode (`pending_alerts` kind
+  `codex_cards_stale`, key `codex-cards:<as_of>`, `reminder_suppressed` cadence: the first alert
+  of an episode at once, reminders once per workday morning); a never-pushed list gets the same
+  30 h grace from the revision-17 `schema_version.applied_at` (no alert right after a deploy).
 - **Shrink guard**: an empty push → 400, a push with < 50 % of the previous codes → 409 (a
   half-loaded ETL would otherwise hold every DL); `?force=1` for a genuine mass removal.
 - **Where it bites** — all LIVE only (shadow / the e2e-dl corpus pass no guard, byte-identical):
@@ -159,14 +160,15 @@ forever). Reusable rules:
     CODEX name (`codex_cards.question_candidates`) — the right card surfaces even under a stale
     name — and carries `codex_name` for the board; the doc is HELD with `_codex_hold_reason`
     (which also says to delete the dead card on Produkty sklad).
-  - **the codex question is BOARD-SETTLED like a #465 conflict** (`payload.codex_missing`,
-    `dl_item_conflict.board_settled`): its answer counts as the sklad's confirmation in
-    `dl_memory._board_confirmed` (else a drifted card whose OUR name shares no word with the
-    wording trips the #465 lexical conflict and the NEXT delivery is held again — review 🟡,
-    probe-reproduced), supersedes the human answer that taught the dead code (undo restores it),
-    and a deduped older plain question is upgraded (`flag_question(flag=, keep=codex.has)` puts
-    the CODEX cards first, drops the dead ones, swaps the reason). The CODEX name also counts
-    for the R73 lexical plausibility (`_memory_conflict(alt_name=)`).
+  - **the codex question shares the #465 question-row mechanics** (`payload.codex_missing`,
+    `dl_item_conflict.board_settled`): its answer supersedes the human answer that taught the
+    dead code (undo restores it) and a deduped older plain question is upgraded
+    (`flag_question(flag=, keep=codex.has)`: CODEX cards first, dead ones dropped, new reason).
+    It is deliberately **NOT a standing confirmation** in `dl_memory._board_confirmed` (review 2
+    🟡, probe-reproduced: that made a misclick on a codex question ship silently on every later
+    delivery) — only the reprocess of the answered message trusts it. The drifted-name case
+    (our name shares no word with the wording) is solved instead by the CODEX name counting for
+    the R73 lexical plausibility (`_memory_conflict(alt_name=codex.name_for(...))`).
   - board: `check_card_code` → 409 `{error, codex:{code, missing, as_of, similar:[{code, name,
     in_catalog, catalog_gtin?, catalog_name?}]}}` on Produkty sklad create/edit, the inline
     „➕ Nová karta", any dl_item pick (checked BEFORE a free/search pick is legitimised — a

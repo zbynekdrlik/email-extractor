@@ -285,12 +285,15 @@ function newCard() {
 }
 
 // ---- load + render ----------------------------------------------------------------
-async function load() {
+async function load({ periodic = false } = {}) {
   try {
     const params = new URLSearchParams({ scope: SCOPE, page: String(state.page) });
     if (state.q) params.set("q", state.q);
     if (SCOPE === "dl" && state.codexIssues) params.set("codex", "issues");
     const data = await apiGet(`/products?${params.toString()}`);
+    // a PERIODIC refresh whose fetch was in flight when an editor/form opened must not
+    // rebuild the list under it (the „element was detached" race)
+    if (periodic && editingOpen()) return;
     state.meta = data.meta || {};
     renderCodexStatus();
     clear(listEl);
@@ -331,5 +334,5 @@ if (nextBtn) nextBtn.addEventListener("click", () => {
   if (state.meta.has_more) { state.page += 1; load(); }
 });
 
-setInterval(() => { if (!editingOpen()) load(); }, 15000);
+setInterval(() => { if (!editingOpen()) load({ periodic: true }); }, 15000);
 load();

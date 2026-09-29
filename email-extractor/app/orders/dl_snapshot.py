@@ -322,6 +322,16 @@ def retired_dl_cards(conn) -> list[dict]:
             for r in rows]
 
 
+def deleted_dl_card(conn, gtin: str) -> dict | None:
+    """#467: the DL card override for `gtin` that the loader HIDES (`retired OR deleted_at IS
+    NOT NULL` — the exact rule of `_load_dl_catalog_overrides`), i.e. a number sitting in the
+    Kôš; None when there is none. (`retired_dl_cards` keys on `retired` alone, for #337.)"""
+    row = conn.execute(
+        "SELECT gtin, name FROM dl_catalog_overrides "
+        "WHERE gtin = %s AND (retired OR deleted_at IS NOT NULL)", (str(gtin),)).fetchone()
+    return {"gtin": row[0], "name": row[1]} if row else None
+
+
 def upsert_dl_catalog_card(conn, gtin: str, name: str, *, doplnok: str = "",
                            mass: float | None = None, sklad: str = "",
                            cena: float | None = None) -> None:
