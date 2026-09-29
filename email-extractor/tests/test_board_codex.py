@@ -258,6 +258,23 @@ def test_the_new_card_on_a_question_refuses_a_deleted_cards_number(pg):
     assert teach.get(pg, qid)["status"] == "open"
 
 
+def test_the_produkty_new_card_refuses_a_deleted_cards_number_too(pg):
+    """Review 2 🔵: the Produkty „Nová karta" (`new: true`) must not overwrite a card sitting in
+    the Kôš either — it wiped sklad/cena while the card stayed hidden, and a later restore would
+    bring back a kg card without sklad=100 (the #462 xN class). ONE guard for both paths."""
+    _base(pg)
+    _codex(pg)
+    _seed(pg, G_MUKA, "Múka pšeničná T650", sklad="100", cena=0.37)
+    dl_snapshot.retire_dl_catalog_card(pg, G_MUKA)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    r = _client().post("/api/board/products?scope=dl", json={
+        "gtin": G_MUKA, "name": "Múka hladká", "sklad": "", "cena": "", "new": True})
+    assert r.status_code == 409 and "Kôš" in r.get_json()["error"]
+    row = pg.execute("SELECT name, retired, sklad, cena FROM dl_catalog_overrides "
+                     "WHERE gtin=%s", (G_MUKA,)).fetchone()
+    assert row[:3] == ("Múka pšeničná T650", True, "100") and float(row[3]) == 0.37
+
+
 def test_a_refused_free_pick_is_not_added_to_the_offered_cards(pg):
     """Review 🔵: the CODEX check runs BEFORE the free/search pick is legitimised, so a refused
     dead code never lingers as an offered button on the question."""

@@ -263,6 +263,24 @@ def test_the_answer_is_honoured_on_later_deliveries_even_when_names_share_no_wor
     assert _open_questions(pg) == [], "the sklad already settled this line — never re-asked"
 
 
+def test_a_misclick_on_a_codex_question_is_not_trusted_on_later_deliveries(
+        pg, tmp_path, monkeypatch):
+    """Review 2 🟡: a codex question is just a list of cards — its answer must NOT count as the
+    board's standing confirmation (#465: a plain answer from another message never does), or a
+    misclick („Rožok…" answered with the bread card) would ship silently on every later
+    delivery. The reprocess of the answered message ships it once; the NEXT delivery is held
+    and re-asked (#465 lexical conflict)."""
+    _snapshot(pg)
+    _codex(pg)
+    _run(pg, tmp_path, "dl1", _doc("0100000216"))
+    qid = _open_questions(pg)[0][0]
+    _answer_through_the_app_path(pg, monkeypatch, qid, G_BREAD)   # the misclick
+    nxt = _run(pg, tmp_path, "dl2", _doc("0100000217"))
+    assert nxt == [], "a lexically unrelated misclick never ships silently on a later DL"
+    rows = _open_questions(pg)
+    assert len(rows) == 1 and rows[0][1] == ROLL
+
+
 def test_the_answer_supersedes_the_dead_human_answer_and_undo_restores_it(
         pg, tmp_path, monkeypatch):
     """Answering the codex question retires the human answer that taught the dead code

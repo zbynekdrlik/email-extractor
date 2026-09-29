@@ -800,13 +800,16 @@ def test_memory_conflict_logs_a_warning(caplog):
 # --- #467: a card whose code CODEX has no stock card for can never ship -----------------
 
 class _Codex:
-    """The duck-typed CODEX guard decide_item takes (`codex_cards.CodexCards.has`)."""
+    """The CODEX guard decide_item takes (`codex_cards.CodexCards`: `has` + `name_for`)."""
 
     def __init__(self, codes):
         self.codes = set(codes)
 
     def has(self, code):
         return str(code) in self.codes
+
+    def name_for(self, code):
+        return ""
 
 
 def test_a_sure_pick_of_a_card_codex_lacks_is_left_without_a_card():
