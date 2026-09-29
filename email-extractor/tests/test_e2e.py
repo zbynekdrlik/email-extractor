@@ -641,7 +641,11 @@ def test_board_products_sklad_refuses_a_code_codex_lacks_and_offers_the_codex_ca
     assert page.locator('.p-row[data-gtin="9990000000017"] .p-editor .p-name').input_value() \
         == "Rožok so slaninou a syrom 70g"
 
-    assert console == [], f"browser console not clean: {console}"
+    # the refusal IS a deliberate 409 — Chromium logs every non-2xx fetch as "Failed to load
+    # resource" (no app console.error); tolerate exactly that one entry, nothing else (#235 shape)
+    real_errors = [m for m in console
+                   if "Failed to load resource" not in m or "status of 409" not in m]
+    assert real_errors == [], f"browser console not clean: {real_errors}"
 
 
 def test_board_dl_item_new_card_refuses_a_code_codex_lacks_and_answers_with_the_codex_card(
@@ -681,4 +685,8 @@ def test_board_dl_item_new_card_refuses_a_code_codex_lacks_and_answers_with_the_
         page.wait_for_timeout(100)
     assert row == ("answered", "9990000000017")
 
-    assert console == [], f"browser console not clean: {console}"
+    # the refusal IS a deliberate 409 — Chromium logs every non-2xx fetch as "Failed to load
+    # resource" (no app console.error); tolerate exactly that one entry, nothing else (#235 shape)
+    real_errors = [m for m in console
+                   if "Failed to load resource" not in m or "status of 409" not in m]
+    assert real_errors == [], f"browser console not clean: {real_errors}"
