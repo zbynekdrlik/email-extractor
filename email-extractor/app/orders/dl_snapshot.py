@@ -322,17 +322,14 @@ def retired_dl_cards(conn) -> list[dict]:
             for r in rows]
 
 
-def deleted_dl_card(conn, gtin: str, code: str | None = None) -> dict | None:
-    """#467: the DL card override for `gtin` that the loader HIDES (`retired OR deleted_at IS
-    NOT NULL` — the exact rule of `_load_dl_catalog_overrides`), i.e. a number sitting in the
-    Kôš; None when there is none. `code` (the normalized CODEX code) also finds that code
-    written with leading zeros / „.0". (`retired_dl_cards` keys on `retired` alone, for #337.)"""
-    row = conn.execute(
-        "SELECT gtin, name FROM dl_catalog_overrides "
-        "WHERE (gtin = %s OR (%s::text IS NOT NULL "
-        "AND regexp_replace(gtin, '^0*([0-9]+)(\\.0+)?$', '\\1') = %s)) "
-        "AND (retired OR deleted_at IS NOT NULL)", (str(gtin), code, code)).fetchone()
-    return {"gtin": row[0], "name": row[1]} if row else None
+def deleted_dl_cards(conn) -> list[dict]:
+    """#467: the DL card overrides the loader HIDES (`retired OR deleted_at IS NOT NULL` — the
+    exact rule of `_load_dl_catalog_overrides`), i.e. the numbers sitting in the Kôš. The caller
+    matches them by CODEX code in Python (`card_guard.same_code_card`, the ONE normalizer).
+    (`retired_dl_cards` keys on `retired` alone, for #337.)"""
+    rows = conn.execute("SELECT gtin, name FROM dl_catalog_overrides "
+                        "WHERE retired OR deleted_at IS NOT NULL ORDER BY gtin").fetchall()
+    return [{"gtin": r[0], "name": r[1]} for r in rows]
 
 
 def upsert_dl_catalog_card(conn, gtin: str, name: str, *, doplnok: str = "",

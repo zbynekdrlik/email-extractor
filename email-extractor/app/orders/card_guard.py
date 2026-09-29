@@ -74,7 +74,7 @@ def guard_new_dl_card(conn, gtin, *texts: str, now=None) -> None:
     hit = same_code_card(catalog, gtin)
     if hit:
         raise taken(hit)
-    if dl_snapshot.deleted_dl_card(conn, gtin, code=codex_cards.normalize_code(gtin)):
+    if same_code_card(dl_snapshot.deleted_dl_cards(conn), gtin):
         raise CardRefused({
             "error": (f"Číslo položky {gtin} patrí zmazanej karte — obnov ju na záložke Kôš "
                       f"(nová karta by ju prepísala prázdnymi údajmi).")})
