@@ -88,6 +88,18 @@ def test_plain_http_through_the_tunnel_is_redirected_to_https():
     assert r.headers["Location"] == f"https://{PUBLIC}/health"
 
 
+def test_the_redirect_is_never_stored_by_a_shared_cache():
+    """The target host comes from forwarded headers a visitor can send themselves (Cloudflare
+    passes an unknown `X-Forwarded-Host` through). Cloudflare's edge caches a 301 on a
+    cacheable path (`/static/*.js`) by default — a visitor's spoofed Host would then be
+    served to everyone. `no-store` keeps each redirect private to the request that made it."""
+    c = _client()
+    r = c.get("/static/board/tab-questions.js", base_url=f"http://{PUBLIC}",
+              headers={**PLAIN, "X-Forwarded-Host": "attacker.example"})
+    assert r.status_code == 301
+    assert "no-store" in r.headers.get("Cache-Control", "")
+
+
 def test_the_redirect_keeps_the_path_and_query_and_runs_before_the_auth_gate():
     c = _client()
     # A gated page: the visitor is sent to https FIRST (not to /login over http).
