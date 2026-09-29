@@ -1440,3 +1440,34 @@ def test_ai_not_order_discard_is_not_restamped_by_the_static_terminal_update(pg)
         "SELECT category, processed_by FROM messages WHERE message_id='m1'").fetchone()
     assert (cat, by) == ("no_processing", "ai-not-order"), \
         "the AI discard must survive, not be re-stamped as static_orders"
+
+
+# --- #470: the photo-order note names cfg.dashboard_base_url (no hardcoded server IP) ------
+
+PUBLIC_DASHBOARD = "https://email-pz.newlevel.media"
+
+
+def test_a_photo_only_shadow_note_names_the_configured_dashboard(pg):
+    _msg(pg, text="krátky text", has_attachments=True)
+    _snapshot(pg)
+    cfg = _cfg(static_orders_shadow=True, dashboard_base_url=PUBLIC_DASHBOARD)
+    assert static_worker.tick(pg, cfg) == 1
+    reason = pg.execute("SELECT result->>'reject_reason' FROM order_runs").fetchone()[0]
+    assert f"otvor dashboard ({PUBLIC_DASHBOARD})" in reason
+
+
+def test_a_photo_only_live_fallback_note_names_the_configured_dashboard():
+    """engine=python: the photo guard routes the message to the AI pipeline and the note it
+    carries (`static_fallback`) tells the operator where to look — the configured address."""
+    seen = []
+
+    def fake_pipeline(conn, cfg, message, snapshot_id):
+        seen.append(message["message_id"])
+        return {"status": "review"}
+
+    result = static_worker.run_live(
+        None, _cfg(dashboard_base_url=PUBLIC_DASHBOARD),
+        {"message_id": "m-photo", "combined_text": "krátky text", "has_attachments": True},
+        1, pipeline=fake_pipeline)
+    assert seen == ["m-photo"]
+    assert f"otvor dashboard ({PUBLIC_DASHBOARD})" in result["static_fallback"]

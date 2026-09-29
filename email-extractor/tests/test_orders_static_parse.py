@@ -259,3 +259,32 @@ def test_parse_static_order_short_body_with_no_attachment_is_not_a_photo_guard()
     empty-order case) must still reach the real parser and its own error/skip handling."""
     with pytest.raises(sp.OrderExtractionError):
         sp.parse_static_order("Subject: x\nFrom: y\nBody:", has_attachments=False)
+
+
+# --- #470: the photo-order text points at the CONFIGURED dashboard, never a baked-in IP ----
+
+_IPV4 = r"\b\d{1,3}(?:\.\d{1,3}){3}\b"
+
+
+def test_the_photo_order_text_has_no_hardcoded_server_address():
+    """The add-on moved behind a Cloudflare tunnel (https://email-pz.newlevel.media) and the
+    raw server port is being closed — a hardcoded IP:port in the text sends the operator to
+    a dead address. Neither the message nor the module source may carry one."""
+    import inspect
+    import re
+
+    with pytest.raises(sp.PhotoOrderNeedsVision) as e:
+        sp.parse_static_order("Subject: objednavka\nFrom: komfos@example.sk\nBody:",
+                              has_attachments=True)
+    assert re.search(_IPV4, str(e.value)) is None, str(e.value)
+    assert ":8099" not in str(e.value)
+    assert "otvor dashboard" in str(e.value)       # the instruction itself stays
+    assert re.search(_IPV4, inspect.getsource(sp)) is None
+
+
+def test_the_photo_order_text_names_the_configured_dashboard_address():
+    with pytest.raises(sp.PhotoOrderNeedsVision) as e:
+        sp.parse_static_order("Subject: objednavka\nFrom: komfos@example.sk\nBody:",
+                              has_attachments=True,
+                              dashboard_url="https://email-pz.newlevel.media/")
+    assert "otvor dashboard (https://email-pz.newlevel.media)" in str(e.value)
