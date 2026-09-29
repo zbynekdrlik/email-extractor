@@ -39,6 +39,18 @@ warning; both alias the same command.)
 
 ## Post-deploy verification
 
+**If `http://<ha-host>:8099` times out from the dev boxes** (2026-09-29: all Docker-published
+ports were filtered upstream for the office egress while 22/8123 still worked — tcpdump on the
+box's `enp1s0` saw 0 packets), read `/health`/`/version` over ssh on the box
+(`curl -4 -s http://127.0.0.1:8099/health`). For the Playwright DOM checks the SSH add-on has
+`AllowTcpForwarding no` (so `ssh -L` accepts locally but every connection dies with curl exit
+56); a small local forwarder works instead — a Python listener on `127.0.0.1:18099` that, per
+connection, spawns `ssh -S <ctl> <ha> "nc 127.0.0.1 8099"` over ONE `ssh -M -f -N` control
+master (control-socket path SHORT, e.g. `/tmp/ha.ctl` — a scratchpad path exceeds the unix
+socket limit), password via `sshpass -e` / `SSHPASS` env (value from memory, never inline in a
+committed file). Then drive the board at `http://127.0.0.1:18099` (never hand that URL to the
+user). The Produkty lists render only the first 50 rows — use the search box to reach a card.
+
 - Liveness: `curl http://<ha-host>:8099/health` → `{"ok":true,"version":"<x.y.z>"}`.
 - Version-on-DOM: any page (the unified nástenka `/nastenka`, the main dashboard) shows
   `v<x.y.z>` in the header — read it with Playwright, not curl. (#449 lane 8: the old
