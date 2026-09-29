@@ -83,3 +83,17 @@ def test_post_orders_chunks_large_batches():
 def test_main_requires_url_and_token(capsys):
     assert push.main(["--url", "", "--token", ""]) == 2
     assert "required" in capsys.readouterr().err
+
+
+def test_the_pushed_line_names_the_target_host_but_never_the_path_or_credentials():
+    """#470: the journal line proves WHICH address the push went to (the Cloudflare tunnel
+    https://email-pz.newlevel.media vs the raw port) — scheme + host only, never a token."""
+    line = push.pushed_line({"fetched": 3, "orders": 2, "upserted": 2},
+                            "https://email-pz.newlevel.media/api/codex/orders")
+    assert line == ("pushed: fetched=3 orders=2 upserted=2 "
+                    "to=https://email-pz.newlevel.media")
+    leaky = push.pushed_line({"fetched": 0, "orders": 0, "upserted": 0},
+                             "https://user:pw@host.example:8443/api/codex/orders?token=x")
+    assert leaky.endswith("to=https://host.example:8443")
+    assert "pw" not in leaky and "token" not in leaky
+

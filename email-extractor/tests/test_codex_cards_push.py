@@ -73,3 +73,17 @@ def test_main_without_url_or_token_is_a_usage_error(monkeypatch):
     monkeypatch.delenv("CODEX_CARDS_PUSH_URL", raising=False)
     monkeypatch.delenv("CODEX_PUSH_TOKEN", raising=False)
     assert push.main([]) == 2
+
+
+def test_the_pushed_line_names_the_target_host_but_never_the_path_or_credentials():
+    """#470: the journal line proves WHICH address the push went to (the Cloudflare tunnel
+    https://email-pz.newlevel.media vs the raw port) — scheme + host only, never a token."""
+    line = push.pushed_line({"fetched": 5, "cards": 5, "rows": 5, "codes": 4},
+                            "https://email-pz.newlevel.media/api/codex/cards")
+    assert line == ("pushed: fetched=5 cards=5 rows=5 codes=4 "
+                    "to=https://email-pz.newlevel.media")
+    leaky = push.pushed_line({"fetched": 0, "cards": 0, "rows": 0, "codes": 0},
+                             "https://user:pw@host.example:8443/api/codex/cards?token=x")
+    assert leaky.endswith("to=https://host.example:8443")
+    assert "pw" not in leaky and "token" not in leaky
+
