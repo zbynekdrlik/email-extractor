@@ -476,3 +476,22 @@ export PG_TEST_DSN="postgresql://postgres:postgres@localhost:$PORT/postgres"
 ```
 
 Always remove throwaway containers after use (`docker rm -f <name>`) to free the port.
+
+## `playwright install` from a worktree venv can DELETE the Playwright MCP's own browser (#470)
+
+The E2E suite needs Chromium for the venv's `playwright` package, so a fresh worktree venv
+seems to want `.venv/bin/python -m playwright install chromium`. On this box that command also
+garbage-collects every browser build in `~/.cache/ms-playwright/` that no registered install
+still links to — on 2026-09-29 it printed `Removing unused browser at …/chromium-1244` and the
+**Playwright MCP** (pinned `@playwright/mcp@0.0.81`, which uses exactly that build) then failed
+every `browser_*` call with `Browser "chrome-for-testing" is not installed; expected executable
+at …/chromium-1244/chrome-linux64/chrome`. Two rules:
+
+- Run the full suite WITHOUT reinstalling browsers when `ls ~/.cache/ms-playwright/` already
+  has a `chromium-*` build the venv's Playwright can use (CI installs its own in the runner).
+- If the MCP browser did get removed, restore it for the MCP's OWN pinned version — read the
+  version from the running process (`ps -eo args | grep '[p]laywright/mcp@'`), then
+  `npx -y @playwright/mcp@<that version> install-browser chrome-for-testing`. A bare
+  `npx @playwright/mcp install-browser …` pulls the LATEST MCP and installs a newer build
+  (e.g. `chromium-1247`) that the running MCP still does not find.
+

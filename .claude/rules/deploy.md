@@ -66,6 +66,12 @@ not build a check or a link on it.
 301 on `/static/*.js` by default) and refuses an invalid forwarded host with 400.
 `SESSION_COOKIE_SECURE` is still OFF — the owner turns it on once `:8099` is closed (then every
 login MUST come over https; the internal n8n calls use no session, so they are unaffected).
+Verified live on 0.9.172: Cloudflare passes a visitor-supplied `X-Forwarded-Host` through to
+the add-on (`curl -H 'X-Forwarded-Host: attacker.example' http://email-pz.newlevel.media/health`
+→ `301 https://attacker.example/health` — that visitor's own redirect only), and the `no-store`
+keeps it out of the edge cache (`cf-cache-status: BYPASS` on `/static/board/*.js`, the next
+plain request gets the correct `Location`). Re-run that pair after any change to
+`_force_https`.
 
 **Fallback when the tunnel itself is down** (or you must reach the raw add-on): read
 `/health`/`/version` over ssh on the box (`curl -4 -s http://127.0.0.1:8099/health`). For the
