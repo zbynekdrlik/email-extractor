@@ -39,12 +39,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from . import card_guard, codex_cards, dl_memory, dl_snapshot, memory, snapshot
+# the memory rules (which rows a move carries / holds) live in `codex_sync_memory` (review 12:
+# the planner neared the size budget)
+from . import card_guard, codex_cards, dl_snapshot, snapshot
+from .codex_sync_memory import CHECK_TAUGHT, SYNC_ACTOR, Split, memory_split, taught_clause
 
 STREDISKO = codex_cards.PICK_STREDISKO
-# the audit actor of every sync write (`codex_sync.ACTOR`) — its own writes are never a human
-# (re)entry of a card
-SYNC_ACTOR = "codex-sync"
 _NEVER = datetime.min.replace(tzinfo=UTC)
 REASON_JOIN = " Tiež: "
 
@@ -70,14 +70,6 @@ SCOPES = (
     _scope("dl", "sklad", ("dl_item_memory",)),
 )
 BY_NAME = {s.name: s for s in SCOPES}
-# memory table -> its UNIQUE mapping columns besides `gtin` (a rewrite X→Y must not collide);
-# trusted literals — the only table/column names ever interpolated into SQL here and in
-# `codex_sync`
-MEMORY_KEYS: dict[str, tuple[str, ...]] = {
-    "item_memory": ("customer_ean", "item_key", "delivered_on"),
-    "global_item_memory": (),
-    "dl_item_memory": ("supplier_ean", "item_key", "delivered_on", "cnt"),
-}
 
 
 @dataclass(frozen=True)
@@ -359,72 +351,6 @@ def _fill(scope: Scope, target: dict, ours: dict) -> dict:
         if (theirs is None or str(theirs).strip() == "") and mine not in (None, ""):
             out[k] = mine
     return out
-
-
-# a TAUGHT row = one the matcher trusts as a warehouse decision (`memory.CURATED_SOURCES`,
-# identical in `dl_memory`: human answers, the sheet import, História „Doučiť" = teachback —
-# review 12 🟡: counting teachback as delivery history held it without any review). Anything
-# else (a shipped row, a NULL source) is delivery history.
-assert memory.CURATED_SOURCES == dl_memory.CURATED_SOURCES
-TAUGHT_SOURCES = memory.CURATED_SOURCES
-
-
-def held_clause(table: str) -> str:
-    """SQL: a mapping row of `table` decided AFTER `%(hold)s` — created then (a NULL
-    `created_at` is an old row), a DL row for a delivery then (`dl_item_memory.delivered_on` is
-    the document's date; `item_memory.delivered_on` is an order's REQUESTED day, often ahead,
-    so it never counts — review 11), or re-pointed then by a human (a non-sync audit row on it,
-    e.g. a Naučené edit that keeps `created_at`). Used while CODEX gave our code to another
-    card: such a row may be that other product's, so it is never moved (review 10 🟡). `table`
-    is a trusted literal (`MEMORY_KEYS`)."""
-    return ("(COALESCE(created_at, '-infinity') > %(hold)s::timestamptz"
-            + (" OR delivered_on > %(hold)s::timestamptz::date"
-               if table == "dl_item_memory" else "")
-            + f" OR EXISTS (SELECT 1 FROM audit_log a WHERE a.table_name = '{table}'"
-              f" AND a.row_id = {table}.id::text AND a.actor <> '{SYNC_ACTOR}'"
-              " AND a.ts > %(hold)s::timestamptz))")
-
-
-# where a human fixes a TAUGHT row: Naučené lists the answers + the sheet import; a História
-# „Doučiť" (teachback) row is undone in the Kôš and taught again (review 12)
-_CHECK = ("skontroluj ich v Naučené (priradenie z „Doučiť“ v Histórii vráť v Koši a doúč "
-          "znova)")
-
-
-def _taught_clause(table: str) -> str:
-    """SQL: a TAUGHT row (all of global_item_memory; a NULL source is history — review 12)."""
-    if table == "global_item_memory":
-        return "TRUE"
-    return ("COALESCE(source, '') IN (" + ", ".join(f"'{s}'" for s in TAUGHT_SOURCES) + ")")
-
-
-@dataclass
-class Split:
-    """What a memory move of some numbers carries and what it holds (decided after `hold`)."""
-    movable: dict[str, int]
-    taught: int = 0            # held rows listed in Naučené
-    shipped: int = 0           # held delivery history
-
-    @property
-    def held(self) -> int:
-        return self.taught + self.shipped
-
-
-def _memory_split(conn, scope: Scope, gtins: list[str], hold: datetime | None) -> Split:
-    split = Split({})
-    for t in scope.memory:
-        where = f"FROM {t} WHERE gtin = ANY(%(g)s) AND deleted_at IS NULL"
-        n_all = int(conn.execute(f"SELECT count(*) {where}", {"g": gtins}).fetchone()[0])
-        taught = shipped = 0
-        if hold:
-            taught, shipped = (int(v or 0) for v in conn.execute(
-                f"SELECT count(*) FILTER (WHERE {_taught_clause(t)}), "
-                f"count(*) FILTER (WHERE NOT ({_taught_clause(t)})) {where} AND "
-                + held_clause(t), {"g": gtins, "hold": hold}).fetchone())
-        split.movable[t] = n_all - taught - shipped
-        split.taught += taught
-        split.shipped += shipped
-    return split
 
 
 class _ScopePlanner:
@@ -731,7 +657,7 @@ class _ScopePlanner:
         old = sorted(set(item["gtins"]) | extra)
         taken = self.cx.taken(card, code)
         hold = taken[0] if taken else None
-        split = _memory_split(self.conn, self.scope, old, hold)
+        split = memory_split(self.conn, self.scope, old, hold)
         entry = dict(item, **{
             "from": item["gtin"], "to": to, "mode": mode, "old_gtins": old,
             "memory": split.movable, "hold": hold.isoformat() if hold else None,
@@ -766,7 +692,7 @@ class _ScopePlanner:
         return (f"{split.taught} naučených priradení k číslu {gtin} vzniklo (alebo ich niekto "
                 f"zmenil) potom, čo sa kód {code} v CODEXe objavil pri karte CODEX "
                 f"{', '.join(takers)} — nevieme, či patria „{name}“ (karta CODEX {card}), alebo "
-                f"jej: ostávajú pod číslom {gtin}{history}; {_CHECK} a tie, čo patria "
+                f"jej: ostávajú pod číslom {gtin}{history}; {CHECK_TAUGHT} a tie, čo patria "
                 f"„{name}“, preraď na {to}.")
 
     def _adopted_review(self, item: dict, target: str, card: str, succ: str) -> None:
@@ -776,15 +702,15 @@ class _ScopePlanner:
         foreign = self.cx.foreign(card, succ)
         if foreign is None:
             return
-        split = _memory_split(self.conn, self.scope, [target], foreign[0])
+        split = memory_split(self.conn, self.scope, [target], foreign[0])
         if not split.taught:
             return
         name = self.cx.name_of(card, succ)
         self.plan.add_review(item, (
             f"{split.taught} naučených priradení k číslu {target} vzniklo, kým kód {succ} v "
             f"CODEXe mala karta CODEX {', '.join(foreign[1])} — prečíslovanie ich teraz pridá ku "
-            f"karte CODEX {card} („{name}“); {_CHECK} a tie, čo patria tej druhej karte, zmaž "
-            f"alebo preraď."))
+            f"karte CODEX {card} („{name}“); {CHECK_TAUGHT} a tie, čo patria tej druhej karte, "
+            f"zmaž alebo preraď."))
 
     def _vacate(self, group: list[dict]) -> None:
         """Our numbers this plan retires go to the (simulated) Kôš — a later step in the SAME
@@ -864,7 +790,7 @@ class _ScopePlanner:
             # 10 🟡) — the same rule as a card's renumber
             taken = self.cx.taken(card, code)
             hold = taken[0] if taken else None
-            split = _memory_split(self.conn, self.scope, old, hold)
+            split = memory_split(self.conn, self.scope, old, hold)
             item = {"scope": self.scope.name, "gtin": code, "gtins": [], "code": code, "name": ""}
             if taken and split.taught:
                 self.plan.add_review(item, self._held_reason(code, code, card, to, split,
@@ -891,7 +817,7 @@ class _ScopePlanner:
         code = codex_cards.normalize_code(gtin) or gtin
         taught = shipped = 0
         for t in self.scope.memory:
-            tc = _taught_clause(t)
+            tc = taught_clause(t)
             a, b = self.conn.execute(
                 f"SELECT count(*) FILTER (WHERE {tc}), count(*) FILTER (WHERE NOT ({tc})) "
                 f"FROM {t} WHERE gtin = %(g)s AND deleted_at IS NULL AND (%(s)s::timestamptz "
@@ -927,8 +853,8 @@ class _ScopePlanner:
             fix = f"„{old_name}“ už v CODEXe nie je — tie priradenia zmaž"
         self.plan.add_review(item, (
             f"{where} bolo karta CODEX {old} („{old_name}“) a {taught} naučených priradení k "
-            f"nemu {older}môže patriť „{old_name}“{history}: {_CHECK}; ak patria „{old_name}“, "
-            f"{fix}"))
+            f"nemu {older}môže patriť „{old_name}“{history}: {CHECK_TAUGHT}; ak patria "
+            f"„{old_name}“, {fix}"))
 
     def _hold_note(self, item: dict, gtin: str, shipped: int, why: str) -> None:
         """Held delivery history (shipped rows) with nothing to move and nothing for a human to

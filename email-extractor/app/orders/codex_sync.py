@@ -48,6 +48,7 @@ from html import escape
 from psycopg.types.json import Json
 
 from . import codex_cards, dl_alerts, dl_snapshot, report, snapshot
+from . import codex_sync_memory as sm
 from . import codex_sync_plan as sp
 
 log = logging.getLogger("orders.codex_sync")
@@ -101,10 +102,10 @@ def _rewrite_memory(conn, table: str, old: list[str], new: str, note: str,
     never a source (review 8 🔴 — a move X → X soft-deleted every row of the card). Returns
     (rows moved, rows merged into an existing mapping)."""
     audit = _audit()
-    keys = sp.MEMORY_KEYS[table]
+    keys = sm.MEMORY_KEYS[table]
     cols = ", ".join(("id", "gtin") + keys)
     sources = [g for g in old if g != new]
-    held = f" AND NOT {sp.held_clause(table)}" if hold else ""
+    held = f" AND NOT {sm.held_clause(table)}" if hold else ""
     rows = conn.execute(
         f"SELECT {cols} FROM {table} WHERE gtin = ANY(%(old)s) AND deleted_at IS NULL{held} "
         "ORDER BY id", {"old": sources, "hold": hold}).fetchall()
