@@ -107,7 +107,10 @@ class Plan:
                 "renumbered": sum(1 for r in self.renumbers if r["mode"] != "memory"),
                 "memory_renumbered": sum(1 for r in self.renumbers if r["mode"] == "memory"),
                 "removed": len(self.removals), "review": len(self.review),
-                "reset": len(self.resets), "bound": len(self.seeds)}
+                "reset": len(self.resets),
+                # stored in every mode / a replacing binding only by an applied run
+                "bound": sum(1 for s in self.seeds if not s["replaces"]),
+                "rebound": sum(1 for s in self.seeds if s["replaces"])}
 
     def add_review(self, item: dict, reason: str) -> None:
         """One review entry per card (the first reason wins)."""
@@ -318,6 +321,8 @@ class _ScopePlanner:
                                          if scope.name == "orders"
                                          else dl_snapshot.deleted_dl_cards(conn))]
         self.identity: dict[str, tuple[str, str]] = {}   # our live gtin -> (card, code)
+        # our number re-picked (#477) as ANOTHER product -> (its old CODEX card, pick time)
+        self.repicked: dict[str, tuple[str, datetime]] = {}
 
     def run(self) -> None:
         groups = _groups(self.catalog, self.scope.max_code)
@@ -342,6 +347,19 @@ class _ScopePlanner:
     def _card_of(self, gtin: str) -> str | None:
         return self._known(gtin).card
 
+    def _renamed_to(self, code: str, known: Known, name: str) -> str | None:
+        """A number the sync RETIRED, brought back by a Kôš „Vrátiť" and then renamed by a
+        human to the product that now carries the code (review 6 🟡 — the review texts tell
+        the warehouse exactly that): our name no longer names its old CODEX card but names
+        exactly one current carrier of the code → that card. Durable evidence (our catalog
+        name), never a guess."""
+        if known.picked or known.old is None or known.old.active or known.card is None:
+            return None
+        if _named(name, self.cx.by_card.get(known.card, [])):
+            return None
+        named = [c for c in self.cx.carriers(code) if _named(name, self.cx.rows(c, code))]
+        return named[0] if len(named) == 1 else None
+
     def _seed(self, gtin: str, card: str, *, replaces: bool = False) -> None:
         """A binding found this run. `replaces` = it overwrites an existing binding with another
         card: stored only by an APPLIED run, so a pick seen during a dry-run / blocked run still
@@ -363,16 +381,25 @@ class _ScopePlanner:
                 old = known.old
                 replaces = old is not None and old.card != known.card
                 self._seed(gtin, known.card, replaces=replaces)
-                if replaces and not _named(name, cx.rows(known.card, code)):
+                if old is not None and replaces and not _named(name, cx.rows(known.card, code)):
                     # our number used to be ANOTHER product: the pick restored its old Kôš
-                    # card „as it was" — its curated data belongs to that product (review 4)
-                    item["reset_from"] = old.card if old else None
+                    # card „as it was" — its curated data (and the mapping rows written to the
+                    # number before the pick) belong to that product (reviews 4, 6)
+                    item["reset_from"] = old.card
+                    self.repicked[gtin] = (old.card, self.cx.events[(self.scope.table, gtin)].at)
                 return known.card
+            renamed = self._renamed_to(code, known, name)
+            if renamed is not None:
+                self._seed(gtin, renamed)
+                return renamed
             others = cx.carriers(code) - {known.card}
             if (cx.gone_twice(known.card) and len(others) == 1
                     and _named(name, cx.rows(next(iter(others)), code))):
-                card = others.pop()            # our card was recreated in CODEX: same name
-                self._seed(gtin, card, replaces=True)
+                # our card was recreated in CODEX under the same name — durable evidence (the
+                # list itself), so stored in every mode (review 6 🟡: a dry-run that skipped
+                # it later REMOVED the card)
+                card = others.pop()
+                self._seed(gtin, card)
                 return card
             return known.card
         carriers = cx.carriers(code)
@@ -540,8 +567,12 @@ class _ScopePlanner:
             for (gtin,) in self.conn.execute(
                     f"SELECT DISTINCT gtin FROM {table} WHERE deleted_at IS NULL").fetchall():
                 norm = codex_cards.normalize_code(gtin)
-                owner = retired.get(str(gtin)) or (retired.get(norm) if norm else None)
-                if norm and owner and norm not in catalog_codes and owner in number:
+                key = str(gtin) if str(gtin) in retired else norm
+                owner = retired.get(key) if key else None
+                # the ONE identity rule decides (review 6 🟡: a newer pick of the retired number
+                # makes it another product — its rows are that product's, never moved)
+                if (norm and owner and norm not in catalog_codes and owner in number
+                        and self._card_of(key or "") == owner):
                     per.setdefault((norm, owner), set()).add(str(gtin))
         for (code, card), gtins in sorted(per.items()):
             old = sorted(gtins | {code})
@@ -550,6 +581,35 @@ class _ScopePlanner:
                 "codex_card": card, "from": code, "to": number[card], "mode": "memory",
                 "old_gtins": old, "memory": _memory_count(self.conn, self.scope, old),
                 "card": {}})
+        for gtin, (card, picked_at) in sorted(self.repicked.items()):
+            self._repicked_memory(gtin, card, picked_at, number)
+
+    def _repicked_memory(self, gtin: str, card: str, picked_at: datetime,
+                         number: dict[str, str]) -> None:
+        """Mapping rows of a number re-picked as another product that were written BEFORE the
+        pick belong to the old product (its wordings, from a frozen question answered with the
+        retired number): they follow the old CODEX card's live number — review 6 🔵. Without a
+        live number of that card a human decides."""
+        code = codex_cards.normalize_code(gtin) or gtin
+        before = picked_at.isoformat()
+        counts = {t: int(self.conn.execute(
+            f"SELECT count(*) FROM {t} WHERE gtin = %s AND deleted_at IS NULL "
+            "AND created_at < %s::timestamptz", (gtin, before)).fetchone()[0])
+            for t in self.scope.memory}
+        if not sum(counts.values()):
+            return
+        if card not in number:
+            self.plan.add_review(
+                {"scope": self.scope.name, "gtin": gtin, "code": code,
+                 "name": self.live.get(gtin, {}).get("name", "")},
+                f"číslo {gtin} bolo pred výberom iný výrobok (karta CODEX {card}) a "
+                f"{sum(counts.values())} naučených priradení k nemu patrí tomu výrobku — "
+                f"skontroluj Naučené")
+            return
+        self.plan.renumbers.append({
+            "scope": self.scope.name, "gtin": gtin, "gtins": [], "code": code, "name": "",
+            "codex_card": card, "from": gtin, "to": number[card], "mode": "memory",
+            "old_gtins": [gtin], "older_than": before, "memory": counts, "card": {}})
 
     def _renames(self) -> None:
         for gtin, card in self.live.items():

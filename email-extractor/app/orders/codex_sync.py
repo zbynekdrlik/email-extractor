@@ -88,16 +88,20 @@ def _retire(conn, scope: sp.Scope, gtin: str, note: str) -> None:
                         note=note)
 
 
-def _rewrite_memory(conn, table: str, old: list[str], new: str, note: str) -> int:
-    """Every live mapping row of `old` → `new`, one audit row each. When the same mapping
-    already exists under `new` (the tables are UNIQUE on it, soft-deleted rows included) the
-    old row is soft-deleted instead — and a soft-deleted twin under `new` is revived, so the
-    live mapping survives (an X → Y → X round trip loses nothing). Returns rows touched."""
+def _rewrite_memory(conn, table: str, old: list[str], new: str, note: str,
+                    older_than: str | None = None) -> int:
+    """Every live mapping row of `old` → `new` (only rows created before `older_than` when
+    given), one audit row each. When the same mapping already exists under `new` (the tables
+    are UNIQUE on it, soft-deleted rows included) the old row is soft-deleted instead — and a
+    soft-deleted twin under `new` is revived, so the live mapping survives (an X → Y → X round
+    trip loses nothing). Returns rows touched."""
     audit = _audit()
     keys = sp.MEMORY_KEYS[table]
     cols = ", ".join(("id", "gtin") + keys)
-    rows = conn.execute(f"SELECT {cols} FROM {table} WHERE gtin = ANY(%s) "
-                        "AND deleted_at IS NULL ORDER BY id", (old,)).fetchall()
+    rows = conn.execute(
+        f"SELECT {cols} FROM {table} WHERE gtin = ANY(%s) AND deleted_at IS NULL "
+        "AND (%s::timestamptz IS NULL OR created_at < %s::timestamptz) ORDER BY id",
+        (old, older_than, older_than)).fetchall()
     clash_sql = (f"SELECT id, deleted_at IS NOT NULL FROM {table} WHERE gtin = %s AND "
                  + " AND ".join(f"{k} = %s" for k in keys) + " LIMIT 1") if keys else None
     for rid, gtin, *key in rows:
@@ -146,8 +150,10 @@ def _apply_renumber(conn, r: dict) -> None:
         _bind(conn, scope.name, gtin, r["codex_card"], active=False)
     if r["mode"] != "memory":
         _bind(conn, scope.name, r["to"], r["codex_card"], active=True)
+    # a re-picked number moves only the rows written BEFORE the pick (the old product's)
+    kw = {"older_than": r["older_than"]} if r.get("older_than") else {}
     for table in scope.memory:
-        _rewrite_memory(conn, table, r["old_gtins"], r["to"], note)
+        _rewrite_memory(conn, table, r["old_gtins"], r["to"], note, **kw)
 
 
 def _bind(conn, scope: str, gtin: str, card: str, *, active: bool) -> None:
