@@ -414,19 +414,28 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   from it, no renumber onto it. (2) Mapping rows OLDER than a re-pick, or ALL rows of every
   number of a group a rename rebind turned into another product (`_repicked_review`) → review
   with the count, where they are after this plan and where they can go (never to a card gone
-  from CODEX) — never moved: `created_at` cannot tell whose a row is. (3) The REUSE HOLD (round
-  10 🟡): `Codex.taken(C, X)` = CODEX gave X to another card after C last carried it. A row on
-  X decided since then (`held_clause`: `created_at` / `delivered_on` after it, or a non-sync
-  audit row on it then — a Naučené edit keeps `created_at`) may be that card's (a #477 pick of
-  X SELECTS our existing number and teaches the other product's wording with NO rename) — the
-  card's renumber and the retired-number memory path move only the older rows; the held ones
-  stay on X with a review. Residual, documented: `dl_memory.remember` promoting / reviving an
-  existing row keeps its `created_at`, so an answer about a delivery from BEFORE the reuse
-  (same delivery date) counts as the old card's — any delivery inside the window is held by
-  its `delivered_on`. One review entry per card keeps every
-  reason in `reasons`; the ops alert dedups PER reason. A renumber carries only OUR group's
-  numbers (+ the canonical number a human deleted, only while it still IS the card) and a
-  memory move only the rows that qualified themselves (no unchecked `| code` union — round 9).
+  from CODEX) — never moved: `created_at` cannot tell whose a row is. (3) The REUSE HOLD (rounds
+  10-11 🟡): `Codex.taken(C, X)` = CODEX gave X to another card D after C last carried it; the
+  window opens when D was first SEEN on X (nobody could pick D before a push listed it). A row
+  on X decided since then (`held_clause`: `created_at` after it — NULL = old; a DL row's
+  document `delivered_on` after it — never `item_memory.delivered_on`, an order's REQUESTED day;
+  or a non-sync audit row on it then — a Naučené edit keeps `created_at`) may be D's (a #477
+  pick of X SELECTS our existing number and teaches D's wording with NO rename) — the card's
+  renumber and the retired-number memory path move only the older rows (`Split`); held rows
+  stay on X. A review only for held TAUGHT rows (`CURATED_SOURCES` = what Naučené lists) —
+  held SHIPPED rows are delivery history, said so, never sent to Naučené. A restore / merge
+  onto a number whose code another card held since C first had it (`Codex.foreign` — a round
+  trip X → Y → X, the #478 incident's shape) flags its taught rows decided since then
+  (`_adopted_review`) — adopted, never silently. In practice the hold matters in the dry-run /
+  blocked / reviewed-renumber windows and for duplicate carriers; with apply on, the push that
+  reveals D also renumbers X. Residual: `dl_memory.remember` promoting / reviving an existing
+  row keeps its `created_at`, so an answer about a delivery from BEFORE the reuse (same date)
+  counts as C's — any DL delivery inside the window is held by its date. The class closes only
+  when every memory writer records the CODEX card a row was taught for (the binding / the pick's
+  `codex_card` — a cross-cutting schema change, follow-up candidate). One review entry per card
+  keeps every reason in `reasons`; the ops alert dedups PER reason. A renumber carries only OUR
+  group's numbers (+ the canonical number a human deleted, only while it still IS the card) and
+  a memory move only the rows that qualified themselves (no unchecked `| code` union — round 9).
 - **What is decided, per catalog, per CODEX code our cards carry** (cards grouped per
   `normalize_code`, the canonical ≤13-char number supplies the data, `codex_cards.index_by_code`),
   with our card bound to card C: C still carries X → rename to C's stredisko-1 name when ours
