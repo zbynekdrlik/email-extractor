@@ -88,26 +88,30 @@ def _retire(conn, scope: sp.Scope, gtin: str, note: str) -> None:
                         note=note)
 
 
-def _rewrite_memory(conn, table: str, old: list[str], new: str, note: str) -> int:
+def _rewrite_memory(conn, table: str, old: list[str], new: str, note: str) -> tuple[int, int]:
     """Every live mapping row of `old` → `new`, one audit row each. When the same mapping
-    already exists under `new` (the tables
-    are UNIQUE on it, soft-deleted rows included) the old row is soft-deleted instead — and a
-    soft-deleted twin under `new` is revived, so the live mapping survives (an X → Y → X round
-    trip loses nothing). Returns rows touched."""
+    already exists under `new` (the tables are UNIQUE on it, soft-deleted rows included) the
+    old row is soft-deleted instead — and a soft-deleted twin under `new` is revived, so the
+    live mapping survives (an X → Y → X round trip loses nothing). A row is never its own
+    duplicate: `new` itself is never a source (review 8 🔴 — a move X → X soft-deleted every
+    row of the card). Returns (rows moved, rows merged into an existing mapping)."""
     audit = _audit()
     keys = sp.MEMORY_KEYS[table]
     cols = ", ".join(("id", "gtin") + keys)
+    sources = [g for g in old if g != new]
     rows = conn.execute(
         f"SELECT {cols} FROM {table} WHERE gtin = ANY(%s) AND deleted_at IS NULL ORDER BY id",
-        (old,)).fetchall()
-    clash_sql = (f"SELECT id, deleted_at IS NOT NULL FROM {table} WHERE gtin = %s AND "
-                 + " AND ".join(f"{k} = %s" for k in keys) + " LIMIT 1") if keys else None
+        (sources,)).fetchall()
+    clash_sql = (f"SELECT id, deleted_at IS NOT NULL FROM {table} WHERE gtin = %s AND id <> %s "
+                 "AND " + " AND ".join(f"{k} = %s" for k in keys) + " LIMIT 1") if keys else None
+    moved = merged = 0
     for rid, gtin, *key in rows:
-        clash = conn.execute(clash_sql, (new, *key)).fetchone() if clash_sql else None
+        clash = conn.execute(clash_sql, (new, rid, *key)).fetchone() if clash_sql else None
         if clash is None:
             conn.execute(f"UPDATE {table} SET gtin = %s WHERE id = %s", (new, rid))
             audit.record(conn, actor=ACTOR, table=table, row_id=rid, action="update",
                          before={"gtin": gtin}, after={"gtin": new}, note=note)
+            moved += 1
             continue
         twin, twin_deleted = clash
         if twin_deleted:
@@ -117,7 +121,14 @@ def _rewrite_memory(conn, table: str, old: list[str], new: str, note: str) -> in
         conn.execute(f"UPDATE {table} SET deleted_at = now() WHERE id = %s", (rid,))
         audit.record(conn, actor=ACTOR, table=table, row_id=rid, action="delete",
                      note=f"{note} — rovnaké priradenie už je pod {new}")
-    return len(rows)
+        merged += 1
+    return moved, merged
+
+
+def _retired_name(r: dict, gtin: str) -> str:
+    """Our number's name as the plan found it — stored on the retired binding, so a later
+    rename by a human is told from a plain Kôš undo (`codex_sync_plan._disputed`)."""
+    return str((r.get("names") or {}).get(gtin, r.get("name") or ""))
 
 
 def _apply_renumber(conn, r: dict) -> None:
@@ -145,23 +156,29 @@ def _apply_renumber(conn, r: dict) -> None:
                         note=f"{note} — doplnené údaje z karty {r['from']}")
     for gtin in r["gtins"]:
         _retire(conn, scope, gtin, note)
-        _bind(conn, scope.name, gtin, r["codex_card"], active=False)
+        _bind(conn, scope.name, gtin, r["codex_card"], active=False,
+              retired_name=_retired_name(r, gtin))
     if r["mode"] != "memory":
         _bind(conn, scope.name, r["to"], r["codex_card"], active=True)
-    # the report + ops message say what was really moved, never the plan's estimate
-    r["memory"] = {table: _rewrite_memory(conn, table, r["old_gtins"], r["to"], note)
-                   for table in scope.memory}
+    # the report + ops message say what really happened, never the plan's estimate: rows
+    # touched (`memory`) and, of those, merged into a mapping already under the new code
+    moved = {t: _rewrite_memory(conn, t, r["old_gtins"], r["to"], note) for t in scope.memory}
+    r["memory"] = {t: m + d for t, (m, d) in moved.items()}
+    r["merged"] = {t: d for t, (_m, d) in moved.items()}
 
 
-def _bind(conn, scope: str, gtin: str, card: str, *, active: bool) -> None:
+def _bind(conn, scope: str, gtin: str, card: str, *, active: bool,
+          retired_name: str | None = None) -> None:
     """Our card `gtin` IS CODEX card `card` (`active=False`: a number the sync retired — a
-    later memory row of it still follows the card). Identity, not catalog data."""
+    later memory row of it still follows the card; `retired_name` = its name then).
+    Identity, not catalog data."""
     conn.execute(
-        """INSERT INTO codex_card_bindings (scope, gtin, card_code, active)
-           VALUES (%s, %s, %s, %s)
+        """INSERT INTO codex_card_bindings (scope, gtin, card_code, active, retired_name)
+           VALUES (%s, %s, %s, %s, %s)
            ON CONFLICT (scope, gtin) DO UPDATE
-              SET card_code = EXCLUDED.card_code, active = EXCLUDED.active, bound_at = now()""",
-        (scope, gtin, card, active))
+              SET card_code = EXCLUDED.card_code, active = EXCLUDED.active,
+                  retired_name = EXCLUDED.retired_name, bound_at = now()""",
+        (scope, gtin, card, active, None if active else retired_name))
 
 
 def _apply(conn, plan: sp.Plan) -> None:
@@ -182,7 +199,8 @@ def _apply(conn, plan: sp.Plan) -> None:
             _retire(conn, sp.BY_NAME[r["scope"]], gtin,
                     f"kód {r['code']} (karta CODEX {r['codex_card']}) z CODEXu zmizol bez "
                     f"náhrady (#478)")
-            _bind(conn, r["scope"], gtin, r["codex_card"], active=False)
+            _bind(conn, r["scope"], gtin, r["codex_card"], active=False,
+                  retired_name=_retired_name(r, gtin))
     for r in plan.renames:
         scope = sp.BY_NAME[r["scope"]]
         if scope.name == "orders":
@@ -216,14 +234,19 @@ def _change_lines(plan: sp.Plan) -> list[str]:
         groups.setdefault(key, []).append(r)
     for (code, to, card), items in groups.items():
         rows = sum(sum(i["memory"].values()) for i in items)
+        merged = sum(sum((i.get("merged") or {}).values()) for i in items)
+        # moved vs merged into the same mapping already under the new code (review 8 🔵 —
+        # a soft-deleted duplicate is no „move")
+        memory = f"{rows - merged} priradení presunutých" + (
+            f", {merged} zlúčených s rovnakým priradením pod {escape(to)}" if merged else "")
         cards = [i for i in items if i["mode"] != "memory"]
         if cards:
             lines.append(f"karta CODEX {escape(card)} „{escape(cards[0]['name'])}“ zmenila kód "
                          f"{escape(code)} → {escape(to)} — upravené ({_labels(cards)}), pamäť: "
-                         f"{rows} priradení")
+                         f"{memory}")
         else:
-            lines.append(f"pamäť: {rows} priradení starého kódu {escape(code)} (karta CODEX "
-                         f"{escape(card)}) presunutých na {escape(to)} ({_labels(items)})")
+            lines.append(f"pamäť starého kódu {escape(code)} (karta CODEX {escape(card)}) na "
+                         f"{escape(to)}: {memory} ({_labels(items)})")
     gone: dict[str, list[dict]] = {}
     for r in plan.removals:
         gone.setdefault(r["code"], []).append(r)
@@ -257,14 +280,28 @@ def _html(head: str, lines: list[str]) -> str:
               "katalógu chýba.</p>")
 
 
-def _review_key(r: dict) -> tuple:
-    return (r.get("scope"), r.get("gtin"), r.get("reason"))
+def _review_keys(r: dict) -> set[tuple]:
+    """One key PER reason of a card's review entry (review 8 🔵: a one-off reason appended to
+    a lasting one changed the whole key and re-alerted the lasting one)."""
+    return {(r.get("scope"), r.get("gtin"), x) for x in (r.get("reasons") or [r.get("reason")])}
 
 
 def _last_applied_review(conn) -> set[tuple]:
     row = conn.execute("SELECT report FROM codex_sync_runs WHERE status = 'apply' "
                        "ORDER BY id DESC LIMIT 1").fetchone()
-    return {_review_key(r) for r in ((row[0] or {}).get("review") or [])} if row else set()
+    review = ((row[0] or {}).get("review") or []) if row else []
+    return set().union(*(_review_keys(r) for r in review))
+
+
+def _fresh_review(review: list[dict], known: set[tuple]) -> list[dict]:
+    """Review entries with only the reasons the previous applied run did not report."""
+    out = []
+    for r in review:
+        new = [x for x in (r.get("reasons") or [r["reason"]])
+               if (r["scope"], r["gtin"], x) not in known]
+        if new:
+            out.append(dict(r, reason=sp.REASON_JOIN.join(new)))
+    return out
 
 
 def _plan_digest(plan: sp.Plan) -> str:
@@ -292,8 +329,7 @@ def _alert(conn, cfg, plan: sp.Plan, mode: str, run_id: int, known: set[tuple],
         dl_alerts.enqueue(conn, channel, ALERT_KIND, _html(head, _change_lines(plan)),
                           message_id=key)
         return
-    lines = _change_lines(plan) + _review_lines(
-        [r for r in plan.review if _review_key(r) not in known])
+    lines = _change_lines(plan) + _review_lines(_fresh_review(plan.review, known))
     if lines:
         dl_alerts.enqueue(conn, channel, ALERT_KIND, _html(
             "&#128260; Karty podľa CODEXu (#478) — zmeny z posledného zoznamu kariet:", lines),

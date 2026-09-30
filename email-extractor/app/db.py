@@ -313,6 +313,9 @@ CODEX_CARD_HISTORY = [
         card_code  TEXT NOT NULL,
         active     BOOLEAN NOT NULL DEFAULT true,
         bound_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        -- our card's name when the sync retired the number (active=false): a later name that
+        -- differs means a human renamed it since (#478 review 8)
+        retired_name TEXT,
         PRIMARY KEY (scope, gtin)
     )
     """,
