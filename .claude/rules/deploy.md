@@ -389,6 +389,27 @@ inside a Slovak `„…"` quote pair breaks a DOUBLE-quoted `--goal`/`--achieved
 closes the shell quote, argparse then errors "unrecognized arguments" and NO card fires,
 though a piped `| tail` masks the real exit code). Single-quote the whole value.
 
+## Admin-password checks + data edits without the password ever leaving the box (#476)
+
+- **A board DATA edit through the app path (audited), from INSIDE the add-on:** a container
+  script reads `dash_password` from `/data/options.json`, logs in with `urllib` +
+  `http.cookiejar` at `http://127.0.0.1:8099/login` (form field `password`; works over plain
+  http while `SESSION_COOKIE_SECURE` is off) and calls the board API, e.g. a name-only
+  `POST /api/board/products?scope=orders` `{gtin, name}` (alias untouched). **GET the card
+  first and refuse if it does not exist** — the same POST on an unknown gtin CREATES a card.
+  Read back via the API + `catalog_overrides`/`catalog_snapshot` + `audit_log`.
+- **Playwright DOM version read without the password in the transcript:** a local bash
+  script captures `dash_password` over ssh (`docker exec … python3 -c 'print(json.load(open(
+  "/data/options.json"))["dash_password"])'`) into `DASH_PW`, then runs the worktree venv's
+  `playwright.sync_api` script reading `os.environ["DASH_PW"]` against
+  `https://email-pz.newlevel.media/login` — the Playwright MCP would need the literal password
+  inside a tool call. Product tabs: `/nastenka/produkty-objednavky` has one search input.
+- **Right after a main-CI build, `ha addons update` can answer „No update available" for
+  ~2 minutes even after `ha store reload`** (0.9.174: the reload itself exited non-zero, the
+  update said „No update available" 4× at 25 s spacing, the 5th went through). Keep the
+  bounded retry loop; one „No update available" is not "already deployed" — read
+  `.data.version` to decide.
+
 ## Setting add-on options over the Supervisor REST API — a PARTIAL POST REPLACES all user options
 
 `ha apps options` (and the older `ha addons options`) is READ-ONLY — there is NO
