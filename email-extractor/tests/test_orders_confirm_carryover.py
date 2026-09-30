@@ -299,9 +299,11 @@ def test_opening_alert_names_the_unknown_code_and_leaves_clean_files_plain(pg):
         _wire("126000021", SUP_A): _desadv_content("126000021", [GOOD_A, DEAD, "4712"]),
         _wire("126000022", SUP_A): _desadv_content("126000022", [GOOD_A, GOOD_B]),
     })
-    for doc in ("126000021", "126000022"):
-        _insert_desadv_at(pg, SUP_A, _fname(doc, SUP_A), uploaded_at=MON_EVENING,
-                          doc_number=doc)
+    # the CLEAN file is the older upload (and the lower id), so upload order alone would list
+    # it first — only the dead-first rule puts 126000021 on top (review round 3: the earlier
+    # fixture had the dead file first anyway, so the assertion proved nothing)
+    for doc, at in (("126000022", MON_EVENING.replace(hour=9)), ("126000021", MON_EVENING)):
+        _insert_desadv_at(pg, SUP_A, _fname(doc, SUP_A), uploaded_at=at, doc_number=doc)
     posts = PostRecorder()
     confirm.sweep(pg, _cfg(),
                   listdir=lambda: _dirs(in_dl=list(reader.files)),
@@ -311,7 +313,7 @@ def test_opening_alert_names_the_unknown_code_and_leaves_clean_files_plain(pg):
             "neexistujú. Zadajte ho ručne.") in html, html
     assert f"<li>DL 126000022 ({SUP_A_NAME})</li>" in html
     assert html.index("126000021") < html.index("126000022"), \
-        "a file CODEX will never take is listed first"
+        "a file CODEX will never take is listed first, ahead of an older clean one"
 
 
 def test_a_stale_codex_list_drops_the_code_line_and_reads_nothing(pg):
@@ -660,3 +662,46 @@ def test_the_grouped_ops_alert_remainder_agrees_with_the_count(pg):
     posted: list[str] = []
     dl_alerts.flush_pending(pg, Cfg(), post=lambda c, h, **kw: posted.append(h) or {"id": 1})
     assert "a ešte 1 ďalší." in posted[0], posted[0]
+
+
+# --- review round 3 pins -----------------------------------------------------------------
+
+def test_the_widening_never_pulls_a_waiting_file_into_a_failed_group(pg):
+    """Only CARRYOVER groups are widened. A failed/unknown group marks its rows TERMINAL — a
+    still-waiting DL pulled into it would be stamped `failed` and never self-heal to imported
+    (review round 3, probe-reproduced with the kind filter removed)."""
+    _suppliers(pg)
+    bad = _insert_desadv_at(pg, SUP_A, _fname("126000141", SUP_A), uploaded_at=MON_EVENING,
+                            doc_number="126000141")
+    waiting = _insert_desadv_at(pg, SUP_A, _fname("126000142", SUP_A),
+                                uploaded_at=MON_EVENING, doc_number="126000142")
+    pg.execute("UPDATE desadv_sent SET import_checked_at = now() WHERE id = %s", (waiting,))
+    posts = PostRecorder()
+    confirm.sweep(pg, _cfg(),
+                  listdir=lambda: {"in": set(), "in_DL": {_wire("126000142", SUP_A)},
+                                   "archCodex": set(),
+                                   "unconfirmed": {_wire("126000141", SUP_A)}},
+                  post=posts, now=TUE_MORNING)
+    assert len(posts.calls) == 1, [h for h, _c in posts.calls]
+    assert "1 dodací list skončil v priečinku" in posts.calls[0][0], posts.calls[0][0]
+    assert _desadv_status(pg, bad) == "failed"
+    assert _desadv_status(pg, waiting) is None, "a waiting file must never be marked terminal"
+
+
+def test_the_widened_list_is_in_upload_order(pg):
+    """The due row that triggers the group can be NEWER than a waiting row the widening adds —
+    the list still reads oldest upload first."""
+    _suppliers(pg)
+    older = _insert_desadv_at(pg, SUP_A, _fname("126000151", SUP_A),
+                              uploaded_at=MON_EVENING.replace(hour=8),
+                              doc_number="126000151")
+    _insert_desadv_at(pg, SUP_A, _fname("126000152", SUP_A), uploaded_at=MON_EVENING,
+                      doc_number="126000152")
+    pg.execute("UPDATE desadv_sent SET import_checked_at = now() WHERE id = %s", (older,))
+    posts = PostRecorder()
+    confirm.sweep(pg, _cfg(),
+                  listdir=lambda: _dirs(in_dl=[_wire("126000151", SUP_A),
+                                               _wire("126000152", SUP_A)]),
+                  post=posts, now=TUE_MORNING)
+    html = posts.calls[0][0]
+    assert html.index("126000151") < html.index("126000152"), html
