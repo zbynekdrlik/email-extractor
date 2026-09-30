@@ -841,6 +841,117 @@ def test_a_code_gone_whose_last_carriers_are_several_is_reviewed_not_silently_st
     assert reasons and "naposledy" in reasons[0]
 
 
+# --- review 5: one identity rule, resets that survive dry-run / blocked -----------------------
+
+def _pagac_names(pg):
+    return ([c["gtin"] for c in _orders(pg).values() if c["name"] == "Pagáč syrový 60g"],
+            [c["gtin"] for c in _dl(pg).values() if c["name"] == "Pagáč syrový 60g"])
+
+
+def test_a_kos_undo_of_a_retired_number_stays_our_card(pg):
+    """Review 5 🟡: the sync retired ROZOK (card 27 moved to ROZOK_NEW), the pagáč took ROZOK,
+    the warehouse „Vrátiť"-ed the sync's delete. It is still card 27's number: the next push
+    merges it back into ROZOK_NEW — it never becomes the pagáč with the rožok's data."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=3)
+    codex_sync.run(pg, _cfg())
+    for table in ("catalog_overrides", "dl_catalog_overrides"):
+        aid = pg.execute("SELECT id FROM audit_log WHERE actor = 'codex-sync' AND action = "
+                         "'delete' AND table_name = %s AND row_id = %s", (table, ROZOK)
+                         ).fetchone()[0]
+        audit.restore(pg, aid, by="sklad")
+    assert ROZOK in _orders(pg) and ROZOK in _dl(pg)
+    _push(pg, _reused(V1), hours_old=2)
+    codex_sync.run(pg, _cfg())
+    assert _pagac_names(pg) == ([], [])
+    assert ROZOK not in _orders(pg) and ROZOK not in _dl(pg)
+    assert _orders(pg)[ROZOK_NEW]["alias"] == "rozok slanina"
+
+
+def _repick_reused(pg):
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    card_guard.add_from_codex(pg, "orders", ROZOK, actor="sklad")
+    card_guard.add_from_codex(pg, "dl", ROZOK, actor="sklad")
+
+
+def _assert_reset(pg, gtin=ROZOK):
+    assert _orders(pg)[gtin]["alias"] == ""
+    card = _dl(pg)[gtin]
+    assert (card["doplnok"], card["mass"], card["cena"]) == ("", None, None)
+
+
+def test_a_pick_seen_by_a_blocked_run_still_resets_when_the_apply_comes(pg):
+    """Review 5 🟡: the blocked run must not store the pick's binding — else the apply that
+    follows sees no newer pick and the rožok's data stays on the pagáč for good."""
+    _repick_reused(pg)
+    _push(pg, _reused(V1), hours_old=3)
+    assert codex_sync.run(pg, _cfg(codex_sync_max_renames=1))["mode"] == "blocked"
+    _push(pg, _reused(V1), hours_old=2)
+    assert codex_sync.run(pg, _cfg())["reset"] == 2
+    _assert_reset(pg)
+
+
+def test_a_pick_seen_by_a_dry_run_still_resets_when_the_apply_comes(pg):
+    _repick_reused(pg)
+    _push(pg, _reused(V1), hours_old=3)
+    assert codex_sync.run(pg, _cfg(apply=False))["reset"] == 2
+    _push(pg, _reused(V1), hours_old=2)
+    assert codex_sync.run(pg, _cfg())["reset"] == 2
+    _assert_reset(pg)
+
+
+def test_a_picked_card_renumbered_in_the_same_push_carries_the_reset_data(pg):
+    """Review 5 🟡: the picked pagáč moves ROZOK → W in the very next push — W is created from
+    the RESET card, and the retired ROZOK row keeps both soft-delete flags together (#442)."""
+    _repick_reused(pg)
+    _push(pg, _reused(V1, pagac_code=PAGAC_W), hours_old=3)
+    codex_sync.run(pg, _cfg())
+    assert _orders(pg)[PAGAC_W]["name"] == "Pagáč syrový 60g"
+    _assert_reset(pg, PAGAC_W)
+    for table in ("catalog_overrides", "dl_catalog_overrides"):
+        assert pg.execute(f"SELECT retired, deleted_at IS NOT NULL FROM {table} "
+                          f"WHERE gtin = %s", (ROZOK,)).fetchone() == (True, True)
+
+
+def test_a_repick_of_the_same_product_under_another_codex_card_keeps_its_data(pg):
+    """Review 5 🔵: the code sits on two CODEX cards with the SAME product name; a delete +
+    re-pick lands on the other card — same product, its doplnok / mass / cena stay."""
+    _baseline(pg)
+    dup = V1 + [dict(_row(ROZOK, "28", "Rožok so slaninou 70g"),
+                     changed_at="2026-09-29T10:00:00+02:00")]
+    _push(pg, dup, hours_old=3)
+    codex_sync.run(pg, _cfg())
+    dl_snapshot.retire_dl_catalog_card(pg, ROZOK)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    audit.record(pg, actor="sklad", table="dl_catalog_overrides", row_id=ROZOK,
+                 action="delete")
+    card_guard.add_from_codex(pg, "dl", ROZOK, actor="sklad")
+    _push(pg, dup, hours_old=2)
+    assert codex_sync.run(pg, _cfg())["reset"] == 0
+    card = _dl(pg)[ROZOK]
+    assert (card["doplnok"], card["mass"], card["cena"]) == ("rožok slanina", 0.07, 0.35)
+
+
+def test_a_create_onto_a_hidden_override_row_undeletes_it(pg):
+    """Review 5 🔵: the executor's guard — a renumber's `create` onto a number whose override
+    row is soft-deleted brings the card back visible (an upsert alone keeps `deleted_at`)."""
+    _seed_catalogs(pg)
+    hidden = "9990000000161"
+    snapshot.upsert_catalog_card(pg, hidden, "Starý záznam")
+    snapshot.retire_catalog_card(pg, hidden)
+    snapshot.rebuild_from_overrides(pg)
+    with pg.transaction():
+        codex_sync._apply_renumber(pg, {
+            "scope": "orders", "codex_card": "27", "code": ROZOK, "from": ROZOK,
+            "to": hidden, "mode": "create", "gtins": [ROZOK], "old_gtins": [ROZOK],
+            "card": {"gtin": ROZOK, "name": "Rožok so slaninou 70g",
+                     "alias": "rozok slanina"}})
+    snapshot.rebuild_from_overrides(pg)
+    assert _orders(pg)[hidden]["name"] == "Rožok so slaninou 70g"
+
+
 def test_a_code_moved_to_another_stredisko_is_reviewed_once(pg):
     """Review 🔵: one card, one review entry — never two with different reasons."""
     _baseline(pg)
