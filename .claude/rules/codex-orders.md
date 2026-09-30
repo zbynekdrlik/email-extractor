@@ -448,6 +448,16 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   keeps every reason in `reasons`; the ops alert dedups PER reason. A renumber carries only OUR
   group's numbers (+ the canonical number a human deleted, only while it still IS the card) and
   a memory move only the rows that qualified themselves (no unchecked `| code` union — round 9).
+- **A text that tells the warehouse what an action WILL do is computed, never written as prose
+  (rounds 13-15 — five rounds found false claims)**: `_pick_advice` (the #477 picker offers ONE
+  card per code — `card_guard.pickable`; a pick resets the curated data only for another
+  product — `same_product`; an unbound number resets nothing; a card the picker cannot offer is
+  named "zaradí len oprava v CODEXe"), `_gone_reason` (no stredisko-1 carrier / one / several),
+  `Split.held_at` (the numbers held rows really sit on — a legacy twin), a hold note's `at` +
+  `moved` read from the same-push renumber, `codex_name` on a renumber line, and a footer that
+  promises a redo only for renames / renumbers (a Kôš undo of a RESET is not redone — the
+  binding it came with is stored by then). `CHECK_TAUGHT` is the one way-out text for taught
+  rows (Naučené; a História „Doučiť" row via the Kôš).
 - **What is decided, per catalog, per CODEX code our cards carry** (cards grouped per
   `normalize_code`, the canonical ≤13-char number supplies the data, `codex_cards.index_by_code`),
   with our card bound to card C: C still carries X → rename to C's stredisko-1 name when ours
