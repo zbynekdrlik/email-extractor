@@ -502,18 +502,25 @@ Ktorá správa kam vedie (rozhoduje KANÁL PRÍJEMCU, nie druh správy):
   (engine vrstva — volá ju board aj legacy `httpapi_orders_questions`; board service by bol
   import smerom nahor). Kód MUSÍ byť medzi tým, čo picker ponúka (`codex_cards.pickable`), kód,
   ktorý už máme (`codex_cards.index_by_code` — JEDINÝ lookup „naša karta s týmto kódom", aj
-  „0"+kód), sa LEN vyberie (nič sa nezapíše — upsert by zmazal mass/sklad/cena). Kód, ktorého karta
+  „0"+kód; presné kanonické číslo vyhrá nad starým „0"+kód dvojčaťom), sa LEN vyberie (nič sa nezapíše — upsert by zmazal mass/sklad/cena). Kód, ktorého karta
   je v Koši, ju **OBNOVÍ** presne ako bola (`snapshot.undelete_catalog_card` /
-  `dl_snapshot.undelete_dl_catalog_card`, oba markery) — okrem HOLÉHO markera karty, ktorá žila len
-  v snapshote (`retire_*` píše name '' + prázdne polia, ďalší snapshot kartu stratil; prod 9/19
-  zmazaných DL kariet) → tá sa vyplní z CODEXu ako nová (inak BEZMENNÁ karta). Zápis = CODEX kód +
+  `dl_snapshot.undelete_dl_catalog_card`, oba markery). HOLÝ marker karty, ktorá žila len v
+  snapshote (`retire_*` píše name '' + prázdne polia, ďalší snapshot kartu stratil; prod 9/19
+  zmazaných DL kariet), sa pri KAŽDOM un-delete (výber aj Kôš „Vrátiť" — `audit._heal_blank_card`)
+  doplní z NAJNOVŠIEHO snapshotu, ktorý kartu ešte má (`heal_blank_marker` /
+  `heal_blank_dl_marker`: názov, doplnok/alias, mass, sklad, cena) — predtým Kôš vracal BEZMENNÚ
+  kartu, ktorá stratila aj sklad=100 (#462 ×N). Marker ostáva pri retire holý zámerne
+  (`retired_dl_cards`, #337, ho číta). Marker, ktorý žiadny snapshot nepamätá → výber ho vyplní z
+  CODEXu ako novú kartu. Zápis = CODEX kód +
   CODEX názov (+ DL `sklad` z CODEXu) + `audit.record(action="create", after.source="codex"
   [, restored=true])` → Kôš „Vrátiť" ju soft-zmaže existujúcou `create` vetvou a ďalší výber ju
   zas vráti (nikdy slepá ulička — review 🟡 #477: pôvodné 409 „je v Koši" + `restore` bez spätnej
   cesty = kód navždy zablokovaný).
 - **Rozsah výberu (merané prod 2026-09-30):** orders = CODEX `stredisko 1 / sklad 1` (130/130
   kariet objednávok tam je); dl = `stredisko 1`, všetky sklady (dnes 1/100/200/500/600/625/650/700);
-  LEN aktívne riadky; NIKDY strediská 4/40x–45x (#337 bordel). DL `sklad` = 100 ak kód má aktívny
+  LEN aktívne riadky; NIKDY strediská 4/40x–45x (#337 bordel); pre DL NIKDY kód dlhší ako 13 znakov
+  (`desadv_edi.GTIN_FIELD_WIDTH` — 14-miestne nápojové karty #245 na sklade 500 by sa nikdy
+  neodoslali a otázka by sa pri každom reprocese pýtala znova). DL `sklad` = 100 ak kód má aktívny
   sklad-100 riadok (kg karta musí ostať kg — prázdna mass → #462 hold sa PÝTA), inak najnižší sklad
   strediska 1 (reprodukuje sklad všetkých 465 našich DL kariet, ktoré ho majú). Názov =
   `codex_cards._name_order` (sklad-1 riadok, potom najnovší) medzi AKTÍVNYMI riadkami strediska 1 —
@@ -546,6 +553,10 @@ Ktorá správa kam vedie (rozhoduje KANÁL PRÍJEMCU, nie druh správy):
   formulár; #465 misclick potvrdenie platí aj pre pick z pickera. Produkty tabs: `#p-new` preč,
   `.p-add-note`. E2E pinuje aj #467 UI (hint prežije 8 s refresh, drift „CODEX: …" na tlačidle,
   Produkty sklad edit refusal `.p-codex-find`).
+- **mypy brána (CI) na `str | None`:** `normalize_code` vracia `str | None` — zúž ho raz
+  (`if norm is None or entry is None: raise`) PRED `.get(norm)`/zápisom; lokálne `.venv/bin/mypy`
+  (bez argumentov, config v `pyproject.toml`) pred pushom — worktree vetva sa necheckuje v CI, kým
+  sa nepushne.
 - **E2E pasca:** odpoveď na kartu A spúšťa explicitný `load()` (prestavia VŠETKY karty) — otvoriť
   picker karty B skôr, než reload dobehne, znamená, že ho reload zmaže (hľadanie potom renderuje do
   odpojeného uzla). V teste najprv `wait_for_selector("#q-card-A", state="detached")`.

@@ -218,10 +218,12 @@ forever). Reusable rules:
     from the pushed list (canonical by construction, so no leading-zero / „.0" variant can
     arise), a code we already have (`codex_cards.index_by_code`, normalized both ways) is only
     selected, one whose card sits in the Kôš RESTORES it (a bare snapshot-card retirement
-    marker is filled from CODEX instead — never a nameless card). Picker list:
-    `GET /api/board/codex-cards` → `card_guard.codex_choices` over `codex_cards.pickable`
-    (stredisko 1 only — never the junk strediská; orders additionally sklad 1; active rows; a
-    STALE list still lists, with a warning — the pick is not blocked by a stopped push). The
+    marker is refilled from the newest snapshot that still has the card, else from CODEX —
+    never a nameless card). Picker list: `GET /api/board/codex-cards` →
+    `card_guard.codex_choices` over `codex_cards.pickable` (stredisko 1 only — never the junk
+    strediská; orders additionally sklad 1; DL never a code > 13 chars, the #245 DESADV field;
+    active rows; a STALE list still lists, with a warning — the pick is not blocked by a
+    stopped push). The
     #467 refusal's `similar` cards are marked `pickable` so the help never offers a card the
     pick would refuse. See `board.md` #477 for the answer flow.
   - the questions tab keeps a refusal hint in `state.codexHints` and re-renders it on every
