@@ -1986,7 +1986,11 @@ def test_a_failing_sync_rolls_back_whole_and_never_fails_the_push(pg, monkeypatc
     assert ROZOK in _orders(pg) and ROZOK_NEW not in _orders(pg)
     assert set(_gtins(pg, "item_memory")) == {ROZOK}
     assert pg.execute("SELECT count(*) FROM audit_log").fetchone()[0] == 0
-    assert pg.execute("SELECT count(*) FROM codex_card_history").fetchone()[0] == history
+    # review 12 (contract changed): the pushed list was live the moment it was accepted — its
+    # HISTORY is kept even though the sync failed (card 27's new code is recorded)
+    assert pg.execute("SELECT count(*) FROM codex_card_history").fetchone()[0] == history + 1
+    assert pg.execute("SELECT count(*) FROM codex_card_history WHERE card_code = '27' AND "
+                      "code = %s", (ROZOK_NEW,)).fetchone()[0] == 1
     assert pg.execute("SELECT status FROM codex_sync_runs ORDER BY id DESC LIMIT 1"
                       ).fetchone()[0] == "error"
     # review 2 🔵: a failing sync is not only a log line — ops hears about it once
