@@ -457,6 +457,39 @@ def test_teachback_refuses_a_number_that_is_not_a_catalog_card(pg):
     assert ok_dl.status_code == 200, ok_dl.get_json()
 
 
+def test_teachback_refuses_a_catalog_card_whose_code_codex_lacks(pg):
+    """#479 review 🔵7a: a card we DO have but whose code CODEX has no stock card for would
+    teach a mapping CODEX refuses — 409 with the CODEX help, exactly like a question pick;
+    nothing written. A stale list passes (fail-open)."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.orders import codex_cards
+    _msg(pg, "tc", proc_status="ok", subject="Obj")
+    _run(pg, "tc", result={"customer_ean": "CUSTC", "customer_name": "Alfa"},
+         items=[{"name": "vianočka", "gtin": "OLD", "card": "Zlá"}])
+    _cards(pg, orders=[("3698", "Vianočka 400g"), ("9990000000116", "Vianočka maslová")])
+    codex_cards.replace_cards(
+        pg, [{"code": "9990000000116", "card_code": "27", "stredisko": 1, "sklad": 1,
+              "name": "Vianočka maslová"}],
+        source_as_of=datetime.now(UTC) - timedelta(hours=1))
+    c = _client()
+    _sklad(c)
+    r = c.post("/api/board/history/tc/teach?scope=orders",
+               json={"name": "vianočka", "gtin": "3698", "card": "Vianočka 400g"})
+    assert r.status_code == 409, r.get_json()
+    assert r.get_json()["codex"]["missing"] is True and "objednávk" in r.get_json()["error"]
+    assert pg.execute("SELECT count(*) FROM item_memory").fetchone()[0] == 0
+    ok = c.post("/api/board/history/tc/teach?scope=orders",
+                json={"name": "vianočka", "gtin": "9990000000116", "card": "Vianočka maslová"})
+    assert ok.status_code == 200, ok.get_json()
+    # a stale list turns the CODEX check off
+    pg.execute("UPDATE codex_card_syncs SET source_as_of = now() - interval '40 hours', "
+               "synced_at = now() - interval '40 hours'")
+    stale = c.post("/api/board/history/tc/teach?scope=orders",
+                   json={"name": "vianočka tmavá", "gtin": "3698", "card": "Vianočka 400g"})
+    assert stale.status_code == 200, stale.get_json()
+
+
 def test_teachback_audit_is_restorable(pg):
     """The `teach` audit row can be reverted from the Kôš (soft-deletes the taught alias)."""
     from app.board.services import audit

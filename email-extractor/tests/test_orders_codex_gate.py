@@ -51,7 +51,8 @@ CUSTOMER_CSV = (
     "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,E-mail\n"
     f"Pekáreň Testovacia s.r.o.,{CUST},Martin,Košútka 1,,,sklad@pekaren.sk\n"
 )
-QTY = {"rožok 50g": 120, "vianočka 400g": 7, "vianočka maslová 400g": 4, "torta": 5}
+QTY = {"rožok 50g": 120, "vianočka 400g": 7, "vianočka maslová 400g": 4, "torta": 5,
+       "vianočka": 3}
 
 
 def _mail(*names, mid="m1"):
@@ -137,7 +138,8 @@ def _run(pg, sid, names, picks, rec, **cfg):
 
 ROLL_VIA = ("rožok 50g", "vianočka 400g")
 PICKS = {"rožok 50g": (G_ROLL, 0.95), "vianočka 400g": (G_DEAD, 0.95),
-         "vianočka maslová 400g": (G_VIA, 0.95), "torta": (None, 0.1)}
+         "vianočka maslová 400g": (G_VIA, 0.95), "torta": (None, 0.1),
+         "vianočka": (None, 0.1)}
 
 
 # --- AI orders: a dead code HOLDS the order with a question, never an ORDER file ----------
@@ -274,6 +276,110 @@ def test_the_deadline_sweep_ships_without_a_code_that_went_dead_never_with_it(pg
     assert codes == [G_VIA]
 
 
+def test_the_deadline_sweep_asks_about_the_line_it_shipped_without(pg, env):
+    """Review 🟡3: the ship-time net must not drop the dead line quietly — the order ships
+    without it (the deadline allows no more waiting) AND a board question names it."""
+    rec = Recorder()
+    _held_on_torta(pg, env, rec)
+    hold.release_due(pg, _cfg(), upload=rec.upload, post=rec.post, today="2026-08-05")
+
+    qs = {q["wording"]: q for q in teach.open_questions(pg)}
+    assert "rožok 50g" in qs, "the dropped line gets its own board question"
+    assert G_ROLL in qs["rožok 50g"]["reason"]
+    assert G_ROLL not in [str(c["gtin"]) for c in qs["rožok 50g"]["candidates"]]
+
+
+def test_a_re_hold_asks_about_a_human_taught_line_whose_code_died_while_it_waited(pg, env):
+    """Review 🟡4 (M2): the release's re-ask must bypass the human-taught pre-check too, or the
+    line is 'unaskable' and the order sits held with no question until its deadline."""
+    memory.remember(pg, CUST, "rožok 50g", G_ROLL, "Rožok štandart 50g", "2026-07-20",
+                    source="human")
+    rec = Recorder()
+    qid = _held_on_torta(pg, env, rec)
+    teach.answer(pg, qid, G_TOR, "Torta čokoládová", by="sklad")
+    released = hold.release_for_question(pg, _cfg(), qid, upload=rec.upload, post=rec.post)
+
+    assert [r["status"] for r in released] == ["held"] and rec.uploads == []
+    assert [q["wording"] for q in teach.open_questions(pg)] == ["rožok 50g"]
+
+
+def test_re_teaching_a_card_taught_earlier_the_same_day_wins_again(pg, env):
+    """Review 🟡1: the wording was taught onto the vianočka card in the morning, then onto the
+    card whose code CODEX dropped. Answering the codex question with the morning card must make
+    it the answer again — a swallowed same-day re-teach re-held the order in a loop."""
+    today = pg.execute("SELECT current_date").fetchone()[0]
+    memory.remember(pg, CUST, "vianočka 400g", G_VIA, "Vianočka maslová 400g", today,
+                    source="human")
+    memory.remember(pg, CUST, "vianočka 400g", G_DEAD, "Vianočka 400g", today, source="human")
+    _codex(pg, ALL_BUT_DEAD)
+    rec = Recorder()
+    assert _run(pg, env, ROLL_VIA, PICKS, rec)["status"] == "held"
+    qid = teach.open_questions(pg)[0]["id"]
+
+    teach.answer(pg, qid, G_VIA, "Vianočka maslová 400g", by="sklad")
+    released = hold.release_for_question(pg, _cfg(), qid, upload=rec.upload, post=rec.post)
+    assert [r["status"] for r in released] == ["ok"]
+    assert sorted(_lin_codes(rec.uploads[0][1])) == sorted([G_ROLL, G_VIA])
+    assert teach.open_questions(pg) == []
+
+
+def test_a_human_answer_is_never_swallowed_by_a_same_day_ship_row(pg):
+    """The memory half of review 🟡1: a same-day ship row of the same card used to swallow the
+    human answer (ON CONFLICT DO NOTHING) — the answer never reached the taught rung."""
+    today = pg.execute("SELECT current_date").fetchone()[0]
+    assert memory.remember(pg, CUST, "chlieb", G_VIA, "Chlieb", today, source="ship")
+    assert memory.remember(pg, CUST, "chlieb", G_VIA, "Chlieb", today, source="human")
+    rec = memory.resolve(pg, CUST, "chlieb")
+    assert rec is not None and rec.human and rec.gtin == G_VIA
+    # a machine duplicate still changes nothing
+    assert memory.remember(pg, CUST, "chlieb", G_VIA, "Chlieb", today, source="ship") is False
+
+
+def test_a_codex_question_never_offers_an_unrelated_card_as_its_only_button(pg, env):
+    """Review 🟡2: a codex_missing line has no engine proposal — only CODEX cards that clear the
+    relevance floor are offered (here none: both vianočka cards are dead), never the top scorer
+    of the unrelated rest shown like a proposal."""
+    _codex(pg, (G_ROLL, G_TOR, G_TOR2))
+    rec = Recorder()
+    assert _run(pg, env, ROLL_VIA, PICKS, rec)["status"] == "held"
+    qs = teach.open_questions(pg)
+    assert [q["wording"] for q in qs] == ["vianočka 400g"]
+    assert qs[0]["candidates"] == []
+
+
+def test_any_item_question_offers_only_cards_codex_has(pg, env):
+    """Review 🟡4 (M1): an ordinary unmatched line's candidates are filtered too — a dead card
+    is never a button, whatever the question's reason."""
+    _codex(pg, ALL_BUT_DEAD)
+    rec = Recorder()
+    assert _run(pg, env, ("rožok 50g", "vianočka"), PICKS, rec)["status"] == "held"
+    qs = teach.open_questions(pg)
+    assert [q["wording"] for q in qs] == ["vianočka"]
+    offered = [str(c["gtin"]) for c in qs[0]["candidates"]]
+    assert G_DEAD not in offered and G_VIA in offered
+
+
+def test_a_confirmed_quantity_is_a_float_so_a_merge_and_a_re_hold_dump_never_crash(pg, env):
+    """Review 🔵7e: the #360 confirmed quantity comes back from NUMERIC as a Decimal — a
+    decision carrying it crashed `merge_same_card`'s sum with a float sibling and the Json dump
+    of a re-hold. `edi.build` reads float(quantity), so no shipped byte changes."""
+    import json
+
+    from app.orders import hold_place, match
+    qid = teach.ask(pg, message_id="m1", customer_ean=CUST, customer_name="P",
+                    wording="rožok 50g", quantity=12, unit="ks", candidates=[])
+    pg.execute("UPDATE order_questions SET quantity = 12.5, status = 'answered' WHERE id = %s",
+               (qid,))
+    ds = [match.Decision(item_name="rožok 50g", gtin=G_ROLL, card="R", confidence=1.0,
+                         rule="human_taught", note="", quantity=12, unit="ks"),
+          match.Decision(item_name="rožok 50g", gtin=G_ROLL, card="R", confidence=1.0,
+                         rule="human_taught", note="", quantity=2.5, unit="ks")]
+    hold_place._apply_confirmed_quantities(pg, ds, [qid])
+    merged = match.merge_same_card(ds)
+    assert merged[0].quantity == 15.0
+    json.dumps(hold_place._dump_decisions(merged))
+
+
 # --- static orders: an unknown code goes to the AI pipeline (which holds + asks) ----------
 
 KARMEN_TEXT = (
@@ -398,20 +504,22 @@ def test_the_stale_list_alert_names_orders_too(pg):
     assert "objednáv" in body and "dodac" in body
 
 
-def test_the_worker_runs_the_stale_sweep_for_an_orders_only_install(pg, monkeypatch):
+def test_the_worker_runs_the_stale_sweep_for_an_orders_only_install(pg):
     """Before #479 the sweep ran only with the DL engine live — an orders-only install whose
-    list went stale would have run with the ORDER gate OFF and nobody told."""
+    list went stale would have run with the ORDER gate OFF and nobody told. One real loop of
+    the real worker (orders engine only) must leave the stale-list ops alert in the outbox."""
     import threading
 
     from app.orders import worker
-    calls = []
-    monkeypatch.setattr(codex_cards, "stale_sweep", lambda conn, cfg: calls.append(1))
+    _codex(pg, ALL_BUT_DEAD, hours_old=codex_cards.STALE_HOURS + 2)
     stop = threading.Event()
 
     def sleep(_s):
         stop.set()
 
     cfg = Config(pg_dsn=PG_DSN, data_dir="/tmp", ai_orders_engine="python",
-                 orders_shadow=False, delivery_notes_engine="n8n")
+                 orders_shadow=False, delivery_notes_engine="n8n", ops_channel_id=77)
     worker.run_forever(pg, cfg, stop=stop, sleep=sleep, pipeline=lambda *a, **k: {})
-    assert calls == [1]
+    rows = pg.execute("SELECT channel_id FROM pending_alerts WHERE kind = %s",
+                      (codex_cards.ALERT_KIND,)).fetchall()
+    assert rows == [(77,)]
