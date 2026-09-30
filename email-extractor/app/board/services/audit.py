@@ -243,7 +243,21 @@ def _restore_soft_delete(conn, table_name, row_id, *, undelete: bool) -> None:
         (str(row_id),)).fetchone()
     if not updated:
         raise RestoreError(409, msg)
+    if undelete:
+        _heal_blank_card(conn, table_name, row_id)
     _rebuild_snapshot(conn, table_name)
+
+
+def _heal_blank_card(conn, table_name, row_id) -> None:
+    """#477: an un-deleted catalog card that was only a BARE retirement marker (the card lived
+    in the snapshot alone) is refilled from the newest snapshot that still has it — never a
+    nameless card. The ONE heal the CODEX pick uses too. Lazy imports keep this module a leaf."""
+    if table_name == "catalog_overrides":
+        from ...orders import snapshot
+        snapshot.heal_blank_marker(conn, str(row_id))
+    elif table_name == "dl_catalog_overrides":
+        from ...orders import dl_snapshot
+        dl_snapshot.heal_blank_dl_marker(conn, str(row_id))
 
 
 def _restore_update(conn, table_name, row_id, before) -> None:

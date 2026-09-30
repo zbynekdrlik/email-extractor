@@ -398,8 +398,9 @@ def create_app(cfg) -> Flask:
     httpapi_fixqueue.register(app, deps)
 
     # #268 krok 10: the AI-orders question board — api_orders_questions,
-    # _api_orders_answer_new_customer/_customer/_new_dl_supplier/_new_dl_item/
-    # _generic, api_orders_answer, api_orders_held, api_orders_taught, api_orders_undo.
+    # _api_orders_answer_new_customer/_customer/_new_dl_supplier/_codex_card (#477 — the
+    # typed _new_dl_item/_new_product cards are gone)/_generic, api_orders_answer,
+    # api_orders_held, api_orders_taught, api_orders_undo.
     # The RISKIEST step (see the design comment on #268): this block carries ALL FOUR
     # two-connection pairs against duplicate uploads and the _role_kinds id-guessing
     # boundary, moved verbatim as ONE indivisible unit into

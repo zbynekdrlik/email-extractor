@@ -3,6 +3,8 @@ paths:
   - "email-extractor/app/orders/snapshot.py"
   - "email-extractor/app/httpapi_znalosti.py"
   - "email-extractor/app/orders/teach.py"
+  - "email-extractor/app/orders/card_guard.py"
+  - "email-extractor/app/board/services/catalog.py"
 ---
 
 # The ONLY source of catalog cards is Postgres — the Google Sheet is RETIRED (#383)
@@ -22,12 +24,17 @@ Ciabatta 3636/3643 incident: two cards added to the sheet only → 2 orders held
   The effective catalog the pipeline matches against is `snapshot.catalog_for_management` /
   `load_catalog` + overrides. DL has its own parallel line (`dl_catalog_snapshot` +
   `dl_catalog_overrides`).
-- **Cards are added/edited via the nástenka „Produkty" tab** (`/nastenka/produkty-objednavky`
-  / `produkty-sklad`), which delegates to `POST /api/znalosti/products`
-  (`snapshot.upsert_catalog_card`); DL cards via the DL-products endpoint. Retire a card via
+- **A NEW card enters the catalog ONLY by „Vybrať kartu z CODEXu" on a board question (#477,
+  owner order 2026-09-30)** — `orders/card_guard.add_from_codex` writes exactly the picked CODEX
+  code + CODEX name (orders = CODEX stredisko 1 / sklad 1; DL = stredisko 1, `sklad` from CODEX),
+  audited, one card per human pick (never a bulk import, #337). EVERY typed creation answers 403
+  „Nové karty sa pridávajú len výberom z CODEXu": the Produkty tabs (no „Pridať" any more), the
+  question's `new_product`/`new_item` bodies, and a NEW number on `POST /api/znalosti/products` /
+  `dl-products`. The nástenka „Produkty" tabs (`/nastenka/produkty-objednavky` /
+  `produkty-sklad`) and those two endpoints now only EDIT an existing card
+  (`snapshot.upsert_catalog_card` / `dl_snapshot.upsert_dl_catalog_card`). Retire a card via
   `DELETE /api/znalosti/products/<gtin>` (`retire_catalog_card`, a `retired=true` override).
-  (#449 lane 8: the old `/znalosti` PAGE is retired — it 302s to the Produkty tab; the
-  `/api/znalosti/*` API stays and is what the board tab delegates to.)
+  (#449 lane 8: the old `/znalosti` PAGE is retired — it 302s to the Produkty tab.)
 - `snapshot.import_snapshot`/`import_files`/`parse_catalog`/`parse_customers` are kept ONLY
   because the offline eval corpus (`eval_run.py`/`dl_eval_run.py`) seeds its frozen snapshot
   from a CSV fixture that way. They are pure network-free CSV-text importers; nothing in the
@@ -63,16 +70,21 @@ UPDATE order_questions
 ```
 
 Then answer it through the board API (`POST /api/orders/question/<qid>/answer`), never a direct
-`item_memory` write. (Live remediation shape used in #383: add the card via
-`POST /api/znalosti/products`, reopen the expired question, answer it → held order ships.)
+`item_memory` write. (Since #477 the answer itself brings the card in: reopen the expired
+question and answer it with `{"codex_card": {"code": "<CODEX EAN kód>"}}` — the card is added
+from CODEX and the held order ships in the same click.)
 
-## How to add a card programmatically (never a direct INSERT)
+## How a card gets in programmatically (never a direct INSERT, never a typed card — #477)
 
 ```bash
-# session cookie via /login (admin), then:
-curl -s -b cookies.txt -X POST <base>/api/znalosti/products \
-  -H 'Content-Type: application/json' \
-  -d '{"gtin":"<gtin>","name":"<name>","doplnok":"<alias or omit the key>"}'
-# read back:
-curl -s -b cookies.txt "<base>/api/znalosti/catalog?q=<gtin-or-name>"
+# session cookie via /login (admin) or the sklad link, then find the CODEX card:
+curl -s -b cookies.txt "<base>/api/board/codex-cards?scope=orders&q=<name-or-code>"
+# and answer the open question with it (adds the card from CODEX, audited, then answers):
+curl -s -b cookies.txt -X POST <base>/api/board/questions/<qid>/answer \
+  -H 'Content-Type: application/json' -d '{"codex_card": {"code": "<code from the list>"}}'
 ```
+
+There is deliberately NO path that adds a card without a question (the owner's #477 order: a
+card is added when the warehouse needs it, one human-picked CODEX card at a time). A card that
+CODEX does not have cannot be added at all — the warehouse creates it in CODEX first; it shows in
+the picker after the next CODEX push (~14:45 / ~18:30).

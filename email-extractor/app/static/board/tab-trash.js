@@ -7,8 +7,10 @@ const PAGE_SIZE = 50;
 
 // Human labels — presentation only, so they live here (JS), never in Python (spec §3).
 const TABLE_LABELS = {
-  catalog_overrides: "Karta (sklad)",
-  dl_catalog_overrides: "Karta (objednávky)",
+  // catalog_overrides = the ORDERS catalog, dl_catalog_overrides = the sklad (DL) one (#477
+  // review: these two were swapped since #444, so every DL card showed as an orders card)
+  catalog_overrides: "Karta (objednávky)",
+  dl_catalog_overrides: "Karta (sklad)",
   customer_overrides: "Zákazník",
   dl_supplier_overrides: "Dodávateľ",
   mail_rules: "Ignorovaný mail",

@@ -6,14 +6,16 @@ TAB decides scope, never the key (spec §6), and `board_gate` already authorized
 so the orders `sklad` key reaches the DL products too (the whole point of lane 4). The card
 FIELD descriptor differs per scope: this module holds ORDERS_FIELDS, `products_dl.py` holds
 the DL one, merged into the list response `meta` so `tab-products.js` builds each scope's
-editor from data. No business logic is re-implemented here — create/update/delete delegate
-to the snapshot machinery, alias add/remove to the memory write paths (via the service).
+editor from data. No business logic is re-implemented here — update/delete delegate to the
+snapshot machinery, alias add/remove to the memory write paths (via the service). #477: the
+tabs never CREATE a card (403); the CODEX picker list `/api/board/codex-cards` lives here too
+(`card_guard.codex_choices`), the pick itself is a question answer.
 """
 from __future__ import annotations
 
 from flask import jsonify, request
 
-from ..orders import codex_cards
+from ..orders import card_guard, codex_cards
 from . import products_dl
 from .auth import actor
 from .services import catalog, catalog_aliases
@@ -72,9 +74,21 @@ def register(bp, deps) -> None:
                 res = catalog.upsert(c, scope, body, actor())
         except ValueError as e:
             return jsonify(error=str(e)), 400
-        except codex_cards.CardRefused as e:   # #467: CODEX lacks it / taken / in the Kôš
-            return jsonify(**e.payload), 409
+        except codex_cards.CardRefused as e:   # #477: a typed new card (403); #467: CODEX (409)
+            return jsonify(**e.payload), e.status
         return jsonify(ok=True, **res)
+
+    @bp.get("/api/board/codex-cards")
+    def board_codex_cards():
+        # #477: the „Vybrať kartu z CODEXu" picker list — the ONLY way a card enters the
+        # catalog is picking one of these on a question (`codex_card` answer body).
+        try:
+            with deps.db() as c:
+                res = card_guard.codex_choices(c, request.args.get("scope", "dl"),
+                                               request.args.get("q", ""))
+        except ValueError as e:
+            return jsonify(error=str(e)), 400
+        return jsonify(**res)
 
     @bp.delete("/api/board/products/<gtin>")
     def board_product_delete(gtin: str):

@@ -1,12 +1,14 @@
 // Produkty sklad + Produkty objednávky tab (#445). Uses the ONE copy of api.js/ui.js
 // helpers. Renders one row per catalog card with search (debounce) + paging; an inline
-// editor (číslo položky readonly after create, názov, doplnok, + mass/sklad/cena for DL)
-// with soft delete (→ toast „Vrátiť v Koši") and a per-card alias manager (add/remove).
-// create/update/delete delegate to /api/board/products* (which delegate to the real
-// snapshot/dl_snapshot + memory machinery). No HTML strings — all nodes via ui.js `el()`.
-// Refresh-safety: an OPEN editor (or the focused search box) is never wiped by the refresh.
-// #467 (Produkty sklad): a card number CODEX has no stock card for is refused by the server —
-// the editor then lists CODEX cards with a similar name + code; drifted names get a badge.
+// editor (číslo položky readonly, názov, doplnok, + mass/sklad/cena for DL) with soft delete
+// (→ toast „Vrátiť v Koši") and a per-card alias manager (add/remove). update/delete delegate
+// to /api/board/products* (which delegate to the real snapshot/dl_snapshot + memory
+// machinery). No HTML strings — all nodes via ui.js `el()`. Refresh-safety: an OPEN editor
+// (or the focused search box) is never wiped by the refresh.
+// #467 (Produkty sklad): an edit of a card whose number CODEX has no stock card for is refused
+// by the server — the editor then lists CODEX cards with a similar name + code; drifted names
+// get a badge. #477: NO „Nová karta" here — a card enters the catalog only by „Vybrať kartu z
+// CODEXu" on a question (owner order 2026-09-30); the toolbar says so.
 import { apiDelete, apiGet, apiPost, clear, debounce, el, toast } from "./ui.js";
 
 const main = document.getElementById("board-main");
@@ -14,7 +16,6 @@ const SCOPE = (main && main.dataset.scope) || "orders";
 const listEl = document.getElementById("p-list");
 const emptyEl = document.getElementById("p-empty");
 const searchEl = document.getElementById("p-search");
-const newBtn = document.getElementById("p-new");
 const prevBtn = document.getElementById("p-prev");
 const nextBtn = document.getElementById("p-next");
 const pageInfo = document.getElementById("p-pageinfo");
@@ -36,56 +37,38 @@ function editingOpen() {
   return false;
 }
 
-// Resolves true when saved. A refusal that carries structured help (#467: `codex.similar` — the
-// number is not a CODEX stock card; `existing` — the number already has a card) is rendered
-// into the editor that sent it, so the editor (and what was typed) stays open.
-async function upsert(body, ed = null, gtinIn = null) {
+// Saves an EDIT. A refusal that carries structured help (#467: `codex.similar` — the number
+// is not a CODEX stock card) is rendered into the editor that sent it, so the editor (and what
+// was typed) stays open.
+async function upsert(body, ed = null) {
   try {
     await apiPost(`/products?scope=${SCOPE}`, body);
     toast("Uložené");
     load();
-    return true;
   } catch (e) {
-    if (ed && e.data && (e.data.codex || e.data.existing)) codexHint(ed, e.data, gtinIn);
+    if (ed && e.data && e.data.codex) codexHint(ed, e.data);
     toast(e.message, { error: true });
-    return false;
   }
 }
 
 // ---- #467: CODEX help inside an editor --------------------------------------------
-function findCard(ed, code) {
-  if (ed.classList.contains("p-new-editor")) ed.remove();
+function findCard(code) {
   if (searchEl) searchEl.value = code;
   state.q = code;
   state.page = 0;
   load();
 }
 
-function codexHint(ed, data, gtinIn) {
+function codexHint(ed, data) {
   const old = ed.querySelector(".p-codex-hint");
   if (old) old.remove();
   const rows = [];
-  if (data.existing) {
-    rows.push(el("div", { class: "p-codex-row" }, [
-      el("span", {}, `${data.existing.gtin} — ${data.existing.name}`),
-      el("button", { class: "p-btn p-codex-find", type: "button", "data-code": data.existing.gtin,
-        onclick: () => findCard(ed, data.existing.gtin) }, "Nájsť kartu v zozname"),
-    ]));
-  }
   const similar = (data.codex && data.codex.similar) || [];
   for (const s of similar) {
-    let btn = null;
-    if (s.in_catalog) {
-      btn = el("button", { class: "p-btn p-codex-find", type: "button", "data-code": s.code,
-        onclick: () => findCard(ed, s.catalog_gtin || s.code) }, "Nájsť kartu v zozname");
-    } else if (gtinIn) {
-      btn = el("button", { class: "p-btn p-codex-use", type: "button", "data-code": s.code,
-        onclick: () => {
-          gtinIn.value = s.code;
-          const nameIn = ed.querySelector(".p-name");
-          if (nameIn && !nameIn.value.trim()) nameIn.value = s.name;
-        } }, "Použiť kód");
-    }
+    const btn = s.in_catalog
+      ? el("button", { class: "p-btn p-codex-find", type: "button", "data-code": s.code,
+        onclick: () => findCard(s.catalog_gtin || s.code) }, "Nájsť kartu v zozname")
+      : null;
     const ours = s.in_catalog ? ` (u nás: ${s.catalog_name})` : "";
     rows.push(el("div", { class: "p-codex-row" }, [
       el("span", {}, `${s.code} — ${s.name}${ours}`), btn]));
@@ -260,30 +243,6 @@ function aliasRow(gtin, a) {
   ]);
 }
 
-// ---- new card ---------------------------------------------------------------------
-function newCard() {
-  if (listEl.querySelector(".p-new-editor")) return;
-  const gtinIn = el("input", { class: "p-gtin", type: "text", autocomplete: "off",
-    placeholder: "Číslo položky (GTIN)" });
-  const { inputs, rows } = fieldInputs();
-  const ed = el("div", { class: "p-editor p-new-editor" }, [
-    el("label", { class: "p-field" }, ["Číslo položky ", gtinIn]),
-    ...rows,
-    el("div", { class: "p-editor-actions" }, [
-      el("button", { class: "p-btn p-btn--primary p-save", type: "button", onclick: async () => {
-        const gtin = gtinIn.value.trim();
-        if (!gtin) { toast("Zadaj číslo položky", { error: true }); return; }
-        // `new: true` — a number that already has a card is refused (never overwritten); the
-        // editor stays open on any refusal so the hint + what was typed are not lost (#467).
-        if (await upsert({ ...collect(gtin, inputs), new: true }, ed, gtinIn)) ed.remove();
-      } }, "Uložiť"),
-      el("button", { class: "p-btn", type: "button", onclick: () => ed.remove() }, "Zrušiť"),
-    ]),
-  ]);
-  listEl.prepend(ed);
-  gtinIn.focus();
-}
-
 // ---- load + render ----------------------------------------------------------------
 async function load({ periodic = false } = {}) {
   try {
@@ -321,7 +280,6 @@ if (searchEl) {
     state.q = searchEl.value.trim(); state.page = 0; load();
   }, 300));
 }
-if (newBtn) newBtn.addEventListener("click", newCard);
 if (codexIssuesEl) {
   codexIssuesEl.addEventListener("change", () => {
     state.codexIssues = codexIssuesEl.checked; state.page = 0; load();

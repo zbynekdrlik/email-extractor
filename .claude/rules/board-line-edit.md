@@ -67,6 +67,13 @@ re-record is safe; then verify offline with `--require-all` (= exactly what CI r
 
 ## „Genuinely new X right on the question card" now has an ORDERS-item member — mirror it exactly (#426)
 
+> **SUPERSEDED for PRODUCT cards by #477 (owner order 2026-09-30):** a product card is never
+> TYPED onto a question any more — `new_product`/`new_item` bodies answer 403; the card comes
+> from „Vybrať kartu z CODEXu" (`codex_card` body → `_api_orders_answer_codex_card`, see
+> `board.md` #477). The two-connection discipline and the `{gtin,name}` candidate-shape trap
+> below still apply to THAT path (it reuses them verbatim). `new_customer`/`new_supplier`
+> (partners, not products) are unchanged.
+
 The board's "create the missing thing right on the question, one click" pattern now covers
 all three orders/DL kinds: customer (`new_customer`, #234), DL supplier/product
 (`new_supplier`/`new_item`, #235), and — since #426 — the ORDERS item card
@@ -82,7 +89,8 @@ specific to the item kind:
 - **`teach.answer` accepts a freshly-created gtin two ways, both belt-and-suspenders:**
   `add_candidate` puts it in the question's own offered set, AND `rebuild_from_overrides`
   re-freezes it into `catalog_gtin_set(conn)` (which `answer` also checks). Either alone
-  would suffice; `_api_orders_answer_new_product` does both, mirroring `new_customer`.
+  would suffice; `_api_orders_answer_new_product` did both (now `_api_orders_answer_codex_card`
+  does, #477), mirroring `new_customer`.
 - **Same two-connection discipline (#116):** `upsert_catalog_card` + `rebuild_from_overrides`
   + `add_candidate` + `teach.answer` in ONE `deps.db_tx()`; `hold.release_for_question`
   AFTERWARDS on a separate `deps.db()` (autocommit) — a real ORION upload must never sit in
@@ -101,8 +109,8 @@ specific to the item kind:
 
 ## Any question-settle write needs the atomic `WHERE status='open' RETURNING` guard, and side effects go AFTER it (#428)
 
-`teach.answer` (the `item` settle — also reached by #426 `new_product` and the #360 line
-edit, since they call it) originally did a NON-atomic check-then-act: a Python
+`teach.answer` (the `item` settle — also reached by the #477 `codex_card` pick, formerly #426
+`new_product`, and the #360 line edit, since they call it) originally did a NON-atomic check-then-act: a Python
 `if q["status"] != "open": raise AlreadyAnswered` (read from an earlier SELECT), then
 `UPDATE … SET status='answered' … WHERE id = %s` with **no `AND status='open'`, no
 `RETURNING`**, and the two `memory.remember*` writes ran **BEFORE** that UPDATE. Two
@@ -121,9 +129,10 @@ The fix mirrors the already-hardened `answer_customer` (#234) and `_api_orders_a
 - Put memory/release side effects **AFTER** the successful guard, never before — so the loser
   writes nothing. (Keep the early Python `status != 'open'` fast-path too; `answer_customer`
   keeps both — it just is not the real guard.)
-- Callers stay unchanged: `api_orders_answer` (item tail) and `_api_orders_answer_new_product`
-  (#426 — whose whole `db_tx`, incl. the `catalog_overrides` card write, rolls back on the
-  raise) already catch `AlreadyAnswered → 409`; `_apply_item` calls `answer()` so it inherits it.
+- Callers stay unchanged: `api_orders_answer` (item tail) and `_api_orders_answer_codex_card`
+  (#477, which replaced #426's `_api_orders_answer_new_product` — its whole `db_tx`, incl. the
+  CODEX card write, rolls back on the raise) already catch `AlreadyAnswered → 409`;
+  `_apply_item` calls `answer()` so it inherits it.
 
 When adding a NEW `teach.KINDS` kind or any new answer path, copy this shape — the guard
 belongs on the WRITE, not in one caller. RED proof = the `run_racers` helper (`tests/_race.py`):

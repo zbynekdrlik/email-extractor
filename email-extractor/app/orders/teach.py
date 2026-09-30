@@ -203,9 +203,9 @@ def answer(conn, qid: int, gtin: str, card: str, by: str = "",
     # `WHERE id=%s AND status='open' RETURNING id` makes the row-lock serialize them: the
     # loser matches 0 rows and is refused — with NO memory side effect, which is why the two
     # `memory.remember*` writes now run AFTER the guard, not before (before, both racers
-    # wrote memory). Every caller (`api_orders_answer` item tail, `_api_orders_answer_new_
-    # product` #426 — whose whole transaction, incl. the catalog card write, rolls back on
-    # this raise — and `_apply_item`) already turns `AlreadyAnswered` into the endpoint's 409.
+    # wrote memory). Every caller (`api_orders_answer` item tail, `_api_orders_answer_codex_
+    # card` #477 — whose whole transaction, incl. the CODEX card write, rolls back on this
+    # raise — and `_apply_item`) already turns `AlreadyAnswered` into the endpoint's 409.
     row = conn.execute(
         """UPDATE order_questions
               SET status = 'answered', answer_gtin = %s, answer_card = %s,

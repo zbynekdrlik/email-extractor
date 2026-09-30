@@ -325,11 +325,62 @@ def retired_dl_cards(conn) -> list[dict]:
 def deleted_dl_cards(conn) -> list[dict]:
     """#467: the DL card overrides the loader HIDES (`retired OR deleted_at IS NOT NULL` — the
     exact rule of `_load_dl_catalog_overrides`), i.e. the numbers sitting in the Kôš. The caller
-    matches them by CODEX code in Python (`card_guard.same_code_card`, the ONE normalizer).
+    matches them by CODEX code in Python (`codex_cards.index_by_code`, the ONE normalizer).
     (`retired_dl_cards` keys on `retired` alone, for #337.)"""
     rows = conn.execute("SELECT gtin, name FROM dl_catalog_overrides "
                         "WHERE retired OR deleted_at IS NOT NULL ORDER BY gtin").fetchall()
     return [{"gtin": r[0], "name": r[1]} for r in rows]
+
+
+def undelete_dl_catalog_card(conn, gtin: str) -> bool:
+    """#477: the DL twin of `snapshot.undelete_catalog_card` — a Kôš card restored exactly as
+    it was (name/doplnok/mass/sklad/cena kept), both markers cleared, a bare marker healed
+    (`heal_blank_dl_marker`). True iff a hidden row was restored; the caller rebuilds + audits."""
+    row = conn.execute(
+        """UPDATE dl_catalog_overrides SET retired = false, deleted_at = NULL,
+                  updated_at = now()
+            WHERE gtin = %s AND (retired OR deleted_at IS NOT NULL) RETURNING gtin""",
+        (gtin,)).fetchone()
+    if row is None:
+        return False
+    heal_blank_dl_marker(conn, gtin)
+    return True
+
+
+def heal_blank_dl_marker(conn, gtin: str) -> bool:
+    """#477: the DL twin of `snapshot.heal_blank_marker` — `retire_dl_catalog_card` of a
+    snapshot-only card leaves a BARE marker (name '' + blank doplnok/mass/sklad/cena; 9 of 19
+    deleted DL cards on prod, 2026-09-30) and un-deleting it alone would make a NAMELESS card
+    that also lost sklad=100 (the #462 ×N class). Refill every field from the newest snapshot
+    that still has the gtin; only a blank-named override row is touched. True iff healed. (The
+    marker stays bare on retire — `retired_dl_cards`, #337, must keep seeing it as-is.)"""
+    snap = last_known_dl_card(conn, gtin)
+    if snap is None:
+        return False
+    row = conn.execute(
+        """UPDATE dl_catalog_overrides
+              SET name = %s, doplnok = %s, mass = %s, sklad = %s, cena = %s, updated_at = now()
+            WHERE gtin = %s AND name = '' RETURNING gtin""",
+        (snap["name"], snap["doplnok"], snap["mass"], snap["sklad"], snap["cena"],
+         gtin)).fetchone()
+    if row is not None:
+        log.info("DL card %s: bare retirement marker healed from the snapshot (#477)", gtin)
+    return row is not None
+
+
+def last_known_dl_card(conn, gtin: str) -> dict | None:
+    """#477: the DL card `gtin` as the most CURRENT snapshot that still has it knew it (name,
+    doplnok, mass, sklad, cena) — newest `checked_at` first, the `latest_snapshot_id` rule
+    (`_freeze` reuses an old id for identical content). None when no snapshot has it."""
+    row = conn.execute(
+        """SELECT c.name, c.doplnok, c.mass, c.sklad, c.cena FROM dl_catalog_snapshot c
+             JOIN dl_snapshots s ON s.id = c.snapshot_id
+            WHERE c.gtin = %s AND c.name <> ''
+            ORDER BY s.checked_at DESC, s.id DESC LIMIT 1""", (gtin,)).fetchone()
+    if row is None:
+        return None
+    return {"name": row[0], "doplnok": row[1] or "", "mass": row[2], "sklad": row[3] or "",
+            "cena": row[4]}
 
 
 def upsert_dl_catalog_card(conn, gtin: str, name: str, *, doplnok: str = "",

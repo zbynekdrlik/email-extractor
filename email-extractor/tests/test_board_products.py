@@ -6,7 +6,8 @@ create/update/delete DELEGATES to the SAME `snapshot`/`dl_snapshot` machinery th
 never a re-implementation); every alias add/remove delegates to the `memory`/`dl_memory`
 write paths. The genuinely-new behaviour: one board page over BOTH catalog scopes reachable
 by the `sklad` role (DL products were admin-only before), soft delete (never hard), and the
-per-card alias manager.
+per-card alias manager. Since #477 the tabs only EDIT/delete — a new number is refused 403
+(a card comes only from the CODEX picker, `test_board_codex_pick.py`).
 """
 import os
 
@@ -175,23 +176,28 @@ def test_the_board_products_api_needs_a_session(pg):
 
 # --- create / update delegate to the SAME snapshot machinery + audit ----------------
 
-def test_create_orders_card_has_the_same_db_effect_as_znalosti_and_audits(pg):
+def test_creating_a_card_on_the_produkty_tabs_is_refused_in_both_scopes(pg):
+    """#477 (owner order 2026-09-30): a card is never TYPED into the catalog any more — a new
+    number (with or without the editor's `new` flag) is refused 403 in both scopes, nothing is
+    written and nothing audited. A card comes only from „Vybrať kartu z CODEXu" on a question."""
     _base_snapshot(pg)
+    _base_snapshot_dl(pg)
     c = _client()
     _sklad(c)
-    r = c.post("/api/board/products?scope=orders",
-               json={"gtin": "NEW1", "name": "Nová karta", "doplnok": "alias1"})
-    assert r.status_code == 200
-    assert r.get_json()["action"] == "create"
-    # identical effect to /api/znalosti/products: the card is in the effective catalog
-    row = next(x for x in snapshot.catalog_for_management(pg) if x["gtin"] == "NEW1")
-    assert row["name"] == "Nová karta" and row["alias"] == "alias1"
-    # and it is a real, searchable, teachable card (in catalog_gtin_set after rebuild)
-    assert "NEW1" in snapshot.catalog_gtin_set(pg)
-    # the board records the change
-    n = pg.execute("SELECT count(*) FROM audit_log WHERE table_name='catalog_overrides' "
-                   "AND action='create' AND row_id='NEW1'").fetchone()[0]
-    assert n == 1
+    for scope, body in (("orders", {"gtin": "NEW1", "name": "Nová karta", "doplnok": "a"}),
+                        ("dl", {"gtin": "DN1", "name": "DL nová", "doplnok": "d",
+                                "mass": "1,5", "sklad": "100", "cena": "0,40"})):
+        for flag in ({}, {"new": True}):
+            r = c.post(f"/api/board/products?scope={scope}", json={**body, **flag})
+            assert r.status_code == 403, (scope, flag)
+            data = r.get_json()
+            assert data["codex_only"] is True
+            assert "Nové karty sa pridávajú len výberom z CODEXu" in data["error"]
+    assert not any(x["gtin"] == "NEW1" for x in snapshot.catalog_for_management(pg))
+    assert not any(x["gtin"] == "DN1" for x in dl_snapshot.dl_catalog_for_management(pg))
+    assert pg.execute("SELECT count(*) FROM catalog_overrides").fetchone()[0] == 0
+    assert pg.execute("SELECT count(*) FROM dl_catalog_overrides").fetchone()[0] == 0
+    assert pg.execute("SELECT count(*) FROM audit_log").fetchone()[0] == 0
 
 
 def test_update_orders_card_name_only_keeps_alias_and_audits_update(pg):
@@ -210,19 +216,22 @@ def test_update_orders_card_name_only_keeps_alias_and_audits_update(pg):
     assert n == 1
 
 
-def test_create_dl_card_delegates_and_audits(pg):
+def test_update_dl_card_parses_numbers_and_audits(pg):
+    """An EDIT of an existing DL card still delegates to the DL machinery (comma decimals
+    parsed) and records an `update` audit row."""
+    _seed_dl(pg, "DN1", "DL stará")
     c = _client()
     _sklad(c)
     r = c.post("/api/board/products?scope=dl",
                json={"gtin": "DN1", "name": "DL nová", "doplnok": "d", "mass": "1,5",
                      "sklad": "100", "cena": "0,40"})
-    assert r.status_code == 200
+    assert r.status_code == 200 and r.get_json()["action"] == "update"
     row = next(x for x in dl_snapshot.dl_catalog_for_management(pg) if x["gtin"] == "DN1")
     assert row["name"] == "DL nová"
     assert row["mass"] == 1.5   # parse_number handled the comma decimal
     assert row["cena"] == 0.40
     n = pg.execute("SELECT count(*) FROM audit_log WHERE table_name='dl_catalog_overrides' "
-                   "AND row_id='DN1'").fetchone()[0]
+                   "AND row_id='DN1' AND action='update'").fetchone()[0]
     assert n == 1
 
 
@@ -336,6 +345,23 @@ def test_add_global_alias_delegates_to_memory_and_audits(pg):
     n = pg.execute("SELECT count(*) FROM audit_log WHERE table_name='global_item_memory' "
                    "AND action='create'").fetchone()[0]
     assert n == 1
+
+
+def test_an_alias_is_only_added_to_a_card_we_have(pg):
+    """#477 review: an alias maps a wording to a card NUMBER that later ships (the orders
+    `human_taught` rung does not re-check the catalog) — a typed number that is no card of the
+    scope is refused, never a memory row pointing nowhere."""
+    _seed_orders(pg, "AG1", "Karta alias")
+    c = _client()
+    _sklad(c)
+    for scope, gtin, body in (("orders", "GHOST1", {"wording": "duch"}),
+                              ("dl", "AG1", {"wording": "duch", "ean": "3000000000001"})):
+        r = c.post(f"/api/board/products/{gtin}/aliases?scope={scope}", json=body)
+        assert r.status_code == 400, (scope, gtin)
+        assert "v katalógu nie je" in r.get_json()["error"]
+    assert memory.list_global_aliases(pg) == []
+    assert pg.execute("SELECT count(*) FROM dl_item_memory").fetchone()[0] == 0
+    assert pg.execute("SELECT count(*) FROM audit_log").fetchone()[0] == 0
 
 
 def test_add_customer_alias_needs_an_ean_and_delegates(pg):

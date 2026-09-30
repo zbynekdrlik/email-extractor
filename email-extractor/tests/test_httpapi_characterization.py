@@ -84,6 +84,8 @@ EXPECTED_ROUTES = sorted([
     (("DELETE",), "/api/board/products/<gtin>"),
     (("POST",), "/api/board/products/<gtin>/aliases"),
     (("DELETE",), "/api/board/products/<gtin>/aliases"),
+    # #477: the „Vybrať kartu z CODEXu" picker list (a card enters the catalog only this way).
+    (("GET",), "/api/board/codex-cards"),
     # #447 board redesign lane 6: the Naučené sklad + Naučené objednávky API — list per kind
     # (scope+kind query, origin joins, search/paging) + update/delete (soft + audit) delegating
     # to the engine write paths.

@@ -21,12 +21,16 @@ move.
 """
 from __future__ import annotations
 
+import logging
+
 from flask import Flask, abort, jsonify, request, session
 from psycopg.types.json import Json
 
 from .httpapi_common import _EAN_STRIP_RE, Deps, _parse_emails_field
 from .httpapi_security import _role_kinds
 from .orders import dl_snapshot, snapshot
+
+log = logging.getLogger("email_extractor.httpapi")
 
 
 def _num(v):
@@ -116,23 +120,19 @@ def _classify_manual_target(conn, qid: int):
 _UNSET = object()
 
 
-def _dl_card_refusal(deps: Deps, gtin: str, *texts: str, new: bool = False):
-    """#467: the 409 response for a DL card number the board must not use, else None. `new`
-    (the inline „➕ Nová karta") runs the ONE new-card gate — CODEX lacks it / we already have
-    it (never overwritten: blank mass/sklad/cena) / it is in the Kôš; otherwise (a dl_item
-    pick) only the CODEX check: a pick of a code CODEX has no stock card for would teach a
-    mapping that can never ship. The 409 carries `codex.similar` / `existing` for the board's
-    one-click help; a missing/stale CODEX list passes (fail-open)."""
+def _dl_card_refusal(deps: Deps, gtin: str, *texts: str):
+    """#467: the 409 response for a dl_item pick of a card number CODEX has no stock card for
+    (it would teach a mapping that can never ship), else None. The 409 carries
+    `codex.similar` for the board's one-click help, each marked `pickable` (#477: only a card
+    the CODEX picker offers may be added from the help); a missing/stale CODEX list passes
+    (fail-open)."""
     from .orders import card_guard, codex_cards
     with deps.db() as c:
         try:
-            if new:
-                card_guard.guard_new_dl_card(c, gtin, *texts)
-            else:
-                codex_cards.check_card_code(
-                    c, gtin, *texts, catalog=dl_snapshot.dl_catalog_for_management(c))
+            codex_cards.check_card_code(
+                c, gtin, *texts, catalog=dl_snapshot.dl_catalog_for_management(c))
         except codex_cards.CardRefused as e:
-            return jsonify(**e.payload), 409
+            return jsonify(**card_guard.mark_pickable(c, "dl", e.payload)), e.status
     return None
 
 
@@ -401,95 +401,61 @@ def register(app: Flask, deps: Deps) -> dict:
             return jsonify(error="Otázka už neexistuje."), 404
         return _api_orders_answer_generic(qid, q2, {"choice": ean, "by": "sklad"})
 
-    def _api_orders_answer_new_dl_item(qid: int, q: dict, ni: dict):
-        """#235: the DL-item half — a genuinely new catalog card with no GTIN in Codex
-        yet (the #236 "Soľ jedlá..." case). Same shape as the supplier branch above."""
-        from .orders import teach
-        gtin = _EAN_STRIP_RE.sub("", str(ni.get("gtin") or ""))
-        if not gtin:
-            return jsonify(error="Bez GTIN sa karta nedá uložiť — nájdeš ho v CODEXe "
-                                 "pri produkte."), 400
-        if not gtin.isdigit():
-            return jsonify(error="GTIN musí byť len číslice."), 400
-        name = str(ni.get("name") or "").strip()
-        if not name:
-            return jsonify(error="chýba názov"), 400
-        refused = _dl_card_refusal(deps, gtin, name, q.get("wording", ""), new=True)  # #467
-        if refused:
-            return refused
-        with deps.db_tx() as c:
-            dl_snapshot.upsert_dl_catalog_card(c, gtin, name)
-            dl_snapshot.dl_rebuild_from_overrides(c)
-            teach.add_candidate(c, qid, {"value": gtin, "label": name})
-        with deps.db() as c2:
-            q2 = teach.get(c2, qid)
-        if q2 is None:
-            return jsonify(error="Otázka už neexistuje."), 404
-        return _api_orders_answer_generic(qid, q2, {"choice": gtin, "by": "sklad"})
+    def _api_orders_answer_codex_card(qid: int, q: dict, body: dict):
+        """#477 „Vybrať kartu z CODEXu": the ONE way a card enters the catalog from the board
+        (owner order 2026-09-30 — the #426 `new_product` / #235 `new_item` typed cards are
+        gone, 403). `codex_card.code` is a card the picker listed (`card_guard.codex_choices`):
+        `card_guard.add_from_codex` puts exactly that code + CODEX name into the catalog
+        override (audited `create`) — or only SELECTS our card when we already have the code —
+        and the question is then answered through the NORMAL path of its kind, so every side
+        effect a human answer fires (memory, release, siblings) fires here too.
 
-    def _api_orders_answer_new_product(qid: int, q: dict, body: dict):
-        """#426: the ORDERS item half of the same "genuinely new card" action #234 gave
-        customers and #235 gave the two DL kinds — a brand-new catalog card whose číslo
-        položky (the catalog `gtin`, read from CODEX) is not in the snapshot yet, typed
-        straight onto the item question instead of the warehouse leaving for /znalosti
-        (owner request 2026-09-14: skladníčka "to nevie"). Same two-connection discipline
-        as `_api_orders_answer_new_customer`: the catalog write, the `teach.add_candidate`
-        audit trail, and `teach.answer` commit together in ONE transaction; the release
-        (a REAL external ORION upload) runs afterward on its own autocommit connection —
-        never inside the same rollback-able transaction (#116). The card lands in
-        `catalog_overrides` exactly like `POST /api/znalosti/products`."""
-        from .orders import hold, teach
-        np = body.get("new_product") or {}
-        gtin = _EAN_STRIP_RE.sub("", str(np.get("gtin") or ""))
-        if not gtin:
-            return jsonify(error="Bez čísla položky sa karta nedá uložiť — nájdeš ho "
-                                 "v CODEXe pri produkte."), 400
-        if not gtin.isdigit():
-            return jsonify(error="Číslo položky musí byť len číslice."), 400
-        name = str(np.get("name") or "").strip()
-        if not name:
-            return jsonify(error="chýba názov"), 400
-        # #383 alias tri-state, exactly like /api/znalosti/products: the `doplnok` key being
-        # ABSENT means "don't touch the alias" (→ None); PRESENT (even "") sets/clears it.
-        if "doplnok" in np:
-            alias: str | None = str(np.get("doplnok") or "").strip()
-        else:
-            alias = None
-        # #360: the board's confirmed quantity + unit price for THIS line (top-level body,
-        # carried by lineFields), same as the normal item tail in `api_orders_answer`.
-        quantity = _num(body.get("quantity"))
-        unit_price = _num(body.get("unit_price"))
+        Same two-connection discipline as every other answer. item: the card write, the
+        `add_candidate` legitimation and `teach.answer` commit together in ONE transaction — a
+        refused/raced answer rolls the new card back with it; the release (a REAL external
+        ORION upload) runs afterward on its own autocommit connection (#116). dl_item: the card
+        write + `add_candidate` commit first, then `_api_orders_answer_generic` (its own
+        guarded UPDATE, then `apply` → `release_for_question`), exactly like a picked
+        candidate — so a dl_item answer that loses a race (409) KEEPS the added card + its
+        audit row. Harmless by construction: it is a real CODEX card the warehouse picked
+        (the Kôš takes it back), never a typed one."""
+        from .board.auth import actor
+        from .orders import card_guard, codex_cards, hold, teach
+        kind = q.get("kind")
+        if kind not in ("item", "dl_item"):
+            return jsonify(error="Kartu z CODEXu vyberáš len pri otázke na položku."), 400
+        if q.get("status") != "open":
+            return jsonify(error=f"otázka {qid} je už zodpovedaná"), 409
+        code = str((body.get("codex_card") or {}).get("code") or "").strip()
+        if not code:
+            return jsonify(error="chýba kód karty z CODEXu"), 400
+        scope = "orders" if kind == "item" else "dl"
         try:
             with deps.db_tx() as c:
-                # Refuse a číslo položky that already belongs to a LIVE card (sheet-derived
-                # OR already overridden — `catalog_for_management` merges both, excludes
-                # retired) — mirrors #234's own new_customer collision check. The client
-                # shows „Použiť existujúcu kartu" from `existing`, one click through the
-                # normal teach() answer, never a forced duplicate override.
-                existing = [r for r in snapshot.catalog_for_management(c)
-                           if str(r.get("gtin") or "") == gtin]
-                if existing:
-                    hit = existing[0]
-                    return jsonify(
-                        error=f"Číslo položky {gtin} už má karta {hit.get('name', '')}.",
-                        existing={"gtin": hit.get("gtin", ""),
-                                 "name": hit.get("name", "")}), 409
-                snapshot.upsert_catalog_card(c, gtin, name, alias=alias)
-                snapshot.rebuild_from_overrides(c)
-                # audit trail (mirrors new_customer): the answered gtin is present in the
-                # question's own candidates; `teach.answer` would also accept it via the
-                # freshly-rebuilt `catalog_gtin_set`, so this is belt-and-suspenders.
-                teach.add_candidate(c, qid, {"gtin": gtin, "name": name})
-                answered = teach.answer(c, qid, gtin=gtin, card=name, by="sklad-new-card",
-                                        quantity=quantity, unit_price=unit_price)
+                card = card_guard.add_from_codex(c, scope, code, actor=actor())
+                if kind == "dl_item":
+                    teach.add_candidate(c, qid, {"value": card["gtin"], "label": card["name"]})
+                else:
+                    teach.add_candidate(c, qid, {"gtin": card["gtin"], "name": card["name"]})
+                    answered = teach.answer(
+                        c, qid, gtin=card["gtin"], card=card["name"], by="sklad-codex-card",
+                        quantity=_num(body.get("quantity")),
+                        unit_price=_num(body.get("unit_price")))
+        except codex_cards.CardRefused as e:
+            return jsonify(**e.payload), e.status
         except teach.AlreadyAnswered as e:
             return jsonify(error=str(e)), 409
         except teach.NotACandidate as e:
             return jsonify(error=str(e)), 400
+        if kind == "dl_item":
+            with deps.db() as c2:
+                q2 = teach.get(c2, qid)
+            if q2 is None:
+                return jsonify(error="Otázka už neexistuje."), 404
+            return _api_orders_answer_generic(qid, q2, {"choice": card["gtin"], "by": "sklad"})
         with deps.db() as c2:
             released = hold.release_for_question(c2, deps.cfg, qid)
-        return jsonify(ok=True, question=answered, released=released,
-                       product={"gtin": gtin, "name": name})
+        return jsonify(ok=True, question=answered, released=released, product=card)
 
     def _api_orders_answer_generic(qid: int, q: dict, body: dict):
         """#164: the SAME dispatch endpoint, generalized for kinds beyond item/customer
@@ -498,14 +464,13 @@ def register(app: Flask, deps: Deps) -> dict:
         `"unknown"` is the universal escape hatch (constraint 5 of #164): the question
         stays OPEN and visible instead of being silently marked answered with nothing.
 
-        #235: a `new_supplier`/`new_item` body (mirrors `customer`'s own `new_customer`
-        branch) means the pick genuinely does not exist yet — dispatched BEFORE the
-        open/kind checks below, same as `_api_orders_answer_customer` does for
-        `new_customer`."""
+        #235: a `new_supplier` body (mirrors `customer`'s own `new_customer` branch) means
+        the supplier genuinely does not exist yet — dispatched BEFORE the open/kind checks
+        below, same as `_api_orders_answer_customer` does for `new_customer`. (The DL
+        product half, a typed `new_item`, is refused since #477 in `_answer_dispatch` — a
+        card comes only from `_api_orders_answer_codex_card`.)"""
         if q.get("kind") == "dl_supplier" and isinstance(body.get("new_supplier"), dict):
             return _api_orders_answer_new_dl_supplier(qid, q, body["new_supplier"])
-        if q.get("kind") == "dl_item" and isinstance(body.get("new_item"), dict):
-            return _api_orders_answer_new_dl_item(qid, q, body["new_item"])
         from .orders import teach
         kind = teach.KINDS.get(q.get("kind", ""))
         if not kind:
@@ -574,7 +539,8 @@ def register(app: Flask, deps: Deps) -> dict:
         # Python-level read from an EARLIER select (the `q` this function was called
         # with), not a WHERE-clause guard on this write — same class of race
         # `answer_customer` (teach.py) was already hardened against on #234's own review.
-        # The new_supplier/new_item branches now route through here too, so two
+        # The new_supplier branch (and #477's codex_card dl_item pick) route through here
+        # too, so two
         # concurrent answers to the same question could both pass the check above and
         # the second write would silently overwrite the first's `answered_by`/
         # `answered_at`. Guard the write itself and re-check on 0 rows affected.
@@ -783,6 +749,17 @@ def register(app: Flask, deps: Deps) -> dict:
                    if allowed_kinds is _UNSET else allowed_kinds)
         if allowed is not None and q0.get("kind", "item") not in allowed:
             abort(403)
+        # #477 (owner order 2026-09-30): a card is never TYPED onto a question any more —
+        # the #426 `new_product` / #235 `new_item` bodies are refused outright (403, nothing
+        # written); „Vybrať kartu z CODEXu" (`codex_card`) is the one way a card enters.
+        if "new_product" in body or "new_item" in body:
+            from .orders import card_guard
+            log.warning("question %s: typed new card refused (#477) — %s", qid,
+                        "new_product" if "new_product" in body else "new_item")
+            refusal = card_guard.blocked()
+            return jsonify(**refusal.payload), refusal.status
+        if isinstance(body.get("codex_card"), dict):
+            return _api_orders_answer_codex_card(qid, q0, body)
         # #307: "netýka sa skladu" — the whole mail is not a warehouse delivery note
         # (a režíjna faktúra / promo, the KLEŠČ case). Terminal + message-level: close
         # every open DL question of the message, mark it handled WITHOUT EDI, upload
@@ -802,12 +779,6 @@ def register(app: Flask, deps: Deps) -> dict:
             return _api_orders_answer_customer(qid, q0, body)
         if q0.get("kind") in ("mail", "date", "line", "dl_item", "dl_supplier", "dl_mass"):
             return _api_orders_answer_generic(qid, q0, body)
-        # #426: „➕ Nová karta" on an item question — create the catalog card + answer +
-        # release in one click, dispatched BEFORE the existing-card gtin check below
-        # (kind=='item' only reaches here — every other kind returned above). Mirrors how
-        # `_api_orders_answer_customer` dispatches its own `new_customer` body.
-        if isinstance(body.get("new_product"), dict):
-            return _api_orders_answer_new_product(qid, q0, body)
         # #384: „Vyriešené ručne" on an ORDER item card — the sklad handled it by hand in
         # CODEX; release every held order of this message WITHOUT any ORION upload.
         if body.get("manual") is True:

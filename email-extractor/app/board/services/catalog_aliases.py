@@ -10,7 +10,7 @@ and adding/removing them. Every write DELEGATES to the existing `orders.memory` 
 from __future__ import annotations
 
 from ...httpapi_common import _fold
-from ...orders import dl_memory, memory
+from ...orders import card_guard, dl_memory, memory
 from . import audit
 
 _CURATED = ("human", "sheet-import")
@@ -73,6 +73,11 @@ def add_alias(conn, scope: str, gtin: str, wording: str, ean: str, actor: str) -
     ean = (ean or "").strip()
     if not wording:
         return {"error": "chýba znenie"}
+    # #477: an alias maps a wording to a card NUMBER that later ships (the orders
+    # `human_taught` rung does not re-check the catalog) — only a card of this scope's catalog
+    if not card_guard.is_card(card_guard.catalog(conn, scope), gtin):
+        return {"error": f"Karta {gtin} v katalógu nie je — alias sa pridáva len k existujúcej "
+                         f"karte."}
     if scope == "orders":
         if ean:
             rid, table = memory.add_customer_alias(conn, ean, wording, gtin, ""), "item_memory"

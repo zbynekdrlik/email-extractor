@@ -22,10 +22,11 @@ from .auth import actor
 from .services import questions
 
 # ORDERS-scope card affordances (beyond the offered candidates), by kind. `op` is what
-# `tab-questions.js` maps to an answer body; `label` is the button text. Candidates + the
-# free "iné číslo položky" input are rendered generically by the JS.
+# `tab-questions.js` maps to an answer body; `label` is the button text. Candidates are
+# rendered generically by the JS. #477: `codex_pick` („Vybrať kartu z CODEXu") is the ONE way
+# to reach a card that is not offered — a new card is never typed (owner order 2026-09-30).
 ORDERS_CARD_ACTIONS: dict[str, list[dict]] = {
-    "item": [{"op": "new_product", "label": "➕ Nová karta"},
+    "item": [{"op": "codex_pick", "label": "Vybrať kartu z CODEXu"},
              {"op": "manual", "label": "Vyriešené ručne"}],
     "customer": [{"op": "new_customer", "label": "➕ Nový zákazník"},
                  {"op": "unknown_customer", "label": "Neviem, kto to je"},

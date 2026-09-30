@@ -345,3 +345,53 @@ def test_restore_undo_is_scoped_to_that_undos_own_prior_answer(pg):
     assert audit.restore(pg, undo1) is True
     q = teach.get(pg, qid)
     assert q["status"] == "answered" and q["answer_gtin"] == "SLI50"
+
+
+# --- #477 review: restoring a card that lived only in the frozen snapshot ----------------
+
+def test_restoring_a_deleted_snapshot_card_brings_it_back_whole(pg):
+    """`retire_*` leaves a bare marker (name '' + blank fields) for a card that lived only in
+    the snapshot, and the next rebuild drops the card — the Kôš „Vrátiť" used to bring back a
+    NAMELESS card (a DL kg card also lost sklad=100, the #462 ×N class). The restore refills
+    the marker from the newest snapshot that still has the card."""
+    from app.orders import dl_snapshot
+    dl_snapshot._freeze(pg, [{"gtin": "DSNAP1", "name": "Múka zo snapshotu", "doplnok": "25kg",
+                              "mass": 25.0, "sklad": "100", "cena": 0.4}], [])
+    snapshot._freeze(pg, [{"gtin": "OSNAP1", "name": "Rožok zo snapshotu", "alias": "roz"}], [])
+    c = _client()
+    _login(c)
+    assert c.delete("/api/board/products/DSNAP1?scope=dl").status_code == 200
+    assert c.delete("/api/board/products/OSNAP1?scope=orders").status_code == 200
+    for table, gtin in (("dl_catalog_overrides", "DSNAP1"), ("catalog_overrides", "OSNAP1")):
+        aid = pg.execute("SELECT id FROM audit_log WHERE table_name=%s AND row_id=%s AND "
+                         "action='delete'", (table, gtin)).fetchone()[0]
+        assert c.post(f"/api/board/audit/{aid}/restore").status_code == 200
+    card = next(x for x in dl_snapshot.dl_catalog_for_management(pg) if x["gtin"] == "DSNAP1")
+    assert (card["name"], card["doplnok"], card["mass"], card["sklad"], card["cena"]) == (
+        "Múka zo snapshotu", "25kg", 25.0, "100", 0.4)
+    card = next(x for x in snapshot.catalog_for_management(pg) if x["gtin"] == "OSNAP1")
+    assert (card["name"], card["alias"]) == ("Rožok zo snapshotu", "roz")
+
+
+def test_the_restore_heals_from_the_current_snapshot_not_the_highest_id(pg):
+    """`_freeze` REUSES an older snapshot id for identical content (only `checked_at` moves) —
+    the heal must read the card from the CURRENT snapshot (newest `checked_at`, the rule of
+    `latest_snapshot_id`), never simply the highest id."""
+    from app.orders import dl_snapshot
+
+    def _snap(name):
+        return dl_snapshot._freeze(pg, [{"gtin": "DSNAP2", "name": name, "doplnok": "",
+                                         "mass": None, "sklad": "1", "cena": None}], [])
+
+    first = _snap("Názov A")
+    assert _snap("Názov B") != first
+    assert _snap("Názov A") == first            # reused id — now the CURRENT snapshot again
+    assert dl_snapshot.latest_snapshot_id(pg) == first
+    c = _client()
+    _login(c)
+    assert c.delete("/api/board/products/DSNAP2?scope=dl").status_code == 200
+    aid = pg.execute("SELECT id FROM audit_log WHERE table_name='dl_catalog_overrides' AND "
+                     "row_id='DSNAP2' AND action='delete'").fetchone()[0]
+    assert c.post(f"/api/board/audit/{aid}/restore").status_code == 200
+    card = next(x for x in dl_snapshot.dl_catalog_for_management(pg) if x["gtin"] == "DSNAP2")
+    assert card["name"] == "Názov A"
