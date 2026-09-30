@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from flask import jsonify, request, send_file
 
+from ..orders import codex_cards
 from . import history_dl
 from .auth import actor
 from .services import history, history_detail, teachback
@@ -111,6 +112,8 @@ def register(bp, deps) -> None:
             return jsonify(error=str(e)), 400
         except TeachbackError as e:
             return jsonify(error=e.message), e.status
+        except codex_cards.CardRefused as e:   # #479: not a card of the catalog → 403
+            return jsonify(**e.payload), e.status
         return jsonify(**res)
 
     @bp.get("/api/board/history/<path:message_id>/files/<int:idx>")

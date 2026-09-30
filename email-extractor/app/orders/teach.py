@@ -67,7 +67,8 @@ class AlreadyAnswered(Exception):
 
 def ask(conn, message_id: str, customer_ean: str, customer_name: str, wording: str,
         quantity, unit: str, candidates: list[dict], delivery_date: str = "",
-        reason: str = "", on_new=None, unit_price=None) -> int | None:
+        reason: str = "", on_new=None, unit_price=None,
+        codex_missing: bool = False) -> int | None:
     """Raise ONE question for this (customer, wording). Returns its id.
 
     Returns the EXISTING id when it is already open, and None when the wording has already
@@ -78,6 +79,12 @@ def ask(conn, message_id: str, customer_ean: str, customer_name: str, wording: s
     wording does not spam a second Odoo message. Called with the full question dict; any
     failure is logged and swallowed, exactly like the main order report's own post — a
     notification failure must never break order processing.
+
+    `codex_missing` (#479): the line's card has a code CODEX has no stock card for — asked
+    EVEN for a human-taught wording (the incident: a wording taught onto the card whose code
+    CODEX then dropped; staying silent would ship the order without the line). The answer
+    becomes the newest human mapping, which `memory.resolve` prefers from then on. The orders
+    twin of `ask_dl_item(codex_missing=True)`.
     """
     key = memory.item_key(wording)
     if not (customer_ean and key):
@@ -85,7 +92,7 @@ def ask(conn, message_id: str, customer_ean: str, customer_name: str, wording: s
     # Skip only when a HUMAN has already settled this wording. A thin machine-learned history
     # is NOT a reason to stay silent: it is below the ladder's 3-day bar, so the line can still
     # end up unmatched — and then nobody could ever teach it.
-    recalled = memory.resolve(conn, customer_ean, wording)
+    recalled = None if codex_missing else memory.resolve(conn, customer_ean, wording)
     if recalled is not None and recalled.human:
         return None
     row = conn.execute(

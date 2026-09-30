@@ -401,17 +401,19 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None, connect=None) -
                 # `prune_delivered` deliberately leaves alone. Same maintenance tick,
                 # same cheap/idempotent discipline — no parallel timer or path.
                 dl_alerts.purge_held(conn)
+                # #467/#479: the CODEX stock-card list is missing/stale → the card-code checks
+                # of BOTH engines (DESADV + ORDER files) fail OPEN; this alerts ops (durable
+                # outbox): at once for each new stale episode, then at most one reminder per
+                # workday morning. Was DL-only — an orders-only install ran with its ORDER
+                # gate silently off.
+                from . import codex_cards
+                codex_cards.stale_sweep(conn, cfg)
             if dl_python:
                 # #239 classes 2/3: a message classified `dodacie_listy` that never got
                 # a first attempt at all — gated on the live DL python engine, same
                 # discipline confirm.sweep above already uses (shadow/n8n modes never
                 # write to messages the way this sweep's own query expects).
                 dl_worker.stuck_classified_sweep(conn, cfg)
-                # #467: the CODEX stock-card list is missing/stale → the card-code checks fail
-                # OPEN; this alerts ops (durable outbox): at once for each new stale episode,
-                # then at most one reminder per workday morning.
-                from . import codex_cards
-                codex_cards.stale_sweep(conn, cfg)
             handled = tick(conn, cfg, pipeline=pipeline)
             handled = static_worker.tick(conn, cfg) or handled
             # #204: shadow ALSO needs a tick (it never claims, but it does need to be

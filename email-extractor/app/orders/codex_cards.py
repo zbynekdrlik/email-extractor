@@ -18,7 +18,10 @@ leave here too, the exact incident class). Consumers:
   CODEX has, ranked by the CODEX name too (`question_candidates`),
 - Produkty sklad flags a card whose name drifted from CODEX's (`annotate`),
 - the #477 card picker offers the pickable cards (`pickable`, stredisko 1, active rows) — the
-  ONE way a new card enters our catalog (`card_guard.add_from_codex`).
+  ONE way a new card enters our catalog (`card_guard.add_from_codex`),
+- #479: every ORDER file too — an orders line whose code CODEX lacks is held with a question
+  (`card_guard.gate_order_line`, AI + static engines) and the orders item answer refuses such
+  a card (`check_card_code(doc=DOC_ORDER)`).
 
 **Fail OPEN, never closed.** A list that never arrived, or whose CODEX snapshot is older than
 `STALE_HOURS`, turns every check OFF (`live_guard` → None + `log.warning`) — a stopped push must
@@ -352,10 +355,15 @@ def live_guard(conn, now: datetime | None = None) -> CodexCards | None:
     return cards
 
 
-def check_card_code(conn, code, *texts: str, catalog=None, now=None) -> None:
+DOC_DL = "celý dodací list s touto kartou"
+DOC_ORDER = "túto položku objednávky"
+
+
+def check_card_code(conn, code, *texts: str, catalog=None, now=None, doc: str = DOC_DL) -> None:
     """Raise `CodexRefusal` when `code` is not a CODEX stock card's EAN kód (the list being
     fresh). `texts` (the card name typed, the delivery-note wording) pick the similar CODEX
-    cards shown; `catalog` (our effective DL catalog) marks which of them we already have.
+    cards shown; `catalog` (our effective catalog) marks which of them we already have; `doc`
+    names what CODEX would refuse (#479: an orders item answer says the order line).
     A missing/stale list passes everything (fail-open)."""
     cards = live_guard(conn, now)
     if cards is None or cards.has(code):
@@ -374,7 +382,7 @@ def check_card_code(conn, code, *texts: str, catalog=None, now=None) -> None:
                 [s["code"] for s in similar])
     raise CodexRefusal({
         "error": (f"Kód {code} v CODEXe neexistuje — žiadna skladová karta ho nemá ako EAN "
-                  f"kód, takže CODEX by pri importe odmietol celý dodací list s touto kartou. "
+                  f"kód, takže CODEX by pri importe odmietol {doc}. "
                   f"Použi kód karty z CODEXu (zoznam kariet je k {_local(cards.as_of)} a "
                   f"obnovuje sa dvakrát denne, okolo 14:45 a 18:30 — kartu, ktorú si v CODEXe "
                   f"založil práve teraz, uvidíme až po tejto aktualizácii)."),
@@ -466,8 +474,9 @@ def stale_sweep(conn, cfg, now: datetime | None = None) -> bool:
     state = (f"je zastaraný (údaje z CODEXu k {escape(_local(anchor))}, pred {hours} h)"
              if sync else f"ešte nikdy neprišiel ({hours} h od nasadenia)")
     body = (f"<p>&#9888;&#65039; Zoznam skladových kariet z CODEXu {state} &mdash; kontrola "
-            "kódov kariet dodacích listov (#467) je dočasne VYPNUTÁ: nástenka prijme aj kód, "
-            "ktorý v CODEXe neexistuje, a dodací list s takou kartou CODEX pri importe odmietne. "
+            "kódov kariet dodacích listov (#467) aj objednávok (#479) je dočasne VYPNUTÁ: "
+            "nástenka prijme aj kód, ktorý v CODEXe neexistuje, a dodací list či objednávku s "
+            "takou kartou CODEX pri importe odmietne. "
             "Skontroluj na dev2 <code>codex-cards-push.timer</code> a codex-bridge ETL.</p>")
     dl_alerts.enqueue(conn, report.ops_channel(cfg), ALERT_KIND, body, message_id=key)
     log.warning("CODEX stock-card list %s — ops alert enqueued", "stale" if sync else "missing")

@@ -4,6 +4,7 @@ read/create surface of `held_orders` (#424 split of hold.py). Re-exported by the
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 
 from psycopg.types.json import Json
 
@@ -31,10 +32,18 @@ def is_past_deadline(delivery_date: str, today: str = "") -> bool:
 
 # --- recording a hold --------------------------------------------------------
 
+def _json_num(value):
+    """A NUMERIC read back from Postgres is a `Decimal`, which JSON cannot hold — the #360
+    confirmed quantity (`order_questions.quantity`) becomes a decision's quantity on release, and
+    a re-hold (#162 / #479) dumps those decisions again. `edi.build` reads `float(quantity)`, so
+    the stored type never changes a shipped byte."""
+    return float(value) if isinstance(value, Decimal) else value
+
+
 def _dump_decisions(decisions) -> list[dict]:
     return [{"item_name": d.item_name, "gtin": d.gtin, "card": d.card,
              "confidence": d.confidence, "rule": d.rule, "note": d.note,
-             "review": d.review, "trace": d.trace, "quantity": d.quantity,
+             "review": d.review, "trace": d.trace, "quantity": _json_num(d.quantity),
              "unit": d.unit} for d in decisions]
 
 
