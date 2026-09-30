@@ -226,6 +226,12 @@ def _release_locked(conn, cfg, hid: int, upload, post) -> dict | None:
         _apply_confirmed_quantities(conn, loaded, locked[0])
         decisions = _redecide(conn, row["customer_ean"], loaded,
                               as_of=as_of, catalog=catalog, _recalled_cache=recalled_cache)
+        # #479: a card code can go dead in CODEX while the order waited (a renumber), and
+        # `_redecide` can re-derive a dead card — such a line is asked + held again below
+        # (`codex_missing` is in ASK_THE_WAREHOUSE), never shipped with the dead code.
+        from . import card_guard
+        codex = card_guard.order_guard(conn)
+        decisions = [card_guard.gate_order_line(d, codex) for d in decisions]
 
         # #162: a customer-unknown hold never got a chance to ask about its ambiguous
         # items on the first pass (the whole point of ASK_THE_WAREHOUSE gating on
@@ -242,19 +248,24 @@ def _release_locked(conn, cfg, hid: int, upload, post) -> dict | None:
         if still_asking:
             new_qids, unaskable = _ask_still_ambiguous(conn, row, decisions, still_asking,
                                                         catalog, as_of,
-                                                        _recalled_cache=recalled_cache)
+                                                        _recalled_cache=recalled_cache,
+                                                        codex=codex)
             all_qids = list(dict.fromkeys(list(locked[0] or []) + new_qids))
             tx.execute(
                 """UPDATE held_orders SET question_ids = %s, decisions_json = %s
                     WHERE id = %s""", (all_qids, Json(_dump_decisions(decisions)), hid))
             log.info(
-                "held order #%s stays held: %d line(s) still ambiguous after the customer "
-                "resolved — %d fresh question(s) raised (%s), %d could not even be asked "
+                "held order #%s stays held: %d line(s) still ambiguous after the answer — "
+                "%d fresh question(s) raised (%s), %d could not even be asked "
                 "about (%s)", hid, len(still_asking), len(new_qids), new_qids,
                 len(unaskable), unaskable)
+            # #479: a line held for a card code CODEX lacks says so — not "customer filled in"
+            why = ("Kód karty v CODEXe neexistuje" if any(
+                d.rule == card_guard.CODEX_MISSING for d in still_asking)
+                else "Zákazník doplnený")
             report.log_event(
                 conn, row["message_id"], stage="held", status="held",
-                outcome=f"Zákazník doplnený, objednávka opäť čaká na sklad "
+                outcome=f"{why}, objednávka opäť čaká na sklad "
                         f"({len(new_qids)} nových otázok) — dodanie "
                         f"{row['delivery_date'] or '(bez dátumu)'}",
                 detail={"held_id": hid, "question_ids": new_qids,

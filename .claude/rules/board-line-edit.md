@@ -34,6 +34,9 @@ a no-op) and needs NO `confirmed_quantity` param. Runs on the RAW loaded decisio
 stay separate decisions that `merge_same_card` later SUMS, so applying to both doubles it.
 Regression test: `test_a_correction_on_an_earlier_answered_question_of_a_multi_question_hold_still_ships`
 (answer the earlier question with a corrected qty, then the last; the earlier correction must ship).
+**#479:** the value read back is `float(order_questions.quantity)` — NUMERIC comes back as a
+`Decimal`, which crashed a re-hold's `Json` dump and `merge_same_card`'s sum with a float
+sibling; `edi.build` reads `float(quantity)`, so shipped bytes are unchanged.
 
 ## `_num` for a board-submitted quantity/price must reject `<= 0`, not just negatives
 

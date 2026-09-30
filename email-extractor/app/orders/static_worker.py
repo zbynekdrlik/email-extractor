@@ -58,6 +58,7 @@ from datetime import UTC, datetime
 from html import escape
 
 from . import (
+    card_guard,
     dl_alerts,
     edi,
     llm,
@@ -541,6 +542,22 @@ def run_live(conn, cfg, message: dict, snapshot_id: int, pipeline=None, upload=N
         # #133: NO silent per-item skip — ANY unresolved item sends the WHOLE order to the
         # AI pipeline, which holds it and asks the warehouse instead of dropping the line.
         note = f"{len(missing)} položka/y bez EAN: {', '.join(missing[:3])}"
+        result = _fallback_to_ai(conn, cfg, message, snapshot_id, note, pipeline=pipeline)
+        merged = _merge_spend(result.get("spend"), extra["spend"])
+        if merged:
+            result["spend"] = merged
+        return result
+
+    # #479: a code no CODEX stock card has would make CODEX refuse the ORDER line — never
+    # ship it. The static engine's hold route is the #133 AI fallback: the AI pipeline's own
+    # CODEX gate holds the order with a board question (or matches a card CODEX has).
+    # Fail-open (None) when the list is stale / never pushed, exactly like the AI + DL gates.
+    dead = card_guard.dead_codes(card_guard.order_guard(conn), [it["gtin"] for it in items])
+    if dead:
+        note = (f"kód(y) {', '.join(dead)} v CODEXe neexistuje/ú — CODEX by objednávku "
+                "neprevzal, preto ju spracuje AI (podrží ju s otázkou na nástenke)")
+        log.warning("static order %s: code(s) %s have no CODEX stock card — AI fallback (#479)",
+                    message["message_id"], dead)
         result = _fallback_to_ai(conn, cfg, message, snapshot_id, note, pipeline=pipeline)
         merged = _merge_spend(result.get("spend"), extra["spend"])
         if merged:
