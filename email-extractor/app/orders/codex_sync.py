@@ -131,6 +131,14 @@ def _apply_renumber(conn, r: dict) -> None:
                                "source": "codex-sync", "renumbered_from": r["from"],
                                "codex_card": r["codex_card"],
                                "restored": r["mode"] == "restore"}, note=note)
+    elif r.get("fill"):
+        # a merge keeps our curated data where the target card is blank (a fresh #477 pick
+        # carries only the CODEX name [+ sklad]) — audited `update`, the Kôš writes it back
+        target = r["target"]
+        _write_card(conn, scope, r["to"], dict(target, **r["fill"]), target.get("name", ""))
+        _audit().record(conn, actor=ACTOR, table=scope.table, row_id=r["to"], action="update",
+                        before={k: target.get(k) for k in r["fill"]}, after=r["fill"],
+                        note=f"{note} — doplnené údaje z karty {r['from']}")
     for gtin in r["gtins"]:
         _retire(conn, scope, gtin, note)
         _bind(conn, scope.name, gtin, r["codex_card"], active=False)
