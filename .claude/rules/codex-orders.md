@@ -14,6 +14,8 @@ paths:
   - "email-extractor/tests/test_board_codex.py"
   - "email-extractor/app/orders/card_guard.py"
   - "email-extractor/tests/test_board_codex_pick.py"
+  - "email-extractor/tests/test_orders_codex_gate.py"
+  - "email-extractor/app/orders/memory.py"
 ---
 
 # CODEX order evidence + the auto-resolve sweep (#342)
@@ -178,7 +180,7 @@ forever). Reusable rules:
 - **Fail OPEN, never closed**: `codex_cards.live_guard` returns None (checks OFF, `log.warning`)
   when nothing was ever pushed or the CODEX data is older than `STALE_HOURS = 30` (ETL 14:15 /
   18:00 → longest normal age ~20.5 h; one missed slot tolerated). `stale_sweep` (worker tick,
-  `if dl_python:`) enqueues ONE ops alert per stale episode (`pending_alerts` kind
+  `if orders_python or dl_python:` since #479) enqueues ONE ops alert per stale episode (`pending_alerts` kind
   `codex_cards_stale`, key `codex-cards:<as_of>`, `reminder_suppressed` cadence: the first alert
   of an episode at once, reminders once per workday morning); a never-pushed list gets the same
   30 h grace from the revision-17 `schema_version.applied_at` (no alert right after a deploy).
@@ -242,3 +244,75 @@ forever). Reusable rules:
 - **Live check** (dev2, read-only): `SELECT count(*), count(DISTINCT code) FROM
   codex_stock_cards` + `SELECT * FROM codex_card_syncs ORDER BY id DESC LIMIT 1` on the add-on
   DB; the Produkty sklad toolbar shows „Karty z CODEXu: stav k …".
+
+## The same list guards every ORDER file (#479) — `card_guard` order gate
+
+The #467 gate covered only DESADV; the card 27 renumber broke ORDER lines too („nebralo do
+objednávky"). Since 0.9.176 the orders engines use the SAME list, LIVE only (shadow / the
+e2e-orders corpus never loads it — `codex = None if shadow`, byte-identical), fail-open exactly
+like DL (`card_guard.order_guard` = `codex_cards.live_guard`). Reusable rules:
+
+- **The gate is a DECISION transform, not a new hold path.** `card_guard.gate_order_line` turns a
+  line whose code CODEX lacks into a cardless `codex_missing` decision (dead code + card + the
+  replaced rule in `trace.codex_missing`, the reason in `note`). `codex_missing` is in
+  `pipeline.ASK_THE_WAREHOUSE`, so the EXISTING item question + `hold.place` + `release_for_
+  question` do the rest — no parallel machinery. It runs in THREE places: `_run` per item (before
+  the ask), `hold_close._release_locked` after `_redecide` (a code can go dead while the order
+  waits, and `_redecide` can re-derive a dead card → re-held via `_ask_still_ambiguous`), and
+  `_ship_one` right before `claim_send` (the net: the deadline sweep ships a held order WITHOUT a
+  line whose code went dead — an `item` question is deadline-shippable, never the dead code — AND
+  `card_guard.ask_codex_missing` raises the board question naming that line; review 🟡3: a net
+  that only dropped it left the board silent, Odoo only counts „chýba N položiek").
+  `_ship_one(codex=...)` takes `_run`'s already-loaded list; the default loads it.
+- **`teach.ask(codex_missing=True)` bypasses the human-taught pre-check** — the incident shape IS
+  a wording the sklad taught onto the card whose code then died; without the bypass the order
+  gets NO question and ships without the line. Pass it on EVERY ask of a codex line (`_run`,
+  `_ask_still_ambiguous`, the net) — a re-hold without it is „unaskable" and sits held silently.
+- **`memory.remember(source='human')` never swallows an answer (review 🟡1).** The unique key is
+  (customer, wording, gtin, day); a same-day human answer colliding with a ship row, or with the
+  same card taught earlier that day, used to be `DO NOTHING` — `resolve` kept the NEWER, replaced
+  human answer (the dead card) and the codex question re-held the order in a loop. Now `DO UPDATE
+  … source='human', deleted_at=NULL, created_at=now() WHERE EXCLUDED.source='human'` (a ship
+  duplicate still returns False). Accepted side effects (the DL #402 trade-off, all need a
+  same-day same-card collision): undo deletes the promoted row with its ship evidence; a promoted
+  ship row is curated, so a Naučené edit/delete touches it; a teachback row later promoted by a
+  question answer is soft-deleted if the teachback's `teach` audit is restored from the Kôš.
+  Still `DO NOTHING`: `memory.add_customer_alias` (the History „Doučiť" / Naučené path) — a
+  teachback onto a card that already shipped under that wording the same day answers 409
+  „toto doučenie už existuje" (#448 behaviour, unchanged here).
+- **A question offers only cards CODEX has** (`card_guard.order_question_candidates`). A
+  `codex_missing` line has NO engine proposal (its proposed gtin IS the dead one), so it offers
+  ONLY CODEX cards ≥ `match.PLAUSIBLE_CANDIDATE_SCORE` — never #160's forced head (the top scorer
+  of unrelated cards shown like a proposal, review 🟡2) — and at most `card_guard.QUESTION_BUTTONS`
+  (6, the #160 cap; a floor-only filter gave a generic „chlieb" 24 buttons, review 2); an empty
+  list is fine (search + „Vybrať kartu z CODEXu" stay). Any other item question just filters dead
+  cards out. The net's questions are announced in the Odoo summary on EVERY `_ship_one` exit
+  (`new_questions=len(net_new)` on the ok/partial AND the review `_finish`).
+- **Every card PICK refuses a dead code (409):** the orders item answer (`_order_card_refusal`,
+  twin of `_dl_card_refusal`) and the History „Doučiť" teachback (after its 403 not-a-card check),
+  via `check_card_code(doc=DOC_ORDER|DOC_DL)` — order wording, not „celý dodací list". Without it
+  a search-pick of the dead card re-holds the same order in a loop. The item refusal is a toast
+  on the board (the one-click CODEX hint renders for `dl_item` only).
+- **Static orders use the #133 AI fallback as their hold:** `static_worker.run_live` checks the
+  resolved codes (`card_guard.dead_codes`) BEFORE `static_edi.build`; a dead one → `_fallback_to_
+  ai` (note names the code), where the AI gate holds + asks. The 7 hardcoded
+  `PRODUCT_EAN_BY_CODE/NAME` codes are checked the same way (all in CODEX on 2026-09-30).
+- **`codex_cards.stale_sweep` runs for orders OR DL** (was DL-only — an orders-only install ran
+  with the ORDER gate silently off); the alert text names both. A static-ONLY install (AI + DL on
+  n8n) gets no sweep — like every other orders sweep (`release_due`, reminders, the alert flush),
+  all gated on `orders_python or dl_python`; static's hold route IS the AI pipeline, so that
+  config is not coherent anyway (live runs all three engines on python).
+- **The #360 confirmed quantity is floated at the source** (`hold_place._apply_confirmed_
+  quantities`: NUMERIC → `Decimal`). A Decimal decision quantity crashed the `Json` dump of a
+  re-hold (reached first by the #479 re-hold after an item answer) and `merge_same_card`'s
+  Decimal + float sum. `edi.build` reads `float(quantity)` — no byte change.
+- **Known, accepted:** an answered release loads the ~6k-row list twice (`_release_locked`, then
+  `_ship_one`'s default) — release is rare, passing it would change the pinned `hold._ship`
+  signature. An older OPEN plain question the codex ask dedupes onto keeps its old reason/buttons
+  (DL upgrades it via `flag_question`); the 409 on a dead pick covers it.
+- **Live verification without shipping:** in the container, `card_guard.dead_codes(
+  card_guard.order_guard(conn), <gtins>)` over the day's shipped ORDER lines (AI: `order_items` of
+  non-shadow non-DL ok/partial runs; static: re-parse + `static_worker._items_with_ean`) — never
+  re-ship, never reset.
+- History „Doučiť" (teachback) teaches only onto an existing card of the scope's catalog
+  (`card_guard.refuse_typed_card(error=TEACH_CARD_ONLY)`, 403 `codex_only`) — see `board.md`.

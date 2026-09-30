@@ -365,6 +365,12 @@ already); of a `restore` row itself → refused; of a missing audit id → 404. 
   `source IN ('human','teachback')` (corpus-NEUTRAL — no teachback rows in the fixtures) and
   `'teachback'` added to both `CURATED_SOURCES`; `dl_memory.add_dl_alias` gained a `source=`
   param. The card picker reuses the lane-4 `/api/board/products?scope=&q=` search — no new endpoint.
+  **#479:** `teach_item` accepts ONLY a number that is a card of the scope's effective catalog
+  (`card_guard.refuse_typed_card(card_guard.catalog(conn, scope), gtin, error=TEACH_CARD_ONLY)` →
+  403 `{error, codex_only: true}`, nothing written, no audit) — the owner order „zablokuj
+  pridávanie produktov" closes the last typed-number path — and a card of ours whose code CODEX
+  lacks → 409 (`check_card_code`, the same refusal as a question pick; a stale list passes). A
+  teachback test must seed the card it teaches onto (`test_board_history._cards`).
 - **New audit actions `teach`/`rerun`/`manual` each get their own `restore` branch** (`audit.py`):
   `teach` → soft-delete the taught memory row (like reverting a create; memory tables have no
   snapshot so `_rebuild_snapshot` is a no-op); `rerun`/`manual` → explicit `RestoreError(400)`

@@ -506,3 +506,13 @@ tests/`, and run just the new tests from there with the worktree's `.venv/bin/py
 (same `PG_TEST_DSN`, nothing else running on it). Then commit tests `[red]` first, code `[green]`
 second. Also: swapping ONE static file back (`git show HEAD:<path> > <path>`, restore after)
 is the quick way to prove a Playwright test depends on a JS change.
+
+## `nohup … pytest … & echo $!` prints the WRAPPER shell's pid — killing it leaves pytest running (#479)
+
+From the Bash tool a backgrounded `nohup .venv/bin/python -m pytest … &` runs inside a wrapper
+`bash -c`, so `$!` is that wrapper, not pytest. `kill <$!>` returned "killed" while the real
+pytest child (re-parented to pid 1) kept running against the SAME `PG_TEST_DSN`; the next full run
+then wedged after 8 tests (`pg_stat_activity`: an `idle in transaction` `FOR UPDATE` on
+`held_orders` from the orphan + a `TRUNCATE` waiting on it). Always find the real process with
+`ps -eo pid,ppid,etimes,cmd | grep '[p]ython -m pytest'` (or `pgrep -f 'python -m pytest'`), kill
+THAT, `pg_terminate_backend` the leftovers, and wait on the python pid — never on `$!`.
