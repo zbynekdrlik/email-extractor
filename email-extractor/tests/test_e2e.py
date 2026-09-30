@@ -889,11 +889,27 @@ def test_board_dl_item_question_picks_a_card_from_codex_in_the_browser(live_serv
                       ("9990000000093",)).fetchone() == ("Mak modrý mletý e2e", "100")
     # only the two misclick confirmations above — the hint pick matched the line, no third
     assert len(dialogs) == 2
+    page.wait_for_selector(f"#q-card-{q_dead}", state="detached")
 
-    # the refusal IS a deliberate 409 — Chromium logs every non-2xx fetch as "Failed to load
-    # resource" (no app console.error); tolerate exactly that ONE entry, nothing else (#235)
+    # the #467 one-click fix for a card we HAVE: the next dead-code refusal lists 093 as ours —
+    # „Použiť kartu" answers with OUR number and writes no card
+    q_dead2 = _board_seed_dl_item_question(pg, "be2e-477e", "Mak modrý mletý e2e balík",
+                                           [("3698", "Mak modrý starý kód")])
+    cards_before = pg.execute("SELECT count(*) FROM dl_catalog_overrides").fetchone()[0]
+    card = page.locator(f"#q-card-{q_dead2}")
+    card.wait_for(timeout=15000)
+    card.locator('button:has-text("Mak modrý starý kód")').click()
+    use = card.locator('.q-codex-hint .q-codex-use[data-code="9990000000093"]')
+    use.wait_for()
+    assert "Mak modrý mletý e2e" in use.inner_text()
+    use.click()
+    assert _wait_answered(pg, page, q_dead2)[:2] == ("answered", "9990000000093")
+    assert pg.execute("SELECT count(*) FROM dl_catalog_overrides").fetchone()[0] == cards_before
+
+    # the refusals ARE deliberate 409s — Chromium logs every non-2xx fetch as "Failed to load
+    # resource" (no app console.error); tolerate exactly those TWO entries, nothing else (#235)
     tolerated = [m for m in console if "Failed to load resource" in m and "status of 409" in m]
-    assert len(tolerated) == 1, f"exactly the one deliberate refusal: {console}"
+    assert len(tolerated) == 2, f"exactly the two deliberate refusals: {console}"
     real_errors = [m for m in console if m not in tolerated]
     assert real_errors == [], f"browser console not clean: {real_errors}"
 

@@ -7,7 +7,7 @@ in, pinned here: „Vybrať kartu z CODEXu" on a question — `GET /api/board/co
 pushed CODEX cards (orders = stredisko 1 / sklad 1, dl = stredisko 1, active rows only, never the
 other strediská's junk sklady #337), and a `codex_card` answer writes exactly THAT code + CODEX
 name into the catalog override (audited) and answers the question through the normal answer
-path. A code we already have is only selected; one in the Kôš is refused.
+path. A code we already have is only selected; one whose card sits in the Kôš restores it.
 Flask test client + real Postgres; synthetic codes/names only (public repo).
 """
 from __future__ import annotations
@@ -27,7 +27,10 @@ G_OBAL = "9990000000048"       # stredisko 1: sklad 700 only
 G_STARY = "9990000000062"      # stredisko 1 / sklad 1 but INACTIVE in CODEX
 G_POBOCKA = "9990000000079"    # only on a junk stredisko (402) — never offered (#337)
 G_CHLIEB = "9990000000086"     # stredisko 1 / sklad 1
+G_LONG = "99900000000093"      # 14 digits, stredisko 1 / sklad 500 — can never ship in a DESADV
 CODEX = [
+    {"code": G_LONG, "card_code": "93", "stredisko": 1, "sklad": 500,
+     "name": "Nápoj dlhý kód"},
     {"code": G_ROZOK, "card_code": "27", "stredisko": 1, "sklad": 1,
      "name": "Rožok so slaninou a syrom 70g"},
     {"code": G_ROZOK, "card_code": "27", "stredisko": 1, "sklad": 600,
@@ -232,13 +235,14 @@ def test_picking_a_code_whose_card_is_in_the_kos_restores_that_card(pg):
     assert teach.get(pg, qid)["answer"]["choice"] == G_MUKA
 
 
-def test_a_retired_snapshot_card_comes_back_with_the_codex_name_never_blank(pg):
+def test_a_retired_snapshot_card_comes_back_whole_never_blank(pg):
     """A card that lived only in the frozen snapshot leaves, when deleted, a bare retirement
-    marker (`retire_*` writes name '' + blank fields; the next snapshot drops the card). There
-    is nothing of ours to keep — un-deleting that marker alone would make a NAMELESS card (9 of
-    19 deleted DL cards on prod are such markers). The pick fills it from CODEX instead."""
-    dl_snapshot._freeze(pg, [{"gtin": G_MUKA, "name": "Múka zo snapshotu", "doplnok": "",
-                              "mass": None, "sklad": "100", "cena": 0.4}], [])
+    marker (`retire_*` writes name '' + blank fields; the next snapshot drops the card; 9 of 19
+    deleted DL cards on prod are such markers). Un-deleting that marker alone would make a
+    NAMELESS card — the restore refills it from the newest snapshot that still has the card
+    (name, doplnok, mass, sklad, cena all ours again)."""
+    dl_snapshot._freeze(pg, [{"gtin": G_MUKA, "name": "Múka zo snapshotu", "doplnok": "25kg",
+                              "mass": 25.0, "sklad": "100", "cena": 0.4}], [])
     _codex(pg)
     assert dl_snapshot.retire_dl_catalog_card(pg, G_MUKA)
     dl_snapshot.dl_rebuild_from_overrides(pg)
@@ -249,7 +253,54 @@ def test_a_retired_snapshot_card_comes_back_with_the_codex_name_never_blank(pg):
                        json={"codex_card": {"code": G_MUKA}})
     assert r.status_code == 200, r.get_data(as_text=True)
     card = next(x for x in dl_snapshot.dl_catalog_for_management(pg) if x["gtin"] == G_MUKA)
+    assert (card["name"], card["doplnok"], card["mass"], card["sklad"], card["cena"]) == (
+        "Múka zo snapshotu", "25kg", 25.0, "100", 0.4)
+    assert teach.get(pg, qid)["answer"]["choice"] == G_MUKA
+
+
+def test_a_bare_marker_with_no_snapshot_history_gets_the_codex_card(pg):
+    """A blank marker whose card no snapshot remembers has nothing to restore — the pick
+    fills it from CODEX like a new card (never a nameless one)."""
+    _base(pg)
+    _codex(pg)
+    pg.execute("INSERT INTO dl_catalog_overrides (gtin, name, retired, deleted_at, updated_at) "
+               "VALUES (%s, '', true, now(), now())", (G_MUKA,))
+    qid = _dl_question(pg)
+    r = _client().post(f"/api/board/questions/{qid}/answer",
+                       json={"codex_card": {"code": G_MUKA}})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    card = next(x for x in dl_snapshot.dl_catalog_for_management(pg) if x["gtin"] == G_MUKA)
     assert (card["name"], card["sklad"]) == ("Múka pšeničná T650", "100")
+
+
+def test_a_dl_code_longer_than_the_desadv_gtin_field_is_never_pickable(pg):
+    """Review: a 14-digit CODEX code (the #245 beverage cards on sklad 500) can never ship in a
+    DESADV (13-char field, `dl_match._gtin_edi_overflow`) — picking it would add a junk card and
+    loop on a fresh question every reprocess. Not offered, refused, never marked pickable."""
+    _base(pg)
+    _codex(pg)
+    c = _client()
+    assert _codes(c.get("/api/board/codex-cards?scope=dl&q=napoj")) == []
+    qid = _dl_question(pg, mid="m477long", wording="Nápoj dlhý kód")
+    r = c.post(f"/api/board/questions/{qid}/answer", json={"codex_card": {"code": G_LONG}})
+    assert r.status_code == 409
+    assert _overrides(pg) == [] and teach.get(pg, qid)["status"] == "open"
+    from app.orders import card_guard
+    payload = card_guard.mark_pickable(pg, "dl", {"codex": {"similar": [{"code": G_LONG}]}})
+    assert payload["codex"]["similar"][0]["pickable"] is False
+
+
+def test_the_exact_number_wins_over_a_legacy_zero_prefixed_twin(pg):
+    """Review: with both „0"+code (a pre-#467 card) and the exact code live, the pick selects
+    the EXACT number — never the legacy twin because it sorts first."""
+    _base(pg)
+    _codex(pg)
+    _seed_dl(pg, "0" + G_MUKA, "Múka stará", sklad="100")
+    _seed_dl(pg, G_MUKA, "Múka pšeničná T650", sklad="100")
+    qid = _dl_question(pg)
+    r = _client().post(f"/api/board/questions/{qid}/answer",
+                       json={"codex_card": {"code": G_MUKA}})
+    assert r.status_code == 200, r.get_data(as_text=True)
     assert teach.get(pg, qid)["answer"]["choice"] == G_MUKA
 
 
