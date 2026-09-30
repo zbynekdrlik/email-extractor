@@ -2491,3 +2491,97 @@ def test_a_failing_dry_run_writes_no_ops_alert(pg, monkeypatch):
     assert pg.execute("SELECT status FROM codex_sync_runs ORDER BY id DESC LIMIT 1"
                       ).fetchone()[0] == "error"
     assert pg.execute("SELECT count(*) FROM pending_alerts").fetchone()[0] == 0
+
+
+# --- review 18: a reset settles before any merge; a restored card is restored as it was -----
+
+def test_a_merge_onto_a_picked_target_carries_our_data_whatever_the_group_order(pg):
+    """Review 18 🟡: card 31 (the chlieb, kg sklad 100, mass 1.0) leaves, card 27 (the rožok)
+    moves to the chlieb's code; following the review, the warehouse deletes the chlieb number
+    and picks the code (restored as card 27 → reset). The next plan resets the chlieb number
+    AND merges the rožok into it — ROZOK sorts BEFORE CHLIEB, so the merge used to read the
+    target before its reset: our data was lost (or the chlieb's kg data written back onto the
+    rožok, the #462 ×N class)."""
+    snapshot._freeze(pg, [
+        {"gtin": ROZOK, "name": "Rožok so slaninou 70g", "alias": "rozok slanina"},
+        {"gtin": CHLIEB, "name": "Chlieb pšeničný 1000g", "alias": "chlieb velky"}], [])
+    dl_snapshot._freeze(pg, [
+        {"gtin": ROZOK, "name": "Rožok so slaninou 70g", "doplnok": "rožok slanina",
+         "mass": 0.07, "sklad": "1", "cena": 0.35},
+        {"gtin": CHLIEB, "name": "Chlieb pšeničný 1000g", "doplnok": "chlieb veľký",
+         "mass": 1.0, "sklad": "100", "cena": None}], [])
+    _push(pg, [_row(ROZOK, "27", "Rožok so slaninou 70g"),
+               _row(CHLIEB, "31", "Chlieb pšeničný 1000g")], hours_old=6)
+    codex_sync.run(pg, _cfg())
+    v2 = [_row(CHLIEB, "27", "Rožok so slaninou 70g")]
+    _push(pg, v2, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    assert "Vybrať kartu z CODEXu" in _review_reason(pg, "dl", ROZOK)
+    snapshot.retire_catalog_card(pg, CHLIEB)
+    snapshot.rebuild_from_overrides(pg)
+    dl_snapshot.retire_dl_catalog_card(pg, CHLIEB)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    for scope in ("orders", "dl"):
+        card_guard.add_from_codex(pg, scope, CHLIEB, actor="sklad")
+    _push(pg, v2, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    card = _dl(pg)[CHLIEB]
+    assert (card["doplnok"], card["mass"], card["cena"]) == ("rožok slanina", 0.07, 0.35)
+    assert card["sklad"] == "1", "never the chlieb's kg sklad on the rožok"
+    assert _orders(pg)[CHLIEB]["alias"] == "rozok slanina"
+    assert ROZOK not in _orders(pg) and ROZOK not in _dl(pg)
+
+
+def _sync_renamed_rozok(pg):
+    """Our orders rožok renamed BY THE SYNC (a name-only override, alias inherited from the
+    snapshot row)."""
+    snapshot._freeze(pg, [{"gtin": ROZOK, "name": "Rožok so slaninou 70g",
+                           "alias": "rozok slanina"}], [])
+    _push(pg, [_row(ROZOK, "27", "Rožok slaninový 70g")], hours_old=8)
+    assert codex_sync.run(pg, _cfg())["renamed"] == 1
+    assert _orders(pg)[ROZOK]["alias"] == "rozok slanina"
+
+
+def test_a_picked_sync_renamed_card_keeps_its_alias_as_promised(pg):
+    """Review 18 🟡: card 27 leaves, two same-named cards carry the code — the review promises
+    delete + pick keeps the data. The sync's rename left the alias only in the snapshot row;
+    the delete's rebuild dropped it and the pick restored the card with NO alias."""
+    _sync_renamed_rozok(pg)
+    two = [_row(ROZOK, "80", "Rožok slaninový 70g"), _row(ROZOK, "81", "Rožok slaninový 70g")]
+    for hours in (7, 6):
+        _push(pg, two, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert "jej údaje ostanú" in _review_reason(pg, "orders", ROZOK)
+    snapshot.retire_catalog_card(pg, ROZOK)
+    snapshot.rebuild_from_overrides(pg)
+    card_guard.add_from_codex(pg, "orders", ROZOK, actor="sklad")
+    assert _orders(pg)[ROZOK]["alias"] == "rozok slanina"
+    _push(pg, two, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    assert _orders(pg)[ROZOK]["alias"] == "rozok slanina"
+
+
+def test_a_kos_undo_of_a_deleted_sync_renamed_card_keeps_its_alias(pg):
+    """Review 18 🟡: the plain Kôš „Vrátiť" of a delete of that card lost the alias too."""
+    _sync_renamed_rozok(pg)
+    snapshot.retire_catalog_card(pg, ROZOK)
+    snapshot.rebuild_from_overrides(pg)
+    audit.record(pg, actor="sklad", table="catalog_overrides", row_id=ROZOK, action="delete",
+                 note="Kôš")
+    aid = pg.execute("SELECT max(id) FROM audit_log WHERE action = 'delete'").fetchone()[0]
+    audit.restore(pg, aid)
+    assert _orders(pg)[ROZOK]["alias"] == "rozok slanina"
+
+
+def test_a_dl_reset_text_says_the_sklad_follows_codex(pg):
+    """Review 18 🔵: a DL reset also sets the sklad to the picked CODEX card's (kg-tracking may
+    switch) — the text says so; the orders one names the alias."""
+    _baseline(pg)
+    v = [dict(r, card_code="80", name="Pagáč syrový 60g") if r["card_code"] == "27" else r
+         for r in V1]
+    for hours in (4, 3):
+        _push(pg, v, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    dl, orders = _review_reason(pg, "dl", ROZOK), _review_reason(pg, "orders", ROZOK)
+    assert "iný názov" in dl and "sklad" in dl
+    assert "iný názov" in orders and "alias" in orders
