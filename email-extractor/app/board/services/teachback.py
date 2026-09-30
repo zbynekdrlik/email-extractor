@@ -16,7 +16,7 @@ existing card of the scope's effective catalog (`card_guard.refuse_typed_card`, 
 """
 from __future__ import annotations
 
-from ...orders import card_guard, dl_memory, memory
+from ...orders import card_guard, codex_cards, dl_memory, memory
 from . import audit, history
 
 
@@ -40,15 +40,22 @@ def teach_item(conn, scope: str, message_id: str, actor: str, *,
                name: str, gtin: str, card: str = "") -> dict:
     """Teach `name → (gtin, card)` for this document's partner. Raises `TeachbackError`
     (400/404/409) on bad input / unknown document / unknown partner / already-taught, and
-    `card_guard.CreateBlocked` (403, #479) when `gtin` is no card of the scope's catalog."""
+    `card_guard.CreateBlocked` (403, #479) when `gtin` is no card of the scope's catalog, and
+    `codex_cards.CodexRefusal` (409) when it is our card but CODEX has no stock card for its
+    code (a fresh CODEX list only)."""
     history.scope_categories(scope)  # raises ValueError (→400) for an unknown scope
     name, gtin, card = (name or "").strip(), (gtin or "").strip(), (card or "").strip()
     if not name or not gtin:
         raise TeachbackError(400, "chýba položka alebo číslo položky (karta)")
     if not history.is_history_document(conn, message_id, scope):
         raise TeachbackError(404, "doklad neexistuje")
-    card_guard.refuse_typed_card(card_guard.catalog(conn, scope), gtin,
-                                 error=card_guard.TEACH_CARD_ONLY)
+    catalog = card_guard.catalog(conn, scope)
+    card_guard.refuse_typed_card(catalog, gtin, error=card_guard.TEACH_CARD_ONLY)
+    # a card of ours whose code CODEX lacks would teach a mapping CODEX refuses (409, #467/#479
+    # — the same refusal as a question pick); a missing/stale list passes (fail-open)
+    codex_cards.check_card_code(conn, gtin, name, card, catalog=catalog,
+                                doc=codex_cards.DOC_ORDER if scope == "orders"
+                                else codex_cards.DOC_DL)
     ean = _partner_ean(conn, scope, message_id)
     if not ean:
         raise TeachbackError(409, "nepodarilo sa zistiť partnera dokladu — doučenie sa nedá uložiť")

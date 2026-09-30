@@ -139,15 +139,17 @@ def _dl_card_refusal(deps: Deps, gtin: str, *texts: str):
 def _order_card_refusal(deps: Deps, gtin: str, *texts: str):
     """#479: the orders twin of `_dl_card_refusal` — a 409 for an `item` pick of a card number
     CODEX has no stock card for (it would teach a mapping whose ORDER line CODEX refuses, and
-    re-hold the order on the next release), else None. A missing/stale list passes."""
-    from .orders import card_guard, codex_cards
+    re-hold the order on the next release), else None. A missing/stale list passes. The board
+    shows an item refusal as a toast (the one-click CODEX hint is dl_item-only), so the payload
+    stays the plain #467 shape."""
+    from .orders import codex_cards
     with deps.db() as c:
         try:
             codex_cards.check_card_code(c, gtin, *texts,
                                         catalog=snapshot.catalog_for_management(c),
                                         doc=codex_cards.DOC_ORDER)
         except codex_cards.CardRefused as e:
-            return jsonify(**card_guard.mark_pickable(c, "orders", e.payload)), e.status
+            return jsonify(**e.payload), e.status
     return None
 
 

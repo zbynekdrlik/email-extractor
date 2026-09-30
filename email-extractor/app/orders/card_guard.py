@@ -304,20 +304,49 @@ def gate_order_line(decision, codex: codex_cards.CodexCards | None):
                           unit=decision.unit)
 
 
+def ask_codex_missing(conn, lines, *, message_id: str, customer_ean: str, customer_name: str,
+                      delivery_date: str, codex: codex_cards.CodexCards | None,
+                      on_new=None) -> list[int]:
+    """#479: the board question for each `CODEX_MISSING` line the SHIP-TIME net found (a code
+    that died while its order waited, reaching `pipeline._ship_one` via the deadline sweep): the
+    order ships without the line (an item question is deadline-shippable), and this question
+    names it + teaches the next order. Returns the qids (fresh or deduped onto an open one)."""
+    from . import teach  # lazy: teach is the question leaf, imported where it is used
+    sid = snapshot.latest_snapshot_id(conn)
+    catalog = snapshot.load_catalog(conn, sid) if sid else []
+    qids: list[int] = []
+    for d in lines:
+        cands = order_question_candidates(d.item_name, [], catalog, d, codex,
+                                          customer_name=customer_name)
+        qid = teach.ask(conn, message_id=message_id, customer_ean=customer_ean,
+                        customer_name=customer_name, wording=d.item_name, quantity=d.quantity,
+                        unit=d.unit,
+                        candidates=[{"gtin": str(c.get("gtin")), "name": c.get("name", "")}
+                                    for c in cands],
+                        delivery_date=delivery_date, reason=d.note, on_new=on_new,
+                        codex_missing=True)
+        if qid:
+            qids.append(qid)
+    return qids
+
+
 def order_question_candidates(item_name: str, item_cands: list[dict], catalog: list[dict],
                               decision, codex: codex_cards.CodexCards | None, *,
                               customer_name: str = "", memory_gtin: str = "") -> list[dict]:
     """The cards an orders item question offers (#147 re-heading + #160 plausibility). With a
-    live CODEX list only cards CODEX has — a dead card is never a button — and a `CODEX_MISSING`
-    line is ranked over those cards alone (its proposed card IS the dead one, so #147's
-    re-heading would put it first). `codex` None = unchanged."""
+    live CODEX list only cards CODEX has — a dead card is never a button. A `CODEX_MISSING` line
+    has NO engine proposal (its proposed card IS the dead one), so it gets only the CODEX cards
+    that clear the #160 relevance floor — never a forced first card that merely scored best (an
+    unrelated card shown like a proposal is the #160 misclick class). An empty list is fine: the
+    question text points to the search and „Vybrať kartu z CODEXu" (a renumbered card is often
+    not in our catalog yet). `codex` None = unchanged."""
     if codex is None:
         return match.plausible_candidates(
             match.candidates_for_question(item_cands, catalog, decision))
     valid = [c for c in catalog if codex.has(c.get("gtin"))]
     if decision.rule == CODEX_MISSING:
-        return match.plausible_candidates(
-            match.candidates(item_name, valid, customer_name=customer_name,
-                             memory_gtin=memory_gtin))
+        return [c for c in match.candidates(item_name, valid, customer_name=customer_name,
+                                             memory_gtin=memory_gtin)
+                if float(c.get("score", 0) or 0) >= match.PLAUSIBLE_CANDIDATE_SCORE]
     return match.plausible_candidates(match.candidates_for_question(
         [c for c in item_cands if codex.has(c.get("gtin"))], valid, decision))

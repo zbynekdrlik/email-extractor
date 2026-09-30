@@ -62,6 +62,15 @@ def remember(conn, customer_ean: str, item: str, gtin: str, card: str,
 
     The unique key is (customer, wording, card, DAY): the pipeline writes one row per
     shipped item, and a re-run of the same order must not look like a second delivery.
+
+    #479: a HUMAN answer is never swallowed by that key. `resolve` trusts the human answer with
+    the newest `created_at`, so a same-day answer colliding with an existing row (a ship row
+    of the same card, the same card taught earlier that day, or a Kôš row) takes it over:
+    promoted to `human`, revived, and made the newest (`created_at = now()`). Without it,
+    re-teaching the card a later same-day answer had replaced kept the replaced one winning —
+    the #479 codex question re-held the order in a loop. A non-human duplicate still does
+    nothing (returns False), exactly as before. Undoing such an answer deletes the promoted
+    row with its ship evidence — the same accepted trade-off as DL's #402.
     """
     key = item_key(item)
     if not (customer_ean and key and gtin):
@@ -70,7 +79,10 @@ def remember(conn, customer_ean: str, item: str, gtin: str, card: str,
         """INSERT INTO item_memory
                (customer_ean, item_key, item_raw, gtin, card, delivered_on, source)
            VALUES (%s, %s, %s, %s, %s, %s, %s)
-           ON CONFLICT (customer_ean, item_key, gtin, delivered_on) DO NOTHING
+           ON CONFLICT (customer_ean, item_key, gtin, delivered_on) DO UPDATE
+              SET source = 'human', item_raw = EXCLUDED.item_raw, card = EXCLUDED.card,
+                  deleted_at = NULL, created_at = now()
+            WHERE EXCLUDED.source = 'human'
            RETURNING id""",
         (str(customer_ean), key, str(item), str(gtin), card or "", delivered_on, source),
     ).fetchone()

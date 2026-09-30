@@ -755,12 +755,26 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
     before the claim — a line whose code CODEX lacks never reaches an ORDER file. `_run` and
     `_release_locked` hold such a line with a question first; what still arrives here (the
     deadline sweep shipping a held order whose code went dead while it waited) ships WITHOUT
-    that line, named missing — an `item` question is deadline-shippable, never the dead code.
+    that line — an `item` question is deadline-shippable, never the dead code — and the line
+    gets its own board question here (the Odoo summary counts it missing, the question names it
+    and teaches the next order).
     """
+    net_new: list[dict] = []
+    net_qids: list[int] = []
     if not shadow:
         if codex is _LOAD_CODEX:
             codex = card_guard.order_guard(conn)
-        decisions = [card_guard.gate_order_line(d, codex) for d in decisions]
+        gated = [card_guard.gate_order_line(d, codex) for d in decisions]
+        newly = [g for d, g in zip(decisions, gated, strict=True) if g is not d]
+        decisions = gated
+        if (newly and matched and str(matched.ean_edi or "").strip()
+                and not extracted.get("isChangeRequest")):
+            net_qids = card_guard.ask_codex_missing(
+                conn, newly, message_id=message.get("message_id", ""),
+                customer_ean=matched.ean_edi, customer_name=matched.name,
+                delivery_date=order.get("deliveryDate", ""), codex=codex,
+                on_new=net_new.append)
+            question_ids = list(question_ids or []) + net_qids
     items = _as_edi_items(decisions)
     shipped_items = [d for d in decisions if d.gtin]
     missing = [d for d in decisions if not d.gtin]
@@ -868,7 +882,8 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
                         delivered_on=_delivery_day(delivery), source="ship")
     _finish(conn, cfg, message, shadow, post,
             status="partial" if missing else "ok", items=result["items"], result=result,
-            detail={"edi_file": name, "orion_path": edi.orion_path(name)}, post_now=post_now)
+            detail={"edi_file": name, "orion_path": edi.orion_path(name)}, post_now=post_now,
+            question_ids=net_qids, new_questions=len(net_new))
     return ("partial" if missing else "ok"), preview, ""
 
 
