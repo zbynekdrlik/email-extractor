@@ -38,6 +38,7 @@ from app.orders import (
     codex_cards,
     confirm,
     desadv_edi,
+    dl_alerts,
     dl_snapshot,
     question_alerts,
     report,
@@ -429,7 +430,7 @@ def test_the_code_line_says_how_old_the_codex_card_list_is(pg):
     confirm.sweep(pg, _cfg(), listdir=lambda: _dirs(in_dl=list(reader.files)), post=posts,
                   now=TUE_MORNING, read_files=reader)
     html = posts.calls[0][0]
-    assert "Zoznam kariet z CODEXu je k 4.8. 08:10" in html, html
+    assert "Zoznam kariet z CODEXu je aktuálny k 4.8. 08:10" in html, html
 
 
 def test_no_codex_note_when_every_code_is_known(pg):
@@ -443,7 +444,7 @@ def test_no_codex_note_when_every_code_is_known(pg):
                   now=TUE_MORNING, read_files=reader)
     html = posts.calls[0][0]
     assert reader.calls, "the file WAS checked"
-    assert "CODEX" not in html.replace("Codexe", ""), html
+    assert "neprevezme" not in html and "Zoznam kariet" not in html, html
 
 
 def test_the_production_reader_reads_the_waiting_file_from_in_dl_read_only(pg):
@@ -554,3 +555,108 @@ def test_the_stale_question_reminder_uses_the_agreeing_remainder():
     html = question_alerts._group_html(rows, {}, 2, "")
     assert html.count("<li>") == 15
     assert "a ešte 1 ďalšia." in html, html
+
+
+# --- review round 2 pins -----------------------------------------------------------------
+
+def test_the_widening_leaves_out_a_file_simply_waiting_for_its_first_morning(pg):
+    """The widening must keep the carryover rule: a file uploaded THIS morning, still before
+    its first import chance, is normal waiting — never listed (that is the #133 false alarm)."""
+    _suppliers(pg)
+    _insert_desadv_at(pg, SUP_A, _fname("126000101", SUP_A), uploaded_at=MON_EVENING,
+                      doc_number="126000101")
+    fresh = _insert_desadv_at(pg, SUP_A, _fname("126000102", SUP_A),
+                              uploaded_at=TUE_MORNING.replace(hour=10, minute=30),
+                              doc_number="126000102")
+    pg.execute("UPDATE desadv_sent SET import_checked_at = now() WHERE id = %s", (fresh,))
+    posts = PostRecorder()
+    confirm.sweep(pg, _cfg(),
+                  listdir=lambda: _dirs(in_dl=[_wire("126000101", SUP_A),
+                                               _wire("126000102", SUP_A)]),
+                  post=posts, now=TUE_MORNING)
+    html = posts.calls[0][0]
+    assert "1 dodací list je stále neprevzatý" in html, html
+    assert "126000102" not in html
+    members = pg.execute("SELECT count(*) FROM import_alert_incident_desadv_members"
+                         ).fetchone()[0]
+    assert members == 1
+
+
+def test_the_widening_never_crosses_into_another_channel(pg):
+    """A waiting row whose file routes to a DIFFERENT channel (a non-DESADV_ name → the
+    orders channel) is never pulled into the delivery-notes alert."""
+    _suppliers(pg)
+    _insert_desadv_at(pg, SUP_A, _fname("126000111", SUP_A), uploaded_at=MON_EVENING,
+                      doc_number="126000111")
+    other = _insert_desadv_at(pg, SUP_A, "LEGACY_126000112.txt", uploaded_at=MON_EVENING,
+                              doc_number="126000112")
+    pg.execute("UPDATE desadv_sent SET import_checked_at = now() WHERE id = %s", (other,))
+    posts = PostRecorder()
+    confirm.sweep(pg, _cfg(),
+                  listdir=lambda: _dirs(in_dl=[_wire("126000111", SUP_A),
+                                               "Z-LEGACY_126000112.txt"]),
+                  post=posts, now=TUE_MORNING)
+    assert [c for _h, c in posts.calls] == [243]
+    assert "126000111" in posts.calls[0][0] and "126000112" not in posts.calls[0][0]
+
+
+def test_reminder_od_is_the_oldest_upload_among_the_waiting_files(pg):
+    _suppliers(pg)
+    for doc, at in (("126000121", MON_EVENING.replace(hour=9, minute=15)),
+                    ("126000122", MON_EVENING)):
+        _insert_desadv_at(pg, SUP_A, _fname(doc, SUP_A), uploaded_at=at, doc_number=doc)
+    wires = [_wire("126000121", SUP_A), _wire("126000122", SUP_A)]
+    posts = PostRecorder()
+    confirm.sweep(pg, _cfg(), listdir=lambda: _dirs(in_dl=wires), post=posts,
+                  now=TUE_MORNING)
+    _make_due(pg)
+    confirm.sweep(pg, _cfg(), listdir=lambda: _dirs(in_dl=wires), post=posts,
+                  now=TUE_MORNING.replace(hour=16))
+    assert len(posts.calls) == 2
+    assert "Stále 2 dodacie listy neprevzaté v ORIONe (od 3.8. 09:15)" in posts.calls[1][0]
+
+
+def test_lin_codes_never_invents_a_code_from_a_utf8_byte_read_as_latin1():
+    """`put()` writes the text as UTF-8 and `read_files` decodes latin-1: „Å" becomes
+    „Ã\\x85", and `str.splitlines()` treats \\x85 as a line break — a HDR tail could turn into a
+    fake „LIN" code. The parser splits on the file's own line ends only."""
+    content = desadv_edi.generate(
+        {"customerEanEdi": SUP_A, "customerName": "ÅLINDT s.r.o.", "docNumber": "1",
+         "deliveryDate": "03.08.2026",
+         "items": [{"gtin": GOOD_A, "name": "Rožok", "supplierName": "Rožok",
+                    "quantity": 1, "unit": "ks", "unitPrice": 1.0}]}, {}, {}).content
+    as_read = content.encode("utf-8").decode("latin-1")
+    assert desadv_edi.lin_codes(as_read) == [GOOD_A]
+
+
+def test_the_carryover_alert_spells_codex_like_every_other_message(pg):
+    """One spelling in one alert — „CODEX"/„v CODEXe" (the #467 messages, the code line)."""
+    _suppliers(pg)
+    rid = _insert_desadv_at(pg, SUP_A, _fname("126000131", SUP_A), uploaded_at=MON_EVENING,
+                            doc_number="126000131")
+    posts = PostRecorder()
+    w = _wire("126000131", SUP_A)
+    confirm.sweep(pg, _cfg(), listdir=lambda: _dirs(in_dl=[w]), post=posts, now=TUE_MORNING)
+    assert "treba ho prijať v CODEXe" in posts.calls[0][0], posts.calls[0][0]
+    pg.execute("UPDATE desadv_sent SET import_checked_at = now() - interval '10 minutes' "
+               "WHERE id = %s", (rid,))
+    confirm.sweep(pg, _cfg(), listdir=lambda: _dirs(arch=[w]), post=posts,
+                  now=TUE_MORNING.replace(hour=12))
+    assert "prijaté v CODEXe" in posts.calls[1][0], posts.calls[1][0]
+    assert "Codex" not in "".join(h for h, _c in posts.calls)
+
+
+def test_the_grouped_ops_alert_remainder_agrees_with_the_count(pg):
+    """`dl_alerts._format_grouped` groups ONE kind per post (every header noun is masculine:
+    e-maily, dodacie listy, skeny) — its remainder goes through the same agreeing helper."""
+    for i in range(11):
+        dl_alerts.enqueue(pg, 592, "human_processing_review",
+                          dl_alerts.item_line(f"odosielatel{i}@x.test", f"Predmet {i}"),
+                          message_id=f"m476-{i}")
+    class Cfg:
+        dashboard_base_url = ""
+        ops_channel_id = 592
+
+    posted: list[str] = []
+    dl_alerts.flush_pending(pg, Cfg(), post=lambda c, h, **kw: posted.append(h) or {"id": 1})
+    assert "a ešte 1 ďalší." in posted[0], posted[0]
