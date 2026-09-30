@@ -535,6 +535,11 @@ class _ScopePlanner:
         known = self._known(gtin)
         if known.card is not None:
             if known.picked:
+                if known.card not in cx.by_card and not cx.gone_twice(known.card):
+                    # the picked card missing from ONE list is a glitch: the pick waits (no
+                    # seed, no reset) — the next list settles it from the card's own rows
+                    # (review 20 🟡: settled now, the reset kept the old product's sklad)
+                    return None
                 old = known.old
                 replaces = old is not None and old.card != known.card
                 self._seed(item, known.card, replaces=replaces)
@@ -777,15 +782,20 @@ class _ScopePlanner:
         self.live[item["gtin"]] = dict(card, **changed)
 
     def _sklad_of(self, card: str, code: str) -> int | None:
-        """The sklad CODEX card `card` gives a DL card — the pick's rule
-        (`codex_cards.pick_sklad`) over ITS stredisko-1 rows, never over whoever carries `code`
-        now (review 19 🟡: the picked card may have moved on since the pick, another card may
-        hold the code — a kg card went piece-tracked). Its active named rows on `code` first,
-        then any of its rows on `code`, then any of its rows; None = the card has none (the
-        number keeps its sklad)."""
-        rows = self.cx.by_card.get(card, [])
-        on_code = [r for r in rows if r.code == code]
-        for pool in (on_code, rows):
+        """The sklad a DL number bound to CODEX card `card` gets — exactly what a fresh pick
+        writes (review 20 🔵): the picker's sklad for the code the card carries now — `code`
+        itself, or the code it is renumbered to (`_successor`) — never the sklad of whoever
+        carries `code` after the card moved on (review 19 🟡: a kg card went piece-tracked).
+        A code the picker does not offer falls back to the pick's rule
+        (`codex_cards.pick_sklad`) over the card's own rows on it, then over all its rows;
+        None = the card has no stredisko-1 row (the number keeps its sklad)."""
+        cx, offered = self.cx, self.cx.pickable[self.scope.name]
+        rows = cx.by_card.get(card, [])
+        now = code if any(r.code == code for r in rows) else (
+            self._successor(card, code)[0] if rows else None)
+        if now is not None and now in offered:
+            return int(offered[now]["sklad"])
+        for pool in ([r for r in rows if r.code == now], rows):
             live = [r for r in pool if not r.inactive and r.name.strip()] or pool
             if live:
                 return codex_cards.pick_sklad(r.sklad for r in live)
