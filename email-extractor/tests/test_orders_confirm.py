@@ -172,7 +172,7 @@ def test_a_carryover_from_yesterday_alerts_once_grouped_next_morning(pg):
     assert len(posts.calls) == 1, "exactly ONE grouped message, never one per file"
     assert "5" in posts.calls[0][0]
     assert "objednávok" in posts.calls[0][0]
-    assert "Codex" in posts.calls[0][0]
+    assert "CODEX" in posts.calls[0][0]
     for i in range(5):
         row = pg.execute(
             "SELECT import_status FROM edi_sent WHERE customer_ean = %s", (f"pno{i}",)
@@ -899,7 +899,7 @@ def test_same_day_stuck_file_alerts_once_grouped_in_the_evening_given_real_activ
         post=posts, now=MON_EVENING)
     assert n == 0, "a same-day-stuck row is never given a terminal status either"
     assert len(posts.calls) == 1, "exactly ONE grouped message, never one per file"
-    assert "Codex" in posts.calls[0][0]
+    assert "CODEX" in posts.calls[0][0]
     assert _status(pg, b_id) is None, "still pending, so it self-heals if accepted later"
 
 
