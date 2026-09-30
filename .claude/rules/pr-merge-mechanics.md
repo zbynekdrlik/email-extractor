@@ -270,3 +270,15 @@ the corpus.
 - Record the decision + the prod evidence on the ticket (`durable-decisions-to-tickets.md`)
   BEFORE merging — the corpus change lives outside the PR diff, so the ticket comment is the
   only durable record of WHY a real-incident corpus case was rewritten.
+
+## Full-flow from a worktree lane: shapes the worktree guard accepts (#477)
+
+The guard refuses any command it cannot prove stays in the worktree — `$(...)` feeding `gh`
+(`gh issue close --comment "$(cat f)"`), a `cd … && python3 - <<EOF` heredoc, a shell loop with a
+computed `node`/`git` argument. What works: write bodies/scripts with the Write tool, then plain
+calls — `gh issue comment N -R owner/repo -F body.md`, then `gh issue close N -R owner/repo
+--comment "<short literal>"`; `python3 <scratch>/script.py args`; one `node --check <file>` per
+file. A sibling lane that MERGED to main meanwhile (#476 landed 0.9.174 while #477 also bumped
+0.9.174): `git merge --no-ff --no-commit origin/main`, keep both `autopilot-log` entries (theirs
+first), renumber your version + log entry, re-run ruff/mypy/targeted tests, commit, then the
+fast-forward `git push origin HEAD:dev` (check `git merge-base --is-ancestor origin/dev HEAD`).
