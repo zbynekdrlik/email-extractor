@@ -96,6 +96,7 @@ class Plan:
     removals: list[dict] = field(default_factory=list)
     review: list[dict] = field(default_factory=list)
     seeds: list[dict] = field(default_factory=list)
+    resets: list[dict] = field(default_factory=list)
 
     def code_changes(self) -> int:
         """Distinct CODEX codes renumbered or removed (a card in both catalogs = one)."""
@@ -106,7 +107,7 @@ class Plan:
                 "renumbered": sum(1 for r in self.renumbers if r["mode"] != "memory"),
                 "memory_renumbered": sum(1 for r in self.renumbers if r["mode"] == "memory"),
                 "removed": len(self.removals), "review": len(self.review),
-                "bound": len(self.seeds)}
+                "reset": len(self.resets), "bound": len(self.seeds)}
 
     def add_review(self, item: dict, reason: str) -> None:
         """One review entry per card (the first reason wins)."""
@@ -125,7 +126,8 @@ class Codex:
     last_seen: dict[tuple[str, str], datetime]
     card_seen: dict[str, datetime]              # card -> last snapshot any of its rows was in
     owners: dict[str, list[str]]                # code -> the cards that carried it LAST
-    pickable: dict[str, set[str]]               # scope -> codes the #477 pick offers
+    carried: dict[str, dict[str, datetime]]     # code -> {card: last seen carrying it}
+    pickable: dict[str, dict[str, dict]]        # scope -> the #477 pick's cards by code
     prev_as_of: datetime | None                 # the previous SUCCESSFULLY synced snapshot
     bindings: dict[tuple[str, str], Binding]
     # (override table, our gtin) -> the newest HUMAN (re)entry of the card into the catalog
@@ -199,17 +201,19 @@ def _prev_as_of(conn, as_of: datetime) -> datetime | None:
 
 
 def _events(conn) -> dict[tuple[str, str], Event]:
-    """The newest human (re)entry of each catalog card (#477 pick / Kôš restore) — never the
-    sync's own writes."""
+    """The newest HUMAN creation of each catalog card — a #477 pick („Vybrať kartu z CODEXu"
+    writes `create` with the picked ACSKLP in `after.codex_card`, a Kôš card restored by a
+    pick included) — never the sync's own writes. A Kôš „Vrátiť" (`restore`) is NOT a new card:
+    it reverts one change of the same card (review 4 🟡: counting it reset a valid binding and
+    re-bound our rožok to the pagáč that reused its code); a number the sync retired that comes
+    back is re-identified through its inactive binding anyway."""
     rows = conn.execute(
-        """SELECT DISTINCT ON (table_name, row_id) table_name, row_id, ts, action,
-                  after->>'codex_card'
+        """SELECT DISTINCT ON (table_name, row_id) table_name, row_id, ts, after->>'codex_card'
              FROM audit_log
             WHERE table_name IN ('catalog_overrides', 'dl_catalog_overrides')
-              AND action IN ('create', 'restore') AND actor <> %s
+              AND action = 'create' AND actor <> %s
             ORDER BY table_name, row_id, id DESC""", (SYNC_ACTOR,)).fetchall()
-    return {(t, str(g)): Event(ts, (card or None) if action == "create" else None)
-            for t, g, ts, action, card in rows}
+    return {(t, str(g)): Event(ts, card or None) for t, g, ts, card in rows}
 
 
 def load(conn, cards: codex_cards.CodexCards, as_of: datetime) -> Codex:
@@ -229,19 +233,21 @@ def load(conn, cards: codex_cards.CodexCards, as_of: datetime) -> Codex:
     card_seen: dict[str, datetime] = {}
     first_seen: dict[tuple[str, str], datetime] = {}
     last_seen: dict[tuple[str, str], datetime] = {}
+    carried: dict[str, dict[str, datetime]] = {}
     for card, code, first, last in hist:
         latest[code] = max(latest.get(code, _NEVER), last)
         card_seen[card] = max(card_seen.get(card, _NEVER), last)
         first_seen[(card, code)] = first
         last_seen[(card, code)] = last
+        carried.setdefault(code, {})[card] = last
     owners: dict[str, list[str]] = {}
     for card, code, _first, last in hist:
         if last == latest[code]:
             owners.setdefault(code, []).append(card)
     bindings = {(s, g): Binding(c, bool(a), at) for s, g, c, a, at in conn.execute(
         "SELECT scope, gtin, card_code, active, bound_at FROM codex_card_bindings").fetchall()}
-    return Codex(cards, by_card, by_code, first_seen, last_seen, card_seen, owners,
-                 {s.name: set(card_guard.pickable(conn, s.name)) for s in SCOPES},
+    return Codex(cards, by_card, by_code, first_seen, last_seen, card_seen, owners, carried,
+                 {s.name: card_guard.pickable(conn, s.name) for s in SCOPES},
                  _prev_as_of(conn, as_of), bindings, _events(conn))
 
 
@@ -358,6 +364,10 @@ class _ScopePlanner:
         old = cx.bindings.get((self.scope.name, gtin))
         if ev is not None and ev.card and (old is None or ev.at > old.bound_at):
             self._seed(gtin, ev.card)          # the human picked exactly this CODEX card
+            if old is not None and old.card != ev.card:
+                # our number used to be ANOTHER product: the pick restored its old Kôš card
+                # „as it was" — its curated data belongs to that product (review 4 🟡)
+                item["reset_from"] = old.card
             return ev.card
         carriers = cx.carriers(code)
         if len(carriers) > 1:
@@ -371,13 +381,17 @@ class _ScopePlanner:
             card = named[0]
         elif carriers:
             card = next(iter(carriers))
-            before = {c for c, k in cx.last_seen if k == code and c != card}
-            if any(not cx.absent_before(c, code) for c in before):
+            if any(not cx.absent_before(c, code) for c in cx.carried.get(code, {}) if c != card):
                 return None                    # another card carried it a snapshot ago
         else:
             last = cx.owners.get(code, [])
+            if len(last) > 1:
+                self.plan.add_review(item, (
+                    f"kód {code} už v stredisku 1 CODEXu nie je a naposledy ho niesli karty "
+                    f"{', '.join(sorted(last))} — nevieme, ktorá je naša; ak kartu už "
+                    f"nepotrebujete, zmažte ju (Kôš)."))
             if len(last) != 1:
-                return None                    # never seen on stredisko 1 while we watched
+                return None                    # no stredisko-1 history, or ambiguous
             card = last[0]
         self._seed(gtin, card)
         return card
@@ -391,6 +405,8 @@ class _ScopePlanner:
         if card is None:
             return
         item["codex_card"] = card
+        if item.pop("reset_from", None) is not None:
+            self._reset(item, self.live[item["gtin"]])
         if cx.rows(card, code):              # our CODEX card still carries our code
             for g in gtins:
                 self.identity[g] = (card, code)
@@ -400,8 +416,7 @@ class _ScopePlanner:
                 return                       # one missing snapshot is no proof (a glitch)
             if not cx.cards.has(code):
                 self.plan.removals.append(item)
-                for g in gtins:
-                    self.live.pop(g, None)
+                self._vacate(group)
             else:
                 self.plan.add_review(item, (
                     f"karta CODEX {card} už v stredisku 1 nie je a kód {code} teraz nesie iná "
@@ -420,7 +435,7 @@ class _ScopePlanner:
         (None, a Slovak reason a human reads)."""
         cx, scope = self.cx, self.scope
         codes = {r.code for r in cx.by_card.get(card, [])} - {code}
-        fit = codes & cx.pickable[scope.name]
+        fit = codes & cx.pickable[scope.name].keys()
         if not fit:
             return None, (f"karta CODEX {card} nesie teraz kód {', '.join(sorted(codes))}, ale "
                           f"výber kariet ho pre katalóg {scope.label} neponúka")
@@ -463,12 +478,38 @@ class _ScopePlanner:
                 entry.update(fill=fill, target=_fields(target))
                 self.live[to] = dict(target, **fill)
         self.plan.renumbers.append(entry)
-        for g in item["gtins"]:
-            self.live.pop(g, None)
+        self._vacate(group)
         if mode != "merge":
             self.live[to] = dict(_fields(group[0]), gtin=to)
             self.binned = [b for b in self.binned if str(b["gtin"]) != to]
         self.identity[to] = (card, succ)
+
+    def _vacate(self, group: list[dict]) -> None:
+        """Our numbers this plan retires go to the (simulated) Kôš — a later step in the SAME
+        push that lands on one of them sees it there, as its old card, never an empty number
+        to create over (review 4 🔴: a chain 024 → NEW, 055 → 024 re-created the koláč onto
+        the row being retired and it vanished)."""
+        for c in group:
+            self.live.pop(str(c["gtin"]), None)
+            self.binned.append(dict(c))
+
+    def _reset(self, item: dict, card: dict) -> None:
+        """A #477 pick restored a number that used to be ANOTHER product: its curated fields
+        (orders alias; DL doplnok / mass / cena, and the sklad of the picked CODEX card) go
+        back to a fresh pick's — audited, restorable."""
+        if self.scope.name == "orders":
+            new: dict = {"alias": ""}
+        else:
+            entry = self.cx.pickable[self.scope.name].get(item["code"]) or {}
+            new = {"doplnok": "", "mass": None, "cena": None,
+                   "sklad": str(entry.get("sklad") or card.get("sklad") or "")}
+        changed = {k: v for k, v in new.items()
+                   if (card.get(k) or None) != (v if v != "" else None)}
+        if not changed:
+            return
+        self.plan.resets.append(dict(item, before={k: card.get(k) for k in changed},
+                                     after=changed, card=_fields(card)))
+        self.live[item["gtin"]] = dict(card, **changed)
 
     def _memory(self, catalog_codes: set[str]) -> None:
         """Mapping rows of a number the sync RETIRED (an inactive binding — written after the

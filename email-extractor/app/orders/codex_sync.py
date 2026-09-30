@@ -122,9 +122,11 @@ def _apply_renumber(conn, r: dict) -> None:
     scope = sp.BY_NAME[r["scope"]]
     note = f"karta CODEX {r['codex_card']} zmenila kód {r['code']} → {r['to']} (#478)"
     if r["mode"] in ("create", "restore"):
-        if r["mode"] == "restore":
-            (snapshot.undelete_catalog_card if scope.name == "orders"
-             else dl_snapshot.undelete_dl_catalog_card)(conn, r["to"])
+        # a restore brings our Kôš card back; for a create it is the guard that a hidden
+        # override row under the new number never swallows the card (an upsert alone keeps
+        # `deleted_at`, which hides it — review 4 🔴)
+        (snapshot.undelete_catalog_card if scope.name == "orders"
+         else dl_snapshot.undelete_dl_catalog_card)(conn, r["to"])
         _write_card(conn, scope, r["to"], r["card"], r["card"].get("name", ""))
         _audit().record(conn, actor=ACTOR, table=scope.table, row_id=r["to"], action="create",
                         after={"gtin": r["to"], "name": r["card"].get("name", ""),
@@ -168,6 +170,14 @@ def _apply(conn, plan: sp.Plan) -> None:
                     f"kód {r['code']} (karta CODEX {r['codex_card']}) z CODEXu zmizol bez "
                     f"náhrady (#478)")
             _bind(conn, r["scope"], gtin, r["codex_card"], active=False)
+    for r in plan.resets:
+        scope = sp.BY_NAME[r["scope"]]
+        _write_card(conn, scope, r["gtin"], dict(r["card"], **r["after"]),
+                    r["card"].get("name", ""))
+        _audit().record(conn, actor=ACTOR, table=scope.table, row_id=r["gtin"],
+                        action="update", before=r["before"], after=r["after"],
+                        note=(f"kód {r['code']} bol predtým iný výrobok — vybraný znova ako "
+                              f"karta CODEX {r['codex_card']}, staré údaje vyčistené (#478)"))
     for r in plan.renames:
         scope = sp.BY_NAME[r["scope"]]
         if scope.name == "orders":
@@ -178,7 +188,7 @@ def _apply(conn, plan: sp.Plan) -> None:
         _audit().record(conn, actor=ACTOR, table=scope.table, row_id=r["gtin"],
                         action="update", before={"name": r["old"]}, after={"name": r["new"]},
                         note="názov podľa CODEXu (#478)")
-    touched = {r["scope"] for r in plan.renumbers + plan.removals + plan.renames
+    touched = {r["scope"] for r in plan.renumbers + plan.removals + plan.resets + plan.renames
                if r.get("mode") != "memory"}
     if "orders" in touched:
         snapshot.rebuild_from_overrides(conn)
@@ -216,6 +226,10 @@ def _change_lines(plan: sp.Plan) -> list[str]:
         lines.append(f"kód {escape(code)} („{escape(items[0]['name'])}“, karta CODEX "
                      f"{escape(items[0]['codex_card'])}) z CODEXu zmizol bez náhrady — karta "
                      f"presunutá do Koša ({_labels(items)})")
+    for r in plan.resets:
+        lines.append(f"kód {escape(r['gtin'])} ({sp.BY_NAME[r['scope']].label}) bol predtým iný "
+                     f"výrobok, teraz karta CODEX {escape(r['codex_card'])} — staré údaje "
+                     f"({escape(', '.join(r['after']))}) vyčistené")
     for r in plan.renames:
         lines.append(f"názov podľa CODEXu ({sp.BY_NAME[r['scope']].label}) "
                      f"{escape(r['gtin'])}: „{escape(r['old'])}“ → „{escape(r['new'])}“")
@@ -299,7 +313,8 @@ def _report(plan: sp.Plan, mode: str, as_of: datetime, would_block: bool,
             "renames": [{k: v for k, v in r.items() if k not in strip} for r in plan.renames],
             "renumbers": [{k: v for k, v in r.items() if k not in strip}
                           for r in plan.renumbers],
-            "removals": plan.removals, "review": plan.review}
+            "removals": plan.removals, "review": plan.review,
+            "resets": [{k: v for k, v in r.items() if k not in strip} for r in plan.resets]}
 
 
 def _log(plan: sp.Plan, mode: str) -> None:
