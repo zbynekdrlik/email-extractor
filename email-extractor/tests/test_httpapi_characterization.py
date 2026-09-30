@@ -110,12 +110,12 @@ EXPECTED_ROUTES = sorted([
     # board-gated + history-scoped original file/eml preview. Tab PAGES via the generic
     # /nastenka/<tab> route (_TAB_CONTENT["historia-objednavok"/"historia-dl"]). Same blueprint.
     (("GET",), "/api/board/history"),
-    (("GET",), "/api/board/history/<message_id>"),
-    (("POST",), "/api/board/history/<message_id>/rerun"),
-    (("POST",), "/api/board/history/<message_id>/manual"),
-    (("POST",), "/api/board/history/<message_id>/teach"),
-    (("GET",), "/api/board/history/<message_id>/files/<int:idx>"),
-    (("GET",), "/api/board/history/<message_id>/eml"),
+    (("GET",), "/api/board/history/<path:message_id>"),
+    (("POST",), "/api/board/history/<path:message_id>/rerun"),
+    (("POST",), "/api/board/history/<path:message_id>/manual"),
+    (("POST",), "/api/board/history/<path:message_id>/teach"),
+    (("GET",), "/api/board/history/<path:message_id>/files/<int:idx>"),
+    (("GET",), "/api/board/history/<path:message_id>/eml"),
     # #342: the codex-bridge push endpoint (machine X-Token auth) — a legitimate NEW route,
     # not a #268 code-move; added here in the same commit that registers it.
     (("POST",), "/api/codex/orders"),

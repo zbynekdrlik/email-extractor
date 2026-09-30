@@ -454,6 +454,115 @@ def test_format_grouped_builds_one_header_capped_lines_and_a_dashboard_link(pg):
     assert html.count("skontroluj ich na dashboarde") == 1
 
 
+class _RoutedCfg:
+    """#473: the live routing shape — orders 152, delivery notes (WAREHOUSE) 243, ops 592."""
+    dashboard_base_url = "https://email-pz.example.test"
+    secret_key = "s"
+    data_dir = "/tmp"
+    ops_channel_id = 592
+    delivery_notes_channel_id = 243
+    orders_channel_id = 152
+
+
+def _flush_one(pg, cfg):
+    posted = []
+    dl_alerts.flush_pending(pg, cfg, post=lambda c, h, **kw: posted.append(
+        (h, kw.get("channel_id"))) or {"id": 1})
+    assert len(posted) == 1
+    return posted[0]
+
+
+def test_a_warehouse_upload_failed_alert_links_that_dl_on_the_board_history(pg):
+    """#473: `dl_upload_failed` goes to the WAREHOUSE delivery-notes channel (243) — its
+    action link must be the password-free /sklad-dl board link to THAT delivery note's
+    detail on História dodacích listov, never the password-gated admin dashboard (which
+    after #470 lands on /login and which the warehouse has no password for)."""
+    from app.orders import report
+    mid = "<dl-upload-1@example-dodavatel.test>"   # SYNTHETIC
+    pg.execute("INSERT INTO messages (message_id, category) VALUES (%s, 'dodacie_listy')",
+               (mid,))
+    dl_alerts.enqueue(pg, 243, "dl_upload_failed",
+                      dl_alerts.item_line("Dodávateľ X", "dodací list 123"), message_id=mid)
+    html, channel = _flush_one(pg, _RoutedCfg())
+    assert channel == 243
+    assert report.dl_history_link(_RoutedCfg(), mid) in html
+    assert "Treba doriešiť na nástenke" in html
+    assert 'href="https://email-pz.example.test"' not in html, "never the bare admin base"
+    assert "Otvor dashboard" not in html
+
+
+def test_a_warehouse_group_of_several_mails_links_the_history_tab_itself(pg):
+    """Several delivery notes in ONE grouped post → the História dodacích listov tab (all
+    of them are listed there, newest first) — one deep link cannot name them all."""
+    for i in range(3):
+        dl_alerts.enqueue(pg, 243, "dl_upload_failed",
+                          dl_alerts.item_line("Dodávateľ X", f"dodací list {i}"),
+                          message_id=f"<dl-{i}@example-dodavatel.test>")
+    html, _channel = _flush_one(pg, _RoutedCfg())
+    assert "/sklad-dl/" in html and "?next=/nastenka/historia-dl\"" in html
+    assert 'href="https://email-pz.example.test"' not in html
+
+
+def test_an_upload_failed_alert_for_a_mail_the_dl_history_does_not_list_links_the_tab(pg):
+    """#473 review round 2: an invoice-as-DL mail (`category='invoices'`, processed by the DL
+    engine in invoice mode) whose ORION upload fails enqueues `dl_upload_failed` too — but
+    História dodacích listov does not list it, so a `?q=` deep link would 404 (+ a console
+    error). Deep-link only a mail that tab really lists (the detail route's own
+    `is_history_document` guard); otherwise the tab itself, still password-free."""
+    mid = "<inv-upload-1@example-dodavatel.test>"   # SYNTHETIC
+    pg.execute("INSERT INTO messages (message_id, category) VALUES (%s, 'invoices')", (mid,))
+    dl_alerts.enqueue(pg, 243, "dl_upload_failed",
+                      dl_alerts.item_line("Dodávateľ X", "dodací list 9"), message_id=mid)
+    html, _channel = _flush_one(pg, _RoutedCfg())
+    assert "/sklad-dl/" in html and "?next=/nastenka/historia-dl\"" in html
+    assert "%3Fq%3D" not in html, "never a deep link the History tab would 404"
+    assert 'href="https://email-pz.example.test"' not in html
+
+
+def test_a_warehouse_scanner_not_dl_alert_carries_no_password_gated_admin_link(pg):
+    """#473: `scanner_not_dl` (warehouse channel 243) is a scan that is NOT a delivery note
+    — it never appears in História dodacích listov and its action is physical (rescan the
+    items page). The admin dashboard link it used to carry is password-gated and useless to
+    the warehouse, so the message carries no link at all — the instruction is complete."""
+    dl_alerts.enqueue(pg, 243, "scanner_not_dl",
+                      dl_alerts.item_line("tlaciaren@example.test", "Scan 1"),
+                      message_id="<scan-1@example.test>")
+    html, channel = _flush_one(pg, _RoutedCfg())
+    assert channel == 243
+    assert "naskenujte znova" in html
+    assert "<a href" not in html
+
+
+def test_an_ops_channel_alert_keeps_the_admin_dashboard_link(pg):
+    """#473 audit: an OPERATOR alert (ops channel 592 — here `mail_no_attachment`, the ops
+    half of the owner's incident) is for the owner, who reclassifies/marks it on the admin
+    dashboard — it keeps that link, never the warehouse board."""
+    dl_alerts.enqueue(pg, 592, "mail_no_attachment",
+                      dl_alerts.item_line("sklad@pekaren.test", "RE: OBJEDNAVKA"),
+                      message_id="<ops-1@example.test>")
+    html, channel = _flush_one(pg, _RoutedCfg())
+    assert channel == 592
+    assert 'href="https://email-pz.example.test"' in html
+    assert "/sklad" not in html
+
+
+def test_the_admin_link_is_fail_closed_to_the_provable_ops_channel():
+    """#473 review finding: the admin dashboard link is decided by the RECIPIENT channel and
+    fails CLOSED — a channel that is not provably the ops channel (0 / unknown / a warehouse
+    one) never gets the password-gated admin link, whatever the kind."""
+    cfg = _RoutedCfg()
+    assert "Otvor dashboard" in dl_alerts._action_line("human_processing_review", cfg, 592, [])
+    for channel in (None, 0, 243, 152):
+        assert "Otvor dashboard" not in dl_alerts._action_line(
+            "human_processing_review", cfg, channel, [])
+
+    class _NoOpsCfg(_RoutedCfg):
+        ops_channel_id = 0
+    # ops channel NOT configured: 0 == 0 must never read as "this is the ops channel"
+    assert "Otvor dashboard" not in dl_alerts._action_line(
+        "human_processing_review", _NoOpsCfg(), 0, [])
+
+
 def test_reminder_suppressed_first_fires_then_once_per_morning_skipping_weekends(pg):
     """#336: replaces the flat ~4h re-ask. The FIRST alert always fires; a re-reminder for
     a still-unresolved message fires at most once per morning (after the configured hour),

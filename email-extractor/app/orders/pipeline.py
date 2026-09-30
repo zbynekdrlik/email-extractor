@@ -411,7 +411,7 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
         _post_summary(cfg, post, shadow, customer_name=hold_matched.name,
                       orders=held_summaries, new_questions=len(new_questions),
                       unverified_count=len(extracted.get("unverified") or []),
-                      notes=conflict_note)
+                      notes=conflict_note, message_id=message.get("message_id", ""))
         return {"status": "held", "items": [], "shadow": shadow, "would_ship": False,
                "customer_ean": hold_matched.ean_edi, "customer_name": hold_matched.name,
                "delivery_date": first_date, "orders": len(orders), "order_results": [],
@@ -686,7 +686,7 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                   customer_name=email_matched.name if email_matched else "",
                   orders=order_summaries, new_questions=len(new_questions),
                   unverified_count=len(extracted.get("unverified") or []),
-                  notes=extracted.get("notes", ""))
+                  notes=extracted.get("notes", ""), message_id=message.get("message_id", ""))
     return out
 
 
@@ -851,7 +851,8 @@ def _delivery_day(delivery_date: str) -> str:
 
 
 def _post_summary(cfg, post, shadow: bool, customer_name: str, orders: list[dict],
-                  new_questions: int = 0, unverified_count: int = 0, notes: str = "") -> None:
+                  new_questions: int = 0, unverified_count: int = 0, notes: str = "",
+                  message_id: str = "") -> None:
     """The ONE Odoo message for a processed e-mail (#139) — every caller of `_finish`/
     `_ship_one` funnels through here exactly once per e-mail (or once per later, standalone
     hold-release event). Never raises: a notification failure must never break order
@@ -861,13 +862,16 @@ def _post_summary(cfg, post, shadow: bool, customer_name: str, orders: list[dict
     notice (e.g. a quoted second order that never became an order) was computed and
     stored, but nothing ever rendered it where a human actually reads outcomes — Odoo.
     Threaded through to `report.build_summary` so it is no longer write-only.
+
+    `message_id` (#473): the processed mail — a review/error outcome with no board question
+    links THIS mail's detail on the nástenka História tab (`report.history_link`).
     """
     if shadow:
         return
     html = report.build_summary(customer_name=customer_name, orders=orders,
                                 new_questions=new_questions,
                                 unverified_count=unverified_count, link=report.sklad_link(cfg),
-                                notes=notes, cfg=cfg)
+                                notes=notes, cfg=cfg, message_id=message_id)
     try:
         post(cfg, html)
     except Exception:
@@ -922,7 +926,9 @@ def _finish(conn, cfg, message, shadow, post, status: str, items: list,
                 # #187 review finding: this was silently dropped on every _finish-based
                 # exit path (refusal, no-orders, mail-rule reject, ...) — only the main
                 # happy/mixed path ever threaded it through.
-                notes=result.get("notes", ""))
+                notes=result.get("notes", ""),
+                # #473: the no-question review/error line deep-links THIS mail.
+                message_id=message.get("message_id", ""))
         report.log_event(
             conn, message.get("message_id", ""),
             stage="uploaded_orion" if result.get("shipped") else

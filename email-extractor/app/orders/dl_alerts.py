@@ -86,7 +86,8 @@ log = logging.getLogger("orders.dl_alerts")
 # (`• odosielateľ — predmet (prijaté D.M.)`), enqueued across many worker ticks and
 # grouped only at flush time. For each, `flush_pending` renders ONE readable message:
 # a per-kind HEADER (count + one explanation, `{n}` filled at flush) + up to
-# DISPLAY_ITEM_CAP short item lines + „…a N ďalších" + a dashboard action link — instead
+# DISPLAY_ITEM_CAP short item lines + „…a N ďalších" + an action link (the admin dashboard
+# on the ops channel, the password-free board on a warehouse channel — #473) — instead
 # of the pre-#336 wall where flush just concatenated N full explanation sentences (live
 # evidence: a 3177-char human_processing_review post). Mirrors question_alerts._group_html's
 # header/cap/„…ďalších"/link convention. A kind NOT in this registry (question_reminder —
@@ -111,13 +112,28 @@ GROUPED_ITEM_KINDS = {
     # #436: a scanner/printer scan (delivery_notes_scanner_senders) that human_processing
     # could NOT classify as a delivery note — routed to the WAREHOUSE delivery-notes channel
     # (243), unlike the ops-bound `human_processing_review`. Each per-message item line names
-    # the recognised document type ("vyzerá ako CMR/faktúra/…"); the constant instruction +
-    # dashboard link live here in the header. The warehouse rescans the items page if it was
-    # really a DL.
+    # the recognised document type ("vyzerá ako CMR/faktúra/…"); the constant instruction
+    # lives here in the header. The warehouse rescans the items page if it was really a DL.
+    # #473: NO link — the scan is not a DL (never in História dodacích listov), the action is
+    # physical, and the admin dashboard it used to link is password-gated for the warehouse.
     "scanner_not_dl":
         "&#128444;&#65039; Skeny z tlačiarne, ktoré sa nepodarilo zaradiť ako dodací list "
         "({n}) &mdash; ak to bol dodací list, naskenujte znova stranu s položkami.",
 }
+
+# #473: a grouped kind that reaches a WAREHOUSE channel links the password-free board
+# History tab of its documents (`board.links` kind), never the password-gated admin
+# dashboard; a kind absent here gets no link on a warehouse channel (`_action_line`). The ops
+# channel keeps the admin dashboard for every kind. Today's warehouse-channel kinds:
+# `dl_upload_failed` (delivery_notes 243 — usually a DL mail, listed in História dodacích
+# listov; an invoice-as-DL mail is NOT, so `_deep_link_mail` deep-links only a listed one)
+# and `scanner_not_dl` (243 — a non-DL scan, deliberately absent). `human_processing_review`,
+# `mail_no_attachment` and `dl_stuck_classified` route to ops (#310).
+WAREHOUSE_HISTORY_KINDS = {
+    "dl_upload_failed": "dl_history",
+}
+# board.links history kind -> the `board.services.history` scope whose tab lists the mail.
+_HISTORY_SCOPE = {"orders_history": "orders", "dl_history": "dl"}
 
 # #239 finding 1 (reopened): production calls flush_pending() on almost every worker
 # tick — this is the window a burst of same-kind alerts is given to accumulate before
@@ -151,8 +167,9 @@ HELD_RETENTION_DAYS = 30
 
 def item_line(sender: str, subject: str, received=None) -> str:
     """#336: ONE short per-item line for a grouped ops alert — `• odosielateľ — predmet
-    (prijaté D.M.)`. The explanation sentence + the dashboard action link live ONCE in the
-    group HEADER (`_format_grouped`, keyed on `GROUPED_ITEM_KINDS`), never repeated per
+    (prijaté D.M.)`. The explanation sentence + the action link (#473: chosen by the
+    recipient channel, `_action_line`) live ONCE in the group HEADER (`_format_grouped`,
+    keyed on `GROUPED_ITEM_KINDS`), never repeated per
     item — that repetition was the pre-#336 wall. `received` may be a datetime/date (a
     `D.M.` suffix is added) or None (no suffix); never a microsecond timestamp."""
     when = ""
@@ -220,14 +237,56 @@ def already_pending(conn, kind: str, message_id: str,
     return row is not None
 
 
-def _format_grouped(kind: str, bodies: list[str], cfg) -> str:
+def _deep_link_mail(conn, kind: str, message_ids: list[str]) -> list[str]:
+    """#473 (review round 2): the group's mail ids `_action_line` may deep-link — unchanged
+    unless the group is exactly ONE mail that its History tab does NOT list (an invoice-as-
+    DL `dl_upload_failed`, `category='invoices'`): then `[]`, so the link is the tab itself,
+    never a `?q=` deep link the detail route would 404. Reuses the detail route's own guard
+    (`board.services.history.is_history_document`); no DB read for any other kind/group."""
+    board_kind = WAREHOUSE_HISTORY_KINDS.get(kind)
+    mids = sorted({m for m in message_ids if m})
+    if not board_kind or len(mids) != 1:
+        return mids
+    from ..board.services.history import is_history_document
+    return mids if is_history_document(conn, mids[0], _HISTORY_SCOPE[board_kind]) else []
+
+
+def _action_line(kind: str, cfg, channel_id: int, message_ids: list[str]) -> str:
+    """#473: the grouped alert's action link, decided by the RECIPIENT channel.
+
+    - OPERATOR (`channel_id` == the ops channel) → the admin dashboard
+      (`report.dashboard_link`): the owner reclassifies / marks the mail there.
+    - WAREHOUSE (any other channel, e.g. delivery notes 243) → never the admin dashboard
+      (password-gated; after #470 it lands on /login and the warehouse has no password).
+      A kind in `WAREHOUSE_HISTORY_KINDS` links the password-free board History tab — ONE
+      mail's detail when the group is one mail, the tab itself when it is several. A
+      warehouse kind with no board surface (`scanner_not_dl`: a non-DL scan, action =
+      rescan) carries no link; its header instruction is complete on its own. Fail-closed:
+      anything that is not provably the ops channel never gets the admin link."""
+    if channel_id and channel_id == report.ops_channel(cfg):
+        base = report.dashboard_link(cfg)
+        return (f'<p>&#128203; Otvor dashboard: <a href="{escape(base)}">{escape(base)}</a></p>'
+                if base else "")
+    board_kind = WAREHOUSE_HISTORY_KINDS.get(kind)
+    if not board_kind:
+        return ""
+    from ..board.links import board_link
+    mids = sorted({m for m in message_ids if m})
+    return report.history_line(
+        board_link(cfg, board_kind, message_id=mids[0] if len(mids) == 1 else None))
+
+
+def _format_grouped(kind: str, bodies: list[str], cfg, *, channel_id: int,
+                    message_ids: list[str] | None = None) -> str:
     """#336: one readable grouped alert for a per-item wall kind — a single per-kind
     HEADER (count + one explanation, `{n}` filled) + up to `DISPLAY_ITEM_CAP` short item
-    lines + „…a N ďalších" + a dashboard action link. Replaces the pre-#336 wall where
+    lines + „…a N ďalších" + an action link. Replaces the pre-#336 wall where
     `flush_pending` just `"".join`-ed N full explanation sentences. Mirrors
     `question_alerts._group_html`'s header/cap/„…ďalších"/link convention. `cfg` may be
-    None (some tests) — `report.dashboard_link` then returns "" and the link line is
-    simply omitted, exactly like an unset `dashboard_base_url`."""
+    None (some tests) — every link builder then returns "" and the link line is simply
+    omitted, exactly like an unset `dashboard_base_url`. #473: the link depends on the
+    recipient `channel_id` (`_action_line`) — admin dashboard for ops, the board for the
+    warehouse."""
     n = len(bodies)
     # `.replace`, not `.format`: a future header template with a stray literal `{`/`}` (a
     # CSS/JSON snippet, an emoji entity) must never raise and break the whole flush (this
@@ -236,10 +295,7 @@ def _format_grouped(kind: str, bodies: list[str], cfg) -> str:
     parts.extend(bodies[:DISPLAY_ITEM_CAP])
     if n > DISPLAY_ITEM_CAP:
         parts.append(f"<p>&#8230; a {n - DISPLAY_ITEM_CAP} ďalších.</p>")
-    base = report.dashboard_link(cfg)
-    if base:
-        parts.append(f'<p>&#128203; Otvor dashboard: '
-                     f'<a href="{escape(base)}">{escape(base)}</a></p>')
+    parts.append(_action_line(kind, cfg, channel_id, list(message_ids or [])))
     return "".join(parts)
 
 
@@ -304,15 +360,15 @@ def flush_pending(conn, cfg, post=None, limit: int = 50,
     post = post or (lambda c, html, **kw: report.post_from_config(
         c, html, channel_id=kw.get("channel_id")))
     rows = conn.execute(
-        """SELECT id, channel_id, kind, body_html, created_at FROM pending_alerts
+        """SELECT id, channel_id, kind, body_html, created_at, message_id FROM pending_alerts
             WHERE delivered_at IS NULL AND attempts < %s
             ORDER BY id LIMIT %s""", (MAX_FLUSH_ATTEMPTS, limit)).fetchall()
     if not rows:
         return 0
-    groups: dict[tuple[int, str], list[tuple[int, str, datetime]]] = {}
-    for rid, channel_id, kind, body_html, created_at in rows:
+    groups: dict[tuple[int, str], list[tuple[int, str, datetime, str]]] = {}
+    for rid, channel_id, kind, body_html, created_at, message_id in rows:
         groups.setdefault((int(channel_id), kind), []).append(
-            (int(rid), body_html, created_at))
+            (int(rid), body_html, created_at, message_id or ""))
     now = datetime.now(UTC)
     delivered = 0
     for (channel_id, kind), items in groups.items():
@@ -331,20 +387,24 @@ def flush_pending(conn, cfg, post=None, limit: int = 50,
         target = channel_id or report.ops_channel(cfg)
         if not target:
             continue
-        newest = max(created_at for _rid, _body, created_at in items)
+        newest = max(created_at for _rid, _body, created_at, _mid in items)
         if quiet_seconds and (now - newest).total_seconds() < quiet_seconds:
             # Still receiving new alerts of this exact (channel, kind) — wait for the
             # burst to go quiet so it lands as ONE grouped post, never one per row.
             continue
-        bodies = [body for _rid, body, _created_at in items]
-        # #336: a per-item wall kind gets ONE header + capped short lines + a dashboard
+        bodies = [body for _rid, body, _created_at, _mid in items]
+        # #336: a per-item wall kind gets ONE header + capped short lines + an action
         # link; every other kind keeps the legacy concatenation (question_reminder is
-        # already a single formatted body, spend_cap is a one-off).
+        # already a single formatted body, spend_cap is a one-off). #473: the link is
+        # chosen by the RECIPIENT channel (`target`) — admin dashboard for ops, the
+        # password-free board for a warehouse channel.
         if kind in GROUPED_ITEM_KINDS:
-            html = _format_grouped(kind, bodies, cfg)
+            html = _format_grouped(kind, bodies, cfg, channel_id=target,
+                                   message_ids=_deep_link_mail(
+                                       conn, kind, [mid for _r, _b, _c, mid in items]))
         else:
             html = "".join(bodies)
-        ids = [rid for rid, _body, _created_at in items]
+        ids = [rid for rid, _body, _created_at, _mid in items]
         try:
             result = post(cfg, html, channel_id=target)
         except Exception:

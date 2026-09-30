@@ -424,6 +424,21 @@ def test_releasing_an_unknown_customer_answer_never_ships_but_becomes_visible(pg
         "SELECT processed FROM messages WHERE message_id='m1'").fetchone() == (True,)
 
 
+def test_a_released_to_review_order_links_its_mail_on_the_board_history(pg, env):
+    """#473: `release_to_review` posts a 'review' summary (nothing is waiting as a board
+    question any more) — its "treba doriešiť" line must point the warehouse, without a
+    password, at THIS held order's mail on História objednávok, never the admin dashboard."""
+    from app.orders import report
+    qid, _hid = _hold_unmatched_customer(pg, env)
+    teach.answer_customer(pg, qid, ean_edi="", name="", by="sklad")
+    rec = Recorder()
+    cfg = _cfg(dashboard_base_url="https://email-pz.example.test", secret_key="s")
+    hold.release_unknown_customer(pg, cfg, qid, post=rec.post)
+    assert len(rec.posts) == 1
+    assert report.history_link(cfg, "m1") in rec.posts[0]
+    assert 'href="https://email-pz.example.test"' not in rec.posts[0]
+
+
 def test_the_deadline_sweep_never_ships_a_still_unresolved_customer(pg, env):
     """Adversarial review finding on PR #161: `_do_release` used to reconstruct a
     `Matched` straight from `held_orders.customer_ean`/`customer_name` unconditionally —

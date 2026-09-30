@@ -198,8 +198,10 @@ def _scanner_doc_type(verdict: dict | None) -> str:
 def _scanner_line(sender, subject, received, doc_type: str) -> str:
     """#436: one per-message line for the grouped scanner alert (channel 243) — carries the
     recognised document type. The constant explanation + the "rescan the items page"
-    instruction + the dashboard link live ONCE in the grouped header
-    (`dl_alerts.GROUPED_ITEM_KINDS['scanner_not_dl']` + `_format_grouped`), never per item."""
+    instruction live ONCE in the grouped header (`dl_alerts.GROUPED_ITEM_KINDS
+    ['scanner_not_dl']` + `_format_grouped`), never per item. #473: no link — the admin
+    dashboard it used to carry is password-gated for the warehouse, and a non-DL scan is
+    not in História dodacích listov."""
     when = ""
     if received is not None and hasattr(received, "day"):
         when = f" (prijaté {received.day}.{received.month}.)"
@@ -352,8 +354,9 @@ def _notify(conn, cfg, message: dict, verdict: dict | None = None) -> None:
       flush_pending` HOLDS the channel-0 group, counted on the dashboard, never delivered),
       NEVER the warehouse (243) / sales (152) channels.
 
-    #336: the body is ONE short line; the explanation + dashboard link live ONCE in the
-    per-kind grouped header `dl_alerts.flush_pending` builds (`GROUPED_ITEM_KINDS`)."""
+    #336: the body is ONE short line; the explanation + the action link live ONCE in the
+    per-kind grouped header `dl_alerts.flush_pending` builds (`GROUPED_ITEM_KINDS`) — #473:
+    the admin dashboard on the ops channel, none for the warehouse `scanner_not_dl`."""
     if dl_questions.is_scanner_sender(cfg, message.get("from_addr")):
         channel = int(getattr(cfg, "delivery_notes_channel_id", 243) or 243)
         line = _scanner_line(message["from_addr"], message["subject"],

@@ -35,12 +35,13 @@ different, non-Odoo, non-counted event: a retry after a partial ship re-skipping
 document THIS SAME message already sent — never a real W7 cross-message duplicate, so it
 must not inflate that count.
 
-The dashboard link (#229 follow-up 2) is included ONLY when there is something the reader
+The nástenka link (#229 follow-up 2) is included ONLY when there is something the reader
 can actually go resolve — a genuine `review` outcome, or a `partial` success that raised a
 real `dl_item` board question (never a clean `ok`, even one carrying a purely informational
 note) — mirrors `report.build_summary`'s own `has_board_item`/`has_other_action` split for
-the orders pipeline, via the shared `report.link_line()` helper so the two notify paths
-never render the link differently.
+the orders pipeline, via the shared `report.link_line()` (a board QUESTION waits on Otázky
+sklad) / `report.history_line()` (#473: NO question — the mail's detail on História
+dodacích listov) helpers, so the two notify paths never render a link differently.
 """
 from __future__ import annotations
 
@@ -153,17 +154,28 @@ def build_success(supplier_name: str, doc_number: str, delivery_date: str,
 
 def build_review(reason: str, supplier_name: str = "", doc_number: str = "",
                  delivery_date: str = "", from_addr: str = "", subject: str = "",
-                 link: str = "", cmr: bool = False) -> str:
-    """#229 follow-up: `link` is rendered whenever given — a review outcome ALWAYS means
+                 link: str = "", cmr: bool = False, history_link: str = "") -> str:
+    """#229 follow-up: a link is rendered whenever given — a review outcome ALWAYS means
     a human has something to check, unlike `build_success` where the link is
-    conditional on there being real board action. #437: `cmr` marks the source as a CMR."""
+    conditional on there being real board action. #437: `cmr` marks the source as a CMR.
+
+    #473: two destinations, chosen by the CALLER from whether this review raised a board
+    question. `link` (the Otázky sklad tab, `report.dl_sklad_link`) is for a review whose
+    question waits there (unknown supplier, held items / mass / CODEX code). `history_link`
+    (`report.dl_history_link` — THIS mail's detail on História dodacích listov) is for a
+    review with NO question (empty mail, correction, unreadable attachment, needsReview,
+    date gate, …) — the questions tab does not list that mail, a dead end. `history_link`
+    wins when given; an empty one (e.g. an invoice-as-DL mail, not in the DL history) falls
+    back to `link`."""
     suffix = " (z CMR)" if cmr else ""
     parts = [f"<p><b>&#10071; Dodací list potrebuje kontrolu{suffix}</b></p>"]
     parts.append(_meta_lines(**{"Od": from_addr, "Predmet": subject,
                                 "Dodávateľ": supplier_name, "Číslo DL": doc_number,
                                 "Dátum dodania": delivery_date}))
     parts.append(f"<p>{escape(reason or 'Neznámy dôvod')}</p>")
-    if link:
+    if history_link:
+        parts.append(report.history_line(history_link))
+    elif link:
         parts.append(report.link_line(link))
     return "".join(p for p in parts if p)
 

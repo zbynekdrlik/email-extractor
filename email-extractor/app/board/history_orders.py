@@ -51,7 +51,14 @@ def register(bp, deps) -> None:
         res["meta"]["labels"] = _LABELS.get(scope, ORDERS_LABELS)
         return jsonify(**res)
 
-    @bp.get("/api/board/history/<message_id>")
+    # #473: `<path:message_id>` on every per-document route — a real Message-ID can carry `/`
+    # (Outlook `<!&!…+AA/…>`, ~14 of 4211 order/DL mails), and waitress/Werkzeug decode the
+    # client's `%2F` back to `/` BEFORE routing, so the default converter 404'd those mails
+    # (the row click AND the Odoo "Treba doriešiť" deep link). Werkzeug still routes the
+    # `/rerun`/`/manual`/`/teach`/`/files/<n>`/`/eml` suffixes to their own rule (the more
+    # specific static suffix wins); prod has 0 message ids ending in such a suffix (checked
+    # 2026-09-30), and a Message-ID normally ends with `>`.
+    @bp.get("/api/board/history/<path:message_id>")
     def board_history_detail(message_id: str):
         scope = request.args.get("scope", "orders")
         try:
@@ -64,7 +71,7 @@ def register(bp, deps) -> None:
         d["labels"] = _LABELS.get(scope, ORDERS_LABELS)
         return jsonify(d)
 
-    @bp.post("/api/board/history/<message_id>/rerun")
+    @bp.post("/api/board/history/<path:message_id>/rerun")
     def board_history_rerun(message_id: str):
         scope = request.args.get("scope", "orders")
         try:
@@ -77,7 +84,7 @@ def register(bp, deps) -> None:
             return jsonify(error=e.message), e.status
         return jsonify(**res)
 
-    @bp.post("/api/board/history/<message_id>/manual")
+    @bp.post("/api/board/history/<path:message_id>/manual")
     def board_history_manual(message_id: str):
         scope = request.args.get("scope", "orders")
         try:
@@ -90,7 +97,7 @@ def register(bp, deps) -> None:
             return jsonify(error=e.message), e.status
         return jsonify(**res)
 
-    @bp.post("/api/board/history/<message_id>/teach")
+    @bp.post("/api/board/history/<path:message_id>/teach")
     def board_history_teach(message_id: str):
         scope = request.args.get("scope", "orders")
         body = request.get_json(silent=True) or {}
@@ -106,7 +113,7 @@ def register(bp, deps) -> None:
             return jsonify(error=e.message), e.status
         return jsonify(**res)
 
-    @bp.get("/api/board/history/<message_id>/files/<int:idx>")
+    @bp.get("/api/board/history/<path:message_id>/files/<int:idx>")
     def board_history_file(message_id: str, idx: int):
         scope = request.args.get("scope", "orders")
         with deps.db() as c:
@@ -115,7 +122,7 @@ def register(bp, deps) -> None:
             return jsonify(error="súbor nie je dostupný"), 404
         return send_file(path)
 
-    @bp.get("/api/board/history/<message_id>/eml")
+    @bp.get("/api/board/history/<path:message_id>/eml")
     def board_history_eml(message_id: str):
         scope = request.args.get("scope", "orders")
         with deps.db() as c:

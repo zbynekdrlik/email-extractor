@@ -159,6 +159,32 @@ post). Fixed by splitting the two concerns:
   #327/#334 tests); `reminder_suppressed` is the new, separate cadence built on the same
   `delivered_at` anchor.
 
+## The grouped action link is chosen by the RECIPIENT channel, never one admin link for all (#473)
+
+`_format_grouped` used to append `report.dashboard_link(cfg)` (the password-gated admin
+dashboard) to EVERY grouped kind — including the two that reach the WAREHOUSE delivery-notes
+channel 243 (`dl_upload_failed`, `scanner_not_dl`, 66 scanner posts in 30 days), where nobody
+has the password (after #470 the bare base lands on `/login`). `flush_pending` now passes the
+group's delivery `target` + its rows' `message_id`s, and `_action_line` decides:
+
+- `target` provably the ops channel (truthy AND `== report.ops_channel(cfg)`) → admin
+  dashboard, unchanged — the owner reclassifies there. FAIL-CLOSED: anything not provably ops
+  (`None` / `0` with the ops channel unset / a warehouse channel) never gets the admin link;
+  `_format_grouped`'s `channel_id` is a required keyword.
+- any other (warehouse) channel → `WAREHOUSE_HISTORY_KINDS[kind]` board History link
+  (`dl_upload_failed` → `dl_history`: ONE mail → its detail `?q=<mid>` ONLY if that tab lists it
+  — `_deep_link_mail` applies the detail route's own `is_history_document` guard, so an
+  invoice-as-DL mail gets the tab, never a 404 deep link; several → the tab); a kind NOT in that
+  map (`scanner_not_dl`, a non-DL scan never listed in the DL history, action = rescan) gets NO
+  link — never the admin fallback.
+
+**To add a warehouse-channel grouped kind:** put it in `GROUPED_ITEM_KINDS` + (if its mail is in
+a História tab) `WAREHOUSE_HISTORY_KINDS`, and call `item_line` at enqueue. Tests:
+`test_dl_alerts.py::test_a_warehouse_*` + `test_an_ops_channel_alert_keeps_the_admin_dashboard_link`
++ `test_the_admin_link_is_fail_closed_to_the_provable_ops_channel` +
+`test_an_upload_failed_alert_for_a_mail_the_dl_history_does_not_list_links_the_tab`.
+The full "which message links where" table lives in `board.md` (#473 section).
+
 Testing: `test_dl_alerts.py` proves the format (`test_format_grouped_...` — 12 items → one
 header + 10 lines + „a 2 ďalších" + dashboard link, explanation appears ONCE) and the
 cadence (`test_reminder_suppressed_...` — explicit `now=` at Sat-afternoon/Mon/Tue/weekend

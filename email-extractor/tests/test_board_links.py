@@ -180,3 +180,99 @@ def test_question_reminder_group_carries_the_new_next_shape():
     html = question_alerts._group_html([row], {1: 1}, 2, report.dl_sklad_link(_cfg()))
     assert "Rieš na nástenke" in html
     assert DL_NEXT in html
+
+
+# --- #473: the password-free History deep link (one mail's detail on the board) ---------
+#
+# An Odoo "treba doriešiť" message about a review / error mail (nothing waiting as a board
+# question) must land the warehouse — without a password — on the História tab with THAT
+# mail's detail open. The mail id rides inside `next` as `?q=<message_id>`, URL-encoded
+# TWICE (once as the q value, once as part of the whole `next` value) so real RFC Message-IDs
+# (`<…$…@…>`, Gmail's `+`, a stray `/`) survive the signed-key redirect intact.
+
+ORDERS_HISTORY_NEXT = "?next=/nastenka/historia-objednavok"
+DL_HISTORY_NEXT = "?next=/nastenka/historia-dl"
+# SYNTHETIC Message-ID carrying every character class a real one uses (Outlook `<!&!…>`,
+# `$`, Gmail `+`, a `/`) — never real mail.
+TRICKY_MID = "<!&!001101dd0000$aa+bb/cc$@example-pekaren.test>"
+
+
+def test_board_link_orders_history_lands_on_the_orders_history_tab():
+    url = board_links.board_link(_cfg(), "orders_history")
+    assert url == f"https://ex.sk/sklad/{linkutil.sklad_key('s')}{ORDERS_HISTORY_NEXT}"
+
+
+def test_board_link_dl_history_lands_on_the_dl_history_tab_with_the_dl_key():
+    url = board_links.board_link(_cfg(), "dl_history")
+    assert url == f"https://ex.sk/sklad-dl/{linkutil.dl_key('s')}{DL_HISTORY_NEXT}"
+
+
+def test_board_link_history_deep_links_one_mail_double_encoded():
+    url = board_links.board_link(_cfg(), "orders_history", message_id="<m1@x.test>")
+    # `<`/`@`/`>` are encoded once as the q value (%3C/%40/%3E) and once more as part of
+    # the `next` value (%25…), and `?q=` itself is %3F/%3D — so q stays INSIDE `next`.
+    assert url.endswith(f"{ORDERS_HISTORY_NEXT}%3Fq%3D%253Cm1%2540x.test%253E")
+
+
+def test_the_history_tab_slugs_are_real_board_tabs():
+    """A deep link to a slug the board does not know hard-404s (the lane-6 `otazky-dl`
+    trap) — the history targets must be real `TABS` slugs."""
+    from app.board import TABS
+    slugs = {s for s, _ in TABS}
+    assert board_links.ORDERS_HISTORY_TAB.rsplit("/", 1)[1] in slugs
+    assert board_links.DL_HISTORY_TAB.rsplit("/", 1)[1] in slugs
+
+
+def test_board_link_refuses_a_message_seed_on_a_question_kind_and_vice_versa():
+    with pytest.raises(ValueError):
+        board_links.board_link(_cfg(), "orders", message_id="<m1@x.test>")
+    with pytest.raises(ValueError):
+        board_links.board_link(_cfg(), "dl_history", question_id=5)
+
+
+def test_board_link_history_is_empty_without_a_human_base_url():
+    cfg = _cfg()
+    cfg.dashboard_base_url = ""
+    assert board_links.board_link(cfg, "orders_history", message_id="<m1@x.test>") == ""
+
+
+@pytest.mark.parametrize("kind,route", [("orders_history", "/sklad/"),
+                                        ("dl_history", "/sklad-dl/")])
+def test_the_history_link_round_trips_the_message_id_through_the_signed_key_redirect(
+        kind, route):
+    """The server-side half of a warehouse click: the built link → the signed key route →
+    `safe_next` → 302 to the History tab whose `?q` decodes back to the EXACT Message-ID
+    (a `+` must not turn into a space, a `/`, `&` or `$` must survive). The browser half
+    (the tab opening that mail's detail) is the Playwright test in test_e2e.py; the detail
+    route resolving a `/` id is test_board_history.py's `…with_a_slash…` test."""
+    from urllib.parse import parse_qs, urlsplit
+
+    class C:
+        dashboard_base_url = "http://localhost"
+        secret_key = "test-secret"
+        data_dir = "/tmp"
+    url = board_links.board_link(C(), kind, message_id=TRICKY_MID)
+    assert route in url
+    parts = urlsplit(url)
+    r = _client().get(parts.path + "?" + parts.query)
+    assert r.status_code == 302
+    loc = urlsplit(r.headers["Location"])
+    tab = "historia-objednavok" if kind == "orders_history" else "historia-dl"
+    assert loc.path.endswith(f"/nastenka/{tab}")
+    assert parse_qs(loc.query)["q"] == [TRICKY_MID]
+
+
+def test_report_history_link_generators_emit_the_history_shape():
+    assert ORDERS_HISTORY_NEXT in report.history_link(_cfg(), "<m1@x.test>")
+    assert "/sklad/" in report.history_link(_cfg(), "<m1@x.test>")
+    assert DL_HISTORY_NEXT in report.dl_history_link(_cfg(), "<m1@x.test>")
+    assert "/sklad-dl/" in report.dl_history_link(_cfg(), "<m1@x.test>")
+    # no message id → the tab itself (still password-free), never the admin dashboard
+    assert report.history_link(_cfg(), "").endswith(ORDERS_HISTORY_NEXT)
+
+
+def test_history_line_wording_and_link():
+    html = report.history_line(report.history_link(_cfg(), "<m1@x.test>"))
+    assert "Treba doriešiť na nástenke" in html
+    assert ORDERS_HISTORY_NEXT in html
+    assert report.history_line("") == ""

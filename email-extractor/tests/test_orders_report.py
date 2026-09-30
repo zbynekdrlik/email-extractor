@@ -78,15 +78,15 @@ def test_new_questions_get_the_link_even_when_every_order_shipped():
 def test_a_plain_review_reason_is_named_but_gets_no_sklad_link():
     """08-03 fix: a "review" status with nothing ever written to `order_questions`/
     `held_orders` (e.g. "no item matched a card") used to get the SAME /sklad link as a
-    genuinely held order — pointing the warehouse at an empty board. Now it points at the
-    dashboard generically instead, never the sklad key."""
+    genuinely held order — pointing the warehouse at an empty questions tab. It never gets
+    the questions link; #473: it says "treba doriešiť na nástenke" (the História tab)."""
     html = report.build_summary(
         "Pekáreň X",
         [_order(status="review", item_count=0, reject_reason="Zákazník nebol nájdený")],
         link="http://x/sklad/k")
     assert "http://x/sklad/k" not in html
     assert "Zákazník nebol nájdený" in html
-    assert "dashboard" in html.lower() or "otvor" in html.lower()
+    assert "treba doriešiť na nástenke" in html.lower()
 
 
 def test_an_error_order_gets_no_sklad_link_either():
@@ -94,7 +94,7 @@ def test_an_error_order_gets_no_sklad_link_either():
         "Pekáreň X", [_order(status="error", reject_reason="Odoslanie do ORIONu zlyhalo")],
         link="http://x/sklad/k")
     assert "http://x/sklad/k" not in html
-    assert "dashboard" in html.lower() or "otvor" in html.lower()
+    assert "treba doriešiť na nástenke" in html.lower()
 
 
 # "partial" keeps the /sklad link (unchanged, see `test_a_partial_order_gets_the_link`
@@ -142,15 +142,15 @@ def test_a_change_of_order_alongside_a_real_held_order_still_gets_the_link():
 def test_unverified_items_are_still_counted_and_pointed_at_the_dashboard():
     """The AGEL-incident phantom-item safeguard (extract.py's `unverified`) must survive
     the shortening — a model-claimed item the e-mail text does not prove must remain
-    visible, even though the shortened message no longer lists it by name. It is resolved
-    from the message detail on the ADMIN dashboard, never from the sklad board (there is
-    no order_questions/held_orders row for it at all) — so it gets the dashboard hint, not
-    the /sklad link (#159's generalized rule)."""
+    visible, even though the shortened message no longer lists it by name. There is no
+    order_questions/held_orders row for it at all, so it never gets the questions /sklad
+    link (#159's generalized rule); #473: it points at the mail's detail on the nástenka
+    (História objednávok), never the password-gated admin dashboard."""
     html = report.build_summary("Pekáreň X", [_order(status="ok")], unverified_count=2,
                                 link="http://x/sklad/k")
     assert "http://x/sklad/k" not in html
     assert "2" in html
-    assert "dashboard" in html.lower() or "otvor" in html.lower()
+    assert "treba doriešiť na nástenke" in html.lower()
 
 
 def test_no_unverified_items_never_mentions_them():
@@ -186,21 +186,62 @@ def test_a_note_is_escaped_like_reject_reason():
 
 def test_no_link_configured_still_says_something_is_unresolved():
     """Nothing may be silently hidden even when dashboard_base_url is unset (#139) — the
-    message must still say a human is needed, just without a clickable link."""
+    message must still say a human is needed, just without a clickable link — and name
+    WHERE it waits: a held order waits on Otázky objednávky, never "História" (#473)."""
     html = report.build_summary("Pekáreň X", [_order(status="held")], link="")
     assert "http" not in html
-    assert "dashboard" in html.lower() or "otvor" in html.lower()
+    assert "treba doriešiť na nástenke" in html.lower()
+    assert "Otázky objednávky" in html and "História" not in html
 
 
-def test_the_fallback_line_carries_a_clickable_dashboard_link_when_configured():
-    """#359: a review/error outcome with no /sklad link still points a human at the admin
-    dashboard — and it must be a CLICKABLE <a href> when dashboard_base_url is configured, not
-    a dead sentence (every actionable Odoo message carries its functional URL)."""
-    class Cfg:
-        dashboard_base_url = "https://email-pz.newlevel.media"
-    html = report.build_summary("Pekáreň X", [_order(status="review")], cfg=Cfg())
-    assert '<a href="https://email-pz.newlevel.media">https://email-pz.newlevel.media</a>' in html
-    assert "Treba doriešiť" in html
+class _BoardCfg:
+    dashboard_base_url = "https://email-pz.example.test"
+    secret_key = "s"
+    data_dir = "/tmp"
+
+
+def test_a_review_summary_links_that_mails_detail_on_the_board_history_tab():
+    """#473 (the owner's incident, msg 13787 "AI nenašla v e-maile žiadnu objednávku"): a
+    review/error outcome with nothing waiting as a board question used to carry the BARE
+    `dashboard_base_url` — the password-gated admin dashboard, which after #470 lands on
+    /login and which the warehouse has no password for. It must instead carry the
+    password-free warehouse link straight to THAT mail's detail on the História
+    objednávok tab: `<base>/sklad/<key>?next=/nastenka/historia-objednavok%3Fq%3D<mid>`."""
+    from app import linkutil
+    mid = "<001101dd0000$aa+bb$@example-pekaren.test>"   # SYNTHETIC
+    html = report.build_summary(
+        "(nezistený zákazník)",
+        [_order(status="review", item_count=0,
+                reject_reason="AI nenašla v e-maile žiadnu objednávku")],
+        cfg=_BoardCfg(), message_id=mid)
+    key = linkutil.sklad_key("s")
+    expected = report.history_link(_BoardCfg(), mid)
+    assert expected.startswith(f"https://email-pz.example.test/sklad/{key}"
+                               "?next=/nastenka/historia-objednavok%3Fq%3D")
+    assert f'href="{expected}"' in html
+    assert "&#128203; Treba doriešiť na nástenke:" in html
+    # never the bare admin base, never the old "otvor dashboard" wording
+    assert 'href="https://email-pz.example.test"' not in html
+    assert "otvor dashboard" not in html.lower()
+
+
+def test_the_review_line_without_a_message_id_still_lands_on_the_history_tab():
+    """A caller that has no message id at hand still gets the password-free History tab
+    (the warehouse can find the mail in the list) — never the admin dashboard."""
+    html = report.build_summary("Pekáreň X", [_order(status="review")], cfg=_BoardCfg())
+    assert "/sklad/" in html and "?next=/nastenka/historia-objednavok" in html
+    assert 'href="https://email-pz.example.test"' not in html
+
+
+def test_a_held_order_keeps_the_questions_link_not_the_history_one():
+    """Something genuinely waiting as a board question keeps #459's Otázky objednávky link;
+    #473 only re-routes the NO-question outcomes."""
+    link = report.sklad_link(_BoardCfg())
+    html = report.build_summary("Pekáreň X", [_order(status="held")], new_questions=1,
+                                link=link, cfg=_BoardCfg(), message_id="<m@x.test>")
+    assert "Rieš na nástenke" in html
+    assert "otazky-objednavky" in html
+    assert "historia-objednavok" not in html
 
 
 def test_the_fallback_line_stays_a_plain_sentence_without_a_dashboard_base_url():
@@ -208,12 +249,13 @@ def test_the_fallback_line_stays_a_plain_sentence_without_a_dashboard_base_url()
     no-link sentence, never a dead/empty <a href>."""
     class Cfg:
         dashboard_base_url = ""
-    html_no_base = report.build_summary("Pekáreň X", [_order(status="review")], cfg=Cfg())
+    html_no_base = report.build_summary("Pekáreň X", [_order(status="review")], cfg=Cfg(),
+                                        message_id="<m@x.test>")
     html_no_cfg = report.build_summary("Pekáreň X", [_order(status="review")])
     for html in (html_no_base, html_no_cfg):
         assert "<a href" not in html
         assert "http" not in html
-        assert "otvor dashboard extraktora" in html.lower()
+        assert "treba doriešiť na nástenke" in html.lower()
 
 
 # --- (b) a clean success never shows the link -------------------------------

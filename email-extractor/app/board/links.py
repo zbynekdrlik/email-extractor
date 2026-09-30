@@ -15,6 +15,14 @@ the base.
 
 `safe_next` is the open-redirect guard the signed key routes apply to a `?next` value: only
 an internal `/nastenka…` path is honoured, everything else falls back to the per-key default.
+
+#473: two HISTORY kinds (`orders_history` → História objednávok, `dl_history` → História
+dodacích listov) with a `message_id` seed (`?q=<message_id>`, opened as that mail's detail by
+`tab-history.js`). They are the warehouse's password-free link for a mail that needs a human
+but has NO board question (review / error / "treba zadať ručne") — the question kinds would
+land on a tab where that mail is not listed, and the bare `dashboard_base_url` is the
+password-gated admin dashboard (→ /login). A question tab takes a `question_id` seed, a
+history tab a `message_id` seed — mixing them is a caller bug (`ValueError`).
 """
 from __future__ import annotations
 
@@ -24,12 +32,19 @@ from .. import linkutil
 
 ORDERS_TAB = "/nastenka/otazky-objednavky"
 DL_TAB = "/nastenka/otazky-sklad"
+# #473: the real `board.TABS` slugs (NOT `historia-dodacich-listov` — a slug the board does
+# not know hard-404s, the lane-6 `otazky-dl` trap).
+ORDERS_HISTORY_TAB = "/nastenka/historia-objednavok"
+DL_HISTORY_TAB = "/nastenka/historia-dl"
 
 # kind -> (URL route segment, key-derivation fn, default tab)
 _KINDS = {
     "orders": ("sklad", linkutil.sklad_key, ORDERS_TAB),
     "dl": ("sklad-dl", linkutil.dl_key, DL_TAB),
+    "orders_history": ("sklad", linkutil.sklad_key, ORDERS_HISTORY_TAB),
+    "dl_history": ("sklad-dl", linkutil.dl_key, DL_HISTORY_TAB),
 }
+_HISTORY_KINDS = frozenset({"orders_history", "dl_history"})
 
 
 def safe_next(nxt: str | None) -> str | None:
@@ -47,20 +62,30 @@ def safe_next(nxt: str | None) -> str | None:
     return None
 
 
-def board_link(cfg, kind: str, question_id: int | None = None) -> str:
+def board_link(cfg, kind: str, question_id: int | None = None,
+               message_id: str | None = None) -> str:
     """The full warehouse link that lands the warehouse on the right nástenka tab.
 
     `<dashboard_base_url>/sklad/<key>?next=/nastenka/otazky-objednavky` (orders) or
     `…/sklad-dl/<key>?next=/nastenka/otazky-sklad` (dl); with `question_id`, the tab path
-    carries `?q=<id>` (URL-encoded so it stays part of the `next` VALUE). Returns `""` when no
-    human-facing base URL is configured (same fallback as `linkutil.sklad_url`)."""
+    carries `?q=<id>` (URL-encoded so it stays part of the `next` VALUE). #473: the history
+    kinds (`orders_history` / `dl_history`) land on the História tab and take a `message_id`
+    seed instead — the Message-ID is encoded as the q VALUE first (`<`, `@`, `$`, `+`, `/`
+    must survive; a raw `+` would decode to a space) and then, with the rest of the tab path,
+    as the `next` value, so it round-trips the signed-key redirect exactly. Returns `""` when
+    no human-facing base URL is configured (same fallback as `linkutil.sklad_url`)."""
     try:
         route, key_fn, tab = _KINDS[kind]
     except KeyError:
         raise ValueError(f"neznámy board_link kind {kind!r}") from None
+    history = kind in _HISTORY_KINDS
+    if (question_id is not None and history) or (message_id and not history):
+        raise ValueError(f"board_link kind {kind!r}: question_id patrí k záložke otázok, "
+                         "message_id k záložke histórie")
     base = (getattr(cfg, "dashboard_base_url", "") or "").rstrip("/")
     if not base:
         return ""
     key = key_fn(linkutil.resolve_secret(cfg))
-    nxt = tab if question_id is None else f"{tab}?q={question_id}"
+    seed = message_id if history else (None if question_id is None else str(question_id))
+    nxt = f"{tab}?q={quote(seed, safe='')}" if seed else tab
     return f"{base}/{route}/{key}?next={quote(nxt, safe='/')}"

@@ -69,13 +69,35 @@ def dl_sklad_link(cfg, question_id: int | None = None) -> str:
     return board_link(cfg, "dl", question_id=question_id)
 
 
+def history_link(cfg, message_id: str = "") -> str:
+    """#473: the warehouse's password-free link to ONE orders mail's detail on the História
+    objednávok tab (`/sklad/<key>?next=/nastenka/historia-objednavok?q=<message_id>`) — for a
+    WAREHOUSE-facing message about a mail that needs a human but has NO board question
+    (review / error / unverified-only). With no `message_id` it lands on the tab itself (the
+    mail is in the list). "" when `dashboard_base_url` is unset. Lazy import keeps the leaf."""
+    from ..board.links import board_link
+    return board_link(cfg, "orders_history", message_id=message_id or None)
+
+
+def dl_history_link(cfg, message_id: str = "") -> str:
+    """#473: the DL sibling of `history_link` — the `/sklad-dl/<key>` link to one delivery
+    note mail's detail on História dodacích listov."""
+    from ..board.links import board_link
+    return board_link(cfg, "dl_history", message_id=message_id or None)
+
+
 def dashboard_link(cfg) -> str:
     """#336: the admin dashboard base URL (the ops fix-queue / message list) — the "miesto
     akcie" a grouped OPERATOR alert points at, where an operator reclassifies / marks a
     stuck message done. Distinct from `sklad_link`/`dl_sklad_link` (the warehouse nástenka):
     an unclassifiable / never-started / upload-failed message is an operator concern, not a
     nástenka question. Returns "" when `dashboard_base_url` is unset (the header then simply
-    omits the action link, same "" fallback as the sklad links)."""
+    omits the action link, same "" fallback as the sklad links).
+
+    #473: OPERATOR (ops channel) messages ONLY. The admin dashboard is behind the password
+    (after #470 the bare base lands on /login) and the warehouse has none — a message that
+    goes to a WAREHOUSE channel (orders 152 / delivery notes 243) uses `history_link` /
+    `dl_history_link` (no board question) or `sklad_link` / `dl_sklad_link` (a question)."""
     return (getattr(cfg, "dashboard_base_url", "") or "").rstrip("/")
 
 
@@ -90,6 +112,17 @@ def link_line(link: str) -> str:
     return f'<p>&#128203; Rieš na nástenke: <a href="{escape(link)}">{escape(link)}</a></p>'
 
 
+def history_line(link: str) -> str:
+    """#473: the ONE shared "this mail needs a human — here it is on the nástenka" line for
+    a message with NO board question, pointing at `history_link`/`dl_history_link` (the
+    mail's detail on the História tab). Both engines render it through here so the wording
+    never drifts; "" for an empty link (the caller decides the no-link fallback)."""
+    if not link:
+        return ""
+    return (f'<p>&#128203; Treba doriešiť na nástenke: '
+            f'<a href="{escape(link)}">{escape(link)}</a></p>')
+
+
 def _plural(n: int, one: str, few: str, many: str) -> str:
     """Slovak has three plural forms for a small count: 1 / 2-4 / 0,5+."""
     if n == 1:
@@ -101,7 +134,7 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
 
 def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0,
                   unverified_count: int = 0, link: str = "", notes: str = "",
-                  cfg=None) -> str:
+                  cfg=None, message_id: str = "") -> str:
     """The ONE Odoo message for a whole processed e-mail.
 
     `orders` is a list of AGGREGATE per-order summaries — never raw decisions or items:
@@ -132,11 +165,13 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
     write-only. Same short-plain-Slovak-sentence shape as `reject_reason`, so it renders
     the same way: `escape()`d, its own paragraph, never a raw trace/JSON/run id.
 
-    `cfg` (#359) is used ONLY to render a clickable admin-dashboard link on the
-    "treba doriešiť" fallback line (via `dashboard_link(cfg)`) when a review/error/
-    unverified outcome carries no `/sklad` `link` of its own. `None` (the default) or an
-    unset `dashboard_base_url` keeps the plain no-link sentence, so every existing caller
-    that omits it is unaffected.
+    `cfg` (#359) + `message_id` (#473) are used ONLY for the "treba doriešiť" line of a
+    review/error/unverified outcome with no board question: it carries the warehouse's
+    password-free `history_link(cfg, message_id)` — THIS mail's detail on the História
+    objednávok tab (#473; #359 used the bare admin `dashboard_link`, which after #470 lands on
+    /login and which the warehouse, the reader of this orders-channel message, has no password
+    for). `None`/an unset `dashboard_base_url` keeps a plain no-link sentence; no
+    `message_id` still links the tab itself.
     """
     orders = orders or []
     counts: dict[str, int] = {}
@@ -215,9 +250,10 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
     #     genuinely open `order_questions`/`held_orders` row — the /sklad link (or, when
     #     no dashboard_base_url is configured, the same generic hint as the other case).
     #   - review / error / unverified-only: none of these ever write anything to the
-    #     board (an unmatched customer past its deadline, an extraction-level reject, a
-    #     failed upload, a phantom-item warning the ADMIN dashboard resolves) — point at
-    #     the dashboard generically, never claim something is "waiting" on the sklad key.
+    #     questions tabs (an unmatched customer past its deadline, an extraction-level
+    #     reject, a failed upload, a phantom-item warning) — never claim something is
+    #     "waiting" there. #473: link THIS mail's detail on the História objednávok tab
+    #     (password-free warehouse key), never the password-gated admin dashboard.
     #   - a change-of-order ALONE: nothing is EVER queued for it (always a human editing
     #     ORION by hand, already stated in its own reason paragraph above) — neither link.
     has_board_item = bool(counts.get("held") or counts.get("partial") or new_questions)
@@ -225,17 +261,16 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
     if has_board_item or has_other_action:
         if has_board_item and link:
             parts.append(link_line(link))
+        elif has_board_item:
+            # no base URL configured → no link at all, but still name WHERE it waits
+            parts.append("<p>&#128203; Treba doriešiť na nástenke (Otázky objednávky).</p>")
         else:
-            # #359: carry the CLICKABLE admin-dashboard URL when one is configured, the same
-            # way `dl_alerts._format_grouped` does — every actionable Odoo message must carry
-            # its functional URL. Falls back to the plain sentence only when no
-            # `dashboard_base_url` is configured (or `cfg` was not passed).
-            base = dashboard_link(cfg)
-            if base:
-                parts.append('<p>&#128203; Treba doriešiť — otvor dashboard: '
-                             f'<a href="{escape(base)}">{escape(base)}</a></p>')
-            else:
-                parts.append("<p>&#128203; Treba doriešiť — otvor dashboard extraktora.</p>")
+            # #359: every actionable Odoo message carries its functional URL. #473: that URL
+            # is the warehouse's own (this message goes to the ORDERS channel the warehouse
+            # reads), so `history_link`, not `dashboard_link`. Falls back to the plain
+            # sentence only when no `dashboard_base_url` is configured (or `cfg` is None).
+            parts.append(history_line(history_link(cfg, message_id)) or
+                         "<p>&#128203; Treba doriešiť na nástenke (História objednávok).</p>")
 
     return "".join(parts)
 

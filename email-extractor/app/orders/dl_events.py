@@ -28,6 +28,20 @@ def _event(conn, shadow: bool, message_id: str, **kwargs) -> None:
     report.log_event(conn, message_id, **kwargs)
 
 
+def _dl_history_link(conn, cfg, message_id: str) -> str:
+    """#473: THIS mail's password-free História dodacích listov deep link for a review with
+    NO board question — but only when that tab really lists the mail (the SAME
+    `is_history_document` guard its detail route applies). Anything else — an invoice-as-DL
+    mail (`category='invoices'`), including one `release_for_question` reprocesses without
+    its invoice flag — gets "" so `build_review` keeps the questions link rather than a deep
+    link that 404s. "" too with no `dashboard_base_url` (no DB read then)."""
+    link = report.dl_history_link(cfg, message_id)
+    if not link:
+        return ""
+    from ..board.services.history import is_history_document
+    return link if is_history_document(conn, message_id, "dl") else ""
+
+
 def _post(cfg, shadow: bool, build, post=None) -> None:
     if shadow:
         return
@@ -41,17 +55,20 @@ def _post(cfg, shadow: bool, build, post=None) -> None:
 
 def _flag_attachment(conn, cfg, shadow: bool, message: dict, link: str,
                      att: dict, reason: str, status: str, synthetic: bool = False,
-                     post=None) -> dict:
+                     post=None, history_link: str = "") -> dict:
     """Shared shape for "this attachment needs a human to look at it" — posts a review
     message, logs a non-rollup event, and returns the `documents_out` entry. Used both
     by the pre-existing attachment-extraction-error path and #238's own completeness
     check (an attachment that read fine but contributed zero documents) — the only
     difference is the event `status` and whether the entry is marked `synthetic`
     (never a REAL document, so callers that count "documents" — `_summary_outcome`,
-    the rollup detail, `dl_evaluate.score()` — must exclude it, per #238's own review)."""
+    the rollup detail, `dl_evaluate.score()` — must exclude it, per #238's own review).
+    #473: neither case raises a board question, so the caller passes `history_link` (the
+    mail's História dodacích listov detail); `link` stays the fallback."""
     _post(cfg, shadow, lambda: dl_report.build_review(
         reason, from_addr=message.get("from_addr", ""),
-        subject=message.get("subject", ""), link=link), post=post)
+        subject=message.get("subject", ""), link=link, history_link=history_link),
+        post=post)
     _event(conn, shadow, message["message_id"], stage="review", status=status,
           outcome=reason, detail={"idx": att.get("idx")}, rollup=False,
           workflow=dl_report.WORKFLOW)
