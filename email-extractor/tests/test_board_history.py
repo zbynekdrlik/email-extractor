@@ -452,5 +452,6 @@ def test_a_message_id_with_a_slash_reaches_every_per_document_route(pg, tmp_path
     assert c.get(f"/api/board/history/{enc}/files/0?scope=orders").status_code == 200
     # the actions reach their OWN handler (a shipped order → rerun refused 409, never 404)
     assert c.post(f"/api/board/history/{enc}/rerun?scope=orders").status_code == 409
+    assert c.post(f"/api/board/history/{enc}/manual?scope=orders").status_code == 409
     assert c.post(f"/api/board/history/{enc}/teach?scope=orders",
                   json={"name": "", "gtin": ""}).status_code == 400

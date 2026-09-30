@@ -479,6 +479,8 @@ def test_a_warehouse_upload_failed_alert_links_that_dl_on_the_board_history(pg):
     after #470 lands on /login and which the warehouse has no password for)."""
     from app.orders import report
     mid = "<dl-upload-1@example-dodavatel.test>"   # SYNTHETIC
+    pg.execute("INSERT INTO messages (message_id, category) VALUES (%s, 'dodacie_listy')",
+               (mid,))
     dl_alerts.enqueue(pg, 243, "dl_upload_failed",
                       dl_alerts.item_line("Dodávateľ X", "dodací list 123"), message_id=mid)
     html, channel = _flush_one(pg, _RoutedCfg())
@@ -498,6 +500,22 @@ def test_a_warehouse_group_of_several_mails_links_the_history_tab_itself(pg):
                           message_id=f"<dl-{i}@example-dodavatel.test>")
     html, _channel = _flush_one(pg, _RoutedCfg())
     assert "/sklad-dl/" in html and "?next=/nastenka/historia-dl\"" in html
+    assert 'href="https://email-pz.example.test"' not in html
+
+
+def test_an_upload_failed_alert_for_a_mail_the_dl_history_does_not_list_links_the_tab(pg):
+    """#473 review round 2: an invoice-as-DL mail (`category='invoices'`, processed by the DL
+    engine in invoice mode) whose ORION upload fails enqueues `dl_upload_failed` too — but
+    História dodacích listov does not list it, so a `?q=` deep link would 404 (+ a console
+    error). Deep-link only a mail that tab really lists (the detail route's own
+    `is_history_document` guard); otherwise the tab itself, still password-free."""
+    mid = "<inv-upload-1@example-dodavatel.test>"   # SYNTHETIC
+    pg.execute("INSERT INTO messages (message_id, category) VALUES (%s, 'invoices')", (mid,))
+    dl_alerts.enqueue(pg, 243, "dl_upload_failed",
+                      dl_alerts.item_line("Dodávateľ X", "dodací list 9"), message_id=mid)
+    html, _channel = _flush_one(pg, _RoutedCfg())
+    assert "/sklad-dl/" in html and "?next=/nastenka/historia-dl\"" in html
+    assert "%3Fq%3D" not in html, "never a deep link the History tab would 404"
     assert 'href="https://email-pz.example.test"' not in html
 
 
@@ -534,9 +552,15 @@ def test_the_admin_link_is_fail_closed_to_the_provable_ops_channel():
     one) never gets the password-gated admin link, whatever the kind."""
     cfg = _RoutedCfg()
     assert "Otvor dashboard" in dl_alerts._action_line("human_processing_review", cfg, 592, [])
-    for channel in (0, 243, 152):
+    for channel in (None, 0, 243, 152):
         assert "Otvor dashboard" not in dl_alerts._action_line(
             "human_processing_review", cfg, channel, [])
+
+    class _NoOpsCfg(_RoutedCfg):
+        ops_channel_id = 0
+    # ops channel NOT configured: 0 == 0 must never read as "this is the ops channel"
+    assert "Otvor dashboard" not in dl_alerts._action_line(
+        "human_processing_review", _NoOpsCfg(), 0, [])
 
 
 def test_reminder_suppressed_first_fires_then_once_per_morning_skipping_weekends(pg):
