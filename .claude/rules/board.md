@@ -445,3 +445,47 @@ already); of a `restore` row itself → refused; of a missing audit id → 404. 
 - **Admin `/` dashboard OSTÁVA** (záložka „Maily"); jeho `__SKLADLINK__`/`__DLSKLADLINK__`
   teraz nesú `?next=<board tab>` (tvar #459 `board_link`, ale na host-base operátora, nie
   `dashboard_base_url` — kvôli 0.9.10 pravidlu). `board_link` (#459) je nezmenený.
+
+## #473 — „Treba doriešiť na nástenke": odkaz na DETAIL mailu v Histórii (bez hesla)
+
+Ktorá správa kam vedie (rozhoduje KANÁL PRÍJEMCU, nie druh správy):
+
+| Správa | Kanál | Odkaz |
+|---|---|---|
+| orders súhrn s otázkou (held / partial / nová otázka) | 152 | `report.sklad_link` → Otázky objednávky („Rieš na nástenke") |
+| orders súhrn BEZ otázky (review / error / unverified) | 152 | `report.history_link(cfg, mid)` → História objednávok s detailom („Treba doriešiť na nástenke") |
+| DL review s otázkou (neznámy dodávateľ, držané položky / hmotnosť / CODEX kód) | 243 | `report.dl_sklad_link` → Otázky sklad |
+| DL review BEZ otázky (vek, prázdny / bez prílohy, oprava, nečitateľná príloha, nič nerozpoznané, needsReview, dátumová brána, chyba párovania dodávateľa, nedá sa EDI bez otázky) | 243 | `report.dl_history_link(cfg, mid)` → História dodacích listov s detailom |
+| grouped `dl_upload_failed` | 243 | DL história — 1 mail = jeho detail, viac = záložka |
+| grouped `scanner_not_dl` | 243 | ŽIADNY odkaz (sken nie je DL, v Histórii nie je; akcia = naskenovať znova) |
+| grouped ops druhy (`human_processing_review`, `mail_no_attachment`, `dl_stuck_classified`) | 592 ops | `report.dashboard_link` → admin dashboard (operátor) |
+| `static_worker` foto-poznámka (`photo_order_message`) | — (len `order_runs.result`) | admin dashboard (operátorská poznámka, nikdy sa neposiela skladu) |
+
+- **`dashboard_link` = LEN ops/operátor.** Admin dashboard je za heslom (po #470 holý base →
+  `/login`), sklad heslo nemá. Správa do skladového kanála NIKDY nenesie `dashboard_link`.
+- **`board_link` druhy `orders_history` / `dl_history`** (slugy `historia-objednavok` /
+  `historia-dl` — reálne `TABS`, nie `historia-dodacich-listov`) + `message_id` seed. Otázková
+  záložka berie `question_id`, historická `message_id` — zmiešanie = `ValueError`.
+- **Message-ID sa enkóduje DVAKRÁT**: `quote(mid, safe='')` ako hodnota `q`, potom celé `next`
+  `quote(…, safe='/')`. Reálne id majú `<>@$+/` — holé `+` by `URLSearchParams`/Flask rozbalil
+  na medzeru. Round-trip test: `test_board_links.py::test_the_history_link_round_trips_…`.
+- **`tab-history.js` seed:** `?q=<message_id>` → `openDetail(q)` AŽ PO `load()` (inak zoznam
+  vyrenderovaný nad šuflíkom odtlačí detail mimo obrazovky); zoznam sa NEfiltruje.
+- **Nový warehouse grouped druh** → pridaj ho do `dl_alerts.WAREHOUSE_HISTORY_KINDS` (ak je
+  jeho mail v niektorej Histórii), inak na skladovom kanáli nemá odkaz. Ops kanál ostáva admin.
+- **Nový DL review bez otázky** → `build_review(..., history_link=hlink)`; s otázkou len
+  `link=link`. Invoice-as-DL (`category='invoices'`) nie je v DL histórii → `hlink=""` → fallback.
+- **Message-ID s `/`** (Outlook `<!&!…+AA/…>`, ≈14 zo 4211 order/DL mailov): waitress/Werkzeug
+  dekódujú `%2F` na `/` PRED routovaním, takže `/api/board/history/<message_id>` ich 404-oval
+  (klik aj deep link). Všetkých 6 per-dokument trás je preto `<path:message_id>` — Werkzeug
+  stále pošle `/rerun`/`/manual`/`/teach`/`/files/<n>`/`/eml` na vlastné pravidlo (špecifickejší
+  statický suffix vyhráva; overené probe + `test_board_history.py::…with_a_slash…`). Nová
+  per-dokument trasa v Histórii MUSÍ tiež použiť `<path:message_id>` (+ `EXPECTED_ROUTES`).
+- **DL deep link len ak ho História naozaj ukáže:** `dl_events._dl_history_link` = odkaz iba pre
+  mail, ktorý `history.is_history_document(conn, mid, "dl")` pustí (tá istá stráž ako detail
+  trasa) — invoice-as-DL (`category='invoices'`, aj pri `release_for_question` reprocese bez
+  invoice flagu) dostane `""` → `build_review` ostane na Otázky sklad (nie 404). Odmietnutá
+  `ask_dl_supplier` (adresa už naučená → `None`) = žiadna otázka → História.
+- **Post-deploy overenie:** odkaz postav READ-ONLY v kontajneri (`report.history_link(cfg, mid)`
+  s `app.config.Config.load()`), otvor v Playwright s vyčistenými cookies (najprv `/` → `/login`), over
+  `.h-detail-title` = predmet toho mailu; nikdy neklikaj akcie na reálnom maile.

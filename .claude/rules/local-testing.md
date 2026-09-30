@@ -495,3 +495,14 @@ at …/chromium-1244/chrome-linux64/chrome`. Two rules:
   `npx @playwright/mcp install-browser …` pulls the LATEST MCP and installs a newer build
   (e.g. `chromium-1247`) that the running MCP still does not find.
 
+
+## Proving review-fix tests RED against the already-committed code — `git archive`, never stash (#473)
+
+When review findings are fixed in the working tree BEFORE their tests were committed, prove the
+new tests genuinely fail on the committed (pre-fix) code without touching the shared stash
+stack (worktrees share it with siblings): `git archive HEAD email-extractor | tar -x -C
+<scratch>/redcheck`, copy the working-tree `tests/*.py` over `<scratch>/redcheck/email-extractor/
+tests/`, and run just the new tests from there with the worktree's `.venv/bin/python -m pytest`
+(same `PG_TEST_DSN`, nothing else running on it). Then commit tests `[red]` first, code `[green]`
+second. Also: swapping ONE static file back (`git show HEAD:<path> > <path>`, restore after)
+is the quick way to prove a Playwright test depends on a JS change.
