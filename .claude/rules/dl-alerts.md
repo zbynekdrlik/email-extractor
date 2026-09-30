@@ -258,10 +258,13 @@ day while 3 of the 4 had been imported two days earlier — the reminder printed
   member, unknown-code line + list date, stale / never-pushed / unreadable / DB-failure
   fail-open, `lin_codes` round-trip through `generate()`, `read_files` + the production reader
   never write, agreement + `capped_list`).
-- **Mutation guards for the widening** (review round 2 — `_stuck`, the channel filter and
-  `min(uploads)` all survived deletion before): a file uploaded THIS morning is never pulled in
-  (the #133 false alarm), a row routing to another channel never joins, and „od" is the oldest
-  waiting upload — each has its own test.
+- **Mutation guards for the widening** (review rounds 2-3 — `_stuck`, the channel filter, the
+  carryover-only kind filter, both sorts and `min(uploads)` all survived deletion before): a
+  file uploaded THIS morning is never pulled in (the #133 false alarm), a row routing to another
+  channel never joins, a waiting file is NEVER widened into a failed/unknown group (those rows
+  go terminal — it would be stamped `failed` and never self-heal), the list reads oldest upload
+  first with a CODEX-rejected file on top, and „od" is the oldest waiting upload — each has its
+  own test; a fixture that is ALREADY in the asserted order proves nothing, build it reversed.
 - **Live read-only check of the text** (no Odoo post): in the add-on container build it with
   `confirm._carryover_html(conn, confirm._pending_members(conn, <incident id>,
   upload.list_dirs(cfg), confirm.DESADV_LEDGER), confirm.DESADV_LEDGER, reminder=True,
