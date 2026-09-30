@@ -1922,6 +1922,67 @@ def test_a_contest_review_names_the_doucit_way_out(pg):
     assert "Doučiť" in _review_reason(pg, "orders", ROZOK)
 
 
+# --- review 14: every line says what really happened ------------------------------------------
+
+def test_a_repick_hold_note_never_moves_rows_the_renumber_kept(pg):
+    """Review 14 🔵: 79 is picked for ROZOK while card 80 ALSO carries ROZOK; next push 79 moves
+    ROZOK → W and 80 stays — the renumber keeps the rows decided since 80 appeared (reuse
+    window). The history row stays on ROZOK; nothing may claim it „je teraz pod" W."""
+    _baseline(pg)
+    both = _reused(V1) + [_row(ROZOK, "80", "Zemiaková placka 90g")]
+    _push(pg, both, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    pg.execute("INSERT INTO item_memory (customer_ean, item_key, item_raw, gtin, card, "
+               "delivered_on, source) VALUES ('C81', 'rozok', 'rožok', %s, 'x', %s, 'ship')",
+               (ROZOK, date(2026, 9, 25)))
+    card_guard.add_from_codex(pg, "orders", ROZOK, actor="sklad")
+    moved = [dict(r, code=PAGAC_W) if r["card_code"] == "79" else r for r in both]
+    _push(pg, moved, hours_old=3)
+    codex_sync.run(pg, _cfg())
+    assert _gtin_of(pg, "C81") == ROZOK
+    body = pg.execute("SELECT body_html FROM pending_alerts ORDER BY id DESC LIMIT 1"
+                      ).fetchone()[0]
+    assert f"je teraz pod {PAGAC_W}" not in body
+    assert all(h.get("at") == _gtin_of(pg, "C81") for h in _last_report(pg)["holds"]
+               if h["scope"] == "orders" and h["gtin"] == ROZOK)
+
+
+def test_a_card_gone_with_its_code_only_elsewhere_never_promises_a_binding(pg):
+    """Review 14 🔵: card 27 left stredisko 1 and ROZOK lives on only on another stredisko —
+    no rename can bind it (nothing there is pickable); the review says so."""
+    _baseline(pg)
+    v = [r for r in V1 if r["card_code"] != "27"] + [
+        _row(ROZOK, "400", "Rožok cestovný 70g", stredisko=4)]
+    for hours in (4, 3):
+        _push(pg, v, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert reason and "priradí" not in reason and "Kôš" in reason
+
+
+def test_a_card_gone_with_its_code_on_two_cards_names_the_pick(pg):
+    """Review 14 🔵: two stredisko-1 cards carry ROZOK now — a rename cannot pick one; the
+    review names the pick."""
+    _baseline(pg)
+    v = [r for r in V1 if r["card_code"] != "27"] + [
+        _row(ROZOK, "80", "Rožok cestovný 70g"), _row(ROZOK, "81", "Bageta 70g")]
+    for hours in (4, 3):
+        _push(pg, v, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert "Vybrať kartu z CODEXu" in _review_reason(pg, "orders", ROZOK)
+
+
+def test_a_renumber_line_names_the_codex_cards_product(pg):
+    """Review 14 🔵: the picked pagáč (restored „as it was", still named like the rožok until
+    the rename) renumbers — the line names card 79's CODEX product, not our old name."""
+    _repick_reused(pg)
+    _push(pg, _reused(V1, pagac_code=PAGAC_W), hours_old=3)
+    codex_sync.run(pg, _cfg())
+    body = pg.execute("SELECT body_html FROM pending_alerts ORDER BY id DESC LIMIT 1"
+                      ).fetchone()[0]
+    assert "karta CODEX 79 „Pagáč syrový 60g“ zmenila kód" in body
+
+
 def test_held_delivery_history_on_a_retired_number_is_reported(pg):
     """Review 12 🔵: on the retired-number path a held row that is only delivery history makes
     no move and no review — the report and the ops message still say it stayed."""
