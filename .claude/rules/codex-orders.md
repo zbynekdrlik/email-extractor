@@ -430,15 +430,19 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   „Doučiť" teachback — review 12: teachback counted as history was held with no review);
   held taught rows get a review with the way out per kind (Naučené; a „Doučiť" row via the Kôš);
   held SHIPPED rows (and a NULL source) are delivery history — never sent to Naučené, and where
-  nothing else is said about them they go to `Plan.holds` (report + ONE ops line, deduped
-  against the last applied run). A restore / merge onto a number whose code another card held
+  nothing else is said about them they go to `Plan.holds` (report + ONE ops line under the
+  number they really sit on — `at`, a same-push renumber carries them — deduped by scope + code
+  + count against the last applied run, whose renumber `held` lines count too; review 13). A
+  restore / merge onto a number whose code another card held
   since C first had it (`Codex.foreign` — a round trip X → Y → X, the #478 incident's shape)
   flags its taught rows decided since then (`_adopted_review`) — adopted, never silently. In
   practice the hold matters in the dry-run / blocked / reviewed-renumber windows and for
   duplicate carriers. Residual: `dl_memory.remember` promoting / reviving an existing row keeps
   its `created_at`, so an answer about a delivery from BEFORE the reuse (same date) counts as
   C's; a round trip that completes while no renumber ran (dry-run) adopts D's rows with no
-  flag; history keeps only first/last seen per (card, code). The class closes only when every
+  flag; history keeps only first/last seen per (card, code) — and its `name` advances ONLY with
+  `last_seen` (an older re-sent list, recorded too, must never set a newer name back:
+  `same_product` reads it — review 13 🟡). The class closes only when every
   memory writer records the CODEX card a row was taught for (the binding / the pick's
   `codex_card` — a cross-cutting schema change, follow-up candidate). One review entry per card
   keeps every reason in `reasons`; the ops alert dedups PER reason. A renumber carries only OUR
