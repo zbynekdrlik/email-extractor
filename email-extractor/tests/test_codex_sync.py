@@ -30,6 +30,9 @@ from app.orders import card_guard, codex_cards, codex_sync, dl_snapshot, snapsho
 
 PG_DSN = os.environ.get("PG_TEST_DSN")
 NOW = datetime.now(UTC)
+# a mapping taught long before any synthetic CODEX push of a test — the pushes are hours old,
+# a row inserted „now" is AFTER them (review 10: rows decided during a reuse are held)
+_BEFORE = NOW - timedelta(hours=12)
 
 ROZOK = "9990000000017"        # CODEX card 27 — the incident card, renumbered below
 ROZOK_NEW = "9990000000093"    # card 27's new code
@@ -80,18 +83,20 @@ def _seed_catalogs(pg):
 
 
 def _seed_memory(pg, gtin=ROZOK):
+    """The card's learned history — taught / shipped long BEFORE the test's CODEX pushes."""
     pg.execute(
         "INSERT INTO item_memory (customer_ean, item_key, item_raw, gtin, card, delivered_on, "
-        "source) VALUES ('C1', 'rozok slanina', 'rožok slanina', %s, 'Rožok', %s, 'ship'), "
-        "('C2', 'rozky so slaninou', 'rožky so slaninou', %s, 'Rožok', %s, 'human')",
-        (gtin, date(2026, 9, 1), gtin, date(2026, 9, 2)))
+        "source, created_at) VALUES ('C1', 'rozok slanina', 'rožok slanina', %s, 'Rožok', %s, "
+        "'ship', %s), ('C2', 'rozky so slaninou', 'rožky so slaninou', %s, 'Rožok', %s, "
+        "'human', %s)", (gtin, date(2026, 9, 1), _BEFORE, gtin, date(2026, 9, 2), _BEFORE))
     pg.execute(
-        "INSERT INTO global_item_memory (item_key, item_raw, gtin, card, taught_by) "
-        "VALUES ('slaninovy rozok', 'slaninový rožok', %s, 'Rožok', 'sklad')", (gtin,))
+        "INSERT INTO global_item_memory (item_key, item_raw, gtin, card, taught_by, created_at) "
+        "VALUES ('slaninovy rozok', 'slaninový rožok', %s, 'Rožok', 'sklad', %s)",
+        (gtin, _BEFORE))
     pg.execute(
         "INSERT INTO dl_item_memory (supplier_ean, item_key, item_raw, gtin, card, "
-        "delivered_on, cnt, source) VALUES ('S1', 'rozok slanina 70', 'Rožok slanina 70g', "
-        "%s, 'Rožok', %s, 1, 'ship')", (gtin, date(2026, 9, 3)))
+        "delivered_on, cnt, source, created_at) VALUES ('S1', 'rozok slanina 70', "
+        "'Rožok slanina 70g', %s, 'Rožok', %s, 1, 'ship', %s)", (gtin, date(2026, 9, 3), _BEFORE))
 
 
 def _gtins(pg, table):
@@ -1447,8 +1452,9 @@ def test_a_restored_number_renamed_to_its_own_cards_new_codex_name_is_merged_bac
 
 def test_a_twins_late_row_never_drags_a_repicked_numbers_rows(pg):
     """Review 9 🔵 F3: ROZOK and its legacy „0"+code twin retired; ROZOK re-picked as the pagáč
-    (a pagáč wording), deleted again; a late row lands on the twin — only the twin's row may
-    follow the rožok, never the pagáč's row on ROZOK."""
+    (a pagáč wording), deleted again; a late row lands on the twin — the pagáč's row on ROZOK
+    never follows the rožok. Review 10 (contract changed): the twin's late row was decided
+    AFTER CODEX gave ROZOK to the pagáč, so it is held for a human too, never moved."""
     _seed_catalogs(pg)
     snapshot.upsert_catalog_card(pg, "0" + ROZOK, "Rožok so slaninou 70g")
     snapshot.rebuild_from_overrides(pg)
@@ -1463,7 +1469,8 @@ def test_a_twins_late_row_never_drags_a_repicked_numbers_rows(pg):
     _push(pg, _reused(V1), hours_old=4)
     codex_sync.run(pg, _cfg())
     assert _gtin_of(pg, "C8") == ROZOK
-    assert _gtin_of(pg, "C9") == ROZOK_NEW
+    assert _gtin_of(pg, "C9") == "0" + ROZOK
+    assert "Naučené" in _review_reason(pg, "orders", ROZOK)
 
 
 def test_a_lone_legacy_twin_keeps_its_cards_binding(pg):
@@ -1517,8 +1524,6 @@ def test_a_blocked_run_never_says_rows_were_moved(pg):
 
 
 # --- review 10: rows decided during a reuse are held; the group follows through ----------------
-
-_BEFORE = NOW - timedelta(hours=12)      # a mapping taught long before the code change
 
 
 def test_a_wording_taught_while_codex_gave_our_code_to_another_card_is_held(pg):
