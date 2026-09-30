@@ -132,6 +132,15 @@ def test_a_stale_codex_list_is_still_offered_with_the_warning(pg):
     assert data["codex"]["stale"] is True and data["codex"]["active"] is False
 
 
+def test_the_picker_freshness_is_the_full_list_meta_without_loading_the_list(pg):
+    """The picker asks the list's freshness on every search — `codex_cards.freshness` reads
+    it from the sync ledger alone and must equal `meta_for(load())` in every state."""
+    assert codex_cards.freshness(pg) == codex_cards.meta_for(codex_cards.load(pg))  # never
+    for hours in (1, codex_cards.STALE_HOURS + 2):
+        _codex(pg, hours_old=hours)
+        assert codex_cards.freshness(pg) == codex_cards.meta_for(codex_cards.load(pg))
+
+
 def test_the_picker_marks_the_cards_we_already_have_and_the_ones_in_the_kos(pg):
     _base(pg)
     _codex(pg)

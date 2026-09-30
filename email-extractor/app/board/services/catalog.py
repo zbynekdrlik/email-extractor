@@ -8,7 +8,8 @@ engines, never copy them"). What IS genuinely new: one board read over BOTH cata
 (reachable by the `sklad` role, DL was admin-only before), searchable + paged, and soft
 delete + audit. The per-card ALIAS manager lives in the sibling `catalog_aliases.py` (kept
 separate to hold each module ≤200 r., spec §3). Every change writes an `audit_log` row via
-the leaf `audit.record` (spec §5).
+the leaf `audit.record` (spec §5). #477: the tabs only EDIT and delete — a new card enters the
+catalog solely through the CODEX pick on a question (`orders.card_guard.add_from_codex`).
 """
 from __future__ import annotations
 
@@ -134,36 +135,26 @@ def card_detail(conn, scope: str, gtin: str) -> dict | None:
 
 
 def upsert(conn, scope: str, body: dict, actor: str) -> dict:
-    """Create or edit a card via the SAME snapshot machinery /znalosti uses, + an audit row.
-    Raises `ValueError` (→ 400) when gtin/name are missing, `codex_cards.CardRefused` (→ 409)
-    for a `new: true` card whose number already has one (never an overwrite — the orders form
-    would clear the alias, the DL one mass/sklad/cena) and for a DL number `card_guard` / CODEX
-    refuses (a number written unlike CODEX, CODEX lacks it, in the Kôš; an edit is
-    CODEX-checked only)."""
+    """EDIT a card via the SAME snapshot machinery /znalosti uses, + an audit row. Raises
+    `ValueError` (→ 400) when gtin/name are missing, `card_guard.CreateBlocked` (→ 403) for a
+    number we do not have or a `new: true` POST (#477: a card enters the catalog only by the
+    CODEX pick, `card_guard.add_from_codex` — never typed here), and `codex_cards.CardRefused`
+    (→ 409) for a DL card whose number CODEX lacks (#467, fail-open)."""
     cfg = _scope(scope)
     gtin = str(body.get("gtin") or "").strip()
     name = str(body.get("name") or "").strip()
     if not (gtin and name):
         raise ValueError("chýba číslo položky alebo názov")
     rows = cfg["for_management"](conn)
-    current = next((r for r in rows if r["gtin"] == gtin), None)
-    existed = current is not None
-    if body.get("new") and scope == "dl":
-        # #467: the ONE new-DL-card gate (zeros, CODEX, a number we have, one in the Kôš)
-        card_guard.guard_new_dl_card(conn, gtin, name)
-    elif body.get("new") and current is not None:
-        raise card_guard.taken(current)
-    elif scope == "dl":
-        # #467: a NEW number without the flag is never written unlike CODEX (a duplicate for
-        # one code); an edit of a DL card whose number CODEX lacks is refused too (fail-open)
-        if current is None:
-            card_guard.refuse_code_variant(gtin, rows)
+    if body.get("new"):
+        raise card_guard.blocked()
+    card_guard.refuse_typed_card(rows, gtin)
+    if scope == "dl":
         codex_cards.check_card_code(conn, gtin, name, catalog=rows)
     cfg["upsert"](conn, gtin, name, body)
-    action = "update" if existed else "create"
-    audit.record(conn, actor=actor, table=cfg["override_table"], row_id=gtin, action=action,
+    audit.record(conn, actor=actor, table=cfg["override_table"], row_id=gtin, action="update",
                  after={"gtin": gtin, "name": name})
-    return {"action": action}
+    return {"action": "update"}
 
 
 def delete(conn, scope: str, gtin: str, actor: str) -> bool:

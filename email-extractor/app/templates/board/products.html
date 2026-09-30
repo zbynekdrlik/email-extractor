@@ -1,12 +1,16 @@
 {# Produkty sklad / Produkty objednávky content (#445). Filled in by tab-products.js, which
    reads the scope from #board-main[data-scope] and calls /api/board/products. The card
    editor (fields, alias form) is built from the list response `meta` — one template, both
-   scopes. No HTML in JS strings: every node is built via ui.js `el()`. #}
+   scopes. No HTML in JS strings: every node is built via ui.js `el()`. Edit + delete only
+   (#477). #}
 <section class="board-products">
   <div class="p-toolbar">
     <input id="p-search" class="p-search" type="search" autocomplete="off"
            placeholder="Hľadať (číslo položky, názov, doplnok, alias…)">
-    <button id="p-new" class="p-btn p-btn--primary" type="button">➕ Nová karta</button>
+    {# #477 (owner order 2026-09-30): no „Nová karta" — a card enters the catalog only by
+       „Vybrať kartu z CODEXu" on a question (CODEX is the one source of a card's code + name). #}
+    <span class="p-add-note">Novú kartu pridáš len pri otázke tlačidlom „Vybrať kartu z CODEXu“ —
+      kód aj názov prídu z CODEXu. Tu kartu upravíš alebo zmažeš.</span>
     {# #467 (Produkty sklad only — tab-products.js hides it for the orders scope): the CODEX
        stock-card list status + a filter to the cards whose name/number disagrees with CODEX. #}
     <label class="p-codex-filter" hidden>

@@ -169,6 +169,11 @@ def register(app: Flask, deps: Deps) -> None:
         else:
             alias = None
         with deps.db() as c:
+            # #477: an edit only — a NEW number is refused 403 (cards come from the CODEX pick)
+            try:
+                card_guard.refuse_typed_card(snapshot.catalog_for_management(c), gtin)
+            except codex_cards.CardRefused as e:
+                return jsonify(**e.payload), e.status
             snapshot.upsert_catalog_card(c, gtin, name, alias=alias)
             snapshot.rebuild_from_overrides(c)
         return jsonify(ok=True)
@@ -278,16 +283,15 @@ def register(app: Flask, deps: Deps) -> None:
         if not (gtin and name):
             return jsonify(error="chýba GTIN alebo názov"), 400
         with deps.db() as c:
-            # #467: the same card-code guards as the board — a legacy API write must not be
-            # the back door for a code CODEX rejects the whole delivery note for, nor for a new
-            # number written unlike CODEX (a second card for one CODEX code).
+            # the same guards as the board — a legacy API write is no back door: a NEW number
+            # is refused 403 (#477, cards come from the CODEX pick), an edit of a card whose
+            # code CODEX lacks 409 (#467 — CODEX would reject the whole delivery note).
             catalog = dl_snapshot.dl_catalog_for_management(c)
             try:
-                if not any(str(r.get("gtin")) == gtin for r in catalog):
-                    card_guard.refuse_code_variant(gtin, catalog)
+                card_guard.refuse_typed_card(catalog, gtin)
                 codex_cards.check_card_code(c, gtin, name, catalog=catalog)
             except codex_cards.CardRefused as e:
-                return jsonify(**e.payload), 409
+                return jsonify(**e.payload), e.status
             dl_snapshot.upsert_dl_catalog_card(
                 c, gtin, name, doplnok=str(body.get("doplnok") or "").strip(),
                 mass=dl_snapshot.parse_number(body.get("mass")),

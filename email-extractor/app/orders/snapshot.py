@@ -354,6 +354,16 @@ def catalog_for_management(conn) -> list[dict]:
     return [dict(r, overridden=r["gtin"] in overrides) for r in merged]
 
 
+def deleted_catalog_cards(conn) -> list[dict]:
+    """#477: the orders card overrides the loader HIDES (`retired OR deleted_at IS NOT NULL` —
+    the exact rule of `_load_catalog_overrides`), i.e. the numbers sitting in the Kôš — the
+    orders twin of `dl_snapshot.deleted_dl_cards`. The caller matches them by CODEX code
+    (`card_guard.same_code_card`, the ONE normalizer)."""
+    rows = conn.execute("SELECT gtin, name FROM catalog_overrides "
+                        "WHERE retired OR deleted_at IS NOT NULL ORDER BY gtin").fetchall()
+    return [{"gtin": r[0], "name": r[1]} for r in rows]
+
+
 def upsert_catalog_card(conn, gtin: str, name: str, alias: str | None = None) -> None:
     """Add a brand-new card, or edit an existing one (sheet-derived or already
     overridden) — same call either way, keyed by gtin.

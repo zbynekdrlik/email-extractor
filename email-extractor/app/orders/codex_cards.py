@@ -75,8 +75,10 @@ class ReplaceRefused(Exception):
 
 
 class CardRefused(Exception):
-    """A DL card number the board must not save; `payload` is the 409 JSON body (`error`, and
-    `existing` when the number already has a card)."""
+    """A card number the board must not save or pick; `payload` is the JSON body (`error`, and
+    `codex` for a CODEX refusal), `status` the HTTP code the endpoint answers with."""
+
+    status = 409
 
     def __init__(self, payload: dict):
         super().__init__(payload.get("error", ""))
@@ -254,10 +256,14 @@ class CodexCards:
         return out
 
     def meta(self) -> dict:
-        return {"active": not self.stale, "stale": self.stale, "codes": len(self.names),
-                "as_of": self.as_of.isoformat() if self.as_of else None,
-                "as_of_local": _local(self.as_of),
-                "synced_at": self.synced_at.isoformat() if self.synced_at else None}
+        return _meta(self.as_of, self.synced_at, self.stale, len(self.names))
+
+
+def _meta(as_of: datetime | None, synced_at: datetime | None, stale: bool, codes: int) -> dict:
+    """The ONE shape of the board's list-freshness status (`CodexCards.meta`, `freshness`)."""
+    return {"active": not stale, "stale": stale, "codes": codes,
+            "as_of": as_of.isoformat() if as_of else None, "as_of_local": _local(as_of),
+            "synced_at": synced_at.isoformat() if synced_at else None}
 
 
 def load(conn, now: datetime | None = None) -> CodexCards | None:
@@ -372,6 +378,18 @@ def meta_for(cards: CodexCards | None) -> dict:
         return {"active": False, "stale": False, "codes": 0, "as_of": None,
                 "as_of_local": None, "synced_at": None, "never": True}
     return cards.meta()
+
+
+def freshness(conn, now: datetime | None = None) -> dict:
+    """`meta_for(load(conn))` read from the sync ledger ALONE — the same status dict without
+    loading the whole ~6k-row list (the #477 picker asks it on every search). `code_count` is
+    the distinct codes of that push, exactly `len(load(conn).names)`."""
+    sync = latest_sync(conn)
+    if sync is None:
+        return meta_for(None)
+    as_of = _data_as_of(sync)
+    stale = ((now or datetime.now(UTC)) - as_of) > timedelta(hours=STALE_HOURS)
+    return _meta(as_of, sync["synced_at"], stale, sync["code_count"])
 
 
 # --- the ops alert for a stopped push -------------------------------------------------------

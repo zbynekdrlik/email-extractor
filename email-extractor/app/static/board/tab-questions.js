@@ -24,7 +24,7 @@ function editingOpen() {
   if (searchEl && document.activeElement === searchEl) return true;
   if (!listEl) return false;
   if (listEl.querySelector(".q-inline-form")) return true;
-  for (const inp of listEl.querySelectorAll(".q-qty, .q-price, .q-freein, .q-in, .q-massin")) {
+  for (const inp of listEl.querySelectorAll(".q-qty, .q-price, .q-in, .q-massin")) {
     if (document.activeElement === inp) return true;
     if (inp.value && inp.value.trim()) return true;
   }
@@ -57,6 +57,85 @@ function candidateButton(q, cand) {
     } }, [label, aka]);
 }
 
+// ---- #477: „Vybrať kartu z CODEXu" — the ONE way a card that is not offered reaches the
+// question. The server lists the pushed CODEX cards (sklad-scoped per question kind); a pick
+// selects our card when we already have the code, else adds exactly that CODEX card (code +
+// CODEX name) to the catalog, then answers through the normal path. Nothing is ever typed as
+// a new card (owner order 2026-09-30). -------------------------------------------------------
+const PICK_SCOPE = { item: "orders", dl_item: "dl" };
+
+function codexStatusText(m) {
+  if (!m || m.never) return "⚠ Zoznam kariet z CODEXu ešte neprišiel — výber zatiaľ nie je možný.";
+  if (m.stale) {
+    return `⚠ Zoznam kariet z CODEXu je zastaraný (stav k ${m.as_of_local}) — karty založené `
+      + "v CODEXe odvtedy tu ešte nie sú.";
+  }
+  return `Karty z CODEXu: stav k ${m.as_of_local} — hľadaj podľa názvu alebo kódu.`;
+}
+
+function toggleCodexPicker(q) {
+  const card = document.getElementById(`q-card-${q.id}`);
+  if (!card) return;
+  let form = card.querySelector(".q-inline-form");
+  if (form) { form.remove(); card.removeAttribute("data-open"); return; }
+  card.setAttribute("data-open", "1");
+  const search = el("input", { class: "q-in q-codex-search", type: "search",
+    placeholder: "Hľadaj v CODEXe — názov alebo kód karty", autocomplete: "off" });
+  const status = el("div", { class: "q-codex-status" }, "Načítavam zoznam kariet z CODEXu…");
+  const results = el("div", { class: "q-codex-results" });
+  const close = () => { form.remove(); card.removeAttribute("data-open"); };
+  form = el("div", { class: "q-inline-form q-codex-picker" }, [
+    search, status, results,
+    el("button", { class: "q-btn", type: "button", onclick: close }, "Zrušiť"),
+  ]);
+  let seq = 0;
+  const run = async () => {
+    const mine = ++seq;
+    const text = search.value.trim();
+    try {
+      const params = new URLSearchParams({ scope: PICK_SCOPE[q.kind] || "dl", q: text });
+      const data = await apiGet(`/codex-cards?${params.toString()}`);
+      if (mine !== seq) return;   // a newer search already answered — never show a stale list
+      const items = data.items || [];
+      let line = codexStatusText(data.codex);
+      if (text && !items.length) line += " Nič sa nenašlo.";
+      else if (data.total > items.length) line += ` Zobrazených ${items.length} z ${data.total} — spresni hľadanie.`;
+      status.textContent = line;
+      status.classList.toggle("is-warn", !data.codex || !data.codex.active);
+      clear(results);
+      for (const c of items) results.appendChild(codexChoice(q, c));
+    } catch (e) { toast(e.message, { error: true }); }
+  };
+  search.addEventListener("input", debounce(run, 300));
+  card.appendChild(form);
+  run();          // the list's freshness (a stale-list warning) shows before any typing
+  search.focus();
+}
+
+function codexChoice(q, c) {
+  const facts = [c.card_code ? `karta ${c.card_code}` : null,
+    q.kind === "dl_item" ? `sklad ${c.sklad}` : null];
+  if (c.in_catalog) facts.push(`u nás: ${c.catalog_name}`);
+  else if (c.in_trash) facts.push("u nás v Koši — obnov ju na záložke Kôš");
+  else facts.push("nová karta");
+  const pick = c.in_trash ? null : el("button", {
+    class: "q-btn q-btn--primary q-codex-pick", type: "button", "data-code": c.code,
+    onclick: () => pickCodex(q, c.code, c.in_catalog ? c.catalog_name : c.name, c.name),
+  }, c.in_catalog ? "Vybrať" : "Pridať a vybrať");
+  return el("div", { class: "q-codex-choice", "data-code": c.code }, [
+    el("span", { class: "q-codex-choice-name" }, `${c.code} — ${c.name}`),
+    el("span", { class: "q-codex-choice-facts" }, facts.filter(Boolean).join(" · ")),
+    pick,
+  ]);
+}
+
+function pickCodex(q, code, cardName, codexName) {
+  if (q.kind === "dl_item" && !confirmUnrelated(q.wording, cardName, codexName)) return;
+  const body = { codex_card: { code } };
+  if (q.kind === "item") Object.assign(body, lineEdits(q));
+  submit(q.id, body, q);
+}
+
 // ---- #467: a card number CODEX has no stock card for — the server refuses it (409) and
 // names CODEX cards with a similar name + code; one click uses the right card -------------
 function showCodexHint(q, data) {
@@ -74,22 +153,16 @@ function codexHint(q, data) {
     submit(q.id, { choice: code }, q);
   };
   const rows = [];
-  if (data.existing) {
-    rows.push(el("div", { class: "q-codex-row" }, [
-      el("span", {}, `${data.existing.gtin} — ${data.existing.name}`),
-      el("button", { class: "q-btn q-codex-use", type: "button", "data-code": data.existing.gtin,
-        onclick: () => pick(data.existing.gtin, data.existing.name, "") },
-      `Použiť kartu „${data.existing.name}“`),
-    ]));
-  }
   const similar = (data.codex && data.codex.similar) || [];
   for (const s of similar) {
+    // #477: a CODEX card we do not have yet is ADDED through the same pick as the picker —
+    // never a typed card
     const btn = s.in_catalog
       ? el("button", { class: "q-btn q-codex-use", type: "button", "data-code": s.code,
         onclick: () => pick(s.catalog_gtin || s.code, s.catalog_name, s.name) },
       `Použiť kartu „${s.catalog_name}“`)
       : el("button", { class: "q-btn q-codex-new", type: "button", "data-code": s.code,
-        onclick: () => prefillNewItem(q, s.code, s.name) }, "Založiť kartu s týmto kódom");
+        onclick: () => pickCodex(q, s.code, s.name, s.name) }, "Pridať kartu z CODEXu");
     rows.push(el("div", { class: "q-codex-row" }, [
       el("span", {}, `${s.code} — ${s.name}`), btn]));
   }
@@ -102,17 +175,6 @@ function codexHint(q, data) {
   hint.appendChild(el("button", { class: "q-btn q-codex-close", type: "button",
     onclick: () => { delete state.codexHints[q.id]; hint.remove(); } }, "Zavrieť"));
   return hint;
-}
-
-// Open (or reuse) the „➕ Nová karta" form of this card, prefilled with a CODEX card's code.
-function prefillNewItem(q, code, name) {
-  const card = document.getElementById(`q-card-${q.id}`);
-  if (!card) return;
-  if (!card.querySelector(".q-inline-form")) toggleForm(q, FORM_OPS.new_item, null);
-  const gtinIn = card.querySelector(".q-in-gtin");
-  const nameIn = card.querySelector(".q-in-name");
-  if (gtinIn) gtinIn.value = code;
-  if (nameIn && !nameIn.value.trim()) nameIn.value = name;
 }
 
 // ---- #465: a dl_item pick sharing NO word with the delivery-note line --------------------
@@ -168,14 +230,17 @@ const SIMPLE_OPS = {
   dl_unknown: () => ({ choice: "unknown" }),
 };
 
+// Partners only — a product card is never typed (#477, `codex_pick` below).
 const FORM_OPS = {
-  new_product: { key: "new_product", fields: [["gtin", "Číslo položky"], ["name", "Názov karty"]] },
-  new_item: { key: "new_item", fields: [["gtin", "Číslo položky"], ["name", "Názov karty"]] },
   new_customer: { key: "new_customer", fields: [["ean_edi", "EAN zákazníka"], ["name", "Názov"]] },
   new_supplier: { key: "new_supplier", fields: [["ean_edi", "EAN dodávateľa"], ["name", "Názov"]] },
 };
 
 function actionButton(q, act) {
+  if (act.op === "codex_pick") {
+    return el("button", { class: "q-btn q-btn--act q-codex-open", type: "button",
+      onclick: () => toggleCodexPicker(q) }, act.label);
+  }
   if (SIMPLE_OPS[act.op]) {
     return el("button", { class: "q-btn q-btn--act", type: "button",
       onclick: () => submit(q.id, { ...SIMPLE_OPS[act.op](), ...(q.kind === "item" ? lineEdits(q) : {}) }) },
@@ -201,9 +266,7 @@ function toggleForm(q, spec, btn) {
     el("button", { class: "q-btn q-btn--primary", type: "button", onclick: () => {
       const payload = {};
       spec.fields.forEach(([name], i) => { payload[name] = inputs[i].value.trim(); });
-      const body = { [spec.key]: payload };
-      if (q.kind === "item") Object.assign(body, lineEdits(q));
-      submit(q.id, body, q);
+      submit(q.id, { [spec.key]: payload }, q);
     } }, "Uložiť"),
     el("button", { class: "q-btn", type: "button",
       onclick: () => { form.remove(); card.removeAttribute("data-open"); } }, "Zrušiť"),
@@ -246,18 +309,8 @@ function card(q) {
         value: q.unit_price != null ? String(q.unit_price) : "" })]),
     ]));
   }
-  if (q.kind === "item" || q.kind === "dl_item") {
-    box.appendChild(el("div", { class: "q-freecard" }, [
-      el("input", { class: "q-freein", type: "text", placeholder: "Iné číslo položky (GTIN)",
-        autocomplete: "off" }),
-      el("button", { class: "q-btn", type: "button", onclick: () => {
-        const g = box.querySelector(".q-freein").value.trim();
-        if (!g) { toast("Zadaj číslo položky", { error: true }); return; }
-        submit(q.id, q.kind === "item"
-          ? { gtin: g, card: "", ...lineEdits(q) } : { choice: g }, q);
-      } }, "Priradiť"),
-    ]));
-  }
+  // #477: no free „iné číslo položky" box — a card that is not offered is found with
+  // „Vybrať kartu z CODEXu" (search by name or code), never typed.
   // #462: a dl_mass question is answered with a plain number (kg per piece), not a card.
   if (q.kind === "dl_mass") {
     box.appendChild(el("div", { class: "q-massedit" }, [
@@ -318,9 +371,9 @@ async function submit(qid, body, q = null) {
     toast("Uložené");
     await load();
   } catch (e) {
-    // #467: a dl_item refusal with structured help (a card number CODEX lacks / a number we
-    // already have) is shown on the card with one-click fixes, not only as a toast.
-    if (q && q.kind === "dl_item" && e.data && (e.data.codex || e.data.existing)) {
+    // #467: a dl_item refusal with structured help (a card number CODEX lacks + similar CODEX
+    // cards) is shown on the card with one-click fixes, not only as a toast.
+    if (q && q.kind === "dl_item" && e.data && e.data.codex) {
       showCodexHint(q, e.data);
     }
     toast(e.message, { error: true });
