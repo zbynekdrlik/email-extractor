@@ -50,6 +50,8 @@ options:
   static_orders_shadow_days: 3
   ai_not_order_discard: false
   codex_sync_apply: false
+  codex_sync_max_code_changes: 10
+  codex_sync_max_renames: 80
   orders_spend_cap_eur: 30
   openai_api_key: ""
   orders_model: "gpt-5.4"
@@ -122,6 +124,8 @@ schema:
   static_orders_shadow_days: int?
   ai_not_order_discard: bool?
   codex_sync_apply: bool?
+  codex_sync_max_code_changes: int?
+  codex_sync_max_renames: int?
   orders_spend_cap_eur: float?
   openai_api_key: password?
   orders_model: str?

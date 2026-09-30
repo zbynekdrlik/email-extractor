@@ -102,6 +102,11 @@ class Config:
     # `codex_sync_runs`, but writes nothing to a catalog or memory. Flip to true (a deliberate
     # operator decision, after the owner reviewed the dry-run report on #478) to apply them.
     codex_sync_apply: bool = False
+    # #478 circuit breaker: more distinct codes renumbered/removed, or more cards renamed, in
+    # ONE push → the sync applies nothing and asks ops (a broken CODEX export). Raise for a
+    # genuine mass change in CODEX, then lower back.
+    codex_sync_max_code_changes: int = 10
+    codex_sync_max_renames: int = 80
     orders_spend_cap_eur: float = 30.0
     openai_api_key: str = ""
     orders_model: str = "gpt-5.4"
@@ -291,6 +296,10 @@ class Config:
             codex_sync_apply=str(
                 _get(o, "codex_sync_apply", "CODEX_SYNC_APPLY", "false")).lower() in (
                     "1", "true", "yes", "on"),
+            codex_sync_max_code_changes=int(_get(
+                o, "codex_sync_max_code_changes", "CODEX_SYNC_MAX_CODE_CHANGES", 10) or 10),
+            codex_sync_max_renames=int(_get(
+                o, "codex_sync_max_renames", "CODEX_SYNC_MAX_RENAMES", 80) or 80),
             orders_spend_cap_eur=float(
                 _get(o, "orders_spend_cap_eur", "ORDERS_SPEND_CAP_EUR", 30) or 0),
             openai_api_key=_get(o, "openai_api_key", "OPENAI_API_KEY", "") or "",
