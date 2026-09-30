@@ -366,8 +366,12 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   number (round 5 🟡: re-identifying it from the list bound it to the pagáč reusing the code).
   A Kôš `restore` row is never a new card (round 4 🟡). Three places deciding identity with
   different rules was the root of rounds 3-5 — never add a fourth, extend `_known`.
-  A binding that REPLACES another card's (a pick, a recreated card) is stored only by an APPLIED
-  run, so a pick seen during a dry-run / blocked run still gets its reset later. A pick of a
+  A binding that REPLACES another card's on a PICK is stored only by an APPLIED run, so a pick
+  seen during a dry-run / blocked run still gets its reset later; a rebind on DURABLE evidence
+  (a recreated card carrying our code under our name; a restored retired number a human renamed
+  to the product that now carries the code — round 6) is stored in every mode. The memory path
+  asks `_known` too: a retired number picked as another product keeps its rows; rows written to
+  it BEFORE the pick follow the old product's live number (`created_at < pick`). A pick of a
   number whose picked CODEX card's name is not ours (a different product) → `resets`: the old
   product's alias / doplnok / mass / cena cleared, sklad := the picked card's (the pick restored
   the Kôš card "as it was"); a re-pick of the SAME product under a second CODEX card keeps its
