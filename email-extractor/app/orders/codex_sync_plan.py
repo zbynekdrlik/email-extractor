@@ -534,10 +534,12 @@ class _ScopePlanner:
             return
         item["codex_card"] = card
         if item.pop("reset_from", None) is not None:
-            self._reset(item, self.live[item["gtin"]])
+            # every number of the group — a legacy twin keeps no old-product data either
+            for g in gtins:
+                self._reset(dict(item, gtin=g), self.live[g])
             # a renumber / fill later in this plan carries the RESET data, never the old
             # product's (review 5 🟡)
-            group = [self.live[item["gtin"]], *group[1:]]
+            group = [self.live[g] for g in gtins]
         if cx.rows(card, code):              # our CODEX card still carries our code
             for g in gtins:
                 self.identity[g] = (card, code)
