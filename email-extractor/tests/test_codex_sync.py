@@ -399,17 +399,205 @@ def test_the_sync_never_adds_a_codex_card_we_do_not_have(pg):
     assert "9990000000123" in _dl(pg), "the DL card itself was renumbered"
 
 
-def test_too_many_code_changes_at_once_apply_nothing(pg, monkeypatch):
+def test_too_many_code_changes_at_once_apply_nothing(pg):
     """A half-broken CODEX export that still passes the push's shrink guard must not strip
-    our catalogs: over the limit the code changes wait for a human."""
-    monkeypatch.setattr(codex_sync, "MAX_CODE_CHANGES", 1)
+    our catalogs: over the limit (the `codex_sync_max_code_changes` option) the code changes
+    wait for a human."""
     _baseline(pg)
     _push(pg, [r for r in _v2_renumbered() if r["code"] != KOLAC], hours_old=1)
-    res = codex_sync.run(pg, _cfg())
+    res = codex_sync.run(pg, _cfg(codex_sync_max_code_changes=1))
     assert res["mode"] == "blocked"
     assert ROZOK in _orders(pg) and KOLAC in _orders(pg)
     body = pg.execute("SELECT body_html FROM pending_alerts").fetchone()[0]
-    assert "naraz" in body
+    assert "naraz" in body and "codex_sync_max_code_changes" in body
+
+
+def test_a_blocked_plan_alerts_once_not_on_every_push(pg):
+    """Review 🟡: the same blocked plan pushed again twice a day must not re-post the same
+    ZASTAVILA message every time (once, then at most a morning reminder)."""
+    _baseline(pg)
+    lst = [r for r in V1 if r["code"] not in (KOLAC, CHLIEB)]
+    _push(pg, lst, hours_old=3)
+    assert codex_sync.run(pg, _cfg(codex_sync_max_code_changes=1))["mode"] == "blocked"
+    _push(pg, lst, hours_old=1)
+    assert codex_sync.run(pg, _cfg(codex_sync_max_code_changes=1))["mode"] == "blocked"
+    assert pg.execute("SELECT count(*) FROM pending_alerts").fetchone()[0] == 1
+
+
+def test_a_garbled_export_renaming_everything_is_blocked(pg):
+    """Review 🟡: a mojibake CODEX export makes every card drift — over
+    `codex_sync_max_renames` nothing is renamed."""
+    _baseline(pg)
+    garbled = [dict(r, name=r["name"].replace("ž", "Å¾").replace("á", "Ã¡") + " ??")
+               for r in V1]
+    _push(pg, garbled, hours_old=1)
+    res = codex_sync.run(pg, _cfg(codex_sync_max_renames=2))
+    assert res["mode"] == "blocked" and res["renamed"] >= 3
+    assert _orders(pg)[ROZOK]["name"] == "Rožok so slaninou 70g"
+    assert "ZASTAVILA" in pg.execute("SELECT body_html FROM pending_alerts").fetchone()[0]
+
+
+def test_dry_run_reports_that_an_apply_would_be_blocked(pg):
+    _seed_catalogs(pg)
+    _push(pg, V1, hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    _push(pg, [r for r in _v2_renumbered() if r["code"] != KOLAC], hours_old=1)
+    res = codex_sync.run(pg, _cfg(apply=False, codex_sync_max_code_changes=1))
+    assert res["mode"] == "dry-run" and res["would_block"] is True
+    report = pg.execute("SELECT report FROM codex_sync_runs ORDER BY id DESC LIMIT 1"
+                        ).fetchone()[0]
+    assert report["would_block"] is True
+
+
+# --- a code REUSED by another CODEX card (review 🔴) ---------------------------------------
+
+def test_a_code_reused_by_another_card_is_followed_never_renamed_to_it(pg):
+    """Card 27 moves ROZOK → ROZOK_NEW and card 79 (a pagáč) takes ROZOK: our rožok card
+    follows ITS card to ROZOK_NEW — it is never renamed to „Pagáč"."""
+    _baseline(pg)
+    _seed_memory(pg)
+    v2 = [dict(r, code=ROZOK_NEW) if r["code"] == ROZOK
+          else dict(r, code=ROZOK) if r["code"] == CUDZIA else r for r in V1]
+    _push(pg, v2, hours_old=1)
+    res = codex_sync.run(pg, _cfg())
+    assert res["renumbered"] == 2 and res["renamed"] == 0
+    orders = _orders(pg)
+    assert ROZOK not in orders
+    assert orders[ROZOK_NEW]["name"] == "Rožok so slaninou 70g"
+    assert orders[ROZOK_NEW]["alias"] == "rozok slanina"
+    assert set(_gtins(pg, "item_memory")) == {ROZOK_NEW}
+
+
+def test_two_of_our_cards_swapping_codes_are_left_for_a_human(pg):
+    """Card 27 takes CHLIEB's code and card 31 takes ROZOK's: nothing is merged, nothing is
+    renamed to the other product — both go to review."""
+    _baseline(pg)
+    _seed_memory(pg)
+    v2 = [dict(r, code=CHLIEB) if r["code"] == ROZOK
+          else dict(r, code=ROZOK) if r["code"] == CHLIEB else r for r in V1]
+    _push(pg, v2, hours_old=1)
+    res = codex_sync.run(pg, _cfg())
+    assert (res["renumbered"], res["renamed"]) == (0, 0) and res["review"] >= 2
+    orders = _orders(pg)
+    assert orders[ROZOK]["name"] == "Rožok so slaninou 70g"
+    assert orders[CHLIEB]["name"] == "Chlieb pšeničný 1000g"
+    assert set(_gtins(pg, "item_memory")) == {ROZOK}
+
+
+def test_a_code_moved_to_another_stredisko_is_reviewed_once(pg):
+    """Review 🔵: one card, one review entry — never two with different reasons."""
+    _baseline(pg)
+    v2 = [dict(r, stredisko=4, name="Koláč tvarohový 90g") if r["code"] == KOLAC else r
+          for r in V1]
+    _push(pg, v2, hours_old=1)
+    codex_sync.run(pg, _cfg())
+    report = pg.execute("SELECT report FROM codex_sync_runs ORDER BY id DESC LIMIT 1"
+                        ).fetchone()[0]
+    assert [(r["scope"], r["gtin"]) for r in report["review"]] == [
+        ("orders", KOLAC), ("dl", KOLAC)]
+    assert _orders(pg)[KOLAC]["name"] == "Koláč makový 80g"
+
+
+def test_a_review_item_is_alerted_once_not_on_every_run(pg):
+    _baseline(pg)
+    v2 = _v2_renumbered() + [_row("9990000000109", "27", "Rožok so slaninou 70g")]
+    _push(pg, v2, hours_old=3)
+    codex_sync.run(pg, _cfg())
+    _push(pg, v2, hours_old=1)
+    codex_sync.run(pg, _cfg())
+    assert pg.execute("SELECT count(*) FROM pending_alerts").fetchone()[0] == 1
+
+
+# --- legacy twin, memory edge cases (review 🟡) ------------------------------------------------
+
+def test_a_renumber_carries_the_canonical_cards_data_not_a_legacy_twins(pg):
+    _seed_catalogs(pg)
+    dl_snapshot.upsert_dl_catalog_card(pg, "0" + ROZOK, "Rožok so slaninou 70g",
+                                       doplnok="stary", mass=0.5, sklad="1", cena=9.99)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    _push(pg, V1, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    _push(pg, _v2_renumbered(), hours_old=1)
+    codex_sync.run(pg, _cfg())
+    dl = _dl(pg)
+    new = dl[ROZOK_NEW]
+    assert (new["doplnok"], new["mass"], new["cena"]) == ("rožok slanina", 0.07, 0.35)
+    assert ROZOK not in dl and "0" + ROZOK not in dl, "both old numbers go to the Kôš"
+
+
+def test_a_memory_row_written_after_a_renumber_follows_on_the_next_push(pg):
+    """A frozen question candidate / held order answered after the renumber writes the OLD
+    code — the next sync moves it to the card's new code."""
+    _baseline(pg)
+    _push(pg, _v2_renumbered(), hours_old=3)
+    codex_sync.run(pg, _cfg())
+    pg.execute("INSERT INTO item_memory (customer_ean, item_key, item_raw, gtin, card, "
+               "delivered_on, source) VALUES ('C9', 'rozok', 'rožok', %s, 'Rožok', %s, "
+               "'human')", (ROZOK, date(2026, 9, 29)))
+    _push(pg, _v2_renumbered(), hours_old=1)
+    res = codex_sync.run(pg, _cfg())
+    assert res["memory_renumbered"] == 1
+    assert _gtins(pg, "item_memory") == [ROZOK_NEW]
+
+
+def test_a_round_trip_with_a_duplicate_mapping_keeps_one_live_row(pg):
+    """Review 🟡: A(C1,k,X,d) + B(C1,k,Y,d). X→Y soft-deletes A (B has the mapping); Y→X
+    must revive A, never soft-delete B against an already soft-deleted A."""
+    _baseline(pg)
+    for g in (ROZOK, ROZOK_NEW):
+        pg.execute("INSERT INTO item_memory (customer_ean, item_key, item_raw, gtin, card, "
+                   "delivered_on, source) VALUES ('C1', 'rozok slanina', 'r', %s, 'R', %s, "
+                   "'human')", (g, date(2026, 9, 1)))
+    _push(pg, _v2_renumbered(), hours_old=3)
+    codex_sync.run(pg, _cfg())
+    _push(pg, V1, hours_old=1)
+    codex_sync.run(pg, _cfg())
+    assert _gtins(pg, "item_memory") == [ROZOK]
+
+
+def test_a_kos_restore_that_would_duplicate_a_mapping_is_a_clean_409(pg):
+    _baseline(pg)
+    _seed_memory(pg)
+    _push(pg, _v2_renumbered(), hours_old=1)
+    codex_sync.run(pg, _cfg())
+    aid, rid = pg.execute("SELECT id, row_id FROM audit_log WHERE table_name = 'item_memory' "
+                          "AND action = 'update' ORDER BY id LIMIT 1").fetchone()
+    key = pg.execute("SELECT customer_ean, item_key, delivered_on FROM item_memory "
+                     "WHERE id = %s", (int(rid),)).fetchone()
+    pg.execute("INSERT INTO item_memory (customer_ean, item_key, item_raw, gtin, card, "
+               "delivered_on, source) VALUES (%s, %s, 'x', %s, 'Rožok', %s, 'ship')",
+               (key[0], key[1], ROZOK, key[2]))
+    try:
+        audit.restore(pg, aid)
+    except audit.RestoreError as e:
+        assert e.status == 409
+    else:
+        raise AssertionError("the duplicate restore must be refused")
+    assert pg.execute("SELECT 1").fetchone() == (1,), "the connection stays usable"
+
+
+def test_a_failing_sync_rolls_back_whole_and_never_fails_the_push(pg, monkeypatch):
+    _baseline(pg)
+    _seed_memory(pg)
+    _push(pg, _v2_renumbered(), hours_old=1)
+    history = pg.execute("SELECT count(*) FROM codex_card_history").fetchone()[0]
+    real, calls = codex_sync._rewrite_memory, []
+
+    def boom(conn, table, old, new, note):
+        calls.append(table)
+        if len(calls) == 2:
+            raise RuntimeError("boom")
+        return real(conn, table, old, new, note)
+
+    monkeypatch.setattr(codex_sync, "_rewrite_memory", boom)
+    res = codex_sync.run_safely(pg, _cfg())
+    assert res["mode"] == "error" and "boom" in res["error"]
+    assert ROZOK in _orders(pg) and ROZOK_NEW not in _orders(pg)
+    assert set(_gtins(pg, "item_memory")) == {ROZOK}
+    assert pg.execute("SELECT count(*) FROM audit_log").fetchone()[0] == 0
+    assert pg.execute("SELECT count(*) FROM codex_card_history").fetchone()[0] == history
+    assert pg.execute("SELECT status FROM codex_sync_runs ORDER BY id DESC LIMIT 1"
+                      ).fetchone()[0] == "error"
 
 
 # --- history + the migration seed ------------------------------------------------------------

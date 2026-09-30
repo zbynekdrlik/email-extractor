@@ -108,7 +108,12 @@ def test_cards_endpoint_replaces_the_list_and_records_the_sync(pg):
     c = _client()
     r = c.post("/api/codex/cards", json=_CARDS, headers={"X-Token": "tok"})
     assert r.status_code == 200
-    assert r.get_json() == {"rows": 3, "codes": 3, "received": 3}
+    body = r.get_json()
+    assert {k: body[k] for k in ("rows", "codes", "received")} == {
+        "rows": 3, "codes": 3, "received": 3}
+    # #478: the accepted push also runs the CODEX card sync and answers its result (its
+    # behaviour is pinned in test_codex_sync.py)
+    assert set(body) == {"rows", "codes", "received", "sync"} and "mode" in body["sync"]
     # a second push without the first card REPLACES the list (the code leaves it)
     second = {"source_as_of": _CARDS["source_as_of"], "cards": _CARDS["cards"][1:]}
     r = c.post("/api/codex/cards", json=second, headers={"X-Token": "tok"})

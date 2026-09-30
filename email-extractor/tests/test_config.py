@@ -266,3 +266,17 @@ def test_codex_sync_apply_defaults_to_dry_run_and_reads_the_option(tmp_path, mon
         tmp_path, monkeypatch, {"codex_sync_apply": True}).codex_sync_apply is True
     text = CONFIG_YAML.read_text(encoding="utf-8")
     assert "  codex_sync_apply: false\n" in text and "  codex_sync_apply: bool?\n" in text
+
+
+def test_codex_sync_limits_default_and_read_the_options(tmp_path, monkeypatch):
+    """#478 review: the sync's circuit breaker is an operator knob (raise it for a genuine
+    mass change in CODEX), declared in config.yaml options + schema."""
+    cfg = _load_with_options(tmp_path, monkeypatch, {})
+    assert (cfg.codex_sync_max_code_changes, cfg.codex_sync_max_renames) == (10, 80)
+    cfg = _load_with_options(tmp_path, monkeypatch, {"codex_sync_max_code_changes": 40,
+                                                     "codex_sync_max_renames": 500})
+    assert (cfg.codex_sync_max_code_changes, cfg.codex_sync_max_renames) == (40, 500)
+    text = CONFIG_YAML.read_text(encoding="utf-8")
+    for line in ("  codex_sync_max_code_changes: 10\n", "  codex_sync_max_renames: 80\n",
+                 "  codex_sync_max_code_changes: int?\n", "  codex_sync_max_renames: int?\n"):
+        assert line in text
