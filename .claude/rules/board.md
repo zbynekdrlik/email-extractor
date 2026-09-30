@@ -502,13 +502,17 @@ Ktorá správa kam vedie (rozhoduje KANÁL PRÍJEMCU, nie druh správy):
   (engine vrstva — volá ju board aj legacy `httpapi_orders_questions`; board service by bol
   import smerom nahor). Kód MUSÍ byť medzi tým, čo picker ponúka (`codex_cards.pickable`), kód,
   ktorý už máme (`codex_cards.index_by_code` — JEDINÝ lookup „naša karta s týmto kódom", aj
-  „0"+kód; presné kanonické číslo vyhrá nad starým „0"+kód dvojčaťom), sa LEN vyberie (nič sa nezapíše — upsert by zmazal mass/sklad/cena). Kód, ktorého karta
+  „0"+kód; presné kanonické číslo vyhrá nad starým „0"+kód dvojčaťom; pre DL sa berú LEN naše čísla
+  ≤ 13 znakov — „0"+13-miestny kód je 14 znakov a DESADV ho nikdy neodošle, výber vtedy pridá
+  kanonickú CODEX kartu, `card_guard._ours`), sa LEN vyberie (nič sa nezapíše — upsert by zmazal mass/sklad/cena). Kód, ktorého karta
   je v Koši, ju **OBNOVÍ** presne ako bola (`snapshot.undelete_catalog_card` /
   `dl_snapshot.undelete_dl_catalog_card`, oba markery). HOLÝ marker karty, ktorá žila len v
   snapshote (`retire_*` píše name '' + prázdne polia, ďalší snapshot kartu stratil; prod 9/19
   zmazaných DL kariet), sa pri KAŽDOM un-delete (výber aj Kôš „Vrátiť" — `audit._heal_blank_card`)
-  doplní z NAJNOVŠIEHO snapshotu, ktorý kartu ešte má (`heal_blank_marker` /
-  `heal_blank_dl_marker`: názov, doplnok/alias, mass, sklad, cena) — predtým Kôš vracal BEZMENNÚ
+  doplní z AKTUÁLNEHO snapshotu, ktorý kartu ešte má (`last_known_card` / `last_known_dl_card`:
+  najnovší `checked_at`, pravidlo `latest_snapshot_id` — `_freeze` recykluje staré id, najvyššie id
+  NIE JE najnovšie; `heal_blank_marker` / `heal_blank_dl_marker`: názov, doplnok/alias, mass,
+  sklad, cena; picker z toho istého ukáže `trash_name`) — predtým Kôš vracal BEZMENNÚ
   kartu, ktorá stratila aj sklad=100 (#462 ×N). Marker ostáva pri retire holý zámerne
   (`retired_dl_cards`, #337, ho číta). Marker, ktorý žiadny snapshot nepamätá → výber ho vyplní z
   CODEXu ako novú kartu. Zápis = CODEX kód +
