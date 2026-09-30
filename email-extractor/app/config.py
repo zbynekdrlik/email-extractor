@@ -96,6 +96,12 @@ class Config:
     # warehouse question. Flip to true (a deliberate operator decision, after ~a week of
     # comparing the dry-run verdicts against the sklad's real answers) to actually discard.
     ai_not_order_discard: bool = False
+    # #478: the CODEX card sync rollout switch. Default FALSE = DRY-RUN — after every accepted
+    # CODEX stock-card push the sync (`orders/codex_sync.py`) computes the renames / renumbers /
+    # removals it WOULD make to our catalogs + memories, logs them and stores the plan in
+    # `codex_sync_runs`, but writes nothing to a catalog or memory. Flip to true (a deliberate
+    # operator decision, after the owner reviewed the dry-run report on #478) to apply them.
+    codex_sync_apply: bool = False
     orders_spend_cap_eur: float = 30.0
     openai_api_key: str = ""
     orders_model: str = "gpt-5.4"
@@ -281,6 +287,9 @@ class Config:
                 _get(o, "static_orders_shadow_days", "STATIC_ORDERS_SHADOW_DAYS", 3) or 3),
             ai_not_order_discard=str(
                 _get(o, "ai_not_order_discard", "AI_NOT_ORDER_DISCARD", "false")).lower() in (
+                    "1", "true", "yes", "on"),
+            codex_sync_apply=str(
+                _get(o, "codex_sync_apply", "CODEX_SYNC_APPLY", "false")).lower() in (
                     "1", "true", "yes", "on"),
             orders_spend_cap_eur=float(
                 _get(o, "orders_spend_cap_eur", "ORDERS_SPEND_CAP_EUR", 30) or 0),
