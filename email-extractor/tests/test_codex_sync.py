@@ -2708,3 +2708,58 @@ def test_a_reset_on_a_code_two_cards_carry_takes_the_pickers_sklad(pg):
     picker = card_guard.pickable(pg, "dl")[CHLIEB]
     assert picker["card_code"] == "40"
     assert _dl(pg)[CHLIEB]["sklad"] == str(picker["sklad"]) == "100"
+
+
+# --- review 21: the picker's sklad only for the card's OWN offered row; both cards of a pick
+# --- wait out a glitch --------------------------------------------------------------------
+
+def test_a_reset_never_takes_the_sklad_of_another_card_offered_for_an_inactive_row(pg):
+    """Review 21 🟡: the picked múka's (card 40) row on CHLIEB went INACTIVE before the
+    resetting sync while the koláč (card 55, sklad 1) carries CHLIEB actively — the picker's
+    entry for CHLIEB is purely the koláč's; the reset must take the múka's own kg sklad."""
+    _picked_as_the_muka(pg, "1")
+    _push(pg, [_row(CHLIEB, "40", "Múka pšeničná T650", sklad=100, inactive=True),
+               _row(CHLIEB, "55", "Koláč makový 80g")], hours_old=5)
+    codex_sync.run(pg, _cfg())
+    assert _dl(pg)[CHLIEB]["sklad"] == "100"
+
+
+def test_a_dry_run_deferred_reset_after_the_row_went_inactive_keeps_the_cards_sklad(pg):
+    """Review 21 🟡: the same after the pick was seen by a dry-run (the reset deferred)."""
+    _picked_as_the_muka(pg, "1")
+    _push(pg, [_row(CHLIEB, "40", "Múka pšeničná T650", sklad=100)], hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    _push(pg, [_row(CHLIEB, "40", "Múka pšeničná T650", sklad=100, inactive=True),
+               _row(CHLIEB, "55", "Koláč makový 80g")], hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert _dl(pg)[CHLIEB]["sklad"] == "100"
+
+
+def test_a_pick_waits_while_the_card_it_replaces_is_missing_once(pg):
+    """Review 21 🔵: card 31 (our chlieb, taught rows) moves to ROZOK_NEW, the múka (card 40)
+    takes CHLIEB, the warehouse picks CHLIEB during the dry-run. The first apply lands on a list
+    missing card 31 ONCE: the rows review told the warehouse the chlieb is gone from CODEX —
+    delete its rows — and the binding made it final. The pick waits; the next list gives the
+    true way out (pick card 31 under its new code)."""
+    dl_snapshot._freeze(pg, [{"gtin": CHLIEB, "name": "Chlieb pšeničný 1000g",
+                              "doplnok": "chlieb", "mass": 1.0, "sklad": "1", "cena": 0.9}], [])
+    _push(pg, [_row(CHLIEB, "31", "Chlieb pšeničný 1000g")], hours_old=8)
+    codex_sync.run(pg, _cfg())
+    pg.execute("INSERT INTO dl_item_memory (supplier_ean, item_key, item_raw, gtin, card, "
+               "delivered_on, cnt, source, created_at) VALUES ('S1', 'chlieb psen', "
+               "'Chlieb pšen.', %s, 'Chlieb', %s, 1, 'human', %s)",
+               (CHLIEB, date(2026, 9, 3), _BEFORE))
+    both = [_row(ROZOK_NEW, "31", "Chlieb pšeničný 1000g"),
+            _row(CHLIEB, "40", "Múka pšeničná T650", sklad=100)]
+    _push(pg, both, hours_old=7)
+    codex_sync.run(pg, _cfg(apply=False))
+    dl_snapshot.retire_dl_catalog_card(pg, CHLIEB)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    card_guard.add_from_codex(pg, "dl", CHLIEB, actor="sklad")
+    _push(pg, [_row(CHLIEB, "40", "Múka pšeničná T650", sklad=100)], hours_old=6)
+    codex_sync.run(pg, _cfg())
+    assert "už v CODEXe nie je" not in _review_reason(pg, "dl", CHLIEB)
+    assert _dl(pg)[CHLIEB]["doplnok"] == "chlieb", "nothing happens on a glitch"
+    _push(pg, both, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    assert f"kód {ROZOK_NEW} (karta CODEX 31)" in _review_reason(pg, "dl", CHLIEB)
