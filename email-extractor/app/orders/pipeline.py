@@ -867,7 +867,8 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
         result["error_detail"] = repr(e)
         _finish(conn, cfg, message, shadow, post, status="error", items=result["items"],
                 result=result, detail={"error": repr(e)}, post_now=post_now,
-                reason=Reason.UPLOAD_FAILED)
+                reason=Reason.UPLOAD_FAILED, question_ids=net_qids,
+                new_questions=len(net_new))
         return "error", preview, result["reject_reason"]
 
     # #153: only NOW is the upload genuinely confirmed — never optimistically alongside
