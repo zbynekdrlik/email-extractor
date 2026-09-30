@@ -390,8 +390,12 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   pending contest). A genuinely recreated product under a NEW name loses its curated data too
   (restorable from the Kôš) — the list cannot tell it from a reuse, and review A says so.
 - **Plan mechanics**: the sync holds `LOCK TABLE codex_stock_cards IN SHARE MODE` (a concurrent
-  push waits). A merge target that is another CODEX card → review; a merge FILLS the target's
-  blank alias / doplnok / mass / sklad / cena from our card. Numbers a plan retires go to the
+  push waits). The planner runs TWO passes (round 18 🟡): `_settle` every group (identity +
+  the reset a pick implies), THEN `_follow` (stay / leave / renumber) — a merge onto a number
+  reset in the same plan must read the reset card; in one pass the group ORDER decided whether
+  our data or the old product's kg sklad + mass survived. A merge target that is another CODEX
+  card → review; a merge FILLS the target's blank alias / doplnok / mass / sklad / cena from our
+  card. Numbers a plan retires go to the
   simulated Kôš (`_vacate`) so a chain in ONE push (024 → NEW while another card takes 024)
   never re-creates onto the row being retired — round 4 🔴: the upsert kept `deleted_at` and the
   koláč vanished; the executor also undeletes before any create. The "previous snapshot"

@@ -54,6 +54,11 @@ column, migrate revision 8) makes it editable via `/znalosti` products.
   „don't touch, inherit the snapshot row's baked-in alias"; a non-NULL string (incl `""`) =
   „override wins" (`""` = an explicit clear). The merged alias is always `or ""`-guarded so
   `None` never reaches `match.py`.
+- **A NULL override alias inherits the SNAPSHOT row — and a delete's rebuild drops that row**
+  (#478 review 18: the CODEX sync's name-only rename writes exactly such an override; a pick or
+  a Kôš undo then restored the card with NO alias). `snapshot.heal_blank_marker` (run by every
+  un-delete: `undelete_catalog_card`, `audit._heal_blank_card`) refills a NULL alias from
+  `last_known_card` as well as a bare marker's name — never overwriting a set value.
 - **API tri-state** (`POST /api/znalosti/products`): the `alias`/`doplnok` KEY being ABSENT →
   don't touch (pass `alias=None`); PRESENT (even `""`) → set/clear it. The `/znalosti` UI
   prefills the input with the current effective alias and always sends it (a name-only UI edit
