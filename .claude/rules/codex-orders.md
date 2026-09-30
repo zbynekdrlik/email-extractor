@@ -12,6 +12,8 @@ paths:
   - "email-extractor/tests/test_codex_cards_push.py"
   - "email-extractor/tests/test_dl_codex_hold.py"
   - "email-extractor/tests/test_board_codex.py"
+  - "email-extractor/app/orders/card_guard.py"
+  - "email-extractor/tests/test_board_codex_pick.py"
 ---
 
 # CODEX order evidence + the auto-resolve sweep (#342)
@@ -203,21 +205,25 @@ forever). Reusable rules:
     (our name shares no word with the wording) is solved instead by the CODEX name counting for
     the R73 lexical plausibility (`_memory_conflict(alt_name=codex.name_for(...))`).
   - board: `check_card_code` → 409 `{error, codex:{code, missing, as_of, similar:[{code, name,
-    in_catalog, catalog_gtin?, catalog_name?}]}}` on Produkty sklad create/edit, the inline
-    „➕ Nová karta", any dl_item pick (checked BEFORE a free/search pick is legitimised — a
-    refused dead code never lingers as an offered button), and legacy
-    `POST /api/znalosti/dl-products`. The one-click pick sends `catalog_gtin` (OUR exact
-    number), never the normalized CODEX code. „Nová karta" with a number we ALREADY have →
-    409 `existing` (it used to UPSERT with blank mass/sklad/cena); with a number of a card
-    deleted to the Kôš → 409 „obnov ju na záložke Kôš"; written unlike CODEX (leading zeros,
-    „.0") → 409 naming our card with that code (CODEX stores the code as a number — „0"+code
-    would be a second card for one CODEX code); `refuse_code_variant` guards EVERY write of a
-    NEW DL number (legacy API, board POST without `new` too), and the taken/Kôš checks compare
-    by normalized code both ways (prod had 0 non-canonical DL numbers on 2026-09-29). ONE gate
-    for both „Nová karta" paths: `app/orders/card_guard.guard_new_dl_card` (catalog rules live
-    there, CODEX rules in `codex_cards`). Produkty „Nová karta" sends `new: true` →
-    `card_guard.taken()` 409 in the orders scope too (the orders form would clear the alias).
+    in_catalog, catalog_gtin?, catalog_name?}]}}` on a Produkty sklad EDIT, any dl_item pick
+    (checked BEFORE a free/search pick is legitimised — a refused dead code never lingers as an
+    offered button), and a legacy `POST /api/znalosti/dl-products` edit. The one-click pick
+    sends `catalog_gtin` (OUR exact number), never the normalized CODEX code; a similar CODEX
+    card we do not have is added through the #477 pick („Pridať kartu z CODEXu").
     The Kôš restore of a DL card whose code CODEX lacks → 409 (`audit._refuse_dead_dl_code`).
+  - **#477 superseded the typed „➕ Nová karta" entirely (owner order 2026-09-30)** — the
+    #467 gates for a TYPED new number (`guard_new_dl_card`, `refuse_code_variant`, `taken`,
+    the `existing` 409) are gone because no typed number can create a card any more (403
+    `card_guard.blocked()`). The ONE creation is `card_guard.add_from_codex` — the code comes
+    from the pushed list (canonical by construction, so no leading-zero / „.0" variant can
+    arise), a code we already have (`codex_cards.index_by_code`, normalized both ways) is only
+    selected, one whose card sits in the Kôš RESTORES it (a bare snapshot-card retirement
+    marker is filled from CODEX instead — never a nameless card). Picker list:
+    `GET /api/board/codex-cards` → `card_guard.codex_choices` over `codex_cards.pickable`
+    (stredisko 1 only — never the junk strediská; orders additionally sklad 1; active rows; a
+    STALE list still lists, with a warning — the pick is not blocked by a stopped push). The
+    #467 refusal's `similar` cards are marked `pickable` so the help never offers a card the
+    pick would refuse. See `board.md` #477 for the answer flow.
   - the questions tab keeps a refusal hint in `state.codexHints` and re-renders it on every
     refresh — a hint never freezes the 8 s refresh (only an open inline form does).
   - `/api/codex/cards` takes the token from the `X-Token` header ONLY (constant-time compare),

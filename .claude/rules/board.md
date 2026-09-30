@@ -489,3 +489,63 @@ Ktorá správa kam vedie (rozhoduje KANÁL PRÍJEMCU, nie druh správy):
 - **Post-deploy overenie:** odkaz postav READ-ONLY v kontajneri (`report.history_link(cfg, mid)`
   s `app.config.Config.load()`), otvor v Playwright s vyčistenými cookies (najprv `/` → `/login`), over
   `.h-detail-title` = predmet toho mailu; nikdy neklikaj akcie na reálnom maile.
+
+## #477 — karta vzniká LEN výberom z CODEXu (owner 2026-09-30), nikdy písaním
+
+- **Žiadna cesta nezakladá kartu z napísaného čísla** — `card_guard.refuse_typed_card` /
+  `card_guard.blocked()` (`CreateBlocked`, **403**, `{error, codex_only: true}`): Produkty
+  „Pridať" (`catalog.upsert` — nové číslo ALEBO `new: true`), `new_product`/`new_item` telo na
+  otázke (`_answer_dispatch`, skôr než čokoľvek iné), legacy `POST /api/znalosti/products` +
+  `dl-products` (nové číslo). Úprava existujúcej karty (názov/doplnok/mass/sklad/cena), aliasy a
+  Kôš ostávajú. Voľné pole „Iné číslo položky" na otázke je PREČ (aj to bolo písané číslo).
+- **Jediná zakladacia funkcia: `orders/card_guard.add_from_codex(conn, scope, code, actor=)`**
+  (engine vrstva — volá ju board aj legacy `httpapi_orders_questions`; board service by bol
+  import smerom nahor). Kód MUSÍ byť medzi tým, čo picker ponúka (`codex_cards.pickable`), kód,
+  ktorý už máme (`codex_cards.index_by_code` — JEDINÝ lookup „naša karta s týmto kódom", aj
+  „0"+kód), sa LEN vyberie (nič sa nezapíše — upsert by zmazal mass/sklad/cena). Kód, ktorého karta
+  je v Koši, ju **OBNOVÍ** presne ako bola (`snapshot.undelete_catalog_card` /
+  `dl_snapshot.undelete_dl_catalog_card`, oba markery) — okrem HOLÉHO markera karty, ktorá žila len
+  v snapshote (`retire_*` píše name '' + prázdne polia, ďalší snapshot kartu stratil; prod 9/19
+  zmazaných DL kariet) → tá sa vyplní z CODEXu ako nová (inak BEZMENNÁ karta). Zápis = CODEX kód +
+  CODEX názov (+ DL `sklad` z CODEXu) + `audit.record(action="create", after.source="codex"
+  [, restored=true])` → Kôš „Vrátiť" ju soft-zmaže existujúcou `create` vetvou a ďalší výber ju
+  zas vráti (nikdy slepá ulička — review 🟡 #477: pôvodné 409 „je v Koši" + `restore` bez spätnej
+  cesty = kód navždy zablokovaný).
+- **Rozsah výberu (merané prod 2026-09-30):** orders = CODEX `stredisko 1 / sklad 1` (130/130
+  kariet objednávok tam je); dl = `stredisko 1`, všetky sklady (dnes 1/100/200/500/600/625/650/700);
+  LEN aktívne riadky; NIKDY strediská 4/40x–45x (#337 bordel). DL `sklad` = 100 ak kód má aktívny
+  sklad-100 riadok (kg karta musí ostať kg — prázdna mass → #462 hold sa PÝTA), inak najnižší sklad
+  strediska 1 (reprodukuje sklad všetkých 465 našich DL kariet, ktoré ho majú). Názov =
+  `codex_cards._name_order` (sklad-1 riadok, potom najnovší) medzi AKTÍVNYMI riadkami strediska 1 —
+  to isté poradie ako `load` (drift odznak), ale `load` berie aj neaktívne/iné strediská, takže
+  sa výnimočne môžu líšiť. Pravidlá zoznamu žijú v `codex_cards` (tabuľka je jeho), katalógové
+  (typed/Kôš/zápis) v `card_guard`.
+- **#467 refusal help nesmie ponúknuť kartu, ktorú server odmietne:** `check_card_code.similar`
+  hľadá v CELOM zozname (aj bordel strediská, neaktívne) → `_dl_card_refusal` označí každú
+  `pickable` (`card_guard.mark_pickable`); JS dá „Pridať kartu z CODEXu" LEN pickable karte.
+- **Alias len k existujúcej karte** (`catalog_aliases.add_alias` → `card_guard.is_card`, 400):
+  alias mapuje znenie na ČÍSLO, ktoré potom odchádza (orders `human_taught` katalóg nekontroluje).
+- **Kôš štítky boli od #444 prehodené** (`tab-trash.js`): `catalog_overrides` = „Karta
+  (objednávky)", `dl_catalog_overrides` = „Karta (sklad)" — opravené v #477 (E2E Kôš test to pinuje).
+- **Picker:** `GET /api/board/codex-cards?scope=orders|dl&q=` (`products_orders.py`, v
+  `EXPECTED_ROUTES`) → `card_guard.codex_choices`: každé slovo `q` (fold) musí byť v názve / EAN
+  kóde / čísle CODEX karty, max 30, `in_catalog` (+ NAŠE `catalog_gtin`/`catalog_name`) /
+  `in_trash`; prázdne `q` = len `codex` meta (čerstvosť). **Zastaraný zoznam stále ponúka** posledné
+  známe karty (varovanie v stavovom riadku); nikdy nenahraný = nič. Odpoveď: telo
+  `{codex_card: {code}}` (+ `quantity`/`unit_price` pri `item`) → `_api_orders_answer_codex_card`:
+  item = `add_from_codex` + `add_candidate({gtin,name})` + `teach.answer(by="sklad-codex-card")` v
+  JEDNOM `db_tx`, release po ňom na autocommit; dl_item = `add_from_codex` + `add_candidate(
+  {value,label})` v `db_tx`, potom `_api_orders_answer_generic` (memory + release + siblings) —
+  dl_item odpoveď, ktorá prehrá závod (409), pridanú CODEX kartu PONECHÁ (neškodné: reálna karta,
+  Kôš ju vráti). Stav zoznamu = `codex_cards.freshness` (zo sync ledgeru, nie 6k riadkov).
+- **UI:** `card_actions` op `codex_pick` („Vybrať kartu z CODEXu") pre `item` aj `dl_item` →
+  `.q-inline-form.q-codex-picker` (zmrazí 8 s refresh ako každý inline formulár); pri otvorení
+  jeden fetch s prázdnym `q` = stavový riadok hneď; výsledky s poradovým `seq` (neskorá odpoveď
+  staršieho hľadania sa zahodí); karta v Koši má „Obnoviť a vybrať". #467 hint: podobná pickable
+  CODEX karta, ktorú nemáme → „Pridať kartu z CODEXu" (ten istý pick), nikdy predvyplnený
+  formulár; #465 misclick potvrdenie platí aj pre pick z pickera. Produkty tabs: `#p-new` preč,
+  `.p-add-note`. E2E pinuje aj #467 UI (hint prežije 8 s refresh, drift „CODEX: …" na tlačidle,
+  Produkty sklad edit refusal `.p-codex-find`).
+- **E2E pasca:** odpoveď na kartu A spúšťa explicitný `load()` (prestavia VŠETKY karty) — otvoriť
+  picker karty B skôr, než reload dobehne, znamená, že ho reload zmaže (hľadanie potom renderuje do
+  odpojeného uzla). V teste najprv `wait_for_selector("#q-card-A", state="detached")`.
