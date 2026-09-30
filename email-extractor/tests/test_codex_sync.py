@@ -1834,6 +1834,94 @@ def test_a_repick_review_never_sends_delivery_history_to_naucene(pg):
     assert "Naučené" not in _review_reason(pg, "orders", ROZOK)
 
 
+# --- review 13: an older list never regresses a name; holds said once, where they are ----------
+
+def _history_name(pg, card, code):
+    return pg.execute("SELECT name FROM codex_card_history WHERE stredisko = 1 AND "
+                      "card_code = %s AND code = %s", (card, code)).fetchone()[0]
+
+
+def test_an_older_repush_never_rewrites_the_history_name(pg):
+    """Review 13 🟡: every accepted push's history is recorded (round 12) — an OLDER re-sent
+    list must never set a card's name back (last_seen does not advance, so the name must not
+    either): the recreated SAME product keeps its alias / doplnok."""
+    renamed = [dict(r, name="Rožok slaninový 70g") if r["card_code"] == "27" else r for r in V1]
+    recreated = ([r for r in V1 if r["card_code"] != "27"]
+                 + [_row(ROZOK, "28", "Rožok slaninový 70g")])
+    _seed_catalogs(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    _push(pg, renamed, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    _push(pg, V1, hours_old=6)                       # the OLD list re-sent
+    assert codex_sync.run(pg, _cfg())["mode"] == "skipped"
+    assert _history_name(pg, "27", ROZOK) == "Rožok slaninový 70g"
+    for hours in (4, 3):                             # card 27 recreated as 28 → rename rebind
+        _push(pg, recreated, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert _orders(pg)[ROZOK]["alias"] == "rozok slanina"
+    assert _dl(pg)[ROZOK]["doplnok"] == "rožok slanina"
+
+
+def test_an_older_list_skip_never_claims_a_newer_list_was_synced(pg, caplog):
+    """Review 13 🔵: the newer list may only have been RECORDED (its sync failed / skipped) —
+    the skip says so."""
+    _baseline(pg)
+    _push(pg, V1, hours_old=7)
+    with caplog.at_level(logging.WARNING, logger="orders.codex_sync"):
+        assert codex_sync.run(pg, _cfg())["mode"] == "skipped"
+    assert any("already recorded" in r.getMessage() for r in caplog.records)
+
+
+def test_a_repick_hold_note_says_where_the_rows_went(pg):
+    """Review 13 🔵: the picked pagáč moves ROZOK → W in the same push — its older delivery
+    history moved with it; the note never says it „stayed" under ROZOK."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    pg.execute("INSERT INTO item_memory (customer_ean, item_key, item_raw, gtin, card, "
+               "delivered_on, source) VALUES ('C80', 'rozok', 'rožok', %s, 'x', %s, 'ship')",
+               (ROZOK, date(2026, 9, 1)))
+    card_guard.add_from_codex(pg, "orders", ROZOK, actor="sklad")
+    _push(pg, _reused(V1, pagac_code=PAGAC_W), hours_old=3)
+    codex_sync.run(pg, _cfg())
+    assert _gtin_of(pg, "C80") == PAGAC_W
+    body = pg.execute("SELECT body_html FROM pending_alerts ORDER BY id DESC LIMIT 1"
+                      ).fetchone()[0]
+    assert f"ostalo pod {ROZOK}" not in body
+    assert all(h.get("at") == PAGAC_W for h in _last_report(pg)["holds"]
+               if h["scope"] == "orders")
+
+
+def test_held_delivery_history_is_alerted_once(pg):
+    """Review 13 🔵: the renumber's line already said the history stayed — the next push's
+    retired-number note about the same rows is not a second alert."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=4.9)
+    codex_sync.run(pg, _cfg(apply=False))
+    pg.execute("INSERT INTO item_memory (customer_ean, item_key, item_raw, gtin, card, "
+               "delivered_on, source) VALUES ('C90', 'pagac', 'pagáč', %s, 'x', %s, 'ship')",
+               (ROZOK, date.today()))
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    before = pg.execute("SELECT count(*) FROM pending_alerts").fetchone()[0]
+    _push(pg, _reused(V1), hours_old=3)
+    codex_sync.run(pg, _cfg())
+    assert pg.execute("SELECT count(*) FROM pending_alerts").fetchone()[0] == before
+
+
+def test_a_contest_review_names_the_doucit_way_out(pg):
+    """Review 13 🔵: every review that sends the warehouse to its taught rows says where a
+    História „Doučiť" row is fixed (the Kôš) — the contest texts too."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    _restore_and_rename(pg)
+    _push(pg, _reused(V1), hours_old=3)
+    codex_sync.run(pg, _cfg())
+    assert "Doučiť" in _review_reason(pg, "orders", ROZOK)
+
+
 def test_held_delivery_history_on_a_retired_number_is_reported(pg):
     """Review 12 🔵: on the retired-number path a held row that is only delivery history makes
     no move and no review — the report and the ops message still say it stayed."""
