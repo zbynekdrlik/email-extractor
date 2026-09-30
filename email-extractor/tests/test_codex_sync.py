@@ -1705,6 +1705,12 @@ def test_held_delivery_history_stays_without_sending_anyone_to_naucene(pg):
     codex_sync.run(pg, _cfg())
     assert _gtin_of(pg, "C47") == ROZOK
     assert "Naučené" not in _review_reason(pg, "orders", ROZOK)
+    # review 12: not trivially — the report and the ops message say the history stayed
+    held = [r["held"] for r in _last_report(pg)["renumbers"] if r["scope"] == "orders"]
+    assert held == [{"taught": 0, "shipped": 1}]
+    body = pg.execute("SELECT body_html FROM pending_alerts ORDER BY id DESC LIMIT 1"
+                      ).fetchone()[0]
+    assert "ostalo pod" in body
 
 
 def test_a_row_held_during_a_reuse_is_flagged_when_the_card_comes_back_to_the_code(pg):
@@ -1745,6 +1751,106 @@ def test_a_row_without_created_at_is_planned_and_moved_alike(pg):
     def rows(report):
         return [r["memory"] for r in report["renumbers"] if r["scope"] == "orders"]
     assert rows(planned) == rows(applied) == [{"item_memory": 1, "global_item_memory": 0}]
+
+
+# --- review 12: the history of every accepted push; "taught" = what the matcher trusts --------
+
+def _last_report(pg):
+    return pg.execute("SELECT report FROM codex_sync_runs ORDER BY id DESC LIMIT 1").fetchone()[0]
+
+
+def test_a_push_whose_sync_failed_still_opens_the_reuse_window(pg, monkeypatch):
+    """Review 12 🟡: the pushed list is live (pickable) the moment it is accepted — even when
+    its sync fails. The pagáč's first sighting on ROZOK is that push's, so a pagáč wording
+    taught right after it is held, never moved with card 27."""
+    _baseline(pg)
+
+    def boom(conn, cx):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(codex_sync.sp, "build_plan", boom)
+    _push(pg, _reused(V1), hours_old=4.9)
+    assert codex_sync.run_safely(pg, _cfg())["mode"] == "error"
+    monkeypatch.undo()
+    _teach(pg, "C60", "pagac syrovy", ROZOK, at=NOW - timedelta(hours=4.5))
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert _gtin_of(pg, "C60") == ROZOK
+
+
+def test_a_doucit_row_decided_during_a_reuse_is_held_and_reviewed(pg):
+    """Review 12 🟡: a História „Doučiť" row (`source='teachback'`) is a taught mapping for the
+    matcher — held during a reuse AND reviewed like one (with its own way out), never counted
+    as delivery history."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=4.9)
+    codex_sync.run(pg, _cfg(apply=False))
+    pg.execute("INSERT INTO item_memory (customer_ean, item_key, item_raw, gtin, card, "
+               "delivered_on, source) VALUES ('C61', 'pagac syrovy', 'pagáč', %s, 'x', %s, "
+               "'teachback')", (ROZOK, date.today()))
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert _gtin_of(pg, "C61") == ROZOK
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "1 naučen" in reason and "Koš" in reason
+    held = [r["held"] for r in _last_report(pg)["renumbers"] if r["scope"] == "orders"]
+    assert held == [{"taught": 1, "shipped": 0}]
+
+
+def test_a_row_without_source_is_planned_and_held_alike(pg):
+    """Review 12 🔵: a NULL `source` counts as delivery history — the dry-run plan and the
+    apply agree on it."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=4.9)
+    codex_sync.run(pg, _cfg(apply=False))
+    pg.execute("INSERT INTO item_memory (customer_ean, item_key, item_raw, gtin, card, "
+               "delivered_on, source) VALUES ('C62', 'pagac', 'pagáč', %s, 'x', %s, NULL)",
+               (ROZOK, date.today()))
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg(apply=False))
+    planned = [(r["memory"], r["held"]) for r in _last_report(pg)["renumbers"]
+               if r["scope"] == "orders"]
+    _push(pg, _reused(V1), hours_old=3)
+    codex_sync.run(pg, _cfg())
+    applied = [(r["memory"], r["held"]) for r in _last_report(pg)["renumbers"]
+               if r["scope"] == "orders"]
+    assert planned == applied == [({"item_memory": 0, "global_item_memory": 0},
+                                   {"taught": 0, "shipped": 1})]
+    assert _gtin_of(pg, "C62") == ROZOK
+
+
+def test_a_repick_review_never_sends_delivery_history_to_naucene(pg):
+    """Review 12 🔵: rows older than a re-pick that are SHIPPED history are not listed in
+    Naučené — the re-pick review never asks to fix them there."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    pg.execute("INSERT INTO item_memory (customer_ean, item_key, item_raw, gtin, card, "
+               "delivered_on, source) VALUES ('C63', 'rozok', 'rožok', %s, 'x', %s, 'ship')",
+               (ROZOK, date(2026, 9, 1)))
+    card_guard.add_from_codex(pg, "orders", ROZOK, actor="sklad")
+    _push(pg, _reused(V1), hours_old=3)
+    codex_sync.run(pg, _cfg())
+    assert "Naučené" not in _review_reason(pg, "orders", ROZOK)
+
+
+def test_held_delivery_history_on_a_retired_number_is_reported(pg):
+    """Review 12 🔵: on the retired-number path a held row that is only delivery history makes
+    no move and no review — the report and the ops message still say it stayed."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=4.9)
+    codex_sync.run(pg, _cfg())                          # ROZOK retired, the pagáč took it
+    pg.execute("INSERT INTO item_memory (customer_ean, item_key, item_raw, gtin, card, "
+               "delivered_on, source) VALUES ('C64', 'pagac', 'pagáč', %s, 'x', %s, 'ship')",
+               (ROZOK, date.today()))
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert _gtin_of(pg, "C64") == ROZOK
+    holds = [h for h in _last_report(pg)["holds"] if h["scope"] == "orders"]
+    assert holds and holds[0]["held"] == {"taught": 0, "shipped": 1}
+    body = pg.execute("SELECT body_html FROM pending_alerts ORDER BY id DESC LIMIT 1"
+                      ).fetchone()[0]
+    assert "ostalo pod" in body
 
 
 def test_a_create_onto_a_hidden_override_row_undeletes_it(pg):
