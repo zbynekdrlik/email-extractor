@@ -368,34 +368,40 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   different rules was the root of rounds 3-5 — never add a fourth, extend `_known`.
   A binding that REPLACES another card's on a PICK is stored only by an APPLIED run, so a pick
   seen during a dry-run / blocked run still gets its reset later; a rebind on DURABLE evidence
-  (a recreated card carrying our code under our name) is stored in every mode. The memory path
-  asks `_known` too: a retired number picked as another product keeps its rows. A pick whose
-  CODEX product differs from the one the data was taught for (`Codex.same_product`: the old
-  card's name while it carried the code — `codex_card_history.name` — vs the picked card's;
-  never OUR current name, a human rename before delete + pick would hide it — round 7) →
-  `resets`: alias / doplnok / mass / cena cleared, sklad := the picked card's (the pick restored
-  the Kôš card "as it was"); a re-pick of the SAME product under a second CODEX card keeps its
-  data. Resets are applied before renumbers and a renumber in the same plan carries the reset
-  card.
-- **What the sync cannot tell goes to a human, never a guess (round 7 — rounds 6-7 each broke a
-  guess)**: (1) a retired number restored from the Kôš under a name that is no longer its CODEX
-  card's product (`_disputed` — e.g. the Produkty drift button „Prevziať názov z CODEXu" offers
-  the name of whoever carries the code NOW, as if cosmetic) → review naming both cards and the
-  way out for each answer (rename back = merged next push; delete + pick at a question = reset
-  + review of its rows); it is never re-bound by the name (round 6's `_renamed_to` kept the old
-  product's alias/doplnok and, when the new holder moved on first, merged the card into the old
-  one), and a renumber onto such a LIVE number waits too. (2) Mapping rows OLDER than a re-pick
-  (`_repicked_review`) → review with the count and where they are after this plan — never moved:
-  `created_at` cannot tell whose a row is (a Naučené edit / `dl_memory.remember` revive
+  (a recreated card carrying our code under our name — also a restored retired number a human
+  renamed to it, as the review advises; checked BEFORE the dispute below, round 8) is stored in
+  every mode. The memory path asks `_known` too: a retired number picked as another product
+  keeps its rows. A pick whose CODEX product differs from the one the data was taught for
+  (`Codex.same_product`: the old card's name while it carried the code —
+  `codex_card_history.name` — vs the picked card's; never OUR current name, a human rename
+  before delete + pick would hide it — round 7) → `resets`: alias / doplnok / mass / cena
+  cleared, sklad := the picked card's (the pick restored the Kôš card "as it was"); a re-pick of
+  the SAME product under a second CODEX card keeps its data. Resets are applied before
+  renumbers and a renumber in the same plan carries the reset card.
+- **Plan mechanics**: the sync holds `LOCK TABLE codex_stock_cards IN SHARE MODE` (a concurrent
+  push waits). A merge target that is another CODEX card → review; a merge FILLS the target's
+  blank alias / doplnok / mass / sklad / cena from our card. Numbers a plan retires go to the
+  simulated Kôš (`_vacate`) so a chain in ONE push (024 → NEW while another card takes 024)
+  never re-creates onto the row being retired — round 4 🔴: the upsert kept `deleted_at` and the
+  koláč vanished; the executor also undeletes before any create. The "previous snapshot"
+  (two-snapshot removal, seed rule) comes from `codex_sync_runs` that actually synced — a
+  failed/skipped sync never counts.
+- **What the sync cannot tell goes to a human, never a guess (rounds 7-8 — rounds 6-7 each
+  broke a guess)**: (1) a retired number a human RENAMED after the retire (`_disputed`: its name
+  — live after a Kôš undo, or its Kôš copy — differs from `codex_card_bindings.retired_name`,
+  the name the sync stored when it retired it; typically the Produkty drift button „Prevziať
+  názov z CODEXu" offered the name of whoever carries the code NOW, as if cosmetic) → review
+  with the way out per case: rename back to the stored name (merged into the old card while it
+  lives in CODEX), rename to the ONE recreated card (rebind), or delete + pick at a question
+  (reset); a code no card carries says so. Never re-bound by the name (round 6's
+  `_renamed_to` kept the old product's alias/doplnok and merged the card into the old one when
+  the new holder moved on first), no memory move from its Kôš copy, no renumber onto it.
+  Keyed on the RETIRE-time name, never today's CODEX name: a plain Kôš undo of a card whose
+  name had drifted is no rename (round 8). (2) Mapping rows OLDER than a re-pick
+  (`_repicked_review`) → review with the count and where they are after this plan — never
+  moved: `created_at` cannot tell whose a row is (a Naučené edit / `dl_memory.remember` revive
   re-points a row and keeps it), and a same-push renumber already carried them with the card.
-  One review entry per card keeps every reason (appended). The memory counts in the report + ops
-  message are what `_rewrite_memory` really touched. The sync holds `LOCK TABLE codex_stock_cards IN SHARE MODE` (a concurrent push waits). A merge target that is another CODEX card →
-  review; a merge FILLS the target's blank alias / doplnok / mass / sklad / cena from our card.
-  Numbers a plan retires go to the simulated Kôš (`_vacate`) so a chain in ONE push (024 → NEW
-  while another card takes 024) never re-creates onto the row being retired — round 4 🔴: the
-  upsert kept `deleted_at` and the koláč vanished; the executor also undeletes before any
-  create. The "previous snapshot" (two-snapshot removal, seed rule) comes from
-  `codex_sync_runs` that actually synced — a failed/skipped sync never counts.
+  One review entry per card keeps every reason in `reasons`; the ops alert dedups PER reason.
 - **What is decided, per catalog, per CODEX code our cards carry** (cards grouped per
   `normalize_code`, the canonical ≤13-char number supplies the data, `codex_cards.index_by_code`),
   with our card bound to card C: C still carries X → rename to C's stredisko-1 name when ours
@@ -413,7 +419,12 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   or an X→Y→X round trip loses the mapping entirely (round-1 🟡, probe-proven). Memory rows of a
   number the sync RETIRED (inactive binding — written later from a frozen question / held order)
   follow its card's live number on the next push (`mode: memory`); a code that was never our
-  card's is never moved.
+  card's is never moved. A move NEVER has its target among its sources (round 8 🔴: card 27
+  back on its old number planned X → X, every row found ITSELF as the duplicate and the card
+  lost all its mappings — `_memory` skips rows already on the live number, `_rewrite_memory`
+  excludes `new` and `id <> rid`). Invariant pinned by a test: an applied sync never lowers the
+  live mapping rows except where the same mapping lives on under the new number; the report's
+  `merged` + the ops message's „N presunutých, M zlúčených" tell the two apart.
 - **Ops alerts**: one per applied run with changes (+ review items not in the previous applied
   run), one per distinct blocked plan, one per failing-sync episode — all `reminder_suppressed`
   where they could repeat. The message says honestly that a Kôš undo is redone by the next list
