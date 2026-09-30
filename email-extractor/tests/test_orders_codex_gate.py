@@ -403,6 +403,8 @@ def test_the_net_question_is_announced_when_the_upload_fails(pg, env):
     released = hold.release_due(pg, _cfg(), upload=down, post=rec.post, today="2026-08-05")
     assert [r["status"] for r in released] == ["error"]
     assert "rožok 50g" in {q["wording"] for q in teach.open_questions(pg)}
+    # the ERROR exit's own post (not the first pass's held summary) carries the announcement
+    assert len(rec.posts) == 2 and "ORIONu zlyhalo" in rec.posts[-1]
     assert "&#10067; 1" in rec.posts[-1]
 
 

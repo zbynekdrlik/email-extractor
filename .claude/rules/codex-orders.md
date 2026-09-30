@@ -287,9 +287,12 @@ like DL (`card_guard.order_guard` = `codex_cards.live_guard`). Reusable rules:
   (6, the #160 cap; a floor-only filter gave a generic „chlieb" 24 buttons, review 2); an empty
   list is fine (search + „Vybrať kartu z CODEXu" stay). Any other item question just filters dead
   cards out. The net's questions are announced in the Odoo summary on every POSTING `_ship_one`
-  exit (`question_ids=net_qids, new_questions=len(net_new)` on the ok/partial, review AND
-  upload-error `_finish` — a retry finds the question already open, no `on_new`, so the first post
-  is the only announcement); the already-sent exit posts nothing.
+  exit (ok/partial, review AND upload-error `_finish`: `new_questions=len(net_new)` + the net's
+  qids in `question_ids` — ok/partial and upload-error pass `net_qids`, the review exit the
+  caller's ids + `net_qids`; never narrow review to `net_qids`, `ITEM_OPEN` is not technical and
+  the #164 invariant would raise a fallback `mail` question). A retry finds the question already
+  open (no `on_new`), so the first post is the only announcement; the already-sent exit posts
+  nothing.
 - **Every card PICK refuses a dead code (409):** the orders item answer (`_order_card_refusal`,
   twin of `_dl_card_refusal`) and the History „Doučiť" teachback (after its 403 not-a-card check),
   via `check_card_code(doc=DOC_ORDER|DOC_DL)` — order wording, not „celý dodací list". Without it
