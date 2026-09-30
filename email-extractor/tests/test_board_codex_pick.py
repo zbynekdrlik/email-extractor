@@ -208,19 +208,98 @@ def test_picking_a_code_we_already_have_selects_our_card_and_writes_nothing(pg):
     assert teach.get(pg, qid)["answer"]["choice"] == "0" + G_MUKA
 
 
-def test_picking_a_code_whose_card_is_in_the_kos_is_refused(pg):
+def test_picking_a_code_whose_card_is_in_the_kos_restores_that_card(pg):
+    """Review 🟡1: a Kôš card is not a dead end — the pick RESTORES our card exactly as it was
+    (never a blank overwrite: mass/sklad/cena and our name kept), audited as a `create` the
+    Kôš can take back again, and the question is answered with it."""
     _base(pg)
     _codex(pg)
-    _seed_dl(pg, G_MUKA, "Múka pšeničná T650", sklad="100", cena=0.37)
+    _seed_dl(pg, G_MUKA, "Múka hladká T650", sklad="100", cena=0.37, mass=25.0)
     dl_snapshot.retire_dl_catalog_card(pg, G_MUKA)
     dl_snapshot.dl_rebuild_from_overrides(pg)
     qid = _dl_question(pg)
     r = _client().post(f"/api/board/questions/{qid}/answer",
                        json={"codex_card": {"code": G_MUKA}})
-    assert r.status_code == 409 and "Kôš" in r.get_json()["error"]
-    assert pg.execute("SELECT retired, sklad FROM dl_catalog_overrides WHERE gtin=%s",
-                      (G_MUKA,)).fetchone() == (True, "100")
-    assert teach.get(pg, qid)["status"] == "open"
+    assert r.status_code == 200, r.get_data(as_text=True)
+    row = pg.execute("SELECT name, retired, deleted_at, sklad, cena, mass "
+                     "FROM dl_catalog_overrides WHERE gtin=%s", (G_MUKA,)).fetchone()
+    assert row[:4] == ("Múka hladká T650", False, None, "100")
+    assert float(row[4]) == 0.37 and float(row[5]) == 25.0
+    assert any(x["gtin"] == G_MUKA for x in dl_snapshot.dl_catalog_for_management(pg))
+    audit = [a for a in _audit(pg) if a[1] == "dl_catalog_overrides"]
+    assert [(a[2], a[3]) for a in audit] == [(G_MUKA, "create")]
+    assert audit[0][4]["restored"] is True
+    assert teach.get(pg, qid)["answer"]["choice"] == G_MUKA
+
+
+def test_an_orders_card_in_the_kos_is_marked_and_restored_by_the_pick(pg):
+    """The same restore in the ORDERS scope (`snapshot.deleted_catalog_cards`), incl. the
+    picker's `in_trash` mark."""
+    _base(pg)
+    _codex(pg)
+    from app.orders import snapshot
+    snapshot.upsert_catalog_card(pg, G_CHLIEB, "Chlieb kváskový", alias="kvasok")
+    snapshot.rebuild_from_overrides(pg)
+    snapshot.retire_catalog_card(pg, G_CHLIEB)
+    snapshot.rebuild_from_overrides(pg)
+    item = _client().get("/api/board/codex-cards?scope=orders&q=kvaskovy").get_json()["items"]
+    assert item[0]["code"] == G_CHLIEB and item[0]["in_trash"] is True
+    qid = teach.ask(pg, message_id="m477k", customer_ean="2000000000864",
+                    customer_name="Pekáreň", wording="chlieb kvaskovy", quantity=2, unit="ks",
+                    candidates=[])
+    r = _client().post(f"/api/board/questions/{qid}/answer",
+                       json={"codex_card": {"code": G_CHLIEB}, "quantity": 2})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert pg.execute("SELECT name, alias, retired, deleted_at FROM catalog_overrides "
+                      "WHERE gtin=%s", (G_CHLIEB,)).fetchone() == (
+        "Chlieb kváskový", "kvasok", False, None)
+    assert G_CHLIEB in snapshot.catalog_gtin_set(pg)
+    assert teach.get(pg, qid)["answer_gtin"] == G_CHLIEB
+
+
+def test_a_codex_pick_taken_back_in_the_kos_can_be_picked_again(pg):
+    """Review 🟡1: pick → Kôš „Vrátiť" (soft-deletes it again) → the next pick of that code
+    brings the card back — never the dead end a plain refusal was."""
+    _base(pg)
+    _codex(pg)
+    c = _client()
+    qid = _dl_question(pg)
+    assert c.post(f"/api/board/questions/{qid}/answer",
+                  json={"codex_card": {"code": G_MUKA}}).status_code == 200
+    aid = pg.execute("SELECT id FROM audit_log WHERE table_name='dl_catalog_overrides' "
+                     "AND action='create'").fetchone()[0]
+    assert _client(login=True).post(f"/api/board/audit/{aid}/restore").status_code == 200
+    assert not any(x["gtin"] == G_MUKA for x in dl_snapshot.dl_catalog_for_management(pg))
+    q2 = _dl_question(pg, mid="m477again", wording="Múka pšeničná T650 25kg")
+    r = c.post(f"/api/board/questions/{q2}/answer", json={"codex_card": {"code": G_MUKA}})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert any(x["gtin"] == G_MUKA for x in dl_snapshot.dl_catalog_for_management(pg))
+    assert teach.get(pg, q2)["answer"]["choice"] == G_MUKA
+
+
+def test_a_codex_pick_without_a_code_is_refused_on_an_open_question(pg):
+    _base(pg)
+    _codex(pg)
+    qid = _dl_question(pg)
+    for body in ({"codex_card": {}}, {"codex_card": {"code": "  "}}):
+        r = _client().post(f"/api/board/questions/{qid}/answer", json=body)
+        assert r.status_code == 400 and "kód" in r.get_json()["error"]
+    assert teach.get(pg, qid)["status"] == "open" and _overrides(pg) == []
+
+
+def test_the_refusal_help_says_which_similar_codex_cards_can_be_picked(pg):
+    """Review 🔵6: the #467 refusal lists similar cards from the WHOLE CODEX list — only the
+    ones the picker would offer (stredisko 1, active) may get „Pridať kartu z CODEXu"."""
+    _base(pg)
+    _codex(pg)
+    _seed_dl(pg, "3698", "Rožok so slaninou a syrom 70g")
+    qid = _dl_question(pg, mid="m477h", wording="Rožok")   # every rožok card is „similar"
+    r = _client().post(f"/api/board/questions/{qid}/answer", json={"choice": "3698"})
+    assert r.status_code == 409
+    similar = {s["code"]: s for s in r.get_json()["codex"]["similar"]}
+    assert similar[G_ROZOK]["pickable"] is True
+    assert similar[G_POBOCKA]["pickable"] is False   # junk stredisko (#337)
+    assert similar[G_STARY]["pickable"] is False     # inactive in CODEX
 
 
 def test_a_code_outside_the_pick_scope_is_refused_and_nothing_is_written(pg):
@@ -256,8 +335,6 @@ def test_the_codex_pick_on_another_kind_or_an_answered_question_is_refused(pg):
     pg.execute("UPDATE order_questions SET status='answered' WHERE id=%s", (qid,))
     assert c.post(f"/api/board/questions/{qid}/answer",
                   json={"codex_card": {"code": G_MUKA}}).status_code == 409
-    assert c.post(f"/api/board/questions/{qid}/answer",
-                  json={"codex_card": {}}).status_code in (400, 409)
     assert _overrides(pg) == [] and _audit(pg) == []
 
 

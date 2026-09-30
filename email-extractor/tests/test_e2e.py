@@ -413,6 +413,10 @@ def test_board_kos_delete_a_card_then_restore_it_in_the_browser(live_server, pg,
     assert backend_ver in page.locator('[data-testid="version"]').inner_text()
     page.fill("#trash-search", "E2EKOS")
     page.wait_for_selector('#trash-rows tr:has-text("E2EKOS")')
+    # an ORDERS catalog card (catalog_overrides) — labelled as such (#477 review: the two card
+    # labels were swapped, so every DL pick showed up in the Kôš as an orders card)
+    assert "Karta (objednávky)" in page.locator(
+        '#trash-rows tr:has-text("E2EKOS")').first.inner_text()
 
     # „Vrátiť" restores it
     page.click('button:has-text("Vrátiť")')
@@ -664,6 +668,11 @@ _E2E_CODEX = [
      "name": "Mak modrý mletý e2e"},
     {"code": "9990000000109", "card_code": "109", "stredisko": 1, "sklad": 1,
      "name": "Chlieb kváskový e2e 500g"},
+    {"code": "9990000000116", "card_code": "116", "stredisko": 1, "sklad": 700,
+     "name": "Obal na bábovku e2e"},
+    # a junk-stredisko card (#337) — CODEX has it, the picker never offers it
+    {"code": "9990000000123", "card_code": "123", "stredisko": 402, "sklad": 402,
+     "name": "Mak modrý mletý pobočka"},
 ]
 
 
@@ -703,6 +712,8 @@ def test_board_produkty_tabs_have_no_add_button_and_the_create_api_refuses(
     _e2e_codex_and_catalog(pg)
     from app.orders import dl_snapshot
     dl_snapshot.upsert_dl_catalog_card(pg, "9990000000093", "Mak modrý mletý e2e", sklad="100")
+    # a card whose number CODEX has no stock card for (the #467 3698 class)
+    dl_snapshot.upsert_dl_catalog_card(pg, "3698", "Rožok so slaninou 70g")
     dl_snapshot.dl_rebuild_from_overrides(pg)
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
@@ -736,20 +747,45 @@ def test_board_produkty_tabs_have_no_add_button_and_the_create_api_refuses(
     row.locator(".p-codex-take").click()
     assert row.locator(".p-editor .p-name").input_value() == "Rožok so slaninou a syrom 70g"
     row.locator(".p-edit").click()   # close the editor again (refresh-safety)
+
+    # #467 edit refusal: saving a card whose number CODEX has no stock card for is refused —
+    # the editor lists CODEX cards with a similar name; one we have is found with one click
+    dead = page.locator('.p-row[data-gtin="3698"]')
+    dead.locator(".p-edit").click()
+    dead.locator(".p-editor .p-save").click()
+    hint = dead.locator(".p-codex-hint")
+    hint.wait_for()
+    assert "3698" in hint.inner_text() and "CODEX" in hint.inner_text()
+    hint.locator('.p-codex-find[data-code="9990000000017"]').click()
+    page.wait_for_selector('.p-row[data-gtin="9990000000093"]', state="detached")
+    assert page.locator("#p-search").input_value() == "9990000000017"
+    assert page.locator('.p-row[data-gtin="9990000000017"]').count() == 1
+    assert pg.execute("SELECT name FROM dl_catalog_overrides WHERE gtin='3698'"
+                      ).fetchone()[0] == "Rožok so slaninou 70g"
+    page.fill("#p-search", "")
+    page.wait_for_selector('.p-row[data-gtin="9990000000093"]')
+
     page.check("#p-codex-issues")
     page.wait_for_selector('.p-row[data-gtin="9990000000093"]', state="detached")
     gtins = page.locator(".p-row").evaluate_all("rs => rs.map(r => r.dataset.gtin)")
-    assert "9990000000017" in gtins and "9990000000093" not in gtins
+    assert "9990000000017" in gtins and "9990000000093" not in gtins and "3698" in gtins
 
-    assert console == [], f"browser console not clean: {console}"
+    # the edit refusal IS a deliberate 409 — Chromium logs every non-2xx fetch as "Failed to
+    # load resource" (no app console.error); tolerate exactly that ONE entry (#235)
+    tolerated = [m for m in console if "Failed to load resource" in m and "status of 409" in m]
+    assert len(tolerated) == 1, f"exactly the one deliberate refusal: {console}"
+    real_errors = [m for m in console if m not in tolerated]
+    assert real_errors == [], f"browser console not clean: {real_errors}"
 
 
 def test_board_dl_item_question_picks_a_card_from_codex_in_the_browser(live_server, pg, page):
     """#477 on Otázky sklad: the card offers „Vybrať kartu z CODEXu" and no typed card /
-    number. The picker shows the list's freshness, finds CODEX cards by name; a card we
-    already have is only selected (our number, nothing written), a new one is added with the
-    CODEX code + name + sklad and the question answered. The #467 refusal help of a dead-code
-    candidate adds/uses a card through the same pick. Nothing else fails; clean console."""
+    number. The picker shows the list's freshness and finds CODEX cards by name; a card we
+    already have is only selected (our number, nothing written); a pick unrelated to the line
+    asks the #465 misclick confirmation first (cancel = nothing written), then adds exactly the
+    CODEX code + name + sklad and answers. The #467 refusal help of a dead-code candidate
+    survives the 8 s refresh, drifted candidates show their CODEX name, and „Pridať kartu z
+    CODEXu" adds + answers through the same pick. Clean console."""
     from app.httpapi import dl_key
 
     _e2e_codex_and_catalog(pg)
@@ -758,9 +794,19 @@ def test_board_dl_item_question_picks_a_card_from_codex_in_the_browser(live_serv
     dl_snapshot.upsert_dl_catalog_card(pg, "3698", "Mak modrý starý kód")
     dl_snapshot.dl_rebuild_from_overrides(pg)
     q_have = _board_seed_dl_item_question(pg, "be2e-477a", "Rožok so slaninou a syrom 70g", [])
-    q_new = _board_seed_dl_item_question(pg, "be2e-477b", "Mak modrý mletý 1 kg", [])
+    q_mis = _board_seed_dl_item_question(pg, "be2e-477b", "Olej olivový e2e 1l", [])
     q_dead = _board_seed_dl_item_question(pg, "be2e-477c", "Mak modrý mletý e2e",
                                           [("3698", "Mak modrý starý kód")])
+    dialogs, mode = [], {"accept": False}
+
+    def _on_dialog(d):
+        dialogs.append(d.message)
+        if mode["accept"]:
+            d.accept()
+        else:
+            d.dismiss()
+
+    page.on("dialog", _on_dialog)
     console = _collect_console(page)
     page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
     page.wait_for_url(re.compile(r"/nastenka"))
@@ -785,38 +831,64 @@ def test_board_dl_item_question_picks_a_card_from_codex_in_the_browser(live_serv
     assert _wait_answered(pg, page, q_have)[:2] == ("answered", "9990000000017")
     assert pg.execute("SELECT name FROM dl_catalog_overrides WHERE gtin='9990000000017'"
                       ).fetchone()[0] == "Bagetka s kečupom a syrom 80 gr"
+    assert dialogs == []
     # the answer's own list reload rebuilds every card — wait for it (the answered card
     # leaves the open list) before opening the next card's picker, or the rebuild wipes it
     page.wait_for_selector(f"#q-card-{q_have}", state="detached")
 
-    # a CODEX card we do not have yet → added (CODEX code + name + sklad) and answered
-    card = page.locator(f"#q-card-{q_new}")
-    card.wait_for()
+    # a CODEX card unrelated to the line → the misclick confirmation first; cancelled =
+    # nothing written, the question stays open; confirmed = added (code + name + sklad)
+    card = page.locator(f"#q-card-{q_mis}")
     card.locator('button:has-text("Vybrať kartu z CODEXu")').click()
     picker = card.locator(".q-codex-picker")
-    picker.locator(".q-codex-search").fill("mak mlety")
-    choice = picker.locator('.q-codex-choice[data-code="9990000000093"]')
+    picker.locator(".q-codex-search").fill("babovku")
+    choice = picker.locator('.q-codex-choice[data-code="9990000000116"]')
     choice.wait_for()
-    assert "sklad 100" in choice.inner_text()
+    assert "sklad 700" in choice.inner_text() and "nová karta" in choice.inner_text()
     choice.locator(".q-codex-pick").click()
-    assert _wait_answered(pg, page, q_new)[:2] == ("answered", "9990000000093")
-    page.wait_for_selector(f"#q-card-{q_new}", state="detached")
+    page.wait_for_timeout(500)
+    assert len(dialogs) == 1 and "Olej olivový e2e 1l" in dialogs[0]
+    assert pg.execute("SELECT count(*) FROM dl_catalog_overrides WHERE gtin='9990000000116'"
+                      ).fetchone()[0] == 0
+    assert pg.execute("SELECT status FROM order_questions WHERE id=%s",
+                      (q_mis,)).fetchone()[0] == "open"
+    mode["accept"] = True
+    choice.locator(".q-codex-pick").click()
+    assert _wait_answered(pg, page, q_mis)[:2] == ("answered", "9990000000116")
     assert pg.execute("SELECT name, sklad FROM dl_catalog_overrides WHERE gtin=%s",
-                      ("9990000000093",)).fetchone() == ("Mak modrý mletý e2e", "100")
+                      ("9990000000116",)).fetchone() == ("Obal na bábovku e2e", "700")
     assert pg.execute("SELECT actor, action FROM audit_log WHERE table_name="
-                      "'dl_catalog_overrides' AND row_id='9990000000093'").fetchall() == [
+                      "'dl_catalog_overrides' AND row_id='9990000000116'").fetchall() == [
         ("sklad", "create")]
+    page.wait_for_selector(f"#q-card-{q_mis}", state="detached")
+    mode["accept"] = False
 
-    # #467 hint: the offered dead-code card is refused (409), the help offers the CODEX card
-    # (now in our catalog) — one click answers with it
+    # #467 hint: the offered dead-code card is refused (409); the help lists the CODEX card
+    # with that name, which we do not have yet → „Pridať kartu z CODEXu"
     card = page.locator(f"#q-card-{q_dead}")
-    card.wait_for()
     card.locator('button:has-text("Mak modrý starý kód")').click()
     hint = card.locator(".q-codex-hint")
     hint.wait_for()
     assert "3698" in hint.inner_text() and "CODEX" in hint.inner_text()
-    hint.locator('.q-codex-use[data-code="9990000000093"]').click()
+    # the hint does NOT freeze the board: a question added meanwhile appears with the 8 s
+    # refresh, the hint is re-rendered on its card; a drifted candidate shows its CODEX name
+    drift_q = _board_seed_dl_item_question(pg, "be2e-477d", "Rožok so slaninou 70g", [])
+    pg.execute("UPDATE order_questions SET candidates = %s::jsonb WHERE id = %s",
+               ('[{"value": "9990000000017", "label": "Bagetka s kečupom a syrom 80 gr", '
+                '"codex_name": "Rožok so slaninou a syrom 70g"}]', drift_q))
+    btn = page.locator(f"#q-card-{drift_q} .q-btn--cand")
+    btn.wait_for(timeout=15000)
+    assert "CODEX: Rožok so slaninou a syrom 70g" in btn.inner_text()
+    assert card.locator(".q-codex-hint").count() == 1
+    # a similar CODEX card the picker would never offer (junk stredisko) gets no add button
+    assert "9990000000123" in card.locator(".q-codex-hint").inner_text()
+    assert card.locator('.q-codex-new[data-code="9990000000123"]').count() == 0
+    card.locator('.q-codex-new[data-code="9990000000093"]').click()
     assert _wait_answered(pg, page, q_dead)[:2] == ("answered", "9990000000093")
+    assert pg.execute("SELECT name, sklad FROM dl_catalog_overrides WHERE gtin=%s",
+                      ("9990000000093",)).fetchone() == ("Mak modrý mletý e2e", "100")
+    # only the two misclick confirmations above — the hint pick matched the line, no third
+    assert len(dialogs) == 2
 
     # the refusal IS a deliberate 409 — Chromium logs every non-2xx fetch as "Failed to load
     # resource" (no app console.error); tolerate exactly that ONE entry, nothing else (#235)

@@ -347,6 +347,23 @@ def test_add_global_alias_delegates_to_memory_and_audits(pg):
     assert n == 1
 
 
+def test_an_alias_is_only_added_to_a_card_we_have(pg):
+    """#477 review: an alias maps a wording to a card NUMBER that later ships (the orders
+    `human_taught` rung does not re-check the catalog) — a typed number that is no card of the
+    scope is refused, never a memory row pointing nowhere."""
+    _seed_orders(pg, "AG1", "Karta alias")
+    c = _client()
+    _sklad(c)
+    for scope, gtin, body in (("orders", "GHOST1", {"wording": "duch"}),
+                              ("dl", "AG1", {"wording": "duch", "ean": "3000000000001"})):
+        r = c.post(f"/api/board/products/{gtin}/aliases?scope={scope}", json=body)
+        assert r.status_code == 400, (scope, gtin)
+        assert "v katalógu nie je" in r.get_json()["error"]
+    assert memory.list_global_aliases(pg) == []
+    assert pg.execute("SELECT count(*) FROM dl_item_memory").fetchone()[0] == 0
+    assert pg.execute("SELECT count(*) FROM audit_log").fetchone()[0] == 0
+
+
 def test_add_customer_alias_needs_an_ean_and_delegates(pg):
     _seed_orders(pg, "AC1", "Karta alias c")
     c = _client()
