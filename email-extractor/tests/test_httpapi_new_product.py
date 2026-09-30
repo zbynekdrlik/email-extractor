@@ -1,36 +1,41 @@
-"""#426: adding a genuinely NEW catalog card straight from the "ktorý výrobok to je?"
-(kind='item') question card on the warehouse orders board — the last "new thing right on
-the question" action that was missing.
+"""#477 (replaces #426's „➕ Nová karta" on the item question): a card is never TYPED onto an
+orders item question — it is PICKED from the CODEX stock-card list.
 
-Root cause (see the design comment on #426): `api_orders_answer` handles `kind=='item'`
-by falling through to a tail that requires an EXISTING card (`if not gtin: 400 "chýba
-karta"`, `httpapi_orders_questions.py`). The "genuinely new" branch already exists for
-`new_customer` (#234) and the two DL kinds `new_supplier`/`new_item` (#235) — item never
-got one, so the warehouse had to leave for /znalosti when a card was missing (owner request
-2026-09-14). This file pins the fix: a `new_product` body on the existing answer route
-(mirrors #234/#235 exactly) — the card is created (catalog_overrides, like /znalosti), the
-question is answered by `sklad-new-card`, and the held order is released, all one click.
+History: #426 let the warehouse type a brand-new číslo položky + name straight onto the
+"ktorý výrobok to je?" (kind='item') question (a `new_product` body). Owner order 2026-09-30
+(#477, after the #467 incident — a typed code the warehouse invented broke orders and DLs):
+typed creation is gone everywhere. A `new_product` body is now refused 403 (nothing written,
+the held order stays held); the replacement is a `codex_card` body — the picked CODEX card
+(CODEX code + CODEX name, orders scope = CODEX stredisko 1 / sklad 1) lands in
+`catalog_overrides` (audited), the question is answered by `sklad-codex-card` through the
+normal `teach.answer` path, and the held order is released — still one click.
 
 Flask test client + real Postgres, same pattern as test_httpapi_new_dl.py /
-test_httpapi_new_customer.py.
+test_httpapi_new_customer.py. Synthetic codes/names only (public repo).
 """
 import os
+from datetime import UTC, datetime, timedelta
 
 from psycopg.types.json import Json
 
 from app.config import Config
 from app.httpapi import create_app, sklad_key
-from app.orders import snapshot
+from app.orders import codex_cards, memory, snapshot
 
 PG_DSN = os.environ.get("PG_TEST_DSN")
 
-# 3600 is a pre-existing base-snapshot card (a real číslo položky is numeric) → the
-# duplicate-gtin test collides with it.
+# 3600 is a pre-existing base-snapshot card (a real číslo položky is numeric).
 CATALOG_CSV = "GTIN,Názov,doplnok\n3600,Rožok štandart,\n"
 CUSTOMER_CSV = (
     "Názov organizácie,EAN kód EDI,Obec,Ulica,E-mail\n"
     "Pekáreň Testovacia,2000000000864,Martin,Košútka 1,sklad@pekaren.sk\n"
 )
+CODEX = [
+    {"code": "3650", "card_code": "3650", "stredisko": 1, "sklad": 1,
+     "name": "Chlieb kváskový pražená cibuľka 500g"},
+    {"code": "3600", "card_code": "3600", "stredisko": 1, "sklad": 1,
+     "name": "Rožok štandart 40g"},
+]
 
 
 def _cfg():
@@ -56,10 +61,13 @@ def _login(c):
     c.post("/login", data={"password": "secret"})
 
 
+def _codex(pg):
+    codex_cards.replace_cards(pg, CODEX, source_as_of=datetime.now(UTC) - timedelta(hours=1))
+
+
 def _seed_item_held_order(pg, message_id="m426"):
     """One held order waiting on ONE item question whose line is unmatched — exactly what
-    `pipeline._run` leaves when a wording has no catalog card yet. Answering with a
-    brand-new card must create it, teach it, and ship the held order (one click)."""
+    `pipeline._run` leaves when a wording has no catalog card yet."""
     snapshot.import_snapshot(pg, CATALOG_CSV, CUSTOMER_CSV)
     pg.execute("INSERT INTO messages (message_id, category) VALUES (%s, 'ai_orders')",
               (message_id,))
@@ -90,102 +98,77 @@ def _answered_row(pg, qid):
         (qid,)).fetchone()
 
 
-# --- the fix: new_product answer path on an item question -----------------------------
+# --- #477: a typed card is refused ----------------------------------------------------
 
-def test_new_product_on_an_item_question_creates_the_card_answers_and_releases(
-        pg, monkeypatch):
-    """Proves the whole #426 flow: a brand-new card (číslo položky from CODEX, never in the
-    catalog) typed straight onto the item question creates the override card, answers the
-    question by `sklad-new-card`, and ships the held order — one document, one click."""
+def test_a_typed_new_product_on_an_item_question_is_refused_codex_only(pg, monkeypatch):
+    """The #426 `new_product` body (a typed číslo položky + názov) is refused 403 from BOTH the
+    admin session and the warehouse link — nothing written, nothing shipped, still open."""
     qid = _seed_item_held_order(pg)
+    _codex(pg)
     monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
-    c = _client()
-    _login(c)
-    r = c.post(f"/api/orders/question/{qid}/answer", json={
-        "new_product": {"gtin": "3650", "name": "Chlieb kváskový pražená cibuľka"},
-        "quantity": 5, "unit_price": "1,20"})
-    assert r.status_code == 200
+    admin = _client()
+    _login(admin)
+    for c in (admin, _sklad_client()):
+        r = c.post(f"/api/orders/question/{qid}/answer", json={
+            "new_product": {"gtin": "3650", "name": "Chlieb kváskový"}, "quantity": 5})
+        assert r.status_code == 403
+        body = r.get_json()
+        assert body["codex_only"] is True
+        assert "Nové karty sa pridávajú len výberom z CODEXu" in body["error"]
+    assert _answered_row(pg, qid)[0] == "open"
+    assert pg.execute("SELECT count(*) FROM catalog_overrides").fetchone()[0] == 0
+    assert pg.execute("SELECT count(*) FROM audit_log").fetchone()[0] == 0
+    assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 0
+    assert pg.execute(
+        "SELECT status FROM held_orders WHERE message_id='m426'").fetchone() == ("held",)
+
+
+# --- #477: the CODEX pick creates + answers + releases --------------------------------
+
+def test_picking_a_codex_card_on_a_held_item_question_creates_it_answers_and_releases(
+        pg, monkeypatch):
+    """The whole flow from the warehouse link: the picked CODEX card lands as an override
+    card (CODEX code + CODEX name, audited), the question is answered by `sklad-codex-card`
+    (the confirmed quantity kept, the wording taught), and the held order ships once."""
+    qid = _seed_item_held_order(pg)
+    _codex(pg)
+    monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
+    r = _sklad_client().post(f"/api/orders/question/{qid}/answer", json={
+        "codex_card": {"code": "3650"}, "quantity": 5, "unit_price": "1,20"})
+    assert r.status_code == 200, r.get_data(as_text=True)
     body = r.get_json()
     assert body["ok"] is True
-    # the card is in the effective catalog + a real override row landed (like /znalosti)
-    assert any(x["gtin"] == "3650" for x in snapshot.catalog_for_management(pg))
-    assert pg.execute(
-        "SELECT name FROM catalog_overrides WHERE gtin='3650'"
-    ).fetchone() == ("Chlieb kváskový pražená cibuľka",)
-    # question answered, attributed to the new-card path
-    assert _answered_row(pg, qid) == ("answered", "3650", "sklad-new-card")
-    # held order released, exactly one EDI shipped
+    assert pg.execute("SELECT gtin, name FROM catalog_overrides").fetchall() == [
+        ("3650", "Chlieb kváskový pražená cibuľka 500g")]
+    assert "3650" in snapshot.catalog_gtin_set(pg)
+    audit = pg.execute("SELECT actor, table_name, row_id, action FROM audit_log "
+                       "WHERE table_name='catalog_overrides'").fetchall()
+    assert audit == [("sklad", "catalog_overrides", "3650", "create")]
+    assert _answered_row(pg, qid) == ("answered", "3650", "sklad-codex-card")
+    assert pg.execute("SELECT quantity FROM order_questions WHERE id=%s",
+                      (qid,)).fetchone()[0] == 5
+    assert memory.resolve(pg, "2000000000864", "chlieb").gtin == "3650"
     assert body["released"] and body["released"][0]["status"] == "ok"
     assert pg.execute(
         "SELECT status FROM held_orders WHERE message_id='m426'").fetchone() == ("released",)
     assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 1
 
 
-def test_new_product_with_a_gtin_that_already_has_a_live_card_is_refused(pg, monkeypatch):
-    """A číslo položky that already belongs to a live card → 409 + `existing`, so the client
-    can offer „Použiť existujúcu kartu" instead of silently creating a duplicate override.
-    The question stays open and nothing ships."""
+def test_picking_a_codex_card_we_already_have_answers_with_our_card(pg, monkeypatch):
+    """3600 is already our card (base snapshot) — the pick only SELECTS it: no override, no
+    audit create, our name kept; the order ships with it."""
     qid = _seed_item_held_order(pg)
+    _codex(pg)
     monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
     c = _client()
     _login(c)
     r = c.post(f"/api/orders/question/{qid}/answer", json={
-        "new_product": {"gtin": "3600", "name": "Iný názov"}, "quantity": 5})
-    assert r.status_code == 409
-    body = r.get_json()
-    assert body["existing"]["gtin"] == "3600"
-    assert "Rožok" in body["existing"]["name"]
-    assert _answered_row(pg, qid)[0] == "open"
+        "codex_card": {"code": "3600"}, "quantity": 5})
+    assert r.status_code == 200, r.get_data(as_text=True)
     assert pg.execute("SELECT count(*) FROM catalog_overrides").fetchone()[0] == 0
-    assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 0
-
-
-def test_new_product_without_a_gtin_is_refused(pg):
-    qid = _seed_item_held_order(pg)
-    c = _client()
-    _login(c)
-    r = c.post(f"/api/orders/question/{qid}/answer",
-              json={"new_product": {"name": "Bez čísla položky"}})
-    assert r.status_code == 400
-    assert pg.execute("SELECT count(*) FROM catalog_overrides").fetchone()[0] == 0
-    assert _answered_row(pg, qid)[0] == "open"
-
-
-def test_new_product_with_a_non_numeric_gtin_is_refused(pg):
-    qid = _seed_item_held_order(pg)
-    c = _client()
-    _login(c)
-    r = c.post(f"/api/orders/question/{qid}/answer",
-              json={"new_product": {"gtin": "36X0", "name": "X"}})
-    assert r.status_code == 400
-    assert pg.execute("SELECT count(*) FROM catalog_overrides").fetchone()[0] == 0
-    assert _answered_row(pg, qid)[0] == "open"
-
-
-def test_new_product_from_the_unauthenticated_sklad_link_is_allowed(pg, monkeypatch):
-    """The warehouse's own /otazky link (role 'sklad', ORDERS_KINDS) may create+answer an
-    item question — SKLAD_ACTION already covers the answer endpoint, no security change."""
-    qid = _seed_item_held_order(pg)
-    monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
-    c = _sklad_client()
-    r = c.post(f"/api/orders/question/{qid}/answer", json={
-        "new_product": {"gtin": "3650", "name": "Chlieb kváskový"}, "quantity": 5})
-    assert r.status_code == 200
-    assert any(x["gtin"] == "3650" for x in snapshot.catalog_for_management(pg))
-    assert _answered_row(pg, qid) == ("answered", "3650", "sklad-new-card")
-
-
-def test_new_product_with_a_doplnok_stores_the_alias(pg, monkeypatch):
-    """The optional doplnok is stored as the card's alias (a real match.py alias_exact
-    signal), exactly like /api/znalosti/products does."""
-    qid = _seed_item_held_order(pg)
-    monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
-    c = _client()
-    _login(c)
-    r = c.post(f"/api/orders/question/{qid}/answer", json={
-        "new_product": {"gtin": "3650", "name": "Chlieb kváskový",
-                        "doplnok": "pražená cibuľka"}, "quantity": 5})
-    assert r.status_code == 200
-    assert pg.execute(
-        "SELECT alias FROM catalog_overrides WHERE gtin='3650'"
-    ).fetchone() == ("pražená cibuľka",)
+    assert pg.execute("SELECT count(*) FROM audit_log WHERE action='create'").fetchone()[0] == 0
+    row = _answered_row(pg, qid)
+    assert row[:2] == ("answered", "3600")
+    assert pg.execute("SELECT answer_card FROM order_questions WHERE id=%s",
+                      (qid,)).fetchone()[0] == "Rožok štandart"
+    assert pg.execute("SELECT count(*) FROM edi_sent").fetchone()[0] == 1

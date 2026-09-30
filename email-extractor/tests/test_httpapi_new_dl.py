@@ -10,7 +10,8 @@ and even the question card itself only offers pre-computed candidates + "Neviem"
 (`_validate_dl_item`/`_validate_dl_supplier` reject anything else). This file pins the fix:
 a `new_supplier`/`new_item` body on the existing answer route (mirrors #234's `new_customer`
 exactly), the DL role gaining narrow API-only access to the two dl-* endpoints, and the
-EAN/GTIN-cannot-be-forgotten guarantee #234 established, reused here.
+EAN/GTIN-cannot-be-forgotten guarantee #234 established, reused here. (#477: the DL product
+half — a TYPED `new_item` — is now refused 403; a card is picked from CODEX instead.)
 
 Flask test client + real Postgres, same pattern as test_httpapi_new_customer.py.
 """
@@ -165,24 +166,23 @@ def test_two_concurrent_new_dl_supplier_ean_collisions_leave_exactly_one_winner(
     ).fetchone()[0] == 1
 
 
-def test_adding_a_new_dl_product_from_the_card_teaches_it_and_answers(pg):
+def test_a_typed_new_dl_product_on_the_card_is_refused_codex_only(pg):
+    """#477 (owner order 2026-09-30) replaces #235's typed DL „➕ Nová karta": a `new_item` body
+    — with or without a číslo položky — is refused 403, nothing is written and the question
+    stays open. A card comes only from „Vybrať kartu z CODEXu" (`codex_card`, pinned in
+    test_board_codex_pick.py)."""
     qid = teach.ask_dl_item(
         pg, message_id="m235d", supplier_ean="S1", supplier_name="Mlyn s.r.o.",
         wording="Soľ jedlá kamenná jódovaná 0,7-0,16 mm", quantity=1000, unit="kg",
         candidates=[])
     c = _dl_client()
-    r = c.post(f"/api/orders/question/{qid}/answer", json={"new_item": {
-        "gtin": "4003885181808", "name": "Soľ jedlá kamenná jódovaná 0,7-0,16 mm"}})
-    assert r.status_code == 200
-    assert r.get_json()["ok"] is True
-    row = pg.execute(
-        "SELECT gtin, name FROM dl_catalog_overrides WHERE gtin='4003885181808'"
-    ).fetchone()
-    assert row == ("4003885181808", "Soľ jedlá kamenná jódovaná 0,7-0,16 mm")
-    assert teach.get(pg, qid)["status"] == "answered"
-    from app.orders import dl_memory
-    assert dl_memory.resolve(pg, "S1", "Soľ jedlá kamenná jódovaná 0,7-0,16 mm").gtin == (
-        "4003885181808")
+    for new_item in ({"gtin": "4003885181808", "name": "Soľ jedlá kamenná jódovaná"},
+                     {"name": "Neznáme"}, {"gtin": "ABC", "name": "Neznáme"}):
+        r = c.post(f"/api/orders/question/{qid}/answer", json={"new_item": new_item})
+        assert r.status_code == 403, new_item
+        assert "Nové karty sa pridávajú len výberom z CODEXu" in r.get_json()["error"]
+    assert pg.execute("SELECT count(*) FROM dl_catalog_overrides").fetchone()[0] == 0
+    assert teach.get(pg, qid)["status"] == "open"
 
 
 def test_ship_without_sentinel_goes_through_the_real_http_answer_path(pg):
@@ -190,8 +190,7 @@ def test_ship_without_sentinel_goes_through_the_real_http_answer_path(pg):
     the REAL HTTP answer path — the offered-lookup miss (the sentinel is never a catalog
     GTIN) must fall through, `_validate_dl_item` must ALLOW it, and `_apply_dl_item` must
     record it (no `dl_item_memory` teach) + trigger a reprocess. The question has no
-    `messages` row, so `release_for_question` short-circuits with no LLM call, exactly like
-    the new_item test above."""
+    `messages` row, so `release_for_question` short-circuits with no LLM call."""
     from app.orders import dl_memory
     qid = teach.ask_dl_item(
         pg, message_id="m365sw", supplier_ean="S1", supplier_name="Mlyn s.r.o.",
@@ -228,28 +227,6 @@ def test_a_new_dl_supplier_with_a_non_numeric_ean_is_refused(pg):
               json={"new_supplier": {"ean_edi": "SK123", "name": "Zlý EAN s.r.o."}})
     assert r.status_code == 400
     assert pg.execute("SELECT count(*) FROM dl_supplier_overrides").fetchone()[0] == 0
-
-
-def test_a_new_dl_product_without_a_gtin_is_refused(pg):
-    qid = teach.ask_dl_item(pg, message_id="m235g", supplier_ean="S1",
-                            supplier_name="Mlyn", wording="Neznáme", quantity=1, unit="ks",
-                            candidates=[])
-    c = _dl_client()
-    r = c.post(f"/api/orders/question/{qid}/answer",
-              json={"new_item": {"name": "Neznáme"}})
-    assert r.status_code == 400
-    assert pg.execute("SELECT count(*) FROM dl_catalog_overrides").fetchone()[0] == 0
-
-
-def test_a_new_dl_product_with_a_non_numeric_gtin_is_refused(pg):
-    qid = teach.ask_dl_item(pg, message_id="m235h", supplier_ean="S1",
-                            supplier_name="Mlyn", wording="Neznáme", quantity=1, unit="ks",
-                            candidates=[])
-    c = _dl_client()
-    r = c.post(f"/api/orders/question/{qid}/answer",
-              json={"new_item": {"gtin": "ABC", "name": "Neznáme"}})
-    assert r.status_code == 400
-    assert pg.execute("SELECT count(*) FROM dl_catalog_overrides").fetchone()[0] == 0
 
 
 def test_two_concurrent_answers_to_the_same_dl_question_leave_exactly_one_winner(pg):

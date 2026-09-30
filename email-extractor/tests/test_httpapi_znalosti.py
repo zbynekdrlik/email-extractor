@@ -186,14 +186,17 @@ def test_products_list_and_search(pg):
     assert [i["gtin"] for i in found] == ["G2"]
 
 
-def test_add_a_new_product_card_is_visible_immediately(pg):
+def test_adding_a_new_product_card_via_the_legacy_api_is_refused(pg):
+    """#477: the legacy upsert is no back door — a NEW number is refused 403 (a card comes only
+    from the CODEX picker on a question); nothing is written."""
     _snap(pg)
     c = _client()
     _login(c)
     r = c.post("/api/znalosti/products", json={"gtin": "NEW1", "name": "Chlieb domáci 1kg"})
-    assert r.status_code == 200 and r.get_json()["ok"] is True
-    items = c.get("/api/znalosti/products?q=domáci").get_json()["items"]
-    assert [i["gtin"] for i in items] == ["NEW1"]
+    assert r.status_code == 403
+    assert "Nové karty sa pridávajú len výberom z CODEXu" in r.get_json()["error"]
+    assert c.get("/api/znalosti/products?q=domáci").get_json()["items"] == []
+    assert pg.execute("SELECT count(*) FROM catalog_overrides").fetchone()[0] == 0
 
 
 def test_add_product_needs_gtin_and_name(pg):
@@ -229,11 +232,13 @@ def test_znalosti_product_writes_reachable_via_the_warehouse_link(pg):
     c = _client()
     c.get("/sklad/" + sklad_key("test-secret"))
     assert c.get("/api/znalosti/products").status_code == 200
-    r = c.post("/api/znalosti/products", json={"gtin": "SK1", "name": "od skladu"})
+    # the warehouse link reaches the write endpoint (an edit of an existing card works; a new
+    # number is refused since #477 — see test_adding_a_new_product_card_via_the_legacy_api…)
+    r = c.post("/api/znalosti/products", json={"gtin": "G1", "name": "od skladu"})
     assert r.status_code == 200
     # retire (DELETE) is method-agnostic in SKLAD_ZNALOSTI_API too, not just GET/POST —
     # review finding: this was untested (mirrors the #93/PR#116 SKLAD_PATHS gap)
-    assert c.delete("/api/znalosti/products/SK1").status_code == 200
+    assert c.delete("/api/znalosti/products/G1").status_code == 200
     assert c.get("/api/messages").status_code == 401
 
 
@@ -388,15 +393,28 @@ def test_dl_products_list_and_search(pg):
     assert [i["gtin"] for i in found] == ["D2"]
 
 
-def test_add_a_new_dl_product_card_is_visible_immediately(pg):
+def test_adding_a_new_dl_product_card_via_the_legacy_api_is_refused(pg):
+    """#477: same for the DL legacy upsert — a NEW number is refused 403, nothing written."""
     _dl_snap(pg)
     c = _client()
     _login(c)
     r = c.post("/api/znalosti/dl-products", json={"gtin": "NEW1", "name": "Chlieb domáci 1kg",
                                                    "mass": "1,2", "sklad": "50", "cena": "2,5"})
+    assert r.status_code == 403
+    assert "Nové karty sa pridávajú len výberom z CODEXu" in r.get_json()["error"]
+    assert c.get("/api/znalosti/dl-products?q=domáci").get_json()["items"] == []
+    assert pg.execute("SELECT count(*) FROM dl_catalog_overrides").fetchone()[0] == 0
+
+
+def test_editing_a_dl_product_card_via_the_legacy_api_parses_numbers(pg):
+    _dl_snap(pg)
+    c = _client()
+    _login(c)
+    r = c.post("/api/znalosti/dl-products", json={"gtin": "D2", "name": "Olej domáci 1l",
+                                                   "mass": "1,2", "sklad": "50", "cena": "2,5"})
     assert r.status_code == 200 and r.get_json()["ok"] is True
     items = c.get("/api/znalosti/dl-products?q=domáci").get_json()["items"]
-    assert [i["gtin"] for i in items] == ["NEW1"]
+    assert [i["gtin"] for i in items] == ["D2"]
     assert items[0]["mass"] == 1.2
     assert items[0]["cena"] == 2.5
 
@@ -577,6 +595,8 @@ def test_products_upsert_accepts_and_maintains_the_doplnok_alias(pg):
     """The Google Sheet is retired, so /znalosti is the only place a card's `doplnok` (a real
     match.py::alias_exact signal) can be set. The API is tri-state: the `doplnok` KEY present
     (incl "") sets/clears it; the key absent leaves it untouched."""
+    # #477: the card exists first (a card is never typed in via this API any more)
+    snapshot.upsert_catalog_card(pg, "ALZ1", "Ciabatta 100g")
     c = _client()
     _login(c)
     r = c.post("/api/znalosti/products",

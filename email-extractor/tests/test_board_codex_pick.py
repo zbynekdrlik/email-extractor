@@ -1,0 +1,279 @@
+"""#477 — a card enters our catalog ONLY by picking it from the CODEX stock-card list.
+
+Owner order 2026-09-30: no free-typed card anywhere — the board Produkty „Pridať", the inline
+„➕ Nová karta" on an item / dl_item question and the legacy `/api/znalosti/*` create all answer
+403 „Nové karty sa pridávajú len výberom z CODEXu" (their own test files pin that). The one way
+in, pinned here: „Vybrať kartu z CODEXu" on a question — `GET /api/board/codex-cards` lists the
+pushed CODEX cards (orders = stredisko 1 / sklad 1, dl = stredisko 1, active rows only, never the
+other strediská's junk sklady #337), and a `codex_card` answer writes exactly THAT code + CODEX
+name into the catalog override (audited) and answers the question through the normal answer
+path. A code we already have is only selected; one in the Kôš is refused.
+Flask test client + real Postgres; synthetic codes/names only (public repo).
+"""
+from __future__ import annotations
+
+import os
+from datetime import UTC, datetime, timedelta
+
+from app.config import Config
+from app.httpapi import create_app, dl_key
+from app.orders import codex_cards, dl_memory, dl_snapshot, teach
+
+PG_DSN = os.environ.get("PG_TEST_DSN")
+
+G_ROZOK = "9990000000017"      # stredisko 1: sklad 1 + 600 (a finished good, also a DL card)
+G_MUKA = "9990000000031"       # stredisko 1: sklad 100 + 625 (kg-tracked raw material)
+G_OBAL = "9990000000048"       # stredisko 1: sklad 700 only
+G_STARY = "9990000000062"      # stredisko 1 / sklad 1 but INACTIVE in CODEX
+G_POBOCKA = "9990000000079"    # only on a junk stredisko (402) — never offered (#337)
+G_CHLIEB = "9990000000086"     # stredisko 1 / sklad 1
+CODEX = [
+    {"code": G_ROZOK, "card_code": "27", "stredisko": 1, "sklad": 1,
+     "name": "Rožok so slaninou a syrom 70g"},
+    {"code": G_ROZOK, "card_code": "27", "stredisko": 1, "sklad": 600,
+     "name": "Rožok so slaninou a syrom 70g"},
+    {"code": G_MUKA, "card_code": "40", "stredisko": 1, "sklad": 625,
+     "name": "Múka pšeničná T650"},
+    {"code": G_MUKA, "card_code": "40", "stredisko": 1, "sklad": 100,
+     "name": "Múka pšeničná T650"},
+    {"code": G_OBAL, "card_code": "48", "stredisko": 1, "sklad": 700,
+     "name": "Obal papierový na rožok"},
+    {"code": G_STARY, "card_code": "62", "stredisko": 1, "sklad": 1,
+     "name": "Rožok starý vyradený", "inactive": True},
+    {"code": G_POBOCKA, "card_code": "79", "stredisko": 402, "sklad": 402,
+     "name": "Rožok z pobočky"},
+    {"code": G_CHLIEB, "card_code": "86", "stredisko": 1, "sklad": 1,
+     "name": "Chlieb kváskový 500g"},
+]
+
+
+def _client(login=False):
+    app = create_app(Config(pg_dsn=PG_DSN, data_dir="/tmp", api_token="tok",
+                            dash_password="secret", secret_key="test-secret"))
+    app.testing = True
+    c = app.test_client()
+    if login:
+        c.post("/login", data={"password": "secret"})
+    else:
+        c.get("/sklad-dl/" + dl_key("test-secret"))
+    return c
+
+
+def _codex(pg, hours_old=1):
+    codex_cards.replace_cards(pg, CODEX,
+                              source_as_of=datetime.now(UTC) - timedelta(hours=hours_old))
+
+
+def _base(pg):
+    dl_snapshot._freeze(pg, [{"gtin": "DBASE0", "name": "Base", "doplnok": "", "mass": None,
+                              "sklad": "", "cena": None}], [])
+    from app.orders import snapshot
+    snapshot._freeze(pg, [{"gtin": "BASE0", "name": "Base", "alias": ""}], [])
+
+
+def _seed_dl(pg, gtin, name, **kw):
+    dl_snapshot.upsert_dl_catalog_card(pg, gtin, name, **kw)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+
+
+def _dl_question(pg, mid="m477", wording="Múka pšeničná hladká T650"):
+    return teach.ask_dl_item(pg, message_id=mid, supplier_ean="S1",
+                             supplier_name="Mlyn s.r.o.", wording=wording, quantity=20,
+                             unit="kg", candidates=[])
+
+
+def _codes(resp):
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    return [i["code"] for i in resp.get_json()["items"]]
+
+
+def _overrides(pg, table="dl_catalog_overrides"):
+    return pg.execute(f"SELECT gtin, name FROM {table} ORDER BY gtin").fetchall()
+
+
+def _audit(pg):
+    return pg.execute("SELECT actor, table_name, row_id, action, after FROM audit_log "
+                      "ORDER BY id").fetchall()
+
+
+# --- the picker list ------------------------------------------------------------------
+
+def test_the_picker_lists_only_active_codex_cards_of_the_scopes_sklady(pg):
+    _codex(pg)
+    c = _client()
+    # orders = stredisko 1 / sklad 1: the inactive card and the junk-stredisko one are never
+    # offered, the kg raw material (sklad 100/625) is not an orders card
+    assert _codes(c.get("/api/board/codex-cards?scope=orders&q=rozok")) == [G_ROZOK]
+    assert _codes(c.get("/api/board/codex-cards?scope=orders&q=muka")) == []
+    # dl = every sklad of stredisko 1 — still no inactive / junk-stredisko card
+    assert sorted(_codes(c.get("/api/board/codex-cards?scope=dl&q=rozok"))) == [G_ROZOK, G_OBAL]
+    muka = c.get("/api/board/codex-cards?scope=dl&q=múka T650").get_json()["items"]
+    assert muka == [{"code": G_MUKA, "name": "Múka pšeničná T650", "card_code": "40",
+                     "sklad": 100, "in_catalog": False, "in_trash": False}]
+    # found by the EAN kód (a part of it) and by the CODEX card number too
+    assert _codes(c.get("/api/board/codex-cards?scope=orders&q=0000086")) == [G_CHLIEB]
+    assert _codes(c.get("/api/board/codex-cards?scope=orders&q=27")) == [G_ROZOK]
+
+
+def test_an_empty_search_lists_nothing_but_says_how_fresh_the_list_is(pg):
+    _codex(pg)
+    data = _client().get("/api/board/codex-cards?scope=dl").get_json()
+    assert data["items"] == []
+    assert data["codex"]["active"] is True and data["codex"]["as_of_local"]
+    assert _client().get("/api/board/codex-cards?scope=nonsense&q=x").status_code == 400
+
+
+def test_a_stale_codex_list_is_still_offered_with_the_warning(pg):
+    """„CODEX list stale → the picker still lists the last known cards with a visible
+    warning" — the pick itself must not stop working while the dev2 push is down."""
+    _codex(pg, hours_old=codex_cards.STALE_HOURS + 5)
+    data = _client().get("/api/board/codex-cards?scope=dl&q=muka").get_json()
+    assert [i["code"] for i in data["items"]] == [G_MUKA]
+    assert data["codex"]["stale"] is True and data["codex"]["active"] is False
+
+
+def test_the_picker_marks_the_cards_we_already_have_and_the_ones_in_the_kos(pg):
+    _base(pg)
+    _codex(pg)
+    _seed_dl(pg, "0" + G_ROZOK, "Bagetka s kečupom a syrom 80 gr", sklad="1")
+    _seed_dl(pg, G_MUKA, "Múka pšeničná T650", sklad="100")
+    dl_snapshot.retire_dl_catalog_card(pg, G_MUKA)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    c = _client()
+    rozok = c.get("/api/board/codex-cards?scope=dl&q=slaninou").get_json()["items"][0]
+    # OUR exact number (a card created before #467 as „0"+code) — what the answer keys on
+    assert rozok["in_catalog"] is True and rozok["catalog_gtin"] == "0" + G_ROZOK
+    assert rozok["catalog_name"] == "Bagetka s kečupom a syrom 80 gr"
+    muka = c.get("/api/board/codex-cards?scope=dl&q=muka").get_json()["items"][0]
+    assert muka["in_catalog"] is False and muka["in_trash"] is True
+
+
+# --- the pick answers the question ------------------------------------------------------
+
+def test_picking_a_codex_card_on_a_dl_item_question_adds_exactly_that_card_and_answers(pg):
+    _base(pg)
+    _codex(pg)
+    qid = _dl_question(pg)
+    r = _client().post(f"/api/board/questions/{qid}/answer",
+                       json={"codex_card": {"code": G_MUKA}})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    # exactly ONE card: the CODEX code + the CODEX name, kg-tracked because CODEX has it on
+    # sklad 100 (sklad 625 is its second row) — never a bulk import
+    assert pg.execute("SELECT gtin, name, sklad, mass, cena FROM dl_catalog_overrides"
+                      ).fetchall() == [(G_MUKA, "Múka pšeničná T650", "100", None, None)]
+    audit = [a for a in _audit(pg) if a[1] == "dl_catalog_overrides"]
+    assert len(audit) == 1
+    actor, _t, row_id, action, after = audit[0]
+    assert (row_id, action) == (G_MUKA, "create") and actor == "sklad"
+    assert after["source"] == "codex" and after["codex_card"] == "40"
+    # the question went through the NORMAL answer path: answered + the wording taught
+    q = teach.get(pg, qid)
+    assert q["status"] == "answered" and q["answer"]["choice"] == G_MUKA
+    assert dl_memory.resolve(pg, "S1", "Múka pšeničná hladká T650").gtin == G_MUKA
+
+
+def test_a_dl_card_takes_the_lowest_stredisko_1_sklad_when_codex_has_no_kg_row(pg):
+    _base(pg)
+    _codex(pg)
+    qid = _dl_question(pg, mid="m477b", wording="Rožok so slaninou 70g")
+    assert _client().post(f"/api/board/questions/{qid}/answer",
+                          json={"codex_card": {"code": G_ROZOK}}).status_code == 200
+    assert pg.execute("SELECT sklad FROM dl_catalog_overrides WHERE gtin=%s",
+                      (G_ROZOK,)).fetchone() == ("1",)
+
+
+def test_picking_a_code_we_already_have_selects_our_card_and_writes_nothing(pg):
+    """A code already in our catalog is just selected, never duplicated or overwritten (the
+    #467 lesson: an upsert would wipe mass/sklad/cena)."""
+    _base(pg)
+    _codex(pg)
+    _seed_dl(pg, "0" + G_MUKA, "Múka hladká T650", sklad="100", cena=0.37)
+    before = pg.execute("SELECT gtin, name, sklad, cena FROM dl_catalog_overrides").fetchall()
+    qid = _dl_question(pg)
+    r = _client().post(f"/api/board/questions/{qid}/answer",
+                       json={"codex_card": {"code": G_MUKA}})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert pg.execute("SELECT gtin, name, sklad, cena FROM dl_catalog_overrides"
+                      ).fetchall() == before
+    assert not any(a[3] == "create" for a in _audit(pg))
+    assert teach.get(pg, qid)["answer"]["choice"] == "0" + G_MUKA
+
+
+def test_picking_a_code_whose_card_is_in_the_kos_is_refused(pg):
+    _base(pg)
+    _codex(pg)
+    _seed_dl(pg, G_MUKA, "Múka pšeničná T650", sklad="100", cena=0.37)
+    dl_snapshot.retire_dl_catalog_card(pg, G_MUKA)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    qid = _dl_question(pg)
+    r = _client().post(f"/api/board/questions/{qid}/answer",
+                       json={"codex_card": {"code": G_MUKA}})
+    assert r.status_code == 409 and "Kôš" in r.get_json()["error"]
+    assert pg.execute("SELECT retired, sklad FROM dl_catalog_overrides WHERE gtin=%s",
+                      (G_MUKA,)).fetchone() == (True, "100")
+    assert teach.get(pg, qid)["status"] == "open"
+
+
+def test_a_code_outside_the_pick_scope_is_refused_and_nothing_is_written(pg):
+    """Only what the picker lists can be added: a junk-stredisko card (#337), an inactive
+    CODEX card, an unknown code, and — on an ORDERS question — a raw material that is not on
+    the finished-goods sklad 1."""
+    _base(pg)
+    _codex(pg)
+    qid = _dl_question(pg)
+    c = _client()
+    for code in (G_POBOCKA, G_STARY, "123456"):
+        r = c.post(f"/api/board/questions/{qid}/answer", json={"codex_card": {"code": code}})
+        assert r.status_code == 409, code
+        assert "CODEX" in r.get_json()["error"]
+    item = teach.ask(pg, message_id="m477o", customer_ean="2000000000864",
+                     customer_name="Pekáreň", wording="muka hladka", quantity=1, unit="ks",
+                     candidates=[])
+    r = c.post(f"/api/board/questions/{item}/answer", json={"codex_card": {"code": G_MUKA}})
+    assert r.status_code == 409
+    assert _overrides(pg) == [] and _overrides(pg, "catalog_overrides") == []
+    assert _audit(pg) == []
+    assert teach.get(pg, qid)["status"] == "open" and teach.get(pg, item)["status"] == "open"
+
+
+def test_the_codex_pick_on_another_kind_or_an_answered_question_is_refused(pg):
+    _base(pg)
+    _codex(pg)
+    c = _client()
+    mail = teach.ask_mail(pg, message_id="m477m", sender_email="x@y.sk", subject="?")
+    assert c.post(f"/api/board/questions/{mail}/answer",
+                  json={"codex_card": {"code": G_CHLIEB}}).status_code == 400
+    qid = _dl_question(pg)
+    pg.execute("UPDATE order_questions SET status='answered' WHERE id=%s", (qid,))
+    assert c.post(f"/api/board/questions/{qid}/answer",
+                  json={"codex_card": {"code": G_MUKA}}).status_code == 409
+    assert c.post(f"/api/board/questions/{qid}/answer",
+                  json={"codex_card": {}}).status_code in (400, 409)
+    assert _overrides(pg) == [] and _audit(pg) == []
+
+
+def test_the_kos_restore_of_a_codex_pick_takes_the_card_back_out(pg):
+    """The pick is audited as a `create` — the Kôš „Vrátiť" soft-deletes the card again."""
+    _base(pg)
+    _codex(pg)
+    qid = _dl_question(pg)
+    assert _client().post(f"/api/board/questions/{qid}/answer",
+                          json={"codex_card": {"code": G_MUKA}}).status_code == 200
+    aid = pg.execute("SELECT id FROM audit_log WHERE table_name='dl_catalog_overrides' "
+                     "AND action='create'").fetchone()[0]
+    admin = _client(login=True)
+    assert admin.post(f"/api/board/audit/{aid}/restore").status_code == 200
+    assert pg.execute("SELECT retired FROM dl_catalog_overrides WHERE gtin=%s",
+                      (G_MUKA,)).fetchone() == (True,)
+
+
+# --- the question cards offer the picker, never a typed card -----------------------------
+
+def test_the_question_cards_offer_the_codex_picker_instead_of_a_new_card_form(pg):
+    c = _client()
+    for scope, kind, gone in (("dl", "dl_item", "new_item"), ("orders", "item", "new_product")):
+        acts = c.get(f"/api/board/questions?scope={scope}").get_json()["meta"]["card_actions"]
+        ops = [a["op"] for a in acts[kind]]
+        assert ops[0] == "codex_pick", ops
+        assert gone not in ops
+        assert acts[kind][0]["label"] == "Vybrať kartu z CODEXu"
