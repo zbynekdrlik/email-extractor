@@ -928,10 +928,93 @@ def test_a_repick_of_the_same_product_under_another_codex_card_keeps_its_data(pg
     audit.record(pg, actor="sklad", table="dl_catalog_overrides", row_id=ROZOK,
                  action="delete")
     card_guard.add_from_codex(pg, "dl", ROZOK, actor="sklad")
+    # review 6 🔵: the pick really landed on the OTHER CODEX card (else this test is vacuous)
+    assert pg.execute("SELECT after->>'codex_card' FROM audit_log WHERE actor = 'sklad' "
+                      "AND action = 'create' AND table_name = 'dl_catalog_overrides' "
+                      "ORDER BY id DESC LIMIT 1").fetchone()[0] == "28"
     _push(pg, dup, hours_old=2)
     assert codex_sync.run(pg, _cfg())["reset"] == 0
     card = _dl(pg)[ROZOK]
     assert (card["doplnok"], card["mass"], card["cena"]) == ("rožok slanina", 0.07, 0.35)
+
+
+# --- review 6: durable rebind, memory through the one resolver, human rename -------------------
+
+def test_a_recreated_card_rebound_during_dry_run_is_followed_by_the_apply(pg):
+    """Review 6 🟡: card 27 recreated as 127 during the dry-run, then 127 renumbers — the
+    first apply follows 127 (renumber), never removes our card."""
+    _seed_catalogs(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync.run(pg, _cfg(apply=False))
+    recreated = [dict(r, card_code="127") if r["card_code"] == "27" else r for r in V1]
+    _push(pg, recreated, hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    _push(pg, recreated, hours_old=4)
+    codex_sync.run(pg, _cfg(apply=False))
+    moved = [dict(r, code=ROZOK_NEW) if r["card_code"] == "127" else r for r in recreated]
+    _push(pg, moved, hours_old=3)
+    res = codex_sync.run(pg, _cfg())
+    assert (res["removed"], res["renumbered"]) == (0, 2)
+    assert ROZOK_NEW in _orders(pg) and ROZOK_NEW in _dl(pg)
+
+
+def test_memory_of_a_retired_number_picked_as_another_product_is_never_moved(pg):
+    """Review 6 🟡: the retired ROZOK was picked (#477) as the pagáč, a pagáč wording taught
+    onto it, the card deleted again — that row is the pagáč's, never moved to the rožok."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    card_guard.add_from_codex(pg, "orders", ROZOK, actor="sklad")
+    _teach(pg, "C8", "pagac syrovy", ROZOK)
+    snapshot.retire_catalog_card(pg, ROZOK)
+    snapshot.rebuild_from_overrides(pg)
+    audit.record(pg, actor="sklad", table="catalog_overrides", row_id=ROZOK, action="delete")
+    _push(pg, _reused(V1), hours_old=3)
+    codex_sync.run(pg, _cfg())
+    assert pg.execute("SELECT gtin FROM item_memory WHERE customer_ean = 'C8'"
+                      ).fetchone()[0] == ROZOK
+
+
+def test_a_restored_retired_number_renamed_to_the_new_holder_becomes_that_card(pg):
+    """Review 6 🟡: Kôš „Vrátiť" of the sync's delete of ROZOK, then the warehouse renamed it
+    to the pagáč (as the review texts advise) and taught a pagáč wording — it is card 79 now:
+    never merged into the rožok, its wording never moved."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    aid = pg.execute("SELECT id FROM audit_log WHERE actor = 'codex-sync' AND action = 'delete' "
+                     "AND table_name = 'catalog_overrides' AND row_id = %s", (ROZOK,)
+                     ).fetchone()[0]
+    audit.restore(pg, aid, by="sklad")
+    snapshot.upsert_catalog_card(pg, ROZOK, "Pagáč syrový 60g")
+    snapshot.rebuild_from_overrides(pg)
+    _teach(pg, "C9", "pagac syrovy", ROZOK)
+    _push(pg, _reused(V1), hours_old=3)
+    codex_sync.run(pg, _cfg())
+    orders = _orders(pg)
+    assert orders[ROZOK]["name"] == "Pagáč syrový 60g"
+    assert orders[ROZOK_NEW]["name"] == "Rožok so slaninou 70g"
+    assert pg.execute("SELECT gtin FROM item_memory WHERE customer_ean = 'C9'"
+                      ).fetchone()[0] == ROZOK
+    assert pg.execute("SELECT card_code FROM codex_card_bindings WHERE scope = 'orders' "
+                      "AND gtin = %s", (ROZOK,)).fetchone()[0] == "79"
+
+
+def test_rows_written_to_a_retired_number_before_its_repick_follow_the_old_product(pg):
+    """Review 6 🔵: a frozen question answered with the retired ROZOK (a rožok wording), THEN
+    the pick of ROZOK as the pagáč — the rožok row follows the rožok's live number; a pagáč
+    row taught after the pick stays."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    _teach(pg, "C10", "rozok slaninovy", ROZOK)
+    card_guard.add_from_codex(pg, "orders", ROZOK, actor="sklad")
+    _teach(pg, "C11", "pagac syrovy", ROZOK)
+    _push(pg, _reused(V1), hours_old=3)
+    codex_sync.run(pg, _cfg())
+    got = dict(pg.execute("SELECT customer_ean, gtin FROM item_memory WHERE customer_ean IN "
+                          "('C10', 'C11') AND deleted_at IS NULL").fetchall())
+    assert got == {"C10": ROZOK_NEW, "C11": ROZOK}
 
 
 def test_a_create_onto_a_hidden_override_row_undeletes_it(pg):
