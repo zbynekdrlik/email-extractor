@@ -279,15 +279,21 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   or the history's last carrier when the code is already gone), stored in every mode (identity,
   not catalog data), and from then on the sync follows THAT card. Any future "same code, other
   card/name" logic must go through the binding, never re-derive ownership from the list.
-- **Binding lifecycle (rounds 3-4)**: a binding is identity only while ACTIVE and not older than
-  a HUMAN creation of the card — the newest non-sync audit `create` on the override table
-  (`codex_sync_plan._events`; a #477 pick, incl. one restoring a Kôš card, writes `create` with
-  `after.codex_card` = the picked ACSKLP, which binds exactly). A Kôš „Vrátiť" (`restore`) is NOT
-  a new card — round 4 🟡: counting it reset a valid binding and re-bound our rožok to the pagáč
-  that reused its code; a retired number brought back is re-identified via its inactive binding.
-  A pick of a number that used to be ANOTHER product (inactive binding on a different card) →
-  `resets`: the old product's alias / doplnok / mass / cena cleared, sklad := the picked card's
-  (the pick restored the Kôš card "as it was"). A merge target that is another CODEX card →
+- **Binding lifecycle (rounds 3-5) — ONE resolver, `_ScopePlanner._known`**: a human #477 pick
+  newer than the binding (the newest non-sync audit `create` on the override table,
+  `codex_sync_plan._events`; the pick writes `after.codex_card` = the picked ACSKLP, also when it
+  restores a Kôš card) names the card exactly; else the binding, ACTIVE OR RETIRED — a Kôš
+  „Vrátiť" of a number the sync retired is still that CODEX card and is merged back into its new
+  number (round 5 🟡: re-identifying it from the list bound it to the pagáč reusing the code).
+  A Kôš `restore` row is never a new card (round 4 🟡). Three places deciding identity with
+  different rules was the root of rounds 3-5 — never add a fourth, extend `_known`.
+  A binding that REPLACES another card's (a pick, a recreated card) is stored only by an APPLIED
+  run, so a pick seen during a dry-run / blocked run still gets its reset later. A pick of a
+  number whose picked CODEX card's name is not ours (a different product) → `resets`: the old
+  product's alias / doplnok / mass / cena cleared, sklad := the picked card's (the pick restored
+  the Kôš card "as it was"); a re-pick of the SAME product under a second CODEX card keeps its
+  data. Resets are applied before renumbers and a renumber in the same plan carries the reset
+  card. The sync holds `LOCK TABLE codex_stock_cards IN SHARE MODE` (a concurrent push waits). A merge target that is another CODEX card →
   review; a merge FILLS the target's blank alias / doplnok / mass / sklad / cena from our card.
   Numbers a plan retires go to the simulated Kôš (`_vacate`) so a chain in ONE push (024 → NEW
   while another card takes 024) never re-creates onto the row being retired — round 4 🔴: the
