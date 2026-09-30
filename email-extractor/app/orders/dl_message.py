@@ -9,7 +9,7 @@ from .. import store
 from . import dl_extract, dl_report, dl_snapshot, report, worker
 from .dl_correction import _correction_review_reason, _looks_like_correction, _mail_body_only
 from .dl_document import _process_document
-from .dl_events import _event, _flag_attachment, _post
+from .dl_events import _dl_history_link, _event, _flag_attachment, _post
 from .dl_retry import _check_retry, _RetryLater
 
 log = logging.getLogger("orders.dl_worker")
@@ -245,10 +245,10 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     # #473: the no-question reviews below (age guard, empty/no attachment, correction,
     # unreadable attachment, nothing recognised) raise NO board question — they link THIS
     # mail's detail on História dodacích listov instead of the Otázky sklad tab (where the
-    # mail is not listed). An invoice-as-DL mail (`category='invoices'`) is NOT in the DL
-    # history (`board.services.history._SCOPES`), so it keeps the questions link ("" →
-    # `build_review` falls back to `link`).
-    hlink = "" if invoice_mode else report.dl_history_link(cfg, message["message_id"])
+    # mail is not listed). A mail that tab does not list (an invoice-as-DL mail, also on a
+    # `release_for_question` reprocess that drops `invoice_mode`) gets "" → `build_review`
+    # keeps the questions link. Shadow never posts, so it never needs (or reads) it.
+    hlink = "" if shadow else _dl_history_link(conn, cfg, message["message_id"])
 
     # #339: age cutoff. An OLD stuck delivery note that becomes claimable again (a fresh
     # _claim, a _release_stuck_siblings reset, or a release_for_question reprocess — ALL

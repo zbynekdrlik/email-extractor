@@ -19,7 +19,7 @@ from . import (
     teach,
 )
 from . import upload as upload_mod
-from .dl_events import _event, _post
+from .dl_events import _dl_history_link, _event, _post
 from .dl_matching import _match_item, _match_supplier
 from .dl_retry import _check_landed, _check_retry, _is_transient
 
@@ -262,12 +262,13 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # #231: the DL-only nástenka link, never the mixed AI-orders `sklad_link`.
     link = report.dl_sklad_link(cfg)
     # #473: THIS mail's detail on História dodacích listov — for every review below that
-    # raises NO board question (needsReview, date gate, supplier-match failure, a
-    # can't-create EDI with nothing asked); a review that DID ask keeps `link`. The caller
-    # (`dl_message._process_message`) passes it ("" for an invoice-as-DL mail, not in the DL
-    # history); a direct caller (a #251 replay script) gets it derived here.
-    hlink = (report.dl_history_link(cfg, message["message_id"]) if history_link is None
-             else history_link)
+    # raises NO board question (needsReview, date gate, supplier-match failure, an ask the
+    # engine refused, a can't-create EDI with nothing asked); a review that DID ask keeps
+    # `link`. The caller (`dl_message._process_message`) passes it ("" for a mail the DL
+    # history does not list); a direct caller (a #251 replay script) gets it derived here.
+    hlink = history_link
+    if hlink is None:
+        hlink = "" if shadow else _dl_history_link(conn, cfg, message["message_id"])
 
     if doc.get("status") == "needsReview":
         reason = doc.get("reviewReason") or "Dokument potrebuje kontrolu"
@@ -339,17 +340,21 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         if nw_remembered and not _document_has_catalog_match(client, message, doc, catalog):
             return _skip_not_warehouse(conn, shadow, message, doc_number,
                                        doc.get("supplierName", ""))
+        supplier_qid = None
         if not shadow:
             cands = dl_match.supplier_candidates(
                 doc.get("supplierName", ""), doc.get("supplierEmail", ""),
                 doc.get("supplierCity", ""), suppliers)
-            teach.ask_dl_supplier(conn, message["message_id"], sender_email, cands,
-                                  delivery_date=delivery_date,
-                                  supplier_name=doc.get("supplierName", ""),
-                                  supplier_city=doc.get("supplierCity", ""))
+            supplier_qid = teach.ask_dl_supplier(
+                conn, message["message_id"], sender_email, cands,
+                delivery_date=delivery_date, supplier_name=doc.get("supplierName", ""),
+                supplier_city=doc.get("supplierCity", ""))
+        # #473: the dl_supplier question (fresh or deduped onto an open one) waits on Otázky
+        # sklad → `link`; an ask REFUSED (`None` — this address is already taught, e.g. to a
+        # supplier no longer in the list) leaves nothing there → this mail's History detail.
         _post(cfg, shadow, lambda: dl_report.build_review(
             supplier_decision.note, "", doc_number, delivery_date, from_addr, subject,
-            link=link, cmr=cmr), post=post)
+            link=link, cmr=cmr, history_link="" if supplier_qid else hlink), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=supplier_decision.note, detail={"doc_number": doc_number},
               rollup=False, workflow=dl_report.WORKFLOW)
@@ -714,7 +719,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                # teach.ask_dl_item call above fires for ANY unmatched item regardless
                # of quantity. `unmatched_notes` is that exact, precise signal (same
                # list build_success's own link condition already reads) -- carry it
-               # through so build_success renders the dashboard link on exactly this
+               # through so build_success renders the Otázky sklad link on exactly this
                # signal, not an imprecise proxy from `outcome`.
                "unmatched_items": unmatched_notes,
                "items": _shipped_items(decisions)}
@@ -737,9 +742,11 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         # #312: the raw upload exception must NOT reach the warehouse channel (243) — a
         # clean sentence goes into the alert; the raw error stays in the log
         # (`log.exception` above) and in `email_events.detail` (below), never on the user
-        # surface. #336: the clean "nahranie do ORIONu zlyhalo" sentence + the dashboard
-        # action link now live ONCE in the per-kind header `dl_alerts.flush_pending` builds
-        # for the whole `dl_upload_failed` group (`GROUPED_ITEM_KINDS`); this alert is just
+        # surface. #336: the clean "nahranie do ORIONu zlyhalo" sentence + the action link
+        # (#473: the password-free História dodacích listov link on this warehouse
+        # channel, `dl_alerts.WAREHOUSE_HISTORY_KINDS`) live ONCE in the per-kind header
+        # `dl_alerts.flush_pending` builds for the whole `dl_upload_failed` group
+        # (`GROUPED_ITEM_KINDS`); this alert is just
         # ONE short line naming the supplier + delivery note.
         # Deep-review finding on this ticket's own PR: `stuck_classified_sweep` below
         # already bails out when `delivery_notes_channel_id` resolves to 0 (unset) —

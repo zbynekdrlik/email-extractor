@@ -261,6 +261,9 @@ def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0
     if has_board_item or has_other_action:
         if has_board_item and link:
             parts.append(link_line(link))
+        elif has_board_item:
+            # no base URL configured → no link at all, but still name WHERE it waits
+            parts.append("<p>&#128203; Treba doriešiť na nástenke (Otázky objednávky).</p>")
         else:
             # #359: every actionable Odoo message carries its functional URL. #473: that URL
             # is the warehouse's own (this message goes to the ORDERS channel the warehouse

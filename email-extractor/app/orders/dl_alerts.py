@@ -164,8 +164,9 @@ HELD_RETENTION_DAYS = 30
 
 def item_line(sender: str, subject: str, received=None) -> str:
     """#336: ONE short per-item line for a grouped ops alert — `• odosielateľ — predmet
-    (prijaté D.M.)`. The explanation sentence + the dashboard action link live ONCE in the
-    group HEADER (`_format_grouped`, keyed on `GROUPED_ITEM_KINDS`), never repeated per
+    (prijaté D.M.)`. The explanation sentence + the action link (#473: chosen by the
+    recipient channel, `_action_line`) live ONCE in the group HEADER (`_format_grouped`,
+    keyed on `GROUPED_ITEM_KINDS`), never repeated per
     item — that repetition was the pre-#336 wall. `received` may be a datetime/date (a
     `D.M.` suffix is added) or None (no suffix); never a microsecond timestamp."""
     when = ""
@@ -233,18 +234,19 @@ def already_pending(conn, kind: str, message_id: str,
     return row is not None
 
 
-def _action_line(kind: str, cfg, channel_id: int | None, message_ids: list[str]) -> str:
+def _action_line(kind: str, cfg, channel_id: int, message_ids: list[str]) -> str:
     """#473: the grouped alert's action link, decided by the RECIPIENT channel.
 
-    - OPERATOR (the ops channel, or an unknown `channel_id=None` legacy caller) → the admin
-      dashboard (`report.dashboard_link`): the owner reclassifies / marks the mail there.
+    - OPERATOR (`channel_id` == the ops channel) → the admin dashboard
+      (`report.dashboard_link`): the owner reclassifies / marks the mail there.
     - WAREHOUSE (any other channel, e.g. delivery notes 243) → never the admin dashboard
       (password-gated; after #470 it lands on /login and the warehouse has no password).
       A kind in `WAREHOUSE_HISTORY_KINDS` links the password-free board History tab — ONE
       mail's detail when the group is one mail, the tab itself when it is several. A
       warehouse kind with no board surface (`scanner_not_dl`: a non-DL scan, action =
-      rescan) carries no link; its header instruction is complete on its own."""
-    if channel_id is None or channel_id == report.ops_channel(cfg):
+      rescan) carries no link; its header instruction is complete on its own. Fail-closed:
+      anything that is not provably the ops channel never gets the admin link."""
+    if channel_id and channel_id == report.ops_channel(cfg):
         base = report.dashboard_link(cfg)
         return (f'<p>&#128203; Otvor dashboard: <a href="{escape(base)}">{escape(base)}</a></p>'
                 if base else "")
@@ -257,7 +259,7 @@ def _action_line(kind: str, cfg, channel_id: int | None, message_ids: list[str])
         board_link(cfg, board_kind, message_id=mids[0] if len(mids) == 1 else None))
 
 
-def _format_grouped(kind: str, bodies: list[str], cfg, channel_id: int | None = None,
+def _format_grouped(kind: str, bodies: list[str], cfg, *, channel_id: int,
                     message_ids: list[str] | None = None) -> str:
     """#336: one readable grouped alert for a per-item wall kind — a single per-kind
     HEADER (count + one explanation, `{n}` filled) + up to `DISPLAY_ITEM_CAP` short item

@@ -483,7 +483,8 @@ def release_unknown_customer(conn, cfg, qid: int, post=None) -> list[dict]:
     """Release every held order waiting on a customer question the warehouse answered
     "neviem, kto to je" (#159). Nobody could ship an order with no customer to address it
     to, so this does NOT ship — it converts the order into the SAME 'review' outcome every
-    other stuck order already gets (report.build_summary's dashboard hint, an
+    other stuck order already gets (report.build_summary's "Treba doriešiť na nástenke"
+    History link, #473 — was the admin dashboard hint), an
     email_events row, the message marked processed), instead of leaving it silently stuck
     'held' forever with no path forward. Shares `release_to_review` with `_do_release`'s
     own deadline-guard for the identical "still no real customer" outcome."""

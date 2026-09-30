@@ -28,6 +28,20 @@ def _event(conn, shadow: bool, message_id: str, **kwargs) -> None:
     report.log_event(conn, message_id, **kwargs)
 
 
+def _dl_history_link(conn, cfg, message_id: str) -> str:
+    """#473: THIS mail's password-free História dodacích listov deep link for a review with
+    NO board question — but only when that tab really lists the mail (the SAME
+    `is_history_document` guard its detail route applies). Anything else — an invoice-as-DL
+    mail (`category='invoices'`), including one `release_for_question` reprocesses without
+    its invoice flag — gets "" so `build_review` keeps the questions link rather than a deep
+    link that 404s. "" too with no `dashboard_base_url` (no DB read then)."""
+    link = report.dl_history_link(cfg, message_id)
+    if not link:
+        return ""
+    from ..board.services.history import is_history_document
+    return link if is_history_document(conn, message_id, "dl") else ""
+
+
 def _post(cfg, shadow: bool, build, post=None) -> None:
     if shadow:
         return

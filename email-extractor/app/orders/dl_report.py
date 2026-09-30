@@ -35,12 +35,13 @@ different, non-Odoo, non-counted event: a retry after a partial ship re-skipping
 document THIS SAME message already sent — never a real W7 cross-message duplicate, so it
 must not inflate that count.
 
-The dashboard link (#229 follow-up 2) is included ONLY when there is something the reader
+The nástenka link (#229 follow-up 2) is included ONLY when there is something the reader
 can actually go resolve — a genuine `review` outcome, or a `partial` success that raised a
 real `dl_item` board question (never a clean `ok`, even one carrying a purely informational
 note) — mirrors `report.build_summary`'s own `has_board_item`/`has_other_action` split for
-the orders pipeline, via the shared `report.link_line()` helper so the two notify paths
-never render the link differently.
+the orders pipeline, via the shared `report.link_line()` (a board QUESTION waits on Otázky
+sklad) / `report.history_line()` (#473: NO question — the mail's detail on História
+dodacích listov) helpers, so the two notify paths never render a link differently.
 """
 from __future__ import annotations
 
