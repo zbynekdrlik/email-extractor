@@ -40,10 +40,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 # the memory rules (which rows a move carries / holds) live in `codex_sync_memory` (review 12:
-# the planner neared the size budget)
+# the planner neared the size budget), the Slovak texts the warehouse reads in
+# `codex_sync_texts` (review 16: pure functions over the facts the planner derives)
 from . import card_guard, codex_cards, dl_snapshot, snapshot
+from . import codex_sync_texts as texts
 from .codex_sync_memory import (
-    CHECK_TAUGHT,
     SYNC_ACTOR,
     Split,
     held_clause,
@@ -452,31 +453,13 @@ class _ScopePlanner:
         was = ((old.retired_name if retired and old is not None else None)
                or cx.name_of(card, code))
         now = sorted(cx.carriers(code) - {card})
-        named = [d for d in now if _named(name, cx.rows(d, code))]
-        if retired and not named:
-            parts = [f"číslo {gtin} bola karta CODEX {card} („{was}“) — synchronizácia ju "
-                     f"zmazala, niekto ju vrátil z Koša a premenoval na „{name}“."]
-        else:
-            # our name = another carrier's: a human rename OR a CODEX-side rename of our card
-            # beside a same-named duplicate — nothing tells which, so say only what we see
-            # (review 10 🔵: „niekto ju premenoval" was false after a CODEX rename)
-            parts = [f"číslo {gtin} („{name}“) je karta CODEX {card} („{was}“), no rovnako ako "
-                     f"naša karta sa volá karta CODEX {', '.join(named)}, ktorá kód {code} teraz "
-                     f"nesie — nevieme, ktorá je naša."]
-        if card in cx.by_card:
-            act = (f"vráť karte názov „{was}“" if retired and not named
-                   else f"premenuj ju na „{was}“")
-            parts.append(f"Ak je to „{was}“, {act} — ďalší zoznam kariet ju zaradí ku karte "
-                         f"CODEX {card}.")
-        if now:
-            advice = self._pick_advice(code, now, card, numbers)
-            parts.append(advice[:1].upper() + advice[1:] + ".")
-        elif not cx.carriers(code):
-            # only when NO card carries it — our own card may (a round trip — review 16)
-            parts.append(f"Kód {code} v stredisku 1 CODEXu teraz nenesie žiadna karta — ak kartu "
-                         f"nepotrebujete, zmažte ju (Kôš).")
-        parts.append(f"Naučené priradenia k číslu {gtin}: {CHECK_TAUGHT}.")
-        return " ".join(parts)
+        return texts.contest(
+            gtin, name, code, card, was, retired=retired,
+            named=[d for d in now if _named(name, cx.rows(d, code))],
+            card_alive=card in cx.by_card,
+            pick=self._pick_advice(code, now, card, numbers) if now else None,
+            # „no card carries it" only when NONE does — our own may (a round trip, review 16)
+            no_carrier=not cx.carriers(code))
 
     def _pick_advice(self, code: str, candidates: list[str], current: str | None,
                      numbers: list[str]) -> str:
@@ -485,29 +468,14 @@ class _ScopePlanner:
         the picker offers ONE card per code (`card_guard.pickable`, under its own name), it
         SELECTS a live number of ours that normalizes to the code (so every such number must
         go to the Kôš first — review 16), and the pick resets the curated data only for another
-        product (`Codex.same_product`, as in `_identify`)."""
+        product (`Codex.same_product`, as in `_identify`; an unbound number resets nothing)."""
         entry = self.cx.pickable[self.scope.name].get(code)
-        if entry is None:
-            return (f"výber kariet kód {code} neponúka — kartu {', '.join(candidates)} zaradí len "
-                    f"oprava v CODEXe")
-        offered = str(entry["card_code"])
-        parts = []
-        if offered in candidates:
-            # a pick of a number bound to nothing resets nothing (`_identify`: no old binding)
-            same = current is None or self.cx.same_product(current, offered, code)
-            data = ("jej údaje ostanú (ten istý výrobok)" if same
-                    else "staré údaje (alias / doplnok / hmotnosť) sa vyčistia")
-            ours = ("našu kartu" if len(numbers) <= 1
-                    else f"naše karty {', '.join(numbers)}")
-            label = str(entry.get("name") or "") or self.cx.name_of(offered, code)
-            parts.append(f"ak je to výrobok karty CODEX {offered} („{label}“), zmaž {ours} (Kôš) "
-                         f"a pri otázke ju vyber cez „Vybrať kartu z CODEXu“ — priradí sa k nej, "
-                         f"{data}")
-        others = [c for c in candidates if c != offered]
-        if others:
-            parts.append(f"kartu CODEX {', '.join(others)} výber priradiť nevie (pre kód {code} "
-                         f"ponúka len kartu {offered}) — tú zaradí len oprava v CODEXe")
-        return "; ".join(parts)
+        offered = str(entry["card_code"]) if entry is not None else None
+        same = offered is not None and (current is None
+                                        or self.cx.same_product(current, offered, code))
+        label = ((str(entry.get("name") or "") if entry is not None else "")
+                 or (self.cx.name_of(offered, code) if offered is not None else ""))
+        return texts.pick_advice(code, candidates, offered, label, same, numbers)
 
     def _seed(self, item: dict, card: str, *, replaces: bool = False) -> None:
         """Bindings found this run — for EVERY number of the group (a legacy „0"+code twin too:
@@ -580,11 +548,9 @@ class _ScopePlanner:
         if len(carriers) > 1:
             named = [c for c in carriers if _named(name, cx.rows(c, code))]
             if len(named) != 1:
-                self.plan.add_review(item, (
-                    f"kód {code} nesie v CODEXe viac kariet ({', '.join(sorted(carriers))}) "
-                    f"— ktorá je naša? Premenuj našu kartu (Produkty) na jej názov v CODEXe, "
-                    f"pri ďalšom zozname kariet sa priradí; ak majú v CODEXe rovnaký názov: "
-                    f"{self._pick_advice(code, sorted(carriers), None, item['gtins'])}."))
+                self.plan.add_review(item, texts.multi_carrier(
+                    code, sorted(carriers),
+                    self._pick_advice(code, sorted(carriers), None, item["gtins"])))
                 return None
             card = named[0]
         elif carriers:
@@ -594,10 +560,7 @@ class _ScopePlanner:
         else:
             last = cx.owners.get(code, [])
             if len(last) > 1:
-                self.plan.add_review(item, (
-                    f"kód {code} už v stredisku 1 CODEXu nie je a naposledy ho niesli karty "
-                    f"{', '.join(sorted(last))} — nevieme, ktorá je naša; ak kartu už "
-                    f"nepotrebujete, zmažte ju (Kôš)."))
+                self.plan.add_review(item, texts.last_owners(code, sorted(last)))
             if len(last) != 1:
                 return None                    # no stredisko-1 history, or ambiguous
             card = last[0]
@@ -643,25 +606,13 @@ class _ScopePlanner:
 
     def _gone_reason(self, card: str, code: str, numbers: list[str]) -> str:
         """Our CODEX card left stredisko 1 for good, the code lives on elsewhere — the way out
-        per case, never a promise the sync cannot keep (review 14 🔵)."""
+        per case, never a promise the sync cannot keep (review 14 🔵); the rename rebind resets
+        the data exactly when `_identify` says so (`same_product` — review 15)."""
         now = sorted(self.cx.carriers(code))
-        head = f"karta CODEX {card} už v stredisku 1 nie je"
-        if not now:
-            return (f"{head} a kód {code} je v CODEXe už len na inom stredisku — výber kariet ho "
-                    f"neponúka, synchronizácia s touto kartou nič neurobí; ak kartu nepotrebujete, "
-                    f"zmažte ju (Kôš).")
-        if len(now) > 1:
-            return (f"{head} a kód {code} teraz nesie viac kariet ({', '.join(now)}): "
-                    f"{self._pick_advice(code, now, card, numbers)}; ak to nie je žiadna z nich, "
-                    f"kartu zmaž (Kôš).")
-        # the rename rebind resets the data exactly when `_identify` says so (review 15)
-        data = ("jej údaje ostanú (ten istý výrobok v CODEXe)"
-                if self.cx.same_product(card, now[0], code)
-                else "má v CODEXe iný názov, preto sa jej alias / doplnok / hmotnosť vyčistia — "
-                     "skontroluj ich")
-        return (f"{head} a kód {code} teraz nesie karta {now[0]} — ak je to ten istý výrobok, "
-                f"premenuj našu kartu (Produkty) na jej názov v CODEXe, pri ďalšom zozname kariet "
-                f"sa priradí ({data}); ak nie, kartu zmaž (Kôš).")
+        return texts.gone(
+            card, code, now,
+            pick=self._pick_advice(code, now, card, numbers) if len(now) > 1 else None,
+            same_one=len(now) == 1 and self.cx.same_product(card, now[0], code))
 
     def _successor(self, card: str, code: str) -> tuple[str | None, str]:
         """The ONE new code our CODEX `card` carries for this catalog → (Y, ""), or
@@ -670,19 +621,16 @@ class _ScopePlanner:
         codes = {r.code for r in cx.by_card.get(card, [])} - {code}
         fit = codes & cx.pickable[scope.name].keys()
         if not fit:
-            return None, (f"karta CODEX {card} nesie teraz kód {', '.join(sorted(codes))}, ale "
-                          f"výber kariet ho pre katalóg {scope.label} neponúka")
+            return None, texts.successor_not_offered(card, sorted(codes), scope.label)
         if len(fit) > 1:
             newest = max(cx.first_seen.get((card, c), _NEVER) for c in fit)
             fit = {c for c in fit if cx.first_seen.get((card, c), _NEVER) == newest}
         if len(fit) != 1:
-            return None, (f"karta CODEX {card} nesie viac kódov naraz ("
-                          f"{', '.join(sorted(fit))}) — nie je jasné, ktorý je nový")
+            return None, texts.successor_ambiguous(card, sorted(fit))
         succ = fit.pop()
         others = cx.carriers(succ) - {card}
         if others:
-            return None, (f"nový kód {succ} karty CODEX {card} nesie aj karta "
-                          f"{', '.join(sorted(others))} — prečíslovanie treba overiť ručne")
+            return None, texts.successor_shared(succ, card, sorted(others))
         return succ, ""
 
     def _renumber(self, item: dict, group: list[dict], card: str, succ: str) -> None:
@@ -694,13 +642,8 @@ class _ScopePlanner:
         if other not in (None, card):
             # our card with the new code is ANOTHER CODEX card (e.g. a #477 pick of the
             # product that held the code before) — never a silent merge of two products
-            self.plan.add_review(item, (
-                f"náš kód {succ} je karta CODEX {other}, nie {card} — prečíslovanie čaká. Ak "
-                f"naše číslo {succ} je teraz výrobok karty CODEX {card} („"
-                f"{self.cx.name_of(card, succ)}“), "
-                + ("zmaž ho (Kôš) a potom " if target is not None else "")
-                + "vyber ho pri otázke cez „Vybrať kartu z CODEXu“ — priradí sa ku karte "
-                f"CODEX {card} a prečíslovanie prebehne."))
+            self.plan.add_review(item, texts.renumber_other_card(
+                succ, str(other), card, self.cx.name_of(card, succ), target is not None))
             return
         hit_name = str((hit or {}).get("name") or "")
         if hit_known is not None and self._contested(hit_known, hit_name, succ):
@@ -709,13 +652,8 @@ class _ScopePlanner:
             # human settles it first (review 7)
             was = ((hit_known.old.retired_name if hit_known.old else None)
                    or self.cx.name_of(card, succ))
-            where = "" if target is not None else "v Koši "
-            back = "" if target is not None else "vráť ju z Koša a "
-            self.plan.add_review(item, (
-                f"nový kód {succ} karty CODEX {card} je u nás karta {where}„{hit_name}“ — "
-                f"synchronizácia ju zmazala ako „{was}“ a niekto ju potom premenoval, "
-                f"prečíslovanie počká: ak je to stále „{was}“, {back}daj jej tento názov (potom "
-                f"sa prečísluje); jej naučené priradenia: {CHECK_TAUGHT}"))
+            self.plan.add_review(item, texts.renumber_contested(
+                succ, card, hit_name, was, target is not None))
             return
         mode = "merge" if target is not None else "restore" if binned is not None else "create"
         to = str(hit["gtin"]) if hit is not None else succ
@@ -759,16 +697,9 @@ class _ScopePlanner:
     def _held_reason(self, gtin: str, code: str, card: str, to: str, split: Split,
                      takers: list[str]) -> str:
         """Only TAUGHT held rows are the warehouse's to check; held delivery history just
-        stays (review 11) — and says where each kind of taught row is fixed (review 12)."""
-        name = self.cx.name_of(card, code)
-        at = split.at(gtin)                    # the numbers they really sit on (review 15)
-        history = (f" ({split.shipped} záznamov o dodávkach z toho obdobia tiež ostáva pod "
-                   f"{at} ako história)" if split.shipped else "")
-        return (f"{split.taught} naučených priradení k číslu {at} vzniklo (alebo ich niekto "
-                f"zmenil) potom, čo sa kód {code} v CODEXe objavil pri karte CODEX "
-                f"{', '.join(takers)} — nevieme, či patria „{name}“ (karta CODEX {card}), alebo "
-                f"jej: ostávajú pod číslom {at}{history}; {CHECK_TAUGHT} a tie, čo patria "
-                f"„{name}“, preraď na {to}.")
+        stays (review 11) — under the numbers they really sit on (review 15)."""
+        return texts.held(split.taught, split.shipped, split.at(gtin), code, takers,
+                          self.cx.name_of(card, code), card, to)
 
     def _adopted_review(self, item: dict, target: str, card: str, succ: str) -> None:
         """Our number `target` becomes card `card`'s again — but another card carried its code
@@ -780,12 +711,8 @@ class _ScopePlanner:
         split = memory_split(self.conn, self.scope, [target], foreign[0])
         if not split.taught:
             return
-        name = self.cx.name_of(card, succ)
-        self.plan.add_review(item, (
-            f"{split.taught} naučených priradení k číslu {target} vzniklo, kým kód {succ} v "
-            f"CODEXe mala karta CODEX {', '.join(foreign[1])} — prečíslovanie ich teraz pridá ku "
-            f"karte CODEX {card} („{name}“); {CHECK_TAUGHT} a tie, čo patria tej druhej karte, "
-            f"zmaž alebo preraď."))
+        self.plan.add_review(item, texts.adopted(split.taught, target, succ, foreign[1], card,
+                                                 self.cx.name_of(card, succ)))
 
     def _vacate(self, group: list[dict]) -> None:
         """Our numbers this plan retires go to the (simulated) Kôš — a later step in the SAME
@@ -879,8 +806,7 @@ class _ScopePlanner:
                     "held_at": split.held_at, "card": {}}))
             elif split.shipped and not split.taught:
                 # the numbers the rows really sit on (a legacy twin too — review 14 🔵)
-                self._hold_note(item, split.at(code), split.shipped,
-                                f"kód {code} mala medzitým v CODEXe iná karta")
+                self._hold_note(item, split.at(code), split.shipped, texts.why_taken(code))
         for gtin, (card, since) in sorted(self.repicked.items()):
             self._repicked_review(gtin, card, since)
 
@@ -913,11 +839,6 @@ class _ScopePlanner:
             kept += int(b or 0)
             shipped += int(c or 0)
         taught = carried + kept
-        if moved and kept:
-            where = (f"číslo {gtin} (prečíslované na {moved}; {kept} z tých priradení ostalo pod "
-                     f"{gtin} — vznikli, keď kód mala iná karta)")
-        else:
-            where = f"číslo {gtin}" + (f" (teraz prečíslované na {moved})" if moved else "")
         old_name = self.cx.name_of(old, code)
         name = next((str(c.get("name") or "") for c in self.catalog if str(c["gtin"]) == gtin),
                     "")
@@ -926,35 +847,21 @@ class _ScopePlanner:
             # delivery history only — nothing for a human to fix in Naučené (review 12 🔵)
             if shipped:
                 self._hold_note(item, moved or gtin, shipped,
-                                f"číslo {gtin} bolo predtým karta CODEX {old} („{old_name}“)",
-                                moved=moved is not None)
+                                texts.why_repick(gtin, old, old_name), moved=moved is not None)
             return
-        history = (f" ({shipped} záznamov o dodávkach z toho času tiež ostáva ako história)"
-                   if shipped else "")
-        older = "je starších ako výber z CODEXu a " if since is not None else ""
         # where they can go: the old product's live number, or nowhere when it left CODEX
-        # (review 10 🔵: never „preraď" to a card gone from CODEX)
+        # (review 10 🔵: never „preraď" to a card gone from CODEX); a pick is advised only under
+        # a code the picker offers the old card for, in this catalog (review 16)
         home = next((g for g, (c, _code) in self.identity.items() if c == old and g in self.live),
                     None)
-        # the codes under which the picker offers the old card (review 16: never advise a pick
-        # the picker cannot do — it offers one card per code, for this catalog only)
         offered = sorted(c for c, e in self.cx.pickable[self.scope.name].items()
                          if str(e["card_code"]) == old)
-        if home is not None:
-            fix = f"preraď ich na {home}"
-        elif offered:
-            fix = (f"„{old_name}“ u nás karta nie je — ak treba, pri otázke vyber cez „Vybrať "
-                   f"kartu z CODEXu“ kód {offered[0]} (karta CODEX {old}) a preraď ich naň")
-        elif old in self.cx.by_card:
-            fix = (f"„{old_name}“ u nás karta nie je a výber kariet ju pre katalóg "
-                   f"{self.scope.label} neponúka — tie priradenia zmaž, alebo pomôže oprava v "
-                   f"CODEXe")
-        else:
-            fix = f"„{old_name}“ už v CODEXe nie je — tie priradenia zmaž"
-        self.plan.add_review(item, (
-            f"{where} bolo karta CODEX {old} („{old_name}“) a {taught} naučených priradení k "
-            f"nemu {older}môže patriť „{old_name}“{history}: {CHECK_TAUGHT}; ak patria "
-            f"„{old_name}“, {fix}"))
+        fix = texts.repick_fix(old, old_name, home=home,
+                               offered_code=offered[0] if offered else None,
+                               old_alive=old in self.cx.by_card, label=self.scope.label)
+        self.plan.add_review(item, texts.repick(
+            gtin, old, old_name, moved=moved, kept=kept, taught=taught, shipped=shipped,
+            older=since is not None, fix=fix))
 
     def _hold_note(self, item: dict, at: str, shipped: int, why: str, *,
                    moved: bool = False) -> None:
