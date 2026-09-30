@@ -374,17 +374,23 @@ def heal_blank_marker(conn, gtin: str) -> bool:
     """#477: `retire_catalog_card` of a card that lived only in the frozen snapshot writes a
     BARE marker (name '') and the next rebuild drops the card from the snapshot — un-deleting
     that marker alone makes a NAMELESS card. Refill it from the newest snapshot that still has
-    the gtin (name + alias). Only a blank-named override row is touched; True iff healed. (The
-    marker itself stays bare on retire: the retired-card readers must keep seeing it as-is.)"""
+    the gtin (name + alias). A NAME-ONLY override (alias NULL = inherit the snapshot row's —
+    e.g. the #478 CODEX sync's rename) loses that row the same way, so its alias is refilled
+    too, never its name (#478 review 18: a pick / Kôš undo restored it with NO alias). Only a
+    blank name / a NULL alias is touched; True iff healed. (The marker itself stays bare on
+    retire: the retired-card readers must keep seeing it as-is.)"""
     snap = last_known_card(conn, gtin)
     if snap is None:
         return False
     row = conn.execute(
-        """UPDATE catalog_overrides SET name = %s, alias = COALESCE(alias, %s), updated_at = now()
-            WHERE gtin = %s AND name = '' RETURNING gtin""",
+        """UPDATE catalog_overrides
+              SET name = CASE WHEN name = '' THEN %s ELSE name END,
+                  alias = COALESCE(alias, %s), updated_at = now()
+            WHERE gtin = %s AND (name = '' OR alias IS NULL) RETURNING gtin""",
         (snap["name"], snap["alias"], gtin)).fetchone()
     if row is not None:
-        log.info("catalog card %s: bare retirement marker healed from the snapshot (#477)", gtin)
+        log.info("catalog card %s: restored from the snapshot as it was — a bare marker's name "
+                 "and / or an inherited alias (#477/#478)", gtin)
     return row is not None
 
 

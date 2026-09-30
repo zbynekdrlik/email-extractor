@@ -11,9 +11,12 @@ from dataclasses import dataclass
 
 from .codex_sync_memory import CHECK_TAUGHT
 
-# the curated fields a pick of another product clears (`_reset`) / a new card lacks, and what a
-# new card takes from CODEX (`card_guard.add_from_codex`), per catalog
+# the curated fields a new card lacks, what a reset to another product does to them (`_reset`:
+# a DL card also takes the picked CODEX card's sklad — kg-tracking may switch, review 18) and
+# what a new card takes from CODEX (`card_guard.add_from_codex`), per catalog
 _CURATED = {"orders": "alias", "dl": "doplnok / hmotnosť / cena"}
+_CLEARED = {"orders": "jej alias sa vyčistí",
+            "dl": "jej doplnok / hmotnosť / cena sa vyčistia a sklad sa nastaví podľa CODEXu"}
 _NEW_FROM = {"orders": "len s názvom z CODEXu", "dl": "len s názvom a skladom z CODEXu"}
 
 
@@ -36,8 +39,7 @@ def pick_result(scope: str, code: str, pick: Pick, delete: list[str]) -> str:
                 f"({_CURATED[scope]}) sa neprenesú{kept}, doplň ich")
     if pick.kind == "select":
         return f"vyberie sa naše číslo {pick.gtin} a nič sa nezmení"
-    data = ("jej údaje ostanú (ten istý výrobok)" if pick.keeps
-            else f"staré údaje ({_CURATED[scope]}) sa vyčistia")
+    data = "jej údaje ostanú (ten istý výrobok)" if pick.keeps else _CLEARED[scope]
     where = "" if pick.gtin in delete else f"obnoví sa z Koša naša karta {pick.gtin} a "
     return f"{where}priradí sa k nej, {data}"
 
@@ -115,8 +117,7 @@ def gone(scope: str, card: str, code: str, now: list[str], *, pick: str | None,
         return (f"{head} a kód {code} teraz nesie viac kariet ({', '.join(now)}): {pick}; ak to "
                 f"nie je žiadna z nich, kartu zmaž (Kôš).")
     data = ("jej údaje ostanú (ten istý výrobok v CODEXe)" if same_one
-            else f"má v CODEXe iný názov, preto sa jej údaje ({_CURATED[scope]}) vyčistia — "
-                 f"skontroluj ich")
+            else f"má v CODEXe iný názov — {_CLEARED[scope]}, skontroluj to")
     return (f"{head} a kód {code} teraz nesie karta {now[0]} — ak je to ten istý výrobok, "
             f"premenuj našu kartu (Produkty) na jej názov v CODEXe, pri ďalšom zozname kariet sa "
             f"priradí ({data}); ak nie, kartu zmaž (Kôš).")

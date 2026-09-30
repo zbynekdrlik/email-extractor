@@ -392,8 +392,14 @@ class _ScopePlanner:
 
     def run(self) -> None:
         groups = _groups(self.catalog, self.scope.name)
-        for code, group in groups.items():
-            self._code(code, group)
+        # two passes: which CODEX card every group IS and every reset that implies, BEFORE any
+        # renumber — a merge onto a number reset in the same plan must read the reset card
+        # (review 18 🟡: in one pass the group order decided whether our data or the old
+        # product's kg sklad + mass survived the merge)
+        settled = [s for s in (self._settle(code, group) for code, group in groups.items())
+                   if s is not None]
+        for item, group in settled:
+            self._follow(item, group)
         self._memory(set(groups))
         self._renames()
 
@@ -586,8 +592,9 @@ class _ScopePlanner:
         self._seed(item, card)
         return card
 
-    def _code(self, code: str, group: list[dict]) -> None:
-        cx = self.cx
+    def _settle(self, code: str, group: list[dict]) -> tuple[dict, list[dict]] | None:
+        """Pass 1 for one group: which CODEX card it IS (`_identify`) and the reset a pick /
+        rebind of another product implies — None when a human decides first."""
         gtins = [str(c["gtin"]) for c in group]
         item = {"scope": self.scope.name, "gtin": gtins[0], "gtins": gtins, "code": code,
                 "name": group[0].get("name", ""),
@@ -595,15 +602,21 @@ class _ScopePlanner:
                 "names": {str(c["gtin"]): str(c.get("name") or "") for c in group}}
         card = self._identify(code, item)
         if card is None:
-            return
+            return None
         item["codex_card"] = card
         if item.pop("reset_from", None) is not None:
             # every number of the group — a legacy twin keeps no old-product data either
             for g in gtins:
                 self._reset(dict(item, gtin=g), self.live[g])
-            # a renumber / fill later in this plan carries the RESET data, never the old
-            # product's (review 5 🟡)
-            group = [self.live[g] for g in gtins]
+        return item, group
+
+    def _follow(self, item: dict, group: list[dict]) -> None:
+        """Pass 2 for one settled group: follow its CODEX card — stays, leaves, renumbers. The
+        group is read from the simulated catalog, so a renumber / fill carries the RESET data,
+        never the old product's (review 5 🟡), and a merge target reset by ANOTHER group is
+        read after its reset (review 18 🟡)."""
+        cx, code, card, gtins = self.cx, item["code"], item["codex_card"], item["gtins"]
+        group = [self.live.get(str(c["gtin"]), c) for c in group]
         if cx.rows(card, code):              # our CODEX card still carries our code
             for g in gtins:
                 self.identity[g] = (card, code)
