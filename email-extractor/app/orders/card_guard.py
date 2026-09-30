@@ -109,6 +109,23 @@ def _card(conn, scope: str, gtin: str) -> dict:
     return next((r for r in catalog(conn, scope) if str(r.get("gtin")) == gtin), {})
 
 
+def _ours(conn, scope: str, *, deleted: bool = False) -> dict[str, dict]:
+    """Our (live or Kôš) cards by CODEX code — only numbers the scope's EDI can carry: a legacy
+    „0"+13-digit DL twin is 14 chars, which no DESADV line can ship, so it is never the card a
+    pick selects or restores (the canonical CODEX card is added instead)."""
+    rows = _deleted(conn, scope) if deleted else catalog(conn, scope)
+    limit = _spec(scope)["max_code"]
+    if limit is not None:
+        rows = [r for r in rows if len(str(r.get("gtin") or "")) <= limit]
+    return codex_cards.index_by_code(rows)
+
+
+def _last_known_name(conn, scope: str, gtin: str) -> str:
+    card = (snapshot.last_known_card(conn, gtin) if scope == "orders"
+            else dl_snapshot.last_known_dl_card(conn, gtin))
+    return card["name"] if card else ""
+
+
 def mark_pickable(conn, scope: str, payload: dict) -> dict:
     """Mark each `codex.similar` card of a #467 refusal `pickable` — only those may be added
     with „Pridať kartu z CODEXu" (the refusal searches the WHOLE CODEX list, junk strediská and
@@ -136,8 +153,7 @@ def codex_choices(conn, scope: str, q: str = "", *, limit: int = PICK_LIMIT) -> 
             if all(w in dl_match.fold(f"{e['name']} {e['code']} {e['card_code']}")
                    for w in words)]
     hits.sort(key=lambda e: (dl_match.fold(e["name"]), e["code"]))
-    ours = codex_cards.index_by_code(catalog(conn, scope))
-    trash = codex_cards.index_by_code(_deleted(conn, scope))
+    ours, trash = _ours(conn, scope), _ours(conn, scope, deleted=True)
     items = []
     for e in hits[:limit]:
         card = ours.get(e["code"])
@@ -145,7 +161,11 @@ def codex_choices(conn, scope: str, q: str = "", *, limit: int = PICK_LIMIT) -> 
         if card is not None:
             item.update(catalog_gtin=str(card["gtin"]), catalog_name=card.get("name", ""))
         elif item["in_trash"]:
-            item["trash_name"] = trash[e["code"]].get("name", "")
+            # a bare retirement marker is blank — the name the restore brings back is the
+            # snapshot's (`heal_blank_*`)
+            binned = trash[e["code"]]
+            item["trash_name"] = (binned.get("name")
+                                  or _last_known_name(conn, scope, str(binned["gtin"])))
         items.append(item)
     return {"items": items, "total": len(hits), "codex": meta}
 
@@ -166,12 +186,12 @@ def add_from_codex(conn, scope: str, code, *, actor: str) -> dict:
         raise CardRefused({"error": (
             f"Kód {code} nie je medzi aktívnymi kartami CODEXu pre {spec['label']} — vyber "
             f"kartu zo zoznamu „Vybrať kartu z CODEXu“.")})
-    ours = codex_cards.index_by_code(catalog(conn, scope)).get(norm)
+    ours = _ours(conn, scope).get(norm)
     if ours is not None:
         log.info("CODEX pick %s: already our card %s „%s“ — selected, nothing written",
                  norm, ours.get("gtin"), ours.get("name", ""))
         return {"gtin": str(ours["gtin"]), "name": ours.get("name", ""), "created": False}
-    binned = codex_cards.index_by_code(_deleted(conn, scope)).get(norm)
+    binned = _ours(conn, scope, deleted=True).get(norm)
     from ..board.services import audit  # lazy: the audit leaf, like orders.teach does
     if binned is not None:
         gtin = str(binned["gtin"])

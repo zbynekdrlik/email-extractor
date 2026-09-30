@@ -354,19 +354,33 @@ def heal_blank_dl_marker(conn, gtin: str) -> bool:
     that also lost sklad=100 (the #462 ×N class). Refill every field from the newest snapshot
     that still has the gtin; only a blank-named override row is touched. True iff healed. (The
     marker stays bare on retire — `retired_dl_cards`, #337, must keep seeing it as-is.)"""
-    snap = conn.execute(
-        "SELECT name, doplnok, mass, sklad, cena FROM dl_catalog_snapshot "
-        "WHERE gtin = %s AND name <> '' ORDER BY snapshot_id DESC LIMIT 1", (gtin,)).fetchone()
+    snap = last_known_dl_card(conn, gtin)
     if snap is None:
         return False
     row = conn.execute(
         """UPDATE dl_catalog_overrides
               SET name = %s, doplnok = %s, mass = %s, sklad = %s, cena = %s, updated_at = now()
             WHERE gtin = %s AND name = '' RETURNING gtin""",
-        (snap[0], snap[1] or "", snap[2], snap[3] or "", snap[4], gtin)).fetchone()
+        (snap["name"], snap["doplnok"], snap["mass"], snap["sklad"], snap["cena"],
+         gtin)).fetchone()
     if row is not None:
         log.info("DL card %s: bare retirement marker healed from the snapshot (#477)", gtin)
     return row is not None
+
+
+def last_known_dl_card(conn, gtin: str) -> dict | None:
+    """#477: the DL card `gtin` as the most CURRENT snapshot that still has it knew it (name,
+    doplnok, mass, sklad, cena) — newest `checked_at` first, the `latest_snapshot_id` rule
+    (`_freeze` reuses an old id for identical content). None when no snapshot has it."""
+    row = conn.execute(
+        """SELECT c.name, c.doplnok, c.mass, c.sklad, c.cena FROM dl_catalog_snapshot c
+             JOIN dl_snapshots s ON s.id = c.snapshot_id
+            WHERE c.gtin = %s AND c.name <> ''
+            ORDER BY s.checked_at DESC, s.id DESC LIMIT 1""", (gtin,)).fetchone()
+    if row is None:
+        return None
+    return {"name": row[0], "doplnok": row[1] or "", "mass": row[2], "sklad": row[3] or "",
+            "cena": row[4]}
 
 
 def upsert_dl_catalog_card(conn, gtin: str, name: str, *, doplnok: str = "",

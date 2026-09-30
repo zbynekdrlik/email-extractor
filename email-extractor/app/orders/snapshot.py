@@ -376,18 +376,29 @@ def heal_blank_marker(conn, gtin: str) -> bool:
     that marker alone makes a NAMELESS card. Refill it from the newest snapshot that still has
     the gtin (name + alias). Only a blank-named override row is touched; True iff healed. (The
     marker itself stays bare on retire: the retired-card readers must keep seeing it as-is.)"""
-    snap = conn.execute(
-        "SELECT name, alias FROM catalog_snapshot WHERE gtin = %s AND name <> '' "
-        "ORDER BY snapshot_id DESC LIMIT 1", (gtin,)).fetchone()
+    snap = last_known_card(conn, gtin)
     if snap is None:
         return False
     row = conn.execute(
         """UPDATE catalog_overrides SET name = %s, alias = COALESCE(alias, %s), updated_at = now()
             WHERE gtin = %s AND name = '' RETURNING gtin""",
-        (snap[0], snap[1] or "", gtin)).fetchone()
+        (snap["name"], snap["alias"], gtin)).fetchone()
     if row is not None:
         log.info("catalog card %s: bare retirement marker healed from the snapshot (#477)", gtin)
     return row is not None
+
+
+def last_known_card(conn, gtin: str) -> dict | None:
+    """#477: the card `gtin` as the most CURRENT snapshot that still has it knew it ({name,
+    alias}) — newest `checked_at` first, the `latest_snapshot_id` rule (`_freeze` reuses an old
+    id for identical content, so the highest id is not the newest). None when no snapshot has
+    it (a card that only ever lived as an override)."""
+    row = conn.execute(
+        """SELECT c.name, c.alias FROM catalog_snapshot c
+             JOIN order_snapshots s ON s.id = c.snapshot_id
+            WHERE c.gtin = %s AND c.name <> ''
+            ORDER BY s.checked_at DESC, s.id DESC LIMIT 1""", (gtin,)).fetchone()
+    return {"name": row[0], "alias": row[1] or ""} if row else None
 
 
 def deleted_catalog_cards(conn) -> list[dict]:
