@@ -354,11 +354,23 @@ def catalog_for_management(conn) -> list[dict]:
     return [dict(r, overridden=r["gtin"] in overrides) for r in merged]
 
 
+def undelete_catalog_card(conn, gtin: str) -> bool:
+    """#477: bring a card out of the Kôš EXACTLY as it was (name/alias kept — never a blank
+    overwrite) — the CODEX pick of a code whose card was deleted. Clears BOTH markers (#442:
+    `retired` synced with `deleted_at`). True iff a hidden row was restored; the caller
+    rebuilds the snapshot + audits (the same split as `retire_catalog_card`)."""
+    row = conn.execute(
+        """UPDATE catalog_overrides SET retired = false, deleted_at = NULL, updated_at = now()
+            WHERE gtin = %s AND (retired OR deleted_at IS NOT NULL) RETURNING gtin""",
+        (gtin,)).fetchone()
+    return row is not None
+
+
 def deleted_catalog_cards(conn) -> list[dict]:
     """#477: the orders card overrides the loader HIDES (`retired OR deleted_at IS NOT NULL` —
     the exact rule of `_load_catalog_overrides`), i.e. the numbers sitting in the Kôš — the
     orders twin of `dl_snapshot.deleted_dl_cards`. The caller matches them by CODEX code
-    (`card_guard.same_code_card`, the ONE normalizer)."""
+    (`codex_cards.index_by_code`, the ONE normalizer)."""
     rows = conn.execute("SELECT gtin, name FROM catalog_overrides "
                         "WHERE retired OR deleted_at IS NOT NULL ORDER BY gtin").fetchall()
     return [{"gtin": r[0], "name": r[1]} for r in rows]

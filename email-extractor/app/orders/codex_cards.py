@@ -16,7 +16,9 @@ leave here too, the exact incident class). Consumers:
 - the live DL path leaves a line matched to such a card without a card (`dl_match.decide_item`'s
   `codex=` guard) → the existing #365 HOLD + a dl_item question whose candidates are only cards
   CODEX has, ranked by the CODEX name too (`question_candidates`),
-- Produkty sklad flags a card whose name drifted from CODEX's (`annotate`).
+- Produkty sklad flags a card whose name drifted from CODEX's (`annotate`),
+- the #477 card picker offers the pickable cards (`pickable`, stredisko 1, active rows) — the
+  ONE way a new card enters our catalog (`card_guard.add_from_codex`).
 
 **Fail OPEN, never closed.** A list that never arrived, or whose CODEX snapshot is older than
 `STALE_HOURS`, turns every check OFF (`live_guard` → None + `log.warning`) — a stopped push must
@@ -60,6 +62,10 @@ SIMILAR_LIMIT = 5
 # `dl_match._score_item` scale (0-99): 30 ≈ half the words shared — below that a "similar"
 # card is noise, not a suggestion.
 SIMILAR_MIN_SCORE = 30.0
+# #477 card picker: only the main site's stock cards are pickable (stredisko 1); a DL card
+# delivered on a sklad-100 row is kg-tracked (`desadv_edi` R84).
+PICK_STREDISKO = 1
+KG_SKLAD = 100
 _REVISION_NAME = "add_codex_stock_cards"
 _LOCAL_TZ = ZoneInfo("Europe/Bratislava")
 _CODE_RE = re.compile(r"(\d+)(?:\.0+)?")
@@ -266,6 +272,46 @@ def _meta(as_of: datetime | None, synced_at: datetime | None, stale: bool, codes
             "synced_at": synced_at.isoformat() if synced_at else None}
 
 
+def _name_order(central: bool, changed_at: datetime | None, name: str) -> tuple:
+    """Which CODEX row's name is THE CODEX name of a code: the central (stredisko 1 / sklad 1)
+    row first, then the newest change — one order for `load` and `pickable`."""
+    return (not central, -(changed_at.timestamp() if changed_at else 0.0), name)
+
+
+def index_by_code(rows: list[dict]) -> dict[str, dict]:
+    """Our catalog rows keyed by CODEX code (`normalize_code` of the gtin; the first row wins)
+    — the ONE "our card holding this code" lookup, a legacy „0"+code card included."""
+    out: dict[str, dict] = {}
+    for r in rows:
+        code = normalize_code(r.get("gtin"))
+        if code:
+            out.setdefault(code, r)
+    return out
+
+
+def pickable(conn, sklady: tuple[int, ...] | None = None) -> dict[str, dict]:
+    """code -> the ONE pickable card {code, name, card_code, sklad} of the #477 picker:
+    `PICK_STREDISKO` active rows only (never another stredisko's junk sklady, #337), `sklady`
+    narrowing the sklad (orders = (1,)), the CODEX name by `_name_order` among those rows, and
+    the sklad a new DL card gets — `KG_SKLAD` when the code has an active sklad-100 row (a kg
+    card must stay kg-tracked), else the lowest. Stale or not (the picker warns, never blocks).
+    Measured 2026-09-30: stredisko 1 carries sklady 1/100/200/500/600/625/650/700."""
+    rows = conn.execute(
+        "SELECT code, card_code, sklad, name, changed_at FROM codex_stock_cards "
+        "WHERE stredisko = %s AND NOT inactive AND name <> ''", (PICK_STREDISKO,)).fetchall()
+    by_code: dict[str, list[tuple]] = {}
+    for code, card_code, sklad, name, changed in rows:
+        if sklady is None or sklad in sklady:
+            by_code.setdefault(code, []).append((card_code, sklad, name, changed))
+    out: dict[str, dict] = {}
+    for code, rs in by_code.items():
+        rs.sort(key=lambda r: _name_order(r[1] == 1, r[3], r[2]))
+        in_sklady = {r[1] for r in rs}
+        out[code] = {"code": code, "name": rs[0][2], "card_code": rs[0][0],
+                     "sklad": KG_SKLAD if KG_SKLAD in in_sklady else min(in_sklady)}
+    return out
+
+
 def load(conn, now: datetime | None = None) -> CodexCards | None:
     """The list as stored (stale or not) — None only when nothing was ever pushed."""
     sync = latest_sync(conn)
@@ -274,8 +320,7 @@ def load(conn, now: datetime | None = None) -> CodexCards | None:
     rows = conn.execute(
         "SELECT code, name, (stredisko = 1 AND sklad = 1) AS central, changed_at "
         "FROM codex_stock_cards").fetchall()
-    rows.sort(key=lambda r: (r[0], not r[2],
-                             -(r[3].timestamp() if r[3] else 0.0), r[1]))
+    rows.sort(key=lambda r: (r[0], *_name_order(r[2], r[3], r[1])))
     names: dict[str, list[str]] = {}
     for code, name, _central, _changed in rows:
         bucket = names.setdefault(code, [])
@@ -316,7 +361,7 @@ def check_card_code(conn, code, *texts: str, catalog=None, now=None) -> None:
         return
     # our card per normalized code — `catalog_gtin` is OUR exact number (what the answer path
     # and the catalog key on), never the normalized CODEX code
-    ours = {normalize_code(r.get("gtin")): r for r in (catalog or [])}
+    ours = index_by_code(catalog or [])
     similar = []
     for s in cards.similar(*texts):
         entry = dict(s, in_catalog=s["code"] in ours)

@@ -116,12 +116,13 @@ function codexChoice(q, c) {
   const facts = [c.card_code ? `karta ${c.card_code}` : null,
     q.kind === "dl_item" ? `sklad ${c.sklad}` : null];
   if (c.in_catalog) facts.push(`u nás: ${c.catalog_name}`);
-  else if (c.in_trash) facts.push("u nás v Koši — obnov ju na záložke Kôš");
+  else if (c.in_trash) facts.push("u nás v Koši — výber ju obnoví");
   else facts.push("nová karta");
-  const pick = c.in_trash ? null : el("button", {
+  const label = c.in_catalog ? "Vybrať" : (c.in_trash ? "Obnoviť a vybrať" : "Pridať a vybrať");
+  const pick = el("button", {
     class: "q-btn q-btn--primary q-codex-pick", type: "button", "data-code": c.code,
     onclick: () => pickCodex(q, c.code, c.in_catalog ? c.catalog_name : c.name, c.name),
-  }, c.in_catalog ? "Vybrať" : "Pridať a vybrať");
+  }, label);
   return el("div", { class: "q-codex-choice", "data-code": c.code }, [
     el("span", { class: "q-codex-choice-name" }, `${c.code} — ${c.name}`),
     el("span", { class: "q-codex-choice-facts" }, facts.filter(Boolean).join(" · ")),
@@ -156,15 +157,20 @@ function codexHint(q, data) {
   const similar = (data.codex && data.codex.similar) || [];
   for (const s of similar) {
     // #477: a CODEX card we do not have yet is ADDED through the same pick as the picker —
-    // never a typed card
-    const btn = s.in_catalog
-      ? el("button", { class: "q-btn q-codex-use", type: "button", "data-code": s.code,
+    // never a typed card — but only one the picker offers (`pickable`: stredisko 1, active)
+    let btn = null;
+    if (s.in_catalog) {
+      btn = el("button", { class: "q-btn q-codex-use", type: "button", "data-code": s.code,
         onclick: () => pick(s.catalog_gtin || s.code, s.catalog_name, s.name) },
-      `Použiť kartu „${s.catalog_name}“`)
-      : el("button", { class: "q-btn q-codex-new", type: "button", "data-code": s.code,
+      `Použiť kartu „${s.catalog_name}“`);
+    } else if (s.pickable) {
+      btn = el("button", { class: "q-btn q-codex-new", type: "button", "data-code": s.code,
         onclick: () => pickCodex(q, s.code, s.name, s.name) }, "Pridať kartu z CODEXu");
+    }
     rows.push(el("div", { class: "q-codex-row" }, [
-      el("span", {}, `${s.code} — ${s.name}`), btn]));
+      el("span", {}, `${s.code} — ${s.name}`
+        + (s.in_catalog || s.pickable ? "" : " (v CODEXe neaktívna alebo mimo skladov strediska 1)")),
+      btn]));
   }
   if (data.codex && !similar.length) {
     rows.push(el("div", { class: "q-codex-row" },

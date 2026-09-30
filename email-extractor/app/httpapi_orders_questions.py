@@ -123,15 +123,16 @@ _UNSET = object()
 def _dl_card_refusal(deps: Deps, gtin: str, *texts: str):
     """#467: the 409 response for a dl_item pick of a card number CODEX has no stock card for
     (it would teach a mapping that can never ship), else None. The 409 carries
-    `codex.similar` for the board's one-click help; a missing/stale CODEX list passes
+    `codex.similar` for the board's one-click help, each marked `pickable` (#477: only a card
+    the CODEX picker offers may be added from the help); a missing/stale CODEX list passes
     (fail-open)."""
-    from .orders import codex_cards
+    from .orders import card_guard, codex_cards
     with deps.db() as c:
         try:
             codex_cards.check_card_code(
                 c, gtin, *texts, catalog=dl_snapshot.dl_catalog_for_management(c))
         except codex_cards.CardRefused as e:
-            return jsonify(**e.payload), e.status
+            return jsonify(**card_guard.mark_pickable(c, "dl", e.payload)), e.status
     return None
 
 
@@ -409,12 +410,15 @@ def register(app: Flask, deps: Deps) -> dict:
         and the question is then answered through the NORMAL path of its kind, so every side
         effect a human answer fires (memory, release, siblings) fires here too.
 
-        Same two-connection discipline as every other answer: the card write, the
-        `add_candidate` legitimation and (item) `teach.answer` commit together in ONE
-        transaction — a refused/raced answer rolls the new card back with it; the release (a
-        REAL external ORION upload) runs afterward on its own autocommit connection (#116).
-        The dl_item half delegates to `_api_orders_answer_generic` (guarded UPDATE, then
-        `apply` → `release_for_question`), exactly like a picked candidate."""
+        Same two-connection discipline as every other answer. item: the card write, the
+        `add_candidate` legitimation and `teach.answer` commit together in ONE transaction — a
+        refused/raced answer rolls the new card back with it; the release (a REAL external
+        ORION upload) runs afterward on its own autocommit connection (#116). dl_item: the card
+        write + `add_candidate` commit first, then `_api_orders_answer_generic` (its own
+        guarded UPDATE, then `apply` → `release_for_question`), exactly like a picked
+        candidate — so a dl_item answer that loses a race (409) KEEPS the added card + its
+        audit row. Harmless by construction: it is a real CODEX card the warehouse picked
+        (the Kôš takes it back), never a typed one."""
         from .board.auth import actor
         from .orders import card_guard, codex_cards, hold, teach
         kind = q.get("kind")
@@ -535,7 +539,8 @@ def register(app: Flask, deps: Deps) -> dict:
         # Python-level read from an EARLIER select (the `q` this function was called
         # with), not a WHERE-clause guard on this write — same class of race
         # `answer_customer` (teach.py) was already hardened against on #234's own review.
-        # The new_supplier/new_item branches now route through here too, so two
+        # The new_supplier branch (and #477's codex_card dl_item pick) route through here
+        # too, so two
         # concurrent answers to the same question could both pass the check above and
         # the second write would silently overwrite the first's `answered_by`/
         # `answered_at`. Guard the write itself and re-check on 0 rows affected.
