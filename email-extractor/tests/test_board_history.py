@@ -397,6 +397,49 @@ def test_teachback_requires_gtin_and_wording(pg):
     assert c.post("/api/board/history/t2/teach", json={"gtin": "G"}).status_code == 400
 
 
+_PARTNERS_CSV = ("Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,"
+                 "E-mail\nPekáreň Testovacia,2000000000864,Martin,Košútka 1,,,sklad@pekaren.sk\n")
+
+
+def test_teachback_refuses_a_number_that_is_not_a_catalog_card(pg):
+    """#479 (owner order „zablokuj pridávanie produktov"): the doučiť API took ANY typed number,
+    so a code our catalog does not have (a made-up one, the #467 incident class) became
+    authoritative taught memory. Refused 403 like every #477 typed-card path — nothing written,
+    no audit row — for BOTH scopes; an existing card of the scope's catalog still teaches."""
+    from app.orders import dl_snapshot, snapshot
+    snapshot.import_snapshot(pg, "GTIN,Sklad,Názov,doplnok\n9990000000017,1,Rožok tmavý,\n",
+                             _PARTNERS_CSV)
+    dl_snapshot.import_snapshot(pg, "GTIN,Názov,doplnok,hmotnost,Sklad,Cena\n"
+                                    "9990000000024,Múka T650,,,1,0.4\n",
+                                "GTIN,Sklad,Názov,doplnok\n", _PARTNERS_CSV)
+    _msg(pg, "tr", proc_status="ok", subject="Obj")
+    _run(pg, "tr", result={"customer_ean": "CUST9", "customer_name": "Alfa"},
+         items=[{"name": "rožok tmavý", "gtin": "OLD", "card": "Zlá karta"}])
+    _msg(pg, "trd", category="dodacie_listy", proc_status="ok", subject="DL")
+    _run(pg, "trd", result={"documents": [{"doc_number": "D9", "supplier_ean": "SUPP9"}]},
+         items=[{"name": "múka", "gtin": "OLD", "card": "Zlá"}])
+    c = _client()
+    _sklad(c)
+    _dl(c)
+    for mid, scope, gtin in (("tr", "orders", "5550001"),
+                             ("trd", "dl", "5550002"),
+                             # a card of the OTHER catalog is not a card of this one
+                             ("tr", "orders", "9990000000024")):
+        r = c.post(f"/api/board/history/{mid}/teach?scope={scope}",
+                   json={"name": "rožok tmavý", "gtin": gtin, "card": "Vymyslená"})
+        assert r.status_code == 403, (scope, gtin, r.get_json())
+        assert r.get_json()["codex_only"] is True
+    assert pg.execute("SELECT count(*) FROM item_memory").fetchone()[0] == 0
+    assert pg.execute("SELECT count(*) FROM dl_item_memory").fetchone()[0] == 0
+    assert pg.execute("SELECT count(*) FROM audit_log WHERE action='teach'").fetchone()[0] == 0
+    ok = c.post("/api/board/history/tr/teach?scope=orders",
+                json={"name": "rožok tmavý", "gtin": "9990000000017", "card": "Rožok tmavý"})
+    assert ok.status_code == 200, ok.get_json()
+    ok_dl = c.post("/api/board/history/trd/teach?scope=dl",
+                   json={"name": "múka", "gtin": "9990000000024", "card": "Múka T650"})
+    assert ok_dl.status_code == 200, ok_dl.get_json()
+
+
 def test_teachback_audit_is_restorable(pg):
     """The `teach` audit row can be reverted from the Kôš (soft-deletes the taught alias)."""
     from app.board.services import audit
