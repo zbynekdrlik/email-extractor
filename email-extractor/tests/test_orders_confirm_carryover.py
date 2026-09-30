@@ -34,7 +34,16 @@ from test_orders_confirm import (
 )
 
 from app.config import Config
-from app.orders import codex_cards, confirm, desadv_edi, dl_snapshot, snapshot, upload
+from app.orders import (
+    codex_cards,
+    confirm,
+    desadv_edi,
+    dl_snapshot,
+    question_alerts,
+    report,
+    snapshot,
+    upload,
+)
 
 SUP_A = "2000000000017"
 SUP_A_NAME = "Pekáreň Testovacia s.r.o."
@@ -144,9 +153,10 @@ def test_reminder_counts_and_lists_only_the_file_still_waiting(pg):
                   post=posts, now=TUE_MORNING.replace(hour=16))
     assert len(posts.calls) == 2, "exactly one reminder once the 4h threshold passed"
     html = posts.calls[1][0]
-    assert "Stále 1 dodací list" in html, html
+    assert "Stále 1 dodací list neprevzatý v ORIONe" in html, html
     assert "4 dodac" not in html and "dodacie listy" not in html
     assert "126000004" in html and SUP_A_NAME in html, "the waiting DL + its supplier"
+    assert "(od 3.8. 18:00)" in html, "since the waiting file's upload, day included"
     for doc in ("126000001", "126000002", "P2600003"):
         assert doc not in html, f"already imported {doc} must not be listed"
     assert SUP_B_NAME not in html
@@ -232,12 +242,14 @@ def test_a_long_list_is_capped_with_a_remainder_line(pg):
     html = posts.calls[0][0]
     assert "18 dodacích listov je stále neprevzatých" in html
     assert html.count("<li>") == confirm.LIST_LIMIT
-    assert f"a ešte {18 - confirm.LIST_LIMIT} ďalších" in html
+    assert "a ešte 3 ďalšie." in html, "the remainder word agrees with N"
 
 
 # --- all imported -> no reminder, the incident closes ------------------------------------
 
 def test_all_imported_sends_no_reminder_one_all_clear_and_closes_the_incident(pg):
+    """Characterization pin (true before #476 too): once nothing waits there is no carryover
+    group at all, so no reminder — the incident closes with its one all-clear."""
     _suppliers(pg)
     posts = PostRecorder()
     _ids, all_wire = _four_member_incident(pg, posts)
@@ -343,6 +355,123 @@ def test_an_unreadable_file_still_sends_the_alert_without_a_code_line(pg):
     assert "126000051" in html and "CODEX ho neprevezme" not in html
 
 
+def test_opening_alert_names_every_waiting_file_not_only_the_rows_due_this_sweep(pg):
+    """#476 review: each row has its own 5-minute re-check cycle, so the first sweep past the
+    morning hour often has only 1 of N waiting files due. The alert must still name all N
+    (and the incident record all of them) — a partial list reads as complete."""
+    _suppliers(pg)
+    ids = [_insert_desadv_at(pg, sup, _fname(doc, sup), uploaded_at=MON_EVENING,
+                             doc_number=doc) for doc, sup in DOCS]
+    pg.execute("UPDATE desadv_sent SET import_checked_at = now() WHERE id = ANY(%s)",
+               (ids[:3],))                       # 3 re-checked a moment ago, 1 due
+    all_wire = [_wire(d, s) for d, s in DOCS]
+    posts = PostRecorder()
+    confirm.sweep(pg, _cfg(), listdir=lambda: _dirs(in_dl=all_wire), post=posts,
+                  now=TUE_MORNING)
+    assert len(posts.calls) == 1
+    html = posts.calls[0][0]
+    assert "4 dodacie listy sú stále neprevzaté" in html, html
+    for doc, _sup in DOCS:
+        assert f"DL {doc} " in html
+    members = pg.execute("SELECT count(*) FROM import_alert_incident_desadv_members"
+                         ).fetchone()[0]
+    assert members == 4
+
+
+def test_a_file_not_due_but_already_imported_is_not_pulled_into_the_opening_alert(pg):
+    _suppliers(pg)
+    ids = [_insert_desadv_at(pg, SUP_A, _fname(doc, SUP_A), uploaded_at=MON_EVENING,
+                             doc_number=doc) for doc in ("126000081", "126000082")]
+    pg.execute("UPDATE desadv_sent SET import_checked_at = now() WHERE id = %s", (ids[0],))
+    posts = PostRecorder()
+    confirm.sweep(pg, _cfg(),
+                  listdir=lambda: _dirs(in_dl=[_wire("126000082", SUP_A)],
+                                        arch=[_wire("126000081", SUP_A)]),
+                  post=posts, now=TUE_MORNING)
+    html = posts.calls[0][0]
+    assert "1 dodací list je stále neprevzatý" in html, html
+    assert "126000082" in html and "126000081" not in html
+
+
+def test_a_failing_name_or_codex_lookup_never_loses_the_alert(pg):
+    """#476 review: the detail is fail-open end to end — a DB error in the supplier-name or
+    the CODEX-list lookup (a REAL failure here: the tables are renamed away) only drops the
+    names / the code lines; the alert itself still goes out, listed by number."""
+    _suppliers(pg)
+    _codex(pg, as_of=TUE_MORNING - timedelta(hours=1))
+    _insert_desadv_at(pg, SUP_A, _fname("126000071", SUP_A), uploaded_at=MON_EVENING,
+                      doc_number="126000071")
+    reader = Reader({_wire("126000071", SUP_A): _desadv_content("126000071", [DEAD])})
+    posts = PostRecorder()
+    pg.execute("ALTER TABLE codex_card_syncs RENAME TO codex_card_syncs_476")
+    pg.execute("ALTER TABLE dl_supplier_overrides RENAME TO dl_supplier_overrides_476")
+    try:
+        confirm.sweep(pg, _cfg(), listdir=lambda: _dirs(in_dl=list(reader.files)),
+                      post=posts, now=TUE_MORNING, read_files=reader)
+    finally:
+        pg.execute("ALTER TABLE codex_card_syncs_476 RENAME TO codex_card_syncs")
+        pg.execute("ALTER TABLE dl_supplier_overrides_476 RENAME TO dl_supplier_overrides")
+    assert len(posts.calls) == 1, "the alert is never lost to a detail lookup"
+    html = posts.calls[0][0]
+    assert "<li>DL 126000071</li>" in html, html
+    assert reader.calls == [], "no ORION read when the CODEX list cannot even be loaded"
+
+
+def test_the_code_line_says_how_old_the_codex_card_list_is(pg):
+    """A card created in CODEX after the last push is not in our list yet — the alert says
+    as of when the list is, so „neexistuje" is never read as final (review nit)."""
+    _suppliers(pg)
+    _codex(pg, as_of=datetime(2026, 8, 4, 8, 10, tzinfo=TZ))
+    reader = Reader({_wire("126000091", SUP_A): _desadv_content("126000091", [DEAD])})
+    _insert_desadv_at(pg, SUP_A, _fname("126000091", SUP_A), uploaded_at=MON_EVENING,
+                      doc_number="126000091")
+    posts = PostRecorder()
+    confirm.sweep(pg, _cfg(), listdir=lambda: _dirs(in_dl=list(reader.files)), post=posts,
+                  now=TUE_MORNING, read_files=reader)
+    html = posts.calls[0][0]
+    assert "Zoznam kariet z CODEXu je k 4.8. 08:10" in html, html
+
+
+def test_no_codex_note_when_every_code_is_known(pg):
+    _suppliers(pg)
+    _codex(pg, as_of=TUE_MORNING - timedelta(hours=1))
+    reader = Reader({_wire("126000092", SUP_A): _desadv_content("126000092", [GOOD_A])})
+    _insert_desadv_at(pg, SUP_A, _fname("126000092", SUP_A), uploaded_at=MON_EVENING,
+                      doc_number="126000092")
+    posts = PostRecorder()
+    confirm.sweep(pg, _cfg(), listdir=lambda: _dirs(in_dl=list(reader.files)), post=posts,
+                  now=TUE_MORNING, read_files=reader)
+    html = posts.calls[0][0]
+    assert reader.calls, "the file WAS checked"
+    assert "CODEX" not in html.replace("Codexe", ""), html
+
+
+def test_the_production_reader_reads_the_waiting_file_from_in_dl_read_only(pg):
+    """The default `read_files` (no injection) reads `<orion_dl_dir>\\Z-<file>` over SFTP in
+    "r" mode — paramiko faked, the one external boundary."""
+    _suppliers(pg)
+    _codex(pg, as_of=TUE_MORNING - timedelta(hours=1))
+    _insert_desadv_at(pg, SUP_A, _fname("126000093", SUP_A), uploaded_at=MON_EVENING,
+                      doc_number="126000093")
+    wire = _wire("126000093", SUP_A)
+    handle = MagicMock()
+    handle.__enter__.return_value.read.return_value = \
+        _desadv_content("126000093", [DEAD]).encode("latin-1")
+    fake_sftp = MagicMock()
+    fake_sftp.open.return_value = handle
+    fake_client = MagicMock()
+    fake_client.open_sftp.return_value = fake_sftp
+    dl_dir = "C:\\ORION\\TEST\\in_DL"
+    posts = PostRecorder()
+    with patch("paramiko.SSHClient", return_value=fake_client):
+        confirm.sweep(pg, _cfg(orion_host="192.168.1.10", orion_dl_dir=dl_dir),
+                      listdir=lambda: _dirs(in_dl=[wire]), post=posts, now=TUE_MORNING)
+    fake_sftp.open.assert_called_once_with(f"{dl_dir}\\{wire}", "r")
+    for forbidden in ("file", "put", "rename", "remove"):
+        getattr(fake_sftp, forbidden).assert_not_called()
+    assert f"kód {DEAD} v CODEXe neexistuje" in posts.calls[0][0]
+
+
 # --- the pieces --------------------------------------------------------------------------
 
 def test_lin_codes_reads_back_exactly_what_generate_wrote():
@@ -390,3 +519,38 @@ def test_read_files_only_ever_opens_for_reading_and_skips_a_vanished_file():
         getattr(fake_sftp, forbidden).assert_not_called()
     fake_sftp.close.assert_called_once()
     fake_client.close.assert_called_once()
+
+
+def test_failed_and_unknown_heads_agree_with_the_count():
+    one = [{"id": 1}]
+    two = [{"id": 1}, {"id": 2}]
+    five = [{"id": i} for i in range(5)]
+    assert "1 dodací list skončil v priečinku" in confirm._group_html("failed", one, "desadv")
+    assert "1 objednávka skončila v priečinku" in confirm._group_html("failed", one, "edi")
+    assert "2 objednávky skončili v priečinku" in confirm._group_html("failed", two, "edi")
+    assert "1 dodací list zmizol zo všetkých" in confirm._group_html("unknown", one, "desadv")
+    assert "2 dodacie listy zmizli zo všetkých" in \
+        confirm._group_html("unknown", two, "desadv")
+    assert "5 objednávok zmizlo zo všetkých" in confirm._group_html("unknown", five, "edi")
+
+
+def test_capped_list_remainder_agrees_with_the_count():
+    items = [f"<li>{i}</li>" for i in range(20)]
+    assert report.capped_list(items[:15], 15, "ďalší", "ďalšie", "ďalších") == \
+        "<ul>" + "".join(items[:15]) + "</ul>"
+    assert report.capped_list(items[:16], 15, "ďalší", "ďalšie", "ďalších").endswith(
+        "<p>&#8230; a ešte 1 ďalší.</p>")
+    assert report.capped_list(items[:18], 15, "ďalšia", "ďalšie", "ďalších").endswith(
+        "<p>&#8230; a ešte 3 ďalšie.</p>")
+    assert report.capped_list(items, 15, "ďalšia", "ďalšie", "ďalších").endswith(
+        "<p>&#8230; a ešte 5 ďalších.</p>")
+
+
+def test_the_stale_question_reminder_uses_the_agreeing_remainder():
+    rows = [{"id": i, "kind": "dl_supplier", "customer_ean": "", "customer_name": "",
+             "wording": f"dodavatel{i}@example.sk", "item_key": "", "context": {},
+             "payload": {}, "created_at": datetime(2026, 8, 3, 9, i, tzinfo=TZ),
+             "reminder_sent_at": None} for i in range(16)]
+    html = question_alerts._group_html(rows, {}, 2, "")
+    assert html.count("<li>") == 15
+    assert "a ešte 1 ďalšia." in html, html
