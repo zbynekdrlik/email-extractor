@@ -211,6 +211,11 @@ class Codex:
         """`card` missing from stredisko 1 in this AND the previous synced CODEX snapshot."""
         return card not in self.by_card and self.absent_before(card)
 
+    def glitched(self, card: str) -> bool:
+        """`card` missing from THIS snapshot only — one list is no proof (an export glitch):
+        nothing that depends on the card is decided on it."""
+        return card not in self.by_card and not self.gone_twice(card)
+
 
 @dataclass(frozen=True)
 class Binding:
@@ -440,7 +445,7 @@ class _ScopePlanner:
         ours = codex_cards.name_key(name)
         if known.picked or card is None or not ours:
             return False
-        if card not in cx.by_card and not cx.gone_twice(card):
+        if cx.glitched(card):
             return False
         if ours in cx.product(card, code):
             return False
@@ -535,12 +540,15 @@ class _ScopePlanner:
         known = self._known(gtin)
         if known.card is not None:
             if known.picked:
-                if known.card not in cx.by_card and not cx.gone_twice(known.card):
-                    # the picked card missing from ONE list is a glitch: the pick waits (no
-                    # seed, no reset) — the next list settles it from the card's own rows
-                    # (review 20 🟡: settled now, the reset kept the old product's sklad)
-                    return None
                 old = known.old
+                if cx.glitched(known.card) or (old is not None and old.card != known.card
+                                               and cx.glitched(old.card)):
+                    # the picked card — or the one it replaces — missing from ONE list is a
+                    # glitch: the pick waits (no seed, no reset), the next list settles it
+                    # (review 20 🟡: the reset kept the old product's sklad; review 21 🔵: the
+                    # rows review called the replaced product gone from CODEX — both final once
+                    # the binding is stored)
+                    return None
                 replaces = old is not None and old.card != known.card
                 self._seed(item, known.card, replaces=replaces)
                 if old is not None and replaces and not cx.same_product(old.card, known.card,
@@ -786,16 +794,19 @@ class _ScopePlanner:
         writes (review 20 🔵): the picker's sklad for the code the card carries now — `code`
         itself, or the code it is renumbered to (`_successor`) — never the sklad of whoever
         carries `code` after the card moved on (review 19 🟡: a kg card went piece-tracked).
-        A code the picker does not offer falls back to the pick's rule
-        (`codex_cards.pick_sklad`) over the card's own rows on it, then over all its rows;
-        None = the card has no stredisko-1 row (the number keeps its sklad)."""
+        The picker's entry counts only when the card's OWN active named row is among the rows
+        it is built from (review 21 🟡: an inactive row left an entry that is purely another
+        card's); otherwise the pick's rule (`codex_cards.pick_sklad`) over the card's own rows
+        on that code, then over all its rows; None = the card has no stredisko-1 row (the
+        number keeps its sklad)."""
         cx, offered = self.cx, self.cx.pickable[self.scope.name]
         rows = cx.by_card.get(card, [])
         now = code if any(r.code == code for r in rows) else (
             self._successor(card, code)[0] if rows else None)
-        if now is not None and now in offered:
-            return int(offered[now]["sklad"])
-        for pool in ([r for r in rows if r.code == now], rows):
+        own = [r for r in rows if r.code == now]
+        if now in offered and any(not r.inactive and r.name.strip() for r in own):
+            return int(offered[str(now)]["sklad"])
+        for pool in (own, rows):
             live = [r for r in pool if not r.inactive and r.name.strip()] or pool
             if live:
                 return codex_cards.pick_sklad(r.sklad for r in live)
