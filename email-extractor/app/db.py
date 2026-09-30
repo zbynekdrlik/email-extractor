@@ -278,6 +278,51 @@ CODEX_STOCK_CARDS = [
 ]
 
 
+# #478 (revision 18): CODEX is the ONE source of truth for a card's code and name.
+# `codex_card_history` remembers which EAN kód (NEANKOD) each CODEX stock card (ACSKLP — unique
+# only WITHIN a stredisko: 400448 is a different product on stredisko 1 and 4) carried and
+# when, because `codex_stock_cards` is a full REPLACE per push and forgets it — without the
+# history a renumber (card 27: X -> 3698 -> …) is indistinguishable from a card that left
+# CODEX. `first_seen`/`last_seen` are the CODEX data age of the push that saw it
+# (`codex_cards._data_as_of`). Seeded from the list already stored, so the FIRST sync after
+# the deploy already compares against the last pre-deploy push. `codex_sync_runs` is the
+# append-only log of every sync (`app/orders/codex_sync.py`): dry-run or applied, the whole
+# plan as JSON — what the ticket / the operator reads before the apply switch goes on.
+CODEX_CARD_HISTORY = [
+    """
+    CREATE TABLE IF NOT EXISTS codex_card_history (
+        stredisko   INTEGER NOT NULL,
+        card_code   TEXT NOT NULL,
+        code        TEXT NOT NULL,
+        name        TEXT NOT NULL DEFAULT '',
+        first_seen  TIMESTAMPTZ NOT NULL,
+        last_seen   TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (stredisko, card_code, code)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_codex_card_history_code ON codex_card_history (code)",
+    """
+    CREATE TABLE IF NOT EXISTS codex_sync_runs (
+        id        BIGSERIAL PRIMARY KEY,
+        sync_id   BIGINT,
+        ran_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        applied   BOOLEAN NOT NULL DEFAULT false,
+        status    TEXT NOT NULL,
+        report    JSONB NOT NULL DEFAULT '{}'::jsonb
+    )
+    """,
+    """
+    INSERT INTO codex_card_history (stredisko, card_code, code, name, first_seen, last_seen)
+    SELECT k.stredisko, k.card_code, k.code, max(k.name), s.as_of, s.as_of
+      FROM codex_stock_cards k
+     CROSS JOIN (SELECT LEAST(COALESCE(source_as_of, synced_at), synced_at) AS as_of
+                   FROM codex_card_syncs ORDER BY id DESC LIMIT 1) s
+     GROUP BY k.stredisko, k.card_code, k.code, s.as_of
+    ON CONFLICT DO NOTHING
+    """,
+]
+
+
 # SCHEMA above is FROZEN as revision 1 (the baseline). NEVER edit those statements for a
 # schema change — append a NEW numbered migrate.Revision to this list instead
 # (immutable-migrations, #269). run_migrations() applies only the unapplied revisions, in
@@ -333,6 +378,7 @@ REVISIONS = [
     migrate.Revision(15, "create_audit_log", AUDIT_LOG),
     migrate.Revision(16, "add_deleted_at_soft_delete", SOFT_DELETE),
     migrate.Revision(17, "add_codex_stock_cards", CODEX_STOCK_CARDS),
+    migrate.Revision(18, "add_codex_card_history", CODEX_CARD_HISTORY),
 ]
 
 

@@ -117,3 +117,22 @@ def test_main_prints_the_pushed_line_with_the_target(monkeypatch, capsys):
     assert out == "pushed: fetched=1 cards=1 rows=1 codes=1 to=https://email-pz.newlevel.media"
     assert "tok-not-for-the-log" not in out
     assert posted == [url]
+
+
+def test_the_pushed_line_carries_the_add_ons_card_sync_result():
+    """#478: the add-on runs the CODEX card sync right after accepting the list and answers
+    its result — the journal line proves on dev2 that the sync ran and what it did."""
+    def fake_poster(url, headers, body):
+        return {"rows": 1, "codes": 1,
+                "sync": {"mode": "dry-run", "renamed": 3, "renumbered": 1, "removed": 0,
+                         "review": 2, "run_id": 7}}
+
+    res = push.run("https://email-pz.newlevel.media/api/codex/cards", "tok",
+                   query=lambda: [{"code": 9990000000017.0, "card_code": "27", "name": "A",
+                                   "stredisko": 1, "sklad": 1}],
+                   as_of=lambda: None, poster=fake_poster)
+    assert res["sync"]["mode"] == "dry-run"
+    line = push.pushed_line(res, "https://email-pz.newlevel.media/api/codex/cards")
+    assert line == ("pushed: fetched=1 cards=1 rows=1 codes=1 "
+                    "to=https://email-pz.newlevel.media "
+                    "sync=dry-run renamed=3 renumbered=1 removed=0 review=2")
