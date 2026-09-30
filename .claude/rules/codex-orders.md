@@ -18,6 +18,8 @@ paths:
   - "email-extractor/app/orders/memory.py"
   - "email-extractor/app/orders/codex_sync.py"
   - "email-extractor/app/orders/codex_sync_plan.py"
+  - "email-extractor/app/orders/codex_sync_memory.py"
+  - "email-extractor/app/orders/codex_sync_texts.py"
   - "email-extractor/tests/test_codex_sync.py"
 ---
 
@@ -457,7 +459,10 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   `moved` read from the same-push renumber, `codex_name` on a renumber line, and a footer that
   promises a redo only for renames / renumbers (a Kôš undo of a RESET is not redone — the
   binding it came with is stored by then). `CHECK_TAUGHT` is the one way-out text for taught
-  rows (Naučené; a História „Doučiť" row via the Kôš).
+  rows (Naučené; a História „Doučiť" row via the Kôš). The Slovak strings live in
+  `codex_sync_texts` — pure functions over FACTS the planner passes in (offered card + its
+  name, `same`, `home`, `no_carrier`…); a new review reason = derive the fact in the planner,
+  add a text function there, never an f-string in `codex_sync_plan` (it is near the size budget).
 - **What is decided, per catalog, per CODEX code our cards carry** (cards grouped per
   `normalize_code`, the canonical ≤13-char number supplies the data, `codex_cards.index_by_code`),
   with our card bound to card C: C still carries X → rename to C's stredisko-1 name when ours
