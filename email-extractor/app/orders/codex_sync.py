@@ -234,6 +234,11 @@ def _labels(items: list[dict]) -> str:
                      if any(i["scope"] == s for i in items))
 
 
+# a reset's field names as the warehouse reads them (review 15 🔵: no raw „mass")
+_FIELD_SK = {"alias": "alias", "doplnok": "doplnok", "mass": "hmotnosť", "cena": "cena",
+             "sklad": "sklad"}
+
+
 def _change_lines(plan: sp.Plan, *, applied: bool = True) -> list[str]:
     """The ops message's change lines — `applied=False` (a blocked plan, nothing written) says
     what WOULD change, never „presunutých" (review 9 🔵)."""
@@ -252,9 +257,11 @@ def _change_lines(plan: sp.Plan, *, applied: bool = True) -> list[str]:
             if applied else f"{rows} priradení by sa presunulo")
         held = sum(sum((i.get("held") or {}).values()) for i in items)
         if held:
-            # rows decided while CODEX gave the code to another card stay (review 10-11)
+            # rows decided while CODEX gave the code to another card stay (review 10-11) —
+            # under the numbers they really sit on (a legacy twin — review 15)
+            at = ", ".join(sorted({g for i in items for g in i.get("held_at") or []})) or code
             memory += (f", {held} z obdobia, keď kód {escape(code)} mala v CODEXe iná karta, "
-                       f"{'ostalo' if applied else 'by ostalo'} pod {escape(code)}")
+                       f"{'ostalo' if applied else 'by ostalo'} pod {escape(at)}")
         cards = [i for i in items if i["mode"] != "memory"]
         if cards:
             label = cards[0].get("codex_name") or cards[0]["name"]
@@ -273,10 +280,11 @@ def _change_lines(plan: sp.Plan, *, applied: bool = True) -> list[str]:
                      f"{escape(items[0]['codex_card'])}) z CODEXu zmizol bez náhrady — karta "
                      f"{'presunutá' if applied else 'by išla'} do Koša ({_labels(items)})")
     for r in plan.resets:
+        fields = ", ".join(_FIELD_SK.get(k, k) for k in r["after"])
         lines.append(f"kód {escape(r['gtin'])} ({sp.BY_NAME[r['scope']].label}) bol predtým iný "
                      f"výrobok, teraz karta CODEX {escape(r['codex_card'])} — staré údaje "
-                     f"({escape(', '.join(r['after']))}) "
-                     f"{'vyčistené' if applied else 'by sa vyčistili'}")
+                     f"({escape(fields)}) "
+                     f"{'nahradené údajmi novej karty' if applied else 'by sa nahradili'}")
     for r in plan.renames:
         lines.append(f"názov podľa CODEXu ({sp.BY_NAME[r['scope']].label}) "
                      f"{escape(r['gtin'])}: „{escape(r['old'])}“ → „{escape(r['new'])}“")
@@ -284,19 +292,23 @@ def _change_lines(plan: sp.Plan, *, applied: bool = True) -> list[str]:
 
 
 def _review_lines(review: list[dict]) -> list[str]:
-    return [f"treba skontrolovať ({sp.BY_NAME[r['scope']].label}) {escape(r['gtin'])} "
-            f"„{escape(r['name'])}“: {escape(r['reason'])}" for r in review]
+    # a retired number's memory item has no card name — no empty „“ (review 15)
+    return [f"treba skontrolovať ({sp.BY_NAME[r['scope']].label}) {escape(r['gtin'])}"
+            + (f" „{escape(r['name'])}“" if r.get("name") else "")
+            + f": {escape(r['reason'])}" for r in review]
 
 
 def _html(head: str, lines: list[str]) -> str:
     more = len(lines) - MAX_ALERT_LINES
     shown = lines[:MAX_ALERT_LINES] + ([f"… a ďalších {more}"] if more > 0 else [])
+    # what a Kôš undo really does, per kind (review 15 🔵: a reset undone is NOT redone — the
+    # binding the reset came with is stored by then)
     return (f"<p>{head}</p><ul>" + "".join(f"<li>{line}</li>" for line in shown)
-            + "</ul><p>Každá zmena je v nástenke → Kôš. Pozor: kým CODEX ostane rovnaký, "
-              "ďalší zoznam kariet ju urobí znova — natrvalo ju zmení len oprava v CODEXe "
-              "(alebo vypnutie codex_sync_apply v nastaveniach add-onu). Prečíslovanie sú DVE "
-              "zmeny (nový kód vytvorený + starý zmazaný) — vracaj vždy obe, inak karta v "
-              "katalógu chýba.</p>")
+            + "</ul><p>Každá zmena je v nástenke → Kôš. Pozor: premenovanie a prečíslovanie, "
+              "ktoré vrátiš, urobí ďalší zoznam kariet znova, kým CODEX ostane rovnaký — "
+              "natrvalo ich zmení len oprava v CODEXe (alebo vypnutie codex_sync_apply v "
+              "nastaveniach add-onu). Prečíslovanie zmaže starý kód a nový vytvorí alebo "
+              "doplní — pri vrátení vracaj všetky jeho zmeny, inak karta v katalógu chýba.</p>")
 
 
 def _review_keys(r: dict) -> set[tuple]:
@@ -367,7 +379,7 @@ def _alert(conn, cfg, plan: sp.Plan, mode: str, run_id: int, known: set[tuple],
         if dl_alerts.reminder_suppressed(conn, cfg, ALERT_KIND, key):
             return
         head = (f"&#9888;&#65039; Synchronizácia kariet s CODEXom (#478) sa ZASTAVILA: zoznam z "
-                f"CODEXu by naraz zmenil kódy {plan.code_changes()} kariet (limit {limits[0]}) "
+                f"CODEXu by naraz zmenil {plan.code_changes()} kódov (limit {limits[0]}) "
                 f"a premenoval {len(plan.renames)} kariet (limit {limits[1]}) — vyzerá to na "
                 f"neúplný alebo pokazený export, nič sa nezmenilo. Skontroluj codex-bridge ETL "
                 f"a codex-cards-push na dev2. Ak je to zámer (hromadná zmena v CODEXe), zvýš v "

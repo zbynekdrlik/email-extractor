@@ -13,7 +13,7 @@ moves).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -78,20 +78,30 @@ class Split:
     movable: dict[str, int]
     taught: int = 0            # held TAUGHT rows (a human checks them)
     shipped: int = 0           # held delivery history
+    held_at: list[str] = field(default_factory=list)   # the numbers the held rows sit on
+
+    def at(self, fallback: str) -> str:
+        """Where the held rows are — a legacy „0"+code twin named as such (review 15)."""
+        return ", ".join(self.held_at) or fallback
 
 
 def memory_split(conn, scope: Scope, gtins: list[str], hold: datetime | None) -> Split:
     split = Split({})
+    at: set[str] = set()
     for t in scope.memory:
         where = f"FROM {t} WHERE gtin = ANY(%(g)s) AND deleted_at IS NULL"
         n_all = int(conn.execute(f"SELECT count(*) {where}", {"g": gtins}).fetchone()[0])
         taught = shipped = 0
         if hold:
+            params = {"g": gtins, "hold": hold}
             taught, shipped = (int(v or 0) for v in conn.execute(
                 f"SELECT count(*) FILTER (WHERE {taught_clause(t)}), "
                 f"count(*) FILTER (WHERE NOT ({taught_clause(t)})) {where} AND "
-                + held_clause(t), {"g": gtins, "hold": hold}).fetchone())
+                + held_clause(t), params).fetchone())
+            at |= {str(g) for (g,) in conn.execute(
+                f"SELECT DISTINCT gtin {where} AND " + held_clause(t), params).fetchall()}
         split.movable[t] = n_all - taught - shipped
         split.taught += taught
         split.shipped += shipped
+    split.held_at = sorted(at)
     return split
