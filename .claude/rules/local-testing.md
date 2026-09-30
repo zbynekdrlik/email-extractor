@@ -506,3 +506,32 @@ tests/`, and run just the new tests from there with the worktree's `.venv/bin/py
 (same `PG_TEST_DSN`, nothing else running on it). Then commit tests `[red]` first, code `[green]`
 second. Also: swapping ONE static file back (`git show HEAD:<path> > <path>`, restore after)
 is the quick way to prove a Playwright test depends on a JS change.
+
+## A crawling full suite on a contended box = fsync on the throwaway test Postgres (#477)
+
+With a sibling lane running its own full suite, a plain `postgres:16` test container crawled
+(~8 % in 15 min): `pg_stat_activity` showed the `pg` fixture's `TRUNCATE` waiting on
+`wait_event_type=IO / DataFileImmediateSync` — every test's truncate fsyncs to a busy disk. A
+THROWAWAY test DB needs no durability; start it with fsync off and the same full suite (~2450
+tests incl. Playwright) finishes in ~20 min:
+
+```bash
+docker run -d --name ee-agent-<id>-pg -p 127.0.0.1::5432 -e POSTGRES_PASSWORD=postgres \
+  postgres:16 -c fsync=off -c synchronous_commit=off -c full_page_writes=off
+until docker exec ee-agent-<id>-pg pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done
+```
+
+Wait for `pg_isready` before the first pytest — right after `docker run` the first tests fail
+with `FATAL: the database system is starting up` (every test ERRORs, not a code problem).
+Never use these flags on anything but a disposable test container.
+
+## `cd … && VAR=… nohup pytest … & echo $!` prints a SUBSHELL's pid — killing it leaves pytest running (#479)
+
+The trailing `&` backgrounds the WHOLE `cd … && … nohup .venv/bin/python -m pytest …` chain, so
+bash forks a subshell for it and `$!` is that subshell, with pytest as its child (a plain
+`cmd &` would give the real pid). `kill <$!>` returned "killed" while the real
+pytest child (re-parented to pid 1) kept running against the SAME `PG_TEST_DSN`; the next full run
+then wedged after 8 tests (`pg_stat_activity`: an `idle in transaction` `FOR UPDATE` on
+`held_orders` from the orphan + a `TRUNCATE` waiting on it). Always find the real process with
+`ps -eo pid,ppid,etimes,cmd | grep '[p]ython -m pytest'` (or `pgrep -f 'python -m pytest'`), kill
+THAT, `pg_terminate_backend` the leftovers, and wait on the python pid — never on `$!`.

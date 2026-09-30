@@ -352,12 +352,32 @@ def test_manual_refuses_dl_scope(pg):
     assert c.post("/api/board/history/dlm/manual?scope=dl").status_code == 409
 
 
+_PARTNERS_CSV = ("Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,"
+                 "E-mail\nPekáreň Testovacia,2000000000864,Martin,Košútka 1,,,sklad@pekaren.sk\n")
+
+
 # --- teachback (writes memory, never the shipped doc / ledger) ----------------------
+
+def _cards(pg, orders=(), dl=()):
+    """#479: teachback teaches only an EXISTING card of the scope's catalog — seed the cards a
+    test teaches onto (synthetic numbers)."""
+    from app.orders import dl_snapshot, snapshot
+    if orders:
+        snapshot.import_snapshot(
+            pg, "GTIN,Sklad,Názov,doplnok\n" + "".join(f"{g},1,{n},\n" for g, n in orders),
+            _PARTNERS_CSV)
+    if dl:
+        dl_snapshot.import_snapshot(
+            pg, "GTIN,Názov,doplnok,hmotnost,Sklad,Cena\n"
+                + "".join(f"{g},{n},,,1,0.4\n" for g, n in dl),
+            "GTIN,Sklad,Názov,doplnok\n", _PARTNERS_CSV)
+
 
 def test_teachback_orders_writes_customer_alias_and_audit(pg):
     _msg(pg, "t1", proc_status="ok", subject="Obj")
     _run(pg, "t1", result={"customer_ean": "CUST1", "customer_name": "Alfa"},
          items=[{"name": "rožok tmavý", "gtin": "OLD", "card": "Zlá karta"}])
+    _cards(pg, orders=[("NEW1", "Správna karta")])
     c = _client()
     _sklad(c)
     r = c.post("/api/board/history/t1/teach",
@@ -377,6 +397,7 @@ def test_teachback_dl_writes_supplier_alias(pg):
     _msg(pg, "td", category="dodacie_listy", proc_status="ok", subject="DL")
     _run(pg, "td", result={"documents": [{"doc_number": "D1", "supplier_ean": "SUPP"}]},
          items=[{"name": "múka", "gtin": "OLD", "card": "Zlá"}])
+    _cards(pg, dl=[("NEWDL", "Múka T650")])
     c = _client()
     _dl(c)
     r = c.post("/api/board/history/td/teach?scope=dl",
@@ -397,12 +418,85 @@ def test_teachback_requires_gtin_and_wording(pg):
     assert c.post("/api/board/history/t2/teach", json={"gtin": "G"}).status_code == 400
 
 
+def test_teachback_refuses_a_number_that_is_not_a_catalog_card(pg):
+    """#479 (owner order „zablokuj pridávanie produktov"): the doučiť API took ANY typed number,
+    so a code our catalog does not have (a made-up one, the #467 incident class) became
+    authoritative taught memory. Refused 403 like every #477 typed-card path — nothing written,
+    no audit row — for BOTH scopes; an existing card of the scope's catalog still teaches."""
+    from app.orders import dl_snapshot, snapshot
+    snapshot.import_snapshot(pg, "GTIN,Sklad,Názov,doplnok\n9990000000017,1,Rožok tmavý,\n",
+                             _PARTNERS_CSV)
+    dl_snapshot.import_snapshot(pg, "GTIN,Názov,doplnok,hmotnost,Sklad,Cena\n"
+                                    "9990000000024,Múka T650,,,1,0.4\n",
+                                "GTIN,Sklad,Názov,doplnok\n", _PARTNERS_CSV)
+    _msg(pg, "tr", proc_status="ok", subject="Obj")
+    _run(pg, "tr", result={"customer_ean": "CUST9", "customer_name": "Alfa"},
+         items=[{"name": "rožok tmavý", "gtin": "OLD", "card": "Zlá karta"}])
+    _msg(pg, "trd", category="dodacie_listy", proc_status="ok", subject="DL")
+    _run(pg, "trd", result={"documents": [{"doc_number": "D9", "supplier_ean": "SUPP9"}]},
+         items=[{"name": "múka", "gtin": "OLD", "card": "Zlá"}])
+    c = _client()
+    _sklad(c)
+    _dl(c)
+    for mid, scope, gtin in (("tr", "orders", "5550001"),
+                             ("trd", "dl", "5550002"),
+                             # a card of the OTHER catalog is not a card of this one
+                             ("tr", "orders", "9990000000024")):
+        r = c.post(f"/api/board/history/{mid}/teach?scope={scope}",
+                   json={"name": "rožok tmavý", "gtin": gtin, "card": "Vymyslená"})
+        assert r.status_code == 403, (scope, gtin, r.get_json())
+        assert r.get_json()["codex_only"] is True
+    assert pg.execute("SELECT count(*) FROM item_memory").fetchone()[0] == 0
+    assert pg.execute("SELECT count(*) FROM dl_item_memory").fetchone()[0] == 0
+    assert pg.execute("SELECT count(*) FROM audit_log WHERE action='teach'").fetchone()[0] == 0
+    ok = c.post("/api/board/history/tr/teach?scope=orders",
+                json={"name": "rožok tmavý", "gtin": "9990000000017", "card": "Rožok tmavý"})
+    assert ok.status_code == 200, ok.get_json()
+    ok_dl = c.post("/api/board/history/trd/teach?scope=dl",
+                   json={"name": "múka", "gtin": "9990000000024", "card": "Múka T650"})
+    assert ok_dl.status_code == 200, ok_dl.get_json()
+
+
+def test_teachback_refuses_a_catalog_card_whose_code_codex_lacks(pg):
+    """#479 review 🔵7a: a card we DO have but whose code CODEX has no stock card for would
+    teach a mapping CODEX refuses — 409 with the CODEX help, exactly like a question pick;
+    nothing written. A stale list passes (fail-open)."""
+    from datetime import UTC, datetime, timedelta
+
+    from app.orders import codex_cards
+    _msg(pg, "tc", proc_status="ok", subject="Obj")
+    _run(pg, "tc", result={"customer_ean": "CUSTC", "customer_name": "Alfa"},
+         items=[{"name": "vianočka", "gtin": "OLD", "card": "Zlá"}])
+    _cards(pg, orders=[("3698", "Vianočka 400g"), ("9990000000116", "Vianočka maslová")])
+    codex_cards.replace_cards(
+        pg, [{"code": "9990000000116", "card_code": "27", "stredisko": 1, "sklad": 1,
+              "name": "Vianočka maslová"}],
+        source_as_of=datetime.now(UTC) - timedelta(hours=1))
+    c = _client()
+    _sklad(c)
+    r = c.post("/api/board/history/tc/teach?scope=orders",
+               json={"name": "vianočka", "gtin": "3698", "card": "Vianočka 400g"})
+    assert r.status_code == 409, r.get_json()
+    assert r.get_json()["codex"]["missing"] is True and "objednávk" in r.get_json()["error"]
+    assert pg.execute("SELECT count(*) FROM item_memory").fetchone()[0] == 0
+    ok = c.post("/api/board/history/tc/teach?scope=orders",
+                json={"name": "vianočka", "gtin": "9990000000116", "card": "Vianočka maslová"})
+    assert ok.status_code == 200, ok.get_json()
+    # a stale list turns the CODEX check off
+    pg.execute("UPDATE codex_card_syncs SET source_as_of = now() - interval '40 hours', "
+               "synced_at = now() - interval '40 hours'")
+    stale = c.post("/api/board/history/tc/teach?scope=orders",
+                   json={"name": "vianočka tmavá", "gtin": "3698", "card": "Vianočka 400g"})
+    assert stale.status_code == 200, stale.get_json()
+
+
 def test_teachback_audit_is_restorable(pg):
     """The `teach` audit row can be reverted from the Kôš (soft-deletes the taught alias)."""
     from app.board.services import audit
     _msg(pg, "t3", proc_status="ok")
     _run(pg, "t3", result={"customer_ean": "CX"},
          items=[{"name": "chlieb", "gtin": "OLD"}])
+    _cards(pg, orders=[("Z1", "K")])
     c = _client()
     _sklad(c)
     c.post("/api/board/history/t3/teach", json={"name": "chlieb", "gtin": "Z1", "card": "K"})

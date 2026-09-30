@@ -26,12 +26,20 @@ Only active rows. A stale list still offers its last known cards (the board warn
 never arrived offers nothing. A new DL card takes its `sklad` from CODEX (100 preferred, else the
 lowest — reproduces the `sklad` of all 465 of our DL cards that carry one); mass/cena stay blank
 (CODEX does not push them — the #462 hold asks for a kg card's mass).
+
+#479 — the SAME CODEX list guards every ORDER file (the #467 gate covered only delivery notes;
+the card 27 renumber broke orders too, „nebralo do objednávky"). `order_guard` (the live list,
+fail-open exactly like DL) + `gate_order_line` (a line whose code CODEX lacks → a cardless
+`codex_missing` line, so the orders engine's own item question + hold take over) +
+`order_question_candidates` (a question offers only cards CODEX has) + `dead_codes` (the static
+engine's check). Callers: `pipeline._run` / `_ship_one`, `hold_close._release_locked`,
+`hold_redecide._ask_still_ambiguous`, `static_worker.run_live` — all LIVE only.
 """
 from __future__ import annotations
 
 import logging
 
-from . import codex_cards, desadv_edi, dl_match, dl_snapshot, snapshot
+from . import codex_cards, desadv_edi, dl_match, dl_snapshot, match, snapshot
 from .codex_cards import CardRefused
 
 log = logging.getLogger("orders.card_guard")
@@ -39,6 +47,14 @@ log = logging.getLogger("orders.card_guard")
 CODEX_ONLY = ("Nové karty sa pridávajú len výberom z CODEXu — pri otázke klikni „Vybrať kartu "
               "z CODEXu“ a vyber kartu zo zoznamu kariet CODEXu. Existujúcu kartu tu môžeš "
               "upraviť alebo zmazať.")
+# #479: the History „Doučiť" teaches onto a card, it never creates one
+TEACH_CARD_ONLY = ("Doučiť sa dá len na existujúcu kartu z katalógu — vyber ju vo vyhľadávaní. "
+                   "Nová karta sa pridáva len výberom z CODEXu (pri otázke „Vybrať kartu z "
+                   "CODEXu“).")
+# #479: an orders line whose card code CODEX has no stock card for — no card, asked + held
+CODEX_MISSING = "codex_missing"
+# #160: at most this many card buttons on an orders question (`match.plausible_candidates`)
+QUESTION_BUTTONS = 6
 PICK_LIMIT = 30
 # scope -> the CODEX sklady a pick may come from (None = every sklad of the pick stredisko),
 # the longest code the scope's EDI can carry (None = no limit), the catalog override table, and
@@ -59,17 +75,18 @@ class CreateBlocked(CardRefused):
     status = 403
 
 
-def blocked() -> CreateBlocked:
-    return CreateBlocked({"error": CODEX_ONLY, "codex_only": True})
+def blocked(error: str = CODEX_ONLY) -> CreateBlocked:
+    return CreateBlocked({"error": error, "codex_only": True})
 
 
-def refuse_typed_card(catalog: list[dict], gtin) -> None:
+def refuse_typed_card(catalog: list[dict], gtin, *, error: str = CODEX_ONLY) -> None:
     """Raise `CreateBlocked` unless `gtin` is exactly the number of a card we already have —
-    an edit passes, a typed NEW number never does."""
+    an edit passes, a typed NEW number never does. `error` words the refusal for the caller
+    (#479: the History „Doučiť" teaches, it does not edit)."""
     if not is_card(catalog, gtin):
         log.warning("typed new card %s refused — cards come only from the CODEX pick (#477)",
                     gtin)
-        raise blocked()
+        raise blocked(error)
 
 
 def is_card(catalog: list[dict], gtin) -> bool:
@@ -237,3 +254,102 @@ def _rebuild(conn, scope: str) -> None:
         snapshot.rebuild_from_overrides(conn)
     else:
         dl_snapshot.dl_rebuild_from_overrides(conn)
+
+
+# --- #479: the ORDER-file gate ---------------------------------------------------------------
+
+def order_guard(conn, now=None) -> codex_cards.CodexCards | None:
+    """The CODEX list the ORDER-file checks may trust — `codex_cards.live_guard`, so exactly the
+    DL rule: None = checks OFF (never pushed / older than `STALE_HOURS` / empty; it logs its own
+    warning, `codex_cards.stale_sweep` alerts ops). A stopped push must never hold every order."""
+    return codex_cards.live_guard(conn, now)
+
+
+def dead_codes(codex: codex_cards.CodexCards | None, gtins) -> list[str]:
+    """The distinct codes among `gtins` no CODEX stock card has, in order — [] when `codex` is
+    None (fail-open). A blank gtin is no card, nothing to check."""
+    if codex is None:
+        return []
+    out: list[str] = []
+    for g in gtins:
+        code = str(g or "").strip()
+        if code and not codex.has(code) and code not in out:
+            out.append(code)
+    return out
+
+
+def codex_missing_note(card: str, gtin: str) -> str:
+    """The warehouse-facing reason on a `codex_missing` order line / its board question."""
+    return (f"Karta „{card or gtin}“ (kód {gtin}) v CODEXe neexistuje — žiadna skladová karta "
+            "nemá tento EAN kód, takže CODEX by túto položku objednávky pri importe neprevzal. "
+            "Objednávka čaká: vyber správnu kartu (ponúkame len karty, ktoré CODEX má) alebo ju "
+            "pridaj cez „Vybrať kartu z CODEXu“; kartu s neplatným kódom potom zmaž v Produkty.")
+
+
+def gate_order_line(decision, codex: codex_cards.CodexCards | None):
+    """#479: an orders line whose card code CODEX has no stock card for → a cardless
+    `CODEX_MISSING` line (the dead code + card + the rule it replaced kept in the note/trace), so
+    the orders engine's own item question + hold take over — the orders twin of
+    `dl_match.decide_item(codex=)`. Unchanged when `codex` is None (fail-open / shadow), the
+    line has no card, or CODEX has the code."""
+    gtin = str(decision.gtin or "").strip()
+    if codex is None or not gtin or codex.has(gtin):
+        return decision
+    log.warning("order line %r: card %s „%s“ (%s) has a code no CODEX stock card has — "
+                "left without a card, the order is asked + held (#479)", decision.item_name,
+                gtin, decision.card, decision.rule)
+    trace = dict(decision.trace or {}, rule=CODEX_MISSING,
+                 codex_missing={"gtin": gtin, "card": decision.card, "rule": decision.rule})
+    return match.Decision(item_name=decision.item_name, gtin=None, card="", confidence=0.0,
+                          rule=CODEX_MISSING, note=codex_missing_note(decision.card, gtin),
+                          review=True, trace=trace, quantity=decision.quantity,
+                          unit=decision.unit)
+
+
+def ask_codex_missing(conn, lines, *, message_id: str, customer_ean: str, customer_name: str,
+                      delivery_date: str, codex: codex_cards.CodexCards | None,
+                      on_new=None) -> list[int]:
+    """#479: the board question for each `CODEX_MISSING` line the SHIP-TIME net found (a code
+    that died while its order waited, reaching `pipeline._ship_one` via the deadline sweep): the
+    order ships without the line (an item question is deadline-shippable), and this question
+    names it + teaches the next order. Returns the qids (fresh or deduped onto an open one)."""
+    from . import teach  # lazy: teach is the question leaf, imported where it is used
+    sid = snapshot.latest_snapshot_id(conn)
+    catalog = snapshot.load_catalog(conn, sid) if sid else []
+    qids: list[int] = []
+    for d in lines:
+        cands = order_question_candidates(d.item_name, [], catalog, d, codex,
+                                          customer_name=customer_name)
+        qid = teach.ask(conn, message_id=message_id, customer_ean=customer_ean,
+                        customer_name=customer_name, wording=d.item_name, quantity=d.quantity,
+                        unit=d.unit,
+                        candidates=[{"gtin": str(c.get("gtin")), "name": c.get("name", "")}
+                                    for c in cands],
+                        delivery_date=delivery_date, reason=d.note, on_new=on_new,
+                        codex_missing=True)
+        if qid:
+            qids.append(qid)
+    return qids
+
+
+def order_question_candidates(item_name: str, item_cands: list[dict], catalog: list[dict],
+                              decision, codex: codex_cards.CodexCards | None, *,
+                              customer_name: str = "", memory_gtin: str = "") -> list[dict]:
+    """The cards an orders item question offers (#147 re-heading + #160 plausibility). With a
+    live CODEX list only cards CODEX has — a dead card is never a button. A `CODEX_MISSING` line
+    has NO engine proposal (its proposed card IS the dead one), so it gets only the CODEX cards
+    that clear the #160 relevance floor — never a forced first card that merely scored best (an
+    unrelated card shown like a proposal is the #160 misclick class). An empty list is fine: the
+    question text points to the search and „Vybrať kartu z CODEXu" (a renumbered card is often
+    not in our catalog yet). `codex` None = unchanged."""
+    if codex is None:
+        return match.plausible_candidates(
+            match.candidates_for_question(item_cands, catalog, decision), QUESTION_BUTTONS)
+    valid = [c for c in catalog if codex.has(c.get("gtin"))]
+    if decision.rule == CODEX_MISSING:
+        return [c for c in match.candidates(item_name, valid, customer_name=customer_name,
+                                             memory_gtin=memory_gtin)
+                if float(c.get("score", 0) or 0) >= match.PLAUSIBLE_CANDIDATE_SCORE
+                ][:QUESTION_BUTTONS]
+    return match.plausible_candidates(match.candidates_for_question(
+        [c for c in item_cands if codex.has(c.get("gtin"))], valid, decision), QUESTION_BUTTONS)

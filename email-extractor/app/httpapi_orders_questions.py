@@ -136,6 +136,23 @@ def _dl_card_refusal(deps: Deps, gtin: str, *texts: str):
     return None
 
 
+def _order_card_refusal(deps: Deps, gtin: str, *texts: str):
+    """#479: the orders twin of `_dl_card_refusal` — a 409 for an `item` pick of a card number
+    CODEX has no stock card for (it would teach a mapping whose ORDER line CODEX refuses, and
+    re-hold the order on the next release), else None. A missing/stale list passes. The board
+    shows an item refusal as a toast (the one-click CODEX hint is dl_item-only), so the payload
+    stays the plain #467 shape."""
+    from .orders import codex_cards
+    with deps.db() as c:
+        try:
+            codex_cards.check_card_code(c, gtin, *texts,
+                                        catalog=snapshot.catalog_for_management(c),
+                                        doc=codex_cards.DOC_ORDER)
+        except codex_cards.CardRefused as e:
+            return jsonify(**e.payload), e.status
+    return None
+
+
 def register(app: Flask, deps: Deps) -> dict:
     @app.get("/api/orders/questions")
     def api_orders_questions():
@@ -787,6 +804,10 @@ def register(app: Flask, deps: Deps) -> dict:
         gtin, card = str(body.get("gtin") or ""), str(body.get("card") or "")
         if not gtin:
             return jsonify(error="chýba karta"), 400
+        # #479: never teach a card whose code CODEX lacks (its ORDER line would be refused)
+        refused = _order_card_refusal(deps, gtin, card, q0.get("wording", ""))
+        if refused:
+            return refused
         # #360: the board sends the warehouse-confirmed quantity + unit price for this line.
         # teach.answer persists both onto the question row (audit + display); the confirmed
         # QUANTITY is then read back at ship time by hold.release_for_question (from

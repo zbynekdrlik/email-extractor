@@ -86,7 +86,8 @@ def _redecide(conn, customer_ean: str, decisions: list, as_of: str = "",
 
 def _ask_still_ambiguous(conn, row: dict, decisions: list, still_asking: list,
                          catalog: list[dict], as_of: str,
-                         _recalled_cache: dict | None = None) -> tuple[list[int], list[str]]:
+                         _recalled_cache: dict | None = None,
+                         codex=None) -> tuple[list[int], list[str]]:
     """Raise a fresh warehouse question for every decision STILL in `ASK_THE_WAREHOUSE`
     after a real-catalog `_redecide` (#162) — mirrors `pipeline._run`'s own per-item ask
     loop exactly (same `teach.ask`/`match.candidates`/`match.candidates_for_question`/
@@ -102,8 +103,11 @@ def _ask_still_ambiguous(conn, row: dict, decisions: list, still_asking: list,
     `_recalled_cache`: see `_redecide`'s docstring — pass the SAME dict `_redecide` was
     given for this same release, so a `still_asking` line (which `_redecide` already
     looked up moments earlier) never pays for `memory.resolve` twice.
+
+    `codex` (#479): the live CODEX list (None = fail-open) — only cards CODEX has are
+    offered, and a `codex_missing` line is asked even for a human-taught wording.
     """
-    from . import match, memory, teach
+    from . import card_guard, match, memory, teach
 
     cache = {} if _recalled_cache is None else _recalled_cache
     new_qids: list[int] = []
@@ -116,17 +120,18 @@ def _ask_still_ambiguous(conn, row: dict, decisions: list, still_asking: list,
             cache[d.item_name] = recalled
         item_cands = match.candidates(d.item_name, catalog, customer_name=row["customer_name"],
                                       memory_gtin=recalled.gtin if recalled else "")
-        ask_cands = match.candidates_for_question(item_cands, catalog, d)
         # #160: mirrors pipeline._run's own shortlist-quality filter exactly — never pad
-        # to a fixed count with a weakly-related card.
-        shown_cands = match.plausible_candidates(ask_cands)
+        # to a fixed count with a weakly-related card (#479: CODEX cards only, when live).
+        shown_cands = card_guard.order_question_candidates(
+            d.item_name, item_cands, catalog, d, codex, customer_name=row["customer_name"])
         qid = teach.ask(
             conn, message_id=row["message_id"], customer_ean=row["customer_ean"],
             customer_name=row["customer_name"], wording=d.item_name, quantity=d.quantity,
             unit=d.unit,
             candidates=[{"gtin": str(c.get("gtin")), "name": c.get("name", "")}
                        for c in shown_cands],
-            delivery_date=row["delivery_date"], reason=d.note)
+            delivery_date=row["delivery_date"], reason=d.note,
+            codex_missing=d.rule == card_guard.CODEX_MISSING)
         if qid:
             new_qids.append(qid)
         else:

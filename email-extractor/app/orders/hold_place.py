@@ -76,7 +76,11 @@ def _apply_confirmed_quantities(conn, decisions: list, question_ids: list) -> No
             continue
         key = memory.item_key(q.get("wording", ""))
         if key:
-            by_key[key] = q["quantity"]   # last write wins for a shared key (rare)
+            # last write wins for a shared key (rare). #479: `quantity` is NUMERIC → a Decimal;
+            # float it HERE — a Decimal decision quantity crashes the `Json` dump of a re-hold
+            # (#162/#479) and `merge_same_card`'s Decimal + float sum. `edi.build` reads
+            # `float(quantity)`, so no shipped byte changes.
+            by_key[key] = float(q["quantity"])
     if not by_key:
         return
     for d in decisions:

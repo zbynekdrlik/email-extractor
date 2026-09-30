@@ -21,6 +21,7 @@ import logging
 from pathlib import Path
 
 from . import (
+    card_guard,
     customer,
     dl_alerts,
     edi,
@@ -82,8 +83,11 @@ TECHNICAL_REASONS = {Reason.CHANGE_REQUEST, Reason.LLM_REFUSED, Reason.UPLOAD_FA
 # ONE question for the warehouse (#88) — answering it teaches the wording for good.
 # What a human can actually settle. `unique_card` is NOT here (#103): a product we make
 # in exactly one gramáž has no alternative to choose between, so asking is noise.
+# #479 `codex_missing`: the line's card has a code CODEX has no stock card for (live only,
+# `card_guard.gate_order_line`) — CODEX would not take it, so the warehouse picks the card.
 ASK_THE_WAREHOUSE = ("unmatched", "llm_borderline", "history_weight",
-                    "llm_sure_alias_conflict", "llm_sure_lexical_gap")
+                    "llm_sure_alias_conflict", "llm_sure_lexical_gap",
+                    card_guard.CODEX_MISSING)
 
 PROMPTS = Path(__file__).with_name("prompts")
 
@@ -443,6 +447,9 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
     # this function, instead of once per order and once per question (the old shape: 5
     # delivery dates + 4 questions produced 6 separate Odoo messages for one e-mail).
     order_summaries: list[dict] = []
+    # #479: the CODEX stock-card list guards every ORDER line — loaded ONCE per mail, LIVE only
+    # (shadow / the e2e-orders corpus never consults it, byte-identical). None = fail-open.
+    codex = None if shadow else card_guard.order_guard(conn)
     for order in orders:
         # Two shops in one file are two customers; everything below — the memory lookup,
         # the alias that names the customer, the question, the EDI header — must be the
@@ -478,6 +485,9 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                                         customer_name=matched.name if matched else "")
             decision.quantity = item.get("quantity")
             decision.unit = item.get("unit", "ks")
+            # #479: a card whose code CODEX lacks → a cardless `codex_missing` line, asked +
+            # held below like any other unsettled line (never an ORDER file CODEX rejects)
+            decision = card_guard.gate_order_line(decision, codex)
             decisions.append(decision)
             # A line the engine could not settle becomes ONE question for the warehouse, with
             # its candidate cards (#88). Answering it teaches the wording for good — measured,
@@ -491,11 +501,13 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                 # on an unrelated card family). Re-head the list with the engine's actual
                 # proposed candidate, computed AFTER the decision, so the warehouse always
                 # has the one card it needs to confirm.
-                ask_cands = match.candidates_for_question(item_cands, catalog, decision)
                 # #160: never pad the shortlist to a fixed count with a weakly-related
                 # card — only the proposed candidate plus anything that genuinely
                 # clears a relevance floor.
-                shown_cands = match.plausible_candidates(ask_cands)
+                # #479: with a live CODEX list only cards CODEX has are offered.
+                shown_cands = card_guard.order_question_candidates(
+                    item["name"], item_cands, catalog, decision, codex,
+                    customer_name=matched.name)
                 qid = teach.ask(
                     conn, message_id=message.get("message_id", ""),
                     customer_ean=matched.ean_edi, customer_name=matched.name,
@@ -510,7 +522,10 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                     # #139: a new question no longer posts its own Odoo message — it is
                     # counted into the ONE summary this e-mail posts at the end. The
                     # wording itself stays fully visible on the linked /otazky page.
-                    on_new=new_questions.append)
+                    on_new=new_questions.append,
+                    # #479: asked even when the wording is human-taught (the incident: a
+                    # wording taught onto the card whose code CODEX then dropped)
+                    codex_missing=decision.rule == card_guard.CODEX_MISSING)
                 if qid:
                     order_question_ids.append(qid)
         decisions = match.merge_same_card(match.apply_siblings(decisions))
@@ -573,7 +588,7 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                 # blank) — fall through to the same reject `_ship_one` always gave
                 status, preview, reject_reason = _ship_one(
                     conn, cfg, message, order, matched, decisions, extracted, shadow,
-                    upload, post, post_now=False)
+                    upload, post, post_now=False, codex=codex)
         elif (not shadow and matched and not is_change and order_question_ids and still_asking
                 and not hold.is_past_deadline(order.get("deliveryDate", ""), today)):
             held_id = hold.place(conn, message_id=message.get("message_id", ""),
@@ -618,7 +633,7 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
             # posted at the end of `_run` (#139) — never one post per order.
             status, preview, reject_reason = _ship_one(
                 conn, cfg, message, order, matched, decisions, extracted, shadow, upload,
-                post, post_now=False, question_ids=ship_question_ids)
+                post, post_now=False, question_ids=ship_question_ids, codex=codex)
         statuses.append(status)
         previews.append(preview)
         order_summaries.append({
@@ -715,9 +730,13 @@ def _merge_by_day(orders: list[dict]) -> list[dict]:
     return list(merged.values())
 
 
+_LOAD_CODEX = object()
+
+
 def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
               upload, post, post_now: bool = True,
-              question_ids: list[int] | None = None) -> tuple[str, dict, str]:
+              question_ids: list[int] | None = None,
+              codex=_LOAD_CODEX) -> tuple[str, dict, str]:
     """Build, send and report ONE order. Returns (status, preview, reject_reason).
 
     `post_now=False` (used by `_run`'s multi-order loop, #139) still logs the event
@@ -730,7 +749,32 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
     calling here (e.g. the per-item `teach.ask` loop in `_run`) — threaded into `_finish`'s
     invariant check so a "no card matched" reject that already has open item questions is
     correctly recognized as resolvable-on-the-board, not silently technical.
+
+    `codex` (#479): the live CODEX list `_run` already loaded (None = fail-open); the hold
+    release paths leave the default and it is loaded here. EVERY live ship re-checks right
+    before the claim — a line whose code CODEX lacks never reaches an ORDER file. `_run` and
+    `_release_locked` hold such a line with a question first; what still arrives here (the
+    deadline sweep shipping a held order whose code went dead while it waited) ships WITHOUT
+    that line — an `item` question is deadline-shippable, never the dead code — and the line
+    gets its own board question here (the Odoo summary counts it missing, the question names it
+    and teaches the next order).
     """
+    net_new: list[dict] = []
+    net_qids: list[int] = []
+    if not shadow:
+        if codex is _LOAD_CODEX:
+            codex = card_guard.order_guard(conn)
+        gated = [card_guard.gate_order_line(d, codex) for d in decisions]
+        newly = [g for d, g in zip(decisions, gated, strict=True) if g is not d]
+        decisions = gated
+        if (newly and matched and str(matched.ean_edi or "").strip()
+                and not extracted.get("isChangeRequest")):
+            net_qids = card_guard.ask_codex_missing(
+                conn, newly, message_id=message.get("message_id", ""),
+                customer_ean=matched.ean_edi, customer_name=matched.name,
+                delivery_date=order.get("deliveryDate", ""), codex=codex,
+                on_new=net_new.append)
+            question_ids = list(question_ids or []) + net_qids
     items = _as_edi_items(decisions)
     shipped_items = [d for d in decisions if d.gtin]
     missing = [d for d in decisions if not d.gtin]
@@ -785,7 +829,7 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
     if result.get("reject_reason"):
         _finish(conn, cfg, message, shadow, post, status="review",
                 items=result["items"], result=result, post_now=post_now, reason=reason,
-                question_ids=question_ids)
+                question_ids=question_ids, new_questions=len(net_new))
         return "review", {}, result["reject_reason"]
 
     built = edi.build(ean=matched.ean_edi, store=matched.name, orderNumber=order_no,
@@ -823,7 +867,8 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
         result["error_detail"] = repr(e)
         _finish(conn, cfg, message, shadow, post, status="error", items=result["items"],
                 result=result, detail={"error": repr(e)}, post_now=post_now,
-                reason=Reason.UPLOAD_FAILED)
+                reason=Reason.UPLOAD_FAILED, question_ids=net_qids,
+                new_questions=len(net_new))
         return "error", preview, result["reject_reason"]
 
     # #153: only NOW is the upload genuinely confirmed — never optimistically alongside
@@ -838,7 +883,8 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
                         delivered_on=_delivery_day(delivery), source="ship")
     _finish(conn, cfg, message, shadow, post,
             status="partial" if missing else "ok", items=result["items"], result=result,
-            detail={"edi_file": name, "orion_path": edi.orion_path(name)}, post_now=post_now)
+            detail={"edi_file": name, "orion_path": edi.orion_path(name)}, post_now=post_now,
+            question_ids=net_qids, new_questions=len(net_new))
     return ("partial" if missing else "ok"), preview, ""
 
 
