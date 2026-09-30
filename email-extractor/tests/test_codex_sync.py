@@ -641,10 +641,13 @@ def test_memory_of_a_code_that_was_never_our_card_is_never_moved(pg):
 
 # --- binding lifecycle: a human re-adds / picks a card (review 3) ------------------------------
 
-def _teach(pg, customer, key, gtin):
+def _teach(pg, customer, key, gtin, at=None, delivered=date(2026, 9, 20)):
+    """A human-taught mapping — `at` = when it was taught (default: now, i.e. after every
+    synthetic CODEX snapshot of a test; a mapping from BEFORE a code change passes an `at`
+    older than the pushes)."""
     pg.execute("INSERT INTO item_memory (customer_ean, item_key, item_raw, gtin, card, "
-               "delivered_on, source) VALUES (%s, %s, %s, %s, 'x', %s, 'human')",
-               (customer, key, key, gtin, date(2026, 9, 20)))
+               "delivered_on, source, created_at) VALUES (%s, %s, %s, %s, 'x', %s, 'human', "
+               "COALESCE(%s, now()))", (customer, key, key, gtin, delivered, at))
 
 
 def test_a_repicked_old_number_is_the_picked_card_not_the_old_binding(pg):
@@ -1511,6 +1514,152 @@ def test_a_blocked_run_never_says_rows_were_moved(pg):
     body = pg.execute("SELECT body_html FROM pending_alerts ORDER BY id DESC LIMIT 1"
                       ).fetchone()[0]
     assert "presunutých" not in body and "priradení" in body
+
+
+# --- review 10: rows decided during a reuse are held; the group follows through ----------------
+
+_BEFORE = NOW - timedelta(hours=12)      # a mapping taught long before the code change
+
+
+def test_a_wording_taught_while_codex_gave_our_code_to_another_card_is_held(pg):
+    """Review 10 🟡 P2: card 27 left ROZOK, the pagáč took it; in the dry-run window the
+    warehouse picked the pagáč at a question — #477 SELECTS our existing ROZOK — and the answer
+    taught the pagáč wording onto ROZOK. No rename happened. The apply renumbers ROZOK → the
+    rožok's ROZOK_NEW, but the row decided after CODEX gave ROZOK away stays (a human decides);
+    the rožok's older rows move."""
+    _baseline(pg)
+    _teach(pg, "C39", "rozok slaninovy", ROZOK, at=_BEFORE)
+    _push(pg, _reused(V1), hours_old=4.9)
+    codex_sync.run(pg, _cfg(apply=False))
+    picked = card_guard.add_from_codex(pg, "orders", ROZOK, actor="sklad")
+    _teach(pg, "C40", "pagac syrovy", picked["gtin"], delivered=date.today())
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert _gtin_of(pg, "C39") == ROZOK_NEW
+    assert _gtin_of(pg, "C40") == ROZOK
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "79" in reason and "Naučené" in reason and ROZOK_NEW in reason
+
+
+def test_a_row_repointed_onto_our_number_during_the_reuse_is_held(pg):
+    """Review 10 🟡 P2: an OLD row re-pointed onto ROZOK (a Naučené edit, audited) after CODEX
+    gave ROZOK to the pagáč keeps its `created_at` — the audit says when it was decided."""
+    _baseline(pg)
+    _teach(pg, "C43", "pagac syrovy", CHLIEB, at=_BEFORE)
+    _push(pg, _reused(V1), hours_old=4.9)
+    codex_sync.run(pg, _cfg(apply=False))
+    rid = pg.execute("SELECT id FROM item_memory WHERE customer_ean = 'C43'").fetchone()[0]
+    pg.execute("UPDATE item_memory SET gtin = %s WHERE id = %s", (ROZOK, rid))
+    audit.record(pg, actor="sklad", table="item_memory", row_id=rid, action="update",
+                 before={"gtin": CHLIEB}, after={"gtin": ROZOK})
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert _gtin_of(pg, "C43") == ROZOK
+
+
+def test_a_codex_rename_beside_a_same_named_duplicate_is_never_called_a_human_rename(pg):
+    """Review 10 🔵 P1: our ROZOK is card 27; card 28 also carries ROZOK under our name; CODEX
+    renames card 27. Nobody touched our card — the review may hold it, but never claims
+    „niekto ju premenoval" nor asks to „vrátiť" a name it never had."""
+    _baseline(pg)
+    dup = V1 + [_row(ROZOK, "28", "Rožok so slaninou 70g")]
+    _push(pg, dup, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    renamed = [dict(r, name="Rožok slaninový 70g") if r["card_code"] == "27" else r for r in dup]
+    _push(pg, renamed, hours_old=3)
+    codex_sync.run(pg, _cfg())
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "premenoval" not in reason and "vráť" not in reason
+
+
+def test_a_rename_rebind_lists_the_twins_rows_too(pg):
+    """Review 10 🔵 P4: a rename rebind to another product lists EVERY number's rows for a
+    human — the legacy twin's too."""
+    _seed_catalogs(pg)
+    snapshot.upsert_catalog_card(pg, "0" + ROZOK, "Rožok so slaninou 70g", alias="rozok twin")
+    snapshot.rebuild_from_overrides(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    _teach(pg, "C70", "rozok twin wording", "0" + ROZOK, at=_BEFORE)
+    reused = [dict(r, code=ROZOK) if r["card_code"] == "79" else r
+              for r in V1 if r["card_code"] != "27"]
+    _push(pg, reused, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    _drift_click(pg, ROZOK, "Pagáč syrový 60g")
+    _push(pg, reused, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert "Naučené" in _review_reason(pg, "orders", "0" + ROZOK)
+
+
+def test_a_twin_joining_an_already_bound_group_is_bound(pg):
+    """Review 10 🔵 P13: a legacy twin that comes back after the group was bound (a Kôš undo) is
+    bound too — left alone later it follows card 27, never captured by the pagáč."""
+    _baseline(pg)
+    snapshot.upsert_catalog_card(pg, "0" + ROZOK, "Rožok so slaninou 70g")
+    snapshot.rebuild_from_overrides(pg)
+    _push(pg, V1, hours_old=4.5)
+    codex_sync.run(pg, _cfg())
+    assert _binding(pg, "0" + ROZOK) == ("27", True)
+
+
+def test_rows_on_a_deleted_canonical_number_follow_the_twins_renumber(pg):
+    """Review 10 🔵 P11: the warehouse deleted the canonical ROZOK (still card 27's — its binding
+    is active) and kept the legacy twin; card 27 moves to ROZOK_NEW — the rožok's older row on
+    ROZOK follows the twin's renumber (checked: only a number that IS card 27)."""
+    _seed_catalogs(pg)
+    snapshot.upsert_catalog_card(pg, "0" + ROZOK, "Rožok so slaninou 70g")
+    snapshot.rebuild_from_overrides(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    _teach(pg, "C80", "rozok x", ROZOK, at=_BEFORE)
+    _kos_delete(pg)
+    for hours in (5, 4):
+        _push(pg, _reused(V1), hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert _gtin_of(pg, "C80") == ROZOK_NEW
+
+
+def test_a_renumber_onto_another_cards_number_names_the_way_out(pg):
+    """Review 10 🔵 P3: „náš kód … je karta CODEX 31, nie 55" repeated on every push without a
+    way out — it names the pick that settles it."""
+    _baseline(pg)
+    v2 = [dict(r, code=CHLIEB_NEW) if r["card_code"] == "31"
+          else dict(r, code=CHLIEB) if r["card_code"] == "55" else r for r in V1]
+    _push(pg, v2, hours_old=3)
+    codex_sync.run(pg, _cfg())
+    assert "Vybrať kartu z CODEXu" in _review_reason(pg, "orders", KOLAC)
+
+
+def test_same_named_duplicate_carriers_name_the_way_out(pg):
+    """Review 10 🔵 P12: two CODEX cards carry our code under the SAME name — renaming cannot
+    tell them apart; the review names the pick."""
+    _seed_catalogs(pg)
+    dup = V1 + [_row(ROZOK, "28", "Rožok so slaninou 70g")]
+    _push(pg, dup, hours_old=3)
+    codex_sync.run(pg, _cfg())
+    assert "Vybrať kartu z CODEXu" in _review_reason(pg, "orders", ROZOK)
+
+
+def test_a_rename_rebind_never_calls_itself_a_pick_or_sends_rows_to_a_gone_card(pg):
+    """Review 10 🔵: the rename-rebind reset is audited without „vybraný znova" (nothing was
+    picked), and its rows review never asks to move them onto a card gone from CODEX."""
+    _seed_catalogs(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    _teach(pg, "C90", "rozok y", ROZOK, at=_BEFORE)
+    reused = [dict(r, code=ROZOK) if r["card_code"] == "79" else r
+              for r in V1 if r["card_code"] != "27"]
+    _push(pg, reused, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    _drift_click(pg, ROZOK, "Pagáč syrový 60g")
+    _push(pg, reused, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    notes = [n for (n,) in pg.execute("SELECT note FROM audit_log WHERE actor = 'codex-sync' "
+                                      "AND action = 'update' AND table_name = "
+                                      "'catalog_overrides'").fetchall()]
+    assert notes and not any("vybraný znova" in n for n in notes)
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "Naučené" in reason and "preraď ich na jeho kartu" not in reason
 
 
 def test_a_create_onto_a_hidden_override_row_undeletes_it(pg):
