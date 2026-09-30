@@ -1983,6 +1983,127 @@ def test_a_renumber_line_names_the_codex_cards_product(pg):
     assert "karta CODEX 79 „Pagáč syrový 60g“ zmenila kód" in body
 
 
+# --- review 15: the texts say what a pick / rename WILL do, derived from the same rules --------
+
+def _pick_card(pg, code=ROZOK, scope="orders"):
+    return str(card_guard.pickable(pg, scope)[code]["card_code"])
+
+
+def test_a_gone_card_review_names_the_one_card_the_pick_binds(pg):
+    """Review 15 🔵: the picker offers ONE card per code — with two carriers the review names
+    that card and says the other one cannot be picked."""
+    _baseline(pg)
+    v = [r for r in V1 if r["card_code"] != "27"] + [
+        _row(ROZOK, "80", "Rožok cestovný 70g"), _row(ROZOK, "81", "Bageta 70g")]
+    for hours in (4, 3):
+        _push(pg, v, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    reason = _review_reason(pg, "orders", ROZOK)
+    offered = _pick_card(pg)
+    other = ({"80", "81"} - {offered}).pop()
+    assert f"karty CODEX {offered}" in reason and "priradiť nevie" in reason
+    assert other in reason.split("priradiť nevie")[0].rsplit(";", 1)[-1]
+
+
+def test_a_contest_review_never_advises_a_pick_that_binds_another_card(pg):
+    """Review 15 🔵: CODEX renamed card 27 beside a same-named duplicate 80 — the contest review
+    must not advise picking card 80: the picker offers card 27 for this code."""
+    _baseline(pg)
+    v = [dict(r, name="Rožok so slaninou a syrom 70g", changed_at="2026-09-29T10:00:00+02:00")
+         if r["card_code"] == "27" else r for r in V1] + [_row(ROZOK, "80", "Rožok so slaninou 70g")]
+    _push(pg, v, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert _pick_card(pg) == "27"
+    assert "Ak je to výrobok karty CODEX 80" not in reason and "priradiť nevie" in reason
+
+
+def test_a_rename_advice_says_the_same_products_data_stays(pg):
+    """Review 15 🔵: card 27 recreated as 127 under 27's OWN name while our name had drifted —
+    renaming to it keeps the data (same product); the review must not promise a reset."""
+    _baseline(pg)
+    snapshot.upsert_catalog_card(pg, ROZOK, "Rožok XXL tmavý 90g")
+    snapshot.rebuild_from_overrides(pg)
+    v = [dict(r, card_code="127") if r["card_code"] == "27" else r for r in V1]
+    for hours in (4, 3):
+        _push(pg, v, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "ostanú" in reason and "vyčistia" not in reason
+
+
+def test_a_held_taught_row_older_than_a_repick_still_points_at_the_old_product(pg):
+    """Review 15 🔵: a frozen rožok answer on the retired ROZOK, older than the pick of 79 and
+    inside card 80's reuse window — some review still names the rožok's number as its home."""
+    _baseline(pg)
+    both = _reused(V1) + [_row(ROZOK, "80", "Zemiaková placka 90g")]
+    _push(pg, both, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    _teach(pg, "C83", "rozok slanina frozen", ROZOK)
+    card_guard.add_from_codex(pg, "orders", ROZOK, actor="sklad")
+    moved = [dict(r, code=PAGAC_W) if r["card_code"] == "79" else r for r in both]
+    _push(pg, moved, hours_old=3)
+    codex_sync.run(pg, _cfg())
+    assert _gtin_of(pg, "C83") == ROZOK
+    assert ROZOK_NEW in _review_reason(pg, "orders", ROZOK)
+
+
+def test_held_rows_on_a_retired_twin_are_named_where_they_sit(pg):
+    """Review 15 🔵: the late rožok row sits on the legacy twin „0"+ROZOK — the held review
+    names that number, and no review line shows an empty „“ name."""
+    _seed_catalogs(pg)
+    snapshot.upsert_catalog_card(pg, "0" + ROZOK, "Rožok so slaninou 70g")
+    snapshot.rebuild_from_overrides(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    _push(pg, _reused(V1), hours_old=5)
+    codex_sync.run(pg, _cfg())
+    card_guard.add_from_codex(pg, "orders", ROZOK, actor="sklad")
+    _teach(pg, "C8", "pagac syrovy", ROZOK)
+    _kos_delete(pg)
+    _teach(pg, "C9", "rozok neskoro", "0" + ROZOK)
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert _gtin_of(pg, "C9") == "0" + ROZOK
+    held = [r for r in _review_reason(pg, "orders", ROZOK).split(" Tiež: ") if "vzniklo" in r]
+    assert held and "0" + ROZOK in held[0]
+    body = pg.execute("SELECT body_html FROM pending_alerts ORDER BY id DESC LIMIT 1"
+                      ).fetchone()[0]
+    assert "„“" not in body
+
+
+def test_held_rows_on_a_live_twin_are_named_where_they_sit(pg):
+    """Review 15 🔵: a row taught onto the live legacy twin after the pagáč appeared is held by
+    the renumber — the review and the ops line name the twin, not the canonical number."""
+    _seed_catalogs(pg)
+    snapshot.upsert_catalog_card(pg, "0" + ROZOK, "Rožok so slaninou 70g")
+    snapshot.rebuild_from_overrides(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    _push(pg, _reused(V1), hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    _teach(pg, "C10", "rozok twin neskoro", "0" + ROZOK)
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert _gtin_of(pg, "C10") == "0" + ROZOK
+    assert "0" + ROZOK in _review_reason(pg, "orders", ROZOK)
+    body = pg.execute("SELECT body_html FROM pending_alerts ORDER BY id DESC LIMIT 1"
+                      ).fetchone()[0]
+    assert f"pod 0{ROZOK}" in body
+
+
+def test_the_ops_footer_never_promises_a_reset_is_redone(pg):
+    """Review 15 🔵: a Kôš undo of a reset is NOT redone by the next list — the footer says only
+    what is (renames / renumbers), and the reset line speaks Slovak field names."""
+    _repick_reused(pg)
+    _push(pg, _reused(V1), hours_old=3)
+    assert codex_sync.run(pg, _cfg())["reset"] == 2
+    body = pg.execute("SELECT body_html FROM pending_alerts ORDER BY id DESC LIMIT 1"
+                      ).fetchone()[0]
+    assert "ju urobí znova" not in body
+    assert "mass" not in body and "hmotnosť" in body
+
+
 def test_held_delivery_history_on_a_retired_number_is_reported(pg):
     """Review 12 🔵: on the retired-number path a held row that is only delivery history makes
     no move and no review — the report and the ops message still say it stayed."""
