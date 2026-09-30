@@ -232,6 +232,27 @@ def test_picking_a_code_whose_card_is_in_the_kos_restores_that_card(pg):
     assert teach.get(pg, qid)["answer"]["choice"] == G_MUKA
 
 
+def test_a_retired_snapshot_card_comes_back_with_the_codex_name_never_blank(pg):
+    """A card that lived only in the frozen snapshot leaves, when deleted, a bare retirement
+    marker (`retire_*` writes name '' + blank fields; the next snapshot drops the card). There
+    is nothing of ours to keep — un-deleting that marker alone would make a NAMELESS card (9 of
+    19 deleted DL cards on prod are such markers). The pick fills it from CODEX instead."""
+    dl_snapshot._freeze(pg, [{"gtin": G_MUKA, "name": "Múka zo snapshotu", "doplnok": "",
+                              "mass": None, "sklad": "100", "cena": 0.4}], [])
+    _codex(pg)
+    assert dl_snapshot.retire_dl_catalog_card(pg, G_MUKA)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    assert pg.execute("SELECT name FROM dl_catalog_overrides WHERE gtin=%s",
+                      (G_MUKA,)).fetchone() == ("",)
+    qid = _dl_question(pg)
+    r = _client().post(f"/api/board/questions/{qid}/answer",
+                       json={"codex_card": {"code": G_MUKA}})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    card = next(x for x in dl_snapshot.dl_catalog_for_management(pg) if x["gtin"] == G_MUKA)
+    assert (card["name"], card["sklad"]) == ("Múka pšeničná T650", "100")
+    assert teach.get(pg, qid)["answer"]["choice"] == G_MUKA
+
+
 def test_an_orders_card_in_the_kos_is_marked_and_restored_by_the_pick(pg):
     """The same restore in the ORDERS scope (`snapshot.deleted_catalog_cards`), incl. the
     picker's `in_trash` mark."""
