@@ -180,7 +180,9 @@ group's delivery `target` + its rows' `message_id`s, and `_action_line` decides:
 
 **To add a warehouse-channel grouped kind:** put it in `GROUPED_ITEM_KINDS` + (if its mail is in
 a História tab) `WAREHOUSE_HISTORY_KINDS`, and call `item_line` at enqueue. Tests:
-`test_dl_alerts.py::test_a_warehouse_*` + `test_an_ops_channel_alert_keeps_the_admin_dashboard_link`.
+`test_dl_alerts.py::test_a_warehouse_*` + `test_an_ops_channel_alert_keeps_the_admin_dashboard_link`
++ `test_the_admin_link_is_fail_closed_to_the_provable_ops_channel` +
+`test_an_upload_failed_alert_for_a_mail_the_dl_history_does_not_list_links_the_tab`.
 The full "which message links where" table lives in `board.md` (#473 section).
 
 Testing: `test_dl_alerts.py` proves the format (`test_format_grouped_...` — 12 items → one
