@@ -285,7 +285,12 @@ CODEX_STOCK_CARDS = [
 # history a renumber (card 27: X -> 3698 -> …) is indistinguishable from a card that left
 # CODEX. `first_seen`/`last_seen` are the CODEX data age of the push that saw it
 # (`codex_cards._data_as_of`). Seeded from the list already stored, so the FIRST sync after
-# the deploy already compares against the last pre-deploy push. `codex_sync_runs` is the
+# the deploy already compares against the last pre-deploy push. `codex_card_bindings` is WHICH
+# CODEX card each of our cards is ((scope, our gtin) -> ACSKLP, set when the code has one
+# stredisko-1 carrier or our name picks one): a renumber / removal follows that card, never
+# whichever card holds the code most recently (a code can be REUSED for another product);
+# `active=false` = our number the sync retired (a later memory row of it still follows the
+# card). `codex_sync_runs` is the
 # append-only log of every sync (`app/orders/codex_sync.py`): dry-run or applied, the whole
 # plan as JSON — what the ticket / the operator reads before the apply switch goes on.
 CODEX_CARD_HISTORY = [
@@ -301,6 +306,16 @@ CODEX_CARD_HISTORY = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_codex_card_history_code ON codex_card_history (code)",
+    """
+    CREATE TABLE IF NOT EXISTS codex_card_bindings (
+        scope      TEXT NOT NULL,
+        gtin       TEXT NOT NULL,
+        card_code  TEXT NOT NULL,
+        active     BOOLEAN NOT NULL DEFAULT true,
+        bound_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (scope, gtin)
+    )
+    """,
     """
     CREATE TABLE IF NOT EXISTS codex_sync_runs (
         id        BIGSERIAL PRIMARY KEY,
