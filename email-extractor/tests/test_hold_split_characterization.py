@@ -47,7 +47,7 @@ EXPECTED_SIGNATURES = {
     # --- re-decision + ship helpers (-> hold_redecide) ---
     "_current_catalog": "(conn) -> 'list[dict]'",
     "_redecide": "(conn, customer_ean: 'str', decisions: 'list', as_of: 'str' = '', catalog: 'list[dict] | None' = None, _recalled_cache: 'dict | None' = None) -> 'list'",
-    "_ask_still_ambiguous": "(conn, row: 'dict', decisions: 'list', still_asking: 'list', catalog: 'list[dict]', as_of: 'str', _recalled_cache: 'dict | None' = None) -> 'tuple[list[int], list[str]]'",
+    "_ask_still_ambiguous": "(conn, row: 'dict', decisions: 'list', still_asking: 'list', catalog: 'list[dict]', as_of: 'str', _recalled_cache: 'dict | None' = None, codex=None) -> 'tuple[list[int], list[str]]'",
     "_post_still_held": "(cfg, post, row: 'dict', decisions: 'list', new_qids: 'list[int]', unaskable: 'list[str]') -> 'None'",
     "_ship": "(conn, cfg, row: 'dict', upload, post, redecide: 'bool', as_of: 'str' = '') -> 'tuple[str, dict, str]'",
     "_mark_message_done_if_clear": "(conn, message_id: 'str') -> 'None'",
