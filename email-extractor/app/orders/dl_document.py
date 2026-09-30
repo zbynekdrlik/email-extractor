@@ -240,7 +240,8 @@ def _ask_pending_lines(conn, message_id: str, supplier_decision, pending_asks: l
 
 def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list[dict],
                       suppliers: list[dict], shadow: bool, all_items: list[dict],
-                      upload=None, post=None, list_dirs=None) -> dict:
+                      upload=None, post=None, list_dirs=None,
+                      history_link: str | None = None) -> dict:
     subject, from_addr = message.get("subject", ""), message.get("from_addr", "")
     doc_number = doc.get("docNumber") or ""
     delivery_date = doc.get("deliveryDate", "")
@@ -260,12 +261,19 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # needs the link (review always does; success only when it raised a real question).
     # #231: the DL-only nástenka link, never the mixed AI-orders `sklad_link`.
     link = report.dl_sklad_link(cfg)
+    # #473: THIS mail's detail on História dodacích listov — for every review below that
+    # raises NO board question (needsReview, date gate, supplier-match failure, a
+    # can't-create EDI with nothing asked); a review that DID ask keeps `link`. The caller
+    # (`dl_message._process_message`) passes it ("" for an invoice-as-DL mail, not in the DL
+    # history); a direct caller (a #251 replay script) gets it derived here.
+    hlink = (report.dl_history_link(cfg, message["message_id"]) if history_link is None
+             else history_link)
 
     if doc.get("status") == "needsReview":
         reason = doc.get("reviewReason") or "Dokument potrebuje kontrolu"
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, doc.get("supplierName", ""), doc_number, delivery_date, from_addr,
-            subject, link=link, cmr=cmr), post=post)
+            subject, link=link, cmr=cmr, history_link=hlink), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, detail={"doc_number": doc_number}, rollup=False,
               workflow=dl_report.WORKFLOW)
@@ -287,7 +295,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                            else f"{date_reason} (DL {doc_number}).")
             _post(cfg, shadow, lambda: dl_report.build_review(
                 full_reason, supplier_name, doc_number, delivery_date, from_addr,
-                subject, link=link, cmr=cmr), post=post)
+                subject, link=link, cmr=cmr, history_link=hlink), post=post)
             _event(conn, shadow, message["message_id"], stage="review",
                   status="review", outcome=full_reason,
                   detail={"doc_number": doc_number}, rollup=False,
@@ -307,8 +315,8 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                     message["message_id"], doc_number, e)
         reason = "Nepodarilo sa priradiť dodávateľa — over dodací list ručne."
         _post(cfg, shadow, lambda: dl_report.build_review(
-            reason, "", doc_number, delivery_date, from_addr, subject, link=link, cmr=cmr),
-            post=post)
+            reason, "", doc_number, delivery_date, from_addr, subject, link=link, cmr=cmr,
+            history_link=hlink), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="error",
               outcome=reason, detail={"doc_number": doc_number, "error": str(e)},
               rollup=False, workflow=dl_report.WORKFLOW)
@@ -552,9 +560,13 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                       "vybav ručne v CODEXe): " + ", ".join(retired_names) + ".")
         if codex_held_items:   # #467: say WHY the only card(s) were refused
             reason = " ".join(filter(None, [reason, _held_reason([], codex_held_items, [])[0]]))
+        # #473: a line that got a board question (dl_item / CODEX code / mass) → Otázky
+        # sklad; nothing asked (retired cards, ask-refused lines) → this mail's history.
+        asked = bool(held_items or codex_held_items or mass_hold_items)
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, supplier_decision.name, built.doc_number, delivery_date,
-            from_addr, subject, link=link, cmr=cmr), post=post)
+            from_addr, subject, link=link, cmr=cmr,
+            history_link="" if asked else hlink), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, detail={"doc_number": built.doc_number},
               rollup=False, workflow=dl_report.WORKFLOW)

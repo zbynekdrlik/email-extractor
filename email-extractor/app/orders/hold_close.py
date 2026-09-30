@@ -37,10 +37,12 @@ def release_to_review(conn, cfg, row: dict, post, reason: str) -> dict:
     questions the same way it already did for an unresolved customer)."""
     from . import report
     post = post or (lambda c, html, **kw: report.post_from_config(c, html))
+    # #473: `message_id` → the "treba doriešiť" line deep-links THIS held order's mail on the
+    # História objednávok tab (nothing is waiting as a board question any more).
     html = report.build_summary(customer_name=row.get("customer_name") or "", orders=[{
         "delivery_date": row["delivery_date"], "status": "review",
         "item_count": len(row["decisions"]), "missing_count": 0,
-        "reject_reason": reason}], cfg=cfg)
+        "reject_reason": reason}], cfg=cfg, message_id=row["message_id"])
     try:
         post(cfg, html)
     except Exception:

@@ -41,17 +41,20 @@ def _post(cfg, shadow: bool, build, post=None) -> None:
 
 def _flag_attachment(conn, cfg, shadow: bool, message: dict, link: str,
                      att: dict, reason: str, status: str, synthetic: bool = False,
-                     post=None) -> dict:
+                     post=None, history_link: str = "") -> dict:
     """Shared shape for "this attachment needs a human to look at it" — posts a review
     message, logs a non-rollup event, and returns the `documents_out` entry. Used both
     by the pre-existing attachment-extraction-error path and #238's own completeness
     check (an attachment that read fine but contributed zero documents) — the only
     difference is the event `status` and whether the entry is marked `synthetic`
     (never a REAL document, so callers that count "documents" — `_summary_outcome`,
-    the rollup detail, `dl_evaluate.score()` — must exclude it, per #238's own review)."""
+    the rollup detail, `dl_evaluate.score()` — must exclude it, per #238's own review).
+    #473: neither case raises a board question, so the caller passes `history_link` (the
+    mail's História dodacích listov detail); `link` stays the fallback."""
     _post(cfg, shadow, lambda: dl_report.build_review(
         reason, from_addr=message.get("from_addr", ""),
-        subject=message.get("subject", ""), link=link), post=post)
+        subject=message.get("subject", ""), link=link, history_link=history_link),
+        post=post)
     _event(conn, shadow, message["message_id"], stage="review", status=status,
           outcome=reason, detail={"idx": att.get("idx")}, rollup=False,
           workflow=dl_report.WORKFLOW)

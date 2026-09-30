@@ -243,4 +243,12 @@ $("h-prev").addEventListener("click", () => { if (state.page > 0) { state.page -
 $("h-next").addEventListener("click", () => { state.page += 1; load(); });
 $("h-close").addEventListener("click", closeDetail);
 setInterval(() => { if (!busy()) load(); }, 20000);
-load();
+
+// #473: an Odoo "📋 Treba doriešiť na nástenke" link lands here as
+// /nastenka/historia-<scope>?q=<message_id> (board.links.board_link, via the signed key route
+// + safe_next) — open THAT mail's detail on arrival, the way tab-questions.js focuses a `?q`
+// question. The list stays unfiltered (the deep link opens, it never hides the rest), and the
+// detail opens only AFTER the list rendered, so scrollIntoView lands on the drawer and a list
+// rendered above it can never push it out of view.
+const _seedMid = new URLSearchParams(location.search).get("q");
+load().then(() => { if (_seedMid) openDetail(_seedMid); });

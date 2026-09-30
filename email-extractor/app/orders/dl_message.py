@@ -242,6 +242,13 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     # mismatch call in this function (mirrors the same pattern in _process_document).
     # #231: the DL-only nástenka link, never the mixed AI-orders `sklad_link`.
     link = report.dl_sklad_link(cfg)
+    # #473: the no-question reviews below (age guard, empty/no attachment, correction,
+    # unreadable attachment, nothing recognised) raise NO board question — they link THIS
+    # mail's detail on História dodacích listov instead of the Otázky sklad tab (where the
+    # mail is not listed). An invoice-as-DL mail (`category='invoices'`) is NOT in the DL
+    # history (`board.services.history._SCOPES`), so it keeps the questions link ("" →
+    # `build_review` falls back to `link`).
+    hlink = "" if invoice_mode else report.dl_history_link(cfg, message["message_id"])
 
     # #339: age cutoff. An OLD stuck delivery note that becomes claimable again (a fresh
     # _claim, a _release_stuck_siblings reset, or a release_for_question reprocess — ALL
@@ -283,7 +290,8 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
             if not already:
                 _post(cfg, shadow, lambda: dl_report.build_review(
                     reason, from_addr=message.get("from_addr", ""),
-                    subject=message.get("subject", ""), link=link), post=post)
+                    subject=message.get("subject", ""), link=link,
+                    history_link=hlink), post=post)
             # #399: status='age_guard' (was 'review') — _release_stuck_siblings' SQL
             # carries NOT EXISTS (status='age_guard') so an age-guarded message is never
             # auto-released. NOTE: _run_and_finish logs a SECOND rollup with status=
@@ -331,7 +339,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                   f"či neobsahuje dodací list")
         documents_out.append(_flag_attachment(
             conn, cfg, shadow, message, link, att, reason, status="review",
-            synthetic=True, post=post))
+            synthetic=True, post=post, history_link=hlink))
     # Review finding: exclude by `idx` (a real `attachments.idx` is always a unique,
     # non-negative 0-based index per message, see the `_BODY_TEXT_IDX` comment above)
     # rather than by dict-value equality — safety here should never depend on two
@@ -394,7 +402,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
             reason = "Email bez prílohy a bez textu — pravdepodobne bežná správa"
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, from_addr=message.get("from_addr", ""),
-            subject=message.get("subject", ""), link=link), post=post)
+            subject=message.get("subject", ""), link=link, history_link=hlink), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
         return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
@@ -421,7 +429,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
         reason = _correction_review_reason(body_text)
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, from_addr=message.get("from_addr", ""),
-            subject=message.get("subject", ""), link=link), post=post)
+            subject=message.get("subject", ""), link=link, history_link=hlink), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
         # #297 review finding: merge with `documents_out` (never overwrite it) — it
@@ -471,13 +479,15 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                 reason = (f"Prílohu {att.get('filename') or att.get('idx')} sa nepodarilo "
                           f"spracovať — over ju ručne.")
             documents_out.append(_flag_attachment(
-                conn, cfg, shadow, message, link, att, reason, status="error", post=post))
+                conn, cfg, shadow, message, link, att, reason, status="error", post=post,
+                history_link=hlink))
 
     for doc in extraction["documents"]:
         extracted_doc_numbers.append(doc.get("docNumber") or "")
         documents_out.append(_process_document(conn, cfg, client, message, doc, catalog,
                                                 suppliers, shadow, all_items,
                                                 upload=upload, post=post,
+                                                history_link=hlink,
                                                 list_dirs=list_dirs))
 
     if not documents_out:
@@ -489,7 +499,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                   "Nepodarilo sa rozpoznať žiadny dodací list v prílohách")
         _post(cfg, shadow, lambda: dl_report.build_review(
             reason, from_addr=message.get("from_addr", ""),
-            subject=message.get("subject", ""), link=link), post=post)
+            subject=message.get("subject", ""), link=link, history_link=hlink), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
         documents_out.append({"outcome": "review", "reason": reason})
@@ -521,7 +531,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                       f"neobsahuje ďalší doklad")
             documents_out.append(_flag_attachment(
                 conn, cfg, shadow, message, link, att, reason, status="review",
-                synthetic=True, post=post))
+                synthetic=True, post=post, history_link=hlink))
 
     # spec §4: announced-vs-attached (Lunys subject shape only — a real, still-useful
     # signal for that supplier). Detection stays, but the per-mail Odoo warning was
