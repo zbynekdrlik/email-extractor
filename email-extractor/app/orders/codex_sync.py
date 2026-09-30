@@ -7,9 +7,11 @@ the orders catalog (`snapshot` + `catalog_overrides`), the DL catalog (`dl_snaps
 `dl_catalog_overrides`) and the learned mappings keyed by code (`item_memory`,
 `global_item_memory`, `dl_item_memory`). `run` is called after every ACCEPTED CODEX stock-card
 push (`POST /api/codex/cards`, `httpapi_codex`): it records the list in `codex_card_history`,
-builds the plan (`codex_sync_plan` — renames, renumbers, removed codes, what a human must
-decide) and, with `codex_sync_apply` on, executes it. It never adds a CODEX card we do not
-already have (the #337 bulk-import ban).
+builds the plan (`codex_sync_plan` — which CODEX card each of our cards IS
+(`codex_card_bindings`), renames, renumbers, removed codes, what a human must decide) and, with
+`codex_sync_apply` on, executes it. It never adds a CODEX card we do not already have (the #337
+bulk-import ban). An OLDER CODEX snapshot than one already synced is skipped (a re-sent old list
+must not undo a renumber).
 
 - **Every write** goes through the engine functions the nástenka uses (`snapshot` /
   `dl_snapshot` upsert / retire / undelete) + one `audit_log` row per change (actor
@@ -131,8 +133,22 @@ def _apply_renumber(conn, r: dict) -> None:
                                "restored": r["mode"] == "restore"}, note=note)
     for gtin in r["gtins"]:
         _retire(conn, scope, gtin, note)
+        _bind(conn, scope.name, gtin, r["codex_card"], active=False)
+    if r["mode"] != "memory":
+        _bind(conn, scope.name, r["to"], r["codex_card"], active=True)
     for table in scope.memory:
         _rewrite_memory(conn, table, r["old_gtins"], r["to"], note)
+
+
+def _bind(conn, scope: str, gtin: str, card: str, *, active: bool) -> None:
+    """Our card `gtin` IS CODEX card `card` (`active=False`: a number the sync retired — a
+    later memory row of it still follows the card). Identity, not catalog data."""
+    conn.execute(
+        """INSERT INTO codex_card_bindings (scope, gtin, card_code, active)
+           VALUES (%s, %s, %s, %s)
+           ON CONFLICT (scope, gtin) DO UPDATE
+              SET card_code = EXCLUDED.card_code, active = EXCLUDED.active, bound_at = now()""",
+        (scope, gtin, card, active))
 
 
 def _apply(conn, plan: sp.Plan) -> None:
@@ -143,6 +159,7 @@ def _apply(conn, plan: sp.Plan) -> None:
             _retire(conn, sp.BY_NAME[r["scope"]], gtin,
                     f"kód {r['code']} (karta CODEX {r['codex_card']}) z CODEXu zmizol bez "
                     f"náhrady (#478)")
+            _bind(conn, r["scope"], gtin, r["codex_card"], active=False)
     for r in plan.renames:
         scope = sp.BY_NAME[r["scope"]]
         if scope.name == "orders":
@@ -206,7 +223,9 @@ def _html(head: str, lines: list[str]) -> str:
     more = len(lines) - MAX_ALERT_LINES
     shown = lines[:MAX_ALERT_LINES] + ([f"… a ďalších {more}"] if more > 0 else [])
     return (f"<p>{head}</p><ul>" + "".join(f"<li>{line}</li>" for line in shown)
-            + "</ul><p>Každá zmena je v nástenke → Kôš a dá sa vrátiť.</p>")
+            + "</ul><p>Každá zmena je v nástenke → Kôš. Pozor: kým CODEX ostane rovnaký, "
+              "ďalší zoznam kariet ju urobí znova — natrvalo ju zmení len oprava v CODEXe "
+              "(alebo vypnutie codex_sync_apply v nastaveniach add-onu).</p>")
 
 
 def _review_key(r: dict) -> tuple:
@@ -319,8 +338,18 @@ def run(conn, cfg, now: datetime | None = None) -> dict:
     limits = _limits(cfg)
     with conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (_LOCK_KEY,))
+        newest = sp.newest_seen(conn)
+        if newest is not None and as_of < newest:
+            # an OLDER CODEX snapshot than one already synced (a re-sent old list) must never
+            # undo a renumber / removal the newer one made
+            log.warning("CODEX card sync skipped: the pushed list (CODEX data as of %s) is older "
+                        "than one already synced (%s) — nothing changes (#478)", as_of, newest)
+            return _summary("skipped", _record(conn, sync, "skipped", {"reason": "older"}),
+                            sp.Plan())
         sp.update_history(conn, as_of)
-        plan = sp.build_plan(conn, sp.load(conn, cards))
+        plan = sp.build_plan(conn, sp.load(conn, cards, as_of))
+        for s in plan.seeds:   # identity (which CODEX card our card is): stored in every mode
+            _bind(conn, s["scope"], s["gtin"], s["card"], active=True)
         too_many = plan.code_changes() > limits[0] or len(plan.renames) > limits[1]
         if not getattr(cfg, "codex_sync_apply", False):
             mode = "dry-run"
@@ -350,9 +379,22 @@ def run_safely(conn, cfg) -> dict:
     except Exception as e:
         log.exception("CODEX card sync failed (#478) — the pushed list stays, nothing synced")
         try:
-            run_id = _record(conn, codex_cards.latest_sync(conn), "error",
-                             {"error": str(e)[:500]})
+            run_id: int | None = _record(conn, codex_cards.latest_sync(conn), "error",
+                                         {"error": str(e)[:500]})
+            _error_alert(conn, cfg, e)
         except Exception:
             log.exception("CODEX card sync: recording the failed run failed too")
             run_id = None
         return {"mode": "error", "run_id": run_id, "error": str(e)[:200]}
+
+
+def _error_alert(conn, cfg, e: Exception) -> None:
+    """ONE ops alert while the sync keeps failing (then at most a workday-morning reminder) —
+    a sync that fails on every push must not stay a log line nobody reads."""
+    key = f"{ALERT_KEY}:error"
+    if dl_alerts.reminder_suppressed(conn, cfg, ALERT_KIND, key):
+        return
+    dl_alerts.enqueue(conn, report.ops_channel(cfg), ALERT_KIND, (
+        "<p>&#9888;&#65039; Synchronizácia kariet s CODEXom (#478) zlyhala — názvy a kódy kariet "
+        f"sa neaktualizujú, zoznam kariet z CODEXu je ale prijatý. Chyba: {escape(str(e)[:300])}"
+        "</p>"), message_id=key)
