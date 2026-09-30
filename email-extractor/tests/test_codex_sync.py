@@ -1481,6 +1481,26 @@ def test_a_lone_legacy_twin_keeps_its_cards_binding(pg):
     assert _binding(pg, "0" + ROZOK)[0] == "27"
 
 
+def test_a_rename_rebind_to_another_product_resets_the_legacy_twin_too(pg):
+    """Round 9 follow-through: the reset of a number that became another product covers every
+    number of its group — a legacy „0"+code twin never keeps the old product's alias."""
+    _seed_catalogs(pg)
+    snapshot.upsert_catalog_card(pg, "0" + ROZOK, "Rožok so slaninou 70g", alias="rozok twin")
+    snapshot.rebuild_from_overrides(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    reused = [dict(r, code=ROZOK) if r["card_code"] == "79" else r
+              for r in V1 if r["card_code"] != "27"]
+    _push(pg, reused, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    _drift_click(pg, ROZOK, "Pagáč syrový 60g")
+    _push(pg, reused, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    orders = _orders(pg)
+    assert (orders[ROZOK]["alias"], orders["0" + ROZOK]["alias"]) == ("", "")
+    assert _binding(pg, "0" + ROZOK) == ("79", True)
+
+
 def test_a_blocked_run_never_says_rows_were_moved(pg):
     """Review 9 🔵 F6: the blocked alert says nothing changed — its memory counts are what
     WOULD move, never „presunutých"."""
