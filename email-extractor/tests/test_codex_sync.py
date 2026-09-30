@@ -1667,6 +1667,86 @@ def test_a_rename_rebind_never_calls_itself_a_pick_or_sends_rows_to_a_gone_card(
     assert "Naučené" in reason and "preraď ich na jeho kartu" not in reason
 
 
+# --- review 11: the reuse window opens when the other card APPEARS; the round trip ------------
+
+def test_a_row_decided_before_the_other_card_appeared_on_our_code_follows_the_card(pg):
+    """Review 11 🟡: the window opens when the pagáč was first SEEN on ROZOK (nobody could pick
+    it before a push listed it), never when card 27 was last seen there — a row decided in
+    between is card 27's and moves with it."""
+    _baseline(pg)                                   # card 27 on ROZOK, as of 5 h ago
+    _teach(pg, "C45", "rozok slaninovy", ROZOK, at=NOW - timedelta(hours=4.5))
+    _push(pg, _reused(V1), hours_old=4)             # the pagáč first seen on ROZOK
+    codex_sync.run(pg, _cfg())
+    assert _gtin_of(pg, "C45") == ROZOK_NEW
+
+
+def test_an_order_for_a_later_delivery_is_not_held_by_its_delivery_date(pg):
+    """Review 11 🟡: item_memory.delivered_on is the order's REQUESTED delivery day (often
+    ahead) — an order taught long before the reuse for a later delivery is card 27's."""
+    _baseline(pg)
+    _teach(pg, "C46", "rozok slaninovy", ROZOK, at=_BEFORE, delivered=date.today()
+           + timedelta(days=2))
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert _gtin_of(pg, "C46") == ROZOK_NEW
+
+
+def test_held_delivery_history_stays_without_sending_anyone_to_naucene(pg):
+    """Review 11 🟡: a SHIPPED row decided during the reuse is delivery history — it stays on
+    the old number, and the review never tells the warehouse to fix it in Naučené (it is not
+    listed there); only taught rows are theirs to check."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=4.9)
+    codex_sync.run(pg, _cfg(apply=False))
+    pg.execute("INSERT INTO item_memory (customer_ean, item_key, item_raw, gtin, card, "
+               "delivered_on, source) VALUES ('C47', 'pagac', 'pagáč', %s, 'x', %s, 'ship')",
+               (ROZOK, date.today()))
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert _gtin_of(pg, "C47") == ROZOK
+    assert "Naučené" not in _review_reason(pg, "orders", ROZOK)
+
+
+def test_a_row_held_during_a_reuse_is_flagged_when_the_card_comes_back_to_the_code(pg):
+    """Review 11 🟡: the held pagáč wording on ROZOK, then card 27 goes BACK to ROZOK and the
+    pagáč moves on — the restore adopts the rows sitting on ROZOK; that must not happen
+    silently (the #478 incident itself was such a round trip)."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=4.9)
+    codex_sync.run(pg, _cfg(apply=False))
+    picked = card_guard.add_from_codex(pg, "orders", ROZOK, actor="sklad")
+    _teach(pg, "C48", "pagac syrovy", picked["gtin"], delivered=date.today())
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert _gtin_of(pg, "C48") == ROZOK
+    _push(pg, _reused(V1, to=ROZOK, pagac_code=PAGAC_W), hours_old=3)
+    codex_sync.run(pg, _cfg())
+    reason = _review_reason(pg, "orders", ROZOK_NEW)
+    assert "79" in reason and "Naučené" in reason
+
+
+def test_a_row_without_created_at_is_planned_and_moved_alike(pg):
+    """Review 11 🔵: a NULL `created_at` (the column allows it) is an old row — moved, and the
+    dry-run count equals what the apply really moves."""
+    _baseline(pg)
+    pg.execute("INSERT INTO item_memory (customer_ean, item_key, item_raw, gtin, card, "
+               "delivered_on, source, created_at) VALUES ('C49', 'rozok', 'rožok', %s, 'x', "
+               "%s, 'human', NULL)", (ROZOK, date(2026, 9, 1)))
+    _push(pg, _reused(V1), hours_old=4.9)
+    codex_sync.run(pg, _cfg(apply=False))
+    planned = pg.execute("SELECT report FROM codex_sync_runs ORDER BY id DESC LIMIT 1"
+                         ).fetchone()[0]
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    applied = pg.execute("SELECT report FROM codex_sync_runs ORDER BY id DESC LIMIT 1"
+                         ).fetchone()[0]
+    assert _gtin_of(pg, "C49") == ROZOK_NEW
+
+    def rows(report):
+        return [r["memory"] for r in report["renumbers"] if r["scope"] == "orders"]
+    assert rows(planned) == rows(applied) == [{"item_memory": 1, "global_item_memory": 0}]
+
+
 def test_a_create_onto_a_hidden_override_row_undeletes_it(pg):
     """Review 5 🔵: the executor's guard — a renumber's `create` onto a number whose override
     row is soft-deleted brings the card back visible (an upsert alone keeps `deleted_at`)."""
