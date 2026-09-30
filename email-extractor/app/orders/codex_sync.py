@@ -304,11 +304,13 @@ def _html(head: str, lines: list[str]) -> str:
     # what a Kôš undo really does, per kind (review 15 🔵: a reset undone is NOT redone — the
     # binding the reset came with is stored by then)
     return (f"<p>{head}</p><ul>" + "".join(f"<li>{line}</li>" for line in shown)
-            + "</ul><p>Každá zmena je v nástenke → Kôš. Pozor: premenovanie a prečíslovanie, "
-              "ktoré vrátiš, urobí ďalší zoznam kariet znova, kým CODEX ostane rovnaký — "
-              "natrvalo ich zmení len oprava v CODEXe (alebo vypnutie codex_sync_apply v "
-              "nastaveniach add-onu). Prečíslovanie zmaže starý kód a nový vytvorí alebo "
-              "doplní — pri vrátení vracaj všetky jeho zmeny, inak karta v katalógu chýba.</p>")
+            + "</ul><p>Každá zmena je v nástenke → Kôš. Pozor: premenovanie, prečíslovanie a "
+              "presun do Koša (kód z CODEXu zmizol), ktoré vrátiš, urobí ďalší zoznam kariet "
+              "znova, kým CODEX ostane rovnaký — natrvalo ich zmení len oprava v CODEXe (alebo "
+              "vypnutie codex_sync_apply v nastaveniach add-onu); vyčistenie starých údajov po "
+              "výbere inej karty sa po vrátení neopakuje. Prečíslovanie zmaže starý kód a nový "
+              "vytvorí alebo doplní — pri vrátení vracaj všetky jeho zmeny, inak karta v "
+              "katalógu chýba.</p>")
 
 
 def _review_keys(r: dict) -> set[tuple]:
