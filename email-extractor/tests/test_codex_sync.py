@@ -1786,15 +1786,17 @@ def test_a_failing_sync_rolls_back_whole_and_never_fails_the_push(pg, monkeypatc
     history = pg.execute("SELECT count(*) FROM codex_card_history").fetchone()[0]
     real, calls = codex_sync._rewrite_memory, []
 
-    def boom(conn, table, old, new, note):
+    def boom(conn, table, old, new, note, hold=None):
         calls.append(table)
         if len(calls) == 2:
             raise RuntimeError("boom")
-        return real(conn, table, old, new, note)
+        return real(conn, table, old, new, note, hold=hold)
 
     monkeypatch.setattr(codex_sync, "_rewrite_memory", boom)
     res = codex_sync.run_safely(pg, _cfg())
     assert res["mode"] == "error" and "boom" in res["error"]
+    # the failure really happened MID-rewrite: the first table was rewritten, then rolled back
+    assert calls == ["item_memory", "global_item_memory"]
     assert ROZOK in _orders(pg) and ROZOK_NEW not in _orders(pg)
     assert set(_gtins(pg, "item_memory")) == {ROZOK}
     assert pg.execute("SELECT count(*) FROM audit_log").fetchone()[0] == 0
