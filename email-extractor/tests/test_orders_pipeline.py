@@ -848,7 +848,11 @@ def test_the_full_exit_matrix_never_lets_a_resolvable_reason_go_silent(pg, env):
                           upload=rec.upload, post=rec.post)
     assert result["status"] == "review" and result.get("question_ids", []) == []
     assert len(_open_qs()) == before, "LLM_REFUSED is technical — no board question"
-    assert len(rec.posts) == 1 and "nástenke" not in rec.posts[0].lower()
+    # no QUESTIONS link (nothing waits there); #473: the "treba doriešiť" line points at
+    # THIS mail's detail on the História tab instead (was: the password-gated admin base)
+    assert len(rec.posts) == 1 and "Rieš na nástenke" not in rec.posts[0]
+    assert "otazky-objednavky" not in rec.posts[0]
+    assert "historia-objednavok%3Fq%3Dmx1" in rec.posts[0]
 
     # 2. NO_ORDERS — resolvable: becomes a `mail`-kind board question.
     # #404: the message must have an attachment, else the 0-attachment gate routes to ops.
@@ -931,7 +935,10 @@ def test_the_full_exit_matrix_never_lets_a_resolvable_reason_go_silent(pg, env):
                           upload=failing, post=rec.post)
     assert result["status"] == "error"
     assert len(_open_qs()) == before, "UPLOAD_FAILED is technical — no board question"
-    assert len(rec.posts) == 1 and "nástenke" not in rec.posts[0].lower()
+    # no QUESTIONS link; #473: the mail's História detail (see case 1)
+    assert len(rec.posts) == 1 and "Rieš na nástenke" not in rec.posts[0]
+    assert "otazky-objednavky" not in rec.posts[0]
+    assert "historia-objednavok%3Fq%3Dmx6" in rec.posts[0]
 
     # 7. DEDUP_ALREADY_SENT — ships "ok" both times; the invariant does not even apply
     # (only review/error are gated), and no NEW question is ever raised for a re-run.
