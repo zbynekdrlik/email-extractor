@@ -752,6 +752,95 @@ def test_a_legacy_twin_does_not_stop_a_retired_numbers_memory(pg):
     assert _gtins(pg, "dl_item_memory") == [ROZOK_NEW]
 
 
+# --- review 4: chains in one push, Kôš undo, re-picked reused number ---------------------------
+
+def test_a_number_vacated_in_the_same_push_is_never_recreated_under_another_card(pg):
+    """Review 4 🔴: card 31 moves CHLIEB → CHLIEB_NEW while card 55 takes CHLIEB, in ONE push.
+    Orders holds both cards: the chlieb follows its card; the koláč must NOT be created onto
+    the number being retired (the upsert kept `deleted_at` and the koláč vanished) — review."""
+    _baseline(pg)
+    v2 = [dict(r, code=CHLIEB_NEW) if r["card_code"] == "31"
+          else dict(r, code=CHLIEB) if r["card_code"] == "55" else r for r in V1]
+    _push(pg, v2, hours_old=1)
+    codex_sync.run(pg, _cfg())
+    orders = _orders(pg)
+    assert orders[KOLAC]["name"] == "Koláč makový 80g", "the koláč never vanishes"
+    assert orders[CHLIEB_NEW]["name"] == "Chlieb pšeničný 1000g"
+    assert CHLIEB not in orders
+    report = pg.execute("SELECT report FROM codex_sync_runs ORDER BY id DESC LIMIT 1"
+                        ).fetchone()[0]
+    assert ("orders", KOLAC) in {(r["scope"], r["gtin"]) for r in report["review"]}
+    assert _dl(pg)[CHLIEB]["name"] == "Koláč makový 80g", "DL has no chlieb: it follows 55"
+
+
+def test_the_same_chain_in_the_other_catalog_order_ends_the_same(pg):
+    """Review 4 🔴 (order independence): the card taking the vacated number sorts FIRST."""
+    _baseline(pg)
+    v2 = [dict(r, code=CHLIEB_NEW) if r["card_code"] == "31"
+          else dict(r, code=CHLIEB) if r["card_code"] == "27" else r for r in V1]
+    _push(pg, v2, hours_old=1)
+    codex_sync.run(pg, _cfg())
+    orders = _orders(pg)
+    assert orders[ROZOK]["name"] == "Rožok so slaninou 70g"
+    assert orders[CHLIEB_NEW]["name"] == "Chlieb pšeničný 1000g" and CHLIEB not in orders
+
+
+def test_a_kos_undo_of_a_sync_change_keeps_the_binding(pg):
+    """Review 4 🟡: reverting the sync's rename in the Kôš is no new card — the binding stays,
+    so when CODEX later reuses our code for the pagáč, our rožok is never re-bound to it."""
+    _baseline(pg)
+    _push(pg, [dict(r, name="Rožok slaninový 70g") if r["code"] == ROZOK else r for r in V1],
+          hours_old=4)
+    codex_sync.run(pg, _cfg())
+    aid = pg.execute("SELECT id FROM audit_log WHERE table_name = 'catalog_overrides' "
+                     "AND row_id = %s AND action = 'update'", (ROZOK,)).fetchone()[0]
+    audit.restore(pg, aid, by="sklad")
+    v2 = [dict(r, code=ROZOK_NEW, sklad=600) if r["card_code"] == "27"
+          else dict(r, code=ROZOK) if r["card_code"] == "79" else r for r in V1]
+    _push(pg, v2, hours_old=3)
+    codex_sync.run(pg, _cfg())
+    _push(pg, v2, hours_old=2)
+    codex_sync.run(pg, _cfg())
+    assert _orders(pg)[ROZOK]["name"] != "Pagáč syrový 60g"
+    assert pg.execute("SELECT card_code FROM codex_card_bindings WHERE scope = 'orders' "
+                      "AND gtin = %s", (ROZOK,)).fetchone()[0] == "27"
+
+
+def test_a_repicked_reused_number_drops_the_old_products_data(pg):
+    """Review 4 🟡: the #477 pick restores our Kôš card „as it was" — the rožok's alias /
+    doplnok / mass / cena on what is now the pagáč; the sync resets them (audited)."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=3)
+    codex_sync.run(pg, _cfg())
+    card_guard.add_from_codex(pg, "orders", ROZOK, actor="sklad")
+    card_guard.add_from_codex(pg, "dl", ROZOK, actor="sklad")
+    _push(pg, _reused(V1), hours_old=2)
+    res = codex_sync.run(pg, _cfg())
+    assert res["reset"] == 2
+    orders, dl = _orders(pg), _dl(pg)
+    assert (orders[ROZOK]["name"], orders[ROZOK]["alias"]) == ("Pagáč syrový 60g", "")
+    card = dl[ROZOK]
+    assert (card["name"], card["doplnok"], card["mass"], card["cena"], card["sklad"]) == (
+        "Pagáč syrový 60g", "", None, None, "1")
+    assert orders[ROZOK_NEW]["alias"] == "rozok slanina", "the real rožok keeps its data"
+
+
+def test_a_code_gone_whose_last_carriers_are_several_is_reviewed_not_silently_stuck(pg):
+    """Review 4 🔵: an unbound card whose code left stredisko 1 while two cards carried it."""
+    _seed_catalogs(pg)
+    snapshot.upsert_catalog_card(pg, ROZOK, "Rožok starý názov")
+    snapshot.rebuild_from_overrides(pg)
+    _push(pg, V1 + [_row(ROZOK, "28", "Bageta šunková 120g")], hours_old=5)
+    codex_sync.run(pg, _cfg())
+    _push(pg, [r for r in V1 if r["code"] != ROZOK], hours_old=3)
+    codex_sync.run(pg, _cfg())
+    report = pg.execute("SELECT report FROM codex_sync_runs ORDER BY id DESC LIMIT 1"
+                        ).fetchone()[0]
+    reasons = [r["reason"] for r in report["review"]
+               if r["scope"] == "orders" and r["gtin"] == ROZOK]
+    assert reasons and "naposledy" in reasons[0]
+
+
 def test_a_code_moved_to_another_stredisko_is_reviewed_once(pg):
     """Review 🔵: one card, one review entry — never two with different reasons."""
     _baseline(pg)
