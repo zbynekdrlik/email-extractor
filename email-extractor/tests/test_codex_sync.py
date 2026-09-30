@@ -2635,3 +2635,76 @@ def test_a_reset_deferred_by_a_dry_run_takes_the_picked_cards_sklad(pg):
         _push(pg, [_row(ROZOK_NEW, "40", "Múka pšeničná T650", sklad=100)], hours_old=hours)
         codex_sync.run(pg, _cfg(apply=hours == 2))
     assert _dl(pg)[ROZOK_NEW]["sklad"] == "100"
+
+
+# --- review 20: a pick waits out a glitch; a reset's sklad is exactly a fresh pick's ----------
+
+def test_a_pick_settled_while_its_card_is_missing_once_waits_for_the_card(pg):
+    """Review 20 🟡: the picked múka (card 40) is missing from ONE list exactly at the sync
+    that settles the pick — the reset ran with no sklad to take and stored the binding, so the
+    chlieb's piece sklad stayed for good. A card missing from one snapshot is a glitch: the
+    pick waits, the next list with the card settles it."""
+    _picked_as_the_muka(pg, "1")
+    _push(pg, [_row(KOLAC, "55", "Koláč makový 80g")], hours_old=5)
+    codex_sync.run(pg, _cfg())
+    assert _dl(pg)[CHLIEB]["doplnok"] == "chlieb", "nothing happens on a glitch"
+    for hours in (4, 3):
+        _push(pg, [_row(CHLIEB, "40", "Múka pšeničná T650", sklad=100),
+                   _row(KOLAC, "55", "Koláč makový 80g")], hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    card = _dl(pg)[CHLIEB]
+    assert (card["sklad"], card["doplnok"]) == ("100", "")
+
+
+def test_a_first_apply_on_a_glitched_list_still_resets_to_the_picked_cards_sklad(pg):
+    """Review 20 🟡: the pick seen by a dry-run; the first APPLY lands on a list missing the
+    picked card once — the next list with the card still resets to its kg sklad."""
+    _picked_as_the_muka(pg, "1")
+    _push(pg, [_row(CHLIEB, "40", "Múka pšeničná T650", sklad=100)], hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    _push(pg, [_row(KOLAC, "55", "Koláč makový 80g")], hours_old=4)
+    codex_sync.run(pg, _cfg())
+    _push(pg, [_row(CHLIEB, "40", "Múka pšeničná T650", sklad=100),
+               _row(KOLAC, "55", "Koláč makový 80g")], hours_old=3)
+    codex_sync.run(pg, _cfg())
+    assert _dl(pg)[CHLIEB]["sklad"] == "100"
+
+
+def test_a_reset_of_a_moved_card_takes_the_sklad_a_pick_of_its_new_code_gives(pg):
+    """Review 20 🔵: the picked card 40 moves — its sklad-1 row now carries the NEW code
+    ROZOK_NEW (the renumber target), its sklad-100 row an older code. A pick of ROZOK_NEW gives
+    sklad 1; the reset took the kg sklad of ALL the card's rows (a piece card kg-tracked with a
+    blank mass → a #462 hold on every piece delivery)."""
+    older = "9990000000086"
+    _picked_as_the_muka(pg, "1")
+    _push(pg, [_row(older, "40", "Múka pšeničná T650", sklad=100),
+               _row(CHLIEB, "40", "Múka pšeničná T650")], hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    _push(pg, [_row(older, "40", "Múka pšeničná T650", sklad=100),
+               _row(ROZOK_NEW, "40", "Múka pšeničná T650")], hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert _dl(pg)[ROZOK_NEW]["sklad"] == str(card_guard.pickable(pg, "dl")[ROZOK_NEW]["sklad"])
+    assert _dl(pg)[ROZOK_NEW]["sklad"] == "1"
+
+
+def test_a_reset_on_a_code_two_cards_carry_takes_the_pickers_sklad(pg):
+    """Review 20 🔵: code CHLIEB carried by card 40 (the central sklad-1 row — the one offered)
+    and card 41 (a kg sklad-100 row): a pick restoring our Kôš chlieb as card 40 is reset to
+    exactly what a fresh pick of the code writes (the picker's sklad rule over the code)."""
+    dl_snapshot._freeze(pg, [{"gtin": CHLIEB, "name": "Chlieb pšeničný 1000g",
+                              "doplnok": "chlieb", "mass": 1.0, "sklad": "1", "cena": 0.9}], [])
+    _push(pg, [_row(CHLIEB, "31", "Chlieb pšeničný 1000g")], hours_old=8)
+    codex_sync.run(pg, _cfg())
+    both = [_row(CHLIEB, "40", "Múka pšeničná T650"),
+            _row(CHLIEB, "41", "Múka pšeničná T650 kg", sklad=100)]
+    for hours in (7, 6):
+        _push(pg, both, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    dl_snapshot.retire_dl_catalog_card(pg, CHLIEB)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    card_guard.add_from_codex(pg, "dl", CHLIEB, actor="sklad")
+    _push(pg, both, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    picker = card_guard.pickable(pg, "dl")[CHLIEB]
+    assert picker["card_code"] == "40"
+    assert _dl(pg)[CHLIEB]["sklad"] == str(picker["sklad"]) == "100"
