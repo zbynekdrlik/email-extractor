@@ -230,14 +230,18 @@ def _named(name: str, rows: list[Row]) -> bool:
 
 def update_history(conn, as_of: datetime) -> None:
     """Record every (stredisko, card, code) of the current list: a new one gets
-    first_seen = last_seen = `as_of` (the CODEX data age), a known one advances last_seen."""
+    first_seen = last_seen = `as_of` (the CODEX data age), a known one advances last_seen — and
+    takes the list's name only then: an OLDER re-sent list (recorded since review 12) never sets
+    a newer name back (review 13 🟡: `same_product` then judged a recreated card another
+    product and cleared its data)."""
     conn.execute(
         """INSERT INTO codex_card_history (stredisko, card_code, code, name, first_seen,
                                            last_seen)
            SELECT stredisko, card_code, code, max(name), %s, %s FROM codex_stock_cards
             GROUP BY stredisko, card_code, code
            ON CONFLICT (stredisko, card_code, code) DO UPDATE
-              SET name = EXCLUDED.name,
+              SET name = CASE WHEN EXCLUDED.last_seen >= codex_card_history.last_seen
+                              THEN EXCLUDED.name ELSE codex_card_history.name END,
                   last_seen = GREATEST(codex_card_history.last_seen, EXCLUDED.last_seen)""",
         (as_of, as_of))
 
@@ -451,7 +455,7 @@ class _ScopePlanner:
         else:
             parts.append(f"Kód {code} v stredisku 1 CODEXu teraz nenesie žiadna karta — ak kartu "
                          f"nepotrebujete, zmažte ju (Kôš).")
-        parts.append(f"Naučené priradenia k číslu {gtin} skontroluj v Naučené.")
+        parts.append(f"Naučené priradenia k číslu {gtin}: {CHECK_TAUGHT}.")
         return " ".join(parts)
 
     def _seed(self, item: dict, card: str, *, replaces: bool = False) -> None:
@@ -644,7 +648,7 @@ class _ScopePlanner:
                 f"nový kód {succ} karty CODEX {card} je u nás karta {where}„{hit_name}“ — "
                 f"synchronizácia ju zmazala ako „{was}“ a niekto ju potom premenoval, "
                 f"prečíslovanie počká: ak je to stále „{was}“, {back}daj jej tento názov (potom "
-                f"sa prečísluje) a jej naučené priradenia skontroluj v Naučené"))
+                f"sa prečísluje); jej naučené priradenia: {CHECK_TAUGHT}"))
             return
         mode = "merge" if target is not None else "restore" if binned is not None else "create"
         to = str(hit["gtin"]) if hit is not None else succ
@@ -834,7 +838,7 @@ class _ScopePlanner:
         if not taught:
             # delivery history only — nothing for a human to fix in Naučené (review 12 🔵)
             if shipped:
-                self._hold_note(item, gtin, shipped,
+                self._hold_note(item, moved or gtin, shipped,
                                 f"číslo {gtin} bolo predtým karta CODEX {old} („{old_name}“)")
             return
         history = (f" ({shipped} záznamov o dodávkach z toho času tiež ostáva ako história)"
@@ -856,10 +860,12 @@ class _ScopePlanner:
             f"nemu {older}môže patriť „{old_name}“{history}: {CHECK_TAUGHT}; ak patria "
             f"„{old_name}“, {fix}"))
 
-    def _hold_note(self, item: dict, gtin: str, shipped: int, why: str) -> None:
-        """Held delivery history (shipped rows) with nothing to move and nothing for a human to
-        fix — a report + ops note, never silent (review 12 🔵)."""
-        self.plan.holds.append(dict(item, held={"taught": 0, "shipped": shipped}, why=why))
+    def _hold_note(self, item: dict, at: str, shipped: int, why: str) -> None:
+        """Delivery history (shipped rows) with nothing for a human to fix — a report + ops
+        note, never silent (review 12 🔵); `at` = the number the rows sit on after this plan
+        (review 13 🔵: a same-push renumber carries them)."""
+        self.plan.holds.append(dict(item, held={"taught": 0, "shipped": shipped}, at=at,
+                                    why=why))
 
     def _renames(self) -> None:
         for gtin, card in self.live.items():

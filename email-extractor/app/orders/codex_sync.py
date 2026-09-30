@@ -10,8 +10,8 @@ push (`POST /api/codex/cards`, `httpapi_codex`): it records the list in `codex_c
 builds the plan (`codex_sync_plan` — which CODEX card each of our cards IS
 (`codex_card_bindings`), renames, renumbers, removed codes, what a human must decide) and, with
 `codex_sync_apply` on, executes it. It never adds a CODEX card we do not already have (the #337
-bulk-import ban). An OLDER CODEX snapshot than one already synced is skipped (a re-sent old list
-must not undo a renumber).
+bulk-import ban). An OLDER CODEX snapshot than the newest list already recorded is skipped (a
+re-sent old list must not undo a renumber).
 
 - **Every write** goes through the engine functions the nástenka uses (`snapshot` /
   `dl_snapshot` upsert / retire / undelete) + one `audit_log` row per change (actor
@@ -94,7 +94,7 @@ def _retire(conn, scope: sp.Scope, gtin: str, note: str) -> None:
 def _rewrite_memory(conn, table: str, old: list[str], new: str, note: str,
                     hold: str | None = None) -> tuple[int, int]:
     """Every live mapping row of `old` → `new`, one audit row each — except, with `hold`, the
-    rows decided after it (`codex_sync_plan.held_clause`: CODEX gave the code to another card
+    rows decided after it (`codex_sync_memory.held_clause`: CODEX gave the code to another card
     then — they stay for a human, review 10 🟡). When the same mapping already exists under
     `new` (the tables are UNIQUE on it, soft-deleted rows included) the old row is soft-deleted
     instead — and a soft-deleted twin under `new` is revived, so the live mapping survives (an
@@ -304,26 +304,39 @@ def _review_keys(r: dict) -> set[tuple]:
     return {(r.get("scope"), r.get("gtin"), x) for x in (r.get("reasons") or [r.get("reason")])}
 
 
-def _hold_key(h: dict) -> tuple:
-    return ("hold", h.get("scope"), h.get("gtin"), (h.get("held") or {}).get("shipped"))
+def _hold_key(scope, code, shipped) -> tuple:
+    return ("hold", scope, code, shipped)
 
 
 def _last_applied_review(conn) -> set[tuple]:
     """The review reasons + held-history notes the previous APPLIED run already reported —
-    each is alerted once, never on every push."""
+    each is alerted once, never on every push. A renumber's own held line counts too: the next
+    push's note about the same rows on the retired number is no news (review 13 🔵)."""
     row = conn.execute("SELECT report FROM codex_sync_runs WHERE status = 'apply' "
                        "ORDER BY id DESC LIMIT 1").fetchone()
     report_json = (row[0] or {}) if row else {}
     keys = set().union(*(_review_keys(r) for r in report_json.get("review") or []))
-    return keys | {_hold_key(h) for h in report_json.get("holds") or []}
+    keys |= {_hold_key(h.get("scope"), h.get("code"), h["held"]["shipped"])
+             for h in report_json.get("holds") or []}
+    return keys | {_hold_key(r.get("scope"), r.get("code"), r["held"]["shipped"])
+                   for r in report_json.get("renumbers") or []
+                   if (r.get("held") or {}).get("shipped")}
 
 
 def _hold_lines(holds: list[dict], *, applied: bool = True) -> list[str]:
-    """Held delivery history with nothing to move — said, never silent (review 12 🔵)."""
-    verb = "ostalo" if applied else "by ostalo"
-    return [f"pamäť ({sp.BY_NAME[h['scope']].label}) {escape(h['gtin'])}: "
-            f"{h['held']['shipped']} záznamov o dodávkach {verb} pod {escape(h['gtin'])} ako "
-            f"história ({escape(h['why'])})" for h in holds]
+    """Delivery history with nothing for a human to fix — said, never silent (review 12 🔵),
+    under the number it really sits on (review 13 🔵)."""
+    out = []
+    for h in holds:
+        at = h.get("at") or h["gtin"]
+        if at == h["gtin"]:
+            verb = "ostalo" if applied else "by ostalo"
+        else:
+            verb = "je teraz" if applied else "by bolo"
+        out.append(f"pamäť ({sp.BY_NAME[h['scope']].label}) {escape(h['gtin'])}: "
+                   f"{h['held']['shipped']} záznamov o dodávkach {verb} pod {escape(at)} ako "
+                   f"história ({escape(h['why'])})")
+    return out
 
 
 def _fresh_review(review: list[dict], known: set[tuple]) -> list[dict]:
@@ -365,7 +378,9 @@ def _alert(conn, cfg, plan: sp.Plan, mode: str, run_id: int, known: set[tuple],
                           message_id=key)
         return
     lines = (_change_lines(plan)
-             + _hold_lines([h for h in plan.holds if _hold_key(h) not in known])
+             + _hold_lines([h for h in plan.holds
+                            if _hold_key(h["scope"], h["code"], h["held"]["shipped"])
+                            not in known])
              + _review_lines(_fresh_review(plan.review, known)))
     if lines:
         dl_alerts.enqueue(conn, channel, ALERT_KIND, _html(
@@ -461,10 +476,12 @@ def run(conn, cfg, now: datetime | None = None) -> dict:
         as_of = codex_cards._data_as_of(sync)
         newest = sp.newest_seen(conn)
         if newest is not None and as_of < newest:
-            # an OLDER CODEX snapshot than one already synced (a re-sent old list) must never
+            # an OLDER CODEX snapshot than the newest list already RECORDED (a re-sent old list;
+            # the newer one may only have been recorded — its sync failed / skipped) must never
             # undo a renumber / removal the newer one made
             log.warning("CODEX card sync skipped: the pushed list (CODEX data as of %s) is older "
-                        "than one already synced (%s) — nothing changes (#478)", as_of, newest)
+                        "than the newest CODEX list already recorded (%s) — nothing changes "
+                        "(#478)", as_of, newest)
             return _summary("skipped", _record(conn, sync, "skipped", {"reason": "older"}),
                             sp.Plan())
         sp.update_history(conn, as_of)

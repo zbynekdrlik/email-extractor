@@ -7,8 +7,8 @@ moves).
 - `MEMORY_KEYS` — the three code-keyed memory tables and their UNIQUE mapping columns.
 - `held_clause` — a row decided after the moment CODEX gave our code to another card (the
   reuse window, `codex_sync_plan.Codex.taken`): it may be that other product's, never moved.
-- `taught_clause` / `TAUGHT_SOURCES` — a row the matcher trusts as a warehouse decision
-  (the same definition as `memory` / `dl_memory`); anything else is delivery history.
+- `taught_clause` / `TAUGHT_SOURCES` — a curated warehouse decision (answers, „Doučiť", the
+  sheet import — `memory.CURATED_SOURCES`); anything else is delivery history.
 - `memory_split` — what a move of some numbers carries vs what it holds (taught / shipped).
 """
 from __future__ import annotations
@@ -35,16 +35,17 @@ MEMORY_KEYS: dict[str, tuple[str, ...]] = {
     "dl_item_memory": ("supplier_ean", "item_key", "delivered_on", "cnt"),
 }
 
-# a TAUGHT row = one the matcher trusts as a warehouse decision (`memory.CURATED_SOURCES`,
-# identical in `dl_memory`: human answers, the sheet import, História „Doučiť" = teachback —
-# review 12 🟡: counting teachback as delivery history held it without any review). Anything
+# a TAUGHT row = a curated warehouse decision (`memory.CURATED_SOURCES`, identical in
+# `dl_memory`): human answers and História „Doučiť" (teachback) — the matcher's taught-first
+# rung — plus the sheet import (Naučené lists it; it votes in the delivery-majority step).
+# Review 12 🟡: counting teachback as delivery history held it without any review. Anything
 # else (a shipped row, a NULL source) is delivery history.
 assert memory.CURATED_SOURCES == dl_memory.CURATED_SOURCES
 TAUGHT_SOURCES = memory.CURATED_SOURCES
 
 # where a human fixes a TAUGHT row: Naučené lists the answers + the sheet import; a História
 # „Doučiť" (teachback) row is undone in the Kôš and taught again (review 12)
-CHECK_TAUGHT = ("skontroluj ich v Naučené (priradenie z „Doučiť“ v Histórii vráť v Koši a doúč "
+CHECK_TAUGHT = ("skontroluj ich v Naučené (priradenie z „Doučiť“ v Histórii zruš v Koši a doúč "
                 "znova)")
 
 
