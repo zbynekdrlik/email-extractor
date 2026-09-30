@@ -26,7 +26,7 @@ from app import db
 from app.board.services import audit
 from app.config import Config
 from app.httpapi import create_app
-from app.orders import codex_cards, codex_sync, dl_snapshot, snapshot
+from app.orders import card_guard, codex_cards, codex_sync, dl_snapshot, snapshot
 
 PG_DSN = os.environ.get("PG_TEST_DSN")
 NOW = datetime.now(UTC)
@@ -637,6 +637,119 @@ def test_memory_of_a_code_that_was_never_our_card_is_never_moved(pg):
     res = codex_sync.run(pg, _cfg())
     assert res["memory_renumbered"] == 0
     assert _gtins(pg, "item_memory") == [CUDZIA]
+
+
+# --- binding lifecycle: a human re-adds / picks a card (review 3) ------------------------------
+
+def _teach(pg, customer, key, gtin):
+    pg.execute("INSERT INTO item_memory (customer_ean, item_key, item_raw, gtin, card, "
+               "delivered_on, source) VALUES (%s, %s, %s, %s, 'x', %s, 'human')",
+               (customer, key, key, gtin, date(2026, 9, 20)))
+
+
+def test_a_repicked_old_number_is_the_picked_card_not_the_old_binding(pg):
+    """Review 3 🔴: the sync moved our rožok ROZOK → ROZOK_NEW, the pagáč card took ROZOK and
+    the warehouse picked it (#477) and taught a pagáč wording — the next sync must NOT merge
+    the pagáč into the rožok nor move its memory; it is card 79 now."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=3)
+    codex_sync.run(pg, _cfg())
+    card_guard.add_from_codex(pg, "orders", ROZOK, actor="sklad")
+    _teach(pg, "C7", "pagac syrovy", ROZOK)
+    _push(pg, _reused(V1), hours_old=2)
+    res = codex_sync.run(pg, _cfg())
+    assert res["renumbered"] == 0
+    orders = _orders(pg)
+    assert orders[ROZOK]["name"] == "Pagáč syrový 60g", "the picked card takes ITS CODEX name"
+    assert orders[ROZOK_NEW]["name"] == "Rožok so slaninou 70g"
+    assert pg.execute("SELECT gtin FROM item_memory WHERE customer_ean = 'C7'"
+                      ).fetchone()[0] == ROZOK
+    assert pg.execute("SELECT card_code FROM codex_card_bindings WHERE scope = 'orders' "
+                      "AND gtin = %s", (ROZOK,)).fetchone()[0] == "79"
+
+
+def test_a_card_deleted_and_repicked_between_two_pushes_is_the_picked_card(pg):
+    """Review 3 🔴: the warehouse deletes our rožok and re-picks ROZOK — now the pagáč — before
+    the next sync ran; the stale binding (card 27) must not drag the pagáč along."""
+    _baseline(pg)
+    snapshot.retire_catalog_card(pg, ROZOK)
+    snapshot.rebuild_from_overrides(pg)
+    audit.record(pg, actor="sklad", table="catalog_overrides", row_id=ROZOK, action="delete")
+    _push(pg, _reused(V1), hours_old=3)
+    card_guard.add_from_codex(pg, "orders", ROZOK, actor="sklad")
+    codex_sync.run(pg, _cfg())
+    orders = _orders(pg)
+    assert orders[ROZOK]["name"] == "Pagáč syrový 60g"
+    assert ROZOK_NEW not in orders, "our orders rožok was deleted by a human — nothing follows"
+    assert ROZOK_NEW in _dl(pg), "the DL rožok still follows its card"
+
+
+def test_a_merge_keeps_our_curated_data_the_picked_target_lacks(pg):
+    """Review 3 🟡: during the dry-run the warehouse picked card 27's new code (#477: only the
+    CODEX name [+ sklad]); the applied merge keeps our alias / doplnok / mass / cena."""
+    _seed_catalogs(pg)
+    _push(pg, V1, hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    _push(pg, _v2_renumbered(), hours_old=3)
+    codex_sync.run(pg, _cfg(apply=False))
+    card_guard.add_from_codex(pg, "orders", ROZOK_NEW, actor="sklad")
+    card_guard.add_from_codex(pg, "dl", ROZOK_NEW, actor="sklad")
+    _push(pg, _v2_renumbered(), hours_old=2)
+    res = codex_sync.run(pg, _cfg())
+    assert res["renumbered"] == 2
+    assert _orders(pg)[ROZOK_NEW]["alias"] == "rozok slanina"
+    new = _dl(pg)[ROZOK_NEW]
+    assert (new["doplnok"], new["mass"], new["cena"]) == ("rožok slanina", 0.07, 0.35)
+    assert ROZOK not in _orders(pg) and ROZOK not in _dl(pg)
+
+
+def test_a_one_push_sole_carrier_is_never_bound(pg):
+    """Review 3 🟡: ROZOK sits on cards 27 and 28 and our name matches neither (review); one
+    export glitch without card 27 must not bind — and rename — our card to card 28 for good."""
+    _seed_catalogs(pg)
+    snapshot.upsert_catalog_card(pg, ROZOK, "Rožok starý názov")
+    snapshot.rebuild_from_overrides(pg)
+    shared = V1 + [_row(ROZOK, "28", "Bageta šunková 120g")]
+    _push(pg, shared, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    _push(pg, [r for r in shared if r["card_code"] != "27"], hours_old=3)
+    res = codex_sync.run(pg, _cfg())
+    assert res["renamed"] == 0
+    assert _orders(pg)[ROZOK]["name"] == "Rožok starý názov"
+    assert pg.execute("SELECT count(*) FROM codex_card_bindings WHERE scope = 'orders' "
+                      "AND gtin = %s", (ROZOK,)).fetchone()[0] == 0
+
+
+def test_a_failed_sync_does_not_count_as_a_seen_snapshot(pg, monkeypatch):
+    """Review 3 🔵: a push whose sync FAILED is no snapshot the removal rule may count."""
+    _baseline(pg)
+    _push(pg, V1, hours_old=4)
+
+    def boom(*a, **kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(codex_sync.sp, "build_plan", boom)
+    assert codex_sync.run_safely(pg, _cfg())["mode"] == "error"
+    monkeypatch.undo()
+    _push(pg, [r for r in V1 if r["code"] != KOLAC], hours_old=3)
+    assert codex_sync.run(pg, _cfg())["removed"] == 0
+    assert KOLAC in _orders(pg)
+
+
+def test_a_legacy_twin_does_not_stop_a_retired_numbers_memory(pg):
+    """Review 3 🔵: with the canonical ROZOK_NEW and a legacy „0"+ROZOK_NEW twin in DL, a
+    memory row written later with the retired ROZOK still follows (to the canonical card)."""
+    _baseline(pg)
+    _push(pg, _v2_renumbered(), hours_old=3)
+    codex_sync.run(pg, _cfg())
+    dl_snapshot.upsert_dl_catalog_card(pg, "0" + ROZOK_NEW, "Rožok so slaninou 70g", sklad="1")
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    pg.execute("INSERT INTO dl_item_memory (supplier_ean, item_key, item_raw, gtin, card, "
+               "delivered_on, cnt, source) VALUES ('S2', 'rozok', 'rožok', %s, 'R', %s, 1, "
+               "'ship')", (ROZOK, date(2026, 9, 25)))
+    _push(pg, _v2_renumbered(), hours_old=2)
+    assert codex_sync.run(pg, _cfg())["memory_renumbered"] == 1
+    assert _gtins(pg, "dl_item_memory") == [ROZOK_NEW]
 
 
 def test_a_code_moved_to_another_stredisko_is_reviewed_once(pg):
