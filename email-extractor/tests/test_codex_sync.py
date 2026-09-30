@@ -2104,6 +2104,85 @@ def test_the_ops_footer_never_promises_a_reset_is_redone(pg):
     assert "mass" not in body and "hmotnosť" in body
 
 
+# --- review 16: the remaining prose claims, derived too --------------------------------------
+
+def test_a_repick_review_never_advises_picking_a_card_the_picker_cannot_offer(pg):
+    """Review 16 🔵: card 27 moved to a sklad-100-only code (the orders picker offers sklad 1),
+    the pagáč took ROZOK and was picked — the rows review never tells the warehouse to pick
+    card 27 at a question: the picker cannot offer it."""
+    _baseline(pg)
+    _seed_memory(pg)
+    moved = [dict(r, code=ROZOK_NEW, sklad=100) if r["card_code"] == "27"
+             else dict(r, code=ROZOK) if r["card_code"] == "79" else r for r in V1]
+    _push(pg, moved, hours_old=4)
+    _kos_delete(pg)
+    card_guard.add_from_codex(pg, "orders", ROZOK, actor="sklad")
+    codex_sync.run(pg, _cfg())
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "u nás karta nie je — ak treba, vyber" not in reason
+    assert "neponúka" in reason
+
+
+def test_a_pick_advice_names_every_number_of_ours_to_delete(pg):
+    """Review 16 🔵: a live legacy twin „0"+ROZOK sits next to our ROZOK — the picker would
+    SELECT the twin and write nothing, so the advice says to delete both numbers."""
+    _seed_catalogs(pg)
+    snapshot.upsert_catalog_card(pg, "0" + ROZOK, "Rožok so slaninou 70g")
+    snapshot.rebuild_from_overrides(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    v = [r for r in V1 if r["card_code"] != "27"] + [
+        _row(ROZOK, "80", "Rožok cestovný 70g"), _row(ROZOK, "81", "Zemiaková placka 90g")]
+    for hours in (5, 4):
+        _push(pg, v, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "Vybrať kartu z CODEXu" in reason and f"0{ROZOK}" in reason
+
+
+def test_the_ops_footer_says_a_removal_undone_is_redone(pg):
+    """Review 16 🔵: a Kôš undo of a removal IS redone by the next list — the footer names it."""
+    _baseline(pg)
+    gone = [r for r in V1 if r["card_code"] != "55"]
+    for hours in (4, 3):
+        _push(pg, gone, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    body = pg.execute("SELECT body_html FROM pending_alerts ORDER BY id DESC LIMIT 1"
+                      ).fetchone()[0]
+    assert "presun do Koša" in body.split("<p>Každá")[-1]
+
+
+def test_a_review_never_quotes_an_empty_codex_name(pg):
+    """Review 16 🔵: card 80's sklad-1 row has a BLANK name (never pickable, the picker offers its
+    named row) — no review quotes „“."""
+    _baseline(pg)
+    v = [r for r in V1 if r["card_code"] != "27"] + [
+        _row(ROZOK, "80", ""), _row(ROZOK, "80", "Rožok cestovný 70g", sklad=100),
+        _row(ROZOK, "81", "Zemiaková placka 90g", sklad=100)]
+    for hours in (4, 3):
+        _push(pg, v, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    reason = _review_reason(pg, "dl", ROZOK)
+    body = pg.execute("SELECT body_html FROM pending_alerts ORDER BY id DESC LIMIT 1"
+                      ).fetchone()[0]
+    assert reason and "„“" not in reason and "„“" not in body
+
+
+def test_a_contest_never_says_no_card_carries_the_code_our_card_carries(pg):
+    """Review 16 🔵: the round trip — card 27 back on ROZOK, our restored retired ROZOK renamed
+    by a human: the contest review never says no card carries ROZOK (card 27 does)."""
+    _baseline(pg)
+    _push(pg, _v2_renumbered(), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    _restore_sync_delete(pg, "catalog_overrides", ROZOK)
+    snapshot.upsert_catalog_card(pg, ROZOK, "Rožok XXL tmavý 90g")
+    snapshot.rebuild_from_overrides(pg)
+    _push(pg, V1, hours_old=3)
+    codex_sync.run(pg, _cfg())
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert reason and "nenesie žiadna karta" not in reason
+
+
 def test_held_delivery_history_on_a_retired_number_is_reported(pg):
     """Review 12 🔵: on the retired-number path a held row that is only delivery history makes
     no move and no review — the report and the ops message still say it stayed."""
