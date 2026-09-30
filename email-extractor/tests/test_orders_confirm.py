@@ -310,7 +310,9 @@ def test_files_gone_from_all_three_directories_alert_grouped_as_unknown(pg):
                   listdir=lambda: {"in": set(), "archCodex": set(), "unconfirmed": set()},
                   post=posts, now=MON_MORNING)
     assert len(posts.calls) == 1
-    assert "zmizlo" in posts.calls[0][0]
+    # #476: the verb agrees with the count — „1 objednávka zmizla" (the old „zmizlo" was the
+    # agreement bug, pinned here by accident)
+    assert "1 objednávka zmizla zo všetkých" in posts.calls[0][0]
     assert _status(pg, rid) == "unknown"
 
 
