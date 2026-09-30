@@ -86,11 +86,12 @@ log = logging.getLogger("orders.dl_alerts")
 # (`• odosielateľ — predmet (prijaté D.M.)`), enqueued across many worker ticks and
 # grouped only at flush time. For each, `flush_pending` renders ONE readable message:
 # a per-kind HEADER (count + one explanation, `{n}` filled at flush) + up to
-# DISPLAY_ITEM_CAP short item lines + „…a N ďalších" + an action link (the admin dashboard
+# DISPLAY_ITEM_CAP short item lines + „… a ešte N ďalší/ďalšie/ďalších" (`report.more_line`,
+# agreeing with N, #476) + an action link (the admin dashboard
 # on the ops channel, the password-free board on a warehouse channel — #473) — instead
 # of the pre-#336 wall where flush just concatenated N full explanation sentences (live
 # evidence: a 3177-char human_processing_review post). Mirrors question_alerts._group_html's
-# header/cap/„…ďalších"/link convention. A kind NOT in this registry (question_reminder —
+# header/cap/remainder/link convention. A kind NOT in this registry (question_reminder —
 # already a fully-formatted single body from question_alerts; spend_cap — a one-off) is
 # concatenated as before, untouched.
 DISPLAY_ITEM_CAP = 10
@@ -280,9 +281,10 @@ def _format_grouped(kind: str, bodies: list[str], cfg, *, channel_id: int,
                     message_ids: list[str] | None = None) -> str:
     """#336: one readable grouped alert for a per-item wall kind — a single per-kind
     HEADER (count + one explanation, `{n}` filled) + up to `DISPLAY_ITEM_CAP` short item
-    lines + „…a N ďalších" + an action link. Replaces the pre-#336 wall where
-    `flush_pending` just `"".join`-ed N full explanation sentences. Mirrors
-    `question_alerts._group_html`'s header/cap/„…ďalších"/link convention. `cfg` may be
+    lines + „… a ešte N ďalší/ďalšie/ďalších" (`report.more_line`, #476) + an action link.
+    Replaces the pre-#336 wall where `flush_pending` just `"".join`-ed N full explanation
+    sentences. Mirrors `question_alerts._group_html`'s header/cap/remainder/link convention.
+    `cfg` may be
     None (some tests) — every link builder then returns "" and the link line is simply
     omitted, exactly like an unset `dashboard_base_url`. #473: the link depends on the
     recipient `channel_id` (`_action_line`) — admin dashboard for ops, the board for the
@@ -294,7 +296,9 @@ def _format_grouped(kind: str, bodies: list[str], cfg, *, channel_id: int,
     parts = [f"<p>{GROUPED_ITEM_KINDS[kind].replace('{n}', str(n))}</p>"]
     parts.extend(bodies[:DISPLAY_ITEM_CAP])
     if n > DISPLAY_ITEM_CAP:
-        parts.append(f"<p>&#8230; a {n - DISPLAY_ITEM_CAP} ďalších.</p>")
+        # #476: one kind per post and every header noun is masculine (e-maily, dodacie
+        # listy, skeny) — the shared agreeing line („a ešte 1 ďalší", never „1 ďalších").
+        parts.append(report.more_line(n - DISPLAY_ITEM_CAP, "ďalší", "ďalšie", "ďalších"))
     parts.append(_action_line(kind, cfg, channel_id, list(message_ids or [])))
     return "".join(parts)
 

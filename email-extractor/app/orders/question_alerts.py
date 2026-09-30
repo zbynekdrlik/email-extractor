@@ -185,11 +185,10 @@ def _group_html(rows: list[dict], repeats: dict[int, int], elapsed_days: int,
     days = _plural(elapsed_days, "pracovný deň", "pracovné dni", "pracovných dní")
     head = (f"<p>&#9200; {n} {noun} na nástenke čaká na odpoveď už "
            f"{elapsed_days} {days}:</p>")
-    shown = sorted(rows, key=lambda q: q["created_at"])[:15]
-    items = "".join(_describe(q, repeats.get(q["id"], 1)) for q in shown)
-    parts = [head, f"<ul>{items}</ul>"]
-    if n > len(shown):
-        parts.append(f"<p>&#8230; a ešte {n - len(shown)} ďalších.</p>")
+    items = [_describe(q, repeats.get(q["id"], 1))
+             for q in sorted(rows, key=lambda q: q["created_at"])]
+    # #476: the shared capped list — its remainder agrees with N („a ešte 1 ďalšia").
+    parts = [head, report.capped_list(items, 15, "ďalšia", "ďalšie", "ďalších")]
     link_html = report.link_line(link)
     if link_html:
         parts.append(link_html)

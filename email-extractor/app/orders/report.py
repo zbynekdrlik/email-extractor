@@ -132,6 +132,25 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
     return many
 
 
+def more_line(rest: int, one: str, few: str, many: str) -> str:
+    """The ONE „… a ešte N <ďalší/ďalšie/ďalších>." line under a capped grouped alert (#476),
+    the remainder word agreeing with N (`one`/`few`/`many` = its forms for 1 / 2-4 / 5+; the
+    caller picks the gender: ďalší dodací list, ďalšia otázka). Three alert builders each
+    carried their own copy printing „a 1 ďalších"."""
+    return f"<p>&#8230; a ešte {rest} {_plural(rest, one, few, many)}.</p>"
+
+
+def capped_list(items: list[str], cap: int, one: str, few: str, many: str) -> str:
+    """A grouped alert's item list (#476): a `<ul>` of at most `cap` ready `<li>` items, then
+    `more_line` for the rest (import-carryover alert, stale-question reminder)."""
+    shown = items[:max(0, cap)]
+    html = f"<ul>{''.join(shown)}</ul>"
+    rest = len(items) - len(shown)
+    if rest > 0:
+        html += more_line(rest, one, few, many)
+    return html
+
+
 def build_summary(customer_name: str, orders: list[dict], new_questions: int = 0,
                   unverified_count: int = 0, link: str = "", notes: str = "",
                   cfg=None, message_id: str = "") -> str:

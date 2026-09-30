@@ -117,7 +117,11 @@ by the user. Import confirmation (`app/orders/confirm.py`, keyed on `archCodex`/
 presence, or vanishing from all three folders) or a CARRYOVER (still unaccepted from a
 PRIOR day, checked once the configured morning hour arrives, default 10:00, skipping
 Saturday/Sunday by default) — grouped per incident, never one message per file. See
-`confirm.py`'s own module docstring for the full model.
+`confirm.py`'s own module docstring for the full model. **#476:** a carryover alert counts and
+lists ONLY the files still waiting (no terminal status AND still in the queued folder of the
+sweep's listing — never the incident's whole membership) and, for a DESADV, reads its LIN codes
+read-only from `in_DL` to say which code CODEX has no card for — details in
+`.claude/rules/dl-alerts.md`.
 
 ## Re-sending orders after an incident — order of operations is binding
 
