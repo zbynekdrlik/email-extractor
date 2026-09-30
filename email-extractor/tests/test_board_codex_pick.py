@@ -28,7 +28,10 @@ G_STARY = "9990000000062"      # stredisko 1 / sklad 1 but INACTIVE in CODEX
 G_POBOCKA = "9990000000079"    # only on a junk stredisko (402) — never offered (#337)
 G_CHLIEB = "9990000000086"     # stredisko 1 / sklad 1
 G_LONG = "99900000000093"      # 14 digits, stredisko 1 / sklad 500 — can never ship in a DESADV
+G_SHORT = "4711"               # a short EAN kód — its legacy „0"+code twin still fits a DESADV
 CODEX = [
+    {"code": G_SHORT, "card_code": "4711", "stredisko": 1, "sklad": 1,
+     "name": "Slanina krájaná"},
     {"code": G_LONG, "card_code": "93", "stredisko": 1, "sklad": 500,
      "name": "Nápoj dlhý kód"},
     {"code": G_ROZOK, "card_code": "27", "stredisko": 1, "sklad": 1,
@@ -147,17 +150,18 @@ def test_the_picker_freshness_is_the_full_list_meta_without_loading_the_list(pg)
 def test_the_picker_marks_the_cards_we_already_have_and_the_ones_in_the_kos(pg):
     _base(pg)
     _codex(pg)
-    _seed_dl(pg, "0" + G_ROZOK, "Bagetka s kečupom a syrom 80 gr", sklad="1")
+    _seed_dl(pg, "0" + G_SHORT, "Slanina stará", sklad="1")
     _seed_dl(pg, G_MUKA, "Múka pšeničná T650", sklad="100")
     dl_snapshot.retire_dl_catalog_card(pg, G_MUKA)
     dl_snapshot.dl_rebuild_from_overrides(pg)
     c = _client()
-    rozok = c.get("/api/board/codex-cards?scope=dl&q=slaninou").get_json()["items"][0]
+    slanina = c.get("/api/board/codex-cards?scope=dl&q=slanina").get_json()["items"][0]
     # OUR exact number (a card created before #467 as „0"+code) — what the answer keys on
-    assert rozok["in_catalog"] is True and rozok["catalog_gtin"] == "0" + G_ROZOK
-    assert rozok["catalog_name"] == "Bagetka s kečupom a syrom 80 gr"
+    assert slanina["in_catalog"] is True and slanina["catalog_gtin"] == "0" + G_SHORT
+    assert slanina["catalog_name"] == "Slanina stará"
     muka = c.get("/api/board/codex-cards?scope=dl&q=muka").get_json()["items"][0]
     assert muka["in_catalog"] is False and muka["in_trash"] is True
+    assert muka["trash_name"] == "Múka pšeničná T650"
 
 
 # --- the pick answers the question ------------------------------------------------------
@@ -199,16 +203,32 @@ def test_picking_a_code_we_already_have_selects_our_card_and_writes_nothing(pg):
     #467 lesson: an upsert would wipe mass/sklad/cena)."""
     _base(pg)
     _codex(pg)
-    _seed_dl(pg, "0" + G_MUKA, "Múka hladká T650", sklad="100", cena=0.37)
+    _seed_dl(pg, "0" + G_SHORT, "Slanina krájaná stará", sklad="1", cena=0.37)
     before = pg.execute("SELECT gtin, name, sklad, cena FROM dl_catalog_overrides").fetchall()
-    qid = _dl_question(pg)
+    qid = _dl_question(pg, wording="Slanina krájaná")
     r = _client().post(f"/api/board/questions/{qid}/answer",
-                       json={"codex_card": {"code": G_MUKA}})
+                       json={"codex_card": {"code": G_SHORT}})
     assert r.status_code == 200, r.get_data(as_text=True)
     assert pg.execute("SELECT gtin, name, sklad, cena FROM dl_catalog_overrides"
                       ).fetchall() == before
     assert not any(a[3] == "create" for a in _audit(pg))
-    assert teach.get(pg, qid)["answer"]["choice"] == "0" + G_MUKA
+    assert teach.get(pg, qid)["answer"]["choice"] == "0" + G_SHORT
+
+
+def test_a_legacy_twin_too_long_for_a_desadv_is_never_selected(pg):
+    """Review 3: „0"+a 13-digit code is a 14-char DL number the DESADV field can never carry
+    (`dl_match._gtin_edi_overflow` — the line would be dropped from every later EDI). The pick
+    never selects (or restores) it; it adds the canonical CODEX card instead."""
+    _base(pg)
+    _codex(pg)
+    _seed_dl(pg, "0" + G_MUKA, "Múka stará", sklad="100")
+    qid = _dl_question(pg)
+    r = _client().post(f"/api/board/questions/{qid}/answer",
+                       json={"codex_card": {"code": G_MUKA}})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert teach.get(pg, qid)["answer"]["choice"] == G_MUKA
+    assert pg.execute("SELECT name, sklad FROM dl_catalog_overrides WHERE gtin=%s",
+                      (G_MUKA,)).fetchone() == ("Múka pšeničná T650", "100")
 
 
 def test_picking_a_code_whose_card_is_in_the_kos_restores_that_card(pg):
@@ -295,13 +315,34 @@ def test_the_exact_number_wins_over_a_legacy_zero_prefixed_twin(pg):
     the EXACT number — never the legacy twin because it sorts first."""
     _base(pg)
     _codex(pg)
-    _seed_dl(pg, "0" + G_MUKA, "Múka stará", sklad="100")
-    _seed_dl(pg, G_MUKA, "Múka pšeničná T650", sklad="100")
-    qid = _dl_question(pg)
+    _seed_dl(pg, "0" + G_SHORT, "Slanina stará", sklad="1")
+    _seed_dl(pg, G_SHORT, "Slanina krájaná", sklad="1")
+    qid = _dl_question(pg, wording="Slanina krájaná")
     r = _client().post(f"/api/board/questions/{qid}/answer",
-                       json={"codex_card": {"code": G_MUKA}})
+                       json={"codex_card": {"code": G_SHORT}})
     assert r.status_code == 200, r.get_data(as_text=True)
-    assert teach.get(pg, qid)["answer"]["choice"] == G_MUKA
+    assert teach.get(pg, qid)["answer"]["choice"] == G_SHORT
+
+
+def test_an_orders_snapshot_card_in_the_kos_comes_back_whole_with_its_name_shown(pg):
+    """Review 3: the ORDERS bare-marker path — the picker names the Kôš card (from the snapshot,
+    the marker itself is blank) and the pick restores it whole (name + alias)."""
+    from app.orders import snapshot
+    snapshot._freeze(pg, [{"gtin": G_CHLIEB, "name": "Chlieb zo snapshotu", "alias": "kvas"}], [])
+    _codex(pg)
+    assert snapshot.retire_catalog_card(pg, G_CHLIEB)
+    snapshot.rebuild_from_overrides(pg)
+    item = _client().get("/api/board/codex-cards?scope=orders&q=kvaskovy").get_json()["items"][0]
+    assert item["in_trash"] is True and item["trash_name"] == "Chlieb zo snapshotu"
+    qid = teach.ask(pg, message_id="m477os", customer_ean="2000000000864",
+                    customer_name="Pekáreň", wording="chlieb kvaskovy", quantity=1, unit="ks",
+                    candidates=[])
+    r = _client().post(f"/api/board/questions/{qid}/answer",
+                       json={"codex_card": {"code": G_CHLIEB}})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    card = next(x for x in snapshot.catalog_for_management(pg) if x["gtin"] == G_CHLIEB)
+    assert (card["name"], card["alias"]) == ("Chlieb zo snapshotu", "kvas")
+    assert teach.get(pg, qid)["answer_card"] == "Chlieb zo snapshotu"
 
 
 def test_an_orders_card_in_the_kos_is_marked_and_restored_by_the_pick(pg):
