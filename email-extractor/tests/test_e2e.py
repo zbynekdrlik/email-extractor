@@ -453,6 +453,78 @@ def test_a_deep_link_from_an_odoo_message_opens_the_right_tab_and_highlights_the
     assert console == [], f"browser console not clean: {console}"
 
 
+def _history_seed(pg, mid, *, category, subject, outcome):
+    pg.execute("INSERT INTO messages (message_id, category, from_addr, from_name, subject, "
+               "processed, proc_status, proc_outcome) VALUES (%s, %s, 'sklad@e2e.sk', "
+               "'Zákazník E2E', %s, true, 'review', %s)", (mid, category, subject, outcome))
+    db.log_event(pg, mid, category, "review", "review", outcome=outcome)
+
+
+class _LinkCfg:
+    """The Odoo-message builder's view of the live server: the SAME `board_link` code the
+    worker thread uses, pointed at the test app (its `secret_key` = the live_server's)."""
+    secret_key = "e2e-secret"
+    data_dir = "/tmp"
+
+    def __init__(self, base):
+        self.dashboard_base_url = base
+
+
+def test_an_odoo_treba_doriesit_link_opens_that_mail_in_the_orders_history_without_login(
+        live_server, pg, page):
+    """#473 — the owner's incident, through the real browser: the "📋 Treba doriešiť na
+    nástenke" link an Odoo orders summary now carries (built by the REAL `report.
+    history_link`) opens — with NO password, from a fresh browser — the História objednávok
+    tab with THAT mail's detail already open (not the admin /login, not the list of some
+    other tab). The Message-ID carries `$`/`+`/`@`/`<>` like a real one. Clean console."""
+    from app.orders import report
+
+    mid = "<e2e473$aa+bb@example-pekaren.test>"   # SYNTHETIC
+    _history_seed(pg, mid, category="ai_orders", subject="RE: OBJEDNAVKA E2E 473",
+                  outcome="AI nenašla v e-maile žiadnu objednávku")
+    # a second mail so the opened detail is provably a SELECTION, not the only row
+    _history_seed(pg, "<e2e473-other@example.test>", category="ai_orders",
+                  subject="Iná objednávka E2E", outcome="EDI nahraté")
+
+    link = report.history_link(_LinkCfg(live_server), mid)
+    assert "/sklad/" in link and "historia-objednavok" in link
+
+    console = _collect_console(page)
+    page.goto(link)
+    page.wait_for_url(re.compile(r"/nastenka/historia-objednavok"))
+    # the detail drawer of THAT mail is open on arrival — no click needed
+    page.wait_for_selector("#h-drawer:not([hidden])")
+    assert page.locator(".h-detail-title").inner_text() == "RE: OBJEDNAVKA E2E 473"
+    assert "AI nenašla v e-maile žiadnu objednávku" in page.locator("#h-detail").inner_text()
+    # the list itself still renders both mails (the deep link opens, it does not filter)
+    page.wait_for_selector("text=Iná objednávka E2E")
+    # the version label matches the backend (a genuinely loaded board page, not /login)
+    backend_ver = page.request.get(f"{live_server}/version").text().strip()
+    assert backend_ver in page.locator('[data-testid="version"]').inner_text()
+
+    assert console == [], f"browser console not clean: {console}"
+
+
+def test_a_dl_review_link_opens_that_delivery_note_in_the_dl_history_for_the_dl_key(
+        live_server, pg, page):
+    """#473, DL side: the /sklad-dl key link a no-question DL review message carries lands
+    on História dodacích listov with that delivery note's detail open. Clean console."""
+    from app.orders import report
+
+    mid = "<e2e473-dl$1@example-dodavatel.test>"   # SYNTHETIC
+    _history_seed(pg, mid, category="dodacie_listy", subject="Dodací list E2E 473",
+                  outcome="Email bez prílohy a bez textu")
+    link = report.dl_history_link(_LinkCfg(live_server), mid)
+    assert "/sklad-dl/" in link and "historia-dl" in link
+
+    console = _collect_console(page)
+    page.goto(link)
+    page.wait_for_url(re.compile(r"/nastenka/historia-dl"))
+    page.wait_for_selector("#h-drawer:not([hidden])")
+    assert page.locator(".h-detail-title").inner_text() == "Dodací list E2E 473"
+    assert console == [], f"browser console not clean: {console}"
+
+
 def test_the_retired_znalosti_ean_link_seeds_the_customers_tab_search(live_server, pg, page):
     """#449 lane 8: the retired /znalosti/<ean> page now redirects to
     /nastenka/zakaznici?q=<ean>, and the Zákazníci tab seeds its search box + filters

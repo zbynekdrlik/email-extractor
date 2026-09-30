@@ -454,6 +454,80 @@ def test_format_grouped_builds_one_header_capped_lines_and_a_dashboard_link(pg):
     assert html.count("skontroluj ich na dashboarde") == 1
 
 
+class _RoutedCfg:
+    """#473: the live routing shape — orders 152, delivery notes (WAREHOUSE) 243, ops 592."""
+    dashboard_base_url = "https://email-pz.example.test"
+    secret_key = "s"
+    data_dir = "/tmp"
+    ops_channel_id = 592
+    delivery_notes_channel_id = 243
+    orders_channel_id = 152
+
+
+def _flush_one(pg, cfg):
+    posted = []
+    dl_alerts.flush_pending(pg, cfg, post=lambda c, h, **kw: posted.append(
+        (h, kw.get("channel_id"))) or {"id": 1})
+    assert len(posted) == 1
+    return posted[0]
+
+
+def test_a_warehouse_upload_failed_alert_links_that_dl_on_the_board_history(pg):
+    """#473: `dl_upload_failed` goes to the WAREHOUSE delivery-notes channel (243) — its
+    action link must be the password-free /sklad-dl board link to THAT delivery note's
+    detail on História dodacích listov, never the password-gated admin dashboard (which
+    after #470 lands on /login and which the warehouse has no password for)."""
+    from app.orders import report
+    mid = "<dl-upload-1@example-dodavatel.test>"   # SYNTHETIC
+    dl_alerts.enqueue(pg, 243, "dl_upload_failed",
+                      dl_alerts.item_line("Dodávateľ X", "dodací list 123"), message_id=mid)
+    html, channel = _flush_one(pg, _RoutedCfg())
+    assert channel == 243
+    assert report.dl_history_link(_RoutedCfg(), mid) in html
+    assert "Treba doriešiť na nástenke" in html
+    assert 'href="https://email-pz.example.test"' not in html, "never the bare admin base"
+    assert "Otvor dashboard" not in html
+
+
+def test_a_warehouse_group_of_several_mails_links_the_history_tab_itself(pg):
+    """Several delivery notes in ONE grouped post → the História dodacích listov tab (all
+    of them are listed there, newest first) — one deep link cannot name them all."""
+    for i in range(3):
+        dl_alerts.enqueue(pg, 243, "dl_upload_failed",
+                          dl_alerts.item_line("Dodávateľ X", f"dodací list {i}"),
+                          message_id=f"<dl-{i}@example-dodavatel.test>")
+    html, _channel = _flush_one(pg, _RoutedCfg())
+    assert "/sklad-dl/" in html and "?next=/nastenka/historia-dl\"" in html
+    assert 'href="https://email-pz.example.test"' not in html
+
+
+def test_a_warehouse_scanner_not_dl_alert_carries_no_password_gated_admin_link(pg):
+    """#473: `scanner_not_dl` (warehouse channel 243) is a scan that is NOT a delivery note
+    — it never appears in História dodacích listov and its action is physical (rescan the
+    items page). The admin dashboard link it used to carry is password-gated and useless to
+    the warehouse, so the message carries no link at all — the instruction is complete."""
+    dl_alerts.enqueue(pg, 243, "scanner_not_dl",
+                      dl_alerts.item_line("tlaciaren@example.test", "Scan 1"),
+                      message_id="<scan-1@example.test>")
+    html, channel = _flush_one(pg, _RoutedCfg())
+    assert channel == 243
+    assert "naskenujte znova" in html
+    assert "<a href" not in html
+
+
+def test_an_ops_channel_alert_keeps_the_admin_dashboard_link(pg):
+    """#473 audit: an OPERATOR alert (ops channel 592 — here `mail_no_attachment`, the ops
+    half of the owner's incident) is for the owner, who reclassifies/marks it on the admin
+    dashboard — it keeps that link, never the warehouse board."""
+    dl_alerts.enqueue(pg, 592, "mail_no_attachment",
+                      dl_alerts.item_line("sklad@pekaren.test", "RE: OBJEDNAVKA"),
+                      message_id="<ops-1@example.test>")
+    html, channel = _flush_one(pg, _RoutedCfg())
+    assert channel == 592
+    assert 'href="https://email-pz.example.test"' in html
+    assert "/sklad" not in html
+
+
 def test_reminder_suppressed_first_fires_then_once_per_morning_skipping_weekends(pg):
     """#336: replaces the flat ~4h re-ask. The FIRST alert always fires; a re-reminder for
     a still-unresolved message fires at most once per morning (after the configured hour),

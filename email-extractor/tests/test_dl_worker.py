@@ -1593,6 +1593,68 @@ def test_the_dashboard_link_is_the_dl_only_nastenka_never_the_orders_one(pg, tmp
     assert "http://x.example/sklad/" not in posted[0], posted[0]
 
 
+# --- #473: a DL review with NO board question links that mail's História detail ----------
+
+def test_an_unmatched_supplier_review_keeps_the_otazky_sklad_questions_link(pg, tmp_path):
+    """#473 keeps a review that DID raise a board question (here the dl_supplier question)
+    on the Otázky sklad tab — that is where the warehouse answers it."""
+    _snapshot(pg)
+    _msg(pg, mid="dl1", from_addr="neznamy@nowhere.sk")
+    _attach(pg, tmp_path, "dl1")
+    client = FakeClient({
+        "dl_documents": [_unknown_supplier_doc("neznamy@nowhere.sk")],
+        "dl_supplier": [{"matched": False, "matchReason": "nie je v zozname"}]})
+    posted = []
+    dl_worker.tick(
+        pg, _cfg(delivery_notes_engine="python", data_dir=str(tmp_path),
+                dashboard_base_url="http://x.example"), client=client,
+        post=lambda c, h: posted.append(h))
+    assert len(posted) == 1
+    assert "Rieš na nástenke" in posted[0]
+    assert "otazky-sklad" in posted[0] and "historia-dl" not in posted[0], posted[0]
+
+
+def test_a_dl_review_with_no_question_links_that_mail_on_the_dl_history(pg, tmp_path):
+    """#473: a mail with no attachment and no text (R15) raises NO board question — its
+    ❗ review message used to link Otázky sklad, where this mail is NOT listed (the same dead
+    end the orders summary had). It must link THIS mail's detail on História dodacích
+    listov, via the password-free /sklad-dl key, with the "Treba doriešiť" wording."""
+    _snapshot(pg)
+    mid = "<dl-empty-1$x+y@example-dodavatel.test>"   # SYNTHETIC
+    _msg(pg, mid=mid, has_attachments=False, combined_text="")
+    posted = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path),
+               dashboard_base_url="http://x.example")
+    dl_worker.tick(pg, cfg, client=FakeClient({}), post=lambda c, h: posted.append(h))
+    assert len(posted) == 1
+    assert "potrebuje kontrolu" in posted[0]
+    assert report.dl_history_link(cfg, mid) in posted[0], posted[0]
+    assert "Treba doriešiť na nástenke" in posted[0]
+    assert "otazky-sklad" not in posted[0]
+    assert _dl_question_count(pg) == 0, "no board question exists for this mail"
+
+
+def test_a_money_gate_needs_review_doc_links_that_mail_on_the_dl_history(pg, tmp_path):
+    """#473: a document whose total does not add up (`needsReview`, money gate) raises no
+    board question — the review message deep-links the mail's História dodacích listov
+    detail, not the questions tab."""
+    _snapshot(pg)
+    _msg(pg, mid="dl-money")
+    _attach(pg, tmp_path, "dl-money")
+    client = FakeClient({"dl_documents": [_doc(total=999.0)],
+                         "dl_supplier": [SUPPLIER_MATCHED], "dl_item": [ITEM_MATCHED]})
+    posted, uploaded = [], []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path),
+               dashboard_base_url="http://x.example")
+    dl_worker.tick(pg, cfg, client=client,
+                   upload=lambda c, name, content, dir_override=None: uploaded.append(name),
+                   post=lambda c, h: posted.append(h))
+    assert uploaded == []
+    assert posted and "potrebuje kontrolu" in posted[-1]
+    assert report.dl_history_link(cfg, "dl-money") in posted[-1], posted[-1]
+    assert "otazky-sklad" not in posted[-1]
+
+
 def test_unmatched_item_holds_the_document_and_raises_a_nastenka_question(pg, tmp_path):
     """#365 (was: partial-ship — the R81 policy this reverses): a shippable document with a
     genuinely unmatched warehouse item is HELD — no claim, no upload — and the `dl_item`

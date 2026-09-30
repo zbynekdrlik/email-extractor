@@ -1344,6 +1344,38 @@ def test_zero_attachment_mail_with_no_orders_routes_to_ops_not_warehouse(pg, env
     assert alert[0] == "mail_no_attachment"
 
 
+def test_the_no_orders_review_summary_links_that_mail_on_the_board_history(pg, env):
+    """#473 — the owner's exact incident (prod msg 13787, "(nezistený zákazník) — 1
+    objednávka · ❗ 1 treba zadať ručne · AI nenašla v e-maile žiadnu objednávku · 📋 Treba
+    doriešiť — otvor dashboard: <base>"): a 0-attachment mail with no orders raises NO board
+    question (the ops alert goes to the ops channel), so the ONE summary posted to the orders
+    channel took the fallback line with the BARE admin base → /login for the warehouse. It
+    must carry the password-free warehouse link to THIS mail's detail on História
+    objednávok. SYNTHETIC mail + Message-ID (public repo)."""
+    from urllib.parse import quote
+
+    from app import linkutil
+    mid = "<001101dd0000$aa+bb$@example-pekaren.test>"
+    _seed_mail(pg, mid, with_attachment=False)
+    rec = Recorder()
+    result = pipeline.run(
+        pg, _cfg(ops_channel_id=999, dashboard_base_url="https://email-pz.example.test",
+                 secret_key="s"),
+        {"message_id": mid, "subject": "RE: OBJEDNAVKA", "from_addr": "sklad@pekaren.sk",
+         "from_name": "Sklad", "combined_text": "na 04.08.2026 poprosím",
+         "today": "2026-07-30"}, env,
+        client=ScriptedClient([dict(_NO_ORDERS_EXTRACT)]), upload=rec.upload, post=rec.post)
+    assert result["status"] == "review"
+    assert len(rec.posts) == 1
+    html = rec.posts[0]
+    key = linkutil.sklad_key("s")
+    inner = quote("/nastenka/historia-objednavok?q=" + quote(mid, safe=""), safe="/")
+    assert f"https://email-pz.example.test/sklad/{key}?next={inner}" in html
+    assert "Treba doriešiť na nástenke" in html
+    assert 'href="https://email-pz.example.test"' not in html, "never the bare admin base"
+    assert "otvor dashboard" not in html.lower()
+
+
 def test_mail_with_attachments_and_no_orders_still_asks_the_warehouse(pg, env):
     """#404: when extraction finds 0 orders but the message HAS attachments, the normal
     'mail' question should still be asked (extraction genuinely ran on real content)."""
