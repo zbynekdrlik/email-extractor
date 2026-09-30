@@ -73,6 +73,8 @@ MAX_DOC_NUMBER_IN_FILENAME = 10
 # source of truth both modules must agree on; `dl_match.py` imports it rather than
 # hardcoding its own "13".
 GTIN_FIELD_WIDTH = 13
+# Where that field starts in a LIN record: "LIN" + the 6-char right-aligned line number.
+LIN_CODE_AT = 3 + 6
 
 
 def _gs1_check_digit(body: str) -> str:
@@ -416,6 +418,23 @@ def generate(data: dict, sklad_by_gtin: dict, cena_by_gtin: dict) -> Desadv:
 
     return Desadv(content="\r\n".join(lines), line_count=line_no, skipped=skipped,
                  substituted=substituted)
+
+
+def lin_codes(content: str) -> list[str]:
+    """#476: the card codes a DESADV file carries, read back from its LIN records — the
+    exact inverse of `generate()`'s layout (`LIN` + a 6-char line number + the
+    `GTIN_FIELD_WIDTH` code field at `LIN_CODE_AT`). Every code once, in file order; the HDR
+    and blank lines are ignored, `\\r\\n` and bare `\\n` files both parse. Used to tell the
+    warehouse WHY CODEX will not import a file still waiting in `in_DL` (a code no CODEX
+    stock card has makes CODEX reject the whole delivery note, #467)."""
+    out: list[str] = []
+    for line in str(content or "").splitlines():
+        if not line.startswith("LIN"):
+            continue
+        code = line[LIN_CODE_AT:LIN_CODE_AT + GTIN_FIELD_WIDTH].strip()
+        if code and code not in out:
+            out.append(code)
+    return out
 
 
 # --- naming (R89) ----------------------------------------------------------

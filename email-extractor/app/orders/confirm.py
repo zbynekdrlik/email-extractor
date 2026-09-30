@@ -82,6 +82,17 @@ morning check already uses (same underlying condition — a file stuck longer th
 reasonable — just a different trigger) — deliberately NOT a new incident `kind`, which
 would need a `db.py` CHECK-constraint migration; see the #255 design comment for the
 rejected alternatives.
+
+**#476 — a carryover alert counts and names ONLY the files still waiting.** The reminder
+used to print the incident's whole membership (`_open_incident`'s count): live 30.9. it said
+„Stále 4 dodacie listy neprevzatých" twice a day while 3 of the 4 had been imported two days
+earlier. Imported members stay in the incident (its history, and `_check_incidents_for_clear`'s
+per-member scope), but a carryover alert is now built from `_pending_members` — no terminal
+status AND `_decide` on THIS sweep's listing still finds the file in its queued folder — and
+lists each one (DL number + supplier / order day + customer, `confirm_carryover`). For a
+waiting DESADV it also says why CODEX will never take it when a LIN code has no CODEX stock
+card (#467 list, read-only file read, fail-open). Nothing waiting → no reminder; the
+incident closes through `_check_incidents_for_clear` with its one all-clear.
 """
 from __future__ import annotations
 
@@ -90,11 +101,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from . import report
+from . import confirm_carryover, report
 from . import upload as upload_mod
 
 log = logging.getLogger("orders.confirm")
 
+# #476: at most this many waiting files are listed in one carryover alert (+ „… a ešte N").
+LIST_LIMIT = 15
 DEFAULT_INTERVAL_MINUTES = 5
 DEFAULT_MORNING_CHECK_HOUR = 10
 DEFAULT_REMINDER_HOURS = 4
@@ -314,11 +327,18 @@ def _is_same_day_stuck(row: dict, now_utc: datetime, activity_at: datetime | Non
 
 # --- alert text (plain Slovak) ----------------------------------------------
 
-def _fmt_hm(ts) -> str:
+def _fmt_since(ts, now: datetime) -> str:
+    """When an incident opened: `HH:MM` if that was today (local), else `D.M. HH:MM` — a bare
+    „od 18:03" five days later reads as if it were today (#476)."""
     try:
-        return _local(ts).strftime("%H:%M")
+        loc = _local(ts)
+        today = _local(now).date()
     except Exception:
+        log.warning("import alert: unusable incident time %r", ts)
         return "?"
+    if loc.date() == today:
+        return loc.strftime("%H:%M")
+    return f"{loc.day}.{loc.month}. {loc:%H:%M}"
 
 
 def _plural(n: int, source: str = "edi") -> str:
@@ -338,16 +358,53 @@ def _plural(n: int, source: str = "edi") -> str:
     return "objednávok"
 
 
+def _unaccepted(n: int, source: str = "edi") -> str:
+    """The adjective agreeing with `_plural(n, source)` (#476 — „1 dodací list …
+    neprevzatých" read wrong): dodací list neprevzatý / objednávka neprevzatá / 2-4
+    neprevzaté / 5+ neprevzatých."""
+    if n == 1:
+        return "neprevzatý" if source == "desadv" else "neprevzatá"
+    if 2 <= n <= 4:
+        return "neprevzaté"
+    return "neprevzatých"
+
+
+def _carryover_head(n: int, source: str, since, now: datetime) -> str:
+    """The head of a carryover alert for `n` files REALLY still waiting — the opening alert
+    (`since=None`) or the reminder of an incident opened at `since`. #255 review finding: the
+    text stays TRIGGER-NEUTRAL (never „z predošlého dňa") — a same-day-stuck file joins the
+    same incident."""
+    noun = _plural(n, source)
+    adj = _unaccepted(n, source)
+    them = "ich" if n != 1 else ("ho" if source == "desadv" else "ju")
+    if since is None:
+        verb = "sú" if 2 <= n <= 4 else "je"
+        return (f"&#9888;&#65039; {n} {noun} {verb} stále {adj} v ORIONe — treba {them} "
+                "prijať v Codexe.")
+    return (f"&#9888;&#65039; Stále {n} {noun} {adj} v ORIONe (od {_fmt_since(since, now)}) "
+            f"— treba {them} prijať v Codexe.")
+
+
+def _carryover_html(conn, rows: list[dict], ledger: _Ledger, *, since, read_files,
+                    now: datetime) -> str:
+    """A carryover alert about `rows` — ONLY the files really still waiting (#476): the head
+    counts them, then one line per file (at most `LIST_LIMIT`, a file CODEX will never take
+    first) from `confirm_carryover.items`."""
+    n = len(rows)
+    lines = confirm_carryover.items(conn, rows, ledger.source, wire_prefix=ledger.wire_prefix,
+                                    read_files=read_files, now=now)
+    parts = [f"<p>{_carryover_head(n, ledger.source, since, now)}</p>",
+             f"<ul>{''.join(lines[:LIST_LIMIT])}</ul>"]
+    if n > LIST_LIMIT:
+        parts.append(f"<p>&#8230; a ešte {n - LIST_LIMIT} ďalších.</p>")
+    return "".join(parts)
+
+
 def _group_html(kind: str, rows: list[dict], source: str = "edi") -> str:
+    """The opening alert of a `failed`/`unknown` incident (a carryover one is
+    `_carryover_html`)."""
     n = len(rows)
     noun = _plural(n, source)
-    if kind == "carryover":
-        # #255 review finding: "z predošlého dňa" ("from the previous day") is now
-        # inaccurate for a same-day-stuck row (or a group mixing both triggers) — this
-        # text must stay TRIGGER-NEUTRAL, matching `_reminder_html`'s own wording below,
-        # which already never made this claim.
-        return (f"<p>&#9888;&#65039; {n} {noun} je "
-               "stále neprevzatých v ORIONe — treba ich prijať v Codexe.</p>")
     if kind == "failed":
         return (f"<p>&#9888;&#65039; {n} {noun} skončilo v priečinku "
                "&quot;unconfirmed&quot; — import zlyhal, treba nahrať do ORIONu "
@@ -357,13 +414,13 @@ def _group_html(kind: str, rows: list[dict], source: str = "edi") -> str:
            "ručne priamo na serveri.</p>")
 
 
-def _reminder_html(kind: str, incident: dict, source: str = "edi") -> str:
+def _reminder_html(incident: dict, now: datetime, source: str = "edi") -> str:
+    """The reminder of a `failed`/`unknown` incident. Those members get a terminal status and
+    never self-heal, so the incident's whole membership (`file_count`) IS what still has a
+    problem — unlike a carryover reminder, which counts `_pending_members` (#476)."""
     n = incident["file_count"]
     noun = _plural(n, source)
-    since = _fmt_hm(incident["opened_at"])
-    if kind == "carryover":
-        return (f"<p>&#9888;&#65039; Stále {n} {noun} neprevzatých v "
-               f"ORIONe (od {since}) — treba ich prijať v Codexe.</p>")
+    since = _fmt_since(incident["opened_at"], now)
     return (f"<p>&#9888;&#65039; Stále {n} {noun} s problémom importu "
            f"do ORIONu (od {since}) — treba to skontrolovať.</p>")
 
@@ -392,6 +449,9 @@ def _all_clear_html(kind: str, source: str = "edi") -> str:
 
 def _open_incident(conn, channel_id: int, kind: str,
                    ledger: _Ledger = EDI_LEDGER) -> dict | None:
+    """The open incident + `file_count` = its WHOLE membership, imported members included —
+    right for a `failed`/`unknown` reminder, never the count a carryover alert prints
+    (`_pending_members`, #476)."""
     row = conn.execute(
         """SELECT id, opened_at, last_alert_at FROM import_alert_incidents
             WHERE channel_id = %s AND kind = %s AND source = %s AND closed_at IS NULL
@@ -414,6 +474,24 @@ def _add_members(conn, incident_id: int, rows: list[dict],
         conn.execute(
             f"""INSERT INTO {ledger.members_table} (incident_id, {ledger.members_fk_col})
                VALUES (%s, %s) ON CONFLICT DO NOTHING""", (incident_id, row["id"]))
+
+
+def _pending_members(conn, incident_id: int, dirs: dict, ledger: _Ledger) -> list[dict]:
+    """The incident's members REALLY still waiting right now (#476): no terminal status in
+    the ledger AND `_decide` on this sweep's own listing still finds the file in its queued
+    folder. An imported member stays in the incident but is never counted or listed again
+    (the live bug reminded „4" for one waiting file) — including one whose own throttled
+    re-check has not run yet while its file already sits in archCodex."""
+    c1, c2 = ledger.identity_cols
+    rows = conn.execute(
+        f"""SELECT e.id, e.{c1}, e.{c2}, e.filename, e.uploaded_at
+              FROM {ledger.members_table} m
+              JOIN {ledger.table} e ON e.id = m.{ledger.members_fk_col}
+             WHERE m.incident_id = %s AND e.import_status IS NULL
+             ORDER BY e.uploaded_at, e.id""", (incident_id,)).fetchall()
+    members = [{"id": r[0], c1: r[1], c2: r[2], "filename": r[3] or "", "uploaded_at": r[4]}
+               for r in rows]
+    return [m for m in members if _decide(m, dirs, ledger) is None]
 
 
 def _check_incidents_for_clear(conn, cfg, post, now: datetime) -> None:
@@ -459,16 +537,25 @@ def _check_incidents_for_clear(conn, cfg, post, now: datetime) -> None:
 
 def _handle_group(conn, cfg, post, channel_id: int, kind: str, rows: list[dict],
                   now: datetime, reminder_hours: int,
-                  ledger: _Ledger = EDI_LEDGER) -> bool:
+                  ledger: _Ledger = EDI_LEDGER, *, dirs: dict, read_files) -> bool:
     """Returns whether this group is now safely ACCOUNTED FOR — either a fresh incident's
     opening alert genuinely delivered, or it was folded into an already-open incident
     (which already communicated the condition once; a failed REMINDER is a lesser,
     retryable concern that must never block marking these rows). False only means "the
     very first alert for this condition has not reached anyone yet" — the caller must
-    leave those rows retryable, never mark them terminal."""
+    leave those rows retryable, never mark them terminal.
+
+    A carryover alert (#476) counts + lists only the files still waiting: the opening one
+    its own `rows` (just decided still queued), a reminder the incident's `_pending_members`
+    against this sweep's `dirs` — never a reminder about nothing. `read_files` reads a
+    waiting DESADV for the CODEX code check (`confirm_carryover`)."""
     incident = _open_incident(conn, channel_id, kind, ledger)
     if incident is None:
-        html = _group_html(kind, rows, ledger.source)
+        if kind == "carryover":
+            html = _carryover_html(conn, rows, ledger, since=None, read_files=read_files,
+                                   now=now)
+        else:
+            html = _group_html(kind, rows, ledger.source)
         try:
             result = post(cfg, html, channel_id=channel_id)
         except Exception:
@@ -493,9 +580,21 @@ def _handle_group(conn, cfg, post, channel_id: int, kind: str, rows: list[dict],
     _add_members(conn, incident["id"], rows, ledger)
     due_for_reminder = (now - incident["last_alert_at"]) >= timedelta(hours=reminder_hours)
     if due_for_reminder:
-        # Re-read AFTER adding members so the reminder text's count is accurate.
-        current = _open_incident(conn, channel_id, kind, ledger)
-        html = _reminder_html(kind, current or incident, ledger.source)
+        if kind == "carryover":
+            # AFTER adding members, so this sweep's own stuck rows are among them.
+            waiting = _pending_members(conn, incident["id"], dirs, ledger)
+            if not waiting:
+                log.info("import-alert incident #%s (carryover/%s): nothing still waiting "
+                         "in ORION — no reminder", incident["id"], ledger.source)
+                return True
+            log.info("import-alert incident #%s (carryover/%s): reminding about %d waiting "
+                     "file(s)", incident["id"], ledger.source, len(waiting))
+            html = _carryover_html(conn, waiting, ledger, since=incident["opened_at"],
+                                   read_files=read_files, now=now)
+        else:
+            # Re-read AFTER adding members so the reminder text's count is accurate.
+            current = _open_incident(conn, channel_id, kind, ledger)
+            html = _reminder_html(current or incident, now, ledger.source)
         try:
             result = post(cfg, html, channel_id=channel_id)
             delivered = result is not None
@@ -512,16 +611,22 @@ def _handle_group(conn, cfg, post, channel_id: int, kind: str, rows: list[dict],
 
 # --- the sweep -------------------------------------------------------------
 
-def sweep(conn, cfg, listdir=None, post=None, now=None) -> int:
+def sweep(conn, cfg, listdir=None, post=None, now=None, read_files=None) -> int:
     """One pass over every confirmed-uploaded, unresolved row in BOTH ledgers (#203:
     edi_sent's ORDER_* uploads and desadv_sent's DESADV_* uploads share one SFTP
     listing). Returns the number of rows that reached a terminal status this pass — a
     carryover row is NEVER terminal, so it never counts even while it's being alerted
-    on."""
+    on.
+
+    `read_files(names)` (#476, default `upload.read_files` on `in_DL`, READ-ONLY) is only
+    called while a carryover alert about a waiting DESADV is being built, and only when the
+    CODEX card list is live — never on an ordinary sweep."""
     interval = int(getattr(cfg, "import_confirm_interval_minutes", DEFAULT_INTERVAL_MINUTES)
                    or DEFAULT_INTERVAL_MINUTES)
     post = post or (lambda c, html, **kw: report.post_from_config(
         c, html, channel_id=kw.get("channel_id")))
+    read_files = read_files or (lambda names: upload_mod.read_files(
+        cfg, getattr(cfg, "orion_dl_dir", upload_mod.DL_DIR), names))
     now = now or datetime.now(UTC)
     reminder_hours = int(getattr(cfg, "import_alert_reminder_hours", DEFAULT_REMINDER_HOURS)
                          or DEFAULT_REMINDER_HOURS)
@@ -606,7 +711,8 @@ def sweep(conn, cfg, listdir=None, post=None, now=None) -> int:
     for (channel_id, kind, source), group_rows in groups.items():
         ledger = DESADV_LEDGER if source == "desadv" else EDI_LEDGER
         accounted_for = _handle_group(conn, cfg, post, channel_id, kind, group_rows, now,
-                                      reminder_hours, ledger)
+                                      reminder_hours, ledger, dirs=dirs,
+                                      read_files=read_files)
         if kind == "carryover":
             continue  # never terminal, whatever happens — self-heals via due_rows
         if accounted_for:

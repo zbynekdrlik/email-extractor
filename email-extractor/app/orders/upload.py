@@ -135,3 +135,32 @@ def list_dirs(cfg) -> dict[str, set[str]]:
             sftp.close()
     finally:
         client.close()
+
+
+def read_files(cfg, base: str, names: list[str]) -> dict[str, str]:
+    """READ-ONLY: the text of each of `names` inside the ORION folder `base` (#476 — the
+    carryover alert reads a DESADV still waiting in `in_DL` to tell the warehouse which card
+    code CODEX will reject). One SFTP session, `sftp.open(path, "r")` only — never writes,
+    renames or deletes anything, the same contract as `list_dirs`. The bytes decode as
+    latin-1 (one byte = one character, never fails), so fixed-width field offsets stay
+    byte-exact. A file that vanished between the listing and this read (the warehouse just
+    imported it) is skipped with a log line; a connection/other failure raises, like
+    `list_dirs` — the caller (`orders.confirm_carryover`) fails open."""
+    out: dict[str, str] = {}
+    client = _connect(cfg)
+    try:
+        sftp = client.open_sftp()
+        try:
+            for name in names:
+                path = f"{base}\\{name}"
+                try:
+                    with sftp.open(path, "r") as fh:
+                        out[name] = fh.read().decode("latin-1")
+                except FileNotFoundError:
+                    log.info("ORION read: %s is gone (imported meanwhile?) — skipped", path)
+        finally:
+            sftp.close()
+    finally:
+        client.close()
+    log.info("ORION read: %d of %d file(s) from %s", len(out), len(names), base)
+    return out
