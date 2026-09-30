@@ -27,7 +27,10 @@ Ciabatta 3636/3643 incident: two cards added to the sheet only → 2 orders held
 - **A NEW card enters the catalog ONLY by „Vybrať kartu z CODEXu" on a board question (#477,
   owner order 2026-09-30)** — `orders/card_guard.add_from_codex` writes exactly the picked CODEX
   code + CODEX name (orders = CODEX stredisko 1 / sklad 1; DL = stredisko 1, `sklad` from CODEX),
-  audited, one card per human pick (never a bulk import, #337). EVERY typed creation answers 403
+  audited, one card per human pick (never a bulk import, #337). WHAT a pick does — select our
+  live number / restore our Kôš card / add a new one — is the pure `card_guard.pick_target`
+  (over `index_ours`: only numbers the scope's EDI can carry); the #478 CODEX sync's review texts
+  call it too, so change the rule THERE, never in a second copy. EVERY typed creation answers 403
   „Nové karty sa pridávajú len výberom z CODEXu": the Produkty tabs (no „Pridať" any more), the
   question's `new_product`/`new_item` bodies, and a NEW number on `POST /api/znalosti/products` /
   `dl-products`. The nástenka „Produkty" tabs (`/nastenka/produkty-objednavky` /

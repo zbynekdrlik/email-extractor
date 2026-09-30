@@ -340,7 +340,8 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   4) — the identity is (stredisko 1, ACSKLP), the #477 pick scope. The push already carried
   ACSKLP (`card_code`) + sklad since #467; #478 needed no new field, only the history.
 - **Rollout switch `codex_sync_apply` (default false = DRY-RUN)**: plan + log + report, ZERO
-  catalog/memory/audit/alert writes; the history is kept either way. Read the dry-run with
+  catalog/memory/audit/alert writes (a failing dry-run sync too — its `error` run row is the
+  record, review 17); the history is kept either way. Read the dry-run with
   `SELECT id, ran_at, status, report FROM codex_sync_runs ORDER BY id DESC LIMIT 1`. Turning it
   on is the OWNER's decision (after reviewing the dry-run on the ticket) — never flip it in a
   lane. A `would_block: true` in a dry-run means the first apply would stop at the breaker.
@@ -451,10 +452,17 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   group's numbers (+ the canonical number a human deleted, only while it still IS the card) and
   a memory move only the rows that qualified themselves (no unchecked `| code` union — round 9).
 - **A text that tells the warehouse what an action WILL do is computed, never written as prose
-  (rounds 13-15 — five rounds found false claims)**: `_pick_advice` (the #477 picker offers ONE
-  card per code — `card_guard.pickable`; a pick resets the curated data only for another
-  product — `same_product`; an unbound number resets nothing; a card the picker cannot offer is
-  named "zaradí len oprava v CODEXe"), `_gone_reason` (no stredisko-1 carrier / one / several),
+  (rounds 13-17 — six rounds found false claims)**: WHAT A PICK DOES is the picker's own pure
+  rule `card_guard.pick_target` (select a live number the scope's EDI can carry / restore our
+  Kôš card / add a NEW card with only the CODEX name + sklad — a DL 14-char twin is never
+  selected or restored), which `add_from_codex` decides through and the planner runs over its
+  simulated catalog (`_pick`, every live number of the code — `_numbers` — sent to the Kôš
+  first; round 17: re-deriving it in prose missed a live legacy twin and a DL twin-only card).
+  `_pick_advice` (the #477 picker offers ONE card per code — `card_guard.pickable`; a restored
+  card keeps its data only when the card it is bound to after this plan is the same product —
+  `_keeps`; the cleared fields named per catalog; a card the picker cannot offer is named
+  "zaradí len oprava v CODEXe"; a repick review never advises a code whose pick SELECTS another
+  number of ours), `_gone_reason` (no stredisko-1 carrier / one / several),
   `Split.held_at` (the numbers held rows really sit on — a legacy twin), a hold note's `at` +
   `moved` read from the same-push renumber, `codex_name` on a renumber line, and a footer that
   promises a redo only for renames / renumbers (a Kôš undo of a RESET is not redone — the
