@@ -63,14 +63,12 @@ class Scope:
     label: str
     table: str
     memory: tuple[str, ...]
-    max_code: int | None
 
 
 def _scope(name: str, label: str, memory: tuple[str, ...]) -> Scope:
-    # the override table + the longest code the scope's EDI carries: ONE definition
-    # (`card_guard`, the #477 pick scope — owned by the orders-gate lane, read only here)
-    spec = card_guard._spec(name)
-    return Scope(name, label, spec["table"], memory, spec["max_code"])
+    # the override table: ONE definition (`card_guard`, the #477 pick scope; which numbers a
+    # pick selects / restores is `card_guard.index_ours` / `pick_target` too)
+    return Scope(name, label, card_guard._spec(name)["table"], memory)
 
 
 SCOPES = (
@@ -340,15 +338,14 @@ def _fields(card: dict) -> dict:
     return {k: v for k, v in card.items() if k != "overridden"}
 
 
-def _ours(cards, max_code: int | None) -> dict[str, dict]:
+def _ours(cards, scope: str) -> dict[str, dict]:
     """Our cards by CODEX code over an in-memory list (the plan simulates the catalog) — the
-    `card_guard._ours` rule: only numbers the scope's EDI can carry, the canonical number
-    winning over a legacy twin (`codex_cards.index_by_code`, the ONE normalizer)."""
-    return codex_cards.index_by_code(
-        [c for c in cards if max_code is None or len(str(c.get("gtin") or "")) <= max_code])
+    picker's own rule (`card_guard.index_ours`): only numbers the scope's EDI can carry, the
+    canonical number winning over a legacy twin."""
+    return card_guard.index_ours(scope, list(cards))
 
 
-def _groups(catalog: list[dict], max_code: int | None) -> dict[str, list[dict]]:
+def _groups(catalog: list[dict], scope: str) -> dict[str, list[dict]]:
     """Our cards per CODEX code, the card `_ours` picks FIRST — a legacy „0"+code twin never
     supplies the data a renumber carries over."""
     groups: dict[str, list[dict]] = {}
@@ -357,7 +354,7 @@ def _groups(catalog: list[dict], max_code: int | None) -> dict[str, list[dict]]:
         if code:
             groups.setdefault(code, []).append(c)
     for code, group in groups.items():
-        primary = _ours(group, max_code).get(code) or group[0]
+        primary = _ours(group, scope).get(code) or group[0]
         group.sort(key=lambda c: c is not primary)
     return groups
 
@@ -394,7 +391,7 @@ class _ScopePlanner:
         self.repicked: dict[str, tuple[str, datetime | None]] = {}
 
     def run(self) -> None:
-        groups = _groups(self.catalog, self.scope.max_code)
+        groups = _groups(self.catalog, self.scope.name)
         for code, group in groups.items():
             self._code(code, group)
         self._memory(set(groups))
@@ -446,8 +443,7 @@ class _ScopePlanner:
         return (old is not None and not old.active and old.retired_name is not None
                 and ours != codex_cards.name_key(old.retired_name))
 
-    def _contest_reason(self, gtin: str, name: str, code: str, known: Known,
-                        numbers: list[str]) -> str:
+    def _contest_reason(self, gtin: str, name: str, code: str, known: Known) -> str:
         cx, card, old = self.cx, str(known.card), known.old
         retired = old is not None and not old.active
         was = ((old.retired_name if retired and old is not None else None)
@@ -457,25 +453,50 @@ class _ScopePlanner:
             gtin, name, code, card, was, retired=retired,
             named=[d for d in now if _named(name, cx.rows(d, code))],
             card_alive=card in cx.by_card,
-            pick=self._pick_advice(code, now, card, numbers) if now else None,
+            pick=self._pick_advice(code, now) if now else None,
             # „no card carries it" only when NONE does — our own may (a round trip, review 16)
             no_carrier=not cx.carriers(code))
 
-    def _pick_advice(self, code: str, candidates: list[str], current: str | None,
-                     numbers: list[str]) -> str:
-        """What deleting our card and picking `code` at a question („Vybrať kartu z CODEXu")
-        would REALLY do — derived from the rules the sync applies, never asserted (review 15):
-        the picker offers ONE card per code (`card_guard.pickable`, under its own name), it
-        SELECTS a live number of ours that normalizes to the code (so every such number must
-        go to the Kôš first — review 16), and the pick resets the curated data only for another
-        product (`Codex.same_product`, as in `_identify`; an unbound number resets nothing)."""
+    def _pick_advice(self, code: str, candidates: list[str]) -> str:
+        """What deleting our cards and picking `code` at a question („Vybrať kartu z CODEXu")
+        would REALLY do — the picker's own rules, never asserted (reviews 15-17): it offers ONE
+        card per code (`card_guard.pickable`, under its own name), it SELECTS a live number of
+        ours it can carry (so every number of the code goes to the Kôš first — review 16), then
+        restores our Kôš card or adds a new one (`_pick` — review 17: a DL legacy twin is never
+        restored), and a restored card keeps its data only for the same product (`_keeps`)."""
         entry = self.cx.pickable[self.scope.name].get(code)
         offered = str(entry["card_code"]) if entry is not None else None
-        same = offered is not None and (current is None
-                                        or self.cx.same_product(current, offered, code))
         label = ((str(entry.get("name") or "") if entry is not None else "")
                  or (self.cx.name_of(offered, code) if offered is not None else ""))
-        return texts.pick_advice(code, candidates, offered, label, same, numbers)
+        delete = self._numbers(code)
+        pick = self._pick(code, delete, offered) if offered is not None else None
+        return texts.pick_advice(self.scope.name, code, candidates, offered, label, delete, pick)
+
+    def _numbers(self, code: str) -> list[str]:
+        """Our live numbers of CODEX `code` as this plan leaves them (a legacy twin included)."""
+        return sorted(g for g in self.live if codex_cards.normalize_code(g) == code)
+
+    def _pick(self, code: str, delete: list[str], offered: str) -> texts.Pick:
+        """What a pick of `code` (CODEX card `offered`) does once our numbers `delete` went to
+        the Kôš — `card_guard.pick_target`, the rule `add_from_codex` applies, over the plan's
+        simulated catalog (review 17: the texts re-derived it in prose and got it wrong)."""
+        gone = set(delete)
+        kind, card = card_guard.pick_target(
+            self.scope.name, code, [c for g, c in self.live.items() if g not in gone],
+            self.binned + [self.live[g] for g in delete if g in self.live])
+        gtin = str(card["gtin"]) if card is not None else None
+        return texts.Pick(kind, gtin, kind == "restore" and gtin is not None
+                          and self._keeps(gtin, offered, code))
+
+    def _keeps(self, gtin: str, offered: str, code: str) -> bool:
+        """A pick restoring our `gtin` as CODEX card `offered` keeps its curated data —
+        `_identify`'s reset rule, against the card the number is bound to once this plan is
+        applied (a seed of this plan, else the stored binding; unbound = nothing to reset)."""
+        seed = next((s["card"] for s in reversed(self.plan.seeds)
+                     if s["scope"] == self.scope.name and s["gtin"] == gtin), None)
+        b = self.cx.bindings.get((self.scope.name, gtin))
+        bound = seed if seed is not None else b.card if b is not None else None
+        return bound is None or bound == offered or self.cx.same_product(bound, offered, code)
 
     def _seed(self, item: dict, card: str, *, replaces: bool = False) -> None:
         """Bindings found this run — for EVERY number of the group (a legacy „0"+code twin too:
@@ -535,8 +556,7 @@ class _ScopePlanner:
                     self._reset_from(item, known.card, None)
                 return card
             if self._contested(known, name, code):
-                self.plan.add_review(item, self._contest_reason(gtin, name, code, known,
-                                                                    item["gtins"]))
+                self.plan.add_review(item, self._contest_reason(gtin, name, code, known))
                 return None
             # a group member that joined later (a legacy twin back from the Kôš) is bound to
             # the group's card too (review 10 🔵: left alone it was identified from the list)
@@ -549,8 +569,7 @@ class _ScopePlanner:
             named = [c for c in carriers if _named(name, cx.rows(c, code))]
             if len(named) != 1:
                 self.plan.add_review(item, texts.multi_carrier(
-                    code, sorted(carriers),
-                    self._pick_advice(code, sorted(carriers), None, item["gtins"])))
+                    code, sorted(carriers), self._pick_advice(code, sorted(carriers))))
                 return None
             card = named[0]
         elif carriers:
@@ -596,7 +615,7 @@ class _ScopePlanner:
                 self.plan.removals.append(item)
                 self._vacate(group)
             else:
-                self.plan.add_review(item, self._gone_reason(card, code, gtins))
+                self.plan.add_review(item, self._gone_reason(card, code))
             return
         succ, why = self._successor(card, code)
         if succ is None:
@@ -604,14 +623,14 @@ class _ScopePlanner:
             return
         self._renumber(item, group, card, succ)
 
-    def _gone_reason(self, card: str, code: str, numbers: list[str]) -> str:
+    def _gone_reason(self, card: str, code: str) -> str:
         """Our CODEX card left stredisko 1 for good, the code lives on elsewhere — the way out
         per case, never a promise the sync cannot keep (review 14 🔵); the rename rebind resets
         the data exactly when `_identify` says so (`same_product` — review 15)."""
         now = sorted(self.cx.carriers(code))
         return texts.gone(
-            card, code, now,
-            pick=self._pick_advice(code, now, card, numbers) if len(now) > 1 else None,
+            self.scope.name, card, code, now,
+            pick=self._pick_advice(code, now) if len(now) > 1 else None,
             same_one=len(now) == 1 and self.cx.same_product(card, now[0], code))
 
     def _successor(self, card: str, code: str) -> tuple[str | None, str]:
@@ -634,16 +653,19 @@ class _ScopePlanner:
         return succ, ""
 
     def _renumber(self, item: dict, group: list[dict], card: str, succ: str) -> None:
-        target = _ours(self.live.values(), self.scope.max_code).get(succ)
-        binned = _ours(self.binned, self.scope.max_code).get(succ)
+        target = _ours(self.live.values(), self.scope.name).get(succ)
+        binned = _ours(self.binned, self.scope.name).get(succ)
         hit = target if target is not None else binned
         hit_known = self._known(str(hit["gtin"])) if hit is not None else None
         other = hit_known.card if hit_known is not None else None
         if other not in (None, card):
             # our card with the new code is ANOTHER CODEX card (e.g. a #477 pick of the
-            # product that held the code before) — never a silent merge of two products
+            # product that held the code before) — never a silent merge of two products. The
+            # way out names every number the picker would select (review 17: a live twin)
+            delete = self._numbers(succ)
             self.plan.add_review(item, texts.renumber_other_card(
-                succ, str(other), card, self.cx.name_of(card, succ), target is not None))
+                self.scope.name, succ, str(other), card, self.cx.name_of(card, succ), delete,
+                self._pick(succ, delete, card)))
             return
         hit_name = str((hit or {}).get("name") or "")
         if hit_known is not None and self._contested(hit_known, hit_name, succ):
@@ -765,7 +787,7 @@ class _ScopePlanner:
                 codes_of.setdefault(card, set()).add(code)
         # the ONE live number of each CODEX card (its canonical number when a legacy twin sits
         # next to it — review 3 🔵); a card holding two different codes of ours stays ambiguous
-        ours = _ours(self.live.values(), self.scope.max_code)
+        ours = _ours(self.live.values(), self.scope.name)
         number = {card: str(ours[next(iter(codes))]["gtin"])
                   for card, codes in codes_of.items()
                   if len(codes) == 1 and next(iter(codes)) in ours}
@@ -856,9 +878,14 @@ class _ScopePlanner:
                     None)
         offered = sorted(c for c, e in self.cx.pickable[self.scope.name].items()
                          if str(e["card_code"]) == old)
-        fix = texts.repick_fix(old, old_name, home=home,
-                               offered_code=offered[0] if offered else None,
-                               old_alive=old in self.cx.by_card, label=self.scope.label)
+        # a code whose pick would SELECT another number of ours is never advised (review 17)
+        picks = {c: self._pick(c, [], old) for c in offered}
+        usable = [c for c in offered if picks[c].kind != "select"]
+        code_to = usable[0] if usable else offered[0] if offered else None
+        fix = texts.repick_fix(
+            old, old_name, home=home, offered_code=code_to,
+            selected=picks[code_to].gtin if code_to and picks[code_to].kind == "select" else None,
+            old_alive=old in self.cx.by_card, label=self.scope.label)
         self.plan.add_review(item, texts.repick(
             gtin, old, old_name, moved=moved, kept=kept, taught=taught, shipped=shipped,
             older=since is not None, fix=fix))

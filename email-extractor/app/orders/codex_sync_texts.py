@@ -7,26 +7,57 @@ rows sit, what the next list redoes). The ops message frame lives in `codex_sync
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from .codex_sync_memory import CHECK_TAUGHT
 
+# the curated fields a pick of another product clears (`_reset`) / a new card lacks, and what a
+# new card takes from CODEX (`card_guard.add_from_codex`), per catalog
+_CURATED = {"orders": "alias", "dl": "doplnok / hmotnosť / cena"}
+_NEW_FROM = {"orders": "len s názvom z CODEXu", "dl": "len s názvom a skladom z CODEXu"}
 
-def pick_advice(code: str, candidates: list[str], offered: str | None, offered_name: str,
-                same: bool, numbers: list[str]) -> str:
-    """What deleting our card and picking `code` at a question would do: `offered` = the ONE
-    card the picker offers for the code (None = not offered at all), `same` = the pick keeps the
-    curated data (the same product / an unbound number), `numbers` = our live numbers of the
-    code (the picker SELECTS any of them, so all must go to the Kôš first)."""
-    if offered is None:
+
+@dataclass(frozen=True)
+class Pick:
+    """What a „Vybrať kartu z CODEXu" pick does — `card_guard.pick_target` (the picker's own
+    rule) run by the planner over its simulated catalog (review 17): `kind` select / restore /
+    new, `gtin` = our number it selects or restores, `keeps` = a restored card keeps its curated
+    data (`_identify`'s reset rule: the card it is bound to is the picked one or its product)."""
+    kind: str
+    gtin: str | None
+    keeps: bool
+
+
+def pick_result(scope: str, code: str, pick: Pick, delete: list[str]) -> str:
+    """What the pick does once our numbers `delete` went to the Kôš, in words."""
+    if pick.kind == "new":
+        kept = " (ostanú v Koši)" if delete else ""
+        return (f"pridá sa ako nová karta {code} {_NEW_FROM[scope]}; údaje našej karty "
+                f"({_CURATED[scope]}) sa neprenesú{kept}, doplň ich")
+    if pick.kind == "select":
+        return f"vyberie sa naše číslo {pick.gtin} a nič sa nezmení"
+    data = ("jej údaje ostanú (ten istý výrobok)" if pick.keeps
+            else f"staré údaje ({_CURATED[scope]}) sa vyčistia")
+    where = "" if pick.gtin in delete else f"obnoví sa z Koša naša karta {pick.gtin} a "
+    return f"{where}priradí sa k nej, {data}"
+
+
+def pick_advice(scope: str, code: str, candidates: list[str], offered: str | None,
+                offered_name: str, delete: list[str], pick: Pick | None) -> str:
+    """What deleting our cards and picking `code` at a question would do: `offered` = the ONE
+    card the picker offers for the code (None = not offered at all), `delete` = our live numbers
+    of the code (the picker SELECTS any it can carry, so all go to the Kôš first), `pick` = what
+    the pick then does (None when not offered)."""
+    if offered is None or pick is None:
         return (f"výber kariet kód {code} neponúka — kartu {', '.join(candidates)} zaradí len "
                 f"oprava v CODEXe")
     parts = []
     if offered in candidates:
-        data = ("jej údaje ostanú (ten istý výrobok)" if same
-                else "staré údaje (alias / doplnok / hmotnosť) sa vyčistia")
-        ours = "našu kartu" if len(numbers) <= 1 else f"naše karty {', '.join(numbers)}"
-        parts.append(f"ak je to výrobok karty CODEX {offered} („{offered_name}“), zmaž {ours} "
-                     f"(Kôš) a pri otázke ju vyber cez „Vybrať kartu z CODEXu“ — priradí sa k "
-                     f"nej, {data}")
+        ours = "našu kartu" if len(delete) <= 1 else f"naše karty {', '.join(delete)}"
+        drop = f"zmaž {ours} (Kôš) a " if delete else ""
+        parts.append(f"ak je to výrobok karty CODEX {offered} („{offered_name}“), {drop}pri "
+                     f"otázke ju vyber cez „Vybrať kartu z CODEXu“ — "
+                     f"{pick_result(scope, code, pick, delete)}")
     others = [c for c in candidates if c != offered]
     if others:
         parts.append(f"kartu CODEX {', '.join(others)} výber priradiť nevie (pre kód {code} "
@@ -72,7 +103,8 @@ def last_owners(code: str, last: list[str]) -> str:
             f"(Kôš).")
 
 
-def gone(card: str, code: str, now: list[str], *, pick: str | None, same_one: bool) -> str:
+def gone(scope: str, card: str, code: str, now: list[str], *, pick: str | None,
+         same_one: bool) -> str:
     """Our CODEX card left stredisko 1 for good, the code lives on elsewhere."""
     head = f"karta CODEX {card} už v stredisku 1 nie je"
     if not now:
@@ -83,8 +115,8 @@ def gone(card: str, code: str, now: list[str], *, pick: str | None, same_one: bo
         return (f"{head} a kód {code} teraz nesie viac kariet ({', '.join(now)}): {pick}; ak to "
                 f"nie je žiadna z nich, kartu zmaž (Kôš).")
     data = ("jej údaje ostanú (ten istý výrobok v CODEXe)" if same_one
-            else "má v CODEXe iný názov, preto sa jej alias / doplnok / hmotnosť vyčistia — "
-                 "skontroluj ich")
+            else f"má v CODEXe iný názov, preto sa jej údaje ({_CURATED[scope]}) vyčistia — "
+                 f"skontroluj ich")
     return (f"{head} a kód {code} teraz nesie karta {now[0]} — ak je to ten istý výrobok, "
             f"premenuj našu kartu (Produkty) na jej názov v CODEXe, pri ďalšom zozname kariet sa "
             f"priradí ({data}); ak nie, kartu zmaž (Kôš).")
@@ -105,13 +137,30 @@ def successor_shared(succ: str, card: str, others: list[str]) -> str:
             f"prečíslovanie treba overiť ručne")
 
 
-def renumber_other_card(succ: str, other: str, card: str, card_name: str, live: bool) -> str:
-    """Our number with the new code IS another CODEX card — never a silent merge."""
+def renumber_other_card(scope: str, succ: str, other: str, card: str, card_name: str,
+                        delete: list[str], pick: Pick) -> str:
+    """Our number with the new code IS another CODEX card — never a silent merge. `delete` =
+    our live numbers of the code (the picker SELECTS any it can carry — review 17: naming only
+    the canonical one left a live legacy twin to be selected), `pick` = what the pick of the
+    code (card `card`, the code's only carrier) then does."""
+    if not delete:
+        drop = ""
+    elif delete == [succ]:
+        drop = "zmaž ho (Kôš) a potom "
+    else:
+        drop = f"zmaž naše čísla {', '.join(delete)} (Kôš) a potom "
+    if pick.kind == "restore":
+        what = ("" if pick.gtin == succ else f"obnoví sa z Koša naše číslo {pick.gtin} a ")
+        result = f"{what}priradí sa ku karte CODEX {card} a prečíslovanie prebehne"
+    elif pick.kind == "new":
+        result = (f"pridá sa nová karta {succ} {_NEW_FROM[scope]}, priradí sa ku karte CODEX "
+                  f"{card} a prečíslovanie prebehne")
+    else:
+        result = (f"vyberie sa naše číslo {pick.gtin} a nič sa nezmení — prečíslovanie vyrieši "
+                  f"len oprava v CODEXe")
     return (f"náš kód {succ} je karta CODEX {other}, nie {card} — prečíslovanie čaká. Ak naše "
-            f"číslo {succ} je teraz výrobok karty CODEX {card} („{card_name}“), "
-            + ("zmaž ho (Kôš) a potom " if live else "")
-            + f"vyber ho pri otázke cez „Vybrať kartu z CODEXu“ — priradí sa ku karte CODEX "
-              f"{card} a prečíslovanie prebehne.")
+            f"číslo {succ} je teraz výrobok karty CODEX {card} („{card_name}“), {drop}vyber "
+            f"ho pri otázke cez „Vybrať kartu z CODEXu“ — {result}.")
 
 
 def renumber_contested(succ: str, card: str, hit_name: str, was: str, live: bool) -> str:
@@ -145,11 +194,17 @@ def adopted(taught: int, target: str, succ: str, takers: list[str], card: str,
 
 
 def repick_fix(old: str, old_name: str, *, home: str | None, offered_code: str | None,
-               old_alive: bool, label: str) -> str:
+               selected: str | None, old_alive: bool, label: str) -> str:
     """Where rows of an old product can go: its live number, a code the picker offers it
-    under, or nowhere (not offered for this catalog / gone from CODEX)."""
+    under, or nowhere (not offered for this catalog / gone from CODEX). `selected` = our number
+    a pick of `offered_code` would SELECT instead (another number of ours carries the code —
+    review 17): that pick is never advised."""
     if home is not None:
         return f"preraď ich na {home}"
+    if offered_code is not None and selected is not None:
+        return (f"„{old_name}“ u nás karta nie je a výber kariet ju ponúka pod kódom "
+                f"{offered_code}, ktorý u nás nesie číslo {selected} (výber by vybral to) — tie "
+                f"priradenia zmaž, alebo pomôže oprava v CODEXe")
     if offered_code is not None:
         return (f"„{old_name}“ u nás karta nie je — ak treba, pri otázke vyber cez „Vybrať "
                 f"kartu z CODEXu“ kód {offered_code} (karta CODEX {old}) a preraď ich naň")

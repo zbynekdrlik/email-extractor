@@ -530,7 +530,9 @@ def run(conn, cfg, now: datetime | None = None) -> dict:
 def run_safely(conn, cfg) -> dict:
     """`run` for the push endpoint: the CODEX list is already replaced, so a sync failure must
     never fail the push — the sync's transaction rolls back whole, the failure is logged
-    (+ an `error` run row) and the next push retries it."""
+    (+ an `error` run row) and the next push retries it. Ops hears about it only with
+    `codex_sync_apply` on: the dry-run writes nothing to the outbox, a failure included (review
+    17 — its `error` run row is the record the dry-run review reads)."""
     try:
         return run(conn, cfg)
     except Exception as e:
@@ -538,7 +540,8 @@ def run_safely(conn, cfg) -> dict:
         try:
             run_id: int | None = _record(conn, codex_cards.latest_sync(conn), "error",
                                          {"error": str(e)[:500]})
-            _error_alert(conn, cfg, e)
+            if getattr(cfg, "codex_sync_apply", False):
+                _error_alert(conn, cfg, e)
         except Exception:
             log.exception("CODEX card sync: recording the failed run failed too")
             run_id = None
