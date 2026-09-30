@@ -368,7 +368,8 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   different rules was the root of rounds 3-5 — never add a fourth, extend `_known`.
   A binding that REPLACES another card's on a PICK is stored only by an APPLIED run, so a pick
   seen during a dry-run / blocked run still gets its reset later. Bindings are seeded for the
-  whole group — a legacy „0"+code twin left alone later still follows its card (round 9). The
+  whole group, also a member joining later (a twin back from the Kôš) — a legacy „0"+code twin
+  left alone later still follows its card (rounds 9-10). A reset covers every group number. The
   memory path asks `_known` too: a retired number picked as another product keeps its rows. A
   pick whose CODEX product differs from the one the data was taught for (`Codex.same_product`:
   the old card's name while it carried the code — `codex_card_history.name` — vs the picked
@@ -393,27 +394,37 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   koláč vanished; the executor also undeletes before any create. The "previous snapshot"
   (two-snapshot removal, seed rule) comes from `codex_sync_runs` that actually synced — a
   failed/skipped sync never counts.
-- **What the sync cannot tell goes to a human, never a guess (rounds 7-9 — each earlier round
-  broke a guess)**: (1) `_ScopePlanner._contested` is THE rule, checked wherever the sync would
-  mutate a number (identify, a renumber onto it — live or its Kôš copy, a memory move from a Kôš
-  copy). Our name vs our CODEX card C: it IS C's product (C's current rows or its history
-  name — also C's NEW CODEX name) → fine; it names ANOTHER card carrying the code now → contested
-  (the #467 drift button „Prevziať názov z CODEXu" offers exactly that reusing card's name, as if
-  cosmetic — it is TRUE for CODEX imports, so the button stays, but renumbering such a number
-  into C moved the other product's wordings onto C, round 9 🟡, also for an ACTIVE binding in
-  the dry-run window); a number the sync RETIRED renamed since (≠ `codex_card_bindings.
-  retired_name`, the name the sync stored when it retired it; so a plain Kôš undo of a card whose
-  name had drifted is no rename, round 8) → contested. Never contested: a blank Kôš marker, a
-  pick, C missing from ONE snapshot. A contested number → review with the way out per case
-  (rename back = rejoins C while C lives; delete + pick at a question = reset; a code no card
-  carries says so); never re-bound by the name alone (round 6's `_renamed_to`), no memory move
-  from it, no renumber onto it. (2) Mapping rows OLDER than a re-pick, or ALL rows of a number
-  a rename rebind turned into another product (`_repicked_review`) → review with the count and
-  where they are after this plan — never moved: `created_at` cannot tell whose a row is (a
-  Naučené edit / `dl_memory.remember` revive re-points a row and keeps it), and a same-push
-  renumber already carried them with the card. One review entry per card keeps every reason in
-  `reasons`; the ops alert dedups PER reason. A renumber carries only OUR group's numbers and a
-  memory move only the rows that qualified themselves (no `| code` union — round 9).
+- **What the sync cannot tell goes to a human (rounds 7-10 — each earlier round broke a
+  guess)**: it acts only on its own recorded evidence (bindings, the history, retire-time names,
+  audit rows) and holds the rest. The residual heuristic is the NAME: a board action that
+  changes a number's meaning records no CODEX card except the #477 pick. (1)
+  `_ScopePlanner._contested` is THE rule, checked wherever the sync would mutate a number
+  (identify, a renumber onto it — live or its Kôš copy, a memory move from a Kôš copy). Our name
+  vs our CODEX card C: it IS C's product (C's current rows or its history name — also C's NEW
+  CODEX name) → fine; it names ANOTHER card carrying the code now → contested (the #467 drift
+  button „Prevziať názov z CODEXu" offers exactly that reusing card's name, as if cosmetic — it
+  is TRUE for CODEX imports, so the button stays, but renumbering such a number into C moved the
+  other product's wordings onto C, round 9 🟡, also for an ACTIVE binding in the dry-run window;
+  it may also be a CODEX rename of C beside a same-named duplicate, so the text only says what it
+  sees, round 10); a number the sync RETIRED renamed since (≠ `codex_card_bindings.
+  retired_name`; a plain Kôš undo of a card whose name had drifted is no rename, round 8) →
+  contested. Never contested: a blank Kôš marker, a pick, C missing from ONE snapshot. A
+  contested number → review with the way out per case (rename to C's name = rejoins C while C
+  lives; delete + pick at a question = reset; a code no card carries says so); no memory move
+  from it, no renumber onto it. (2) Mapping rows OLDER than a re-pick, or ALL rows of every
+  number of a group a rename rebind turned into another product (`_repicked_review`) → review
+  with the count, where they are after this plan and where they can go (never to a card gone
+  from CODEX) — never moved: `created_at` cannot tell whose a row is. (3) The REUSE HOLD (round
+  10 🟡): `Codex.taken(C, X)` = CODEX gave X to another card after C last carried it. A row on
+  X decided since then (`held_clause`: `created_at` / `delivered_on` after it, or a non-sync
+  audit row on it then — a Naučené edit keeps `created_at`) may be that card's (a #477 pick of
+  X SELECTS our existing number and teaches the other product's wording with NO rename) — the
+  card's renumber and the retired-number memory path move only the older rows; the held ones
+  stay on X with a review. Residual, documented: `dl_memory.remember` REVIVING an old
+  soft-deleted row (same delivery date) is not seen. One review entry per card keeps every
+  reason in `reasons`; the ops alert dedups PER reason. A renumber carries only OUR group's
+  numbers (+ the canonical number a human deleted, only while it still IS the card) and a
+  memory move only the rows that qualified themselves (no unchecked `| code` union — round 9).
 - **What is decided, per catalog, per CODEX code our cards carry** (cards grouped per
   `normalize_code`, the canonical ≤13-char number supplies the data, `codex_cards.index_by_code`),
   with our card bound to card C: C still carries X → rename to C's stredisko-1 name when ours
