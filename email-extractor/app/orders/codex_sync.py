@@ -257,7 +257,8 @@ def _change_lines(plan: sp.Plan, *, applied: bool = True) -> list[str]:
                        f"{'ostalo' if applied else 'by ostalo'} pod {escape(code)}")
         cards = [i for i in items if i["mode"] != "memory"]
         if cards:
-            lines.append(f"karta CODEX {escape(card)} „{escape(cards[0]['name'])}“ zmenila kód "
+            label = cards[0].get("codex_name") or cards[0]["name"]
+            lines.append(f"karta CODEX {escape(card)} „{escape(label)}“ zmenila kód "
                          f"{escape(code)} → {escape(to)} — "
                          f"{'upravené' if applied else 'na úpravu'} ({_labels(cards)}), pamäť: "
                          f"{memory}")
@@ -325,14 +326,14 @@ def _last_applied_review(conn) -> set[tuple]:
 
 def _hold_lines(holds: list[dict], *, applied: bool = True) -> list[str]:
     """Delivery history with nothing for a human to fix — said, never silent (review 12 🔵),
-    under the number it really sits on (review 13 🔵)."""
+    under the number(s) it really sits on (reviews 13-14 🔵)."""
     out = []
     for h in holds:
         at = h.get("at") or h["gtin"]
-        if at == h["gtin"]:
-            verb = "ostalo" if applied else "by ostalo"
-        else:
+        if h.get("moved"):
             verb = "je teraz" if applied else "by bolo"
+        else:
+            verb = "ostalo" if applied else "by ostalo"
         out.append(f"pamäť ({sp.BY_NAME[h['scope']].label}) {escape(h['gtin'])}: "
                    f"{h['held']['shipped']} záznamov o dodávkach {verb} pod {escape(at)} ako "
                    f"história ({escape(h['why'])})")

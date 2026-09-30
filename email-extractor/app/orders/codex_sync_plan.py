@@ -42,7 +42,14 @@ from datetime import UTC, datetime
 # the memory rules (which rows a move carries / holds) live in `codex_sync_memory` (review 12:
 # the planner neared the size budget)
 from . import card_guard, codex_cards, dl_snapshot, snapshot
-from .codex_sync_memory import CHECK_TAUGHT, SYNC_ACTOR, Split, memory_split, taught_clause
+from .codex_sync_memory import (
+    CHECK_TAUGHT,
+    SYNC_ACTOR,
+    Split,
+    held_clause,
+    memory_split,
+    taught_clause,
+)
 
 STREDISKO = codex_cards.PICK_STREDISKO
 _NEVER = datetime.min.replace(tzinfo=UTC)
@@ -582,19 +589,32 @@ class _ScopePlanner:
                 self.plan.removals.append(item)
                 self._vacate(group)
             else:
-                self.plan.add_review(item, (
-                    f"karta CODEX {card} už v stredisku 1 nie je a kód {code} teraz nesie iná "
-                    f"karta ({', '.join(sorted(cx.carriers(code))) or 'iné stredisko'}) — ak je "
-                    f"to ten istý výrobok, premenuj našu kartu (Produkty) na jej názov v CODEXe, "
-                    f"pri ďalšom zozname kariet sa priradí (má v CODEXe iný názov, preto sa jej "
-                    f"alias / doplnok / hmotnosť vyčistia — skontroluj ich); ak nie, kartu zmaž "
-                    f"(Kôš)."))
+                self.plan.add_review(item, self._gone_reason(card, code))
             return
         succ, why = self._successor(card, code)
         if succ is None:
             self.plan.add_review(item, why)
             return
         self._renumber(item, group, card, succ)
+
+    def _gone_reason(self, card: str, code: str) -> str:
+        """Our CODEX card left stredisko 1 for good, the code lives on elsewhere — the way out
+        per case, never a promise the sync cannot keep (review 14 🔵)."""
+        now = sorted(self.cx.carriers(code))
+        head = f"karta CODEX {card} už v stredisku 1 nie je"
+        if not now:
+            return (f"{head} a kód {code} je v CODEXe už len na inom stredisku — výber kariet ho "
+                    f"neponúka, synchronizácia s touto kartou nič neurobí; ak kartu nepotrebujete, "
+                    f"zmažte ju (Kôš).")
+        if len(now) > 1:
+            return (f"{head} a kód {code} teraz nesie viac kariet ({', '.join(now)}) — ak je to "
+                    f"jedna z nich, zmaž našu kartu (Kôš) a pri otázke ju vyber cez „Vybrať kartu "
+                    f"z CODEXu“ (vybraná karta sa priradí, staré údaje sa vyčistia); ak nie, kartu "
+                    f"zmaž (Kôš).")
+        return (f"{head} a kód {code} teraz nesie karta {now[0]} — ak je to ten istý výrobok, "
+                f"premenuj našu kartu (Produkty) na jej názov v CODEXe, pri ďalšom zozname kariet "
+                f"sa priradí (má v CODEXe iný názov, preto sa jej alias / doplnok / hmotnosť "
+                f"vyčistia — skontroluj ich); ak nie, kartu zmaž (Kôš).")
 
     def _successor(self, card: str, code: str) -> tuple[str | None, str]:
         """The ONE new code our CODEX `card` carries for this catalog → (Y, ""), or
@@ -664,6 +684,9 @@ class _ScopePlanner:
         split = memory_split(self.conn, self.scope, old, hold)
         entry = dict(item, **{
             "from": item["gtin"], "to": to, "mode": mode, "old_gtins": old,
+            # the CODEX card's product, for the ops line (review 14: our pre-plan name may be
+            # another product's — a pick restores a Kôš card „as it was")
+            "codex_name": self.cx.name_of(card, succ),
             "memory": split.movable, "hold": hold.isoformat() if hold else None,
             "held": {"taught": split.taught, "shipped": split.shipped},
             "card": _fields(group[0])})
@@ -806,7 +829,8 @@ class _ScopePlanner:
                     "hold": hold.isoformat() if hold else None,
                     "held": {"taught": split.taught, "shipped": split.shipped}, "card": {}}))
             elif split.shipped and not split.taught:
-                self._hold_note(item, code, split.shipped,
+                # the numbers the rows really sit on (a legacy twin too — review 14 🔵)
+                self._hold_note(item, ", ".join(old), split.shipped,
                                 f"kód {code} mala medzitým v CODEXe iná karta")
         for gtin, (card, since) in sorted(self.repicked.items()):
             self._repicked_review(gtin, card, since)
@@ -816,20 +840,25 @@ class _ScopePlanner:
         than the pick (`since`; every row for a rename rebind, `since` None) — may be the old
         product's (a frozen question answered with the retired number — review 6) or the new
         one's (a Naučené edit / a revive re-points a row and keeps its `created_at` — review 7):
-        nothing tells, so they stay where they are and a human checks them. Where they are =
-        the number after this plan (a same-push renumber carries them — review 7 F2)."""
+        nothing tells, so they stay where they are and a human checks them. Where they are is
+        read from the same-push renumber of the number, never guessed (review 14 🔵): the rows
+        it carries are under its new number; the rows it HOLDS (reuse window) stay and are
+        already reported by its own `held` line — they are left out here."""
         code = codex_cards.normalize_code(gtin) or gtin
+        entry = next((r for r in self.plan.renumbers
+                      if r["scope"] == self.scope.name and gtin in r["gtins"]), None)
+        moved = entry["to"] if entry is not None else None
+        hold = entry.get("hold") if entry is not None else None
         taught = shipped = 0
         for t in self.scope.memory:
             tc = taught_clause(t)
+            kept = f" AND NOT {held_clause(t)}" if hold else ""
             a, b = self.conn.execute(
                 f"SELECT count(*) FILTER (WHERE {tc}), count(*) FILTER (WHERE NOT ({tc})) "
                 f"FROM {t} WHERE gtin = %(g)s AND deleted_at IS NULL AND (%(s)s::timestamptz "
-                "IS NULL OR COALESCE(created_at, '-infinity') < %(s)s::timestamptz)",
-                {"g": gtin, "s": since}).fetchone()
+                f"IS NULL OR COALESCE(created_at, '-infinity') < %(s)s::timestamptz){kept}",
+                {"g": gtin, "s": since, "hold": hold}).fetchone()
             taught, shipped = taught + int(a or 0), shipped + int(b or 0)
-        moved = next((r["to"] for r in self.plan.renumbers
-                      if r["scope"] == self.scope.name and gtin in r["gtins"]), None)
         where = f"číslo {gtin}" + (f" (teraz prečíslované na {moved})" if moved else "")
         old_name = self.cx.name_of(old, code)
         name = next((str(c.get("name") or "") for c in self.catalog if str(c["gtin"]) == gtin),
@@ -839,7 +868,8 @@ class _ScopePlanner:
             # delivery history only — nothing for a human to fix in Naučené (review 12 🔵)
             if shipped:
                 self._hold_note(item, moved or gtin, shipped,
-                                f"číslo {gtin} bolo predtým karta CODEX {old} („{old_name}“)")
+                                f"číslo {gtin} bolo predtým karta CODEX {old} („{old_name}“)",
+                                moved=moved is not None)
             return
         history = (f" ({shipped} záznamov o dodávkach z toho času tiež ostáva ako história)"
                    if shipped else "")
@@ -860,12 +890,13 @@ class _ScopePlanner:
             f"nemu {older}môže patriť „{old_name}“{history}: {CHECK_TAUGHT}; ak patria "
             f"„{old_name}“, {fix}"))
 
-    def _hold_note(self, item: dict, at: str, shipped: int, why: str) -> None:
+    def _hold_note(self, item: dict, at: str, shipped: int, why: str, *,
+                   moved: bool = False) -> None:
         """Delivery history (shipped rows) with nothing for a human to fix — a report + ops
-        note, never silent (review 12 🔵); `at` = the number the rows sit on after this plan
-        (review 13 🔵: a same-push renumber carries them)."""
+        note, never silent (review 12 🔵); `at` = the number(s) the rows sit on after this plan,
+        `moved` = a same-push renumber carried them there (reviews 13-14 🔵)."""
         self.plan.holds.append(dict(item, held={"taught": 0, "shipped": shipped}, at=at,
-                                    why=why))
+                                    moved=moved, why=why))
 
     def _renames(self) -> None:
         for gtin, card in self.live.items():
