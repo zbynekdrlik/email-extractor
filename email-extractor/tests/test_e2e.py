@@ -476,10 +476,12 @@ def test_an_odoo_treba_doriesit_link_opens_that_mail_in_the_orders_history_witho
     nástenke" link an Odoo orders summary now carries (built by the REAL `report.
     history_link`) opens — with NO password, from a fresh browser — the História objednávok
     tab with THAT mail's detail already open (not the admin /login, not the list of some
-    other tab). The Message-ID carries `$`/`+`/`@`/`<>` like a real one. Clean console."""
+    other tab). The Message-ID carries `!&$+/@<>` like a real Outlook one — the `/` is the
+    #473 review finding: the detail route must still resolve it (`<path:message_id>`). Clean
+    console (a 404 on the detail fetch would log a console error)."""
     from app.orders import report
 
-    mid = "<e2e473$aa+bb@example-pekaren.test>"   # SYNTHETIC
+    mid = "<!&!e2e473$aa+AA/bb@example-pekaren.test>"   # SYNTHETIC
     _history_seed(pg, mid, category="ai_orders", subject="RE: OBJEDNAVKA E2E 473",
                   outcome="AI nenašla v e-maile žiadnu objednávku")
     # a second mail so the opened detail is provably a SELECTION, not the only row

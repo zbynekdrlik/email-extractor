@@ -192,8 +192,9 @@ def test_question_reminder_group_carries_the_new_next_shape():
 
 ORDERS_HISTORY_NEXT = "?next=/nastenka/historia-objednavok"
 DL_HISTORY_NEXT = "?next=/nastenka/historia-dl"
-# SYNTHETIC Message-ID carrying every character class a real one uses (never real mail).
-TRICKY_MID = "<001101dd0000$aa+bb/cc$@example-pekaren.test>"
+# SYNTHETIC Message-ID carrying every character class a real one uses (Outlook `<!&!…>`,
+# `$`, Gmail `+`, a `/`) — never real mail.
+TRICKY_MID = "<!&!001101dd0000$aa+bb/cc$@example-pekaren.test>"
 
 
 def test_board_link_orders_history_lands_on_the_orders_history_tab():
@@ -239,9 +240,11 @@ def test_board_link_history_is_empty_without_a_human_base_url():
                                         ("dl_history", "/sklad-dl/")])
 def test_the_history_link_round_trips_the_message_id_through_the_signed_key_redirect(
         kind, route):
-    """The whole chain a warehouse click takes: the built link → the signed key route →
+    """The server-side half of a warehouse click: the built link → the signed key route →
     `safe_next` → 302 to the History tab whose `?q` decodes back to the EXACT Message-ID
-    (a `+` must not turn into a space, a `/` or `$` must survive)."""
+    (a `+` must not turn into a space, a `/`, `&` or `$` must survive). The browser half
+    (the tab opening that mail's detail) is the Playwright test in test_e2e.py; the detail
+    route resolving a `/` id is test_board_history.py's `…with_a_slash…` test."""
     from urllib.parse import parse_qs, urlsplit
 
     class C:

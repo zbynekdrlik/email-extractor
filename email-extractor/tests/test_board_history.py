@@ -419,3 +419,38 @@ def test_history_file_guard_404_for_non_history_message(pg):
     c = _client()
     _sklad(c)
     assert c.get("/api/board/history/np/files/0").status_code == 404
+
+
+# --- #473: a Message-ID carrying `/` (Outlook `<!&!…+AA/…>`) opens + acts like any other ---
+
+def test_a_message_id_with_a_slash_reaches_every_per_document_route(pg, tmp_path):
+    """#473 review finding: waitress/Werkzeug decode the client's `%2F` back to `/` BEFORE
+    routing, so the default `<message_id>` converter 404'd every mail whose Message-ID holds
+    a `/` (~14 of 4211 real order/DL mails) — the row click AND the new Odoo deep link. With
+    `<path:message_id>` the detail + every action/preview route still reach their own
+    handler for such an id (the static suffix wins). SYNTHETIC id with the real shape."""
+    from urllib.parse import quote
+
+    from app import store
+    mid = "<!&!AAAAslash+AA/BBBB@example-pekaren.test>"
+    _msg(pg, mid, proc_status="ok", subject="Obj so lomkou", edi_file="ORDER_7.txt")
+    _run(pg, mid, result={"customer_ean": "EANS"},
+         items=[{"name": "rožok", "gtin": "111", "card": "Rožok"}])
+    d = store.message_dir(str(tmp_path), mid)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "att0__o.pdf").write_bytes(b"%PDF-1.4 x\n")
+    (d / "raw.eml").write_bytes(b"Subject: x\n\nbody\n")
+    enc = quote(mid, safe="")
+    c = _client(_cfg(data_dir=str(tmp_path)))
+    _sklad(c)
+    r = c.get(f"/api/board/history/{enc}?scope=orders")
+    assert r.status_code == 200, r.get_data(as_text=True)
+    body = r.get_json()
+    assert body["message_id"] == mid and body["subject"] == "Obj so lomkou"
+    # the preview links the detail itself hands out resolve too
+    assert c.get(body["eml_url"] + "?scope=orders").status_code == 200
+    assert c.get(f"/api/board/history/{enc}/files/0?scope=orders").status_code == 200
+    # the actions reach their OWN handler (a shipped order → rerun refused 409, never 404)
+    assert c.post(f"/api/board/history/{enc}/rerun?scope=orders").status_code == 409
+    assert c.post(f"/api/board/history/{enc}/teach?scope=orders",
+                  json={"name": "", "gtin": ""}).status_code == 400

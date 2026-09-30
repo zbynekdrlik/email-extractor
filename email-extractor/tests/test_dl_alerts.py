@@ -528,6 +528,17 @@ def test_an_ops_channel_alert_keeps_the_admin_dashboard_link(pg):
     assert "/sklad" not in html
 
 
+def test_the_admin_link_is_fail_closed_to_the_provable_ops_channel():
+    """#473 review finding: the admin dashboard link is decided by the RECIPIENT channel and
+    fails CLOSED — a channel that is not provably the ops channel (0 / unknown / a warehouse
+    one) never gets the password-gated admin link, whatever the kind."""
+    cfg = _RoutedCfg()
+    assert "Otvor dashboard" in dl_alerts._action_line("human_processing_review", cfg, 592, [])
+    for channel in (0, 243, 152):
+        assert "Otvor dashboard" not in dl_alerts._action_line(
+            "human_processing_review", cfg, channel, [])
+
+
 def test_reminder_suppressed_first_fires_then_once_per_morning_skipping_weekends(pg):
     """#336: replaces the flat ~4h re-ask. The FIRST alert always fires; a re-reminder for
     a still-unresolved message fires at most once per morning (after the configured hour),

@@ -186,10 +186,12 @@ def test_a_note_is_escaped_like_reject_reason():
 
 def test_no_link_configured_still_says_something_is_unresolved():
     """Nothing may be silently hidden even when dashboard_base_url is unset (#139) — the
-    message must still say a human is needed, just without a clickable link."""
+    message must still say a human is needed, just without a clickable link — and name
+    WHERE it waits: a held order waits on Otázky objednávky, never "História" (#473)."""
     html = report.build_summary("Pekáreň X", [_order(status="held")], link="")
     assert "http" not in html
     assert "treba doriešiť na nástenke" in html.lower()
+    assert "Otázky objednávky" in html and "História" not in html
 
 
 class _BoardCfg:

@@ -1614,6 +1614,55 @@ def test_an_unmatched_supplier_review_keeps_the_otazky_sklad_questions_link(pg, 
     assert "otazky-sklad" in posted[0] and "historia-dl" not in posted[0], posted[0]
 
 
+def test_an_unmatched_supplier_whose_ask_is_refused_links_the_dl_history(pg, tmp_path):
+    """#473 review finding: `teach.ask_dl_supplier` asks NOTHING (returns None) when the
+    sender address is already taught — e.g. to a supplier EAN no longer in the list. Then no
+    question waits on Otázky sklad, so the review must deep-link the mail's História
+    dodacích listov detail instead of that dead end."""
+    _snapshot(pg)
+    dl_supplier_memory.remember(pg, "neznamy@nowhere.sk", "2000000000999", "Vyradený s.r.o.")
+    _msg(pg, mid="dl-refused", from_addr="neznamy@nowhere.sk")
+    _attach(pg, tmp_path, "dl-refused")
+    client = FakeClient({
+        "dl_documents": [_unknown_supplier_doc("neznamy@nowhere.sk")],
+        "dl_supplier": [{"matched": False, "matchReason": "nie je v zozname"}]})
+    posted = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path),
+               dashboard_base_url="http://x.example")
+    dl_worker.tick(pg, cfg, client=client, post=lambda c, h: posted.append(h))
+    assert _dl_question_count(pg) == 0, "the taught address suppressed the question"
+    assert len(posted) == 1
+    assert report.dl_history_link(cfg, "dl-refused") in posted[0], posted[0]
+    assert "otazky-sklad" not in posted[0]
+
+
+def test_a_mail_the_dl_history_does_not_list_keeps_the_questions_link(pg, tmp_path):
+    """#473 review finding: an invoice-as-DL mail (`category='invoices'`) is not listed in
+    História dodacích listov — a deep link there would 404. `release_for_question`
+    reprocesses such a mail WITHOUT its invoice flag, so the guard keys on the mail's REAL
+    category (the same `is_history_document` check the detail route applies), never on the
+    flag: the review keeps the Otázky sklad link."""
+    from app.orders import dl_message
+    sid = _snapshot(pg)
+    pg.execute(
+        """INSERT INTO messages (message_id, category, subject, from_addr, combined_text,
+                                 has_attachments, processed)
+           VALUES ('inv-1', 'invoices', 'Faktúra', 'dodavatel@lunys.sk', '', false, true)""")
+    row = pg.execute(
+        """SELECT message_id, subject, from_addr, from_name, combined_text, body_text,
+                  has_attachments FROM messages WHERE message_id = 'inv-1'""").fetchone()
+    message = dl_message._as_message(row)
+    posted = []
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path),
+               dashboard_base_url="http://x.example")
+    dl_message._process_message(pg, cfg, FakeClient({}), message, sid,
+                                dl_snapshot.load_catalog(pg, sid),
+                                dl_snapshot.load_suppliers(pg, sid), shadow=False,
+                                post=lambda c, h: posted.append(h))
+    assert len(posted) == 1
+    assert "otazky-sklad" in posted[0] and "historia-dl" not in posted[0], posted[0]
+
+
 def test_a_dl_review_with_no_question_links_that_mail_on_the_dl_history(pg, tmp_path):
     """#473: a mail with no attachment and no text (R15) raises NO board question — its
     ❗ review message used to link Otázky sklad, where this mail is NOT listed (the same dead
