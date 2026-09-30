@@ -39,7 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from . import card_guard, codex_cards, dl_snapshot, snapshot
+from . import card_guard, codex_cards, dl_memory, dl_snapshot, memory, snapshot
 
 STREDISKO = codex_cards.PICK_STREDISKO
 # the audit actor of every sync write (`codex_sync.ACTOR`) — its own writes are never a human
@@ -101,6 +101,9 @@ class Plan:
     review: list[dict] = field(default_factory=list)
     seeds: list[dict] = field(default_factory=list)
     resets: list[dict] = field(default_factory=list)
+    # delivery history (shipped rows) held on a number with nothing to move and nothing for a
+    # human to fix — reported, never silently (review 12 🔵)
+    holds: list[dict] = field(default_factory=list)
 
     def code_changes(self) -> int:
         """Distinct CODEX codes renumbered or removed (a card in both catalogs = one)."""
@@ -358,9 +361,12 @@ def _fill(scope: Scope, target: dict, ours: dict) -> dict:
     return out
 
 
-# the rows the board's Naučené lists and edits (`board.services.rules._CURATED`); a SHIPPED row
-# is delivery history, not editable there
-CURATED_SOURCES = ("human", "sheet-import")
+# a TAUGHT row = one the matcher trusts as a warehouse decision (`memory.CURATED_SOURCES`,
+# identical in `dl_memory`: human answers, the sheet import, História „Doučiť" = teachback —
+# review 12 🟡: counting teachback as delivery history held it without any review). Anything
+# else (a shipped row, a NULL source) is delivery history.
+assert memory.CURATED_SOURCES == dl_memory.CURATED_SOURCES
+TAUGHT_SOURCES = memory.CURATED_SOURCES
 
 
 def held_clause(table: str) -> str:
@@ -379,11 +385,17 @@ def held_clause(table: str) -> str:
               " AND a.ts > %(hold)s::timestamptz))")
 
 
+# where a human fixes a TAUGHT row: Naučené lists the answers + the sheet import; a História
+# „Doučiť" (teachback) row is undone in the Kôš and taught again (review 12)
+_CHECK = ("skontroluj ich v Naučené (priradenie z „Doučiť“ v Histórii vráť v Koši a doúč "
+          "znova)")
+
+
 def _taught_clause(table: str) -> str:
-    """SQL: a row the warehouse can see and fix in Naučené (all of global_item_memory)."""
+    """SQL: a TAUGHT row (all of global_item_memory; a NULL source is history — review 12)."""
     if table == "global_item_memory":
         return "TRUE"
-    return "source IN (" + ", ".join(f"'{s}'" for s in CURATED_SOURCES) + ")"
+    return ("COALESCE(source, '') IN (" + ", ".join(f"'{s}'" for s in TAUGHT_SOURCES) + ")")
 
 
 @dataclass
@@ -746,16 +758,16 @@ class _ScopePlanner:
 
     def _held_reason(self, gtin: str, code: str, card: str, to: str, split: Split,
                      takers: list[str]) -> str:
-        """Only TAUGHT held rows are the warehouse's to check (Naučené lists them); held
-        delivery history just stays (review 11)."""
+        """Only TAUGHT held rows are the warehouse's to check; held delivery history just
+        stays (review 11) — and says where each kind of taught row is fixed (review 12)."""
         name = self.cx.name_of(card, code)
         history = (f" ({split.shipped} záznamov o dodávkach z toho obdobia tiež ostáva pod "
                    f"{gtin} ako história)" if split.shipped else "")
         return (f"{split.taught} naučených priradení k číslu {gtin} vzniklo (alebo ich niekto "
                 f"zmenil) potom, čo sa kód {code} v CODEXe objavil pri karte CODEX "
                 f"{', '.join(takers)} — nevieme, či patria „{name}“ (karta CODEX {card}), alebo "
-                f"jej: ostávajú pod číslom {gtin}{history}; skontroluj ich v Naučené a tie, čo "
-                f"patria „{name}“, preraď na {to}.")
+                f"jej: ostávajú pod číslom {gtin}{history}; {_CHECK} a tie, čo patria "
+                f"„{name}“, preraď na {to}.")
 
     def _adopted_review(self, item: dict, target: str, card: str, succ: str) -> None:
         """Our number `target` becomes card `card`'s again — but another card carried its code
@@ -771,8 +783,8 @@ class _ScopePlanner:
         self.plan.add_review(item, (
             f"{split.taught} naučených priradení k číslu {target} vzniklo, kým kód {succ} v "
             f"CODEXe mala karta CODEX {', '.join(foreign[1])} — prečíslovanie ich teraz pridá ku "
-            f"karte CODEX {card} („{name}“); skontroluj ich v Naučené a tie, čo patria tej "
-            f"druhej karte, zmaž alebo preraď."))
+            f"karte CODEX {card} („{name}“); {_CHECK} a tie, čo patria tej druhej karte, zmaž "
+            f"alebo preraď."))
 
     def _vacate(self, group: list[dict]) -> None:
         """Our numbers this plan retires go to the (simulated) Kôš — a later step in the SAME
@@ -863,6 +875,9 @@ class _ScopePlanner:
                     "old_gtins": old, "memory": split.movable,
                     "hold": hold.isoformat() if hold else None,
                     "held": {"taught": split.taught, "shipped": split.shipped}, "card": {}}))
+            elif split.shipped and not split.taught:
+                self._hold_note(item, code, split.shipped,
+                                f"kód {code} mala medzitým v CODEXe iná karta")
         for gtin, (card, since) in sorted(self.repicked.items()):
             self._repicked_review(gtin, card, since)
 
@@ -874,18 +889,30 @@ class _ScopePlanner:
         nothing tells, so they stay where they are and a human checks them. Where they are =
         the number after this plan (a same-push renumber carries them — review 7 F2)."""
         code = codex_cards.normalize_code(gtin) or gtin
-        total = sum(int(self.conn.execute(
-            f"SELECT count(*) FROM {t} WHERE gtin = %s AND deleted_at IS NULL "
-            "AND (%s::timestamptz IS NULL OR created_at < %s::timestamptz)",
-            (gtin, since, since)).fetchone()[0]) for t in self.scope.memory)
-        if not total:
-            return
+        taught = shipped = 0
+        for t in self.scope.memory:
+            tc = _taught_clause(t)
+            a, b = self.conn.execute(
+                f"SELECT count(*) FILTER (WHERE {tc}), count(*) FILTER (WHERE NOT ({tc})) "
+                f"FROM {t} WHERE gtin = %(g)s AND deleted_at IS NULL AND (%(s)s::timestamptz "
+                "IS NULL OR COALESCE(created_at, '-infinity') < %(s)s::timestamptz)",
+                {"g": gtin, "s": since}).fetchone()
+            taught, shipped = taught + int(a or 0), shipped + int(b or 0)
         moved = next((r["to"] for r in self.plan.renumbers
                       if r["scope"] == self.scope.name and gtin in r["gtins"]), None)
         where = f"číslo {gtin}" + (f" (teraz prečíslované na {moved})" if moved else "")
         old_name = self.cx.name_of(old, code)
         name = next((str(c.get("name") or "") for c in self.catalog if str(c["gtin"]) == gtin),
                     "")
+        item = {"scope": self.scope.name, "gtin": gtin, "code": code, "name": name}
+        if not taught:
+            # delivery history only — nothing for a human to fix in Naučené (review 12 🔵)
+            if shipped:
+                self._hold_note(item, gtin, shipped,
+                                f"číslo {gtin} bolo predtým karta CODEX {old} („{old_name}“)")
+            return
+        history = (f" ({shipped} záznamov o dodávkach z toho času tiež ostáva ako história)"
+                   if shipped else "")
         older = "je starších ako výber z CODEXu a " if since is not None else ""
         # where they can go: the old product's live number, or nowhere when it left CODEX
         # (review 10 🔵: never „preraď" to a card gone from CODEX)
@@ -898,10 +925,15 @@ class _ScopePlanner:
                    f"kartu z CODEXu“ a preraď ich na ňu")
         else:
             fix = f"„{old_name}“ už v CODEXe nie je — tie priradenia zmaž"
-        self.plan.add_review(
-            {"scope": self.scope.name, "gtin": gtin, "code": code, "name": name},
-            f"{where} bolo karta CODEX {old} („{old_name}“) a {total} naučených priradení k "
-            f"nemu {older}môže patriť „{old_name}“: skontroluj ich v Naučené a ak áno, {fix}")
+        self.plan.add_review(item, (
+            f"{where} bolo karta CODEX {old} („{old_name}“) a {taught} naučených priradení k "
+            f"nemu {older}môže patriť „{old_name}“{history}: {_CHECK}; ak patria „{old_name}“, "
+            f"{fix}"))
+
+    def _hold_note(self, item: dict, gtin: str, shipped: int, why: str) -> None:
+        """Held delivery history (shipped rows) with nothing to move and nothing for a human to
+        fix — a report + ops note, never silent (review 12 🔵)."""
+        self.plan.holds.append(dict(item, held={"taught": 0, "shipped": shipped}, why=why))
 
     def _renames(self) -> None:
         for gtin, card in self.live.items():

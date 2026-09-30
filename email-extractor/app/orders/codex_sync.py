@@ -28,7 +28,9 @@ must not undo a renumber).
 - **Rollout switch `codex_sync_apply`** (default false = DRY-RUN): the plan is computed,
   logged and stored in `codex_sync_runs.report` (with `would_block`), and nothing is written
   to a catalog, a memory table, the audit log or the ops outbox. The history is kept in both
-  modes, so the first applied run still knows who carried what.
+  modes — and for every ACCEPTED push, in its own committed step, even when its sync then
+  fails or skips (the list is pickable the moment it is accepted) — so the first applied run
+  still knows who carried what, and since when.
 - ONE ops message per applied run with changes (`pending_alerts` → ops channel): „karta N
   zmenila kód X → Y, upravené", removed codes, renames, and review items not already reported
   by the previous applied run. One sync at a time (`pg_advisory_xact_lock`), each sync in ONE
@@ -301,11 +303,26 @@ def _review_keys(r: dict) -> set[tuple]:
     return {(r.get("scope"), r.get("gtin"), x) for x in (r.get("reasons") or [r.get("reason")])}
 
 
+def _hold_key(h: dict) -> tuple:
+    return ("hold", h.get("scope"), h.get("gtin"), (h.get("held") or {}).get("shipped"))
+
+
 def _last_applied_review(conn) -> set[tuple]:
+    """The review reasons + held-history notes the previous APPLIED run already reported —
+    each is alerted once, never on every push."""
     row = conn.execute("SELECT report FROM codex_sync_runs WHERE status = 'apply' "
                        "ORDER BY id DESC LIMIT 1").fetchone()
-    review = ((row[0] or {}).get("review") or []) if row else []
-    return set().union(*(_review_keys(r) for r in review))
+    report_json = (row[0] or {}) if row else {}
+    keys = set().union(*(_review_keys(r) for r in report_json.get("review") or []))
+    return keys | {_hold_key(h) for h in report_json.get("holds") or []}
+
+
+def _hold_lines(holds: list[dict], *, applied: bool = True) -> list[str]:
+    """Held delivery history with nothing to move — said, never silent (review 12 🔵)."""
+    verb = "ostalo" if applied else "by ostalo"
+    return [f"pamäť ({sp.BY_NAME[h['scope']].label}) {escape(h['gtin'])}: "
+            f"{h['held']['shipped']} záznamov o dodávkach {verb} pod {escape(h['gtin'])} ako "
+            f"história ({escape(h['why'])})" for h in holds]
 
 
 def _fresh_review(review: list[dict], known: set[tuple]) -> list[dict]:
@@ -342,10 +359,13 @@ def _alert(conn, cfg, plan: sp.Plan, mode: str, run_id: int, known: set[tuple],
                 f"nastaveniach add-onu codex_sync_max_code_changes / codex_sync_max_renames — "
                 f"zmeny sa použijú pri ďalšom zozname kariet.")
         dl_alerts.enqueue(conn, channel, ALERT_KIND,
-                          _html(head, _change_lines(plan, applied=False)),
+                          _html(head, _change_lines(plan, applied=False)
+                                + _hold_lines(plan.holds, applied=False)),
                           message_id=key)
         return
-    lines = _change_lines(plan) + _review_lines(_fresh_review(plan.review, known))
+    lines = (_change_lines(plan)
+             + _hold_lines([h for h in plan.holds if _hold_key(h) not in known])
+             + _review_lines(_fresh_review(plan.review, known)))
     if lines:
         dl_alerts.enqueue(conn, channel, ALERT_KIND, _html(
             "&#128260; Karty podľa CODEXu (#478) — zmeny z posledného zoznamu kariet:", lines),
@@ -372,7 +392,7 @@ def _report(plan: sp.Plan, mode: str, as_of: datetime, would_block: bool,
             "renames": [{k: v for k, v in r.items() if k not in strip} for r in plan.renames],
             "renumbers": [{k: v for k, v in r.items() if k not in strip}
                           for r in plan.renumbers],
-            "removals": plan.removals, "review": plan.review,
+            "removals": plan.removals, "review": plan.review, "holds": plan.holds,
             "resets": [{k: v for k, v in r.items() if k not in strip} for r in plan.resets]}
 
 
@@ -405,11 +425,26 @@ def _summary(mode: str, run_id: int | None, plan: sp.Plan, would_block: bool = F
                 would_block=would_block)
 
 
+def _record_history(conn) -> None:
+    """The accepted list's history, in its OWN committed step before the sync: the list is
+    live (pickable at a question) the moment the push is accepted, so a sync that then fails
+    or skips (stale / older) must not lose when a card was first seen on a code — the reuse
+    window opens there (review 12 🟡). Recording a stale or older list is an observation of
+    CODEX at its data age — `first_seen` on insert, `last_seen` only ever advances."""
+    with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (_LOCK_KEY,))
+        conn.execute("LOCK TABLE codex_stock_cards IN SHARE MODE")
+        sync = codex_cards.latest_sync(conn)
+        if sync is not None:
+            sp.update_history(conn, codex_cards._data_as_of(sync))
+
+
 def run(conn, cfg, now: datetime | None = None) -> dict:
     """Sync our catalogs + memories to the CURRENT CODEX list (after an accepted push). Returns
     {mode: apply|dry-run|blocked|skipped, run_id, renamed, renumbered, memory_renumbered,
     removed, review, codes, would_block}."""
     limits = _limits(cfg)
+    _record_history(conn)
     with conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (_LOCK_KEY,))
         # the list must not change under the sync: SHARE conflicts with the push's EXCLUSIVE
