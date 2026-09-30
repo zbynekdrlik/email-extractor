@@ -420,8 +420,10 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   audit row on it then — a Naučené edit keeps `created_at`) may be that card's (a #477 pick of
   X SELECTS our existing number and teaches the other product's wording with NO rename) — the
   card's renumber and the retired-number memory path move only the older rows; the held ones
-  stay on X with a review. Residual, documented: `dl_memory.remember` REVIVING an old
-  soft-deleted row (same delivery date) is not seen. One review entry per card keeps every
+  stay on X with a review. Residual, documented: `dl_memory.remember` promoting / reviving an
+  existing row keeps its `created_at`, so an answer about a delivery from BEFORE the reuse
+  (same delivery date) counts as the old card's — any delivery inside the window is held by
+  its `delivered_on`. One review entry per card keeps every
   reason in `reasons`; the ops alert dedups PER reason. A renumber carries only OUR group's
   numbers (+ the canonical number a human deleted, only while it still IS the card) and a
   memory move only the rows that qualified themselves (no unchecked `| code` union — round 9).
