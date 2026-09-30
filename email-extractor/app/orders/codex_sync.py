@@ -127,7 +127,7 @@ def _rewrite_memory(conn, table: str, old: list[str], new: str, note: str) -> tu
 
 def _retired_name(r: dict, gtin: str) -> str:
     """Our number's name as the plan found it — stored on the retired binding, so a later
-    rename by a human is told from a plain Kôš undo (`codex_sync_plan._disputed`)."""
+    rename by a human is told from a plain Kôš undo (`codex_sync_plan._contested`)."""
     return str((r.get("names") or {}).get(gtin, r.get("name") or ""))
 
 
@@ -226,7 +226,9 @@ def _labels(items: list[dict]) -> str:
                      if any(i["scope"] == s for i in items))
 
 
-def _change_lines(plan: sp.Plan) -> list[str]:
+def _change_lines(plan: sp.Plan, *, applied: bool = True) -> list[str]:
+    """The ops message's change lines — `applied=False` (a blocked plan, nothing written) says
+    what WOULD change, never „presunutých" (review 9 🔵)."""
     lines: list[str] = []
     groups: dict[tuple, list[dict]] = {}
     for r in plan.renumbers:
@@ -237,12 +239,14 @@ def _change_lines(plan: sp.Plan) -> list[str]:
         merged = sum(sum((i.get("merged") or {}).values()) for i in items)
         # moved vs merged into the same mapping already under the new code (review 8 🔵 —
         # a soft-deleted duplicate is no „move")
-        memory = f"{rows - merged} priradení presunutých" + (
+        memory = (f"{rows - merged} priradení presunutých" + (
             f", {merged} zlúčených s rovnakým priradením pod {escape(to)}" if merged else "")
+            if applied else f"{rows} priradení by sa presunulo")
         cards = [i for i in items if i["mode"] != "memory"]
         if cards:
             lines.append(f"karta CODEX {escape(card)} „{escape(cards[0]['name'])}“ zmenila kód "
-                         f"{escape(code)} → {escape(to)} — upravené ({_labels(cards)}), pamäť: "
+                         f"{escape(code)} → {escape(to)} — "
+                         f"{'upravené' if applied else 'na úpravu'} ({_labels(cards)}), pamäť: "
                          f"{memory}")
         else:
             lines.append(f"pamäť starého kódu {escape(code)} (karta CODEX {escape(card)}) na "
@@ -253,11 +257,12 @@ def _change_lines(plan: sp.Plan) -> list[str]:
     for code, items in gone.items():
         lines.append(f"kód {escape(code)} („{escape(items[0]['name'])}“, karta CODEX "
                      f"{escape(items[0]['codex_card'])}) z CODEXu zmizol bez náhrady — karta "
-                     f"presunutá do Koša ({_labels(items)})")
+                     f"{'presunutá' if applied else 'by išla'} do Koša ({_labels(items)})")
     for r in plan.resets:
         lines.append(f"kód {escape(r['gtin'])} ({sp.BY_NAME[r['scope']].label}) bol predtým iný "
                      f"výrobok, teraz karta CODEX {escape(r['codex_card'])} — staré údaje "
-                     f"({escape(', '.join(r['after']))}) vyčistené")
+                     f"({escape(', '.join(r['after']))}) "
+                     f"{'vyčistené' if applied else 'by sa vyčistili'}")
     for r in plan.renames:
         lines.append(f"názov podľa CODEXu ({sp.BY_NAME[r['scope']].label}) "
                      f"{escape(r['gtin'])}: „{escape(r['old'])}“ → „{escape(r['new'])}“")
@@ -326,7 +331,8 @@ def _alert(conn, cfg, plan: sp.Plan, mode: str, run_id: int, known: set[tuple],
                 f"a codex-cards-push na dev2. Ak je to zámer (hromadná zmena v CODEXe), zvýš v "
                 f"nastaveniach add-onu codex_sync_max_code_changes / codex_sync_max_renames — "
                 f"zmeny sa použijú pri ďalšom zozname kariet.")
-        dl_alerts.enqueue(conn, channel, ALERT_KIND, _html(head, _change_lines(plan)),
+        dl_alerts.enqueue(conn, channel, ALERT_KIND,
+                          _html(head, _change_lines(plan, applied=False)),
                           message_id=key)
         return
     lines = _change_lines(plan) + _review_lines(_fresh_review(plan.review, known))
