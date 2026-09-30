@@ -88,20 +88,24 @@ def _retire(conn, scope: sp.Scope, gtin: str, note: str) -> None:
                         note=note)
 
 
-def _rewrite_memory(conn, table: str, old: list[str], new: str, note: str) -> tuple[int, int]:
-    """Every live mapping row of `old` → `new`, one audit row each. When the same mapping
-    already exists under `new` (the tables are UNIQUE on it, soft-deleted rows included) the
-    old row is soft-deleted instead — and a soft-deleted twin under `new` is revived, so the
-    live mapping survives (an X → Y → X round trip loses nothing). A row is never its own
-    duplicate: `new` itself is never a source (review 8 🔴 — a move X → X soft-deleted every
-    row of the card). Returns (rows moved, rows merged into an existing mapping)."""
+def _rewrite_memory(conn, table: str, old: list[str], new: str, note: str,
+                    hold: str | None = None) -> tuple[int, int]:
+    """Every live mapping row of `old` → `new`, one audit row each — except, with `hold`, the
+    rows decided after it (`codex_sync_plan.held_clause`: CODEX gave the code to another card
+    then — they stay for a human, review 10 🟡). When the same mapping already exists under
+    `new` (the tables are UNIQUE on it, soft-deleted rows included) the old row is soft-deleted
+    instead — and a soft-deleted twin under `new` is revived, so the live mapping survives (an
+    X → Y → X round trip loses nothing). A row is never its own duplicate: `new` itself is
+    never a source (review 8 🔴 — a move X → X soft-deleted every row of the card). Returns
+    (rows moved, rows merged into an existing mapping)."""
     audit = _audit()
     keys = sp.MEMORY_KEYS[table]
     cols = ", ".join(("id", "gtin") + keys)
     sources = [g for g in old if g != new]
+    held = f" AND NOT {sp.held_clause(table)}" if hold else ""
     rows = conn.execute(
-        f"SELECT {cols} FROM {table} WHERE gtin = ANY(%s) AND deleted_at IS NULL ORDER BY id",
-        (sources,)).fetchall()
+        f"SELECT {cols} FROM {table} WHERE gtin = ANY(%(old)s) AND deleted_at IS NULL{held} "
+        "ORDER BY id", {"old": sources, "hold": hold}).fetchall()
     clash_sql = (f"SELECT id, deleted_at IS NOT NULL FROM {table} WHERE gtin = %s AND id <> %s "
                  "AND " + " AND ".join(f"{k} = %s" for k in keys) + " LIMIT 1") if keys else None
     moved = merged = 0
@@ -162,7 +166,8 @@ def _apply_renumber(conn, r: dict) -> None:
         _bind(conn, scope.name, r["to"], r["codex_card"], active=True)
     # the report + ops message say what really happened, never the plan's estimate: rows
     # touched (`memory`) and, of those, merged into a mapping already under the new code
-    moved = {t: _rewrite_memory(conn, t, r["old_gtins"], r["to"], note) for t in scope.memory}
+    moved = {t: _rewrite_memory(conn, t, r["old_gtins"], r["to"], note, hold=r.get("hold"))
+             for t in scope.memory}
     r["memory"] = {t: m + d for t, (m, d) in moved.items()}
     r["merged"] = {t: d for t, (_m, d) in moved.items()}
 
@@ -190,8 +195,8 @@ def _apply(conn, plan: sp.Plan) -> None:
                     r["card"].get("name", ""))
         _audit().record(conn, actor=ACTOR, table=scope.table, row_id=r["gtin"],
                         action="update", before=r["before"], after=r["after"],
-                        note=(f"kód {r['code']} bol predtým iný výrobok — vybraný znova ako "
-                              f"karta CODEX {r['codex_card']}, staré údaje vyčistené (#478)"))
+                        note=(f"kód {r['code']} bol predtým iný výrobok — teraz karta CODEX "
+                              f"{r['codex_card']}, staré údaje vyčistené (#478)"))
     for r in plan.renumbers:
         _apply_renumber(conn, r)
     for r in plan.removals:
