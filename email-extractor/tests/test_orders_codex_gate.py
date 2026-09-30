@@ -391,6 +391,21 @@ def test_the_net_question_is_announced_when_nothing_is_left_to_ship(pg, env):
     assert "&#10067; 2" in rec.posts[-1]
 
 
+def test_the_net_question_is_announced_when_the_upload_fails(pg, env):
+    """Review 3 🔵: the upload-failed exit must announce the net's question too — the retry
+    finds it already open (no `on_new`), so this error post is the only announcement."""
+    rec = Recorder()
+    _held_on_torta(pg, env, rec)
+
+    def down(cfg, name, content):
+        raise OSError("ORION unreachable")
+
+    released = hold.release_due(pg, _cfg(), upload=down, post=rec.post, today="2026-08-05")
+    assert [r["status"] for r in released] == ["error"]
+    assert "rožok 50g" in {q["wording"] for q in teach.open_questions(pg)}
+    assert "&#10067; 1" in rec.posts[-1]
+
+
 def test_any_item_question_offers_only_cards_codex_has(pg, env):
     """Review 🟡4 (M1): an ordinary unmatched line's candidates are filtered too — a dead card
     is never a button, whatever the question's reason."""
