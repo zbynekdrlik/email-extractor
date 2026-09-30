@@ -367,17 +367,24 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   A Kôš `restore` row is never a new card (round 4 🟡). Three places deciding identity with
   different rules was the root of rounds 3-5 — never add a fourth, extend `_known`.
   A binding that REPLACES another card's on a PICK is stored only by an APPLIED run, so a pick
-  seen during a dry-run / blocked run still gets its reset later; a rebind on DURABLE evidence
-  (a recreated card carrying our code under our name — also a restored retired number a human
-  renamed to it, as the review advises; checked BEFORE the dispute below, round 8) is stored in
-  every mode. The memory path asks `_known` too: a retired number picked as another product
-  keeps its rows. A pick whose CODEX product differs from the one the data was taught for
-  (`Codex.same_product`: the old card's name while it carried the code —
-  `codex_card_history.name` — vs the picked card's; never OUR current name, a human rename
-  before delete + pick would hide it — round 7) → `resets`: alias / doplnok / mass / cena
-  cleared, sklad := the picked card's (the pick restored the Kôš card "as it was"); a re-pick of
-  the SAME product under a second CODEX card keeps its data. Resets are applied before
-  renumbers and a renumber in the same plan carries the reset card.
+  seen during a dry-run / blocked run still gets its reset later. Bindings are seeded for the
+  whole group — a legacy „0"+code twin left alone later still follows its card (round 9). The
+  memory path asks `_known` too: a retired number picked as another product keeps its rows. A
+  pick whose CODEX product differs from the one the data was taught for (`Codex.same_product`:
+  the old card's name while it carried the code — `codex_card_history.name` — vs the picked
+  card's; never OUR current name, a human rename before delete + pick would hide it — round 7)
+  → `resets`: alias / doplnok / mass / cena cleared, sklad := the picked card's (the pick
+  restored the Kôš card "as it was"); a re-pick of the SAME product under a second CODEX card
+  keeps its data. Resets are applied before renumbers and a renumber in the same plan carries
+  the reset card.
+- **Rename rebind** (our CODEX card left for good AND exactly one card carries our code under
+  OUR name — recreated in CODEX, or a number a human renamed to it as review A asks; checked
+  BEFORE the contest rule, round 8): the SAME product (`same_product`) keeps its data and the
+  binding is durable (every mode, round 6); ANOTHER product is a pick in all but name —
+  `_reset_from` (reset + every row of the number to a human), stored by an applied run only
+  (round 9 🟡: it kept the old product's alias / doplnok, also when it silently resolved a
+  pending contest). A genuinely recreated product under a NEW name loses its curated data too
+  (restorable from the Kôš) — the list cannot tell it from a reuse, and review A says so.
 - **Plan mechanics**: the sync holds `LOCK TABLE codex_stock_cards IN SHARE MODE` (a concurrent
   push waits). A merge target that is another CODEX card → review; a merge FILLS the target's
   blank alias / doplnok / mass / sklad / cena from our card. Numbers a plan retires go to the
@@ -386,22 +393,27 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   koláč vanished; the executor also undeletes before any create. The "previous snapshot"
   (two-snapshot removal, seed rule) comes from `codex_sync_runs` that actually synced — a
   failed/skipped sync never counts.
-- **What the sync cannot tell goes to a human, never a guess (rounds 7-8 — rounds 6-7 each
-  broke a guess)**: (1) a retired number a human RENAMED after the retire (`_disputed`: its name
-  — live after a Kôš undo, or its Kôš copy — differs from `codex_card_bindings.retired_name`,
-  the name the sync stored when it retired it; typically the Produkty drift button „Prevziať
-  názov z CODEXu" offered the name of whoever carries the code NOW, as if cosmetic) → review
-  with the way out per case: rename back to the stored name (merged into the old card while it
-  lives in CODEX), rename to the ONE recreated card (rebind), or delete + pick at a question
-  (reset); a code no card carries says so. Never re-bound by the name (round 6's
-  `_renamed_to` kept the old product's alias/doplnok and merged the card into the old one when
-  the new holder moved on first), no memory move from its Kôš copy, no renumber onto it.
-  Keyed on the RETIRE-time name, never today's CODEX name: a plain Kôš undo of a card whose
-  name had drifted is no rename (round 8). (2) Mapping rows OLDER than a re-pick
-  (`_repicked_review`) → review with the count and where they are after this plan — never
-  moved: `created_at` cannot tell whose a row is (a Naučené edit / `dl_memory.remember` revive
-  re-points a row and keeps it), and a same-push renumber already carried them with the card.
-  One review entry per card keeps every reason in `reasons`; the ops alert dedups PER reason.
+- **What the sync cannot tell goes to a human, never a guess (rounds 7-9 — each earlier round
+  broke a guess)**: (1) `_ScopePlanner._contested` is THE rule, checked wherever the sync would
+  mutate a number (identify, a renumber onto it — live or its Kôš copy, a memory move from a Kôš
+  copy). Our name vs our CODEX card C: it IS C's product (C's current rows or its history
+  name — also C's NEW CODEX name) → fine; it names ANOTHER card carrying the code now → contested
+  (the #467 drift button „Prevziať názov z CODEXu" offers exactly that reusing card's name, as if
+  cosmetic — it is TRUE for CODEX imports, so the button stays, but renumbering such a number
+  into C moved the other product's wordings onto C, round 9 🟡, also for an ACTIVE binding in
+  the dry-run window); a number the sync RETIRED renamed since (≠ `codex_card_bindings.
+  retired_name`, the name the sync stored when it retired it; so a plain Kôš undo of a card whose
+  name had drifted is no rename, round 8) → contested. Never contested: a blank Kôš marker, a
+  pick, C missing from ONE snapshot. A contested number → review with the way out per case
+  (rename back = rejoins C while C lives; delete + pick at a question = reset; a code no card
+  carries says so); never re-bound by the name alone (round 6's `_renamed_to`), no memory move
+  from it, no renumber onto it. (2) Mapping rows OLDER than a re-pick, or ALL rows of a number
+  a rename rebind turned into another product (`_repicked_review`) → review with the count and
+  where they are after this plan — never moved: `created_at` cannot tell whose a row is (a
+  Naučené edit / `dl_memory.remember` revive re-points a row and keeps it), and a same-push
+  renumber already carried them with the card. One review entry per card keeps every reason in
+  `reasons`; the ops alert dedups PER reason. A renumber carries only OUR group's numbers and a
+  memory move only the rows that qualified themselves (no `| code` union — round 9).
 - **What is decided, per catalog, per CODEX code our cards carry** (cards grouped per
   `normalize_code`, the canonical ≤13-char number supplies the data, `codex_cards.index_by_code`),
   with our card bound to card C: C still carries X → rename to C's stredisko-1 name when ours
@@ -426,7 +438,8 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   live mapping rows except where the same mapping lives on under the new number; the report's
   `merged` + the ops message's „N presunutých, M zlúčených" tell the two apart.
 - **Ops alerts**: one per applied run with changes (+ review items not in the previous applied
-  run), one per distinct blocked plan, one per failing-sync episode — all `reminder_suppressed`
+  run), one per distinct blocked plan (worded as what WOULD change — `_change_lines(applied=
+  False)`, round 9), one per failing-sync episode — all `reminder_suppressed`
   where they could repeat. The message says honestly that a Kôš undo is redone by the next list
   while CODEX stays the same (only a CODEX fix or `codex_sync_apply=false` stops it).
 - **Every write is Kôš-restorable**: renames/memory rewrites = `update` (before/after), new
