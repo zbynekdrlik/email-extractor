@@ -774,7 +774,9 @@ def test_board_dl_item_question_picks_a_card_from_codex_in_the_browser(live_serv
     card.locator('button:has-text("Vybrať kartu z CODEXu")').click()
     picker = card.locator(".q-codex-picker")
     picker.wait_for()
-    assert "stav k" in picker.locator(".q-codex-status").inner_text()
+    # the freshness line arrives with the picker's first (async) list fetch
+    page.wait_for_function("el => el.textContent.includes('stav k')",
+                           arg=picker.locator(".q-codex-status").element_handle())
     picker.locator(".q-codex-search").fill("slaninou")
     choice = picker.locator('.q-codex-choice[data-code="9990000000017"]')
     choice.wait_for()
@@ -783,6 +785,9 @@ def test_board_dl_item_question_picks_a_card_from_codex_in_the_browser(live_serv
     assert _wait_answered(pg, page, q_have)[:2] == ("answered", "9990000000017")
     assert pg.execute("SELECT name FROM dl_catalog_overrides WHERE gtin='9990000000017'"
                       ).fetchone()[0] == "Bagetka s kečupom a syrom 80 gr"
+    # the answer's own list reload rebuilds every card — wait for it (the answered card
+    # leaves the open list) before opening the next card's picker, or the rebuild wipes it
+    page.wait_for_selector(f"#q-card-{q_have}", state="detached")
 
     # a CODEX card we do not have yet → added (CODEX code + name + sklad) and answered
     card = page.locator(f"#q-card-{q_new}")
@@ -795,6 +800,7 @@ def test_board_dl_item_question_picks_a_card_from_codex_in_the_browser(live_serv
     assert "sklad 100" in choice.inner_text()
     choice.locator(".q-codex-pick").click()
     assert _wait_answered(pg, page, q_new)[:2] == ("answered", "9990000000093")
+    page.wait_for_selector(f"#q-card-{q_new}", state="detached")
     assert pg.execute("SELECT name, sklad FROM dl_catalog_overrides WHERE gtin=%s",
                       ("9990000000093",)).fetchone() == ("Mak modrý mletý e2e", "100")
     assert pg.execute("SELECT actor, action FROM audit_log WHERE table_name="
