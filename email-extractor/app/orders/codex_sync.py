@@ -162,14 +162,8 @@ def _bind(conn, scope: str, gtin: str, card: str, *, active: bool) -> None:
 
 
 def _apply(conn, plan: sp.Plan) -> None:
-    for r in plan.renumbers:
-        _apply_renumber(conn, r)
-    for r in plan.removals:
-        for gtin in r["gtins"]:
-            _retire(conn, sp.BY_NAME[r["scope"]], gtin,
-                    f"kód {r['code']} (karta CODEX {r['codex_card']}) z CODEXu zmizol bez "
-                    f"náhrady (#478)")
-            _bind(conn, r["scope"], gtin, r["codex_card"], active=False)
+    # resets FIRST: a card the same plan then renumbers is retired AFTER its reset, so the
+    # retire leaves `retired` and `deleted_at` set together (#442) — review 5 🟡
     for r in plan.resets:
         scope = sp.BY_NAME[r["scope"]]
         _write_card(conn, scope, r["gtin"], dict(r["card"], **r["after"]),
@@ -178,6 +172,14 @@ def _apply(conn, plan: sp.Plan) -> None:
                         action="update", before=r["before"], after=r["after"],
                         note=(f"kód {r['code']} bol predtým iný výrobok — vybraný znova ako "
                               f"karta CODEX {r['codex_card']}, staré údaje vyčistené (#478)"))
+    for r in plan.renumbers:
+        _apply_renumber(conn, r)
+    for r in plan.removals:
+        for gtin in r["gtins"]:
+            _retire(conn, sp.BY_NAME[r["scope"]], gtin,
+                    f"kód {r['code']} (karta CODEX {r['codex_card']}) z CODEXu zmizol bez "
+                    f"náhrady (#478)")
+            _bind(conn, r["scope"], gtin, r["codex_card"], active=False)
     for r in plan.renames:
         scope = sp.BY_NAME[r["scope"]]
         if scope.name == "orders":
@@ -247,7 +249,9 @@ def _html(head: str, lines: list[str]) -> str:
     return (f"<p>{head}</p><ul>" + "".join(f"<li>{line}</li>" for line in shown)
             + "</ul><p>Každá zmena je v nástenke → Kôš. Pozor: kým CODEX ostane rovnaký, "
               "ďalší zoznam kariet ju urobí znova — natrvalo ju zmení len oprava v CODEXe "
-              "(alebo vypnutie codex_sync_apply v nastaveniach add-onu).</p>")
+              "(alebo vypnutie codex_sync_apply v nastaveniach add-onu). Prečíslovanie sú DVE "
+              "zmeny (nový kód vytvorený + starý zmazaný) — vracaj vždy obe, inak karta v "
+              "katalógu chýba.</p>")
 
 
 def _review_key(r: dict) -> tuple:
@@ -350,17 +354,20 @@ def run(conn, cfg, now: datetime | None = None) -> dict:
     """Sync our catalogs + memories to the CURRENT CODEX list (after an accepted push). Returns
     {mode: apply|dry-run|blocked|skipped, run_id, renamed, renumbered, memory_renumbered,
     removed, review, codes, would_block}."""
-    cards = codex_cards.live_guard(conn, now)
-    sync = codex_cards.latest_sync(conn)
-    if cards is None or sync is None:
-        log.warning("CODEX card sync skipped: the CODEX stock-card list is stale or missing — "
-                    "nothing is renamed, renumbered or removed (#478)")
-        return _summary("skipped", _record(conn, sync, "skipped", {"reason": "stale"}),
-                        sp.Plan())
-    as_of = codex_cards._data_as_of(sync)
     limits = _limits(cfg)
     with conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (_LOCK_KEY,))
+        # the list must not change under the sync: SHARE conflicts with the push's EXCLUSIVE
+        # replace (`codex_cards.replace_cards`), plain readers are never blocked (review 5)
+        conn.execute("LOCK TABLE codex_stock_cards IN SHARE MODE")
+        cards = codex_cards.live_guard(conn, now)
+        sync = codex_cards.latest_sync(conn)
+        if cards is None or sync is None:
+            log.warning("CODEX card sync skipped: the CODEX stock-card list is stale or missing"
+                        " — nothing is renamed, renumbered or removed (#478)")
+            return _summary("skipped", _record(conn, sync, "skipped", {"reason": "stale"}),
+                            sp.Plan())
+        as_of = codex_cards._data_as_of(sync)
         newest = sp.newest_seen(conn)
         if newest is not None and as_of < newest:
             # an OLDER CODEX snapshot than one already synced (a re-sent old list) must never
@@ -371,8 +378,6 @@ def run(conn, cfg, now: datetime | None = None) -> dict:
                             sp.Plan())
         sp.update_history(conn, as_of)
         plan = sp.build_plan(conn, sp.load(conn, cards, as_of))
-        for s in plan.seeds:   # identity (which CODEX card our card is): stored in every mode
-            _bind(conn, s["scope"], s["gtin"], s["card"], active=True)
         too_many = plan.code_changes() > limits[0] or len(plan.renames) > limits[1]
         if not getattr(cfg, "codex_sync_apply", False):
             mode = "dry-run"
@@ -383,6 +388,12 @@ def run(conn, cfg, now: datetime | None = None) -> dict:
             mode = "blocked"
         else:
             mode = "apply"
+        for s in plan.seeds:
+            # identity (which CODEX card our card is) is stored in every mode — except a
+            # binding that REPLACES another card's: only an applied run stores it, so a pick
+            # seen during a dry-run / blocked run still gets its reset when the apply comes
+            if mode == "apply" or not s["replaces"]:
+                _bind(conn, s["scope"], s["gtin"], s["card"], active=True)
         known = _last_applied_review(conn)
         if mode == "apply":
             _apply(conn, plan)

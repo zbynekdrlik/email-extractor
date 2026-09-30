@@ -161,7 +161,15 @@ class Binding:
 @dataclass(frozen=True)
 class Event:
     at: datetime
-    card: str | None     # the CODEX card a #477 pick named; None for a Kôš restore
+    card: str | None     # the CODEX card a #477 pick named; None for a legacy creation
+
+
+@dataclass(frozen=True)
+class Known:
+    """What `_ScopePlanner._known` decided about one number of ours."""
+    card: str | None           # the CODEX card it is, None = unknown
+    picked: bool               # decided by a human #477 pick newer than the binding
+    old: Binding | None        # the stored binding (may be retired / superseded)
 
 
 def _named(name: str, rows: list[Row]) -> bool:
@@ -318,57 +326,55 @@ class _ScopePlanner:
         self._memory(set(groups))
         self._renames()
 
-    def _card_of(self, gtin: str) -> str | None:
-        """The CODEX card a card of ours (live or in the Kôš) is known to be: its live binding,
-        else the card a newer human #477 pick named (None for a Kôš restore — unknown), else
-        the card it was last bound to (a number the sync retired)."""
-        b = self._binding(gtin)
-        if b is not None:
-            return b.card
-        ev = self.cx.events.get((self.scope.table, gtin))
-        old = self.cx.bindings.get((self.scope.name, gtin))
-        if ev is not None and (old is None or ev.at > old.bound_at):
-            return ev.card
-        return old.card if old else None
-
-    def _binding(self, gtin: str) -> Binding | None:
-        """The binding that still IS our live card's identity: active, and not older than a
-        human (re)entry of the card (a #477 pick / Kôš restore makes it a new card — review 3
-        🔴: a stale binding moved a re-picked pagáč's memory onto the rožok)."""
+    def _known(self, gtin: str) -> Known:
+        """THE identity rule — the one place that decides which CODEX card a number of ours
+        (live or in the Kôš) is known to be: a human #477 pick newer than its binding names it
+        exactly (a pick is a NEW card — review 3 🔴); else its binding, active OR retired (a
+        Kôš „Vrátiť" of a number the sync retired is still that CODEX card — review 5 🟡: taking
+        it for whoever carries the code now re-bound our rožok to the pagáč); a legacy creation
+        without a named card newer than the binding = unknown (identify it from the list)."""
         b = self.cx.bindings.get((self.scope.name, gtin))
         ev = self.cx.events.get((self.scope.table, gtin))
-        if b is None or not b.active or (ev is not None and ev.at > b.bound_at):
-            return None
-        return b
+        if ev is not None and (b is None or ev.at > b.bound_at):
+            return Known(ev.card, picked=ev.card is not None, old=b)
+        return Known(b.card if b else None, picked=False, old=b)
 
-    def _seed(self, gtin: str, card: str) -> None:
-        self.plan.seeds.append({"scope": self.scope.name, "gtin": gtin, "card": card})
+    def _card_of(self, gtin: str) -> str | None:
+        return self._known(gtin).card
+
+    def _seed(self, gtin: str, card: str, *, replaces: bool = False) -> None:
+        """A binding found this run. `replaces` = it overwrites an existing binding with another
+        card: stored only by an APPLIED run, so a pick seen during a dry-run / blocked run still
+        triggers its reset when the apply finally comes (review 5 🟡)."""
+        self.plan.seeds.append({"scope": self.scope.name, "gtin": gtin, "card": card,
+                                "replaces": replaces})
 
     def _identify(self, code: str, item: dict) -> str | None:
-        """The CODEX card our card with `code` IS: its binding; else (bound now) the card a
-        human #477 pick named, the code's only stredisko-1 carrier when no other card carried
-        it in the previous snapshot (one push is no proof — an export glitch), the one our name
-        picks among several, or the history's last carrier when the code is gone already.
-        None = cannot tell yet (a human decides when it matters)."""
+        """The CODEX card our card with `code` IS (`_known`); a card not known yet is bound now
+        to the code's only stredisko-1 carrier when no other card carried it in the previous
+        snapshot (one push is no proof — an export glitch), the one our name picks among
+        several, or the history's last carrier when the code is gone already. A card whose
+        CODEX card left for good while exactly one card carries our code under OUR name is
+        re-bound to it (recreated in CODEX). None = cannot tell yet (a human decides)."""
         cx, name, gtin = self.cx, item["name"], item["gtin"]
-        b = self._binding(gtin)
-        if b is not None:
-            others = cx.carriers(code) - {b.card}
-            if (cx.gone_twice(b.card) and len(others) == 1
+        known = self._known(gtin)
+        if known.card is not None:
+            if known.picked:
+                old = known.old
+                replaces = old is not None and old.card != known.card
+                self._seed(gtin, known.card, replaces=replaces)
+                if replaces and not _named(name, cx.rows(known.card, code)):
+                    # our number used to be ANOTHER product: the pick restored its old Kôš
+                    # card „as it was" — its curated data belongs to that product (review 4)
+                    item["reset_from"] = old.card if old else None
+                return known.card
+            others = cx.carriers(code) - {known.card}
+            if (cx.gone_twice(known.card) and len(others) == 1
                     and _named(name, cx.rows(next(iter(others)), code))):
                 card = others.pop()            # our card was recreated in CODEX: same name
-                self._seed(gtin, card)
+                self._seed(gtin, card, replaces=True)
                 return card
-            return b.card
-        ev = cx.events.get((self.scope.table, gtin))
-        old = cx.bindings.get((self.scope.name, gtin))
-        if ev is not None and ev.card and (old is None or ev.at > old.bound_at):
-            self._seed(gtin, ev.card)          # the human picked exactly this CODEX card
-            if old is not None and old.card != ev.card:
-                # our number used to be ANOTHER product: the pick restored its old Kôš card
-                # „as it was" — its curated data belongs to that product (review 4 🟡)
-                item["reset_from"] = old.card
-            return ev.card
+            return known.card
         carriers = cx.carriers(code)
         if len(carriers) > 1:
             named = [c for c in carriers if _named(name, cx.rows(c, code))]
@@ -407,6 +413,9 @@ class _ScopePlanner:
         item["codex_card"] = card
         if item.pop("reset_from", None) is not None:
             self._reset(item, self.live[item["gtin"]])
+            # a renumber / fill later in this plan carries the RESET data, never the old
+            # product's (review 5 🟡)
+            group = [self.live[item["gtin"]], *group[1:]]
         if cx.rows(card, code):              # our CODEX card still carries our code
             for g in gtins:
                 self.identity[g] = (card, code)
