@@ -245,7 +245,8 @@ def seed_taught(conn, entries: list[dict]) -> int:
 
     Each entry: `{"scope": "customer", "customer_ean": ..., "wording": ..., "gtin": ...,
     "card": ...}` or `{"scope": "global", "wording": ..., "gtin": ..., "card": ...}`.
-    Returns the number of mappings actually stored (new ones only).
+    Returns the number of mappings actually stored (new ones, plus — since #479 — a same-day
+    re-run's human rows, which `remember` refreshes instead of skipping).
     """
     stored = 0
     for e in entries:

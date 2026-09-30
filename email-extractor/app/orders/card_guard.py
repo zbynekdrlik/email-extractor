@@ -53,6 +53,8 @@ TEACH_CARD_ONLY = ("Doučiť sa dá len na existujúcu kartu z katalógu — vyb
                    "CODEXu“).")
 # #479: an orders line whose card code CODEX has no stock card for — no card, asked + held
 CODEX_MISSING = "codex_missing"
+# #160: at most this many card buttons on an orders question (`match.plausible_candidates`)
+QUESTION_BUTTONS = 6
 PICK_LIMIT = 30
 # scope -> the CODEX sklady a pick may come from (None = every sklad of the pick stredisko),
 # the longest code the scope's EDI can carry (None = no limit), the catalog override table, and
@@ -342,11 +344,12 @@ def order_question_candidates(item_name: str, item_cands: list[dict], catalog: l
     not in our catalog yet). `codex` None = unchanged."""
     if codex is None:
         return match.plausible_candidates(
-            match.candidates_for_question(item_cands, catalog, decision))
+            match.candidates_for_question(item_cands, catalog, decision), QUESTION_BUTTONS)
     valid = [c for c in catalog if codex.has(c.get("gtin"))]
     if decision.rule == CODEX_MISSING:
         return [c for c in match.candidates(item_name, valid, customer_name=customer_name,
                                              memory_gtin=memory_gtin)
-                if float(c.get("score", 0) or 0) >= match.PLAUSIBLE_CANDIDATE_SCORE]
+                if float(c.get("score", 0) or 0) >= match.PLAUSIBLE_CANDIDATE_SCORE
+                ][:QUESTION_BUTTONS]
     return match.plausible_candidates(match.candidates_for_question(
-        [c for c in item_cands if codex.has(c.get("gtin"))], valid, decision))
+        [c for c in item_cands if codex.has(c.get("gtin"))], valid, decision), QUESTION_BUTTONS)

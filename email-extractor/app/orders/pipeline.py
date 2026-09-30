@@ -829,7 +829,7 @@ def _ship_one(conn, cfg, message, order, matched, decisions, extracted, shadow,
     if result.get("reject_reason"):
         _finish(conn, cfg, message, shadow, post, status="review",
                 items=result["items"], result=result, post_now=post_now, reason=reason,
-                question_ids=question_ids)
+                question_ids=question_ids, new_questions=len(net_new))
         return "review", {}, result["reject_reason"]
 
     built = edi.build(ean=matched.ean_edi, store=matched.name, orderNumber=order_no,
