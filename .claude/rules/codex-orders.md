@@ -279,15 +279,21 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   or the history's last carrier when the code is already gone), stored in every mode (identity,
   not catalog data), and from then on the sync follows THAT card. Any future "same code, other
   card/name" logic must go through the binding, never re-derive ownership from the list.
-- **Binding lifecycle (round-3 🔴)**: a binding is identity only while ACTIVE and not older than
-  a HUMAN (re)entry of the card — the newest non-sync audit `create`/`restore` on the override
-  table (`codex_sync_plan._events`). A #477 pick's audit `after.codex_card` binds the card to
-  exactly the picked CODEX card; a Kôš restore / a retired number brought back is re-identified.
-  Without this a stale binding dragged a re-picked pagáč (same old number) and its memory onto
-  the rožok. A merge target that is another CODEX card → review; a merge FILLS the target's
-  blank alias / doplnok / mass / sklad / cena from our card (a fresh pick carries only the name).
-  The "previous snapshot" (two-snapshot removal, seed rule) comes from `codex_sync_runs` that
-  actually synced — a failed/skipped sync never counts.
+- **Binding lifecycle (rounds 3-4)**: a binding is identity only while ACTIVE and not older than
+  a HUMAN creation of the card — the newest non-sync audit `create` on the override table
+  (`codex_sync_plan._events`; a #477 pick, incl. one restoring a Kôš card, writes `create` with
+  `after.codex_card` = the picked ACSKLP, which binds exactly). A Kôš „Vrátiť" (`restore`) is NOT
+  a new card — round 4 🟡: counting it reset a valid binding and re-bound our rožok to the pagáč
+  that reused its code; a retired number brought back is re-identified via its inactive binding.
+  A pick of a number that used to be ANOTHER product (inactive binding on a different card) →
+  `resets`: the old product's alias / doplnok / mass / cena cleared, sklad := the picked card's
+  (the pick restored the Kôš card "as it was"). A merge target that is another CODEX card →
+  review; a merge FILLS the target's blank alias / doplnok / mass / sklad / cena from our card.
+  Numbers a plan retires go to the simulated Kôš (`_vacate`) so a chain in ONE push (024 → NEW
+  while another card takes 024) never re-creates onto the row being retired — round 4 🔴: the
+  upsert kept `deleted_at` and the koláč vanished; the executor also undeletes before any
+  create. The "previous snapshot" (two-snapshot removal, seed rule) comes from
+  `codex_sync_runs` that actually synced — a failed/skipped sync never counts.
 - **What is decided, per catalog, per CODEX code our cards carry** (cards grouped per
   `normalize_code`, the canonical ≤13-char number supplies the data, `codex_cards.index_by_code`),
   with our card bound to card C: C still carries X → rename to C's stredisko-1 name when ours
