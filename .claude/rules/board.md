@@ -456,7 +456,7 @@ Ktorá správa kam vedie (rozhoduje KANÁL PRÍJEMCU, nie druh správy):
 | orders súhrn BEZ otázky (review / error / unverified) | 152 | `report.history_link(cfg, mid)` → História objednávok s detailom („Treba doriešiť na nástenke") |
 | DL review s otázkou (neznámy dodávateľ, držané položky / hmotnosť / CODEX kód) | 243 | `report.dl_sklad_link` → Otázky sklad |
 | DL review BEZ otázky (vek, prázdny / bez prílohy, oprava, nečitateľná príloha, nič nerozpoznané, needsReview, dátumová brána, chyba párovania dodávateľa, nedá sa EDI bez otázky) | 243 | `report.dl_history_link(cfg, mid)` → História dodacích listov s detailom |
-| grouped `dl_upload_failed` | 243 | DL história — 1 mail = jeho detail, viac = záložka |
+| grouped `dl_upload_failed` | 243 | DL história — 1 mail = jeho detail (len ak ho História ukáže; invoice-as-DL → záložka), viac = záložka |
 | grouped `scanner_not_dl` | 243 | ŽIADNY odkaz (sken nie je DL, v Histórii nie je; akcia = naskenovať znova) |
 | grouped ops druhy (`human_processing_review`, `mail_no_attachment`, `dl_stuck_classified`) | 592 ops | `report.dashboard_link` → admin dashboard (operátor) |
 | `static_worker` foto-poznámka (`photo_order_message`) | — (len `order_runs.result`) | admin dashboard (operátorská poznámka, nikdy sa neposiela skladu) |

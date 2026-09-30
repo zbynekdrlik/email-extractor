@@ -125,12 +125,15 @@ GROUPED_ITEM_KINDS = {
 # History tab of its documents (`board.links` kind), never the password-gated admin
 # dashboard; a kind absent here gets no link on a warehouse channel (`_action_line`). The ops
 # channel keeps the admin dashboard for every kind. Today's warehouse-channel kinds:
-# `dl_upload_failed` (delivery_notes 243 — a DL mail, in História dodacích listov) and
-# `scanner_not_dl` (243 — a non-DL scan, deliberately absent). `human_processing_review`,
+# `dl_upload_failed` (delivery_notes 243 — usually a DL mail, listed in História dodacích
+# listov; an invoice-as-DL mail is NOT, so `_deep_link_mail` deep-links only a listed one)
+# and `scanner_not_dl` (243 — a non-DL scan, deliberately absent). `human_processing_review`,
 # `mail_no_attachment` and `dl_stuck_classified` route to ops (#310).
 WAREHOUSE_HISTORY_KINDS = {
     "dl_upload_failed": "dl_history",
 }
+# board.links history kind -> the `board.services.history` scope whose tab lists the mail.
+_HISTORY_SCOPE = {"orders_history": "orders", "dl_history": "dl"}
 
 # #239 finding 1 (reopened): production calls flush_pending() on almost every worker
 # tick — this is the window a burst of same-kind alerts is given to accumulate before
@@ -232,6 +235,20 @@ def already_pending(conn, kind: str, message_id: str,
         "LIMIT 1",
         (kind, message_id, max(1, int(window_hours)))).fetchone()
     return row is not None
+
+
+def _deep_link_mail(conn, kind: str, message_ids: list[str]) -> list[str]:
+    """#473 (review round 2): the group's mail ids `_action_line` may deep-link — unchanged
+    unless the group is exactly ONE mail that its History tab does NOT list (an invoice-as-
+    DL `dl_upload_failed`, `category='invoices'`): then `[]`, so the link is the tab itself,
+    never a `?q=` deep link the detail route would 404. Reuses the detail route's own guard
+    (`board.services.history.is_history_document`); no DB read for any other kind/group."""
+    board_kind = WAREHOUSE_HISTORY_KINDS.get(kind)
+    mids = sorted({m for m in message_ids if m})
+    if not board_kind or len(mids) != 1:
+        return mids
+    from ..board.services.history import is_history_document
+    return mids if is_history_document(conn, mids[0], _HISTORY_SCOPE[board_kind]) else []
 
 
 def _action_line(kind: str, cfg, channel_id: int, message_ids: list[str]) -> str:
@@ -383,7 +400,8 @@ def flush_pending(conn, cfg, post=None, limit: int = 50,
         # password-free board for a warehouse channel.
         if kind in GROUPED_ITEM_KINDS:
             html = _format_grouped(kind, bodies, cfg, channel_id=target,
-                                   message_ids=[mid for _r, _b, _c, mid in items])
+                                   message_ids=_deep_link_mail(
+                                       conn, kind, [mid for _r, _b, _c, mid in items]))
         else:
             html = "".join(bodies)
         ids = [rid for rid, _body, _created_at, _mid in items]

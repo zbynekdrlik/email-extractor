@@ -167,12 +167,16 @@ channel 243 (`dl_upload_failed`, `scanner_not_dl`, 66 scanner posts in 30 days),
 has the password (after #470 the bare base lands on `/login`). `flush_pending` now passes the
 group's delivery `target` + its rows' `message_id`s, and `_action_line` decides:
 
-- `target == report.ops_channel(cfg)` (or a legacy `channel_id=None` caller) → admin dashboard,
-  unchanged — the owner reclassifies there.
+- `target` provably the ops channel (truthy AND `== report.ops_channel(cfg)`) → admin
+  dashboard, unchanged — the owner reclassifies there. FAIL-CLOSED: anything not provably ops
+  (`None` / `0` with the ops channel unset / a warehouse channel) never gets the admin link;
+  `_format_grouped`'s `channel_id` is a required keyword.
 - any other (warehouse) channel → `WAREHOUSE_HISTORY_KINDS[kind]` board History link
-  (`dl_upload_failed` → `dl_history`: ONE mail → its detail `?q=<mid>`, several → the tab);
-  a kind NOT in that map (`scanner_not_dl`, a non-DL scan never listed in the DL history, action
-  = rescan) gets NO link — never the admin fallback.
+  (`dl_upload_failed` → `dl_history`: ONE mail → its detail `?q=<mid>` ONLY if that tab lists it
+  — `_deep_link_mail` applies the detail route's own `is_history_document` guard, so an
+  invoice-as-DL mail gets the tab, never a 404 deep link; several → the tab); a kind NOT in that
+  map (`scanner_not_dl`, a non-DL scan never listed in the DL history, action = rescan) gets NO
+  link — never the admin fallback.
 
 **To add a warehouse-channel grouped kind:** put it in `GROUPED_ITEM_KINDS` + (if its mail is in
 a História tab) `WAREHOUSE_HISTORY_KINDS`, and call `item_line` at enqueue. Tests:

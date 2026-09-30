@@ -178,10 +178,10 @@ avoid the reject-and-repost loop.
 
 ## `git push` rejected `GH007` / "push declined due to email privacy restrictions" (#473)
 
-This box's shared `.git/config` carries a personal `user.email` that GitHub's email-privacy
+This box's global `~/.gitconfig` carries a personal `user.email` that GitHub's email-privacy
 setting refuses on push — even for the `refs/autopilot-wip/*` durability backup. Commit with
-the owner's noreply identity via env vars (never `git config`, which would rewrite the shared
-config for every worktree/sibling): `GIT_AUTHOR_EMAIL=26905282+zbynekdrlik@users.noreply.github.com
+the owner's noreply identity via env vars (never `git config` — the repo `.git/config` is
+shared by every worktree/sibling, `~/.gitconfig` by every repo): `GIT_AUTHOR_EMAIL=26905282+zbynekdrlik@users.noreply.github.com
 GIT_COMMITTER_EMAIL=26905282+zbynekdrlik@users.noreply.github.com git commit -F <file>`. A
 commit already made with the wrong email (unpushed) → `git reset --soft HEAD~1` + recommit
 with the env vars (sanctioned above; never `--amend`).
