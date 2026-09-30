@@ -1326,6 +1326,173 @@ def test_a_persistent_review_is_alerted_once_even_when_another_reason_came_and_w
     assert len([b for b in bodies if "nesie aj karta" in b]) == 1
 
 
+# --- review 9: ONE contest rule wherever the sync would mutate a number ------------------------
+
+def _drift_click(pg, gtin, name, table="catalog_overrides"):
+    """Produkty „Prevziať názov z CODEXu" + Uložiť — a plain, audited name edit (the #467 drift
+    button offers the name CODEX has for the code NOW, i.e. a reusing card's)."""
+    if table == "catalog_overrides":
+        before = _orders(pg)[gtin]["name"]
+        snapshot.upsert_catalog_card(pg, gtin, name)
+        snapshot.rebuild_from_overrides(pg)
+    else:
+        card = _dl(pg)[gtin]
+        before = card["name"]
+        dl_snapshot.upsert_dl_catalog_card(pg, gtin, name, doplnok=card["doplnok"] or "",
+                                           mass=card["mass"], sklad=card["sklad"] or "",
+                                           cena=card["cena"])
+        dl_snapshot.dl_rebuild_from_overrides(pg)
+    audit.record(pg, actor="sklad", table=table, row_id=gtin, action="update",
+                 before={"name": before}, after={"name": name})
+
+
+def _restore_sync_delete(pg, table, gtin):
+    aid = pg.execute("SELECT id FROM audit_log WHERE actor = 'codex-sync' AND action = 'delete' "
+                     "AND table_name = %s AND row_id = %s ORDER BY id DESC LIMIT 1",
+                     (table, gtin)).fetchone()[0]
+    audit.restore(pg, aid, by="sklad")
+
+
+def test_a_drift_rename_to_the_code_reusers_name_holds_the_renumber_for_a_human(pg):
+    """Review 9 🟡 F1: during the dry-run card 27 moved ROZOK → ROZOK_NEW and the pagáč took
+    ROZOK; the warehouse clicked the drift button (ROZOK „Pagáč") and taught a pagáč wording.
+    Whether our ROZOK is still the rožok or now the pagáč is a human's call — the apply never
+    renumbers it into the rožok (the pagáč wording would move onto the rožok)."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=4.9)
+    codex_sync.run(pg, _cfg(apply=False))
+    _drift_click(pg, ROZOK, "Pagáč syrový 60g")
+    _teach(pg, "C40", "pagac syrovy", ROZOK)
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert _orders(pg)[ROZOK]["name"] == "Pagáč syrový 60g"
+    assert _gtin_of(pg, "C40") == ROZOK
+    assert _binding(pg, ROZOK) == ("27", True)
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "27" in reason and "79" in reason
+
+
+def test_a_rename_rebind_to_another_product_drops_the_old_products_data(pg):
+    """Review 9 🟡 F2: code KOLAC left CODEX with card 55 (removed), then CODEX gave it to a
+    DIFFERENT product (card 155); the warehouse restored KOLAC and clicked the drift button.
+    The recreated-card rebind binds it to 155 — but a different product never keeps the koláč's
+    DL doplnok / mass / cena, and the koláč's wordings go to a human."""
+    _seed_catalogs(pg)
+    dl_snapshot.upsert_dl_catalog_card(pg, KOLAC, "Koláč makový 80g", doplnok="makový koláč",
+                                       mass=0.08, sklad="1", cena=0.31)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    _teach(pg, "C50", "kolac makovy", KOLAC)
+    gone = [r for r in V1 if r["card_code"] != "55"]
+    _push(pg, gone, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    _push(pg, gone, hours_old=4.5)
+    assert codex_sync.run(pg, _cfg())["removed"] == 2
+    back = gone + [_row(KOLAC, "155", "Pizza štangľa 90g")]
+    _push(pg, back, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    _restore_sync_delete(pg, "catalog_overrides", KOLAC)
+    _restore_sync_delete(pg, "dl_catalog_overrides", KOLAC)
+    _drift_click(pg, KOLAC, "Pizza štangľa 90g")
+    _drift_click(pg, KOLAC, "Pizza štangľa 90g", table="dl_catalog_overrides")
+    _push(pg, back, hours_old=3)
+    codex_sync.run(pg, _cfg())
+    card = _dl(pg)[KOLAC]
+    assert (card["doplnok"], card["mass"], card["cena"]) == ("", None, None)
+    assert _binding(pg, KOLAC, "dl") == ("155", True)
+    assert "Naučené" in _review_reason(pg, "orders", KOLAC)
+
+
+def test_a_pending_dispute_resolved_by_the_old_card_leaving_codex_drops_its_data(pg):
+    """Review 9 🟡 F2: a pending dispute (restored ROZOK drift-renamed to the pagáč while card 27
+    lived), then card 27 leaves CODEX for good — the rebind to the pagáč never keeps the
+    rožok's alias."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=4.9)
+    codex_sync.run(pg, _cfg())
+    _restore_sync_delete(pg, "catalog_overrides", ROZOK)
+    _drift_click(pg, ROZOK, "Pagáč syrový 60g")
+    _push(pg, _reused(V1), hours_old=4.7)
+    codex_sync.run(pg, _cfg())
+    assert _review_reason(pg, "orders", ROZOK), "disputed while card 27 lives"
+    no27 = [r for r in _reused(V1) if r["card_code"] != "27"]
+    for hours in (4.5, 4.3):
+        _push(pg, no27, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert _binding(pg, ROZOK)[0] == "79"
+    assert _orders(pg)[ROZOK]["alias"] == ""
+
+
+def test_a_restored_number_renamed_to_its_own_cards_new_codex_name_is_merged_back(pg):
+    """Review 9 🔵 F5: CODEX renamed card 27 after the sync retired ROZOK; the warehouse
+    restored ROZOK and took card 27's NEW name — the same product: merged back, no dispute."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=4.9)
+    codex_sync.run(pg, _cfg())
+    renamed = [dict(r, name="Rožok slaninový 70g") if r["card_code"] == "27" else r
+               for r in _reused(V1)]
+    _push(pg, renamed, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    _restore_sync_delete(pg, "catalog_overrides", ROZOK)
+    _drift_click(pg, ROZOK, "Rožok slaninový 70g")
+    _push(pg, renamed, hours_old=3)
+    codex_sync.run(pg, _cfg())
+    assert ROZOK not in _orders(pg)
+    assert not _review_reason(pg, "orders", ROZOK)
+
+
+def test_a_twins_late_row_never_drags_a_repicked_numbers_rows(pg):
+    """Review 9 🔵 F3: ROZOK and its legacy „0"+code twin retired; ROZOK re-picked as the pagáč
+    (a pagáč wording), deleted again; a late row lands on the twin — only the twin's row may
+    follow the rožok, never the pagáč's row on ROZOK."""
+    _seed_catalogs(pg)
+    snapshot.upsert_catalog_card(pg, "0" + ROZOK, "Rožok so slaninou 70g")
+    snapshot.rebuild_from_overrides(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    _push(pg, _reused(V1), hours_old=5)
+    codex_sync.run(pg, _cfg())
+    card_guard.add_from_codex(pg, "orders", ROZOK, actor="sklad")
+    _teach(pg, "C8", "pagac syrovy", ROZOK)
+    _kos_delete(pg)
+    _teach(pg, "C9", "rozok neskoro", "0" + ROZOK)
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert _gtin_of(pg, "C8") == ROZOK
+    assert _gtin_of(pg, "C9") == ROZOK_NEW
+
+
+def test_a_lone_legacy_twin_keeps_its_cards_binding(pg):
+    """Review 9 🔵 F4: the whole group (canonical + legacy twin) is bound — after the warehouse
+    deleted the canonical card and the code was reused, the lone twin still follows card 27,
+    never identified from the list as the pagáč (the round-1 🔴 pattern through a twin)."""
+    _seed_catalogs(pg)
+    snapshot.upsert_catalog_card(pg, "0" + ROZOK, "Rožok so slaninou 70g")
+    snapshot.rebuild_from_overrides(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    assert _binding(pg, "0" + ROZOK) == ("27", True)
+    _kos_delete(pg)
+    for hours in (5, 4):
+        _push(pg, _reused(V1), hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert _pagac_names(pg)[0] == []
+    assert _binding(pg, "0" + ROZOK)[0] == "27"
+
+
+def test_a_blocked_run_never_says_rows_were_moved(pg):
+    """Review 9 🔵 F6: the blocked alert says nothing changed — its memory counts are what
+    WOULD move, never „presunutých"."""
+    _baseline(pg)
+    _seed_memory(pg)
+    _push(pg, _v2_two_renumbers(), hours_old=3)
+    assert codex_sync.run(pg, _cfg(codex_sync_max_code_changes=1))["mode"] == "blocked"
+    body = pg.execute("SELECT body_html FROM pending_alerts ORDER BY id DESC LIMIT 1"
+                      ).fetchone()[0]
+    assert "presunutých" not in body and "priradení" in body
+
+
 def test_a_create_onto_a_hidden_override_row_undeletes_it(pg):
     """Review 5 🔵: the executor's guard — a renumber's `create` onto a number whose override
     row is soft-deleted brings the card back visible (an upsert alone keeps `deleted_at`)."""
