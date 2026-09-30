@@ -2585,3 +2585,53 @@ def test_a_dl_reset_text_says_the_sklad_follows_codex(pg):
     dl, orders = _review_reason(pg, "dl", ROZOK), _review_reason(pg, "orders", ROZOK)
     assert "iný názov" in dl and "sklad" in dl
     assert "iný názov" in orders and "alias" in orders
+
+
+# --- review 19: a reset takes the sklad of the card the number IS, never the code's holder ---
+
+def _picked_as_the_muka(pg, old_sklad):
+    """Our DL chlieb CHLIEB (card 31, sklad `old_sklad`); card 31 leaves and card 40 (the múka,
+    kg sklad 100) carries CHLIEB; the warehouse deletes CHLIEB and picks it (restored, card 40)."""
+    dl_snapshot._freeze(pg, [{"gtin": CHLIEB, "name": "Chlieb pšeničný 1000g",
+                              "doplnok": "chlieb", "mass": 1.0, "sklad": old_sklad,
+                              "cena": 0.9}], [])
+    _push(pg, [_row(CHLIEB, "31", "Chlieb pšeničný 1000g", sklad=int(old_sklad))], hours_old=8)
+    codex_sync.run(pg, _cfg())
+    for hours in (7, 6):
+        _push(pg, [_row(CHLIEB, "40", "Múka pšeničná T650", sklad=100)], hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    dl_snapshot.retire_dl_catalog_card(pg, CHLIEB)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    card_guard.add_from_codex(pg, "dl", CHLIEB, actor="sklad")
+
+
+def test_a_reset_takes_the_sklad_of_the_picked_card_after_it_moved(pg):
+    """Review 19 🟡: the picked múka (card 40) moves CHLIEB → ROZOK_NEW before the sync that
+    resets our number: the reset read the sklad of whoever carries CHLIEB NOW (nobody) and kept
+    the chlieb's piece sklad — a kg card piece-tracked (the #462 ×N class)."""
+    _picked_as_the_muka(pg, "1")
+    _push(pg, [_row(ROZOK_NEW, "40", "Múka pšeničná T650", sklad=100)], hours_old=5)
+    codex_sync.run(pg, _cfg())
+    assert _dl(pg)[ROZOK_NEW]["sklad"] == "100"
+
+
+def test_a_reset_never_takes_the_sklad_of_the_card_that_took_the_code_since(pg):
+    """Review 19 🟡: … and card 55 (the koláč, sklad 1) took CHLIEB meanwhile — the reset took
+    the koláč's sklad for our múka."""
+    _picked_as_the_muka(pg, "100")
+    _push(pg, [_row(ROZOK_NEW, "40", "Múka pšeničná T650", sklad=100),
+               _row(CHLIEB, "55", "Koláč makový 80g")], hours_old=5)
+    codex_sync.run(pg, _cfg())
+    assert _dl(pg)[ROZOK_NEW]["sklad"] == "100"
+
+
+def test_a_reset_deferred_by_a_dry_run_takes_the_picked_cards_sklad(pg):
+    """Review 19 🟡: the pick seen by dry-run syncs (its reset waits for the first apply), the
+    múka moves meanwhile — the first apply still resets to the múka's kg sklad."""
+    _picked_as_the_muka(pg, "1")
+    _push(pg, [_row(CHLIEB, "40", "Múka pšeničná T650", sklad=100)], hours_old=4)
+    codex_sync.run(pg, _cfg(apply=False))
+    for hours in (3, 2):
+        _push(pg, [_row(ROZOK_NEW, "40", "Múka pšeničná T650", sklad=100)], hours_old=hours)
+        codex_sync.run(pg, _cfg(apply=hours == 2))
+    assert _dl(pg)[ROZOK_NEW]["sklad"] == "100"
