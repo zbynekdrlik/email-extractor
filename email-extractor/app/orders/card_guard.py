@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 
-from . import codex_cards, dl_match, dl_snapshot, snapshot
+from . import codex_cards, desadv_edi, dl_match, dl_snapshot, snapshot
 from .codex_cards import CardRefused
 
 log = logging.getLogger("orders.card_guard")
@@ -41,10 +41,15 @@ CODEX_ONLY = ("Nové karty sa pridávajú len výberom z CODEXu — pri otázke 
               "upraviť alebo zmazať.")
 PICK_LIMIT = 30
 # scope -> the CODEX sklady a pick may come from (None = every sklad of the pick stredisko),
-# the catalog override table, and how a refusal names the catalog.
+# the longest code the scope's EDI can carry (None = no limit), the catalog override table, and
+# how a refusal names the catalog. A DESADV line has a 13-char GTIN field: a longer CODEX code
+# (the 14-digit #245 beverage cards on sklad 500) can never ship — `dl_match._gtin_edi_overflow`
+# would re-hold the line and ask again on every reprocess.
 _SCOPES: dict[str, dict] = {
-    "orders": {"sklady": (1,), "table": "catalog_overrides", "label": "objednávky (sklad 1)"},
-    "dl": {"sklady": None, "table": "dl_catalog_overrides", "label": "dodacie listy"},
+    "orders": {"sklady": (1,), "max_code": None, "table": "catalog_overrides",
+               "label": "objednávky (sklad 1)"},
+    "dl": {"sklady": None, "max_code": desadv_edi.GTIN_FIELD_WIDTH,
+           "table": "dl_catalog_overrides", "label": "dodacie listy"},
 }
 
 
@@ -91,8 +96,17 @@ def _deleted(conn, scope: str) -> list[dict]:
 
 
 def pickable(conn, scope: str) -> dict[str, dict]:
-    """code -> the pickable CODEX card of `scope` (`codex_cards.pickable`)."""
-    return codex_cards.pickable(conn, _spec(scope)["sklady"])
+    """code -> the pickable CODEX card of `scope` (`codex_cards.pickable`, minus a code longer
+    than the scope's EDI can carry)."""
+    spec = _spec(scope)
+    cards = codex_cards.pickable(conn, spec["sklady"])
+    if spec["max_code"] is not None:
+        cards = {c: e for c, e in cards.items() if len(c) <= spec["max_code"]}
+    return cards
+
+
+def _card(conn, scope: str, gtin: str) -> dict:
+    return next((r for r in catalog(conn, scope) if str(r.get("gtin")) == gtin), {})
 
 
 def mark_pickable(conn, scope: str, payload: dict) -> dict:
@@ -130,6 +144,8 @@ def codex_choices(conn, scope: str, q: str = "", *, limit: int = PICK_LIMIT) -> 
         item = dict(e, in_catalog=card is not None, in_trash=card is None and e["code"] in trash)
         if card is not None:
             item.update(catalog_gtin=str(card["gtin"]), catalog_name=card.get("name", ""))
+        elif item["in_trash"]:
+            item["trash_name"] = trash[e["code"]].get("name", "")
         items.append(item)
     return {"items": items, "total": len(hits), "codex": meta}
 
@@ -144,7 +160,7 @@ def add_from_codex(conn, scope: str, code, *, actor: str) -> dict:
     spec = _spec(scope)
     norm = codex_cards.normalize_code(code)
     entry = pickable(conn, scope).get(norm) if norm else None
-    if entry is None:
+    if norm is None or entry is None:
         log.warning("CODEX pick %r refused — not an active CODEX card of the %s scope",
                     code, scope)
         raise CardRefused({"error": (
@@ -159,16 +175,16 @@ def add_from_codex(conn, scope: str, code, *, actor: str) -> dict:
     from ..board.services import audit  # lazy: the audit leaf, like orders.teach does
     if binned is not None:
         gtin = str(binned["gtin"])
+        # un-delete heals a bare retirement marker (a snapshot-only card) from the newest
+        # snapshot that still has it — the same heal as the Kôš „Vrátiť"
         (snapshot.undelete_catalog_card if scope == "orders"
          else dl_snapshot.undelete_dl_catalog_card)(conn, gtin)
-        if not str(binned.get("name") or "").strip():
-            # a bare retirement marker of a card that lived only in the snapshot (`retire_*`
-            # writes name '' + blank fields, the next snapshot dropped the card) — nothing of
-            # ours to keep, and un-deleting it alone would make a NAMELESS card: fill it from
-            # CODEX exactly like a new card
+        if not str(_card(conn, scope, gtin).get("name") or "").strip():
+            # a bare marker no snapshot remembers — nothing of ours to restore, and a NAMELESS
+            # card is never acceptable: fill it from CODEX exactly like a new card
             _write(conn, scope, gtin, entry)
         _rebuild(conn, scope)
-        card = next((r for r in catalog(conn, scope) if str(r.get("gtin")) == gtin), {})
+        card = _card(conn, scope, gtin)
         audit.record(conn, actor=actor, table=spec["table"], row_id=gtin, action="create",
                      after={"gtin": gtin, "name": card.get("name", ""), "source": "codex",
                             "restored": True, "codex_card": entry["card_code"]},

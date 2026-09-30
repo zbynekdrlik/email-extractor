@@ -357,12 +357,36 @@ def catalog_for_management(conn) -> list[dict]:
 def undelete_catalog_card(conn, gtin: str) -> bool:
     """#477: bring a card out of the Kôš EXACTLY as it was (name/alias kept — never a blank
     overwrite) — the CODEX pick of a code whose card was deleted. Clears BOTH markers (#442:
-    `retired` synced with `deleted_at`). True iff a hidden row was restored; the caller
-    rebuilds the snapshot + audits (the same split as `retire_catalog_card`)."""
+    `retired` synced with `deleted_at`) and heals a bare marker (`heal_blank_marker`). True iff
+    a hidden row was restored; the caller rebuilds the snapshot + audits (the same split as
+    `retire_catalog_card`)."""
     row = conn.execute(
         """UPDATE catalog_overrides SET retired = false, deleted_at = NULL, updated_at = now()
             WHERE gtin = %s AND (retired OR deleted_at IS NOT NULL) RETURNING gtin""",
         (gtin,)).fetchone()
+    if row is None:
+        return False
+    heal_blank_marker(conn, gtin)
+    return True
+
+
+def heal_blank_marker(conn, gtin: str) -> bool:
+    """#477: `retire_catalog_card` of a card that lived only in the frozen snapshot writes a
+    BARE marker (name '') and the next rebuild drops the card from the snapshot — un-deleting
+    that marker alone makes a NAMELESS card. Refill it from the newest snapshot that still has
+    the gtin (name + alias). Only a blank-named override row is touched; True iff healed. (The
+    marker itself stays bare on retire: the retired-card readers must keep seeing it as-is.)"""
+    snap = conn.execute(
+        "SELECT name, alias FROM catalog_snapshot WHERE gtin = %s AND name <> '' "
+        "ORDER BY snapshot_id DESC LIMIT 1", (gtin,)).fetchone()
+    if snap is None:
+        return False
+    row = conn.execute(
+        """UPDATE catalog_overrides SET name = %s, alias = COALESCE(alias, %s), updated_at = now()
+            WHERE gtin = %s AND name = '' RETURNING gtin""",
+        (snap[0], snap[1] or "", gtin)).fetchone()
+    if row is not None:
+        log.info("catalog card %s: bare retirement marker healed from the snapshot (#477)", gtin)
     return row is not None
 
 

@@ -334,13 +334,38 @@ def deleted_dl_cards(conn) -> list[dict]:
 
 def undelete_dl_catalog_card(conn, gtin: str) -> bool:
     """#477: the DL twin of `snapshot.undelete_catalog_card` — a Kôš card restored exactly as
-    it was (name/doplnok/mass/sklad/cena kept), both markers cleared. True iff a hidden row was
-    restored; the caller rebuilds + audits."""
+    it was (name/doplnok/mass/sklad/cena kept), both markers cleared, a bare marker healed
+    (`heal_blank_dl_marker`). True iff a hidden row was restored; the caller rebuilds + audits."""
     row = conn.execute(
         """UPDATE dl_catalog_overrides SET retired = false, deleted_at = NULL,
                   updated_at = now()
             WHERE gtin = %s AND (retired OR deleted_at IS NOT NULL) RETURNING gtin""",
         (gtin,)).fetchone()
+    if row is None:
+        return False
+    heal_blank_dl_marker(conn, gtin)
+    return True
+
+
+def heal_blank_dl_marker(conn, gtin: str) -> bool:
+    """#477: the DL twin of `snapshot.heal_blank_marker` — `retire_dl_catalog_card` of a
+    snapshot-only card leaves a BARE marker (name '' + blank doplnok/mass/sklad/cena; 9 of 19
+    deleted DL cards on prod, 2026-09-30) and un-deleting it alone would make a NAMELESS card
+    that also lost sklad=100 (the #462 ×N class). Refill every field from the newest snapshot
+    that still has the gtin; only a blank-named override row is touched. True iff healed. (The
+    marker stays bare on retire — `retired_dl_cards`, #337, must keep seeing it as-is.)"""
+    snap = conn.execute(
+        "SELECT name, doplnok, mass, sklad, cena FROM dl_catalog_snapshot "
+        "WHERE gtin = %s AND name <> '' ORDER BY snapshot_id DESC LIMIT 1", (gtin,)).fetchone()
+    if snap is None:
+        return False
+    row = conn.execute(
+        """UPDATE dl_catalog_overrides
+              SET name = %s, doplnok = %s, mass = %s, sklad = %s, cena = %s, updated_at = now()
+            WHERE gtin = %s AND name = '' RETURNING gtin""",
+        (snap[0], snap[1] or "", snap[2], snap[3] or "", snap[4], gtin)).fetchone()
+    if row is not None:
+        log.info("DL card %s: bare retirement marker healed from the snapshot (#477)", gtin)
     return row is not None
 
 

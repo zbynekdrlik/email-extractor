@@ -279,13 +279,14 @@ def _name_order(central: bool, changed_at: datetime | None, name: str) -> tuple:
 
 
 def index_by_code(rows: list[dict]) -> dict[str, dict]:
-    """Our catalog rows keyed by CODEX code (`normalize_code` of the gtin; the first row wins)
-    — the ONE "our card holding this code" lookup, a legacy „0"+code card included."""
+    """Our catalog rows keyed by CODEX code (`normalize_code` of the gtin) — the ONE "our card
+    holding this code" lookup, a legacy „0"+code card included. The card whose number IS the
+    canonical code wins over a legacy twin; otherwise the first row."""
     out: dict[str, dict] = {}
     for r in rows:
         code = normalize_code(r.get("gtin"))
-        if code:
-            out.setdefault(code, r)
+        if code and (code not in out or str(r.get("gtin")).strip() == code):
+            out[code] = r
     return out
 
 

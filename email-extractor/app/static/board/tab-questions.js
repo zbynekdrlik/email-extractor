@@ -113,15 +113,19 @@ function toggleCodexPicker(q) {
 }
 
 function codexChoice(q, c) {
+  // the CODEX sklad is only what a NEW card gets — our own / Kôš card keeps its stored data
+  const isNew = !c.in_catalog && !c.in_trash;
   const facts = [c.card_code ? `karta ${c.card_code}` : null,
-    q.kind === "dl_item" ? `sklad ${c.sklad}` : null];
+    isNew && q.kind === "dl_item" ? `sklad ${c.sklad}` : null];
   if (c.in_catalog) facts.push(`u nás: ${c.catalog_name}`);
-  else if (c.in_trash) facts.push("u nás v Koši — výber ju obnoví");
-  else facts.push("nová karta");
+  else if (c.in_trash) {
+    facts.push(`u nás v Koši${c.trash_name ? `: ${c.trash_name}` : ""} — výber ju obnoví`);
+  } else facts.push("nová karta");
   const label = c.in_catalog ? "Vybrať" : (c.in_trash ? "Obnoviť a vybrať" : "Pridať a vybrať");
+  const ourName = c.in_catalog ? c.catalog_name : (c.in_trash && c.trash_name) || c.name;
   const pick = el("button", {
     class: "q-btn q-btn--primary q-codex-pick", type: "button", "data-code": c.code,
-    onclick: () => pickCodex(q, c.code, c.in_catalog ? c.catalog_name : c.name, c.name),
+    onclick: () => pickCodex(q, c.code, ourName, c.name),
   }, label);
   return el("div", { class: "q-codex-choice", "data-code": c.code }, [
     el("span", { class: "q-codex-choice-name" }, `${c.code} — ${c.name}`),
@@ -169,7 +173,8 @@ function codexHint(q, data) {
     }
     rows.push(el("div", { class: "q-codex-row" }, [
       el("span", {}, `${s.code} — ${s.name}`
-        + (s.in_catalog || s.pickable ? "" : " (v CODEXe neaktívna alebo mimo skladov strediska 1)")),
+        + (s.in_catalog || s.pickable ? "" : " (z CODEXu sa nedá vybrať — neaktívna, mimo "
+          + "skladov strediska 1 alebo kód dlhší ako 13 znakov)")),
       btn]));
   }
   if (data.codex && !similar.length) {
