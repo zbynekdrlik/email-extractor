@@ -760,14 +760,14 @@ class _ScopePlanner:
 
     def _reset(self, item: dict, card: dict) -> None:
         """A #477 pick restored a number that used to be ANOTHER product: its curated fields
-        (orders alias; DL doplnok / mass / cena, and the sklad of the picked CODEX card) go
-        back to a fresh pick's — audited, restorable."""
+        (orders alias; DL doplnok / mass / cena, and the sklad of the CODEX card the number IS
+        now — `_sklad_of`) go back to a fresh pick's — audited, restorable."""
         if self.scope.name == "orders":
             new: dict = {"alias": ""}
         else:
-            entry = self.cx.pickable[self.scope.name].get(item["code"]) or {}
+            sklad = self._sklad_of(item["codex_card"], item["code"])
             new = {"doplnok": "", "mass": None, "cena": None,
-                   "sklad": str(entry.get("sklad") or card.get("sklad") or "")}
+                   "sklad": str(sklad if sklad is not None else card.get("sklad") or "")}
         changed = {k: v for k, v in new.items()
                    if (card.get(k) or None) != (v if v != "" else None)}
         if not changed:
@@ -775,6 +775,21 @@ class _ScopePlanner:
         self.plan.resets.append(dict(item, before={k: card.get(k) for k in changed},
                                      after=changed, card=_fields(card)))
         self.live[item["gtin"]] = dict(card, **changed)
+
+    def _sklad_of(self, card: str, code: str) -> int | None:
+        """The sklad CODEX card `card` gives a DL card — the pick's rule
+        (`codex_cards.pick_sklad`) over ITS stredisko-1 rows, never over whoever carries `code`
+        now (review 19 🟡: the picked card may have moved on since the pick, another card may
+        hold the code — a kg card went piece-tracked). Its active named rows on `code` first,
+        then any of its rows on `code`, then any of its rows; None = the card has none (the
+        number keeps its sklad)."""
+        rows = self.cx.by_card.get(card, [])
+        on_code = [r for r in rows if r.code == code]
+        for pool in (on_code, rows):
+            live = [r for r in pool if not r.inactive and r.name.strip()] or pool
+            if live:
+                return codex_cards.pick_sklad(r.sklad for r in live)
+        return None
 
     def _memory(self, catalog_codes: set[str]) -> None:
         """Mapping rows of a number the sync RETIRED (an inactive binding — written after the
