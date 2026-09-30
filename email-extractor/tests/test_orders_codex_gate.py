@@ -347,6 +347,50 @@ def test_a_codex_question_never_offers_an_unrelated_card_as_its_only_button(pg, 
     assert qs[0]["candidates"] == []
 
 
+def test_a_codex_question_shows_at_most_six_buttons():
+    """Review 2 🟡: the floor-only codex branch lost #160's cap — a generic wording („chlieb")
+    over a big catalog got 24 buttons. Same cap as every other orders question."""
+    from app.orders import card_guard, match
+    catalog = [{"gtin": f"99900000001{i:02d}", "name": f"Chlieb pšeničný {i}00g",
+                "alias": ""} for i in range(1, 13)]
+    codex = codex_cards.CodexCards(names={c["gtin"]: (c["name"],) for c in catalog},
+                                   as_of=datetime.now(UTC), synced_at=datetime.now(UTC),
+                                   stale=False)
+    line = match.Decision(item_name="chlieb pšeničný", gtin=None, card="", confidence=0.0,
+                          rule=card_guard.CODEX_MISSING, note="")
+    shown = card_guard.order_question_candidates("chlieb pšeničný", [], catalog, line, codex)
+    assert 0 < len(shown) <= card_guard.QUESTION_BUTTONS == 6
+    assert all(c["score"] >= match.PLAUSIBLE_CANDIDATE_SCORE for c in shown)
+
+
+def test_a_human_answer_revives_its_own_soft_deleted_same_day_row(pg):
+    """Review 2 🟡: the re-teach upsert must also revive a row the sklad soft-deleted (Naučené
+    / Kôš) the same day — else the new answer is swallowed by the non-partial UNIQUE key (the
+    DL #465 lesson)."""
+    today = pg.execute("SELECT current_date").fetchone()[0]
+    assert memory.remember(pg, CUST, "chlieb", G_VIA, "Chlieb", today, source="human")
+    pg.execute("UPDATE item_memory SET deleted_at = now()")
+    assert memory.resolve(pg, CUST, "chlieb") is None
+    assert memory.remember(pg, CUST, "chlieb", G_VIA, "Chlieb nový", today, source="human")
+    rec = memory.resolve(pg, CUST, "chlieb")
+    assert rec is not None and rec.human and rec.gtin == G_VIA and rec.card == "Chlieb nový"
+
+
+def test_the_net_question_is_announced_when_nothing_is_left_to_ship(pg, env):
+    """Review 2 🔵: every shippable code died while the order waited → the deadline sweep ships
+    nothing (review) — the Odoo summary must still announce the net's new questions (and link
+    the board), not only the ok/partial path."""
+    rec = Recorder()
+    _held_on_torta(pg, env, rec)
+    _codex(pg, (G_TOR, G_TOR2), force=True)
+    released = hold.release_due(pg, _cfg(), upload=rec.upload, post=rec.post,
+                                today="2026-08-05")
+    assert [r["status"] for r in released] == ["review"] and rec.uploads == []
+    assert {q["wording"] for q in teach.open_questions(pg)} >= {"rožok 50g",
+                                                              "vianočka maslová 400g"}
+    assert "&#10067; 2" in rec.posts[-1]
+
+
 def test_any_item_question_offers_only_cards_codex_has(pg, env):
     """Review 🟡4 (M1): an ordinary unmatched line's candidates are filtered too — a dead card
     is never a button, whatever the question's reason."""
