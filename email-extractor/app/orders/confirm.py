@@ -91,14 +91,17 @@ per-member scope), but a carryover alert is now built from `_pending_members` �
 status AND `_decide` on THIS sweep's listing still finds the file in its queued folder — and
 lists each one (DL number + supplier / order day + customer, `confirm_carryover`). For a
 waiting DESADV it also says why CODEX will never take it when a LIN code has no CODEX stock
-card (#467 list, read-only file read, fail-open). Nothing waiting → no reminder; the
-incident closes through `_check_incidents_for_clear` with its one all-clear.
+card (#467 list, read-only file read, fail-open). A carryover alert names EVERY file of its
+channel still waiting, not only the throttled rows due this sweep. Once nothing waits there
+is no carryover group at all, so no reminder — the incident closes through
+`_check_incidents_for_clear` with its one all-clear.
 """
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from html import escape
 from zoneinfo import ZoneInfo
 
 from . import confirm_carryover, report
@@ -187,8 +190,29 @@ def due_rows(conn, interval_minutes: int, ledger: _Ledger = EDI_LEDGER) -> list[
                    OR import_checked_at < now() - make_interval(mins => %s))
             ORDER BY uploaded_at""",
         (max(1, int(interval_minutes or DEFAULT_INTERVAL_MINUTES)),)).fetchall()
+    return _row_dicts(rows, ledger)
+
+
+def _row_dicts(rows, ledger: _Ledger) -> list[dict]:
+    """(id, identity col 1, identity col 2, filename, uploaded_at) tuples → the row dicts
+    every function here passes around."""
+    c1, c2 = ledger.identity_cols
     return [{"id": r[0], c1: r[1], c2: r[2], "filename": r[3] or "", "uploaded_at": r[4]}
-           for r in rows]
+            for r in rows]
+
+
+def _unresolved_rows(conn, ledger: _Ledger) -> list[dict]:
+    """Every confirmed-uploaded, not-yet-resolved row of the ledger, WITHOUT the per-row
+    throttle (#476 review): once a sweep holds a listing, a carryover alert names every file
+    still waiting, not only the rows whose 5-minute re-check happened to fall on this sweep.
+    Only rows without a terminal status — normally just the handful really waiting."""
+    c1, c2 = ledger.identity_cols
+    rows = conn.execute(
+        f"""SELECT id, {c1}, {c2}, filename, uploaded_at
+             FROM {ledger.table}
+            WHERE uploaded_at IS NOT NULL AND import_status IS NULL
+            ORDER BY uploaded_at, id""").fetchall()
+    return _row_dicts(rows, ledger)
 
 
 def _decide(row: dict, dirs: dict, ledger: _Ledger = EDI_LEDGER) -> str | None:
@@ -358,24 +382,31 @@ def _plural(n: int, source: str = "edi") -> str:
     return "objednávok"
 
 
-def _unaccepted(n: int, source: str = "edi") -> str:
-    """The adjective agreeing with `_plural(n, source)` (#476 — „1 dodací list …
-    neprevzatých" read wrong): dodací list neprevzatý / objednávka neprevzatá / 2-4
-    neprevzaté / 5+ neprevzatých."""
+def _agree(n: int, source: str, forms: tuple[str, str, str, str]) -> str:
+    """The word agreeing with `_plural(n, source)` (#476 — „1 dodací list … neprevzatých",
+    „2 objednávky skončilo" read wrong). `forms` = (1 masculine — a dodací list, 1 feminine
+    — an objednávka, 2-4, 5+)."""
     if n == 1:
-        return "neprevzatý" if source == "desadv" else "neprevzatá"
+        return forms[0] if source == "desadv" else forms[1]
     if 2 <= n <= 4:
-        return "neprevzaté"
-    return "neprevzatých"
+        return forms[2]
+    return forms[3]
+
+
+_UNACCEPTED = ("neprevzatý", "neprevzatá", "neprevzaté", "neprevzatých")
+_ENDED = ("skončil", "skončila", "skončili", "skončilo")
+_VANISHED = ("zmizol", "zmizla", "zmizli", "zmizlo")
+# „… a ešte N ďalší/ďalšia/ďalšie/ďalších" under a capped list (report.capped_list)
+_FURTHER = {"desadv": ("ďalší", "ďalšie", "ďalších"), "edi": ("ďalšia", "ďalšie", "ďalších")}
 
 
 def _carryover_head(n: int, source: str, since, now: datetime) -> str:
     """The head of a carryover alert for `n` files REALLY still waiting — the opening alert
-    (`since=None`) or the reminder of an incident opened at `since`. #255 review finding: the
-    text stays TRIGGER-NEUTRAL (never „z predošlého dňa") — a same-day-stuck file joins the
-    same incident."""
+    (`since=None`) or a reminder („od" = when the oldest of them was uploaded). #255 review
+    finding: the text stays TRIGGER-NEUTRAL (never „z predošlého dňa") — a same-day-stuck
+    file joins the same incident."""
     noun = _plural(n, source)
-    adj = _unaccepted(n, source)
+    adj = _agree(n, source, _UNACCEPTED)
     them = "ich" if n != 1 else ("ho" if source == "desadv" else "ju")
     if since is None:
         verb = "sú" if 2 <= n <= 4 else "je"
@@ -385,18 +416,27 @@ def _carryover_head(n: int, source: str, since, now: datetime) -> str:
             f"— treba {them} prijať v Codexe.")
 
 
-def _carryover_html(conn, rows: list[dict], ledger: _Ledger, *, since, read_files,
+def _carryover_html(conn, rows: list[dict], ledger: _Ledger, *, reminder: bool, read_files,
                     now: datetime) -> str:
     """A carryover alert about `rows` — ONLY the files really still waiting (#476): the head
-    counts them, then one line per file (at most `LIST_LIMIT`, a file CODEX will never take
-    first) from `confirm_carryover.items`."""
+    counts them (a reminder also says since when: the oldest upload among them, never the
+    incident's opening, which a never-importing file can keep open for days while newer
+    files join), then one line per file (at most `LIST_LIMIT`, a file CODEX will never take
+    first) from `confirm_carryover.items`, + the CODEX list's date when a code line is
+    there."""
     n = len(rows)
-    lines = confirm_carryover.items(conn, rows, ledger.source, wire_prefix=ledger.wire_prefix,
-                                    read_files=read_files, now=now)
+    since = None
+    if reminder:
+        uploads = [r["uploaded_at"] for r in rows if r.get("uploaded_at")]
+        since = min(uploads) if uploads else now
+    detail = confirm_carryover.items(conn, rows, ledger.source,
+                                     wire_prefix=ledger.wire_prefix,
+                                     read_files=read_files, now=now)
     parts = [f"<p>{_carryover_head(n, ledger.source, since, now)}</p>",
-             f"<ul>{''.join(lines[:LIST_LIMIT])}</ul>"]
-    if n > LIST_LIMIT:
-        parts.append(f"<p>&#8230; a ešte {n - LIST_LIMIT} ďalších.</p>")
+             report.capped_list(detail.lines, LIST_LIMIT, *_FURTHER[ledger.source])]
+    if detail.codex_as_of:
+        parts.append(f"<p>(Zoznam kariet z CODEXu je k {escape(detail.codex_as_of)} — kartu, "
+                     "ktorú ste v CODEXe založili neskôr, ešte nevidíme.)</p>")
     return "".join(parts)
 
 
@@ -406,10 +446,10 @@ def _group_html(kind: str, rows: list[dict], source: str = "edi") -> str:
     n = len(rows)
     noun = _plural(n, source)
     if kind == "failed":
-        return (f"<p>&#9888;&#65039; {n} {noun} skončilo v priečinku "
+        return (f"<p>&#9888;&#65039; {n} {noun} {_agree(n, source, _ENDED)} v priečinku "
                "&quot;unconfirmed&quot; — import zlyhal, treba nahrať do ORIONu "
                "ručne.</p>")
-    return (f"<p>&#9888;&#65039; {n} {noun} zmizlo zo všetkých "
+    return (f"<p>&#9888;&#65039; {n} {noun} {_agree(n, source, _VANISHED)} zo všetkých "
            "sledovaných priečinkov ORIONu — nedá sa overiť import, treba skontrolovať "
            "ručne priamo na serveri.</p>")
 
@@ -489,9 +529,7 @@ def _pending_members(conn, incident_id: int, dirs: dict, ledger: _Ledger) -> lis
               JOIN {ledger.table} e ON e.id = m.{ledger.members_fk_col}
              WHERE m.incident_id = %s AND e.import_status IS NULL
              ORDER BY e.uploaded_at, e.id""", (incident_id,)).fetchall()
-    members = [{"id": r[0], c1: r[1], c2: r[2], "filename": r[3] or "", "uploaded_at": r[4]}
-               for r in rows]
-    return [m for m in members if _decide(m, dirs, ledger) is None]
+    return [m for m in _row_dicts(rows, ledger) if _decide(m, dirs, ledger) is None]
 
 
 def _check_incidents_for_clear(conn, cfg, post, now: datetime) -> None:
@@ -546,14 +584,18 @@ def _handle_group(conn, cfg, post, channel_id: int, kind: str, rows: list[dict],
     leave those rows retryable, never mark them terminal.
 
     A carryover alert (#476) counts + lists only the files still waiting: the opening one
-    its own `rows` (just decided still queued), a reminder the incident's `_pending_members`
-    against this sweep's `dirs` — never a reminder about nothing. `read_files` reads a
-    waiting DESADV for the CODEX code check (`confirm_carryover`)."""
+    its own `rows` (every file of this channel/source still waiting — `sweep` widens a
+    carryover group past the throttled due rows), a reminder the incident's
+    `_pending_members` against this sweep's `dirs`. There is no "reminder about nothing":
+    a carryover group exists only while some file is still waiting, and those rows are
+    members by the time the reminder is built; once nothing waits there is no group, and
+    `_check_incidents_for_clear` closes the incident. `read_files` reads a waiting DESADV
+    for the CODEX code check (`confirm_carryover`)."""
     incident = _open_incident(conn, channel_id, kind, ledger)
     if incident is None:
         if kind == "carryover":
-            html = _carryover_html(conn, rows, ledger, since=None, read_files=read_files,
-                                   now=now)
+            html = _carryover_html(conn, rows, ledger, reminder=False,
+                                   read_files=read_files, now=now)
         else:
             html = _group_html(kind, rows, ledger.source)
         try:
@@ -581,15 +623,12 @@ def _handle_group(conn, cfg, post, channel_id: int, kind: str, rows: list[dict],
     due_for_reminder = (now - incident["last_alert_at"]) >= timedelta(hours=reminder_hours)
     if due_for_reminder:
         if kind == "carryover":
-            # AFTER adding members, so this sweep's own stuck rows are among them.
+            # AFTER adding members, so this sweep's own stuck rows are among them (never
+            # empty: the group's rows were just decided still queued against the same dirs).
             waiting = _pending_members(conn, incident["id"], dirs, ledger)
-            if not waiting:
-                log.info("import-alert incident #%s (carryover/%s): nothing still waiting "
-                         "in ORION — no reminder", incident["id"], ledger.source)
-                return True
             log.info("import-alert incident #%s (carryover/%s): reminding about %d waiting "
                      "file(s)", incident["id"], ledger.source, len(waiting))
-            html = _carryover_html(conn, waiting, ledger, since=incident["opened_at"],
+            html = _carryover_html(conn, waiting, ledger, reminder=True,
                                    read_files=read_files, now=now)
         else:
             # Re-read AFTER adding members so the reminder text's count is accurate.
@@ -663,6 +702,14 @@ def sweep(conn, cfg, listdir=None, post=None, now=None, read_files=None) -> int:
     # the common case (most of the day) skips it entirely.
     evening_active = evening_check_active(cfg, now)
     activity_at = _activity_today_at(conn, now) if evening_active else None
+
+    def _stuck(row: dict) -> bool:
+        # #255: same 'carryover' kind/grouping either way — a morning-leftover row and a
+        # same-day-stuck row are the SAME underlying condition (stuck longer than
+        # reasonable), just a different trigger. See the module docstring.
+        return ((morning_active and _is_carryover(row, now))
+                or (evening_active and _is_same_day_stuck(row, now, activity_at)))
+
     changed = 0
     groups: dict[tuple[int, str, str], list[dict]] = {}
     for ledger, rows in ((EDI_LEDGER, edi_rows), (DESADV_LEDGER, desadv_rows)):
@@ -673,12 +720,7 @@ def sweep(conn, cfg, listdir=None, post=None, now=None, read_files=None) -> int:
                 conn.execute(
                     f"UPDATE {ledger.table} SET import_checked_at = now() WHERE id = %s",
                     (row["id"],))
-                # #255: same 'carryover' kind/grouping either way — a morning-leftover row
-                # and a same-day-stuck row are the SAME underlying condition (stuck longer
-                # than reasonable), just a different trigger. See the module docstring.
-                is_stuck = ((morning_active and _is_carryover(row, now))
-                           or (evening_active and _is_same_day_stuck(row, now, activity_at)))
-                if is_stuck:
+                if _stuck(row):
                     ch = _channel_for(row["filename"], cfg)
                     groups.setdefault((ch, "carryover", ledger.source), []).append(row)
                 continue
@@ -707,6 +749,21 @@ def sweep(conn, cfg, listdir=None, post=None, now=None, read_files=None) -> int:
             log.info("%s import check: %s (%s / %s, %s #%s) -> %s", ledger.source,
                      row["filename"], row.get(c1), row.get(c2), ledger.table, row["id"],
                      status)
+
+    # #476 review: each row sits on its OWN 5-minute re-check cycle, so the due rows that
+    # trigger a carryover group are often only 1 of N files waiting on that channel. The
+    # listing is already in hand, so the alert names (and the incident records) every file
+    # still waiting — never a partial list the warehouse would read as complete.
+    for (channel_id, kind, source), group_rows in groups.items():
+        if kind != "carryover":
+            continue
+        ledger = DESADV_LEDGER if source == "desadv" else EDI_LEDGER
+        seen = {r["id"] for r in group_rows}
+        for row in _unresolved_rows(conn, ledger):
+            if (row["id"] not in seen and _decide(row, dirs, ledger) is None and _stuck(row)
+                    and _channel_for(row["filename"], cfg) == channel_id):
+                group_rows.append(row)
+        group_rows.sort(key=lambda r: (r["uploaded_at"], r["id"]))
 
     for (channel_id, kind, source), group_rows in groups.items():
         ledger = DESADV_LEDGER if source == "desadv" else EDI_LEDGER
