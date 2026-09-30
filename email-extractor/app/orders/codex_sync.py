@@ -247,6 +247,11 @@ def _change_lines(plan: sp.Plan, *, applied: bool = True) -> list[str]:
         memory = (f"{rows - merged} priradení presunutých" + (
             f", {merged} zlúčených s rovnakým priradením pod {escape(to)}" if merged else "")
             if applied else f"{rows} priradení by sa presunulo")
+        held = sum(sum((i.get("held") or {}).values()) for i in items)
+        if held:
+            # rows decided while CODEX gave the code to another card stay (review 10-11)
+            memory += (f", {held} z obdobia, keď kód {escape(code)} mala v CODEXe iná karta, "
+                       f"{'ostalo' if applied else 'by ostalo'} pod {escape(code)}")
         cards = [i for i in items if i["mode"] != "memory"]
         if cards:
             lines.append(f"karta CODEX {escape(card)} „{escape(cards[0]['name'])}“ zmenila kód "

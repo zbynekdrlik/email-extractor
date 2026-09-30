@@ -162,14 +162,29 @@ class Codex:
                 or next((r.name for r in self.by_card.get(card, [])), "") or "?")
 
     def taken(self, card: str, code: str) -> tuple[datetime, list[str]] | None:
-        """(when `card` last carried `code`, the cards that carried it AFTER that) when CODEX
-        gave the code to another card — a REUSE: a mapping decided on our number since then may
-        be that other product's (review 10 🟡). None = no other card had it after `card`."""
+        """CODEX gave `code` to another card after `card` last carried it (a REUSE) → (when
+        the first such card was first SEEN on the code — nobody could pick it before a push
+        listed it (review 11) — and those cards). A mapping decided on our number since then
+        may be that other product's (review 10 🟡). None = no other card had it after `card`."""
         left = self.last_seen.get((card, code))
         if left is None:
             return None
         takers = sorted(d for d, t in self.carried.get(code, {}).items() if d != card and t > left)
-        return (left, takers) if takers else None
+        return (self._window(card, code, takers), takers) if takers else None
+
+    def foreign(self, card: str, code: str) -> tuple[datetime, list[str]] | None:
+        """Another card carried `code` since `card` first had it — e.g. while `card` was away
+        on another code (a round trip X → Y → X, the #478 incident's shape) → (when the first
+        of them was first seen on it, those cards); None otherwise (review 11 🟡)."""
+        mine = self.first_seen.get((card, code))
+        if mine is None:
+            return None
+        others = sorted(d for d, t in self.carried.get(code, {}).items() if d != card and t > mine)
+        return (self._window(card, code, others), others) if others else None
+
+    def _window(self, card: str, code: str, others: list[str]) -> datetime:
+        mine = self.first_seen.get((card, code), _NEVER)
+        return min(max(self.first_seen.get((d, code), mine), mine) for d in others)
 
     def same_product(self, old: str, new: str, code: str) -> bool:
         """Two CODEX cards name the same product — the curated data taught for `old` fits
@@ -343,34 +358,61 @@ def _fill(scope: Scope, target: dict, ours: dict) -> dict:
     return out
 
 
+# the rows the board's Naučené lists and edits (`board.services.rules._CURATED`); a SHIPPED row
+# is delivery history, not editable there
+CURATED_SOURCES = ("human", "sheet-import")
+
+
 def held_clause(table: str) -> str:
-    """SQL: a mapping row of `table` decided AFTER `%(hold)s` — taught / shipped then (its
-    `created_at` or its delivery date), or re-pointed then by a human (a non-sync audit row on
-    it, e.g. a Naučené edit that keeps `created_at`). Used while CODEX gave our code to another
+    """SQL: a mapping row of `table` decided AFTER `%(hold)s` — created then (a NULL
+    `created_at` is an old row), a DL row for a delivery then (`dl_item_memory.delivered_on` is
+    the document's date; `item_memory.delivered_on` is an order's REQUESTED day, often ahead,
+    so it never counts — review 11), or re-pointed then by a human (a non-sync audit row on it,
+    e.g. a Naučené edit that keeps `created_at`). Used while CODEX gave our code to another
     card: such a row may be that other product's, so it is never moved (review 10 🟡). `table`
     is a trusted literal (`MEMORY_KEYS`)."""
-    dated = "delivered_on" in MEMORY_KEYS[table]
-    return ("(created_at > %(hold)s::timestamptz"
-            + (" OR delivered_on > %(hold)s::timestamptz::date" if dated else "")
+    return ("(COALESCE(created_at, '-infinity') > %(hold)s::timestamptz"
+            + (" OR delivered_on > %(hold)s::timestamptz::date"
+               if table == "dl_item_memory" else "")
             + f" OR EXISTS (SELECT 1 FROM audit_log a WHERE a.table_name = '{table}'"
               f" AND a.row_id = {table}.id::text AND a.actor <> '{SYNC_ACTOR}'"
               " AND a.ts > %(hold)s::timestamptz))")
 
 
-def _memory_split(conn, scope: Scope, gtins: list[str],
-                  hold: datetime | None) -> tuple[dict[str, int], int]:
-    """(live rows per table a move of `gtins` carries, rows it holds — decided after `hold`)."""
-    movable, held = {}, 0
+def _taught_clause(table: str) -> str:
+    """SQL: a row the warehouse can see and fix in Naučené (all of global_item_memory)."""
+    if table == "global_item_memory":
+        return "TRUE"
+    return "source IN (" + ", ".join(f"'{s}'" for s in CURATED_SOURCES) + ")"
+
+
+@dataclass
+class Split:
+    """What a memory move of some numbers carries and what it holds (decided after `hold`)."""
+    movable: dict[str, int]
+    taught: int = 0            # held rows listed in Naučené
+    shipped: int = 0           # held delivery history
+
+    @property
+    def held(self) -> int:
+        return self.taught + self.shipped
+
+
+def _memory_split(conn, scope: Scope, gtins: list[str], hold: datetime | None) -> Split:
+    split = Split({})
     for t in scope.memory:
-        n_all = int(conn.execute(
-            f"SELECT count(*) FROM {t} WHERE gtin = ANY(%(g)s) AND deleted_at IS NULL",
-            {"g": gtins}).fetchone()[0])
-        n_held = int(conn.execute(
-            f"SELECT count(*) FROM {t} WHERE gtin = ANY(%(g)s) AND deleted_at IS NULL AND "
-            + held_clause(t), {"g": gtins, "hold": hold}).fetchone()[0]) if hold else 0
-        movable[t] = n_all - n_held
-        held += n_held
-    return movable, held
+        where = f"FROM {t} WHERE gtin = ANY(%(g)s) AND deleted_at IS NULL"
+        n_all = int(conn.execute(f"SELECT count(*) {where}", {"g": gtins}).fetchone()[0])
+        taught = shipped = 0
+        if hold:
+            taught, shipped = (int(v or 0) for v in conn.execute(
+                f"SELECT count(*) FILTER (WHERE {_taught_clause(t)}), "
+                f"count(*) FILTER (WHERE NOT ({_taught_clause(t)})) {where} AND "
+                + held_clause(t), {"g": gtins, "hold": hold}).fetchone())
+        split.movable[t] = n_all - taught - shipped
+        split.taught += taught
+        split.shipped += shipped
+    return split
 
 
 class _ScopePlanner:
@@ -677,13 +719,17 @@ class _ScopePlanner:
         old = sorted(set(item["gtins"]) | extra)
         taken = self.cx.taken(card, code)
         hold = taken[0] if taken else None
-        memory, held = _memory_split(self.conn, self.scope, old, hold)
+        split = _memory_split(self.conn, self.scope, old, hold)
         entry = dict(item, **{
-            "from": item["gtin"], "to": to, "mode": mode, "old_gtins": old, "memory": memory,
-            "hold": hold.isoformat() if hold else None, "card": _fields(group[0])})
-        if taken and held:
-            self.plan.add_review(item, self._held_reason(item["gtin"], code, card, to, held,
+            "from": item["gtin"], "to": to, "mode": mode, "old_gtins": old,
+            "memory": split.movable, "hold": hold.isoformat() if hold else None,
+            "held": {"taught": split.taught, "shipped": split.shipped},
+            "card": _fields(group[0])})
+        if taken and split.taught:
+            self.plan.add_review(item, self._held_reason(item["gtin"], code, card, to, split,
                                                          taken[1]))
+        if hit is not None:
+            self._adopted_review(item, str(hit["gtin"]), card, succ)
         if target is not None:
             fill = _fill(self.scope, target, group[0])
             if fill:
@@ -698,14 +744,35 @@ class _ScopePlanner:
             self.binned = [b for b in self.binned if str(b["gtin"]) != to]
         self.identity[to] = (card, succ)
 
-    def _held_reason(self, gtin: str, code: str, card: str, to: str, held: int,
+    def _held_reason(self, gtin: str, code: str, card: str, to: str, split: Split,
                      takers: list[str]) -> str:
+        """Only TAUGHT held rows are the warehouse's to check (Naučené lists them); held
+        delivery history just stays (review 11)."""
         name = self.cx.name_of(card, code)
-        return (f"{held} naučených priradení k číslu {gtin} vzniklo (alebo ich niekto zmenil) "
-                f"potom, čo kód {code} v CODEXe prevzala karta CODEX {', '.join(takers)} — "
-                f"nevieme, či patria „{name}“ (karta CODEX {card}), alebo jej: ostávajú pod "
-                f"číslom {gtin}; skontroluj ich v Naučené a tie, čo patria „{name}“, preraď na "
-                f"{to}.")
+        history = (f" ({split.shipped} záznamov o dodávkach z toho obdobia tiež ostáva pod "
+                   f"{gtin} ako história)" if split.shipped else "")
+        return (f"{split.taught} naučených priradení k číslu {gtin} vzniklo (alebo ich niekto "
+                f"zmenil) potom, čo sa kód {code} v CODEXe objavil pri karte CODEX "
+                f"{', '.join(takers)} — nevieme, či patria „{name}“ (karta CODEX {card}), alebo "
+                f"jej: ostávajú pod číslom {gtin}{history}; skontroluj ich v Naučené a tie, čo "
+                f"patria „{name}“, preraď na {to}.")
+
+    def _adopted_review(self, item: dict, target: str, card: str, succ: str) -> None:
+        """Our number `target` becomes card `card`'s again — but another card carried its code
+        in between (a round trip X → Y → X): its TAUGHT rows decided since then may be that
+        other product's and are adopted as they sit; never silently (review 11 🟡)."""
+        foreign = self.cx.foreign(card, succ)
+        if foreign is None:
+            return
+        split = _memory_split(self.conn, self.scope, [target], foreign[0])
+        if not split.taught:
+            return
+        name = self.cx.name_of(card, succ)
+        self.plan.add_review(item, (
+            f"{split.taught} naučených priradení k číslu {target} vzniklo, kým kód {succ} v "
+            f"CODEXe mala karta CODEX {', '.join(foreign[1])} — prečíslovanie ich teraz pridá ku "
+            f"karte CODEX {card} („{name}“); skontroluj ich v Naučené a tie, čo patria tej "
+            f"druhej karte, zmaž alebo preraď."))
 
     def _vacate(self, group: list[dict]) -> None:
         """Our numbers this plan retires go to the (simulated) Kôš — a later step in the SAME
@@ -785,16 +852,17 @@ class _ScopePlanner:
             # 10 🟡) — the same rule as a card's renumber
             taken = self.cx.taken(card, code)
             hold = taken[0] if taken else None
-            memory, held = _memory_split(self.conn, self.scope, old, hold)
+            split = _memory_split(self.conn, self.scope, old, hold)
             item = {"scope": self.scope.name, "gtin": code, "gtins": [], "code": code, "name": ""}
-            if taken and held:
-                self.plan.add_review(item, self._held_reason(code, code, card, to, held,
+            if taken and split.taught:
+                self.plan.add_review(item, self._held_reason(code, code, card, to, split,
                                                              taken[1]))
-            if sum(memory.values()):
+            if sum(split.movable.values()):
                 self.plan.renumbers.append(dict(item, **{
                     "codex_card": card, "from": code, "to": to, "mode": "memory",
-                    "old_gtins": old, "memory": memory,
-                    "hold": hold.isoformat() if hold else None, "card": {}}))
+                    "old_gtins": old, "memory": split.movable,
+                    "hold": hold.isoformat() if hold else None,
+                    "held": {"taught": split.taught, "shipped": split.shipped}, "card": {}}))
         for gtin, (card, since) in sorted(self.repicked.items()):
             self._repicked_review(gtin, card, since)
 
