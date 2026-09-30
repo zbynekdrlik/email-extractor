@@ -2,6 +2,9 @@
 paths:
   - "email-extractor/app/orders/dl_alerts.py"
   - "email-extractor/tests/test_dl_alerts.py"
+  - "email-extractor/app/orders/confirm.py"
+  - "email-extractor/app/orders/confirm_carryover.py"
+  - "email-extractor/tests/test_orders_confirm*.py"
 ---
 
 # `pending_alerts` durable alert outbox — retention + routing gotchas
@@ -140,7 +143,7 @@ post). Fixed by splitting the two concerns:
   the group: for a kind in `GROUPED_ITEM_KINDS` (a `{kind: header_template}` registry, the
   template carrying `{n}`) it builds ONE header (count + explanation + a
   `report.dashboard_link(cfg)` action link) + up to `DISPLAY_ITEM_CAP` (10) lines +
-  „…a N ďalších"; every OTHER kind keeps the legacy `"".join` (question_reminder/escalation
+  „… a ešte N ďalší/ďalšie/ďalších" (`report.more_line`, #476); every OTHER kind keeps the legacy `"".join` (question_reminder/escalation
   already store a full formatted body from `question_alerts._group_html`; spend_cap is a
   one-off). **To add a FUTURE grouped ops kind: add it to `GROUPED_ITEM_KINDS` AND make its
   enqueue site call `item_line` — do only ONE and it either double-wraps or stays a wall.**
@@ -186,9 +189,83 @@ a História tab) `WAREHOUSE_HISTORY_KINDS`, and call `item_line` at enqueue. Tes
 The full "which message links where" table lives in `board.md` (#473 section).
 
 Testing: `test_dl_alerts.py` proves the format (`test_format_grouped_...` — 12 items → one
-header + 10 lines + „a 2 ďalších" + dashboard link, explanation appears ONCE) and the
+header + 10 lines + „a ešte 2 ďalšie" (#476) + dashboard link, explanation appears ONCE) and the
 cadence (`test_reminder_suppressed_...` — explicit `now=` at Sat-afternoon/Mon/Tue/weekend
 crossings, delivered_at set to a prior day). The three flush-mechanics tests that encoded
 the old exact-`"".join` body were re-scoped to substring assertions; `test_dl_worker.py`'s
 `..._stamps_a_detection_time...` (the removed microsecond timestamp) became
 `..._uses_a_short_line_with_no_microsecond_timestamps`.
+
+## Import-confirmation (`confirm.py`) carryover alerts count + name ONLY the files still
+## waiting — never the incident's whole membership (#476)
+
+`confirm.py` posts its grouped ORION-import alerts DIRECTLY (not through `pending_alerts`), one
+open incident per (channel, kind, source), members in `import_alert_incident[_desadv]_members`.
+Live 30.9.: the delivery-notes channel was reminded „Stále 4 dodacie listy neprevzatých" twice a
+day while 3 of the 4 had been imported two days earlier — the reminder printed `_open_incident`'s
+`file_count` = `count(*)` over EVERY member ever added. Rules that fell out:
+
+- **"Still waiting" = no terminal `import_status` AND `_decide()` on THIS sweep's own
+  `list_dirs()` listing still finds the file in its queued folder.** The second condition
+  matters: a member whose own throttled re-check (5 min) has not run yet can already sit in
+  `archCodex` — the ledger still says NULL, the listing says imported. A reminder counts
+  `confirm._pending_members`; imported members STAY in the incident (history +
+  `_check_incidents_for_clear`'s per-member scope) — never delete them to "fix" a count.
+  `failed`/`unknown` reminders keep the whole membership (terminal members never self-heal).
+- **The throttle spreads the rows out — a group of due rows is NOT the list of waiting files.**
+  Each row has its own 5-minute re-check cycle, so the first sweep past the morning hour often
+  has 1 of N waiting files due (review 🟡, probe-reproduced: „1 dodací list" for 4 waiting).
+  `sweep` therefore WIDENS every carryover group with `_unresolved_rows` (no throttle) that are
+  still queued, `_stuck` (the one morning/same-day predicate) and on the same channel — the
+  opening alert and the incident name all of them. A carryover group exists only while
+  something waits, so there is no "reminder about nothing"; once nothing waits the incident
+  closes through the unchanged all-clear path.
+- **Every carryover alert lists its files** (`confirm_carryover.items`: „DL <číslo>
+  (<dodávateľ>)" from `dl_snapshot.dl_suppliers_for_management`, „objednávka na <deň>
+  (<odberateľ>)" from `snapshot.customers_for_management`) through `report.capped_list` — the
+  capped `<ul>` + `report.more_line`, the ONE „… a ešte N ďalší/ďalšie/ďalších" whose remainder
+  word agrees with N (also `question_alerts._group_html` and `dl_alerts._format_grouped` — one
+  kind per post, every header noun masculine — which all printed „a 1 ďalších"). Slovak
+  agreement everywhere via `confirm._agree` (1 masc dodací list / 1 fem objednávka / 2-4 / 5+:
+  neprevzatý/-á/-é/-ých, skončil/-a/-i/-o, zmizol/-a/-i/-o; ho/ju/ich; je/sú). A reminder's
+  „od" is the OLDEST UPLOAD among the waiting files (a never-importing file keeps an incident
+  open for days while newer files join), with the day when it is not today. ONE spelling in
+  the alert and its all-clear: „CODEX" / „v CODEXe" (like the #467 messages).
+- **WHY a DESADV never imports is read, not guessed.** CODEX rejects a WHOLE delivery note when
+  one LIN code has no stock card (#467). While building a carryover alert the waiting DESADV
+  files are read READ-ONLY from `in_DL` (`upload.read_files`: one SFTP session,
+  `sftp.open(path, "r")` only; latin-1 decode keeps fixed-width offsets byte-exact; a file gone
+  between listing and read is skipped) and `desadv_edi.lin_codes` (the inverse of `generate()`'s
+  LIN layout, `LIN_CODE_AT` + `GTIN_FIELD_WIDTH`; it splits on `\n` ONLY — the file is uploaded
+  as UTF-8 and read back as latin-1, so an „Å" arrives as „Ã\x85" and `str.splitlines()` breaks
+  on \x85, letting a HDR tail pose as a fake code) is checked against `codex_cards.live_guard` →
+  „DL … : CODEX ho neprevezme — kód X v CODEXe neexistuje. Zadajte ho ručne.", that file first,
+  plus ONE note with the card list's date (a card made after the last push is not in it yet).
+- **Fail-open END TO END — a detail lookup never loses the alert** (review 🟡: the first cut
+  guarded only the SFTP read; a DB error in `live_guard` or the name lookup raised through
+  `_handle_group`/`sweep`, lost the alert AND skipped the rest of the worker tick).
+  `confirm_carryover.items` wraps the name lookup and the whole CODEX check (`live_guard` is
+  consulted BEFORE any ORION read — stale / never pushed → no read at all) and logs; the alert
+  goes out with at least „DL <číslo>" per file. Pinned with a REAL failure (the tables renamed
+  away inside the test, restored in `finally`), not a mock. Reads happen only while an alert is
+  being built (opening or due reminder), never on an ordinary sweep.
+- **Tests inject `now` (Aug-2026 constants) — a CODEX push in a test must use `source_as_of`
+  relative to THAT `now`** (`TUE_MORNING - 1h`), not `datetime.now()`: `live_guard(conn, now)`
+  measures staleness against the injected time, and `_data_as_of` is `min(source_as_of,
+  synced_at)`, so a real-clock push looks ~2 months in the future and a real-clock "now" in the
+  sweep can land on a weekend (no carryover at all). Pins: `tests/test_orders_confirm_carryover.py`
+  (the 4-member/3-imported regression, staggered re-checks, the not-yet-rechecked archCodex
+  member, unknown-code line + list date, stale / never-pushed / unreadable / DB-failure
+  fail-open, `lin_codes` round-trip through `generate()`, `read_files` + the production reader
+  never write, agreement + `capped_list`).
+- **Mutation guards for the widening** (review rounds 2-3 — `_stuck`, the channel filter, the
+  carryover-only kind filter, both sorts and `min(uploads)` all survived deletion before): a
+  file uploaded THIS morning is never pulled in (the #133 false alarm), a row routing to another
+  channel never joins, a waiting file is NEVER widened into a failed/unknown group (those rows
+  go terminal — it would be stamped `failed` and never self-heal), the list reads oldest upload
+  first with a CODEX-rejected file on top, and „od" is the oldest waiting upload — each has its
+  own test; a fixture that is ALREADY in the asserted order proves nothing, build it reversed.
+- **Live read-only check of the text** (no Odoo post): in the add-on container build it with
+  `confirm._carryover_html(conn, confirm._pending_members(conn, <incident id>,
+  upload.list_dirs(cfg), confirm.DESADV_LEDGER), confirm.DESADV_LEDGER, reminder=True,
+  read_files=lambda n: upload.read_files(cfg, cfg.orion_dl_dir, n), now=datetime.now(UTC))`.

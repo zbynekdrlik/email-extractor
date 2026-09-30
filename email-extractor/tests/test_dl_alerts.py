@@ -431,7 +431,7 @@ def test_item_line_is_a_short_bullet_with_no_microsecond_timestamp():
 
 def test_format_grouped_builds_one_header_capped_lines_and_a_dashboard_link(pg):
     """#336: 12 stuck human_processing messages -> ONE post with a single header (count +
-    explanation), up to DISPLAY_ITEM_CAP short item lines, „…a N ďalších", and a dashboard
+    explanation), up to DISPLAY_ITEM_CAP short item lines, „… a ešte N ďalšie", and a dashboard
     action link — never 12 repeated explanation sentences (the pre-#336 3000-char wall)."""
     class Cfg:
         dashboard_base_url = "https://email-pz.newlevel.media/"
@@ -448,7 +448,7 @@ def test_format_grouped_builds_one_header_capped_lines_and_a_dashboard_link(pg):
     html = posted[0]
     assert "Nezaradené e-maily (12)" in html
     assert html.count("&#8226;") == dl_alerts.DISPLAY_ITEM_CAP, "cap displayed lines at 10"
-    assert "a 2 ďalších" in html
+    assert "a ešte 2 ďalšie." in html   # #476: the remainder agrees with N
     assert 'href="https://email-pz.newlevel.media"' in html   # trailing slash stripped
     # the explanation sentence appears ONCE (in the header), never repeated per item
     assert html.count("skontroluj ich na dashboarde") == 1
