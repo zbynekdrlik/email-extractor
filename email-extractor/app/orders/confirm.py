@@ -385,12 +385,8 @@ def _plural(n: int, source: str = "edi") -> str:
 def _agree(n: int, source: str, forms: tuple[str, str, str, str]) -> str:
     """The word agreeing with `_plural(n, source)` (#476 — „1 dodací list … neprevzatých",
     „2 objednávky skončilo" read wrong). `forms` = (1 masculine — a dodací list, 1 feminine
-    — an objednávka, 2-4, 5+)."""
-    if n == 1:
-        return forms[0] if source == "desadv" else forms[1]
-    if 2 <= n <= 4:
-        return forms[2]
-    return forms[3]
+    — an objednávka, 2-4, 5+); the 1 / 2-4 / 5+ rule itself is `report._plural`'s."""
+    return report._plural(n, forms[0] if source == "desadv" else forms[1], forms[2], forms[3])
 
 
 _UNACCEPTED = ("neprevzatý", "neprevzatá", "neprevzaté", "neprevzatých")
@@ -411,9 +407,9 @@ def _carryover_head(n: int, source: str, since, now: datetime) -> str:
     if since is None:
         verb = "sú" if 2 <= n <= 4 else "je"
         return (f"&#9888;&#65039; {n} {noun} {verb} stále {adj} v ORIONe — treba {them} "
-                "prijať v Codexe.")
+                "prijať v CODEXe.")
     return (f"&#9888;&#65039; Stále {n} {noun} {adj} v ORIONe (od {_fmt_since(since, now)}) "
-            f"— treba {them} prijať v Codexe.")
+            f"— treba {them} prijať v CODEXe.")
 
 
 def _carryover_html(conn, rows: list[dict], ledger: _Ledger, *, reminder: bool, read_files,
@@ -435,7 +431,8 @@ def _carryover_html(conn, rows: list[dict], ledger: _Ledger, *, reminder: bool, 
     parts = [f"<p>{_carryover_head(n, ledger.source, since, now)}</p>",
              report.capped_list(detail.lines, LIST_LIMIT, *_FURTHER[ledger.source])]
     if detail.codex_as_of:
-        parts.append(f"<p>(Zoznam kariet z CODEXu je k {escape(detail.codex_as_of)} — kartu, "
+        parts.append(f"<p>(Zoznam kariet z CODEXu je aktuálny k "
+                     f"{escape(detail.codex_as_of)} — kartu, "
                      "ktorú ste v CODEXe založili neskôr, ešte nevidíme.)</p>")
     return "".join(parts)
 
@@ -468,7 +465,7 @@ def _reminder_html(incident: dict, now: datetime, source: str = "edi") -> str:
 def _all_clear_html(kind: str, source: str = "edi") -> str:
     if kind == "carryover":
         noun = "Dodacie listy" if source == "desadv" else "Objednávky"
-        return (f"<p>&#9989; {noun} boli prijaté v Codexe — import do ORIONu je v "
+        return (f"<p>&#9989; {noun} boli prijaté v CODEXe — import do ORIONu je v "
                "poriadku.</p>")
     return "<p>&#9989; Import do ORIONu je opäť v poriadku.</p>"
 

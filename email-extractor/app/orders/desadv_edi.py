@@ -426,9 +426,15 @@ def lin_codes(content: str) -> list[str]:
     `GTIN_FIELD_WIDTH` code field at `LIN_CODE_AT`). Every code once, in file order; the HDR
     and blank lines are ignored, `\\r\\n` and bare `\\n` files both parse. Used to tell the
     warehouse WHY CODEX will not import a file still waiting in `in_DL` (a code no CODEX
-    stock card has makes CODEX reject the whole delivery note, #467)."""
+    stock card has makes CODEX reject the whole delivery note, #467).
+
+    Splits on `\\n` ONLY — the exact inverse of `generate()`'s `"\\r\\n".join` — never
+    `str.splitlines()`: the text is uploaded as UTF-8 and read back as latin-1, so a „Å" in a
+    name becomes „Ã\\x85" and `splitlines()` breaks on \\x85, which let a HDR tail pose as a
+    fake LIN code (#476 review)."""
     out: list[str] = []
-    for line in str(content or "").splitlines():
+    for raw in str(content or "").split("\n"):
+        line = raw.rstrip("\r")
         if not line.startswith("LIN"):
             continue
         code = line[LIN_CODE_AT:LIN_CODE_AT + GTIN_FIELD_WIDTH].strip()

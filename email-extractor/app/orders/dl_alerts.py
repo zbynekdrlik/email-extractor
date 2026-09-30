@@ -294,7 +294,9 @@ def _format_grouped(kind: str, bodies: list[str], cfg, *, channel_id: int,
     parts = [f"<p>{GROUPED_ITEM_KINDS[kind].replace('{n}', str(n))}</p>"]
     parts.extend(bodies[:DISPLAY_ITEM_CAP])
     if n > DISPLAY_ITEM_CAP:
-        parts.append(f"<p>&#8230; a {n - DISPLAY_ITEM_CAP} ďalších.</p>")
+        # #476: one kind per post and every header noun is masculine (e-maily, dodacie
+        # listy, skeny) — the shared agreeing line („a ešte 1 ďalší", never „1 ďalších").
+        parts.append(report.more_line(n - DISPLAY_ITEM_CAP, "ďalší", "ďalšie", "ďalších"))
     parts.append(_action_line(kind, cfg, channel_id, list(message_ids or [])))
     return "".join(parts)
 
