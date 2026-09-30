@@ -2396,3 +2396,98 @@ def test_the_cards_push_endpoint_runs_the_sync_and_reports_it(pg):
     assert sync["mode"] == "dry-run" and sync["renamed"] == 1
     assert _orders(pg)[CHLIEB]["name"] == "Chlieb pšeničný 1000g", "dry-run by default"
     assert pg.execute("SELECT count(*) FROM codex_sync_runs").fetchone()[0] == 2
+
+
+# --- review 17: what a pick does is the picker's own rule (`card_guard.pick_target`) --------
+
+def test_a_renumber_waiting_on_another_card_names_every_number_the_pick_would_select(pg):
+    """Review 17 🔵: our CHLIEB (card 31) + its live legacy twin 0CHLIEB; card 31 is missing from
+    ONE snapshot and card 55 (the koláč) takes code CHLIEB. The koláč's renumber waits on our
+    CHLIEB — the review names BOTH numbers to delete (the picker SELECTS the twin otherwise), and
+    following it the pick restores CHLIEB as card 55 and the renumber goes through."""
+    _seed_catalogs(pg)
+    snapshot.upsert_catalog_card(pg, "0" + CHLIEB, "Chlieb pšeničný 1000g")
+    snapshot.rebuild_from_overrides(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    v2 = [dict(r, code=CHLIEB) if r["card_code"] == "55" else r
+          for r in V1 if r["card_code"] != "31"]
+    _push(pg, v2, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    reason = _review_reason(pg, "orders", KOLAC)
+    assert "nie 55" in reason and f"0{CHLIEB}" in reason
+    for g in (CHLIEB, "0" + CHLIEB):
+        snapshot.retire_catalog_card(pg, g)
+    snapshot.rebuild_from_overrides(pg)
+    res = card_guard.add_from_codex(pg, "orders", CHLIEB, actor="sklad")
+    assert (res["gtin"], res["created"]) == (CHLIEB, True)
+    _push(pg, v2, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert "nie 55" not in _review_reason(pg, "orders", KOLAC)
+    orders = _orders(pg)
+    assert CHLIEB in orders and KOLAC not in orders, "the koláč was renumbered onto CHLIEB"
+
+
+def test_a_pick_advice_for_a_dl_twin_says_the_pick_adds_a_new_card(pg):
+    """Review 17 🔵: the DL catalog has only the legacy 14-char twin 0ROZOK (curated doplnok /
+    mass / cena) and two CODEX cards carry ROZOK under the same name. The DL picker never
+    selects or restores a 14-char number — the advice says the pick ADDS a new card with only
+    the CODEX name (+ sklad), never that the data stays; and that is what the pick does."""
+    dl_snapshot._freeze(pg, [
+        {"gtin": "0" + ROZOK, "name": "Rožok so slaninou 70g", "doplnok": "rožok slanina",
+         "mass": 0.07, "sklad": "1", "cena": 0.35}], [])
+    dup = V1 + [_row(ROZOK, "28", "Rožok so slaninou 70g")]
+    _push(pg, dup, hours_old=3)
+    codex_sync.run(pg, _cfg())
+    reason = _review_reason(pg, "dl", "0" + ROZOK)
+    assert "Vybrať kartu z CODEXu" in reason
+    assert "údaje ostanú" not in reason and "nová karta" in reason
+    dl_snapshot.retire_dl_catalog_card(pg, "0" + ROZOK)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    res = card_guard.add_from_codex(pg, "dl", ROZOK, actor="sklad")
+    assert (res["gtin"], res["created"]) == (ROZOK, True)
+    assert not _dl(pg)[ROZOK].get("doplnok") and _dl(pg)[ROZOK].get("cena") is None
+
+
+def test_a_repick_review_never_advises_a_pick_that_selects_another_number_of_ours(pg):
+    """Review 17 (speculative, made concrete): the warehouse re-picked our ROZOK as the pagáč
+    (card 79) while card 27 moved to ROZOK_NEW — a code our number ROZOK_NEW (card 81) carries
+    too. The picker offers card 27 for ROZOK_NEW, but a pick of it SELECTS our ROZOK_NEW (card
+    81): the review never advises that pick for the rožok's rows."""
+    _seed_catalogs(pg)
+    snapshot.upsert_catalog_card(pg, ROZOK_NEW, "Zemiaková placka 90g")
+    snapshot.rebuild_from_overrides(pg)
+    _seed_memory(pg)
+    placka = _row(ROZOK_NEW, "81", "Zemiaková placka 90g")
+    _push(pg, V1 + [placka], hours_old=6)
+    codex_sync.run(pg, _cfg())
+    assert _binding(pg, ROZOK_NEW)[0] == "81"
+    v2 = _reused(V1) + [placka]
+    _push(pg, v2, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    snapshot.retire_catalog_card(pg, ROZOK)
+    snapshot.rebuild_from_overrides(pg)
+    card_guard.add_from_codex(pg, "orders", ROZOK, actor="sklad")
+    _push(pg, v2, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "môže patriť" in reason, "the rožok's rows older than the pick go to a human"
+    assert f"kód {ROZOK_NEW} (karta CODEX 27)" not in reason and ROZOK_NEW in reason
+
+
+def test_a_failing_dry_run_writes_no_ops_alert(pg, monkeypatch):
+    """Review 17 🔵: the dry-run writes nothing to the ops outbox — a failing sync included
+    (its `error` run row is the record; the alert said names „are not updated", which a dry-run
+    never does anyway)."""
+    _seed_catalogs(pg)
+    _push(pg, V1, hours_old=3)
+
+    def boom(conn, cx):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(codex_sync.sp, "build_plan", boom)
+    res = codex_sync.run_safely(pg, _cfg(apply=False))
+    assert res["mode"] == "error"
+    assert pg.execute("SELECT status FROM codex_sync_runs ORDER BY id DESC LIMIT 1"
+                      ).fetchone()[0] == "error"
+    assert pg.execute("SELECT count(*) FROM pending_alerts").fetchone()[0] == 0
