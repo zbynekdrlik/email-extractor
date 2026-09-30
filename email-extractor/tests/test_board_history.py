@@ -352,12 +352,32 @@ def test_manual_refuses_dl_scope(pg):
     assert c.post("/api/board/history/dlm/manual?scope=dl").status_code == 409
 
 
+_PARTNERS_CSV = ("Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,"
+                 "E-mail\nPekáreň Testovacia,2000000000864,Martin,Košútka 1,,,sklad@pekaren.sk\n")
+
+
 # --- teachback (writes memory, never the shipped doc / ledger) ----------------------
+
+def _cards(pg, orders=(), dl=()):
+    """#479: teachback teaches only an EXISTING card of the scope's catalog — seed the cards a
+    test teaches onto (synthetic numbers)."""
+    from app.orders import dl_snapshot, snapshot
+    if orders:
+        snapshot.import_snapshot(
+            pg, "GTIN,Sklad,Názov,doplnok\n" + "".join(f"{g},1,{n},\n" for g, n in orders),
+            _PARTNERS_CSV)
+    if dl:
+        dl_snapshot.import_snapshot(
+            pg, "GTIN,Názov,doplnok,hmotnost,Sklad,Cena\n"
+                + "".join(f"{g},{n},,,1,0.4\n" for g, n in dl),
+            "GTIN,Sklad,Názov,doplnok\n", _PARTNERS_CSV)
+
 
 def test_teachback_orders_writes_customer_alias_and_audit(pg):
     _msg(pg, "t1", proc_status="ok", subject="Obj")
     _run(pg, "t1", result={"customer_ean": "CUST1", "customer_name": "Alfa"},
          items=[{"name": "rožok tmavý", "gtin": "OLD", "card": "Zlá karta"}])
+    _cards(pg, orders=[("NEW1", "Správna karta")])
     c = _client()
     _sklad(c)
     r = c.post("/api/board/history/t1/teach",
@@ -377,6 +397,7 @@ def test_teachback_dl_writes_supplier_alias(pg):
     _msg(pg, "td", category="dodacie_listy", proc_status="ok", subject="DL")
     _run(pg, "td", result={"documents": [{"doc_number": "D1", "supplier_ean": "SUPP"}]},
          items=[{"name": "múka", "gtin": "OLD", "card": "Zlá"}])
+    _cards(pg, dl=[("NEWDL", "Múka T650")])
     c = _client()
     _dl(c)
     r = c.post("/api/board/history/td/teach?scope=dl",
@@ -395,10 +416,6 @@ def test_teachback_requires_gtin_and_wording(pg):
     _sklad(c)
     assert c.post("/api/board/history/t2/teach", json={"name": "x"}).status_code == 400
     assert c.post("/api/board/history/t2/teach", json={"gtin": "G"}).status_code == 400
-
-
-_PARTNERS_CSV = ("Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,"
-                 "E-mail\nPekáreň Testovacia,2000000000864,Martin,Košútka 1,,,sklad@pekaren.sk\n")
 
 
 def test_teachback_refuses_a_number_that_is_not_a_catalog_card(pg):
@@ -446,6 +463,7 @@ def test_teachback_audit_is_restorable(pg):
     _msg(pg, "t3", proc_status="ok")
     _run(pg, "t3", result={"customer_ean": "CX"},
          items=[{"name": "chlieb", "gtin": "OLD"}])
+    _cards(pg, orders=[("Z1", "K")])
     c = _client()
     _sklad(c)
     c.post("/api/board/history/t3/teach", json={"name": "chlieb", "gtin": "Z1", "card": "K"})
