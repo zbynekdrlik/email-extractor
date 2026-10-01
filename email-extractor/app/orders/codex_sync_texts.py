@@ -25,10 +25,12 @@ class Pick:
     """What a „Vybrať kartu z CODEXu" pick does — `card_guard.pick_target` (the picker's own
     rule) run by the planner over its simulated catalog (review 17): `kind` select / restore /
     new, `gtin` = our number it selects or restores, `keeps` = a restored card keeps its curated
-    data (`_identify`'s reset rule: the card it is bound to is the picked one or its product)."""
+    data (`_identify`'s reset rule), `same` = because it is bound to the picked card's product
+    (else because it is bound to nothing — nothing to reset, no product claim)."""
     kind: str
     gtin: str | None
     keeps: bool
+    same: bool = False
 
 
 def pick_result(scope: str, code: str, pick: Pick, delete: list[str]) -> str:
@@ -39,7 +41,8 @@ def pick_result(scope: str, code: str, pick: Pick, delete: list[str]) -> str:
                 f"({_CURATED[scope]}) sa neprenesú{kept}, doplň ich")
     if pick.kind == "select":
         return f"vyberie sa naše číslo {pick.gtin} a nič sa nezmení"
-    data = "jej údaje ostanú (ten istý výrobok)" if pick.keeps else _CLEARED[scope]
+    data = (("jej údaje ostanú (ten istý výrobok)" if pick.same else "jej údaje ostanú")
+            if pick.keeps else _CLEARED[scope])
     where = "" if pick.gtin in delete else f"obnoví sa z Koša naša karta {pick.gtin} a "
     return f"{where}priradí sa k nej, {data}"
 
@@ -242,13 +245,34 @@ def why_new_carrier(code: str, card: str, before: list[str]) -> str:
             f"niesla karta CODEX {', '.join(before)} — čaká sa na ďalší zoznam")
 
 
-def carrier_changed(code: str, card: str, card_name: str, earlier: list[str]) -> str:
-    """An unbound number whose code changed carrier, named like none of the cards."""
-    return (f"kód {code} teraz nesie karta CODEX {card} („{card_name}“), predtým ho niesla "
-            f"karta CODEX {', '.join(earlier)} — názov našej karty nesedí so žiadnou z nich, "
-            f"nevieme, ktorá je naša. Premenuj našu kartu (Produkty) na názov tej, ktorá je "
-            f"naša — pri ďalšom zozname kariet sa priradí; ak kartu nepotrebujete, zmažte ju "
-            f"(Kôš).")
+def carrier_way_out(renames: list[tuple[str, str]], pick: str) -> str:
+    """The ways out of a carrier-change review (`_carrier_way_out` computed which work)."""
+    parts = [f"Ak je to výrobok karty CODEX {c}, premenuj našu kartu (Produkty) na „{label}“ — "
+             f"pri ďalšom zozname kariet sa priradí ku karte CODEX {c}." for c, label in renames]
+    parts.append(pick[:1].upper() + pick[1:] + ".")
+    parts.append("Ak kartu nepotrebujete, zmažte ju (Kôš).")
+    return " ".join(parts)
+
+
+def carrier_changed(code: str, card: str, card_name: str, earlier: list[str],
+                    named: list[str], way_out: str) -> str:
+    """An unbound number whose code changed carrier: our name matches none of the earlier
+    carriers, or several (same-named duplicates)."""
+    head = (f"kód {code} teraz nesie karta CODEX {card} („{card_name}“), predtým ho niesla "
+            f"karta CODEX {', '.join(earlier)} — ")
+    which = (f"naša karta sa volá rovnako ako karty CODEX {', '.join(named)}, nevieme, ktorá "
+             f"je naša (pomôže aj oprava názvov v CODEXe)." if named
+             else "názov našej karty nesedí so žiadnou z nich, nevieme, ktorá je naša.")
+    return f"{head}{which} {way_out}"
+
+
+def carrier_named_now(name: str, code: str, card: str, alive: list[str], way_out: str) -> str:
+    """An unbound number named like the code's carrier now, while an earlier carrier of
+    another product lives on in CODEX — the name may come from the #467 drift button."""
+    return (f"naša karta „{name}“ sa volá ako karta CODEX {card}, ktorá kód {code} nesie teraz, "
+            f"no predtým ho niesla karta CODEX {', '.join(alive)} — iný výrobok, ktorý v CODEXe "
+            f"stále je; názov mohol prísť z tlačidla „Prevziať názov z CODEXu“, nevieme, ktorá "
+            f"je naša. {way_out}")
 
 
 def why_pick_waits(picked: str, missing: str) -> str:
@@ -265,8 +289,8 @@ def why_renumber_waits(succ: str, at: str, kind: str | None) -> str:
         return (f"prečíslovanie na {succ} čaká — výber karty na našom čísle {at} sa vyrieši "
                 f"s ďalším zoznamom")
     if kind == "carrier":
-        return (f"prečíslovanie na {succ} čaká — naše číslo {at} sa ku karte CODEX priradí "
-                f"s ďalším zoznamom")
+        return (f"prečíslovanie na {succ} čaká — kód nášho čísla {at} má nového nositeľa, "
+                f"rozhodne ďalší zoznam")
     return (f"prečíslovanie na {succ} čaká — najprv treba vyriešiť naše číslo {at} (má vlastnú "
             f"kontrolu)")
 

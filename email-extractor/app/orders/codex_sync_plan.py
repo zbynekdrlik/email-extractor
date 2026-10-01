@@ -292,7 +292,8 @@ class _ScopePlanner:
         card per code (`card_guard.pickable`, under its own name), it SELECTS a live number of
         ours it can carry (so every number of the code goes to the Kôš first — review 16), then
         restores our Kôš card or adds a new one (`_pick` — review 17: a DL legacy twin is never
-        restored), and a restored card keeps its data only for the same product (`_keeps`)."""
+        restored), and a restored card keeps its data only when bound to nothing or to the same
+        product (`_pick` / `_bound`)."""
         entry = self.cx.pickable[self.scope.name].get(code)
         offered = str(entry["card_code"]) if entry is not None else None
         label = ((str(entry.get("name") or "") if entry is not None else "")
@@ -314,18 +315,21 @@ class _ScopePlanner:
             self.scope.name, code, [c for g, c in self.live.items() if g not in gone],
             self.binned + [self.live[g] for g in delete if g in self.live])
         gtin = str(card["gtin"]) if card is not None else None
-        return texts.Pick(kind, gtin, kind == "restore" and gtin is not None
-                          and self._keeps(gtin, offered, code))
+        bound = self._bound(gtin) if kind == "restore" and gtin is not None else None
+        same = bound is not None and (bound == offered
+                                      or self.cx.same_product(bound, offered, code))
+        # `_identify`'s reset rule: a restored number keeps its curated data when it is bound to
+        # nothing (nothing to reset) or to the same product (review 26: an unbound number's
+        # text claimed „the same product")
+        return texts.Pick(kind, gtin, kind == "restore" and (bound is None or same), same)
 
-    def _keeps(self, gtin: str, offered: str, code: str) -> bool:
-        """A pick restoring our `gtin` as CODEX card `offered` keeps its curated data —
-        `_identify`'s reset rule, against the card the number is bound to once this plan is
-        applied (a seed of this plan, else the stored binding; unbound = nothing to reset)."""
+    def _bound(self, gtin: str) -> str | None:
+        """The CODEX card our `gtin` is bound to once this plan is applied — a seed of this
+        plan, else the stored binding — what `_identify` compares a later pick with."""
         seed = next((s["card"] for s in reversed(self.plan.seeds)
                      if s["scope"] == self.scope.name and s["gtin"] == gtin), None)
         b = self.cx.bindings.get((self.scope.name, gtin))
-        bound = seed if seed is not None else b.card if b is not None else None
-        return bound is None or bound == offered or self.cx.same_product(bound, offered, code)
+        return seed if seed is not None else b.card if b is not None else None
 
     def _seed(self, item: dict, card: str, *, replaces: bool = False) -> None:
         """Bindings found this run — for EVERY number of the group (a legacy „0"+code twin too:
@@ -443,15 +447,44 @@ class _ScopePlanner:
             self.plan.wait(item, texts.why_new_carrier(code, card, recent))
             self.waiting.update({g: "carrier" for g in item["gtins"]})
             return None
-        if not earlier or is_named(name, cx.rows(card, code)):
+        if not earlier:
             return card
+        if is_named(name, cx.rows(card, code)):
+            # our name is the carrier now's — unless an earlier carrier of ANOTHER product
+            # lives on in CODEX: the name may come from the #467 drift button, which offers the
+            # code's current holder (round 9's rule, for an unbound number — review 26)
+            alive = [c for c in earlier
+                     if c in cx.by_card and not cx.same_product(c, card, code)]
+            if not alive:
+                return card
+            self.plan.add_review(item, texts.carrier_named_now(
+                name, code, card, alive, self._carrier_way_out(code, card, alive, earlier)))
+            return None
         ours = codex_cards.name_key(name)
         named = [c for c in earlier if ours and ours in cx.product(c, code)]
         if len(named) == 1:
             return named[0]
-        self.plan.add_review(item, texts.carrier_changed(code, card, cx.name_of(card, code),
-                                                         earlier))
+        self.plan.add_review(item, texts.carrier_changed(
+            code, card, cx.name_of(card, code), earlier, named,
+            self._carrier_way_out(code, card, earlier, earlier)))
         return None
+
+    def _carrier_way_out(self, code: str, card: str, candidates: list[str],
+                         earlier: list[str]) -> str:
+        """The ways out of a carrier-change review, each what the next list then decides:
+        rename our card to a candidate's name that ONLY it bears among the code's earlier
+        carriers (and the carrier now does not) → bound to it (`_sole_carrier`); the pick of
+        the code — the carrier now (`_pick_advice`) → bound to it; never a rename to the
+        carrier now's name (the drift-button shape — a human again, review 26)."""
+        cx = self.cx
+        now = {codex_cards.name_key(r.name) for r in cx.rows(card, code)}
+        renames = []
+        for c in candidates:
+            label = cx.name_of(c, code)
+            key = codex_cards.name_key(label)
+            if key and key not in now and sum(key in cx.product(e, code) for e in earlier) == 1:
+                renames.append((c, label))
+        return texts.carrier_way_out(renames, self._pick_advice(code, [card]))
 
     def _settle(self, code: str, group: list[dict]) -> tuple[dict, list[dict]] | None:
         """Pass 1 for one group: which CODEX card it IS (`_identify`) and the reset a pick /

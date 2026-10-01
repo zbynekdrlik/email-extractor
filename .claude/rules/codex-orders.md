@@ -366,9 +366,13 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   A card is bound ONCE (the code's only stredisko-1 carrier — but only when no other card
   carried it in the previous synced snapshot, one push is no proof; and when another card
   carried it EARLIER the code changed carrier: the number is the product its NAME is — the
-  carrier now, or exactly one earlier carrier, which it then follows — else a human decides,
-  `_sole_carrier`, round 25: on the first post-deploy lists every number is unbound and a
-  reuse bound our rožok to the pagáč; or the one our name picks; or the history's last
+  carrier now (unless an earlier carrier of ANOTHER product lives on in CODEX: the name may be
+  the #467 drift button's, round 9's rule → a human, round 26), or exactly one earlier carrier,
+  which it then follows — else a human decides, with ways out that work (`_carrier_way_out`:
+  rename to a name only that earlier carrier bears, or the pick of the carrier now — never a
+  rename to the carrier now's name), `_sole_carrier`, round 25: on the first post-deploy lists
+  every number is unbound and a reuse bound our rožok to the pagáč; or the one our name picks;
+  or the history's last
   carrier when the code is already gone), stored in every mode (identity, not catalog data),
   and from then on the sync follows THAT card. Pass 1's verdict (`settled` / `unsettled` /
   `waiting`) is what `_renumber` reads for a target bound only in THIS plan — never a merge
@@ -485,8 +489,9 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   simulated catalog (`_pick`, every live number of the code — `_numbers` — sent to the Kôš
   first; round 17: re-deriving it in prose missed a live legacy twin and a DL twin-only card).
   `_pick_advice` (the #477 picker offers ONE card per code — `card_guard.pickable`; a restored
-  card keeps its data only when the card it is bound to after this plan is the same product —
-  `_keeps`; the cleared fields named per catalog; a card the picker cannot offer is named
+  card keeps its data when the card it is bound to after this plan (`_bound`) is the same
+  product — „ten istý výrobok" — or when it is bound to nothing — no product claim then, round
+  26; the cleared fields named per catalog; a card the picker cannot offer is named
   "zaradí len oprava v CODEXe"; a repick review never advises a code whose pick SELECTS another
   number of ours), `_gone_reason` (no stredisko-1 carrier / one / several),
   `Split.held_at` (the numbers held rows really sit on — a legacy twin), a hold note's `at` +
