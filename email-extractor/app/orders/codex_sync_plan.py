@@ -421,10 +421,11 @@ class _ScopePlanner:
     def _by_history(self, code: str, item: dict, carriers: set[str]) -> str | None:
         """THE rule for an UNBOUND number (every number on the first post-deploy lists): which
         CODEX card it IS, from every card that carried its code since the history began
-        (`Codex.since_seed` — a sighting only in a list older than that is no evidence, review
-        33) — the carriers now (none, one or several) and before — never "who holds the code
-        now / held it last" (reviews 25 / 28 / 29: a reuser — also one that moved on, or one
-        beside a duplicate carrier — dragged our rožok along, round 1's 🔴).
+        (`Codex.since_seed`, each counted from its first list since then — `Codex.seen_from`:
+        a sighting in a list older than the beginning is no evidence, reviews 33-34) — the
+        carriers now (none, one or several) and before — never "who holds the code now / held
+        it last" (reviews 25 / 28 / 29: a reuser — also one that moved on, or one beside a
+        duplicate carrier — dragged our rožok along, round 1's 🔴).
         - One list is no proof: a card that left the code since the last list, a card arriving
           on a code no card carried before (review 30: a #467 "missing" card bound to it and
           then removed), or (no carrier now) a last carrier missing from this list only → it
@@ -444,7 +445,7 @@ class _ScopePlanner:
         seed = cx.seeded_at or NEVER
 
         def since(c: str) -> datetime:
-            return cx.first_seen.get((c, code), NEVER)
+            return cx.seen_from(c, code)
 
         recent = [c for c in earlier if not cx.absent_before(c, code)] if now else []
         arrived = bool(now) and not earlier and all(
@@ -482,9 +483,12 @@ class _ScopePlanner:
     def _took_over(self, code: str, card: str) -> list[str]:
         """The cards of ANOTHER product that carried `code` before `card` first did — `card`
         took the code over from them (a reuse). A number named like `card` may have that name
-        from the #467 drift button, which offers the code's holder — while its data is theirs."""
+        from the #467 drift button, which offers the code's holder — while its data is theirs.
+        `card` counts from its first list since the history began (`Codex.seen_from` — a
+        sighting before we watched hid a take-over, review 34); the others from their first
+        sighting at all (clamped to the beginning — the cautious side)."""
         cx = self.cx
-        first = cx.first_seen.get((card, code), NEVER)
+        first = cx.seen_from(card, code)
         return [d for d in sorted(cx.carried.get(code, {}))
                 if d != card and not cx.same_product(d, card, code)
                 and cx.first_seen.get((d, code), NEVER) < first]

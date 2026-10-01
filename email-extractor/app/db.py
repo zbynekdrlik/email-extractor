@@ -284,8 +284,10 @@ CODEX_STOCK_CARDS = [
 # when, because `codex_stock_cards` is a full REPLACE per push and forgets it — without the
 # history a renumber (card 27: X -> 3698 -> …) is indistinguishable from a card that left
 # CODEX. `first_seen`/`last_seen` are the CODEX data age of the push that saw it
-# (`codex_cards._data_as_of`). Seeded from the list already stored, so the FIRST sync after
-# the deploy already compares against the last pre-deploy push. `codex_card_bindings` is WHICH
+# (`codex_cards._data_as_of`; a list older than the history's beginning: first_seen clamped to
+# it, `seen_since` NULL — `codex_sync_list.update_history`). Seeded from the list already
+# stored (that seed IS the beginning), so the FIRST sync after the deploy already compares
+# against the last pre-deploy push. `codex_card_bindings` is WHICH
 # CODEX card each of our cards is ((scope, our gtin) -> ACSKLP, set from the code's history and
 # our name — `codex_sync_plan._by_history`, or a #477 pick): a renumber / removal follows that card, never
 # whichever card holds the code most recently (a code can be REUSED for another product);
@@ -303,6 +305,10 @@ CODEX_CARD_HISTORY = [
         name        TEXT NOT NULL DEFAULT '',
         first_seen  TIMESTAMPTZ NOT NULL,
         last_seen   TIMESTAMPTZ NOT NULL,
+        -- the first list SINCE its stredisko's history began that showed the pair (NULL = only
+        -- ever in a list older than the beginning, whose first_seen is clamped to it): who our
+        -- number IS reads this, the reuse windows read first_seen (#478 review 34)
+        seen_since  TIMESTAMPTZ,
         PRIMARY KEY (stredisko, card_code, code)
     )
     """,
@@ -331,8 +337,9 @@ CODEX_CARD_HISTORY = [
     )
     """,
     """
-    INSERT INTO codex_card_history (stredisko, card_code, code, name, first_seen, last_seen)
-    SELECT k.stredisko, k.card_code, k.code, max(k.name), s.as_of, s.as_of
+    INSERT INTO codex_card_history (stredisko, card_code, code, name, first_seen, last_seen,
+                                    seen_since)
+    SELECT k.stredisko, k.card_code, k.code, max(k.name), s.as_of, s.as_of, s.as_of
       FROM codex_stock_cards k
      CROSS JOIN (SELECT LEAST(COALESCE(source_as_of, synced_at), synced_at) AS as_of
                    FROM codex_card_syncs ORDER BY id DESC LIMIT 1) s

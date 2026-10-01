@@ -2387,6 +2387,27 @@ def test_the_migration_seeds_the_history_from_the_stored_list(pg):
     seen = pg.execute("SELECT DISTINCT first_seen FROM codex_card_history").fetchall()
     assert len(seen) == 1
     assert abs((seen[0][0] - (NOW - timedelta(hours=5))).total_seconds()) < 2
+    # review 34: the seed IS the beginning — every seeded pair is seen since it
+    assert pg.execute("SELECT count(*) FROM codex_card_history "
+                      "WHERE seen_since IS DISTINCT FROM first_seen").fetchone()[0] == 0
+
+
+def test_the_migration_seeded_history_identifies_our_numbers(pg):
+    """Review 34: who our number IS reads `seen_since` — a migration seed without it would
+    leave every number "never touched" after the deploy. A drifted card on the first
+    post-deploy list follows its seed card."""
+    _seed_catalogs(pg)
+    _push(pg, V1, hours_old=6)
+    rev = next(r.revision for r in db.REVISIONS if r.name == "add_codex_card_history")
+    pg.execute("DROP TABLE codex_card_history")
+    pg.execute("DROP TABLE codex_sync_runs")
+    pg.execute("DELETE FROM schema_version WHERE revision = %s", (rev,))
+    db.init_schema(pg)
+    drift = [dict(r, name="Rožok slaninový 70g") if r["card_code"] == "27" else r for r in V1]
+    _push(pg, drift, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    assert _binding(pg, ROZOK)[0] == "27"
+    assert _orders(pg)[ROZOK]["name"] == "Rožok slaninový 70g"
 
 
 # --- the push endpoint runs the sync ----------------------------------------------------------
@@ -3740,3 +3761,28 @@ def test_the_history_reads_each_strediskos_beginning_once_per_list(pg):
     spy = _Explaining(pg)
     codex_sync_list.update_history(spy, NOW - timedelta(hours=5))
     assert spy.plans and not any("SubPlan" in p for p in spy.plans), spy.plans
+
+
+def _seen_since(pg, card):
+    return pg.execute("SELECT seen_since FROM codex_card_history WHERE stredisko = 1 AND "
+                      "card_code = %s", (card,)).fetchone()[0]
+
+
+def test_seen_since_is_the_first_list_since_the_beginning_that_showed_the_pair(pg):
+    """Review 34 (pins `seen_since`): a list of the beginning's own age is since the beginning;
+    a pair seen only in an older list has none; seen again since → that list, and a later
+    re-sent (older) list never moves it — a later value only errs towards „arrived"."""
+    _seed_catalogs(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync._record_history(pg)
+    _push(pg, V1 + [_row(BAGETA, "90", "Pagáč nový 60g")], hours_old=6)
+    codex_sync._record_history(pg)
+    assert _seen_since(pg, "90") == NOW - timedelta(hours=6)
+    late = _row(PAGAC_W, "92", "Bageta cesnaková 120g")
+    _push(pg, V1 + [late], hours_old=8)
+    codex_sync._record_history(pg)
+    assert _seen_since(pg, "92") is None
+    for hours in (4, 5):
+        _push(pg, V1 + [late], hours_old=hours)
+        codex_sync._record_history(pg)
+    assert _seen_since(pg, "92") == NOW - timedelta(hours=4)

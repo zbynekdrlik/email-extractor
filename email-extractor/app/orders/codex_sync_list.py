@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from . import card_guard, codex_cards
@@ -53,17 +53,26 @@ class Codex:
     # since then was there before we watched; one arriving later on a code no card carried is
     # a carrier change (review 30)
     seeded_at: datetime | None = None
+    # (card, code) -> the first list SINCE the beginning that showed the pair (`seen_since`;
+    # absent = only ever in a list older than the beginning). `first_seen` is clamped to the
+    # beginning for such a pair (its reuse window opens — review 32), so it cannot tell a seed
+    # card from one seen before we watched: who our number IS reads this (reviews 33-34)
+    seen_since: dict[tuple[str, str], datetime] = field(default_factory=dict)
 
     def carriers(self, code: str) -> set[str]:
         return {r.card for r in self.by_code.get(code, [])}
 
     def since_seed(self, code: str) -> list[str]:
         """The cards seen carrying `code` in a list since the history began. A card seen on it
-        only in a list OLDER than the beginning (recorded as first seen AT the beginning, so
-        its reuse window opens — review 32) is no evidence of who our number is: it bound a
+        only in a list OLDER than the beginning is no evidence of who our number is: it bound a
         #467 "missing" card with no name check, then removed / renumbered it (review 33)."""
-        seed = self.seeded_at or NEVER
-        return sorted(c for c, t in self.carried.get(code, {}).items() if t >= seed)
+        return sorted(c for c in self.carried.get(code, {}) if (c, code) in self.seen_since)
+
+    def seen_from(self, card: str, code: str) -> datetime:
+        """When `card` was first seen on `code` in a list since the history began — a card also
+        seen there before we watched counts from then, never "since the beginning" (review 34:
+        it bound a missing card at once, and hid a take-over)."""
+        return self.seen_since.get((card, code), NEVER)
 
     def product(self, card: str, code: str) -> set[str]:
         """The product names (#467 `name_key`) of CODEX `card`: its current rows + its name
@@ -168,27 +177,38 @@ def update_history(conn, as_of: datetime) -> None:
     OLDER than the history's beginning is recorded as first seen AT that beginning — its
     stredisko's own, the one `Codex.seeded_at` reads for stredisko 1 (review 33): the beginning
     never moves back, else every card on a code since then would count as "arrived" (review 31).
-    Only first_seen is clamped — last_seen stays the list's age (the name rule above). Such a
-    pair is no identity evidence (`Codex.since_seed`, review 33)."""
-    begun = conn.execute("SELECT min(first_seen) FROM codex_card_history").fetchone()
-    if begun and begun[0] is not None and as_of < begun[0]:
+    Only first_seen is clamped — last_seen stays the list's age (the name rule above).
+    `seen_since` is the first list since the beginning that showed the pair (NULL until one
+    does; never moved once set — a later value only errs towards "arrived", the cautious
+    side): who our number IS reads it, never the clamped first_seen (reviews 33-34). Each
+    stredisko's beginning is read ONCE per list (review 34: a per-row subquery was ~1000x
+    slower on a production-size list, inside the push's request)."""
+    late = conn.execute(
+        """SELECT h.stredisko, min(h.first_seen) FROM codex_card_history h
+            WHERE h.stredisko IN (SELECT stredisko FROM codex_stock_cards)
+            GROUP BY h.stredisko HAVING min(h.first_seen) > %s ORDER BY h.stredisko""",
+        (as_of,)).fetchall()
+    if late:
         log.warning("CODEX card history: the list (CODEX data as of %s) is older than the "
-                    "history's beginning (%s) — its new sightings are recorded at the beginning "
-                    "(#478)", as_of, begun[0])
+                    "history's beginning on stredisko %s — its new sightings there are recorded "
+                    "at the beginning, and are no evidence of who our numbers are (#478)", as_of,
+                    ", ".join(f"{s} ({at:%Y-%m-%d %H:%M})" for s, at in late))
     # GREATEST ignores NULL: a stredisko with no history yet records the list's own age
     conn.execute(
-        """INSERT INTO codex_card_history (stredisko, card_code, code, name, first_seen,
-                                           last_seen)
-           SELECT c.stredisko, c.card_code, c.code, max(c.name),
-                  GREATEST(%(as_of)s, (SELECT min(h.first_seen) FROM codex_card_history h
-                                        WHERE h.stredisko = c.stredisko)),
-                  %(as_of)s
+        """WITH begun AS (SELECT stredisko, min(first_seen) AS at
+                             FROM codex_card_history GROUP BY stredisko)
+           INSERT INTO codex_card_history (stredisko, card_code, code, name, first_seen,
+                                           last_seen, seen_since)
+           SELECT c.stredisko, c.card_code, c.code, max(c.name), GREATEST(%(as_of)s, b.at),
+                  %(as_of)s, CASE WHEN b.at IS NULL OR %(as_of)s >= b.at THEN %(as_of)s END
              FROM codex_stock_cards c
-            GROUP BY c.stredisko, c.card_code, c.code
+             LEFT JOIN begun b ON b.stredisko = c.stredisko
+            GROUP BY c.stredisko, c.card_code, c.code, b.at
            ON CONFLICT (stredisko, card_code, code) DO UPDATE
               SET name = CASE WHEN EXCLUDED.last_seen >= codex_card_history.last_seen
                               THEN EXCLUDED.name ELSE codex_card_history.name END,
-                  last_seen = GREATEST(codex_card_history.last_seen, EXCLUDED.last_seen)""",
+                  last_seen = GREATEST(codex_card_history.last_seen, EXCLUDED.last_seen),
+                  seen_since = COALESCE(codex_card_history.seen_since, EXCLUDED.seen_since)""",
         {"as_of": as_of})
 
 
@@ -236,23 +256,26 @@ def load(conn, cards: codex_cards.CodexCards, as_of: datetime,
         row = Row(r[0], r[1], int(r[2]), r[3] or "", bool(r[4]), r[5])
         by_card.setdefault(row.card, []).append(row)
         by_code.setdefault(row.code, []).append(row)
-    hist = conn.execute("SELECT card_code, code, first_seen, last_seen, name "
+    hist = conn.execute("SELECT card_code, code, first_seen, last_seen, name, seen_since "
                         "FROM codex_card_history WHERE stredisko = %s", (STREDISKO,)).fetchall()
     latest: dict[str, datetime] = {}
     card_seen: dict[str, datetime] = {}
     first_seen: dict[tuple[str, str], datetime] = {}
     last_seen: dict[tuple[str, str], datetime] = {}
+    seen_since: dict[tuple[str, str], datetime] = {}
     carried: dict[str, dict[str, datetime]] = {}
     names: dict[tuple[str, str], str] = {}
-    for card, code, first, last, name in hist:
+    for card, code, first, last, name, since in hist:
         latest[code] = max(latest.get(code, NEVER), last)
         card_seen[card] = max(card_seen.get(card, NEVER), last)
         first_seen[(card, code)] = first
         last_seen[(card, code)] = last
+        if since is not None:
+            seen_since[(card, code)] = since
         names[(card, code)] = name or ""
         carried.setdefault(code, {})[card] = last
     owners: dict[str, list[str]] = {}
-    for card, code, _first, last, _name in hist:
+    for card, code, _first, last, _name, _since in hist:
         if last == latest[code]:
             owners.setdefault(code, []).append(card)
     bindings = {(s, g): Binding(c, bool(a), at, rn) for s, g, c, a, at, rn in conn.execute(
@@ -261,4 +284,4 @@ def load(conn, cards: codex_cards.CodexCards, as_of: datetime,
     return Codex(cards, by_card, by_code, first_seen, last_seen, names, card_seen, owners,
                  carried, {s: card_guard.pickable(conn, s) for s in scopes},
                  _prev_as_of(conn, as_of), bindings, _events(conn),
-                 min(first_seen.values(), default=None))
+                 min(first_seen.values(), default=None), seen_since)
