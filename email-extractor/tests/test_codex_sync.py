@@ -3786,3 +3786,63 @@ def test_seen_since_is_the_first_list_since_the_beginning_that_showed_the_pair(p
         _push(pg, V1 + [late], hours_old=hours)
         codex_sync._record_history(pg)
     assert _seen_since(pg, "92") == NOW - timedelta(hours=4)
+
+
+# --- review 35: a card seen before the history began is still ANOTHER card on the code ------
+
+# at the history's beginning card 27 (our rožok) already carries ROZOK_NEW and the pagáč 90
+# carries ROZOK — the #478 incident shape, before the deploy
+MOVED_BEFORE = ([r for r in V1 if r["card_code"] != "27"]
+                + [_row(ROZOK, "90", "Pagáč nový 60g"), _row(ROZOK_NEW, "27", "Rožok so slaninou 70g")])
+
+
+def _rozok_before_we_watched(pg, lists):
+    """The beginning = MOVED_BEFORE; then a list OLDER than it shows card 27 on ROZOK (V1);
+    then `lists` (list, hours old) are synced."""
+    _seed_catalogs(pg)
+    _push(pg, MOVED_BEFORE, hours_old=6)
+    codex_sync._record_history(pg)
+    _push(pg, V1, hours_old=8)
+    assert codex_sync.run(pg, _cfg())["mode"] == "skipped"
+    for cards, hours in lists:
+        _push(pg, cards, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+
+
+def test_a_card_on_the_code_before_the_history_began_blocks_the_one_card_rule(pg):
+    """Review 35 🟡: the pagáč 90 is the ONE card on ROZOK since the history began — but card
+    27 (our rožok) carried ROZOK in a list older than that. Round 33 dropped 27 from the
+    candidates AND from the count: our unbound rožok was bound to the pagáč with no name check
+    and renamed (round 1's 🔴). Another card ever on the code → the name rule / a human; the
+    review names the card seen before we watched."""
+    _rozok_before_we_watched(pg, [(MOVED_BEFORE, 5), (MOVED_BEFORE, 4)])
+    assert _binding(pg, ROZOK) is None and _binding(pg, ROZOK, "dl") is None
+    assert _orders(pg)[ROZOK]["name"] == "Rožok so slaninou 70g"
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "staršom ako začiatok sledovania" in reason and "27" in reason, reason
+    assert "sa volá ako karta CODEX 27" in reason, reason
+
+
+def test_a_card_on_the_code_before_the_history_began_never_lets_its_reuser_remove_ours(pg):
+    """Review 35 🟡: as above, then the pagáč 90 leaves CODEX — bound to it, our rožok was
+    REMOVED from both catalogs (the DL number for good, #467) while its card 27 lives on."""
+    gone = [r for r in MOVED_BEFORE if r["card_code"] != "90"]
+    _rozok_before_we_watched(pg, [(gone, 5), (gone, 4)])
+    assert ROZOK in _orders(pg) and ROZOK in _dl(pg)
+    assert _last_report(pg)["removals"] == []
+    assert _binding(pg, ROZOK) is None
+
+
+def test_an_arrival_wait_names_a_card_seen_before_the_history_began(pg):
+    """Review 35 🔵: card 91 carried our missing card's code only in a list older than the
+    beginning; card 90 arrives — „doteraz ho nenesla žiadna karta" was untrue: the wait says
+    no card carried it since we watched, and names 91."""
+    _missing_bageta(pg)
+    _push(pg, V1, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    _push(pg, V1 + [_row(BAGETA, "91", "Bageta cesnaková 120g")], hours_old=7)
+    codex_sync.run(pg, _cfg())
+    _push(pg, V1 + [PAGAC_ON_BAGETA], hours_old=4)
+    codex_sync.run(pg, _cfg())
+    why = _waits(pg).get(("dl", BAGETA), "")
+    assert "od začiatku sledovania ho nenesla" in why and "91" in why, why
