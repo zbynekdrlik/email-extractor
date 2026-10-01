@@ -1250,10 +1250,25 @@ def _apply_dl_mass(conn, cfg, q: dict, choice: str, by: str) -> dict:
     if not gtin:
         return {}
     from . import dl_snapshot
-    dl_snapshot.set_dl_card_mass(conn, gtin, mass)
+    if dl_snapshot.set_dl_card_mass(conn, gtin, mass):
+        _audit_card_mass(conn, gtin, mass, by, q["id"])
     from . import dl_worker
     released = dl_worker.release_for_question(conn, cfg, q["id"])
     return {"released": released}
+
+
+def _audit_card_mass(conn, gtin: str, mass: float | None, by: str, qid) -> None:
+    """The answered (or undone) mass written onto the CARD leaves an `update` row on the card
+    too — the #478 CODEX sync reads it as a human fix of the card's data (review 43: a reset
+    of a pick-restored card wiped the warehouse's answer). `after` only — the question's own
+    undo is the way back, never a Kôš restore of this row. Best-effort like `_audit_change`."""
+    try:
+        from ..board.services import audit
+        audit.record(conn, actor=(by or "auto:teach"), table="dl_catalog_overrides",
+                     row_id=gtin, action="update", question_id=qid,
+                     after={"gtin": gtin, "mass": mass}, note="hmotnosť z odpovede (#462)")
+    except Exception:
+        log.exception("audit hook failed (dl_mass card %s, question %s)", gtin, qid)
 
 
 def _undo_dl_mass(conn, q: dict) -> dict:
@@ -1263,8 +1278,8 @@ def _undo_dl_mass(conn, q: dict) -> dict:
     from . import dl_snapshot
     payload = q.get("payload") or {}
     gtin = str(payload.get("gtin") or "")
-    if gtin:
-        dl_snapshot.set_dl_card_mass(conn, gtin, None)
+    if gtin and dl_snapshot.set_dl_card_mass(conn, gtin, None):
+        _audit_card_mass(conn, gtin, None, "", q["id"])
     conn.execute(
         """UPDATE order_questions
               SET status = 'open', answer = NULL, answered_by = NULL, answered_at = NULL,

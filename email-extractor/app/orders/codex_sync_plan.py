@@ -175,7 +175,7 @@ def _groups(catalog: list[dict], scope: str) -> dict[str, list[dict]]:
 
 
 # the curated fields a merge carries over onto a target that lacks them
-_FILL_FIELDS = {"orders": ("alias",), "dl": ("doplnok", "mass", "sklad", "cena")}
+_FILL_FIELDS = card_guard.CURATED_FIELDS
 
 
 def _fill(scope: Scope, target: dict, ours: dict) -> dict:
@@ -216,6 +216,7 @@ class _ScopePlanner(KosRules):
         self.unsettled: set[str] = set()
         # renumber reviews whose way out depends on the catalog as the WHOLE plan leaves it
         self.other_card: list[tuple[dict, str, str, str]] = []
+        self.kos_picks = []                  # judged restore-picks (`KosRules`)
 
     def run(self) -> None:
         groups = _groups(self.catalog, self.scope.name)
@@ -229,6 +230,7 @@ class _ScopePlanner(KosRules):
             self._follow(item, group)
         for args in self.other_card:          # the way out read from the catalog as the WHOLE
             self._other_card_review(*args)    # plan leaves it, whatever the group order
+        self._kos_pick_reviews()              # so are the restore-picks' (review 43)
         self._memory(set(groups))
         self._renames()
 
@@ -678,8 +680,12 @@ class _ScopePlanner(KosRules):
                                                          taken[1]))
         if hit is not None:
             self._adopted_review(item, str(hit["gtin"]), card, succ)
-            if target is None and other != card:
-                self._kos_review(item, hit, card, succ, other)
+            # known only through a restore-pick never judged (undone in the Kôš / deleted again
+            # before any applied run) = never identified (review 43: its rows adopted silently)
+            unjudged = (target is None and hit_known is not None and hit_known.picked
+                        and hit_known.old is None)
+            if target is None and (other != card or unjudged):
+                self._kos_review(item, hit, card, succ, None if unjudged else other)
         if target is not None:
             fill = _fill(self.scope, target, group[0])
             if fill:
@@ -737,12 +743,13 @@ class _ScopePlanner(KosRules):
         """A #477 pick restored a number that used to be ANOTHER product: its curated fields
         (orders alias; DL doplnok / mass / cena, and the sklad of the CODEX card the number IS
         now — `_sklad_of`) go back to a fresh pick's — audited, restorable."""
-        if self.scope.name == "orders":
-            new: dict = {"alias": ""}
-        else:
+        # every curated field (`card_guard.CURATED_FIELDS`, the board's audit reads the same
+        # list — review 43): text cleared, numbers to None, the sklad the picker would give
+        new: dict = {k: "" if k in ("alias", "doplnok") else None
+                     for k in card_guard.CURATED_FIELDS[self.scope.name]}
+        if "sklad" in new:
             sklad = self._sklad_of(item["codex_card"], item["code"])
-            new = {"doplnok": "", "mass": None, "cena": None,
-                   "sklad": str(sklad if sklad is not None else card.get("sklad") or "")}
+            new["sklad"] = str(sklad if sklad is not None else card.get("sklad") or "")
         changed = {k: v for k, v in new.items()
                    if (card.get(k) or None) != (v if v != "" else None)}
         if not changed:

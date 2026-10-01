@@ -188,16 +188,16 @@ def kos_adopted(gtin: str, succ: str, card: str, card_name: str, kos_name: str, 
 
 
 def kos_picked(at: str, code: str, card: str, card_name: str, kos_name: str, taught: int,
-               drift: Sequence[str], others: Sequence[str], *, reset: bool) -> str:
+               drift: Sequence[str], others: Sequence[str], *, reset: bool, where: str) -> str:
     """A #477 pick of card `card` restored our never-identified Kôš card `at` as it was — by
     its name then not `card`'s product: its data reset like a re-pick of another product only
-    on evidence (`reset`, review 41), its taught rows from before the pick stay — a human checks
-    them (review 40)."""
+    on evidence (`reset`, review 41), its taught rows from before the pick stay — under `where`,
+    the number this plan leaves them on (review 43) — a human checks them (review 40)."""
     label, what = _kos_what(kos_name, card, code, drift, others)
     data = ("jej údaje sa vynulujú ako pri výbere inej karty" if reset else
             f"jej údaje (Produkty) ostávajú — ak nie sú údajmi karty CODEX {card}, oprav ich")
-    rows = (f"; jej {taught} naučených priradení spred výberu ostáva — môžu patriť jej, nie "
-            f"karte CODEX {card}: {CHECK_TAUGHT}" if taught else "")
+    rows = (f"; jej {taught} naučených priradení spred výberu ostáva pod číslom {where} — môžu "
+            f"patriť jej, nie karte CODEX {card}: {CHECK_TAUGHT}" if taught else "")
     return (f"výber karty CODEX {card} („{card_name}“) obnovil z Koša našu kartu {at} {label} "
             f"— {what}: {data}{rows}.")
 

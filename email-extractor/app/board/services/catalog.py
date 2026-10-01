@@ -73,7 +73,7 @@ _SCOPES = {
         "retire": _orders_retire,
         "override_table": "catalog_overrides",
         "alias_tables": ("global_item_memory", "item_memory"),
-        "data_fields": ("alias",),
+        "data_fields": card_guard.CURATED_FIELDS["orders"],
     },
     "dl": {
         "for_management": dl_snapshot.dl_catalog_for_management,
@@ -82,7 +82,7 @@ _SCOPES = {
         "retire": _dl_retire,
         "override_table": "dl_catalog_overrides",
         "alias_tables": ("dl_item_memory",),
-        "data_fields": ("doplnok", "mass", "sklad", "cena"),
+        "data_fields": card_guard.CURATED_FIELDS["dl"],
     },
 }
 

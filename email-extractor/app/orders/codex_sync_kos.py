@@ -12,11 +12,13 @@ pick that RESTORED such a Kôš card as it was is judged the same way (review 40
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from . import codex_cards, dl_snapshot, snapshot
 from . import codex_sync_texts as texts
+from .card_guard import CURATED_FIELDS
 from .codex_sync_list import NEVER
 from .codex_sync_memory import SYNC_ACTOR, rows_on
 
@@ -24,20 +26,29 @@ if TYPE_CHECKING:
     from .codex_sync_list import Codex, Event
     from .codex_sync_plan import Plan, Scope
 
-# per catalog, the curated fields a reset clears (`codex_sync_plan._ScopePlanner._reset`) — a
-# human save that changed one of them is a fix of the data (`_edited_since`)
-RESET_FIELDS: dict[str, tuple[str, ...]] = {
-    "orders": ("alias",),
-    "dl": ("doplnok", "mass", "cena", "sklad"),
-}
+
+@dataclass
+class KosPick:
+    """A judged #477 restore-pick, its review written once the whole plan is done — the rows
+    sit where the same plan's renumber moves them (review 43)."""
+    item: dict
+    gtin: str
+    card: str
+    name: str
+    drift: list[str]
+    others: list[str]
+    reset: bool
+    since: datetime
 
 
 class KosRules:
-    """Mixin of `codex_sync_plan._ScopePlanner` (its state: `conn`, `scope`, `cx`, `plan`)."""
+    """Mixin of `codex_sync_plan._ScopePlanner` (its state: `conn`, `scope`, `cx`, `plan`,
+    `kos_picks`)."""
     conn: Any
     scope: Scope
     cx: Codex
     plan: Plan
+    kos_picks: list[KosPick]
 
     def _took_over(self, code: str, card: str) -> list[str]:
         raise NotImplementedError       # the planner's identity rule
@@ -82,11 +93,22 @@ class KosRules:
             return False
         reset = (bool(others) and ev.at >= (self.cx.seeded_at or NEVER)
                  and not self._edited_since(gtin, ev.at))
-        self._kos_rows(item, gtin, card, ev.name, drift, others, picked=True, reset=reset,
-                       since=ev.at)
-        if reset:                  # after the review's copy of the item (never in its JSON)
+        # its review is written once the whole plan is done (`_kos_pick_reviews`)
+        self.kos_picks.append(KosPick(dict(item), gtin, card, ev.name, drift, others, reset,
+                                      ev.at))
+        if reset:
             item["reset_kos"] = True
         return True
+
+    def _kos_pick_reviews(self) -> None:
+        """The judged restore-picks' reviews, read from the plan as the WHOLE plan leaves it:
+        the rows sit where the same plan's renumber moves them (review 43: the text said they
+        stay under the old number while the apply moved them — `_repicked_review`'s rule)."""
+        for p in self.kos_picks:
+            moved = next((r["to"] for r in self.plan.renumbers
+                          if r["scope"] == self.scope.name and p.gtin in r["gtins"]), None)
+            self._kos_rows(p.item, p.gtin, p.card, p.name, p.drift, p.others, picked=True,
+                           reset=p.reset, since=p.since, where=moved)
 
     def _kos_verdict(self, name: str, card: str, code: str
                      ) -> tuple[bool, list[str], list[str]]:
@@ -112,28 +134,32 @@ class KosRules:
             "SELECT 1 FROM audit_log WHERE table_name = %s AND row_id = %s AND action = 'update' "
             "AND actor <> %s AND ts > %s AND after ?| %s::text[] LIMIT 1",
             (self.scope.table, gtin, SYNC_ACTOR, at,
-             list(RESET_FIELDS[self.scope.name]))).fetchone() is not None
+             list(CURATED_FIELDS[self.scope.name]))).fetchone() is not None
 
     def _kos_rows(self, item: dict, at: str, card: str, name: str, drift: list[str],
                   others: list[str], *, picked: bool, reset: bool = False,
-                  since: datetime | None = None, succ: str = "") -> None:
+                  since: datetime | None = None, succ: str = "",
+                  where: str | None = None) -> None:
         """Another product's rows under our number `at` (a Kôš card our card takes over — a
         renumber onto it, or a #477 pick that restored it — only its rows from before the pick:
         the warehouse's own answer at that question is never the other product's, review 41):
         taught → a human checks them (a pick whose data is not reset: always — its data too);
-        delivery history → said in the report (review 12)."""
+        delivery history → said in the report (review 12). `where` = the number this plan
+        moves them to (a pick's renumber in the same plan, review 43)."""
         taught, shipped = rows_on(self.conn, self.scope, at, before=since)
         code = codex_cards.normalize_code(at) or at
         card_name = self.cx.name_of(card, code)
         if picked and (taught or not reset):
             self.plan.add_review(item, texts.kos_picked(
-                at, code, card, card_name, name, taught, drift, others, reset=reset))
+                at, code, card, card_name, name, taught, drift, others, reset=reset,
+                where=where or at))
         elif not picked and taught:
             self.plan.add_review(item, texts.kos_adopted(
                 item["gtin"], succ, card, card_name, name, taught, drift, others))
         if shipped:
-            self._hold_note(dict(item, gtin=at, name=name), at, shipped,
-                            texts.why_kos_other(at, name, card, drift, others))
+            self._hold_note(dict(item, gtin=at, name=name), where or at, shipped,
+                            texts.why_kos_other(at, name, card, drift, others),
+                            moved=where is not None)
 
     def _kos_name(self, card: dict) -> str:
         """A Kôš card's name — a bare retirement marker's from the newest snapshot that had it."""

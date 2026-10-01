@@ -550,15 +550,21 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   picked branch): not C's product by that name → reset like a re-pick of another product
   (`reset_kos`) ONLY on evidence — the name is another card's that carried the code
   (`_kos_verdict`'s `others`), the pick is not older than the history, no human edit of its
-  DATA since (`_edited_since`: an audited board save whose `after` carries a `RESET_FIELDS`
-  field — a name-only „Prevziať názov z CODEXu" save is no fix, round 42) — else its data stays
-  and a human is told (round 41: a missing name match wiped our own croissant restored under a
-  drifted name, and a warehouse fix); a JUDGED pick's binding (reset or told) is stored by an
-  APPLIED run only (`replaces`, the review-5 rule — rounds 41-42: a dry-run stored it, the
-  apply never reset, and the one-time review never reached ops); the review counts only rows from BEFORE the
-  pick (the warehouse's own answer at that question is ours). Texts say what the Kôš card is:
+  DATA since (`_edited_since`: an audited `update` on the card whose `after` carries a
+  `card_guard.CURATED_FIELDS` field — the board's Produkty save and the #462 dl_mass answer
+  write one; a name-only „Prevziať názov z CODEXu" save is no fix, rounds 42-43) — else its
+  data stays and a human is told (round 41: a missing name match wiped our own croissant
+  restored under a drifted name, and a warehouse fix); a JUDGED pick's binding (reset or told)
+  is stored by an APPLIED run only (`replaces`, the review-5 rule — rounds 41-42: a dry-run
+  stored it, the apply never reset, and the one-time review never reached ops); its review is
+  written once the WHOLE plan is done (`KosPick` → `_kos_pick_reviews`: the rows sit where the
+  same plan's renumber moves them, round 43) and counts only rows from BEFORE the pick (the
+  warehouse's own answer at that question is ours). A Kôš number known ONLY through a pick never
+  judged (undone in the Kôš / deleted again before any applied run) is never identified:
+  `_kos_review` decides (round 43: its rows adopted silently). Texts say what the Kôš card is:
   another card's product / a drift-button name / only a different name (we do not know) /
-  nameless. C missing from stredisko 1 in TWO
+  nameless. `card_guard.CURATED_FIELDS` is the ONE list of curated fields: the board audits it,
+  the sync fills / resets / reads it (round 43: four hand-kept copies). C missing from stredisko 1 in TWO
   consecutive snapshots (`prev_as_of`; one missing push is an export glitch) → removal when X is
   nowhere in CODEX, a silent rebind when exactly one card now carries X under OUR name (card
   recreated), else review. A code with no carrier and no history is never touched (#467

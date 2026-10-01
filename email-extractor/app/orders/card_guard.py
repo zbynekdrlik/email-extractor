@@ -67,6 +67,14 @@ _SCOPES: dict[str, dict] = {
     "dl": {"sklady": None, "max_code": desadv_edi.GTIN_FIELD_WIDTH,
            "table": "dl_catalog_overrides", "label": "dodacie listy"},
 }
+# scope -> a card's CURATED data fields beyond its name — the ONE list the board's Produkty
+# save audits (`board.services.catalog.upsert`) and the #478 CODEX sync fills on a merge /
+# clears on a reset / reads as "a human fixed the data" (`codex_sync_kos._edited_since`).
+# Review 43: four hand-kept copies, nothing tying what the board audits to what the sync reads.
+CURATED_FIELDS: dict[str, tuple[str, ...]] = {
+    "orders": ("alias",),
+    "dl": ("doplnok", "mass", "sklad", "cena"),
+}
 
 
 class CreateBlocked(CardRefused):

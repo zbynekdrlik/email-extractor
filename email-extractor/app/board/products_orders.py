@@ -23,7 +23,9 @@ from .services import catalog, catalog_aliases
 # ORDERS editor fields beyond the readonly „číslo položky" (gtin).
 ORDERS_FIELDS: list[dict] = [
     {"key": "name", "label": "Názov", "required": True},
-    {"key": "doplnok", "label": "Doplnok / aliasy (oddelené čiarkou)"},
+    # keyed as an orders card carries it (`alias`): keyed `doplnok`, the editor opened empty
+    # and every save — a rename included — wiped the card's alias (#478 review 43)
+    {"key": "alias", "label": "Doplnok / aliasy (oddelené čiarkou)"},
 ]
 # Orders aliases can be global (no EAN) or per-customer (EAN present) — EAN optional.
 ORDERS_ALIAS = {"per_customer": True, "ean_required": False, "ean_label": "EAN zákazníka"}
