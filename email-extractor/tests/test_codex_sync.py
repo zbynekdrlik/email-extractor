@@ -2763,3 +2763,41 @@ def test_a_pick_waits_while_the_card_it_replaces_is_missing_once(pg):
     _push(pg, both, hours_old=5)
     codex_sync.run(pg, _cfg())
     assert f"kód {ROZOK_NEW} (karta CODEX 31)" in _review_reason(pg, "dl", CHLIEB)
+
+
+# --- review 22: no renumber merges onto a number whose pick is waiting -----------------------
+
+def test_a_renumber_never_merges_onto_a_pick_waiting_out_a_glitch(pg):
+    """Review 22 🟡: card 31 (the chlieb) moves CHLIEB → ROZOK_NEW (our CHLIEB follows, the
+    number goes to the Kôš) and card 27 (the rožok) ALSO carries CHLIEB; the warehouse picks
+    CHLIEB — the Kôš chlieb is restored as card 27. The next list misses card 31 once (the pick
+    waits) and card 27 leaves ROZOK: our ROZOK renumbered onto the waiting CHLIEB as a merge,
+    the binding it stored superseded the pick — the chlieb's alias / doplnok stayed on the
+    rožok for good, never reset, never reviewed."""
+    rest = [_row(KOLAC, "55", "Koláč makový 80g"), _row(CUDZIA, "79", "Pagáč syrový 60g")]
+    snapshot._freeze(pg, [
+        {"gtin": ROZOK, "name": "Rožok so slaninou 70g", "alias": "rozok slanina"},
+        {"gtin": CHLIEB, "name": "Chlieb pšeničný 1000g", "alias": "chlieb velky"}], [])
+    dl_snapshot._freeze(pg, [
+        {"gtin": ROZOK, "name": "Rožok so slaninou 70g", "doplnok": "rožok slanina",
+         "mass": 0.07, "sklad": "1", "cena": 0.35},
+        {"gtin": CHLIEB, "name": "Chlieb pšeničný 1000g", "doplnok": "chlieb veľký",
+         "mass": 1.0, "sklad": "1", "cena": 0.9}], [])
+    _push(pg, rest + [_row(ROZOK, "27", "Rožok so slaninou 70g"),
+                      _row(CHLIEB, "31", "Chlieb pšeničný 1000g")], hours_old=9)
+    codex_sync.run(pg, _cfg())
+    _push(pg, rest + [_row(ROZOK, "27", "Rožok so slaninou 70g"),
+                      _row(CHLIEB, "27", "Rožok so slaninou 70g"),
+                      _row(ROZOK_NEW, "31", "Chlieb pšeničný 1000g")], hours_old=8)
+    codex_sync.run(pg, _cfg())
+    for scope in ("orders", "dl"):
+        card_guard.add_from_codex(pg, scope, CHLIEB, actor="sklad")
+    _push(pg, rest + [_row(CHLIEB, "27", "Rožok so slaninou 70g")], hours_old=7)
+    codex_sync.run(pg, _cfg())
+    steady = rest + [_row(CHLIEB, "27", "Rožok so slaninou 70g"),
+                     _row(ROZOK_NEW, "31", "Chlieb pšeničný 1000g")]
+    for hours in (6, 5):
+        _push(pg, steady, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert _dl(pg)[CHLIEB]["doplnok"] == "rožok slanina"
+    assert _orders(pg)[CHLIEB]["alias"] == "rozok slanina"
