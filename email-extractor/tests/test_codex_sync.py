@@ -3537,3 +3537,99 @@ def test_a_card_arriving_on_a_code_that_had_carriers_is_a_carrier_change(pg):
     codex_sync.run(pg, _cfg(apply=False))
     assert ("dl", BAGETA) not in _waits(pg)
     assert "92" in _review_reason(pg, "dl", BAGETA)
+
+
+# --- review 33: a sighting older than the history is no evidence of who our number is -------
+
+def _missing_bageta(pg):
+    """Our DL card BAGETA with curated data — a #467 „missing" card: no CODEX card carries its
+    code in any list we watched."""
+    _seed_catalogs(pg)
+    dl_snapshot.upsert_dl_catalog_card(pg, BAGETA, "Bageta stará", doplnok="moja", mass=0.12,
+                                       sklad="1", cena=0.5)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+
+
+def _stredisko_1_beginning(pg):
+    return pg.execute("SELECT min(first_seen) FROM codex_card_history WHERE stredisko = 1"
+                      ).fetchone()[0]
+
+
+def test_a_card_seen_only_before_the_history_began_never_removes_a_missing_card(pg):
+    """Review 33 🟡: a list OLDER than the history's beginning showed card 90 on BAGETA. Its
+    pair is recorded at the beginning (review 32), so the „ONE card on the code since the
+    history began" rule bound our missing DL card to 90 with no name check — and 90 being gone
+    from every later list removed it for good (the Kôš refuses a DL number whose code left
+    CODEX, #467). No list since the beginning showed a carrier: never touched."""
+    _missing_bageta(pg)
+    for hours in (5, 4.5):
+        _push(pg, V1, hours_old=hours)
+        assert codex_sync.run(pg, _cfg())["mode"] == "apply"
+    _push(pg, V1 + [_row(BAGETA, "90", "Pagáč nový 60g")], hours_old=7)
+    assert codex_sync.run(pg, _cfg())["mode"] == "skipped"
+    _push(pg, V1, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert BAGETA in _dl(pg), "our missing card was removed on a pre-history sighting"
+    assert _binding(pg, BAGETA, "dl") is None
+    assert not _review_reason(pg, "dl", BAGETA) and ("dl", BAGETA) not in _waits(pg)
+
+
+def test_a_missing_card_never_follows_a_card_seen_only_before_the_history_began(pg):
+    """Review 33 🟡: card 90 (seen on BAGETA only in a list older than the beginning) now
+    carries PAGAC_W — our missing DL card was bound to it and renumbered there, our doplnok /
+    mass / cena carried onto another product. Never touched."""
+    _missing_bageta(pg)
+    _push(pg, V1, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    _push(pg, V1 + [_row(BAGETA, "90", "Pagáč nový 60g")], hours_old=7)
+    codex_sync.run(pg, _cfg())
+    _push(pg, V1 + [_row(PAGAC_W, "90", "Pagáč nový 60g")], hours_old=4)
+    codex_sync.run(pg, _cfg())
+    dl = _dl(pg)
+    assert BAGETA in dl and PAGAC_W not in dl, "our missing card followed a pre-history card"
+    assert dl[BAGETA]["doplnok"] == "moja"
+    assert _binding(pg, BAGETA, "dl") is None
+    assert _last_report(pg)["renumbers"] == []
+
+
+def test_an_older_list_is_recorded_at_the_oldest_first_sighting(pg):
+    """Review 33 🔵 (pins `min`): the history's beginning is its OLDEST first sighting — with
+    two distinct ones, an older list's new pair is recorded at the oldest, never the newest."""
+    _seed_catalogs(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    _push(pg, V1 + [_row(PAGAC_W, "91", "Pagáč nový 60g")], hours_old=5)
+    codex_sync.run(pg, _cfg())
+    seed = _stredisko_1_beginning(pg)
+    _push(pg, V1 + [_row(BAGETA, "95", "Starý kus 10g")], hours_old=9)
+    codex_sync.run(pg, _cfg())
+    assert pg.execute("SELECT first_seen FROM codex_card_history WHERE card_code = '95'"
+                      ).fetchone()[0] == seed == NOW - timedelta(hours=6)
+
+
+def test_an_older_list_never_sets_back_a_name_last_seen_at_the_beginning(pg):
+    """Review 33 🔵 (pins: only first_seen is clamped, last_seen stays the list's own age):
+    card 27 seen once, at the beginning, under its newer name — an older list with its old
+    name never sets it back (review 13's rule)."""
+    _seed_catalogs(pg)
+    renamed = [dict(r, name="Rožok slaninový 70g") if r["card_code"] == "27" else r for r in V1]
+    _push(pg, renamed, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    _push(pg, V1, hours_old=7)
+    codex_sync.run(pg, _cfg())
+    assert _history_name(pg, "27", ROZOK) == "Rožok slaninový 70g"
+
+
+def test_another_strediskos_older_history_never_moves_stredisko_1s_beginning(pg):
+    """Review 33 🔵: `Codex.seeded_at` is stredisko 1's beginning — the clamp is per stredisko:
+    with stredisko 4 seen first, an older list's new stredisko-1 pair is recorded at stredisko
+    1's beginning, never at stredisko 4's earlier one (that moved `seeded_at` back)."""
+    _seed_catalogs(pg)
+    _push(pg, [_row(BAGETA, "400", "Bageta cestovná 120g", sklad=4, stredisko=4)], hours_old=8)
+    codex_sync._record_history(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync._record_history(pg)
+    seed = _stredisko_1_beginning(pg)
+    _push(pg, V1 + [_row(BAGETA, "95", "Starý kus 10g")], hours_old=7)
+    codex_sync._record_history(pg)
+    assert _stredisko_1_beginning(pg) == seed == NOW - timedelta(hours=6)
