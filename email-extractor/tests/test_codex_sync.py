@@ -3362,6 +3362,8 @@ def test_a_card_arriving_on_a_carrierless_code_never_takes_our_number_on_one_lis
     codex_sync.run(pg, _cfg())
     assert _dl(pg)[BAGETA]["name"] == "Bageta stará" and _binding(pg, BAGETA, "dl") is None
     assert "90" in _review_reason(pg, "dl", BAGETA)
+    # review 31 🔵: one card on the code — the wording says so
+    assert "nevieme, či je to naša karta" in _review_reason(pg, "dl", BAGETA)
     for hours in (4, 3):
         _push(pg, V1, hours_old=hours)
         codex_sync.run(pg, _cfg())
@@ -3387,3 +3389,110 @@ def test_the_ops_footer_says_a_dl_number_whose_code_left_codex_does_not_come_bac
                       ).fetchone()[0]
     assert "premenovan" in body or "Chlieb pšeničný voľný" in body
     assert "#467" not in body, "a rename-only plan has nothing the Kôš refuses"
+
+
+# --- review 31: the seed is stable; round 30's paths are pinned ---------------------------------
+
+def _last_alert(pg):
+    return pg.execute("SELECT body_html FROM pending_alerts ORDER BY id DESC LIMIT 1"
+                      ).fetchone()[0]
+
+
+def test_a_list_older_than_the_history_never_moves_its_beginning(pg):
+    """Review 31 🔵: the history's beginning (`seeded_at`, the oldest first sighting) moved back
+    when a re-sent list OLDER than the seed added a pair — every card on a code since the seed
+    then counted as „arrived" and a drifted unbound card waited / went to a human instead of
+    following its card. A list older than the history's beginning records nothing."""
+    _seed_catalogs(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync._record_history(pg)
+    _push(pg, V1 + [_row("9990000000307", "95", "Starý kus 10g")], hours_old=9)
+    assert codex_sync.run(pg, _cfg())["mode"] == "skipped"
+    drift = [dict(r, name="Rožok slaninový 70g") if r["card_code"] == "27" else r for r in V1]
+    _push(pg, drift, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    assert _orders(pg)[ROZOK]["name"] == "Rožok slaninový 70g", "bound to its seed card"
+    assert pg.execute("SELECT count(*) FROM codex_card_history WHERE card_code = '95'"
+                      ).fetchone()[0] == 0
+
+
+def test_the_footer_names_a_dl_renumber_whose_old_code_left_codex(pg):
+    """Review 31 🔵 (pins `old_dead`): card 27 moved ROZOK → ROZOK_NEW and ROZOK left CODEX —
+    the DL renumber retires ROZOK for good (the Kôš refuses it, 409): the footer says so; when
+    another card still carries the old code (a reuse), the Kôš returns it — no such sentence."""
+    _baseline(pg)
+    _push(pg, _v2_renumbered(), hours_old=1)
+    codex_sync.run(pg, _cfg())
+    assert "Kôš nevráti (#467)" in _last_alert(pg)
+    aid = pg.execute("SELECT id FROM audit_log WHERE table_name = 'dl_catalog_overrides' AND "
+                     "row_id = %s AND action = 'delete' ORDER BY id DESC LIMIT 1",
+                     (ROZOK,)).fetchone()[0]
+    try:
+        audit.restore(pg, aid, by="sklad")
+        raise AssertionError("the Kôš returned a DL number whose code left CODEX")
+    except audit.RestoreError as e:
+        assert e.status == 409
+
+
+def test_the_footer_stays_quiet_for_a_reused_old_code(pg):
+    """Review 31 🔵: a renumber whose old code another card carries now — the Kôš can return
+    the DL number, the footer promises nothing it cannot keep."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=1)
+    codex_sync.run(pg, _cfg())
+    assert "#467" not in _last_alert(pg)
+
+
+def test_the_footer_stays_quiet_for_an_orders_only_removal(pg):
+    """Review 31 🔵: CHLIEB is ours in the orders catalog only — its removal is Kôš-restorable."""
+    _baseline(pg)
+    gone = [r for r in V1 if r["card_code"] != "31"]
+    for hours in (4, 3):
+        _push(pg, gone, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    body = _last_alert(pg)
+    assert CHLIEB in body and "#467" not in body
+
+
+def test_a_blocked_plan_with_a_dl_removal_carries_the_footer(pg):
+    """Review 31 🔵: the blocked alert lists the would-be changes — with the same footer."""
+    _baseline(pg)
+    gone = [r for r in V1 if r["card_code"] != "55"]
+    _push(pg, gone, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    both = [dict(r, code=ROZOK_NEW) if r["card_code"] == "27" else r for r in gone]
+    _push(pg, both, hours_old=3)
+    assert codex_sync.run(pg, _cfg(codex_sync_max_code_changes=1))["mode"] == "blocked"
+    assert "Kôš nevráti (#467)" in _last_alert(pg)
+
+
+def test_a_card_codex_never_had_is_never_touched(pg):
+    """Review 31 🔵 (pins „no history → never touched"): our DL card on a code no CODEX card
+    ever carried (a #467 „missing" card) — no review, no wait, list after list."""
+    _seed_catalogs(pg)
+    dl_snapshot.upsert_dl_catalog_card(pg, BAGETA, "Bageta stará", doplnok="", mass=None,
+                                       sklad="1", cena=None)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    for hours in (6, 5, 4):
+        _push(pg, V1, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert not _review_reason(pg, "dl", BAGETA) and ("dl", BAGETA) not in _waits(pg)
+
+
+def test_the_first_post_deploy_list_waits_for_a_card_new_on_its_code(pg):
+    """Review 31 🔵 (pins the first sync after deploy): no synced list yet, a card arrives on a
+    code the seed list had no card on — our unbound number waits."""
+    _seed_catalogs(pg)
+    dl_snapshot.upsert_dl_catalog_card(pg, BAGETA, "Bageta stará", doplnok="", mass=None,
+                                       sklad="1", cena=None)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    _first_post_deploy(pg, V1 + [_row(BAGETA, "90", "Bageta stará")], runs=1)
+    assert "doteraz ho nenesla" in _waits(pg).get(("dl", BAGETA), "")
+    assert _binding(pg, BAGETA, "dl") is None
+
+
+def test_a_card_arriving_beside_a_seed_carrier_never_delays_ours(pg):
+    """Review 31 🔵 (pins `not earlier` / `all(...)`): card 80 arrives on ROZOK beside card 27,
+    which was there at the seed — our rožok is decided on that list (bound to 27)."""
+    _first_post_deploy(pg, V1 + [_row(ROZOK, "80", "Bageta šunková 120g")], runs=1)
+    assert _binding(pg, ROZOK)[0] == "27"
