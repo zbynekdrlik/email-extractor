@@ -3911,3 +3911,25 @@ def test_a_review_naming_a_card_seen_before_the_history_began_speaks_of_several(
         codex_sync.run(pg, _cfg())
     reason = _review_reason(pg, "orders", ROZOK)
     assert "nesedí so žiadnou z nich" in reason, reason
+
+
+# --- review 37: a card never seen since the beginning is never „missing once" ---------------
+
+def test_a_card_seen_only_before_the_history_began_is_never_missing_once(pg):
+    """Review 37 🔵: card 27 carried ROZOK only in a list older than the beginning and is in no
+    list since; our rožok drift-renamed to the pagáč 90 (the holder at the beginning). 27 was
+    in no list since, yet the first sync after the deploy (no previous synced list) called it
+    „v tomto zozname chýba (raz)" and waited a list — an untrue reason in the dry-run report
+    the owner reads. A human decides on that list."""
+    _seed_catalogs(pg)
+    _drift_click(pg, ROZOK, "Pagáč nový 60g")
+    no27 = [r for r in MOVED_BEFORE if r["card_code"] != "27"]
+    _push(pg, no27, hours_old=6)
+    codex_sync._record_history(pg)
+    _push(pg, V1, hours_old=8)
+    assert codex_sync.run(pg, _cfg())["mode"] == "skipped"
+    _push(pg, no27, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    assert ("orders", ROZOK) not in _waits(pg)
+    assert "pred ňou niesla karta CODEX 27" in _review_reason(pg, "orders", ROZOK)
+    assert _binding(pg, ROZOK) is None
