@@ -562,7 +562,8 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   warehouse's own answer at that question is ours). A Kôš number known as C ONLY through a
   RESTORE-pick never judged (undone in the Kôš / deleted again before any applied run) is
   decided by what it was BEFORE the pick (`KosRules._kos_hit_review`): never identified, or the
-  card its binding names — counting only its rows from before the pick (rounds 43-44: its rows
+  card its binding names — by its name AT the pick (`Event.name`, round 45: renamed after the
+  pick, then deleted, it passed as C's product), counting only its rows from before the pick (rounds 43-44: its rows
   adopted silently, also behind a re-pick over another card's binding — the very delete + pick
   the other-card review advises); a FRESH pick made it C (no review). Texts say what the Kôš card is:
   another card's product / a drift-button name / only a different name (we do not know) /

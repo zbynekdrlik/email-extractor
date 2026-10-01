@@ -60,7 +60,9 @@ class KosRules:
         through a RESTORE-pick never judged (undone in the Kôš / deleted again before any applied
         run): what it was BEFORE the pick decides — never identified (review 43), or the card its
         binding names (review 44: a re-pick over another card's binding hid its rows) — counting
-        only its rows from before the pick. A FRESH pick made it `card` (review 44: no review)."""
+        only its rows from before the pick, judged by its name AT the pick, as a live judged pick
+        is (review 45: „Prevziať názov z CODEXu" after the pick, then a delete, passed it as
+        `card`'s product). A FRESH pick made it `card` (review 44: no review)."""
         if other != card:
             self._kos_review(item, binned, card, succ, other)
             return
@@ -70,8 +72,8 @@ class KosRules:
         old = hit_known.old
         if ev is None or not ev.restored or (old is not None and old.card == card):
             return
-        self._kos_review(item, binned, card, succ, old.card if old is not None else None,
-                         since=ev.at)
+        self._kos_review(item, dict(binned, name=ev.name or binned.get("name")), card, succ,
+                         old.card if old is not None else None, since=ev.at)
 
     def _kos_review(self, item: dict, binned: dict, card: str, succ: str,
                     known: str | None, *, since: datetime | None = None) -> None:
