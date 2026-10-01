@@ -6,12 +6,15 @@ Split from the planner (review 23: the planner reached the size budget).
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from . import card_guard, codex_cards
 from .codex_sync_memory import SYNC_ACTOR
+
+log = logging.getLogger("orders.codex_sync")
 
 STREDISKO = codex_cards.PICK_STREDISKO
 NEVER = datetime.min.replace(tzinfo=UTC)
@@ -151,7 +154,15 @@ def update_history(conn, as_of: datetime) -> None:
     first_seen = last_seen = `as_of` (the CODEX data age), a known one advances last_seen — and
     takes the list's name only then: an OLDER re-sent list (recorded since review 12) never sets
     a newer name back (review 13 🟡: `same_product` then judged a recreated card another
-    product and cleared its data)."""
+    product and cleared its data). A list OLDER than the history's beginning (a rolled-back
+    ETL, a hand push) records nothing: its new pairs would move that beginning
+    (`Codex.seeded_at`) back and every card on a code since then would count as "arrived"
+    (review 31)."""
+    begun = conn.execute("SELECT min(first_seen) FROM codex_card_history").fetchone()
+    if begun and begun[0] is not None and as_of < begun[0]:
+        log.warning("CODEX card history: the list (CODEX data as of %s) is older than the "
+                    "history's beginning (%s) — not recorded (#478)", as_of, begun[0])
+        return
     conn.execute(
         """INSERT INTO codex_card_history (stredisko, card_code, code, name, first_seen,
                                            last_seen)

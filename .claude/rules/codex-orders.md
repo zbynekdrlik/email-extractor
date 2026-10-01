@@ -369,8 +369,10 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   turned a drift review into a binding): from every card that ever carried the code
   (`Codex.carried`), never "who holds it now / held it last" (rounds 25 / 28: a reuse — also
   one that moved on — dragged our rožok to the pagáč): one list is no proof (a card that left
-  the code since the last list, or — no carrier now — the last carrier missing once → WAIT,
-  protected); one card ever carried it → that card; else our NAME — the one carrier now named
+  the code since the last list, a card arriving on a code no card carried — rounds 30-31, or
+  — no carrier now — the last carrier missing once → WAIT, protected); the ONE card on the code
+  since the history began (`Codex.seeded_at`; a list older than that beginning is never
+  recorded, round 31) → that card; else our NAME — the one carrier now named
   so, else the one card ever named so — unless that card took the code over from ANOTHER
   product (`_took_over`: first seen before it — cards seeded together never count; in CODEX or
   gone — the #467 drift button offers the code's holder, round 9's rule → a human, rounds

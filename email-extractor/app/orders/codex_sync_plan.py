@@ -6,9 +6,10 @@ or only reports it in dry-run. Nothing here writes; the new card bindings it fin
 **Identity = the CODEX card our card IS**, stored in `codex_card_bindings` ((scope, our gtin)
 → ACSKLP on stredisko 1 — `codex_cards.PICK_STREDISKO`, the #477 pick scope; ACSKLP is unique
 only WITHIN a stredisko: live 2026-09-30 card 400448 is garlic on stredisko 1, crisps on 4).
-A card is bound once (`_by_history`): to the ONE card that ever carried its code, or — the code
-changed carrier — to the card its NAME is among every card that ever carried it (never one that
-took the code over from another product: a human then; one list is no proof: it waits). From
+A card is bound once (`_by_history`): to the ONE card on its code since the history began, or
+— the code changed carrier, or a card arrived on it later — to the card its NAME is among every
+card that ever carried it (never one that took the code over from another product: a human
+then; one list is no proof: it waits). From
 then on the sync follows THAT card and never "whoever holds the code now": a code can be REUSED
 for another product (the #478 review 🔴s: following the newest carrier renamed our rožok to a
 pagáč and moved its memory). `codex_card_history` (per stredisko, card, code: first/last seen) gives the
