@@ -37,6 +37,7 @@ from app.orders import (
     dl_snapshot,
     memory,
     snapshot,
+    teach,
 )
 
 PG_DSN = os.environ.get("PG_TEST_DSN")
@@ -4396,6 +4397,112 @@ def test_a_name_only_save_after_the_pick_never_cancels_the_reset(pg):
     _picked_then(pg, lambda pg: catalog.upsert(pg, "dl", {
         "gtin": KOS_BAGETA, "name": "Rožok so slaninou 70g"}, actor="sklad"))
     assert _dl_card(pg, KOS_BAGETA) == OUR_ROZOK_DL
+
+
+# --- review 43 ------------------------------------------------------------------------------
+
+def test_a_sklad_or_mass_only_save_after_the_pick_is_a_fix_of_the_data(pg):
+    """Review 43 🔵 (pins the DL curated fields, one list shared by the board's audit and the
+    sync — `card_guard.CURATED_FIELDS`): a save that changed only the sklad, or only the mass,
+    is a fix of the data — never reset."""
+    _picked_then(pg, lambda pg: catalog.upsert(pg, "dl", {
+        "gtin": KOS_BAGETA, "name": "Bageta cesnaková 100g", "sklad": "100"}, actor="sklad"))
+    assert _dl(pg)[KOS_BAGETA]["sklad"] == "100"
+
+
+def test_a_mass_only_save_after_the_pick_is_a_fix_of_the_data(pg):
+    _picked_then(pg, lambda pg: catalog.upsert(pg, "dl", {
+        "gtin": KOS_BAGETA, "name": "Bageta cesnaková 100g", "mass": "0,2"}, actor="sklad"))
+    assert _dl(pg)[KOS_BAGETA]["mass"] == 0.2
+
+
+def test_an_orders_alias_fixed_after_the_pick_is_never_reset(pg):
+    """Review 43 🔵 (pins the orders curated field): the orders pick restored the bageta; the
+    warehouse fixed its alias (Produkty objednávky) — never reset."""
+    def fix(pg):
+        card_guard.add_from_codex(pg, "orders", KOS_BAGETA, actor="sklad")
+        catalog.upsert(pg, "orders", {"gtin": KOS_BAGETA, "name": "Rožok so slaninou 70g",
+                                      "alias": "rozok novy"}, actor="sklad")
+    _picked_then(pg, fix)
+    assert _orders(pg)[KOS_BAGETA]["alias"] == "rozok novy"
+
+
+def test_a_dl_mass_answer_after_the_pick_is_a_fix_of_the_data(pg):
+    """Review 43 🔵: the warehouse answered the #462 „koľko kg má 1 kus" question for the
+    restored card — that answer is a fix of its data (audited on the card now), never reset."""
+    def answer(pg):
+        qid = teach.ask_dl_mass(pg, message_id="mk478", supplier_ean="9000000000001",
+                                supplier_name="Dodávateľ X", gtin=KOS_BAGETA, card="Bageta",
+                                wording="bageta", quantity=1, unit="ks")
+        pg.execute("UPDATE order_questions SET status = 'answered' WHERE id = %s", (qid,))
+        cfg = Config(pg_dsn=PG_DSN or "", data_dir="/tmp", ops_channel_id=77)
+        teach.KINDS["dl_mass"].apply(pg, cfg, teach.get(pg, qid), "0,072", "sklad")
+    _picked_then(pg, answer)
+    assert _dl(pg)[KOS_BAGETA]["mass"] == 0.072
+
+
+def _undone(pg, undo):
+    """The bageta under its freed code reused for card 27; in the dry-run window the
+    warehouse picks card 27 there in BOTH catalogs (restoring the Kôš bageta) — and then takes
+    the restore back (`undo`); then the apply."""
+    _kos_bageta(pg)
+    _seed_catalogs(pg)
+    _push(pg, V1 + [_row(KOS_BAGETA, "86", "Bageta cesnaková 100g")], hours_old=6)
+    codex_sync.run(pg, _cfg(apply=False))
+    _push(pg, BAGETA_REUSED, hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    for scope in ("dl", "orders"):
+        card_guard.add_from_codex(pg, scope, KOS_BAGETA, actor="sklad")
+        undo(pg, scope)
+    _push(pg, BAGETA_REUSED, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    for scope in ("dl", "orders"):
+        reason = _review_reason(pg, scope, ROZOK)
+        assert "„Bageta cesnaková 100g“" in reason and KOS_BAGETA in reason, (scope, reason)
+
+
+def test_an_undone_pick_never_hides_the_kos_cards_rows(pg):
+    """Review 43 🟡: a pick restored the Kôš bageta and was undone in the Kôš („Vrátiť" on its
+    „Pridané" row) — the number is in the Kôš again, known only through that pick, never
+    judged. The renumber restored it and its taught rows were adopted with no review. Known only
+    by an unjudged pick = unknown: `_kos_review` decides."""
+    def undo(pg, scope):
+        table = "dl_catalog_overrides" if scope == "dl" else "catalog_overrides"
+        aid = pg.execute("SELECT id FROM audit_log WHERE table_name = %s AND row_id = %s AND "
+                         "action = 'create' ORDER BY id DESC LIMIT 1",
+                         (table, KOS_BAGETA)).fetchone()[0]
+        audit.restore(pg, aid, by="sklad")
+    _undone(pg, undo)
+
+
+def test_a_pick_deleted_again_never_hides_the_kos_cards_rows(pg):
+    """Review 43 🟡: the same, the restored card deleted again on Produkty."""
+    _undone(pg, lambda pg, scope: catalog.delete(pg, scope, KOS_BAGETA, actor="sklad"))
+
+
+CROISSANT_NEW = "9990000000291"   # synthetic: card 50's next code
+
+
+def test_a_judged_picks_review_says_where_its_rows_sit_after_a_renumber(pg):
+    """Review 43 🔵: the pick-restore review was written before the same plan's renumber moved
+    the number — it said the rows stay under the old number while the apply moved them. Read
+    once the whole plan is done (as `_repicked_review` does)."""
+    _seed_catalogs(pg)
+    _kos_croissant(pg)
+    pg.execute(
+        "INSERT INTO dl_item_memory (supplier_ean, item_key, item_raw, gtin, card, delivered_on, "
+        "cnt, source, created_at) VALUES ('S9', %s, 'Croissant', %s, 'Croissant', %s, 1, "
+        "'human', %s)", (memory.item_key("Croissant"), CROISSANT, date(2026, 9, 1), _BEFORE))
+    _push(pg, V1 + [_row(CROISSANT, "50", "Croissant maslový 60g")], hours_old=6)
+    codex_sync.run(pg, _cfg(apply=False))
+    card_guard.add_from_codex(pg, "dl", CROISSANT, actor="sklad")
+    _push(pg, V1 + [_row(CROISSANT_NEW, "50", "Croissant maslový 60g")], hours_old=5)
+    codex_sync.run(pg, _cfg())
+    assert CROISSANT not in _dl(pg) and CROISSANT_NEW in _dl(pg)
+    reason = _review_reason(pg, "dl", CROISSANT)
+    assert f"pod číslom {CROISSANT_NEW}" in reason, reason
+    assert pg.execute("SELECT gtin FROM dl_item_memory WHERE supplier_ean = 'S9'"
+                      ).fetchone()[0] == CROISSANT_NEW
 
 
 def test_a_pick_older_than_the_history_is_never_reset(pg):

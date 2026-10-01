@@ -358,6 +358,37 @@ def test_board_products_orders_tab_search_edit_delete_in_the_browser(live_server
     assert console == [], f"browser console not clean: {console}"
 
 
+def test_board_products_orders_editor_keeps_the_alias_on_a_rename(live_server, pg, page):
+    """#478 review 43: the Produkty objednávky editor's „Doplnok / aliasy" field was keyed
+    `doplnok` while an orders card carries `alias` — it opened EMPTY and every „Uložiť" (a
+    rename included) wiped the card's alias. It shows the alias and a rename keeps it."""
+    from app.httpapi import sklad_key
+    from app.orders import snapshot
+
+    snapshot.upsert_catalog_card(pg, "E2EPROD2", "Chlieb e2e produkt", alias="chlieb e2e")
+    snapshot.rebuild_from_overrides(pg)
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
+    page.wait_for_url(re.compile(r"/nastenka"))
+    page.goto(f"{live_server}/nastenka/produkty-objednavky")
+    page.wait_for_selector("text=Chlieb e2e produkt")
+    old_row = page.query_selector('.p-row:has-text("Chlieb e2e produkt")')
+    page.fill("#p-search", "Chlieb e2e")
+    page.wait_for_function("el => !el.isConnected", arg=old_row)
+    page.click('.p-row:has-text("Chlieb e2e produkt") .p-edit')
+    page.wait_for_selector(".p-editor .p-name")
+    extra = page.locator(".p-editor input:not(.p-name)").first
+    assert extra.input_value() == "chlieb e2e", "the editor opened without the card's alias"
+    page.fill(".p-editor .p-name", "Chlieb e2e premenovaný")
+    page.click(".p-editor .p-save")
+    page.wait_for_selector("text=Uložené")
+    alias = pg.execute("SELECT alias FROM catalog_overrides WHERE gtin = 'E2EPROD2'").fetchone()[0]
+    assert alias == "chlieb e2e", "a rename wiped the alias"
+
+    assert console == [], f"browser console not clean: {console}"
+
+
 def test_board_products_sklad_tab_renders_dl_cards_for_the_dl_key(live_server, pg, page):
     """The Produkty sklad tab lists DL catalog cards (admin-only before lane 4), reachable
     via the DL key, clean console, version label present."""
