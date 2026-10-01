@@ -3412,8 +3412,28 @@ def test_a_list_older_than_the_history_never_moves_its_beginning(pg):
     _push(pg, drift, hours_old=5)
     codex_sync.run(pg, _cfg())
     assert _orders(pg)[ROZOK]["name"] == "Rožok slaninový 70g", "bound to its seed card"
-    assert pg.execute("SELECT count(*) FROM codex_card_history WHERE card_code = '95'"
-                      ).fetchone()[0] == 0
+    # review 32 (contract changed): the older list IS recorded — every accepted push is (round
+    # 12: it was pickable) — its new pairs as seen at the history's beginning, which never moves
+    seed = pg.execute("SELECT first_seen FROM codex_card_history WHERE card_code = '27' "
+                      "AND code = %s", (ROZOK,)).fetchone()[0]
+    assert pg.execute("SELECT min(first_seen) FROM codex_card_history").fetchone()[0] == seed
+    assert pg.execute("SELECT first_seen FROM codex_card_history WHERE card_code = '95'"
+                      ).fetchone()[0] == seed
+
+
+def test_a_reuse_seen_only_in_a_list_older_than_the_history_still_opens_the_window(pg):
+    """Review 32 🟡: a list older than the history's beginning was not recorded at all (round
+    31) — but it was accepted and pickable: the pagáč's sighting on ROZOK in it no longer opened
+    the reuse window, and a pagáč wording taught from it moved with the rožok's renumber.
+    Recorded (clamped to the beginning), the row taught since is held for a human."""
+    _baseline(pg)
+    _push(pg, _reused(V1), hours_old=7)
+    assert codex_sync.run(pg, _cfg())["mode"] == "skipped"
+    _teach(pg, "C60", "pagac syrovy", ROZOK, at=NOW - timedelta(hours=4.5))
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert _gtin_of(pg, "C60") == ROZOK, "held on ROZOK, never moved with the rožok"
+    assert "naučených priradení" in _review_reason(pg, "orders", ROZOK)
 
 
 def test_the_footer_names_a_dl_renumber_whose_old_code_left_codex(pg):
@@ -3492,7 +3512,28 @@ def test_the_first_post_deploy_list_waits_for_a_card_new_on_its_code(pg):
 
 
 def test_a_card_arriving_beside_a_seed_carrier_never_delays_ours(pg):
-    """Review 31 🔵 (pins `not earlier` / `all(...)`): card 80 arrives on ROZOK beside card 27,
-    which was there at the seed — our rožok is decided on that list (bound to 27)."""
+    """Review 31 🔵 (pins `all(...)`): card 80 arrives on ROZOK beside card 27, which was there
+    at the seed — our rožok is decided on that list (bound to 27)."""
     _first_post_deploy(pg, V1 + [_row(ROZOK, "80", "Bageta šunková 120g")], runs=1)
     assert _binding(pg, ROZOK)[0] == "27"
+
+
+def test_a_card_arriving_on_a_code_that_had_carriers_is_a_carrier_change(pg):
+    """Review 32 🔵 (pins `not earlier`): cards 90 and 91 carried BAGETA at the seed and left;
+    card 92 arrives later — a carrier CHANGE (the leavers are long gone), never the
+    carrier-less arrival wait: our DL number named like none of them goes to a human on that
+    list."""
+    _seed_catalogs(pg)
+    dl_snapshot.upsert_dl_catalog_card(pg, BAGETA, "Bageta stará", doplnok="", mass=None,
+                                       sklad="1", cena=None)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    _push(pg, V1 + [_row(BAGETA, "90", "Bageta šunková 120g"),
+                    _row(BAGETA, "91", "Bageta cesnaková 120g")], hours_old=6)
+    codex_sync._record_history(pg)
+    for hours in (5, 4):
+        _push(pg, V1, hours_old=hours)
+        codex_sync.run(pg, _cfg(apply=False))
+    _push(pg, V1 + [_row(BAGETA, "92", "Pagáč nový 60g")], hours_old=3)
+    codex_sync.run(pg, _cfg(apply=False))
+    assert ("dl", BAGETA) not in _waits(pg)
+    assert "92" in _review_reason(pg, "dl", BAGETA)
