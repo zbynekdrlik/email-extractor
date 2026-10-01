@@ -4259,6 +4259,26 @@ def test_a_pick_restoring_our_own_kos_card_with_a_drifted_name_keeps_its_data(pg
     assert "iný výrobok" not in reason, reason
 
 
+def test_a_kept_restored_card_is_said_even_with_no_taught_rows(pg):
+    """Review 41 (pins: a restored card whose data the sync keeps is ALWAYS told — its data
+    may be another product's even when no taught row sits on it)."""
+    _seed_catalogs(pg)
+    dl_snapshot.upsert_dl_catalog_card(pg, CROISSANT, "Croissant 60g", doplnok="croissant",
+                                       mass=0.06, sklad="1", cena=0.4)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    dl_snapshot.retire_dl_catalog_card(pg, CROISSANT)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    cards = V1 + [_row(CROISSANT, "50", "Croissant maslový 60g")]
+    _push(pg, cards, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    card_guard.add_from_codex(pg, "dl", CROISSANT, actor="sklad")
+    _push(pg, cards, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    reason = _review_reason(pg, "dl", CROISSANT)
+    assert "„Croissant 60g“" in reason and "oprav ich" in reason, reason
+    assert "naučených" not in reason, reason
+
+
 def test_a_card_fixed_after_the_pick_is_never_reset(pg):
     """Review 41 🟡: the warehouse fixed the restored card after the pick (Produkty — an
     audited update): its fix wins, never reset to blank by the next sync; a human is told."""
