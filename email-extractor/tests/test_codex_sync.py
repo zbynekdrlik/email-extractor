@@ -4009,6 +4009,8 @@ def test_an_unknown_kos_card_of_another_product_is_overwritten_and_its_rows_go_t
         reason = _review_reason(pg, scope, ROZOK)
         assert "„Bageta cesnaková 100g“" in reason and KOS_BAGETA in reason, (scope, reason)
         assert "iný výrobok" in reason, reason
+        # pins `drift = took if named_like`: named unlike card 27, never a drift-button name
+        assert "Prevziať názov" not in reason, reason
 
 
 def test_an_unknown_kos_card_with_delivery_history_only_is_said_never_silent(pg):
