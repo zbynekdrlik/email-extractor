@@ -4234,6 +4234,9 @@ def test_a_dry_run_between_the_pick_and_the_apply_never_loses_the_reset(pg):
     assert _dl_card(pg, KOS_BAGETA) == OUR_ROZOK_DL
     reason = _review_reason(pg, "dl", KOS_BAGETA)
     assert "„Bageta cesnaková 100g“" in reason and "1 naučených priradení" in reason, reason
+    # review 45 🔵 (pins `target is None`): the rožok MERGES into the live picked card — no
+    # second, untrue "a Kôš card our data overwrites" reason on it (the pick's review says it)
+    assert not _review_reason(pg, "dl", ROZOK)
 
 
 CROISSANT = "9990000000277"    # synthetic: our croissant, card 50 the only card ever on it
@@ -4712,3 +4715,27 @@ def test_a_dl_mass_answer_and_its_undo_are_audited_on_the_card(pg):
                       "'dl_catalog_overrides' AND row_id = %s AND action = 'update' "
                       "ORDER BY id", (MUKA,)).fetchall()
     assert [r[0] for r in rows] == ["25.0", None]
+
+
+# --- review 45 ------------------------------------------------------------------------------
+
+def test_an_undone_pick_renamed_before_the_delete_is_judged_by_its_name_at_the_pick(pg):
+    """Review 45 🟡: the restore-pick of our Kôš bageta, then „Prevziať názov z CODEXu" (the
+    click Produkty invites right after the pick), then deleted again. Judged by its name NOW
+    (card 27's), the undone pick's Kôš card passed as card 27's product: the bageta's taught row
+    adopted silently on our rožok's number. What it was BEFORE the pick decides — its name at
+    the pick, as for a live judged pick."""
+    _kos_bageta(pg)
+    _seed_catalogs(pg)
+    _push(pg, V1, hours_old=6)                     # card 86 never in the history
+    codex_sync.run(pg, _cfg(apply=False))
+    _push(pg, BAGETA_REUSED, hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    card_guard.add_from_codex(pg, "dl", KOS_BAGETA, actor="sklad")
+    catalog.upsert(pg, "dl", {"gtin": KOS_BAGETA, "name": "Rožok so slaninou 70g"},
+                   actor="sklad")
+    catalog.delete(pg, "dl", KOS_BAGETA, actor="sklad")
+    _push(pg, BAGETA_REUSED, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    reason = _review_reason(pg, "dl", ROZOK)
+    assert "„Bageta cesnaková 100g“" in reason and "1 naučených priradení" in reason, reason
