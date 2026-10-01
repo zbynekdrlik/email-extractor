@@ -3878,6 +3878,24 @@ def test_a_card_seen_before_the_history_began_reveals_a_take_over(pg):
     assert ROZOK in _orders(pg) and _last_report(pg)["removals"] == []
 
 
+def test_a_card_seen_before_the_history_began_and_back_since_still_came_first(pg):
+    """Review 36 🔵: as above, but the rožok 27 is BACK on ROZOK beside the pagáč 90 — it has a
+    first list since the beginning now, later than its clamped first sighting: it was on the
+    code before we watched, so still before the pagáč (`Codex.before_watch`) → a human."""
+    _seed_catalogs(pg)
+    _drift_click(pg, ROZOK, "Pagáč nový 60g")
+    _push(pg, MOVED_BEFORE, hours_old=6)
+    codex_sync._record_history(pg)
+    _push(pg, V1, hours_old=8)
+    codex_sync.run(pg, _cfg())
+    both = V1 + [_row(ROZOK, "90", "Pagáč nový 60g")]
+    for hours in (5, 4):
+        _push(pg, both, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert _binding(pg, ROZOK) is None
+    assert "pred ňou niesla karta CODEX 27" in _review_reason(pg, "orders", ROZOK)
+
+
 def test_a_review_naming_a_card_seen_before_the_history_began_speaks_of_several(pg):
     """Review 36 🔵 (pins the count): the pagáč 90 on the code now, the rožok 27 only before
     we watched, our name matches neither — the head names two cards, so „nesedí so žiadnou
