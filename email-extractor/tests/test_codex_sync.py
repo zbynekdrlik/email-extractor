@@ -2801,3 +2801,48 @@ def test_a_renumber_never_merges_onto_a_pick_waiting_out_a_glitch(pg):
         codex_sync.run(pg, _cfg())
     assert _dl(pg)[CHLIEB]["doplnok"] == "rožok slanina"
     assert _orders(pg)[CHLIEB]["alias"] == "rozok slanina"
+
+
+# --- review 23: every glitch wait is reported + logged; the run log keeps a bounded window ---
+
+def _waits(pg):
+    return {(w["scope"], w["gtin"]): w["why"] for w in _last_report(pg).get("waits", [])}
+
+
+def test_a_card_missing_from_one_list_is_reported_as_waiting(pg, caplog):
+    """Review 23 🔵: a card missing from ONE list leaves its numbers alone (a glitch) — and the
+    report / log say so, never an all-zero plan indistinguishable from "nothing to do"."""
+    _baseline(pg)
+    _push(pg, [r for r in V1 if r["card_code"] != "27"], hours_old=4)
+    with caplog.at_level(logging.INFO, logger="orders.codex_sync"):
+        codex_sync.run(pg, _cfg())
+    waits = _waits(pg)
+    assert ("orders", ROZOK) in waits and ("dl", ROZOK) in waits
+    assert "27" in waits[("orders", ROZOK)]
+    assert any("waits" in r.getMessage() and ROZOK in r.getMessage() for r in caplog.records)
+
+
+def test_a_pick_waiting_out_a_glitch_is_reported(pg):
+    """Review 23 🔵: a pick whose picked card is missing from one list waits — reported."""
+    _picked_as_the_muka(pg, "1")
+    _push(pg, [_row(KOLAC, "55", "Koláč makový 80g")], hours_old=5)
+    codex_sync.run(pg, _cfg())
+    assert "40" in _waits(pg).get(("dl", CHLIEB), "")
+
+
+def test_the_run_log_keeps_a_window_and_the_newest_run_of_each_status(pg):
+    """Review 23 🔵: `codex_sync_runs` (the whole plan as JSON per push) never grew bounded —
+    runs older than `RUNS_KEEP_DAYS` are pruned, the newest run of each status is always kept
+    (the last applied run's review dedup, the previous synced snapshot)."""
+    _baseline(pg)
+    old = NOW - timedelta(days=codex_sync.RUNS_KEEP_DAYS + 10)
+    for status in ("dry-run", "error", "error", "apply"):
+        pg.execute("INSERT INTO codex_sync_runs (ran_at, status, applied, report) "
+                   "VALUES (%s, %s, %s, '{}')", (old, status, status == "apply"))
+    _push(pg, V1, hours_old=1)
+    codex_sync.run(pg, _cfg())
+    rows = pg.execute("SELECT status FROM codex_sync_runs WHERE ran_at < %s ORDER BY id",
+                      (NOW - timedelta(days=codex_sync.RUNS_KEEP_DAYS),)).fetchall()
+    assert [r[0] for r in rows] == ["dry-run", "error"], "the newest old run of each status"
+    assert pg.execute("SELECT count(*) FROM codex_sync_runs WHERE ran_at >= %s",
+                      (NOW - timedelta(days=1),)).fetchone()[0] == 2
