@@ -4178,3 +4178,184 @@ def test_a_kos_number_of_a_gone_card_of_the_same_product_is_restored_quietly(pg)
     assert ROZOK not in _dl(pg) and KOS_ROZOK in _dl(pg)
     assert not _review_reason(pg, "dl", ROZOK)
     assert _binding(pg, KOS_ROZOK, "dl")[:2] == ("27", True)
+
+
+# --- review 41: a pick that restored a Kôš card — reset only on evidence, applied only -------
+
+OUR_ROZOK_DL = ("Rožok so slaninou 70g", "rožok slanina", 0.07, 0.35)
+BAGETA_DL = ("bageta", 0.1, 0.5)
+
+
+def _dl_card(pg, gtin):
+    c = _dl(pg)[gtin]
+    return c["name"], c["doplnok"], c["mass"], c["cena"]
+
+
+def _bageta_picked(pg, *, runs_before_apply=0):
+    """The round-40 shape: our unknown Kôš bageta under its freed code (card 86 on it in the
+    history), CODEX reuses the code for card 27; in the dry-run window the warehouse picks card
+    27 there — the picker restores the bageta as it was — and answers its question (a taught
+    row AFTER the pick). Then `runs_before_apply` more dry-runs, then the apply."""
+    _kos_bageta(pg)
+    _seed_catalogs(pg)
+    _push(pg, V1 + [_row(KOS_BAGETA, "86", "Bageta cesnaková 100g")], hours_old=6)
+    codex_sync.run(pg, _cfg(apply=False))
+    _push(pg, BAGETA_REUSED, hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    card_guard.add_from_codex(pg, "dl", KOS_BAGETA, actor="sklad")
+    pg.execute(
+        "INSERT INTO dl_item_memory (supplier_ean, item_key, item_raw, gtin, card, delivered_on, "
+        "cnt, source, created_at) VALUES ('S7', %s, 'Rožok slanina', %s, 'Rožok', %s, 1, "
+        "'human', %s)", (memory.item_key("Rožok slanina"), KOS_BAGETA, date(2026, 9, 2),
+                         datetime.now(UTC) + timedelta(seconds=1)))
+    for i in range(runs_before_apply):
+        _push(pg, BAGETA_REUSED, hours_old=4.5 - i * 0.1)
+        codex_sync.run(pg, _cfg(apply=False))
+    _push(pg, BAGETA_REUSED, hours_old=4)
+    codex_sync.run(pg, _cfg())
+
+
+def test_a_dry_run_between_the_pick_and_the_apply_never_loses_the_reset(pg):
+    """Review 41 🟡: the pick-restore reset's binding was stored by the dry-run after the pick
+    — the apply then saw no pick: no reset, no review, the bageta's doplnok / mass / cena on
+    our rožok (its doplnok even defeating the #465 lexical guard), though the dry-run report
+    promised the reset. A binding that carries a reset is stored by an applied run only (the
+    review-5 rule). The review counts only the rows from before the pick (review 41 🔵: the
+    warehouse's own answer at that question is never the bageta's)."""
+    _bageta_picked(pg, runs_before_apply=1)
+    assert _dl_card(pg, KOS_BAGETA) == OUR_ROZOK_DL
+    reason = _review_reason(pg, "dl", KOS_BAGETA)
+    assert "„Bageta cesnaková 100g“" in reason and "1 naučených priradení" in reason, reason
+
+
+CROISSANT = "9990000000277"    # synthetic: our croissant, card 50 the only card ever on it
+
+
+def test_a_pick_restoring_our_own_kos_card_with_a_drifted_name_keeps_its_data(pg):
+    """Review 41 🟡: our croissant in the Kôš under OUR name „Croissant 60g" (CODEX: „Croissant
+    maslový 60g" — a #467 drift) is picked back: no card but its own ever carried the code, so
+    nothing says another product — the reset wiped its alias / doplnok / mass / cena and told
+    the warehouse to cancel correct rows. Reset only on EVIDENCE (the name is another card's
+    that carried the code); else its data stays and a human is told, never „sa vynulujú"."""
+    _seed_catalogs(pg)
+    dl_snapshot.upsert_dl_catalog_card(pg, CROISSANT, "Croissant 60g", doplnok="croissant",
+                                       mass=0.06, sklad="1", cena=0.4)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    pg.execute(
+        "INSERT INTO dl_item_memory (supplier_ean, item_key, item_raw, gtin, card, delivered_on, "
+        "cnt, source, created_at) VALUES ('S9', %s, 'Croissant', %s, 'Croissant', %s, 1, "
+        "'human', %s)", (memory.item_key("Croissant"), CROISSANT, date(2026, 9, 1), _BEFORE))
+    dl_snapshot.retire_dl_catalog_card(pg, CROISSANT)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    cards = V1 + [_row(CROISSANT, "50", "Croissant maslový 60g")]
+    _push(pg, cards, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    card_guard.add_from_codex(pg, "dl", CROISSANT, actor="sklad")
+    _push(pg, cards, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    assert _dl_card(pg, CROISSANT)[1:] == ("croissant", 0.06, 0.4)
+    reason = _review_reason(pg, "dl", CROISSANT)
+    assert "„Croissant 60g“" in reason and "vynulujú" not in reason, reason
+    assert "iný výrobok" not in reason, reason
+
+
+def test_a_card_fixed_after_the_pick_is_never_reset(pg):
+    """Review 41 🟡: the warehouse fixed the restored card after the pick (Produkty — an
+    audited update): its fix wins, never reset to blank by the next sync; a human is told."""
+    _kos_bageta(pg)
+    _seed_catalogs(pg)
+    _push(pg, V1 + [_row(KOS_BAGETA, "86", "Bageta cesnaková 100g")], hours_old=6)
+    codex_sync.run(pg, _cfg(apply=False))
+    _push(pg, BAGETA_REUSED, hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    card_guard.add_from_codex(pg, "dl", KOS_BAGETA, actor="sklad")
+    dl_snapshot.upsert_dl_catalog_card(pg, KOS_BAGETA, "Rožok so slaninou 70g",
+                                       doplnok="rožok veľký", mass=0.07, sklad="1", cena=0.36)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    audit.record(pg, actor="sklad", table="dl_catalog_overrides", row_id=KOS_BAGETA,
+                 action="update", before={"doplnok": "bageta"}, after={"doplnok": "rožok veľký"})
+    _push(pg, BAGETA_REUSED, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert _dl_card(pg, KOS_BAGETA)[1:] == ("rožok veľký", 0.07, 0.36)
+    reason = _review_reason(pg, "dl", KOS_BAGETA)
+    assert "„Bageta cesnaková 100g“" in reason and "vynulujú" not in reason, reason
+
+
+def test_a_pick_older_than_the_history_is_never_reset(pg):
+    """Review 41 🟡: a restore-pick made before the history began (before the deploy — the
+    #477 picker is older than the sync) is judged by a name from back then: never reset."""
+    _kos_bageta(pg)
+    _seed_catalogs(pg)
+    _push(pg, BAGETA_REUSED, hours_old=8)
+    card_guard.add_from_codex(pg, "dl", KOS_BAGETA, actor="sklad")
+    pg.execute("UPDATE audit_log SET ts = %s WHERE table_name = 'dl_catalog_overrides' AND "
+               "row_id = %s AND action = 'create'", (NOW - timedelta(hours=9), KOS_BAGETA))
+    _push(pg, V1 + [_row(KOS_BAGETA, "86", "Bageta cesnaková 100g")], hours_old=6)
+    codex_sync._record_history(pg)
+    _push(pg, BAGETA_REUSED, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    assert _dl_card(pg, KOS_BAGETA)[1:] == BAGETA_DL, "a pre-history pick was reset"
+    reason = _review_reason(pg, "dl", KOS_BAGETA)
+    assert "„Bageta cesnaková 100g“" in reason and "vynulujú" not in reason, reason
+
+
+def test_a_human_renamed_kos_number_of_a_gone_card_is_overwritten_never_blocked(pg):
+    """Review 41 🔵: our bageta bound to card 86, renamed by the #467 drift button to card 27's
+    name and deleted by a human; 86 then left CODEX and its code went to card 27. `_contested`
+    (named like the carrier) still blocked the renumber with an untrue text („the sync deleted
+    it, someone renamed it"). A gone card's Kôš number is decided by `_kos_review`: our data,
+    its rows to a human, the drift named."""
+    _seed_catalogs(pg)
+    dl_snapshot.upsert_dl_catalog_card(pg, KOS_BAGETA, "Bageta cesnaková 100g",
+                                       doplnok="bageta", mass=0.1, sklad="1", cena=0.5)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    pg.execute(
+        "INSERT INTO dl_item_memory (supplier_ean, item_key, item_raw, gtin, card, delivered_on, "
+        "cnt, source, created_at) VALUES ('S9', %s, %s, %s, 'Bageta', %s, 1, 'human', %s)",
+        (memory.item_key(BAGETA_TAUGHT), BAGETA_TAUGHT, KOS_BAGETA, date(2026, 9, 1), _BEFORE))
+    _push(pg, V1 + [_row(KOS_BAGETA, "86", "Bageta cesnaková 100g")], hours_old=7)
+    codex_sync.run(pg, _cfg())
+    assert _binding(pg, KOS_BAGETA, "dl")[0] == "86"
+    _drift_click(pg, KOS_BAGETA, "Rožok so slaninou 70g", table="dl_catalog_overrides")
+    dl_snapshot.retire_dl_catalog_card(pg, KOS_BAGETA)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    for hours in (6, 5):
+        _push(pg, V1, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    _push(pg, BAGETA_REUSED, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert ROZOK not in _dl(pg), "blocked by `_contested` on a gone card's Kôš number"
+    assert _dl_card(pg, KOS_BAGETA) == OUR_ROZOK_DL
+    reason = _review_reason(pg, "dl", ROZOK)
+    assert "pred ňou niesla karta CODEX 86" in reason, reason
+
+
+def test_a_live_number_of_a_gone_card_is_never_merged_into(pg):
+    """Review 41 🔵 (pins `target is None` of the gone-card exemption): our LIVE bageta bound
+    to card 86 that left CODEX while card 27 took its code — another product's live card,
+    never merged into: a human decides."""
+    _seed_catalogs(pg)
+    dl_snapshot.upsert_dl_catalog_card(pg, KOS_BAGETA, "Bageta cesnaková 100g",
+                                       doplnok="bageta", mass=0.1, sklad="1", cena=0.5)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    _push(pg, V1 + [_row(KOS_BAGETA, "86", "Bageta cesnaková 100g")], hours_old=7)
+    codex_sync.run(pg, _cfg())
+    for hours in (6, 5):
+        _push(pg, BAGETA_REUSED, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert ROZOK in _dl(pg) and _dl_card(pg, KOS_BAGETA)[1:] == BAGETA_DL
+
+
+def test_a_fresh_pick_at_a_reused_code_is_no_kos_restore(pg):
+    """Review 41 🔵 (pins `ev.restored`): a pick that ADDED a new card (nothing of ours in the
+    Kôš under the code) is never judged as a restored Kôš card — no reset, no review."""
+    _seed_catalogs(pg)
+    _push(pg, V1 + [_row(KOS_BAGETA, "86", "Bageta cesnaková 100g")], hours_old=6)
+    codex_sync.run(pg, _cfg())
+    _push(pg, BAGETA_REUSED, hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    card_guard.add_from_codex(pg, "dl", KOS_BAGETA, actor="sklad")
+    _push(pg, BAGETA_REUSED, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert not _review_reason(pg, "dl", KOS_BAGETA)
+    assert _dl_card(pg, KOS_BAGETA) == OUR_ROZOK_DL
