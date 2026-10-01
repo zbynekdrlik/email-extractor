@@ -239,7 +239,16 @@ def why_glitch(card: str) -> str:
 def why_new_carrier(code: str, card: str, before: list[str]) -> str:
     """An unbound number whose code's only carrier changed in ONE list — one push is no proof."""
     return (f"kód {code} teraz nesie len karta CODEX {card}, v predchádzajúcom zozname ho "
-            f"niesla aj karta CODEX {', '.join(before)} — čaká sa na ďalší zoznam")
+            f"niesla karta CODEX {', '.join(before)} — čaká sa na ďalší zoznam")
+
+
+def carrier_changed(code: str, card: str, card_name: str, earlier: list[str]) -> str:
+    """An unbound number whose code changed carrier, named like none of the cards."""
+    return (f"kód {code} teraz nesie karta CODEX {card} („{card_name}“), predtým ho niesla "
+            f"karta CODEX {', '.join(earlier)} — názov našej karty nesedí so žiadnou z nich, "
+            f"nevieme, ktorá je naša. Premenuj našu kartu (Produkty) na názov tej, ktorá je "
+            f"naša — pri ďalšom zozname kariet sa priradí; ak kartu nepotrebujete, zmažte ju "
+            f"(Kôš).")
 
 
 def why_pick_waits(picked: str, missing: str) -> str:
@@ -248,10 +257,18 @@ def why_pick_waits(picked: str, missing: str) -> str:
             f"v tomto zozname chýba (raz)")
 
 
-def why_renumber_waits(succ: str, at: str) -> str:
-    """A renumber onto our number whose pick waits."""
-    return (f"prečíslovanie na {succ} čaká — výber karty na našom čísle {at} sa vyrieši "
-            f"s ďalším zoznamom")
+def why_renumber_waits(succ: str, at: str, kind: str | None) -> str:
+    """A renumber onto our number `at` whose identity is not settled this list: its #477 pick
+    waits (`kind` "pick"), its code's carrier changed ("carrier"), or a human decides it first
+    (None — the number has its own review)."""
+    if kind == "pick":
+        return (f"prečíslovanie na {succ} čaká — výber karty na našom čísle {at} sa vyrieši "
+                f"s ďalším zoznamom")
+    if kind == "carrier":
+        return (f"prečíslovanie na {succ} čaká — naše číslo {at} sa ku karte CODEX priradí "
+                f"s ďalším zoznamom")
+    return (f"prečíslovanie na {succ} čaká — najprv treba vyriešiť naše číslo {at} (má vlastnú "
+            f"kontrolu)")
 
 
 def why_taken(code: str) -> str:

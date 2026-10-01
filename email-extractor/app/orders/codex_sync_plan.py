@@ -199,9 +199,17 @@ class _ScopePlanner:
         # our number now ANOTHER product -> (its old CODEX card, the #477 pick time; None for
         # a rename rebind — `_reset_from`)
         self.repicked: dict[str, tuple[str, datetime | None]] = {}
-        # our numbers whose #477 pick waits out a glitch this list — nothing may land on them
-        # (review 22 🟡: a merge's binding superseded the waiting pick, its reset never ran)
-        self.waiting: set[str] = set()
+        # our numbers left waiting this list ("pick": a #477 pick waits out a glitch; "carrier":
+        # an unbound number's code has a new carrier) — nothing may land on them (review 22 🟡:
+        # a merge's binding superseded the waiting pick; review 25 🟡: a merge renamed the
+        # waiting number to another product)
+        self.waiting: dict[str, str] = {}
+        # pass 1's verdict per number of ours: the CODEX card it IS in this plan (a binding
+        # this plan stores counts — `_known` reads only the stored ones), or not decided
+        self.settled: dict[str, str] = {}
+        self.unsettled: set[str] = set()
+        # renumber reviews whose way out depends on the catalog as the WHOLE plan leaves it
+        self.other_card: list[tuple[dict, str, str, str]] = []
 
     def run(self) -> None:
         groups = _groups(self.catalog, self.scope.name)
@@ -213,6 +221,8 @@ class _ScopePlanner:
                    if s is not None]
         for item, group in settled:
             self._follow(item, group)
+        for args in self.other_card:          # the way out read from the catalog as the WHOLE
+            self._other_card_review(*args)    # plan leaves it, whatever the group order
         self._memory(set(groups))
         self._renames()
 
@@ -357,7 +367,7 @@ class _ScopePlanner:
                     # 22), the next list settles it (review 20 🟡: the reset kept the old
                     # product's sklad; review 21 🔵: the rows review called the replaced product
                     # gone from CODEX — both final once the binding is stored)
-                    self.waiting.update(item["gtins"])
+                    self.waiting.update({g: "pick" for g in item["gtins"]})
                     missing = known.card if picked_gone or old is None else old.card
                     self.plan.wait(item, texts.why_pick_waits(known.card, missing))
                     return None
@@ -404,12 +414,10 @@ class _ScopePlanner:
                 return None
             card = named[0]
         elif carriers:
-            card = next(iter(carriers))
-            before = sorted(c for c in cx.carried.get(code, {})
-                            if c != card and not cx.absent_before(c, code))
-            if before:                         # another card carried it a snapshot ago
-                self.plan.wait(item, texts.why_new_carrier(code, card, before))
+            sole = self._sole_carrier(code, item, next(iter(carriers)))
+            if sole is None:
                 return None
+            card = sole
         else:
             last = cx.owners.get(code, [])
             if len(last) > 1:
@@ -419,6 +427,31 @@ class _ScopePlanner:
             card = last[0]
         self._seed(item, card)
         return card
+
+    def _sole_carrier(self, code: str, item: dict, card: str) -> str | None:
+        """An UNBOUND number whose code has ONE stredisko-1 carrier `card` now. Another card
+        carried the code a snapshot ago → it waits (one push is no proof); another card carried
+        it before that → the code changed carrier, and the number is the product its NAME is:
+        the carrier now, or exactly one earlier carrier (then it follows THAT card — renumber /
+        gone), else a human decides. Review 25 🟡: binding it to whoever holds the code now
+        renamed our rožok to the pagáč that reused its code (round 1's 🔴) on the first
+        post-deploy lists, when every number is unbound."""
+        cx, name = self.cx, item["name"]
+        earlier = sorted(c for c in cx.carried.get(code, {}) if c != card)
+        recent = [c for c in earlier if not cx.absent_before(c, code)]
+        if recent:
+            self.plan.wait(item, texts.why_new_carrier(code, card, recent))
+            self.waiting.update({g: "carrier" for g in item["gtins"]})
+            return None
+        if not earlier or is_named(name, cx.rows(card, code)):
+            return card
+        ours = codex_cards.name_key(name)
+        named = [c for c in earlier if ours and ours in cx.product(c, code)]
+        if len(named) == 1:
+            return named[0]
+        self.plan.add_review(item, texts.carrier_changed(code, card, cx.name_of(card, code),
+                                                         earlier))
+        return None
 
     def _settle(self, code: str, group: list[dict]) -> tuple[dict, list[dict]] | None:
         """Pass 1 for one group: which CODEX card it IS (`_identify`) and the reset a pick /
@@ -430,7 +463,9 @@ class _ScopePlanner:
                 "names": {str(c["gtin"]): str(c.get("name") or "") for c in group}}
         card = self._identify(code, item)
         if card is None:
+            self.unsettled.update(gtins)
             return None
+        self.settled.update({g: card for g in gtins})
         item["codex_card"] = card
         if item.pop("reset_from", None) is not None:
             # every number of the group — a legacy twin keeps no old-product data either
@@ -498,20 +533,22 @@ class _ScopePlanner:
         target = _ours(self.live.values(), self.scope.name).get(succ)
         binned = _ours(self.binned, self.scope.name).get(succ)
         hit = target if target is not None else binned
-        if hit is not None and str(hit["gtin"]) in self.waiting:
-            # its pick settles first (next list) — review 22
-            self.plan.wait(item, texts.why_renumber_waits(succ, str(hit["gtin"])))
+        at = str(hit["gtin"]) if hit is not None else ""
+        hit_known = self._known(at) if hit is not None else None
+        unknown = hit_known is not None and hit_known.card is None
+        if at in self.waiting or (unknown and at in self.unsettled):
+            # what our number IS settles first — never a merge onto it (reviews 22 / 25)
+            self.plan.wait(item, texts.why_renumber_waits(succ, at, self.waiting.get(at)))
             return
-        hit_known = self._known(str(hit["gtin"])) if hit is not None else None
-        other = hit_known.card if hit_known is not None else None
+        # what the number IS: its stored identity, else this plan's (a binding this plan stores
+        # — review 25: an unbound number settled as another card was merged into)
+        other = (hit_known.card if hit_known is not None and hit_known.card is not None
+                 else self.settled.get(at))
         if other not in (None, card):
             # our card with the new code is ANOTHER CODEX card (e.g. a #477 pick of the
             # product that held the code before) — never a silent merge of two products. The
-            # way out names every number the picker would select (review 17: a live twin)
-            delete = self._numbers(succ)
-            self.plan.add_review(item, texts.renumber_other_card(
-                self.scope.name, succ, str(other), card, self.cx.name_of(card, succ), delete,
-                self._pick(succ, delete, card)))
+            # way out is read once the whole plan is done (`_other_card_review`)
+            self.other_card.append((item, succ, str(other), card))
             return
         hit_name = str((hit or {}).get("name") or "")
         if hit_known is not None and self._contested(hit_known, hit_name, succ):
@@ -561,6 +598,16 @@ class _ScopePlanner:
             self.live[to] = dict(_fields(group[0]), gtin=to)
             self.binned = [b for b in self.binned if str(b["gtin"]) != to]
         self.identity[to] = (card, succ)
+
+    def _other_card_review(self, item: dict, succ: str, other: str, card: str) -> None:
+        """The review of a renumber whose target is ANOTHER CODEX card's number — its way out
+        names every live number the picker would select (review 17: a live twin) and what the
+        pick then does, read from the catalog as the WHOLE plan leaves it (review 25: a number
+        another group vacates later in the same plan is in the Kôš by then)."""
+        delete = self._numbers(succ)
+        self.plan.add_review(item, texts.renumber_other_card(
+            self.scope.name, succ, other, card, self.cx.name_of(card, succ), delete,
+            self._pick(succ, delete, card)))
 
     def _held_reason(self, gtin: str, code: str, card: str, to: str, split: Split,
                      takers: list[str]) -> str:
