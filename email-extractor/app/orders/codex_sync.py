@@ -63,6 +63,8 @@ ALERT_KEY = "codex-sync"
 # CODEX export touches hundreds.
 MAX_CODE_CHANGES = 10
 MAX_RENAMES = 80
+# `codex_sync_runs` keeps this many days of runs (+ the newest run of each status) — review 23
+RUNS_KEEP_DAYS = 90
 MAX_ALERT_LINES = 40
 _LOCK_KEY = 478_478_478
 
@@ -407,11 +409,22 @@ def _alert(conn, cfg, plan: sp.Plan, mode: str, run_id: int, known: set[tuple],
 # --- the run log -------------------------------------------------------------------------------
 
 def _record(conn, sync: dict | None, status: str, report_json: dict) -> int:
+    """Log the run (the whole plan as JSON) and prune the log to a bounded window: runs older
+    than `RUNS_KEEP_DAYS` go, the newest run of each status always stays — the last applied
+    run's review dedup and the previous synced snapshot read them (review 23 🔵: the log grew
+    without bound, ~2 plans a day). Housekeeping of the run log itself — in every mode."""
     row = conn.execute(
         "INSERT INTO codex_sync_runs (sync_id, applied, status, report) "
         "VALUES (%s, %s, %s, %s) RETURNING id",
         (sync["id"] if sync else None, status == "apply", status, Json(report_json))
     ).fetchone()
+    pruned = conn.execute(
+        "DELETE FROM codex_sync_runs WHERE ran_at < now() - make_interval(days => %s) "
+        "AND id NOT IN (SELECT max(id) FROM codex_sync_runs GROUP BY status)",
+        (RUNS_KEEP_DAYS,)).rowcount
+    if pruned:
+        log.info("codex sync: %d run(s) older than %d days pruned from codex_sync_runs", pruned,
+                 RUNS_KEEP_DAYS)
     return int(row[0])
 
 
@@ -425,6 +438,7 @@ def _report(plan: sp.Plan, mode: str, as_of: datetime, would_block: bool,
             "renumbers": [{k: v for k, v in r.items() if k not in strip}
                           for r in plan.renumbers],
             "removals": plan.removals, "review": plan.review, "holds": plan.holds,
+            "waits": plan.waits,
             "resets": [{k: v for k, v in r.items() if k not in strip} for r in plan.resets]}
 
 
@@ -442,6 +456,9 @@ def _log(plan: sp.Plan, mode: str) -> None:
     for r in plan.review:
         log.warning("codex sync (%s): %s card %s needs a human — %s", mode, r["scope"],
                     r["gtin"], r["reason"])
+    for w in plan.waits:
+        log.info("codex sync (%s): %s card %s waits for the next list — %s", mode, w["scope"],
+                 w["gtin"], w["why"])
     log.info("codex sync (%s): %s", mode, plan.counts())
 
 

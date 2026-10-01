@@ -231,6 +231,23 @@ def repick(gtin: str, old: str, old_name: str, *, moved: str | None, kept: int, 
             f"„{old_name}“, {fix}")
 
 
+def why_glitch(card: str) -> str:
+    """A card missing from ONE list — nothing happens to our numbers until the next list."""
+    return f"karta CODEX {card} v tomto zozname chýba (raz) — čaká sa na ďalší zoznam"
+
+
+def why_pick_waits(picked: str, missing: str) -> str:
+    """A #477 pick waits while the picked card or the card it replaces is missing once."""
+    return (f"výber karty CODEX {picked} sa vyrieši s ďalším zoznamom — karta CODEX {missing} "
+            f"v tomto zozname chýba (raz)")
+
+
+def why_renumber_waits(succ: str, at: str) -> str:
+    """A renumber onto our number whose pick waits."""
+    return (f"prečíslovanie na {succ} čaká — výber karty na našom čísle {at} sa vyrieši "
+            f"s ďalším zoznamom")
+
+
 def why_taken(code: str) -> str:
     return f"kód {code} mala medzitým v CODEXe iná karta"
 

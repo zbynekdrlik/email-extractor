@@ -96,6 +96,13 @@ class Plan:
     # delivery history (shipped rows) held on a number with nothing to move and nothing for a
     # human to fix — reported, never silently (review 12 🔵)
     holds: list[dict] = field(default_factory=list)
+    # our numbers left alone on THIS list because a card they depend on is missing from it once
+    # (a glitch) — reported + logged, never an all-zero plan that reads "nothing to do" (review 23)
+    waits: list[dict] = field(default_factory=list)
+
+    def wait(self, item: dict, why: str) -> None:
+        self.waits.append({"scope": item["scope"], "gtin": item["gtin"],
+                           "code": item["code"], "why": why})
 
     def code_changes(self) -> int:
         """Distinct CODEX codes renumbered or removed (a card in both catalogs = one)."""
@@ -342,14 +349,17 @@ class _ScopePlanner:
         if known.card is not None:
             if known.picked:
                 old = known.old
-                if cx.glitched(known.card) or (old is not None and old.card != known.card
-                                               and cx.glitched(old.card)):
+                picked_gone = cx.glitched(known.card)
+                if picked_gone or (old is not None and old.card != known.card
+                                   and cx.glitched(old.card)):
                     # the picked card — or the one it replaces — missing from ONE list is a
                     # glitch: the pick waits (no seed, no reset, no renumber onto it — review
                     # 22), the next list settles it (review 20 🟡: the reset kept the old
                     # product's sklad; review 21 🔵: the rows review called the replaced product
                     # gone from CODEX — both final once the binding is stored)
                     self.waiting.update(item["gtins"])
+                    missing = known.card if picked_gone or old is None else old.card
+                    self.plan.wait(item, texts.why_pick_waits(known.card, missing))
                     return None
                 replaces = old is not None and old.card != known.card
                 self._seed(item, known.card, replaces=replaces)
@@ -437,8 +447,9 @@ class _ScopePlanner:
                 self.identity[g] = (card, code)
             return
         if card not in cx.by_card:           # our CODEX card left stredisko 1
-            if not cx.gone_twice(card):
-                return                       # one missing snapshot is no proof (a glitch)
+            if not cx.gone_twice(card):      # one missing snapshot is no proof (a glitch)
+                self.plan.wait(item, texts.why_glitch(card))
+                return
             if not cx.cards.has(code):
                 self.plan.removals.append(item)
                 self._vacate(group)
@@ -485,7 +496,9 @@ class _ScopePlanner:
         binned = _ours(self.binned, self.scope.name).get(succ)
         hit = target if target is not None else binned
         if hit is not None and str(hit["gtin"]) in self.waiting:
-            return                           # its pick settles first (next list) — review 22
+            # its pick settles first (next list) — review 22
+            self.plan.wait(item, texts.why_renumber_waits(succ, str(hit["gtin"])))
+            return
         hit_known = self._known(str(hit["gtin"])) if hit is not None else None
         other = hit_known.card if hit_known is not None else None
         if other not in (None, card):
