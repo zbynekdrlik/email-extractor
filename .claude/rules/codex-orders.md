@@ -20,6 +20,7 @@ paths:
   - "email-extractor/app/orders/codex_sync_plan.py"
   - "email-extractor/app/orders/codex_sync_memory.py"
   - "email-extractor/app/orders/codex_sync_texts.py"
+  - "email-extractor/app/orders/codex_sync_list.py"
   - "email-extractor/tests/test_codex_sync.py"
 ---
 
@@ -341,7 +342,12 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   ACSKLP (`card_code`) + sklad since #467; #478 needed no new field, only the history.
 - **Rollout switch `codex_sync_apply` (default false = DRY-RUN)**: plan + log + report, ZERO
   catalog/memory/audit/alert writes (a failing dry-run sync too — its `error` run row is the
-  record, review 17); the history is kept either way. Read the dry-run with
+  record, review 17); the history is kept either way. A glitch wait (a card missing from one
+  list, a pick / renumber waiting on it) is in the report's `waits` + the log — an all-zero
+  plan never hides one (review 23). The run log keeps `RUNS_KEEP_DAYS` (90) + the newest run of
+  each status. Module map: `codex_sync_list` (what the list says: rows, history, bindings, pick
+  events) → `codex_sync_plan` (what to do) → `codex_sync` (does it); `codex_sync_memory`
+  (memory rules), `codex_sync_texts` (Slovak texts). Read the dry-run with
   `SELECT id, ran_at, status, report FROM codex_sync_runs ORDER BY id DESC LIMIT 1`. Turning it
   on is the OWNER's decision (after reviewing the dry-run on the ticket) — never flip it in a
   lane. A `would_block: true` in a dry-run means the first apply would stop at the breaker.
