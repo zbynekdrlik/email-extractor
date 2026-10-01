@@ -4664,6 +4664,11 @@ def test_a_fresh_pick_deleted_again_is_no_kos_restore(pg):
     codex_sync.run(pg, _cfg())
     _push(pg, BAGETA_REUSED, hours_old=5)
     codex_sync.run(pg, _cfg(apply=False))
+    # delivery history on the code from before the pick (no card of ours carried it then)
+    pg.execute(
+        "INSERT INTO dl_item_memory (supplier_ean, item_key, item_raw, gtin, card, delivered_on, "
+        "cnt, source, created_at) VALUES ('S8', %s, 'Rožok 70', %s, 'Rožok', %s, 1, 'ship', %s)",
+        (memory.item_key("Rožok 70"), KOS_BAGETA, date(2026, 9, 1), _BEFORE))
     card_guard.add_from_codex(pg, "dl", KOS_BAGETA, actor="sklad")
     _answer_after_pick(pg, "dl")
     catalog.delete(pg, "dl", KOS_BAGETA, actor="sklad")
@@ -4671,6 +4676,7 @@ def test_a_fresh_pick_deleted_again_is_no_kos_restore(pg):
     codex_sync.run(pg, _cfg())
     assert ROZOK not in _dl(pg) and KOS_BAGETA in _dl(pg)
     assert not _review_reason(pg, "dl", ROZOK)
+    assert not [h for h in _last_report(pg)["holds"] if h["scope"] == "dl"]
 
 
 def test_a_judged_picks_delivery_history_note_names_its_new_number(pg):
