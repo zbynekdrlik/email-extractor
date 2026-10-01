@@ -533,10 +533,13 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   inactive, every memory row X→Y — but a Y another card ALSO carries, or our Y bound to another
   card → review (never a silent merge of two products). Our Kôš Y never identified (no binding,
   no pick — deleted before the deploy, its code freed in CODEX and REUSED for C) is restored
-  only as C's product by name (`_kos_other`; a bare marker named by its last snapshot) or when
-  it has no taught rows (its delivery history then said in the report — a hold note); another
-  product's taught rows → review, nothing moves, cancelling them lets the next list renumber
-  (round 38: the deleted bageta's taught wording came back recalling the rožok). C missing from stredisko 1 in TWO
+  with OUR data (CODEX's truth); when it is not C's product (`_kos_review`: by name — a bare
+  marker named by its last snapshot — and never a name C's take-over of the code may have
+  lent it via the #467 drift button, `_took_over`) its taught rows, adopted as they sit, go
+  to a human and its delivery history is said (a hold note) — rounds 38-39: silently the
+  bageta's wording recalled the rožok; a BLOCK instead held every order line of ours on a code
+  CODEX no longer has, protected nothing in orders (orders recall never reads the catalog)
+  and led the warehouse to a pick restoring the bageta's data. C missing from stredisko 1 in TWO
   consecutive snapshots (`prev_as_of`; one missing push is an export glitch) → removal when X is
   nowhere in CODEX, a silent rebind when exactly one card now carries X under OUR name (card
   recreated), else review. A code with no carrier and no history is never touched (#467

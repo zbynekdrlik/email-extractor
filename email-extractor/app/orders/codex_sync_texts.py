@@ -156,26 +156,34 @@ def renumber_other_card(scope: str, succ: str, other: str, card: str, card_name:
             f"ho pri otázke cez „Vybrať kartu z CODEXu“ — {result}.")
 
 
-def _kos_label(name: str) -> str:
-    return f"„{name}“" if name else "bez názvu"
+def _kos_what(kos_name: str, card: str, succ: str, drift: Sequence[str]) -> tuple[str, str]:
+    """(label, what it is) of our never-identified Kôš card under `succ`: no name → we never
+    compared the products (review 39); named like card `card` that took the code over from
+    `drift` → the name may come from the #467 drift button; else another product."""
+    if not kos_name:
+        return "bez názvu", "nevieme, aký výrobok to bol"
+    if drift:
+        return (f"„{kos_name}“", f"názov ako karta CODEX {card}, no kód {succ} pred ňou niesla "
+                f"karta CODEX {', '.join(drift)} (iný výrobok) — názov mohol prísť z tlačidla "
+                f"„Prevziať názov z CODEXu“")
+    return f"„{kos_name}“", "iný výrobok"
 
 
-def renumber_kos_other(gtin: str, succ: str, card: str, card_name: str, kos_name: str,
-                       taught: int) -> str:
-    """Our number's CODEX card got the new code `succ`, but our never-identified Kôš card
-    under `succ` is another product with taught rows — restored as ours it would adopt them
-    (review 38). Cancelling them lets the next list renumber."""
-    kos = _kos_label(kos_name)
-    return (f"karta CODEX {card} („{card_name}“) má nový kód {succ}, ale náš kód {succ} je v "
-            f"Koši ako {kos} — iný výrobok — a má {taught} naučených priradení: prečíslovanie "
-            f"{gtin} → {succ} čaká, nič sa nemení (obnovená karta by ich prevzala). Naučené "
-            f"priradenia k číslu {succ} patria karte {kos}: {CHECK_TAUGHT} a zruš ich — potom "
-            f"sa {gtin} pri ďalšom zozname kariet prečísluje na {succ} (kartu {succ} v Koši "
-            f"prepíše).")
+def kos_adopted(gtin: str, succ: str, card: str, card_name: str, kos_name: str, taught: int,
+                drift: Sequence[str]) -> str:
+    """Our number goes to `succ`, where our never-identified Kôš card of another product sat:
+    OUR data replaces its, its taught rows stay under `succ` (adopted as they sit) — a human
+    checks them (reviews 38-39, the review-11 rule)."""
+    label, what = _kos_what(kos_name, card, succ, drift)
+    return (f"naše číslo {gtin} sa prečísluje na {succ} (karta CODEX {card} „{card_name}“), kde "
+            f"máme v Koši kartu {label} — {what}: jej údaje prepíšu naše, no jej {taught} "
+            f"naučených priradení pod číslom {succ} ostáva — môžu patriť jej, nie karte CODEX "
+            f"{card}: {CHECK_TAUGHT}.")
 
 
-def why_kos_other(at: str, kos_name: str, card: str) -> str:
-    return f"číslo {at} v Koši bolo {_kos_label(kos_name)} — iný výrobok než karta CODEX {card}"
+def why_kos_other(at: str, kos_name: str, card: str, drift: Sequence[str]) -> str:
+    label, what = _kos_what(kos_name, card, at, drift)
+    return f"pod číslom {at} bola v Koši karta {label} — {what}"
 
 
 def renumber_contested(succ: str, card: str, hit_name: str, was: str, live: bool) -> str:

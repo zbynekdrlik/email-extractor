@@ -626,9 +626,6 @@ class _ScopePlanner:
             # way out is read once the whole plan is done (`_other_card_review`)
             self.other_card.append((item, succ, str(other), card))
             return
-        if target is None and binned is not None and other is None and self._kos_other(
-                item, binned, card, succ):
-            return
         hit_name = str((hit or {}).get("name") or "")
         if hit_known is not None and self._contested(hit_known, hit_name, succ):
             # our card with the new code — live, or its Kôš copy (review 8) — was renamed by a
@@ -667,6 +664,8 @@ class _ScopePlanner:
                                                          taken[1]))
         if hit is not None:
             self._adopted_review(item, str(hit["gtin"]), card, succ)
+            if target is None and other is None:
+                self._kos_review(item, hit, card, succ)
         if target is not None:
             fill = _fill(self.scope, target, group[0])
             if fill:
@@ -681,28 +680,32 @@ class _ScopePlanner:
             self.binned = [b for b in self.binned if str(b["gtin"]) != to]
         self.identity[to] = (card, succ)
 
-    def _kos_other(self, item: dict, binned: dict, card: str, succ: str) -> bool:
+    def _kos_review(self, item: dict, binned: dict, card: str, succ: str) -> None:
         """Our Kôš number under the new code that was never identified (no binding, no pick —
-        e.g. deleted before the deploy, its code freed in CODEX and then REUSED for this card):
-        restored as ours only when it is this card's product by name, or has no taught rows —
-        another product's taught rows would be adopted by our card, a wording of a deleted
-        product recalling ours (review 38: the bageta's wording shipped as the rožok) → a human,
-        nothing moves (True). Its delivery history only → the renumber goes on, the history
-        said in the report (review 12's rule)."""
+        e.g. deleted before the deploy, its code freed in CODEX and then REUSED for this card)
+        is restored as ours: CODEX's truth, OUR data over the dead card's. When it is not this
+        card's product — by name, never a name the #467 drift button may have given (this card
+        took the code over from another product, `_took_over` — review 39) — its taught rows,
+        adopted as they sit, go to a human (review 38: silently, the bageta's wording recalled
+        the rožok; the review-11 rule for adopted rows — review 39: a BLOCK held every order line
+        of ours on a code CODEX no longer has, protected nothing in orders, whose recall never
+        reads the catalog, and led the warehouse to a pick restoring the bageta's data); its
+        delivery history is said in the report (review 12)."""
         at = str(binned["gtin"])
         name = self._kos_name(binned)
         key = codex_cards.name_key(name)
-        if key and key in self.cx.product(card, succ):
-            return False
+        took = self._took_over(succ, card)
+        named_like = bool(key) and key in self.cx.product(card, succ)
+        if named_like and not took:
+            return
+        drift = took if named_like else []
         taught, shipped = rows_on(self.conn, self.scope, at)
         if taught:
-            self.plan.add_review(item, texts.renumber_kos_other(
-                item["gtin"], succ, card, self.cx.name_of(card, succ), name, taught))
-            return True
+            self.plan.add_review(item, texts.kos_adopted(
+                item["gtin"], succ, card, self.cx.name_of(card, succ), name, taught, drift))
         if shipped:
             self._hold_note(dict(item, gtin=at, name=name), at, shipped,
-                            texts.why_kos_other(at, name, card))
-        return False
+                            texts.why_kos_other(at, name, card, drift))
 
     def _kos_name(self, card: dict) -> str:
         """A Kôš card's name — a bare retirement marker's from the newest snapshot that had it."""
