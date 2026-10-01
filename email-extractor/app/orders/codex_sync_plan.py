@@ -37,23 +37,28 @@ Nothing here ever adds a CODEX card we do not already have (#337).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 
 # the memory rules (which rows a move carries / holds) live in `codex_sync_memory` (review 12:
 # the planner neared the size budget), the Slovak texts the warehouse reads in
-# `codex_sync_texts` (review 16: pure functions over the facts the planner derives)
-from . import card_guard, codex_cards, dl_snapshot, snapshot
+# `codex_sync_texts` (review 16: pure functions over the facts the planner derives), the CODEX
+# list + history + bindings as read in `codex_sync_list` (review 23)
+from . import card_guard, codex_cards, codex_sync_list, dl_snapshot, snapshot
 from . import codex_sync_texts as texts
+from .codex_sync_list import (
+    NEVER,
+    Binding,
+    Codex,
+    best_row,
+    is_named,
+)
 from .codex_sync_memory import (
-    SYNC_ACTOR,
     Split,
     held_clause,
     memory_split,
     taught_clause,
 )
 
-STREDISKO = codex_cards.PICK_STREDISKO
-_NEVER = datetime.min.replace(tzinfo=UTC)
 REASON_JOIN = " Tiež: "
 
 
@@ -76,17 +81,6 @@ SCOPES = (
     _scope("dl", "sklad", ("dl_item_memory",)),
 )
 BY_NAME = {s.name: s for s in SCOPES}
-
-
-@dataclass(frozen=True)
-class Row:
-    """One stredisko-1 row of the current CODEX list."""
-    code: str
-    card: str
-    sklad: int
-    name: str
-    inactive: bool
-    changed_at: datetime | None
 
 
 @dataclass
@@ -129,108 +123,6 @@ class Plan:
         self.review.append(dict(item, reason=reason, reasons=[reason]))
 
 
-@dataclass
-class Codex:
-    """The stredisko-1 CODEX list, its history and our card bindings, as the plan reads them."""
-    cards: codex_cards.CodexCards
-    by_card: dict[str, list[Row]]
-    by_code: dict[str, list[Row]]
-    first_seen: dict[tuple[str, str], datetime]
-    last_seen: dict[tuple[str, str], datetime]
-    names: dict[tuple[str, str], str]           # (card, code) -> its name while it carried it
-    card_seen: dict[str, datetime]              # card -> last snapshot any of its rows was in
-    owners: dict[str, list[str]]                # code -> the cards that carried it LAST
-    carried: dict[str, dict[str, datetime]]     # code -> {card: last seen carrying it}
-    pickable: dict[str, dict[str, dict]]        # scope -> the #477 pick's cards by code
-    prev_as_of: datetime | None                 # the previous SUCCESSFULLY synced snapshot
-    bindings: dict[tuple[str, str], Binding]
-    # (override table, our gtin) -> the newest HUMAN (re)entry of the card into the catalog
-    # (a #477 pick = audit `create` naming its CODEX card; a Kôš „Vrátiť" = `restore`)
-    events: dict[tuple[str, str], Event]
-
-    def carriers(self, code: str) -> set[str]:
-        return {r.card for r in self.by_code.get(code, [])}
-
-    def product(self, card: str, code: str) -> set[str]:
-        """The product names (#467 `name_key`) of CODEX `card`: its current rows + its name
-        while it carried `code` (the history keeps it after the card moved on)."""
-        keys = {codex_cards.name_key(r.name) for r in self.by_card.get(card, [])}
-        keys.add(codex_cards.name_key(self.names.get((card, code), "")))
-        return {k for k in keys if k}
-
-    def name_of(self, card: str, code: str) -> str:
-        """CODEX `card`'s name for `code`: its central current NAMED row (the `_name_order` rule
-        the renames use — review 15; a blank row is never a name, as the picker skips it —
-        review 16), else the name it had while it carried the code."""
-        rows = [r for r in self.rows(card, code) if r.name.strip()]
-        if rows:
-            return _best_row(rows).name
-        return (self.names.get((card, code))
-                or next((r.name for r in self.by_card.get(card, [])), "") or "?")
-
-    def taken(self, card: str, code: str) -> tuple[datetime, list[str]] | None:
-        """CODEX gave `code` to another card after `card` last carried it (a REUSE) → (when
-        the first such card was first SEEN on the code — nobody could pick it before a push
-        listed it (review 11) — and those cards). A mapping decided on our number since then
-        may be that other product's (review 10 🟡). None = no other card had it after `card`."""
-        left = self.last_seen.get((card, code))
-        if left is None:
-            return None
-        takers = sorted(d for d, t in self.carried.get(code, {}).items() if d != card and t > left)
-        return (self._window(card, code, takers), takers) if takers else None
-
-    def foreign(self, card: str, code: str) -> tuple[datetime, list[str]] | None:
-        """Another card carried `code` since `card` first had it — e.g. while `card` was away
-        on another code (a round trip X → Y → X, the #478 incident's shape) → (when the first
-        of them was first seen on it, those cards); None otherwise (review 11 🟡)."""
-        mine = self.first_seen.get((card, code))
-        if mine is None:
-            return None
-        others = sorted(d for d, t in self.carried.get(code, {}).items() if d != card and t > mine)
-        return (self._window(card, code, others), others) if others else None
-
-    def _window(self, card: str, code: str, others: list[str]) -> datetime:
-        mine = self.first_seen.get((card, code), _NEVER)
-        return min(max(self.first_seen.get((d, code), mine), mine) for d in others)
-
-    def same_product(self, old: str, new: str, code: str) -> bool:
-        """Two CODEX cards name the same product — the curated data taught for `old` fits
-        `new` (a card recreated in CODEX), else it belongs to another product."""
-        return bool(self.product(old, code) & self.product(new, code))
-
-    def rows(self, card: str, code: str) -> list[Row]:
-        return [r for r in self.by_card.get(card, []) if r.code == code]
-
-    def absent_before(self, card: str, code: str | None = None) -> bool:
-        """`card` (carrying `code`, when given) missing from stredisko 1 in the previous
-        successfully synced snapshot too — never true without one (no guess from one push)."""
-        seen = self.card_seen.get(card) if code is None else self.last_seen.get((card, code))
-        return self.prev_as_of is not None and (seen or _NEVER) < self.prev_as_of
-
-    def gone_twice(self, card: str) -> bool:
-        """`card` missing from stredisko 1 in this AND the previous synced CODEX snapshot."""
-        return card not in self.by_card and self.absent_before(card)
-
-    def glitched(self, card: str) -> bool:
-        """`card` missing from THIS snapshot only — one list is no proof (an export glitch):
-        nothing that depends on the card is decided on it."""
-        return card not in self.by_card and not self.gone_twice(card)
-
-
-@dataclass(frozen=True)
-class Binding:
-    card: str
-    active: bool
-    bound_at: datetime
-    retired_name: str | None = None     # our card's name when the sync retired the number
-
-
-@dataclass(frozen=True)
-class Event:
-    at: datetime
-    card: str | None     # the CODEX card a #477 pick named; None for a legacy creation
-
-
 @dataclass(frozen=True)
 class Known:
     """What `_ScopePlanner._known` decided about one number of ours."""
@@ -239,104 +131,10 @@ class Known:
     old: Binding | None        # the stored binding (may be retired / superseded)
 
 
-def _named(name: str, rows: list[Row]) -> bool:
-    """Our card name is one of these CODEX rows' names, cosmetics aside (#467 `name_key`)."""
-    ours = codex_cards.name_key(name)
-    return any(codex_cards.name_key(r.name) == ours for r in rows)
-
-
-def _best_row(rows: list[Row]) -> Row:
-    """The central row of a card's rows for a code (active first, the #477 `_name_order`)."""
-    active = [r for r in rows if not r.inactive] or rows
-    return min(active, key=lambda r: codex_cards._name_order(r.sklad == 1, r.changed_at, r.name))
-
-
-def update_history(conn, as_of: datetime) -> None:
-    """Record every (stredisko, card, code) of the current list: a new one gets
-    first_seen = last_seen = `as_of` (the CODEX data age), a known one advances last_seen — and
-    takes the list's name only then: an OLDER re-sent list (recorded since review 12) never sets
-    a newer name back (review 13 🟡: `same_product` then judged a recreated card another
-    product and cleared its data)."""
-    conn.execute(
-        """INSERT INTO codex_card_history (stredisko, card_code, code, name, first_seen,
-                                           last_seen)
-           SELECT stredisko, card_code, code, max(name), %s, %s FROM codex_stock_cards
-            GROUP BY stredisko, card_code, code
-           ON CONFLICT (stredisko, card_code, code) DO UPDATE
-              SET name = CASE WHEN EXCLUDED.last_seen >= codex_card_history.last_seen
-                              THEN EXCLUDED.name ELSE codex_card_history.name END,
-                  last_seen = GREATEST(codex_card_history.last_seen, EXCLUDED.last_seen)""",
-        (as_of, as_of))
-
-
-def newest_seen(conn) -> datetime | None:
-    """The newest CODEX snapshot the history already holds (an older push must not undo it)."""
-    row = conn.execute("SELECT max(last_seen) FROM codex_card_history").fetchone()
-    return row[0] if row else None
-
-
-def _prev_as_of(conn, as_of: datetime) -> datetime | None:
-    """The newest CODEX snapshot older than `as_of` that a sync actually PROCESSED (a push
-    whose sync failed or was skipped never counts as "seen" — review 3)."""
-    row = conn.execute(
-        "SELECT max((report->>'as_of')::timestamptz) FROM codex_sync_runs "
-        "WHERE status IN ('apply', 'dry-run', 'blocked') "
-        "AND (report->>'as_of')::timestamptz < %s", (as_of,)).fetchone()
-    return row[0] if row else None
-
-
-def _events(conn) -> dict[tuple[str, str], Event]:
-    """The newest HUMAN creation of each catalog card — a #477 pick („Vybrať kartu z CODEXu"
-    writes `create` with the picked ACSKLP in `after.codex_card`, a Kôš card restored by a
-    pick included) — never the sync's own writes. A Kôš „Vrátiť" (`restore`) is NOT a new card:
-    it reverts one change of the same card (review 4 🟡: counting it reset a valid binding and
-    re-bound our rožok to the pagáč that reused its code); a number the sync retired that comes
-    back is re-identified through its inactive binding anyway."""
-    rows = conn.execute(
-        """SELECT DISTINCT ON (table_name, row_id) table_name, row_id, ts, after->>'codex_card'
-             FROM audit_log
-            WHERE table_name IN ('catalog_overrides', 'dl_catalog_overrides')
-              AND action = 'create' AND actor <> %s
-            ORDER BY table_name, row_id, id DESC""", (SYNC_ACTOR,)).fetchall()
-    return {(t, str(g)): Event(ts, card or None) for t, g, ts, card in rows}
-
-
 def load(conn, cards: codex_cards.CodexCards, as_of: datetime) -> Codex:
-    """The current stredisko-1 list + the history + our bindings (call `update_history`
-    first, so a code new in this push is known with its first_seen)."""
-    by_card: dict[str, list[Row]] = {}
-    by_code: dict[str, list[Row]] = {}
-    for r in conn.execute(
-            "SELECT code, card_code, sklad, name, inactive, changed_at FROM codex_stock_cards "
-            "WHERE stredisko = %s", (STREDISKO,)).fetchall():
-        row = Row(r[0], r[1], int(r[2]), r[3] or "", bool(r[4]), r[5])
-        by_card.setdefault(row.card, []).append(row)
-        by_code.setdefault(row.code, []).append(row)
-    hist = conn.execute("SELECT card_code, code, first_seen, last_seen, name "
-                        "FROM codex_card_history WHERE stredisko = %s", (STREDISKO,)).fetchall()
-    latest: dict[str, datetime] = {}
-    card_seen: dict[str, datetime] = {}
-    first_seen: dict[tuple[str, str], datetime] = {}
-    last_seen: dict[tuple[str, str], datetime] = {}
-    carried: dict[str, dict[str, datetime]] = {}
-    names: dict[tuple[str, str], str] = {}
-    for card, code, first, last, name in hist:
-        latest[code] = max(latest.get(code, _NEVER), last)
-        card_seen[card] = max(card_seen.get(card, _NEVER), last)
-        first_seen[(card, code)] = first
-        last_seen[(card, code)] = last
-        names[(card, code)] = name or ""
-        carried.setdefault(code, {})[card] = last
-    owners: dict[str, list[str]] = {}
-    for card, code, _first, last, _name in hist:
-        if last == latest[code]:
-            owners.setdefault(code, []).append(card)
-    bindings = {(s, g): Binding(c, bool(a), at, rn) for s, g, c, a, at, rn in conn.execute(
-        "SELECT scope, gtin, card_code, active, bound_at, retired_name FROM codex_card_bindings"
-    ).fetchall()}
-    return Codex(cards, by_card, by_code, first_seen, last_seen, names, card_seen, owners,
-                 carried, {s.name: card_guard.pickable(conn, s.name) for s in SCOPES},
-                 _prev_as_of(conn, as_of), bindings, _events(conn))
+    """The current stredisko-1 list + its history + our bindings, with the #477 pick's
+    cards of both catalogs (call `update_history` first)."""
+    return codex_sync_list.load(conn, cards, as_of, [s.name for s in SCOPES])
 
 
 def _fields(card: dict) -> dict:
@@ -452,7 +250,7 @@ class _ScopePlanner:
             return False
         if ours in cx.product(card, code):
             return False
-        if any(_named(name, cx.rows(d, code)) for d in cx.carriers(code) - {card}):
+        if any(is_named(name, cx.rows(d, code)) for d in cx.carriers(code) - {card}):
             return True
         return (old is not None and not old.active and old.retired_name is not None
                 and ours != codex_cards.name_key(old.retired_name))
@@ -465,7 +263,7 @@ class _ScopePlanner:
         now = sorted(cx.carriers(code) - {card})
         return texts.contest(
             gtin, name, code, card, was, retired=retired,
-            named=[d for d in now if _named(name, cx.rows(d, code))],
+            named=[d for d in now if is_named(name, cx.rows(d, code))],
             card_alive=card in cx.by_card,
             pick=self._pick_advice(code, now) if now else None,
             # „no card carries it" only when NONE does — our own may (a round trip, review 16)
@@ -565,7 +363,7 @@ class _ScopePlanner:
                 return known.card
             others = cx.carriers(code) - {known.card}
             if (cx.gone_twice(known.card) and len(others) == 1
-                    and _named(name, cx.rows(next(iter(others)), code))):
+                    and is_named(name, cx.rows(next(iter(others)), code))):
                 # our CODEX card left for good and exactly one card carries our code under OUR
                 # name: it is that card now (recreated in CODEX — review 6; or a number a human
                 # renamed to it, as the review asks — review 8). The SAME product keeps its data
@@ -589,7 +387,7 @@ class _ScopePlanner:
             return known.card
         carriers = cx.carriers(code)
         if len(carriers) > 1:
-            named = [c for c in carriers if _named(name, cx.rows(c, code))]
+            named = [c for c in carriers if is_named(name, cx.rows(c, code))]
             if len(named) != 1:
                 self.plan.add_review(item, texts.multi_carrier(
                     code, sorted(carriers), self._pick_advice(code, sorted(carriers))))
@@ -672,8 +470,8 @@ class _ScopePlanner:
         if not fit:
             return None, texts.successor_not_offered(card, sorted(codes), scope.label)
         if len(fit) > 1:
-            newest = max(cx.first_seen.get((card, c), _NEVER) for c in fit)
-            fit = {c for c in fit if cx.first_seen.get((card, c), _NEVER) == newest}
+            newest = max(cx.first_seen.get((card, c), NEVER) for c in fit)
+            fit = {c for c in fit if cx.first_seen.get((card, c), NEVER) == newest}
         if len(fit) != 1:
             return None, texts.successor_ambiguous(card, sorted(fit))
         succ = fit.pop()
@@ -960,9 +758,9 @@ class _ScopePlanner:
             codex_card, code = self.identity[gtin]
             rows = self.cx.rows(codex_card, code)
             name = card.get("name") or ""
-            if not rows or _named(name, rows):
+            if not rows or is_named(name, rows):
                 continue
-            new = _best_row(rows).name.strip()
+            new = best_row(rows).name.strip()
             if new and new != name.strip():
                 self.plan.renames.append({
                     "scope": self.scope.name, "gtin": gtin, "code": code, "name": name,

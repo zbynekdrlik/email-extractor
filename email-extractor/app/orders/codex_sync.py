@@ -48,6 +48,7 @@ from html import escape
 from psycopg.types.json import Json
 
 from . import codex_cards, dl_alerts, dl_snapshot, report, snapshot
+from . import codex_sync_list as sl
 from . import codex_sync_memory as sm
 from . import codex_sync_plan as sp
 
@@ -467,7 +468,7 @@ def _record_history(conn) -> None:
         conn.execute("LOCK TABLE codex_stock_cards IN SHARE MODE")
         sync = codex_cards.latest_sync(conn)
         if sync is not None:
-            sp.update_history(conn, codex_cards._data_as_of(sync))
+            sl.update_history(conn, codex_cards._data_as_of(sync))
 
 
 def run(conn, cfg, now: datetime | None = None) -> dict:
@@ -489,7 +490,7 @@ def run(conn, cfg, now: datetime | None = None) -> dict:
             return _summary("skipped", _record(conn, sync, "skipped", {"reason": "stale"}),
                             sp.Plan())
         as_of = codex_cards._data_as_of(sync)
-        newest = sp.newest_seen(conn)
+        newest = sl.newest_seen(conn)
         if newest is not None and as_of < newest:
             # an OLDER CODEX snapshot than the newest list already RECORDED (a re-sent old list;
             # the newer one may only have been recorded — its sync failed / skipped) must never
@@ -499,7 +500,7 @@ def run(conn, cfg, now: datetime | None = None) -> dict:
                         "(#478)", as_of, newest)
             return _summary("skipped", _record(conn, sync, "skipped", {"reason": "older"}),
                             sp.Plan())
-        sp.update_history(conn, as_of)
+        sl.update_history(conn, as_of)
         plan = sp.build_plan(conn, sp.load(conn, cards, as_of))
         too_many = plan.code_changes() > limits[0] or len(plan.renames) > limits[1]
         if not getattr(cfg, "codex_sync_apply", False):

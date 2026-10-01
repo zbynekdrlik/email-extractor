@@ -6,7 +6,7 @@ moves).
 
 - `MEMORY_KEYS` — the three code-keyed memory tables and their UNIQUE mapping columns.
 - `held_clause` — a row decided after the moment CODEX gave our code to another card (the
-  reuse window, `codex_sync_plan.Codex.taken`): it may be that other product's, never moved.
+  reuse window, `codex_sync_list.Codex.taken`): it may be that other product's, never moved.
 - `taught_clause` / `TAUGHT_SOURCES` — a curated warehouse decision (answers, „Doučiť", the
   sheet import — `memory.CURATED_SOURCES`); anything else is delivery history.
 - `memory_split` — what a move of some numbers carries vs what it holds (taught / shipped).
