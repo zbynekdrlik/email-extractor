@@ -3007,6 +3007,10 @@ def test_a_carrier_change_review_names_a_way_out_that_works(pg):
     v2 = _bageta_taken_by_the_rozok(pg, runs=2)
     reason = _review_reason(pg, "orders", BAGETA)
     assert "Vybrať kartu z CODEXu" in reason and "„Bageta šunková 120g“" in reason
+    # review 27 🔵: an UNBOUND number restored by the pick keeps its data — with no claim it is
+    # „the same product" — and the taught rows are pointed at
+    assert "jej údaje ostanú" in reason and "ten istý" not in reason
+    assert "Naučené" in reason
     snapshot.retire_catalog_card(pg, BAGETA)
     snapshot.rebuild_from_overrides(pg)
     card_guard.add_from_codex(pg, "orders", BAGETA, actor="sklad")
@@ -3027,6 +3031,8 @@ def test_a_carrier_change_with_two_same_named_earlier_carriers_says_so(pg):
         codex_sync.run(pg, _cfg(apply=False))
     reason = _review_reason(pg, "orders", ROZOK)
     assert "nesedí so žiadnou" not in reason and "27" in reason and "127" in reason
+    # review 27 🔵: a name several earlier carriers bear binds none of them — never offered
+    assert "premenuj" not in reason
 
 
 def test_an_unbound_number_renamed_to_the_reusers_name_goes_to_a_human(pg):
@@ -3046,6 +3052,9 @@ def test_an_unbound_number_renamed_to_the_reusers_name_goes_to_a_human(pg):
     reason = _review_reason(pg, "orders", ROZOK)
     assert "79" in reason and "27" in reason
     assert _binding(pg, ROZOK, "dl")[0] == "27"
+    # review 27 🔵: the pick way out keeps data the review suspects is the rožok's — the taught
+    # rows are pointed at, like the bound contest review does
+    assert "Naučené" in reason
 
 
 def test_an_other_card_review_reads_the_catalog_the_whole_plan_leaves(pg):
@@ -3059,3 +3068,98 @@ def test_an_other_card_review_reads_the_catalog_the_whole_plan_leaves(pg):
     codex_sync.run(pg, _cfg())
     reason = _review_reason(pg, "orders", ROZOK)
     assert "nie 27" in reason and "zmaž" not in reason
+
+
+# --- review 27: one list is no proof for the earlier carrier either; every way out is pinned --
+
+def test_a_drift_renamed_unbound_number_waits_while_the_earlier_carrier_is_missing_once(pg):
+    """Review 27 🟡: the drift-renamed unbound ROZOK (named like the pagáč now on its code)
+    was decided on a list missing card 27 (the rožok, on ROZOK_NEW) ONCE — no earlier carrier
+    „alive", bound to the pagáč for good, a dry-run included. It waits; with 27 back a human
+    decides, the rožok's alias untouched."""
+    _seed_catalogs(pg)
+    _seed_memory(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync._record_history(pg)
+    _push(pg, _reused(V1), hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    _drift_click(pg, ROZOK, "Pagáč syrový 60g")
+    _push(pg, [r for r in _reused(V1) if r["card_code"] != "27"], hours_old=4)
+    codex_sync.run(pg, _cfg(apply=False))
+    assert _binding(pg, ROZOK) is None
+    assert "27" in _waits(pg).get(("orders", ROZOK), "")
+    _push(pg, _reused(V1), hours_old=3)
+    codex_sync.run(pg, _cfg())
+    assert _binding(pg, ROZOK) is None and _orders(pg)[ROZOK]["alias"] == "rozok slanina"
+    assert "79" in _review_reason(pg, "orders", ROZOK)
+
+
+def test_an_unbound_number_named_like_a_new_carrier_of_the_same_product_is_bound(pg):
+    """Review 27 🔵 (pins round 26's same-product rule): card 27 moved to ROZOK_NEW renamed
+    „Rožok slaninový 70g", card 127 carries ROZOK under 27's old name — the same product,
+    never the drift-button suspicion: bound to 127."""
+    v2 = [dict(r, code=ROZOK_NEW, name="Rožok slaninový 70g") if r["card_code"] == "27"
+          else r for r in V1] + [_row(ROZOK, "127", "Rožok so slaninou 70g")]
+    _first_post_deploy(pg, v2)
+    assert _binding(pg, ROZOK)[0] == "127"
+
+
+def test_a_carrier_change_review_never_offers_the_carrier_nows_name(pg):
+    """Review 27 🔵: ROZOK sat on cards 27 (rožok) and 79 (pagáč); now card 80 carries it,
+    named like the pagáč; our ROZOK „Bageta stará" matches none — renaming to „Pagáč syrový
+    60g" is the carrier now's name (a human again): never offered; the rožok's name is."""
+    _seed_catalogs(pg)
+    snapshot.upsert_catalog_card(pg, ROZOK, "Bageta stará")
+    snapshot.rebuild_from_overrides(pg)
+    _push(pg, V1 + [_row(ROZOK, "79", "Pagáč syrový 60g")], hours_old=6)
+    codex_sync._record_history(pg)
+    v2 = ([dict(r, code=ROZOK_NEW) if r["card_code"] == "27" else r for r in V1]
+          + [_row(ROZOK, "80", "Pagáč syrový 60g")])
+    for hours in (5, 4):
+        _push(pg, v2, hours_old=hours)
+        codex_sync.run(pg, _cfg(apply=False))
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "na „Rožok so slaninou 70g“" in reason
+    assert "na „Pagáč syrový 60g“" not in reason
+    assert "Naučené" in reason
+
+
+def test_a_carrier_change_review_never_offers_a_card_gone_from_codex(pg):
+    """Review 27 🔵: card 88 (the bageta that carried BAGETA before) left CODEX entirely — the
+    review offered „rename to its name", which binds a card gone from CODEX (review 10's rule:
+    never point at a card gone from CODEX)."""
+    _seed_catalogs(pg)
+    snapshot.upsert_catalog_card(pg, BAGETA, "Bageta stará")
+    snapshot.rebuild_from_overrides(pg)
+    _push(pg, V1 + [_row(BAGETA, "88", "Bageta šunková 120g")], hours_old=6)
+    codex_sync._record_history(pg)
+    v2 = [dict(r, code=BAGETA) if r["card_code"] == "27" else r for r in V1]
+    for hours in (5, 4):
+        _push(pg, v2, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    reason = _review_reason(pg, "orders", BAGETA)
+    assert reason and "premenuj" not in reason
+
+
+def test_a_pick_advice_says_a_restored_card_bound_to_another_product_is_cleared(pg):
+    """Review 27 🔵 (pins `Pick.same`'s cleared branch): our ROZOK (card 27) renamed by the
+    drift button to the bageta's name while card 80 (the bageta — the card the picker offers)
+    also carries ROZOK: the contest review's pick restores ROZOK as card 80 — another product,
+    its alias is cleared; said so, and true."""
+    _baseline(pg)
+    v = V1 + [_row(ROZOK, "80", "Bageta šunková 120g")]
+    v[-1]["changed_at"] = "2026-09-29T10:00:00+02:00"
+    _push(pg, v, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    _drift_click(pg, ROZOK, "Bageta šunková 120g")
+    _push(pg, v, hours_old=3)
+    codex_sync.run(pg, _cfg())
+    assert _pick_card(pg) == "80"
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "jej alias sa vyčistí" in reason and "jej údaje ostanú" not in reason
+    snapshot.retire_catalog_card(pg, ROZOK)
+    snapshot.rebuild_from_overrides(pg)
+    card_guard.add_from_codex(pg, "orders", ROZOK, actor="sklad")
+    _push(pg, v, hours_old=2)
+    codex_sync.run(pg, _cfg())
+    assert _orders(pg)[ROZOK]["alias"] == ""
