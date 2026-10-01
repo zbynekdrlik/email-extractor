@@ -4768,3 +4768,58 @@ def test_a_long_ops_message_never_cuts_what_a_human_must_check(pg):
     body = _last_alert(pg)
     assert "treba skontrolovať" in body and ROZOK in body, body[-600:]
     assert "… a ďalších" in body
+
+
+# --- review 47 ------------------------------------------------------------------------------
+
+_LONG = [(f"99920000001{i:02d}", f"1{i:02d}") for i in range(45)]
+
+
+def _long_rows(state, n=45):
+    return [_row(code, card, f"Pečivo {i} {state} 50g") for i, (code, card) in
+            enumerate(_LONG[:n])]
+
+
+def _seed_long(pg, n=45):
+    _seed_catalogs(pg)
+    for i, (code, _card) in enumerate(_LONG[:n]):
+        snapshot.upsert_catalog_card(pg, code, f"Pečivo {i} staré 50g")
+    snapshot.rebuild_from_overrides(pg)
+
+
+def test_more_reviews_than_the_cap_all_reach_the_ops_message(pg):
+    """Review 47 🔵: the review-46 test had ONE review — it fit the first 40 lines either way,
+    so `keep` was unpinned. 41 cards each carrying TWO new codes (a human decides which): all 41
+    review lines are in the message — the cap applies to the changes only."""
+    _seed_long(pg, 41)
+    cfg = _cfg(codex_sync_max_code_changes=100)
+    _push(pg, V1 + _long_rows("staré", 41), hours_old=5)
+    codex_sync.run(pg, cfg)
+    v2 = list(V1)
+    for i, (_code, card) in enumerate(_LONG[:41]):
+        v2.append(_row(f"99930000001{i:02d}", card, f"Pečivo {i} staré 50g"))
+        v2.append(_row(f"99940000001{i:02d}", card, f"Pečivo {i} staré 50g"))
+    _push(pg, v2, hours_old=4)
+    codex_sync.run(pg, cfg)
+    body = _last_alert(pg)
+    missing = [code for code, _card in _LONG[:41] if code not in body]
+    assert missing == [], missing
+    assert "… a ďalších" not in body
+
+
+def test_held_history_line_is_never_cut_from_a_long_ops_message(pg):
+    """Review 47 🔵: the hold placement was unpinned too — the retired-number hold note
+    (review 12) beside 45 renames stays in the message, before the capped change list."""
+    _seed_long(pg)
+    _push(pg, V1 + _long_rows("staré"), hours_old=5)
+    codex_sync.run(pg, _cfg())
+    _push(pg, _reused(V1) + _long_rows("staré"), hours_old=4.9)
+    codex_sync.run(pg, _cfg())                          # ROZOK retired, the pagáč took it
+    pg.execute("INSERT INTO item_memory (customer_ean, item_key, item_raw, gtin, card, "
+               "delivered_on, source) VALUES ('C64', 'pagac', 'pagáč', %s, 'x', %s, 'ship')",
+               (ROZOK, date.today()))
+    _push(pg, _reused(V1) + _long_rows("nové"), hours_old=4)
+    assert codex_sync.run(pg, _cfg())["renamed"] == 45
+    body = _last_alert(pg)
+    assert "ostalo pod" in body, body[:800]
+    assert "… a ďalších" in body
