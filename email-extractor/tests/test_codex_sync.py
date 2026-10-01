@@ -2928,9 +2928,11 @@ def test_an_unbound_number_named_like_neither_carrier_goes_to_a_human(pg):
 
 def test_an_unbound_number_named_like_the_new_carrier_is_bound_to_it(pg):
     """Review 25 🔵: the rožok recreated in CODEX as card 127 under 27's own name, card 27 gone
-    — our unbound rožok is the same product: bound to 127, no rename."""
+    — our unbound rožok is the same product: bound to 127, no rename. Review 26 🔵 (test
+    fixed): decided on the SECOND list, the one after the wait — with a third list it also
+    converged through the rename rebind, so it pinned nothing."""
     _first_post_deploy(pg, [dict(r, card_code="127") if r["card_code"] == "27" else r
-                            for r in V1], runs=3)
+                            for r in V1], runs=2)
     assert _binding(pg, ROZOK)[0] == "127"
     assert _orders(pg)[ROZOK]["name"] == "Rožok so slaninou 70g"
 
@@ -2954,3 +2956,106 @@ def test_no_renumber_merges_onto_an_unbound_number_waiting_for_its_carrier(pg):
     # human's call (a chain in one push), never a merge
     assert ROZOK not in orders and orders[CHLIEB]["name"] == "Chlieb pšeničný 1000g"
     assert "nie 31" in _review_reason(pg, "orders", CHLIEB)
+
+
+# --- review 26: the carrier-change reviews say what is true; the gates are pinned -------------
+
+BAGETA = "9990000000215"        # synthetic: card 88's code, then card 27's
+BAGETA_ELSE = "9990000000222"   # card 88's next code
+
+
+def _bageta_taken_by_the_rozok(pg, runs):
+    """Our unbound orders BAGETA („Bageta stará" — named like no card) on card 88's code;
+    card 27 (our rožok) moves ROZOK → BAGETA, card 88 moves on to BAGETA_ELSE."""
+    _seed_catalogs(pg)
+    snapshot.upsert_catalog_card(pg, BAGETA, "Bageta stará")
+    snapshot.rebuild_from_overrides(pg)
+    v1 = V1 + [_row(BAGETA, "88", "Bageta šunková 120g")]
+    _push(pg, v1, hours_old=6)
+    codex_sync._record_history(pg)
+    v2 = [dict(r, code=BAGETA) if r["card_code"] == "27"
+          else dict(r, code=BAGETA_ELSE) if r["card_code"] == "88" else r for r in v1]
+    for hours in range(5, 5 - runs, -1):
+        _push(pg, v2, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    return v2
+
+
+def test_a_renumber_waiting_on_a_new_carrier_wait_promises_nothing(pg):
+    """Review 26 🔵: the renumber onto a number waiting for its new carrier said the number
+    „will be assigned to a CODEX card with the next list" — it may get a review instead."""
+    _bageta_taken_by_the_rozok(pg, runs=1)
+    why = _waits(pg)[("orders", ROZOK)]
+    assert BAGETA in why and "priradí" not in why
+
+
+def test_no_renumber_merges_onto_an_unbound_number_a_human_must_decide(pg):
+    """Review 26 🔵 (pins round 25's gate): our BAGETA is named like neither card — reviewed;
+    our rožok's renumber onto it never merges (it waits, pointing at the number's review)."""
+    _bageta_taken_by_the_rozok(pg, runs=2)
+    orders = _orders(pg)
+    assert orders[BAGETA]["name"] == "Bageta stará"
+    assert orders[ROZOK]["name"] == "Rožok so slaninou 70g"
+    assert _binding(pg, BAGETA) is None
+    assert "kontrol" in _waits(pg)[("orders", ROZOK)]
+
+
+def test_a_carrier_change_review_names_a_way_out_that_works(pg):
+    """Review 26 🔵: the review advised „rename it to the name of the card that is ours" — for
+    the CURRENT carrier that is the drift-button shape (a human again); the way out for it is
+    the pick, and following it settles the number."""
+    v2 = _bageta_taken_by_the_rozok(pg, runs=2)
+    reason = _review_reason(pg, "orders", BAGETA)
+    assert "Vybrať kartu z CODEXu" in reason and "„Bageta šunková 120g“" in reason
+    snapshot.retire_catalog_card(pg, BAGETA)
+    snapshot.rebuild_from_overrides(pg)
+    card_guard.add_from_codex(pg, "orders", BAGETA, actor="sklad")
+    _push(pg, v2, hours_old=3)
+    codex_sync.run(pg, _cfg())
+    assert _binding(pg, BAGETA)[0] == "27"
+
+
+def test_a_carrier_change_with_two_same_named_earlier_carriers_says_so(pg):
+    """Review 26 🔵: same-named cards 27 and 127 carried ROZOK; both leave it, the pagáč takes
+    it — the review said our name „matches none of them" while it is the name of both."""
+    _seed_catalogs(pg)
+    _push(pg, V1 + [_row(ROZOK, "127", "Rožok so slaninou 70g")], hours_old=6)
+    codex_sync._record_history(pg)
+    v2 = _reused(V1) + [_row("9990000000208", "127", "Rožok so slaninou 70g")]
+    for hours in (5, 4):
+        _push(pg, v2, hours_old=hours)
+        codex_sync.run(pg, _cfg(apply=False))
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "nesedí so žiadnou" not in reason and "27" in reason and "127" in reason
+
+
+def test_an_unbound_number_renamed_to_the_reusers_name_goes_to_a_human(pg):
+    """Review 26 🔵 (round 9's rule for an unbound number): the pagáč (79) took ROZOK, card 27
+    moved to ROZOK_NEW; during the wait the warehouse clicked the #467 drift button (our orders
+    ROZOK takes the pagáč's name) — the next list bound it to the pagáč with the rožok's alias
+    and wordings, the DL copy following 27. A human decides."""
+    _seed_catalogs(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync._record_history(pg)
+    _push(pg, _reused(V1), hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    _drift_click(pg, ROZOK, "Pagáč syrový 60g")
+    _push(pg, _reused(V1), hours_old=4)
+    codex_sync.run(pg, _cfg(apply=False))
+    assert _binding(pg, ROZOK) is None
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "79" in reason and "27" in reason
+    assert _binding(pg, ROZOK, "dl")[0] == "27"
+
+
+def test_an_other_card_review_reads_the_catalog_the_whole_plan_leaves(pg):
+    """Review 26 🔵 (pins round 25's deferral): card 31 moves CHLIEB → CHLIEB_NEW and card 27
+    moves ROZOK → CHLIEB in one push — the ROZOK group runs first; its review said „delete it
+    (Kôš)" for the CHLIEB number the same plan already retires."""
+    _baseline(pg)
+    v2 = [dict(r, code=CHLIEB) if r["card_code"] == "27"
+          else dict(r, code=CHLIEB_NEW) if r["card_code"] == "31" else r for r in V1]
+    _push(pg, v2, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "nie 27" in reason and "zmaž" not in reason
