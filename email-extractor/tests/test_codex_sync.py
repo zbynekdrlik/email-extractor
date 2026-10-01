@@ -33,6 +33,7 @@ from app.orders import (
     codex_cards,
     codex_sync,
     codex_sync_list,
+    dl_memory,
     dl_snapshot,
     snapshot,
 )
@@ -3933,3 +3934,85 @@ def test_a_card_seen_only_before_the_history_began_is_never_missing_once(pg):
     assert ("orders", ROZOK) not in _waits(pg)
     assert "pred ňou niesla karta CODEX 27" in _review_reason(pg, "orders", ROZOK)
     assert _binding(pg, ROZOK) is None
+
+
+# --- review 38: our unknown Kôš card of ANOTHER product under the new code ------------------
+
+KOS_BAGETA = "9990000000253"   # synthetic: our bageta's code — freed in CODEX, then reused
+
+
+def _kos_bageta(pg, *, taught=True, shipped=False):
+    """Our bageta KOS_BAGETA (orders + DL) with its DL mapping rows, deleted (Kôš) and never
+    bound — the warehouse deleted it before the deploy (the #467 cleanup of freed codes)."""
+    snapshot.upsert_catalog_card(pg, KOS_BAGETA, "Bageta cesnaková 100g", alias="bageta cesnak")
+    snapshot.rebuild_from_overrides(pg)
+    dl_snapshot.upsert_dl_catalog_card(pg, KOS_BAGETA, "Bageta cesnaková 100g",
+                                       doplnok="bageta", mass=0.1, sklad="1", cena=0.5)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    for source, on in (("human", taught), ("ship", shipped)):
+        if on:
+            pg.execute(
+                "INSERT INTO dl_item_memory (supplier_ean, item_key, item_raw, gtin, card, "
+                "delivered_on, cnt, source, created_at) VALUES ('S9', %s, 'Bageta cesnaková', "
+                "%s, 'Bageta', %s, 1, %s, %s)",
+                (f"bageta cesnakova {source}", KOS_BAGETA, date(2026, 9, 1), source, _BEFORE))
+    snapshot.retire_catalog_card(pg, KOS_BAGETA)
+    snapshot.rebuild_from_overrides(pg)
+    dl_snapshot.retire_dl_catalog_card(pg, KOS_BAGETA)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+
+
+# card 86 (the bageta) left CODEX, CODEX gave its freed code to card 27 (our rožok)
+BAGETA_REUSED = ([r for r in V1 if r["code"] != ROZOK]
+                 + [_row(KOS_BAGETA, "27", "Rožok so slaninou 70g")])
+
+
+def _kos_bageta_lists(pg, lists):
+    _seed_catalogs(pg)
+    _push(pg, V1 + [_row(KOS_BAGETA, "86", "Bageta cesnaková 100g")], hours_old=6)
+    assert codex_sync.run(pg, _cfg())["mode"] == "apply"
+    for cards, hours in lists:
+        _push(pg, cards, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+
+
+def test_a_renumber_never_restores_an_unknown_kos_card_of_another_product(pg):
+    """Review 38 🟡: card 27 (our rožok) moved to the bageta's freed code. Our Kôš bageta
+    under that code was never bound — the renumber RESTORED it as the rožok (the bageta's data
+    overwritten) and its taught DL wording, unreachable while deleted, now recalled the rožok:
+    silently, no review. Another product by name, with taught rows → a human; nothing moves.
+    In orders the bageta has no taught rows — nothing to adopt, the rožok follows its card."""
+    _kos_bageta(pg)
+    _kos_bageta_lists(pg, [(BAGETA_REUSED, 5)])
+    dl = _dl(pg)
+    assert ROZOK in dl and KOS_BAGETA not in dl
+    reason = _review_reason(pg, "dl", ROZOK)
+    assert "„Bageta cesnaková 100g“" in reason and KOS_BAGETA in reason, reason
+    gtins = {c["gtin"] for c in dl_snapshot.dl_catalog_for_management(pg)}
+    assert dl_memory.resolve(pg, "S9", "Bageta cesnaková", catalog_gtins=gtins) is None
+    orders = _orders(pg)
+    assert ROZOK not in orders and orders[KOS_BAGETA]["name"] == "Rožok so slaninou 70g"
+
+
+def test_cancelling_the_kos_cards_taught_rows_lets_the_renumber_through(pg):
+    """Review 38: the review's way out works — the bageta's taught rows cancelled (Naučené →
+    Kôš), the next list renumbers our rožok onto its card's new code."""
+    _kos_bageta(pg)
+    _kos_bageta_lists(pg, [(BAGETA_REUSED, 5)])
+    pg.execute("UPDATE dl_item_memory SET deleted_at = now() WHERE gtin = %s", (KOS_BAGETA,))
+    _push(pg, BAGETA_REUSED, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    dl = _dl(pg)
+    assert ROZOK not in dl and dl[KOS_BAGETA]["name"] == "Rožok so slaninou 70g"
+    assert dl[KOS_BAGETA]["doplnok"] == "rožok slanina"
+
+
+def test_an_unknown_kos_card_with_delivery_history_only_is_said_never_silent(pg):
+    """Review 38: no taught rows — nothing for a human to fix, the renumber goes through; the
+    other product's delivery history on the code stays as history — said in the report
+    (review 12's rule), never silent."""
+    _kos_bageta(pg, taught=False, shipped=True)
+    _kos_bageta_lists(pg, [(BAGETA_REUSED, 5)])
+    assert ROZOK not in _dl(pg) and _dl(pg)[KOS_BAGETA]["name"] == "Rožok so slaninou 70g"
+    holds = [h for h in _last_report(pg)["holds"] if h["scope"] == "dl"]
+    assert holds and "Bageta cesnaková 100g" in holds[0]["why"], holds
