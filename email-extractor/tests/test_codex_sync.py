@@ -4150,3 +4150,31 @@ def test_an_unknown_kos_card_of_the_same_product_is_restored_with_its_rows(pg):
     gtins = {c["gtin"] for c in dl_snapshot.dl_catalog_for_management(pg)}
     recalled = dl_memory.resolve(pg, "S9", "Rožok slaninový", catalog_gtins=gtins)
     assert recalled is not None and recalled.gtin == KOS_ROZOK
+
+
+def test_a_kos_number_of_a_gone_card_of_the_same_product_is_restored_quietly(pg):
+    """Review 40 (pins `same_product` for a known gone card): our second rožok number, bound
+    to card 88 — the same product as card 27 — removed by the sync when 88 left CODEX; card 27
+    then moves onto its code: restored as ours, its taught rows ours, no review."""
+    _seed_catalogs(pg)
+    dl_snapshot.upsert_dl_catalog_card(pg, KOS_ROZOK, "Rožok so slaninou 70g", doplnok="",
+                                       mass=None, sklad="1", cena=None)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    pg.execute(
+        "INSERT INTO dl_item_memory (supplier_ean, item_key, item_raw, gtin, card, delivered_on, "
+        "cnt, source, created_at) VALUES ('S9', %s, 'Rožok slaninový', %s, 'Rožok', %s, 1, "
+        "'human', %s)", (memory.item_key("Rožok slaninový"), KOS_ROZOK, date(2026, 9, 1),
+                         _BEFORE))
+    _push(pg, V1 + [_row(KOS_ROZOK, "88", "Rožok so slaninou 70g")], hours_old=7)
+    codex_sync.run(pg, _cfg())
+    assert _binding(pg, KOS_ROZOK, "dl")[0] == "88"
+    for hours in (6, 5):
+        _push(pg, V1, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert KOS_ROZOK not in _dl(pg)
+    moved = [dict(r, code=KOS_ROZOK) if r["card_code"] == "27" else r for r in V1]
+    _push(pg, moved, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert ROZOK not in _dl(pg) and KOS_ROZOK in _dl(pg)
+    assert not _review_reason(pg, "dl", ROZOK)
+    assert _binding(pg, KOS_ROZOK, "dl")[:2] == ("27", True)
