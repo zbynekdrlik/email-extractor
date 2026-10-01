@@ -382,12 +382,13 @@ class _ScopePlanner(KosRules):
                     return None
                 replaces = old is not None and old.card != known.card
                 ev = cx.events[(self.scope.table, gtin)]
-                # the pick restored our NEVER-identified Kôš card as it was (reviews 40-41): a
-                # reset it implies is stored with its binding by an applied run only (review 5's
-                # rule — review 41: a dry-run's binding hid the pick from the apply)
-                reset_kos = (old is None and ev.restored
-                             and self._restored_pick(item, gtin, code, known.card, ev))
-                self._seed(item, known.card, replaces=replaces or reset_kos)
+                # the pick restored our NEVER-identified Kôš card as it was (reviews 40-42): when
+                # judged (not the card's product — reset or a human told) its binding is stored
+                # by an applied run only (review 5's rule — review 41: a dry-run's binding hid
+                # the pick from the apply; review 42: and the one-time review never reached ops)
+                judged = (old is None and ev.restored
+                          and self._restored_pick(item, gtin, code, known.card, ev))
+                self._seed(item, known.card, replaces=replaces or judged)
                 if old is not None and replaces and not cx.same_product(old.card, known.card,
                                                                         code):
                     # our number used to be ANOTHER product: the pick restored its old Kôš

@@ -549,11 +549,13 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   as it was (`Event.restored` + its name then; `KosRules._restored_pick` in `_identify`'s
   picked branch): not C's product by that name → reset like a re-pick of another product
   (`reset_kos`) ONLY on evidence — the name is another card's that carried the code
-  (`_kos_verdict`'s `others`), the pick is not older than the history, no human edit
-  (audited `update`) since — else its data stays and a human is told (round 41: a missing name
-  match wiped our own croissant restored under a drifted name, and a warehouse fix); a reset's
-  binding is stored by an APPLIED run only (`replaces`, the review-5 rule — round 41: a
-  dry-run stored it and the apply never reset); the review counts only rows from BEFORE the
+  (`_kos_verdict`'s `others`), the pick is not older than the history, no human edit of its
+  DATA since (`_edited_since`: an audited board save whose `after` carries a `RESET_FIELDS`
+  field — a name-only „Prevziať názov z CODEXu" save is no fix, round 42) — else its data stays
+  and a human is told (round 41: a missing name match wiped our own croissant restored under a
+  drifted name, and a warehouse fix); a JUDGED pick's binding (reset or told) is stored by an
+  APPLIED run only (`replaces`, the review-5 rule — rounds 41-42: a dry-run stored it, the
+  apply never reset, and the one-time review never reached ops); the review counts only rows from BEFORE the
   pick (the warehouse's own answer at that question is ours). Texts say what the Kôš card is:
   another card's product / a drift-button name / only a different name (we do not know) /
   nameless. C missing from stredisko 1 in TWO

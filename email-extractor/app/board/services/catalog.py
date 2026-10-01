@@ -73,6 +73,7 @@ _SCOPES = {
         "retire": _orders_retire,
         "override_table": "catalog_overrides",
         "alias_tables": ("global_item_memory", "item_memory"),
+        "data_fields": ("alias",),
     },
     "dl": {
         "for_management": dl_snapshot.dl_catalog_for_management,
@@ -81,6 +82,7 @@ _SCOPES = {
         "retire": _dl_retire,
         "override_table": "dl_catalog_overrides",
         "alias_tables": ("dl_item_memory",),
+        "data_fields": ("doplnok", "mass", "sklad", "cena"),
     },
 }
 
@@ -151,9 +153,14 @@ def upsert(conn, scope: str, body: dict, actor: str) -> dict:
     card_guard.refuse_typed_card(rows, gtin)
     if scope == "dl":
         codex_cards.check_card_code(conn, gtin, name, catalog=rows)
+    before: dict = next((r for r in rows if r["gtin"] == gtin), {})
     cfg["upsert"](conn, gtin, name, body)
+    # the curated data fields the save CHANGED are audited too (#478 review 42: the CODEX sync
+    # tells a human's fix of the data from a name-only save, e.g. „Prevziať názov z CODEXu")
+    now: dict = next((r for r in cfg["for_management"](conn) if r["gtin"] == gtin), {})
+    changed = {k: now.get(k) for k in cfg["data_fields"] if now.get(k) != before.get(k)}
     audit.record(conn, actor=actor, table=cfg["override_table"], row_id=gtin, action="update",
-                 after={"gtin": gtin, "name": name})
+                 after={"gtin": gtin, "name": name, **changed})
     return {"action": "update"}
 
 

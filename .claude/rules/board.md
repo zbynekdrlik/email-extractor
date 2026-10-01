@@ -65,7 +65,11 @@ first), so the delegation, not a blueprint hook, is the guard.
   these tables must add the same filter, or a soft-deleted row silently re-enters matching.**
 - **`audit_log` (migrate r15) records every change** made through the board AND the existing
   `teach.answer`/`undo` paths, via `audit.record(conn, actor=, table=, row_id=, action=,
-  before=, after=, ...)`. `row_id` is TEXT (tables key on mixed pk types) — record the REAL
+  before=, after=, ...)`. A Produkty card save (`catalog.upsert`) audits `after={gtin, name,
+  + every curated data field the save CHANGED}` (orders `alias`; DL `doplnok`/`mass`/`sklad`/
+  `cena` — `_SCOPES[..]["data_fields"]`): the #478 CODEX sync reads it to tell a human's fix of
+  the data from a name-only save (`codex_sync_kos._edited_since`, review 42) — keep the
+  changed fields in `after` if you touch that save. `row_id` is TEXT (tables key on mixed pk types) — record the REAL
   primary key the restore path uses (for `customer_overrides`/`dl_supplier_overrides` that
   is the surrogate `id`, resolved even on an identity-delete — NOT the EAN). `restore()` is
   a lane-1 skeleton (undoes a soft delete by `id::text`/`gtin` from a trusted table

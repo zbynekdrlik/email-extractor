@@ -24,6 +24,13 @@ if TYPE_CHECKING:
     from .codex_sync_list import Codex, Event
     from .codex_sync_plan import Plan, Scope
 
+# per catalog, the curated fields a reset clears (`codex_sync_plan._ScopePlanner._reset`) — a
+# human save that changed one of them is a fix of the data (`_edited_since`)
+RESET_FIELDS: dict[str, tuple[str, ...]] = {
+    "orders": ("alias",),
+    "dl": ("doplnok", "mass", "cena", "sklad"),
+}
+
 
 class KosRules:
     """Mixin of `codex_sync_plan._ScopePlanner` (its state: `conn`, `scope`, `cx`, `plan`)."""
@@ -67,19 +74,19 @@ class KosRules:
         product only on EVIDENCE — its name is another card's that carried the code — for a pick
         since the history began, never over a human's edit since the pick (review 41: a missing
         name match wiped our own croissant restored under a drifted name, and a warehouse fix);
-        else its data stays and a human is told. True = reset (its binding: an applied run
-        only). Review 40: kept silently, a merge filled only blanks — the bageta's mass / cena on
-        our rožok."""
+        else its data stays and a human is told. True = judged (reset or told — its binding: an
+        applied run only, review 42). Review 40: kept silently, a merge filled only blanks — the
+        bageta's mass / cena on our rožok."""
         ours, drift, others = self._kos_verdict(ev.name, card, code)
         if ours:
             return False
         reset = (bool(others) and ev.at >= (self.cx.seeded_at or NEVER)
                  and not self._edited_since(gtin, ev.at))
-        if reset:
-            item["reset_kos"] = True
         self._kos_rows(item, gtin, card, ev.name, drift, others, picked=True, reset=reset,
                        since=ev.at)
-        return reset
+        if reset:                  # after the review's copy of the item (never in its JSON)
+            item["reset_kos"] = True
+        return True
 
     def _kos_verdict(self, name: str, card: str, code: str
                      ) -> tuple[bool, list[str], list[str]]:
@@ -97,11 +104,15 @@ class KosRules:
         return named_like and not took, (took if named_like else []), others
 
     def _edited_since(self, gtin: str, at: datetime) -> bool:
-        """A human edited our card `gtin` (Produkty — an audited `update`) since `at`."""
+        """A human edited our card `gtin`'s DATA since `at` — a Produkty save that changed a
+        field the reset would clear (the board audits them, `board.services.catalog.upsert`);
+        a name-only save (e.g. „Prevziať názov z CODEXu", invited right after the pick) is no
+        fix of the data (review 42)."""
         return self.conn.execute(
             "SELECT 1 FROM audit_log WHERE table_name = %s AND row_id = %s AND action = 'update' "
-            "AND actor <> %s AND ts > %s LIMIT 1",
-            (self.scope.table, gtin, SYNC_ACTOR, at)).fetchone() is not None
+            "AND actor <> %s AND ts > %s AND after ?| %s::text[] LIMIT 1",
+            (self.scope.table, gtin, SYNC_ACTOR, at,
+             list(RESET_FIELDS[self.scope.name]))).fetchone() is not None
 
     def _kos_rows(self, item: dict, at: str, card: str, name: str, drift: list[str],
                   others: list[str], *, picked: bool, reset: bool = False,
