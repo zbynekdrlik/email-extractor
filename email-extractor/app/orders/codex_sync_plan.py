@@ -430,17 +430,22 @@ class _ScopePlanner:
           on a code no card carried before (review 30: a #467 "missing" card bound to it and
           then removed), or (no carrier now) a last carrier missing from this list only → it
           waits (protected, `waiting`).
-        - The ONE card on the code since the history began (`Codex.seeded_at`) → that card.
+        - The ONE card on the code since the history began (`Codex.seeded_at`) → that card —
+          only when NO other card ever carried it: one seen there only before we watched is
+          never a candidate, but still another carrier (review 35: round 33 dropped it from the
+          count too, and the pagáč that reused our rožok's code got our number).
         - Else its NAME: the one carrier now named so (its rows), else the one card ever named
           so (`Codex.product` — its history name too) — unless that card took the code over
           from ANOTHER product (`_took_over`: the #467 drift button offers the code's holder,
           round 9's rule → a human, reviews 26-29; one of them missing once → it waits).
-        - Else a human decides, with ways out that work (`_carrier_way_out`)."""
+        - Else a human decides, with ways out that work (`_carrier_way_out`); the review names
+          the cards seen on the code only before we watched (`unwatched`)."""
         cx, name = self.cx, item["name"]
         now = sorted(carriers)
         hist = cx.since_seed(code)               # a pre-history-only sighting: no evidence
         if not hist:
             return None                          # no stredisko-1 history: never touched
+        unwatched = [c for c in sorted(cx.carried.get(code, {})) if c not in hist]
         earlier = [c for c in hist if c not in carriers]
         seed = cx.seeded_at or NEVER
 
@@ -453,10 +458,10 @@ class _ScopePlanner:
         missing = [] if now else [c for c in cx.owners.get(code, []) if cx.glitched(c)]
         if recent or arrived or missing:
             self._wait_carrier(item, texts.why_new_carrier(code, now, recent) if recent
-                               else texts.why_arrived(code, now) if arrived
+                               else texts.why_arrived(code, now, unwatched) if arrived
                                else texts.why_glitch(", ".join(missing)))
             return None
-        if len(hist) == 1 and since(hist[0]) <= seed:
+        if len(hist) == 1 and not unwatched and since(hist[0]) <= seed:
             return hist[0]
         ours = codex_cards.name_key(name)
         named = ([c for c in now if is_named(name, cx.rows(c, code))]
@@ -465,7 +470,9 @@ class _ScopePlanner:
             self.plan.add_review(item, texts.carrier_changed(
                 self.scope.name, item["gtin"], code, [(c, cx.name_of(c, code)) for c in now],
                 earlier, named, self._carrier_way_out(code, ours, now, hist),
-                last=sorted(cx.owners.get(code, []))))
+                last=sorted(cx.owners.get(code, [])),
+                unwatched=[(c, cx.name_of(c, code)) for c in unwatched],
+                named_unwatched=[c for c in unwatched if ours and ours in cx.product(c, code)]))
             return None
         card = named[0]
         took = self._took_over(code, card)

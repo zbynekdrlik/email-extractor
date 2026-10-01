@@ -7,6 +7,7 @@ rows sit, what the next list redoes). The ops message frame lives in `codex_sync
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .codex_sync_memory import CHECK_TAUGHT
@@ -227,10 +228,19 @@ def why_glitch(card: str) -> str:
     return f"karta CODEX {card} v tomto zozname chýba (raz) — čaká sa na ďalší zoznam"
 
 
-def why_arrived(code: str, now: list[str]) -> str:
-    """A card arriving on a code no card carried before — one push is no proof."""
-    return (f"kód {code} teraz nesie karta CODEX {', '.join(now)}, doteraz ho nenesla žiadna "
-            f"karta — čaká sa na ďalší zoznam")
+def why_arrived(code: str, now: list[str], before: Sequence[str] = ()) -> str:
+    """A card arriving on a code no card carried since we watched — one push is no proof.
+    `before`: cards seen on it only in a list older than the history's beginning (review 35)."""
+    if not before:
+        return (f"kód {code} teraz nesie karta CODEX {', '.join(now)}, doteraz ho nenesla "
+                f"žiadna karta — čaká sa na ďalší zoznam")
+    return (f"kód {code} teraz nesie karta CODEX {', '.join(now)}, od začiatku sledovania ho "
+            f"nenesla žiadna karta ({_before_watch_cards(before)}) — čaká sa na ďalší zoznam")
+
+
+def _before_watch_cards(before: Sequence[str]) -> str:
+    return (f"predtým len karta CODEX {', '.join(before)} v zozname staršom ako začiatok "
+            f"sledovania")
 
 
 def why_new_carrier(code: str, now: list[str], before: list[str]) -> str:
@@ -260,9 +270,12 @@ def _carried(now: list[str]) -> str:
 
 def carrier_changed(scope: str, gtin: str, code: str, now: list[tuple[str, str]],
                     earlier: list[str], named: list[str], way_out: str, *,
-                    last: list[str]) -> str:
+                    last: list[str], unwatched: Sequence[tuple[str, str]] = (),
+                    named_unwatched: Sequence[str] = ()) -> str:
     """An unbound number whose code changed carrier — `now` carries it (card, name), several or
-    none (`last` carried it last) — our name matches none of the cards, or several."""
+    none (`last` carried it last) — our name matches none of the cards, or several.
+    `unwatched` (card, name): cards seen on the code only in a list older than the history's
+    beginning — named, never a candidate (`named_unwatched`: our name is theirs, review 35)."""
     if now:
         cards = ", ".join(f"{c} („{n}“)" for c, n in now)
         head = (f"kód {code} teraz nesie karta CODEX {cards}"
@@ -271,10 +284,17 @@ def carrier_changed(scope: str, gtin: str, code: str, now: list[tuple[str, str]]
         before = [c for c in earlier if c not in last]
         head = (f"kód {code} už v stredisku 1 CODEXu nie je a naposledy ho niesla karta CODEX "
                 f"{', '.join(last)}" + (f", predtým {', '.join(before)}" if before else ""))
+    if unwatched:
+        head += ("; v zozname staršom ako začiatok sledovania ho niesla karta CODEX "
+                 + ", ".join(f"{c} („{n}“)" for c, n in unwatched))
     if named:
         which = (f"naša karta sa volá rovnako ako karty CODEX {', '.join(named)}, nevieme, "
                  f"ktorá je naša (pomôže aj oprava názvov v CODEXe).")
-    elif len(now) + len(earlier) == 1:
+    elif named_unwatched:
+        which = (f"naša karta sa volá ako karta CODEX {', '.join(named_unwatched)}, ktorá ho "
+                 f"niesla len pred začiatkom sledovania — to nestačí, nevieme, či je to naša "
+                 f"karta.")
+    elif len(now) + len(earlier) + len(unwatched) == 1:
         which = "názov našej karty sa s jej názvom nezhoduje, nevieme, či je to naša karta."
     else:
         which = "názov našej karty nesedí so žiadnou z nich, nevieme, ktorá je naša."

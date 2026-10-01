@@ -375,11 +375,15 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   recorded — accepted = pickable, round 12 — with its new sightings at its stredisko's
   beginning, so it never moves, rounds 31-33. TWO facts per pair: `first_seen` (clamped —
   the reuse windows read it) and `seen_since` (r18: the first list SINCE the beginning that
-  showed it, NULL until one does). Who our number IS reads only `seen_since`
-  (`Codex.since_seed` / `Codex.seen_from`, `_by_history` + `_took_over`'s candidate): a
-  card seen on the code in such an older list — only there, or also again since — is no
-  "since the beginning" evidence: it bound a #467 "missing" card at once with no name check,
-  then removed it / renumbered it onto another product, and hid a take-over, rounds 33-34)
+  showed it, NULL until one does). Who our number IS — the CANDIDATES and their "since" —
+  reads only `seen_since` (`Codex.since_seed` / `Codex.seen_from`, `_by_history` +
+  `_took_over`'s candidate): a card seen on the code in such an older list — only there, or
+  also again since — is no "since the beginning" evidence: it bound a #467 "missing" card at
+  once with no name check, then removed it / renumbered it onto another product, and hid a
+  take-over, rounds 33-34. But the UNIQUENESS of "the one card" counts every recorded
+  carrier: a card seen there only before we watched (`unwatched`) is still ANOTHER card —
+  round 35: dropped from the count too, the pagáč that reused our rožok's code got our number
+  and, once gone, removed it; the review / arrival wait name the `unwatched` cards)
   → that card; else our NAME — the one carrier now named
   so, else the one card ever named so — unless that card took the code over from ANOTHER
   product (`_took_over`: first seen before it — cards seeded together never count; in CODEX or
