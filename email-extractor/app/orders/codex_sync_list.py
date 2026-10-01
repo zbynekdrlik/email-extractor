@@ -74,6 +74,14 @@ class Codex:
         it bound a missing card at once, and hid a take-over)."""
         return self.seen_since.get((card, code), NEVER)
 
+    def before_watch(self, card: str, code: str) -> bool:
+        """`card` (in the history on `code`) was first seen there in a list OLDER than the
+        history's beginning: no list since showed it, or its first list since is later than
+        its first sighting (clamped to the beginning — a pair first seen since has both
+        equal). It carried the code before any card first seen since (review 36)."""
+        since = self.seen_since.get((card, code))
+        return since is None or since > self.first_seen.get((card, code), NEVER)
+
     def product(self, card: str, code: str) -> set[str]:
         """The product names (#467 `name_key`) of CODEX `card`: its current rows + its name
         while it carried `code` (the history keeps it after the card moved on)."""

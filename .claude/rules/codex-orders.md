@@ -386,7 +386,9 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   and, once gone, removed it; the review / arrival wait name the `unwatched` cards)
   → that card; else our NAME — the one carrier now named
   so, else the one card ever named so — unless that card took the code over from ANOTHER
-  product (`_took_over`: first seen before it — cards seeded together never count; in CODEX or
+  product (`_took_over`: first seen before it — cards seeded together never count, but a card
+  seen on the code before we watched (`Codex.before_watch`: no `seen_since`, or one later
+  than its clamped `first_seen`) always came first, round 36; in CODEX or
   gone — the #467 drift button offers the code's holder, round 9's rule → a human, rounds
   26-29; one missing once → WAIT); else a human, with ways out that work (`_carrier_way_out`:
   rename only to a name ONE historic card bears — never our own, never a gone card, never one

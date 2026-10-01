@@ -492,13 +492,16 @@ class _ScopePlanner:
         took the code over from them (a reuse). A number named like `card` may have that name
         from the #467 drift button, which offers the code's holder — while its data is theirs.
         `card` counts from its first list since the history began (`Codex.seen_from` — a
-        sighting before we watched hid a take-over, review 34); the others from their first
-        sighting at all (clamped to the beginning — the cautious side)."""
+        sighting before we watched hid a take-over, review 34); another card seen on the code
+        before we watched (`Codex.before_watch`) carried it before ANY card first seen since —
+        never "seeded together" with one at the beginning (review 36: its clamped first
+        sighting tied, our rožok drift-renamed to the reusing pagáč was bound to it and later
+        removed); else its first sighting."""
         cx = self.cx
         first = cx.seen_from(card, code)
         return [d for d in sorted(cx.carried.get(code, {}))
                 if d != card and not cx.same_product(d, card, code)
-                and cx.first_seen.get((d, code), NEVER) < first]
+                and (cx.before_watch(d, code) or cx.first_seen.get((d, code), NEVER) < first)]
 
     def _wait_carrier(self, item: dict, why: str) -> None:
         """One list is no proof: the number waits — reported, and protected from a renumber
