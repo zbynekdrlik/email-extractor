@@ -46,6 +46,10 @@ class Codex:
     # (override table, our gtin) -> the newest HUMAN (re)entry of the card into the catalog
     # (a #477 pick = audit `create` naming its CODEX card; a Kôš „Vrátiť" = `restore`)
     events: dict[tuple[str, str], Event]
+    # when the history began (its oldest first sighting — the migration seed): a card on a code
+    # since then was there before we watched; one arriving later on a code no card carried is
+    # a carrier change (review 30)
+    seeded_at: datetime | None = None
 
     def carriers(self, code: str) -> set[str]:
         return {r.card for r in self.by_code.get(code, [])}
@@ -228,4 +232,5 @@ def load(conn, cards: codex_cards.CodexCards, as_of: datetime,
     ).fetchall()}
     return Codex(cards, by_card, by_code, first_seen, last_seen, names, card_seen, owners,
                  carried, {s: card_guard.pickable(conn, s) for s in scopes},
-                 _prev_as_of(conn, as_of), bindings, _events(conn))
+                 _prev_as_of(conn, as_of), bindings, _events(conn),
+                 min(first_seen.values(), default=None))

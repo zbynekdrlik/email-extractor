@@ -286,8 +286,8 @@ CODEX_STOCK_CARDS = [
 # CODEX. `first_seen`/`last_seen` are the CODEX data age of the push that saw it
 # (`codex_cards._data_as_of`). Seeded from the list already stored, so the FIRST sync after
 # the deploy already compares against the last pre-deploy push. `codex_card_bindings` is WHICH
-# CODEX card each of our cards is ((scope, our gtin) -> ACSKLP, set when the code has one
-# stredisko-1 carrier or our name picks one): a renumber / removal follows that card, never
+# CODEX card each of our cards is ((scope, our gtin) -> ACSKLP, set from the code's history and
+# our name — `codex_sync_plan._by_history`, or a #477 pick): a renumber / removal follows that card, never
 # whichever card holds the code most recently (a code can be REUSED for another product);
 # `active=false` = our number the sync retired (a later memory row of it still follows the
 # card). `codex_sync_runs` is the

@@ -342,10 +342,10 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   ACSKLP (`card_code`) + sklad since #467; #478 needed no new field, only the history.
 - **Rollout switch `codex_sync_apply` (default false = DRY-RUN)**: plan + log + report, ZERO
   catalog/memory/audit/alert writes (a failing dry-run sync too — its `error` run row is the
-  record, review 17); the history is kept either way. A wait (a card missing from one list, an
-  unbound number whose code has a new carrier since the last list, a pick / renumber waiting on
-  either) is in the report's `waits` + the log — an all-zero plan never hides one (reviews
-  23-25). The run log keeps `RUNS_KEEP_DAYS` (90) + the newest run of
+  record, review 17); the history is kept either way. A wait (a card missing from one list; an
+  unbound number whose code lost a carrier since the last list, or got its first carrier ever
+  — review 30; a pick / renumber waiting on either) is in the report's `waits` + the log — an
+  all-zero plan never hides one (reviews 23-30). The run log keeps `RUNS_KEEP_DAYS` (90) + the newest run of
   each status. Module map: `codex_sync_list` (what the list says: rows, history, bindings, pick
   events) → `codex_sync_plan` (what to do) → `codex_sync` (does it); `codex_sync_memory`
   (memory rules), `codex_sync_texts` (Slovak texts). Read the dry-run with
@@ -534,8 +534,11 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   False)`, round 9), one per failing-sync episode — all `reminder_suppressed`
   where they could repeat. The message says honestly that a Kôš undo is redone by the next list
   while CODEX stays the same (only a CODEX fix or `codex_sync_apply=false` stops it).
-- **Every write is Kôš-restorable**: renames/memory rewrites = `update` (before/after), new
-  card = `create`, retired number / duplicate memory row = `delete`. `audit._restore_update`
+- **Every write is audited and Kôš-restorable — except a DL number whose code left CODEX**
+  (#467 `audit._refuse_dead_dl_code` refuses it, 409: every DL removal, a DL renumber's old
+  number when its code left CODEX — the ops footer says so, `codex_sync._dl_dead`, review 30):
+  renames/memory rewrites = `update` (before/after), new card = `create`, retired number /
+  duplicate memory row = `delete`. `audit._restore_update`
   now runs its UPDATE on a savepoint and turns a UNIQUE clash into `RestoreError(409)` (a
   memory gtin written back while the mapping was re-learned under it).
 - **Tests** (`tests/test_codex_sync.py`, synthetic codes 999…): `_baseline` = push V1 + one

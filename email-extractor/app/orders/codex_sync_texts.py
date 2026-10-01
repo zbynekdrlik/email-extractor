@@ -227,6 +227,12 @@ def why_glitch(card: str) -> str:
     return f"karta CODEX {card} v tomto zozname chýba (raz) — čaká sa na ďalší zoznam"
 
 
+def why_arrived(code: str, now: list[str]) -> str:
+    """A card arriving on a code no card carried before — one push is no proof."""
+    return (f"kód {code} teraz nesie karta CODEX {', '.join(now)}, doteraz ho nenesla žiadna "
+            f"karta — čaká sa na ďalší zoznam")
+
+
 def why_new_carrier(code: str, now: list[str], before: list[str]) -> str:
     """An unbound number whose code's carriers changed in ONE list — one push is no proof."""
     return (f"kód {code} teraz nesie karta CODEX {', '.join(now)}, v predchádzajúcom zozname ho "
@@ -265,9 +271,13 @@ def carrier_changed(scope: str, gtin: str, code: str, now: list[tuple[str, str]]
         before = [c for c in earlier if c not in last]
         head = (f"kód {code} už v stredisku 1 CODEXu nie je a naposledy ho niesla karta CODEX "
                 f"{', '.join(last)}" + (f", predtým {', '.join(before)}" if before else ""))
-    which = (f"naša karta sa volá rovnako ako karty CODEX {', '.join(named)}, nevieme, ktorá "
-             f"je naša (pomôže aj oprava názvov v CODEXe)." if named
-             else "názov našej karty nesedí so žiadnou z nich, nevieme, ktorá je naša.")
+    if named:
+        which = (f"naša karta sa volá rovnako ako karty CODEX {', '.join(named)}, nevieme, "
+                 f"ktorá je naša (pomôže aj oprava názvov v CODEXe).")
+    elif len(now) + len(earlier) == 1:
+        which = "názov našej karty sa s jej názvom nezhoduje, nevieme, či je to naša karta."
+    else:
+        which = "názov našej karty nesedí so žiadnou z nich, nevieme, ktorá je naša."
     return f"{head} — {which} {way_out} {_taught(scope, gtin)}"
 
 

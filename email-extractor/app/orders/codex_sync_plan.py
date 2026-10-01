@@ -201,9 +201,10 @@ class _ScopePlanner:
         # a rename rebind — `_reset_from`)
         self.repicked: dict[str, tuple[str, datetime | None]] = {}
         # our numbers left waiting this list ("pick": a #477 pick waits out a glitch; "carrier":
-        # an unbound number's code has a new carrier) — nothing may land on them (review 22 🟡:
-        # a merge's binding superseded the waiting pick; review 25 🟡: a merge renamed the
-        # waiting number to another product)
+        # an unbound number on one-list evidence — a card left its code, a card arrived on a
+        # code no card carried, a card it depends on missing once) — nothing may land on them
+        # (review 22 🟡: a merge's binding superseded the waiting pick; review 25 🟡: a merge
+        # renamed the waiting number to another product)
         self.waiting: dict[str, str] = {}
         # pass 1's verdict per number of ours: the CODEX card it IS in this plan (a binding
         # this plan stores counts — `_known` reads only the stored ones), or not decided
@@ -421,9 +422,11 @@ class _ScopePlanner:
         carriers now (none, one or several) and before — never "who holds the code now / held
         it last" (reviews 25 / 28 / 29: a reuser — also one that moved on, or one beside a
         duplicate carrier — dragged our rožok along, round 1's 🔴).
-        - One list is no proof: a card that left the code since the last list, or (no carrier
-          now) a last carrier missing from this list only → it waits (protected, `waiting`).
-        - One card ever carried it → that card.
+        - One list is no proof: a card that left the code since the last list, a card arriving
+          on a code no card carried before (review 30: a #467 "missing" card bound to it and
+          then removed), or (no carrier now) a last carrier missing from this list only → it
+          waits (protected, `waiting`).
+        - The ONE card on the code since the history began (`Codex.seeded_at`) → that card.
         - Else its NAME: the one carrier now named so (its rows), else the one card ever named
           so (`Codex.product` — its history name too) — unless that card took the code over
           from ANOTHER product (`_took_over`: the #467 drift button offers the code's holder,
@@ -432,15 +435,25 @@ class _ScopePlanner:
         cx, name = self.cx, item["name"]
         now = sorted(carriers)
         hist = sorted(cx.carried.get(code, {}))
+        if not hist:
+            return None                          # no stredisko-1 history: never touched
         earlier = [c for c in hist if c not in carriers]
+        seed = cx.seeded_at or NEVER
+
+        def since(c: str) -> datetime:
+            return cx.first_seen.get((c, code), NEVER)
+
         recent = [c for c in earlier if not cx.absent_before(c, code)] if now else []
+        arrived = bool(now) and not earlier and all(
+            since(c) > seed and (cx.prev_as_of is None or since(c) > cx.prev_as_of) for c in now)
         missing = [] if now else [c for c in cx.owners.get(code, []) if cx.glitched(c)]
-        if recent or missing:
+        if recent or arrived or missing:
             self._wait_carrier(item, texts.why_new_carrier(code, now, recent) if recent
+                               else texts.why_arrived(code, now) if arrived
                                else texts.why_glitch(", ".join(missing)))
             return None
-        if len(hist) <= 1:
-            return hist[0] if hist else None
+        if len(hist) == 1 and since(hist[0]) <= seed:
+            return hist[0]
         ours = codex_cards.name_key(name)
         named = ([c for c in now if is_named(name, cx.rows(c, code))]
                  or [c for c in hist if ours and ours in cx.product(c, code)])
@@ -622,6 +635,9 @@ class _ScopePlanner:
             "codex_name": self.cx.name_of(card, succ),
             "memory": split.movable, "hold": hold.isoformat() if hold else None,
             "held": {"taught": split.taught, "shipped": split.shipped}, "held_at": split.held_at,
+            # the old code left CODEX: a DL number retired with it never comes back from the
+            # Kôš (#467) — the ops footer says so (review 30)
+            "old_dead": not self.cx.cards.has(code),
             "card": _fields(group[0])})
         if taken and split.taught:
             self.plan.add_review(item, self._held_reason(item["gtin"], code, card, to, split,

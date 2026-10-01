@@ -301,11 +301,25 @@ def _review_lines(review: list[dict]) -> list[str]:
             + f": {escape(r['reason'])}" for r in review]
 
 
-def _html(head: str, lines: list[str]) -> str:
+def _dl_dead(plan: sp.Plan) -> bool:
+    """The plan retires a DL number whose code CODEX no longer has — the Kôš will NOT return
+    it (#467 `audit._refuse_dead_dl_code`, 409): a removal always, a renumber when its old code
+    left CODEX (review 30 🔵: the footer promised every change could be undone)."""
+    return (any(r["scope"] == "dl" for r in plan.removals)
+            or any(r["scope"] == "dl" and r["mode"] != "memory" and r.get("old_dead")
+                   for r in plan.renumbers))
+
+
+def _html(head: str, lines: list[str], *, dl_dead: bool = False) -> str:
     more = len(lines) - MAX_ALERT_LINES
     shown = lines[:MAX_ALERT_LINES] + ([f"… a ďalších {more}"] if more > 0 else [])
     # what a Kôš undo really does, per kind (review 15 🔵: a reset undone is NOT redone — the
-    # binding the reset came with is stored by then)
+    # binding the reset came with is stored by then; review 30 🔵: a DL number whose code left
+    # CODEX does not come back at all)
+    dead = (" Výnimka: číslo v katalógu sklad (dodacie listy), ktorého kód CODEX už nemá, Kôš "
+            "nevráti (#467) — po vrátení prečíslovania by karta v katalógu sklad chýbala, späť "
+            "ju vráti len výber nového kódu pri otázke („Vybrať kartu z CODEXu“)."
+            if dl_dead else "")
     return (f"<p>{head}</p><ul>" + "".join(f"<li>{line}</li>" for line in shown)
             + "</ul><p>Každá zmena je v nástenke → Kôš. Pozor: premenovanie, prečíslovanie a "
               "presun do Koša (kód z CODEXu zmizol), ktoré vrátiš, urobí ďalší zoznam kariet "
@@ -313,7 +327,7 @@ def _html(head: str, lines: list[str]) -> str:
               "vypnutie codex_sync_apply v nastaveniach add-onu); vyčistenie starých údajov po "
               "výbere inej karty sa po vrátení neopakuje. Prečíslovanie zmaže starý kód a nový "
               "vytvorí alebo doplní — pri vrátení vracaj všetky jeho zmeny, inak karta v "
-              "katalógu chýba.</p>")
+              f"katalógu chýba.{dead}</p>")
 
 
 def _review_keys(r: dict) -> set[tuple]:
@@ -392,7 +406,8 @@ def _alert(conn, cfg, plan: sp.Plan, mode: str, run_id: int, known: set[tuple],
                 f"zmeny sa použijú pri ďalšom zozname kariet.")
         dl_alerts.enqueue(conn, channel, ALERT_KIND,
                           _html(head, _change_lines(plan, applied=False)
-                                + _hold_lines(plan.holds, applied=False)),
+                                + _hold_lines(plan.holds, applied=False),
+                                dl_dead=_dl_dead(plan)),
                           message_id=key)
         return
     lines = (_change_lines(plan)
@@ -402,8 +417,8 @@ def _alert(conn, cfg, plan: sp.Plan, mode: str, run_id: int, known: set[tuple],
              + _review_lines(_fresh_review(plan.review, known)))
     if lines:
         dl_alerts.enqueue(conn, channel, ALERT_KIND, _html(
-            "&#128260; Karty podľa CODEXu (#478) — zmeny z posledného zoznamu kariet:", lines),
-            message_id=f"{ALERT_KEY}:{run_id}")
+            "&#128260; Karty podľa CODEXu (#478) — zmeny z posledného zoznamu kariet:", lines,
+            dl_dead=_dl_dead(plan)), message_id=f"{ALERT_KEY}:{run_id}")
 
 
 # --- the run log -------------------------------------------------------------------------------
