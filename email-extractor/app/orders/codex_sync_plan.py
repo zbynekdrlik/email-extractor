@@ -476,7 +476,9 @@ class _ScopePlanner:
             return None
         card = named[0]
         took = self._took_over(code, card)
-        missing = [d for d in took if cx.glitched(d)]
+        # a card never seen on the code since the beginning is never "missing from this list
+        # only" — no previous synced list made it look so (review 37)
+        missing = [d for d in took if cx.glitched(d) and d not in unwatched]
         if missing:
             self._wait_carrier(item, texts.why_glitch(", ".join(missing)))
             return None

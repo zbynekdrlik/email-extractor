@@ -390,7 +390,9 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   seen on the code before we watched (`Codex.before_watch`: no `seen_since`, or one later
   than its clamped `first_seen`) always came first, round 36; in CODEX or
   gone — the #467 drift button offers the code's holder, round 9's rule → a human, rounds
-  26-29; one missing once → WAIT); else a human, with ways out that work (`_carrier_way_out`:
+  26-29; one missing once → WAIT — never one seen only before we watched: it took no list
+  since, so with no previous synced list it only LOOKED missing once, round 37); else a
+  human, with ways out that work (`_carrier_way_out`:
   rename only to a name ONE historic card bears — never our own, never a gone card, never one
   that took the code over — or the pick among the carriers now; plus the curated-fields /
   taught-rows pointer). Stored in every mode (identity, not catalog data), and from then on the
