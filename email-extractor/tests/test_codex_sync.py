@@ -2868,3 +2868,89 @@ def test_the_run_log_keeps_a_window_and_the_newest_run_of_each_status(pg):
     assert [r[0] for r in rows] == ["dry-run", "error"], "the newest old run of each status"
     assert pg.execute("SELECT count(*) FROM codex_sync_runs WHERE ran_at >= %s",
                       (NOW - timedelta(days=1),)).fetchone()[0] == 2
+
+
+# --- review 25: an UNBOUND number whose code changed carrier — our name decides, else a human -
+
+def _first_post_deploy(pg, v2, *, apply=True, runs=2):
+    """The rollout shape: the history holds only the pre-deploy list (the migration seed — no
+    synced run yet, every number unbound), then `runs` pushes of `v2`."""
+    _seed_catalogs(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync._record_history(pg)
+    for hours in range(5, 5 - runs, -1):
+        _push(pg, v2, hours_old=hours)
+        codex_sync.run(pg, _cfg(apply=apply))
+
+
+def test_an_unbound_number_follows_the_card_its_name_is_not_the_reuser(pg):
+    """Review 25 🟡: card 27 (our rožok) moved ROZOK → ROZOK_NEW and the pagáč (79) took ROZOK
+    — on the first post-deploy lists every number is unbound; after the one-list wait our rožok
+    was bound to the pagáč and renamed (round 1's 🔴). Our NAME is card 27's product: it follows
+    card 27 to ROZOK_NEW."""
+    _first_post_deploy(pg, _reused(V1))
+    orders = _orders(pg)
+    assert ROZOK not in orders and orders[ROZOK_NEW]["name"] == "Rožok so slaninou 70g"
+    assert _binding(pg, ROZOK_NEW)[0] == "27"
+    assert pg.execute("SELECT count(*) FROM codex_card_bindings WHERE card_code = '79'"
+                      ).fetchone()[0] == 0
+
+
+def test_a_dry_run_never_stores_the_reusers_binding_for_an_unbound_number(pg):
+    """Review 25 🟡: the same under the real rollout — dry-runs store identity in every mode,
+    and stored the pagáč's binding; the first apply then renamed both catalogs' rožok."""
+    _first_post_deploy(pg, _reused(V1), apply=False)
+    assert _binding(pg, ROZOK)[0] == "27" and _binding(pg, ROZOK, "dl")[0] == "27"
+    _push(pg, _reused(V1), hours_old=2)
+    codex_sync.run(pg, _cfg())
+    assert _orders(pg)[ROZOK_NEW]["name"] == "Rožok so slaninou 70g"
+
+
+def test_an_unbound_number_named_like_neither_carrier_goes_to_a_human(pg):
+    """Review 25 🟡: ROZOK sat on cards 27 and 28 and our orders name matches neither
+    (reviewed); card 27 moves to ROZOK_NEW — after the one-list wait our ROZOK was bound to the
+    bageta (28) and renamed. Neither name is ours: a human decides."""
+    _seed_catalogs(pg)
+    snapshot.upsert_catalog_card(pg, ROZOK, "Rožok starý názov")
+    snapshot.rebuild_from_overrides(pg)
+    shared = V1 + [_row(ROZOK, "28", "Bageta šunková 120g")]
+    _push(pg, shared, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    moved = [dict(r, code=ROZOK_NEW) if r["card_code"] == "27" else r for r in shared]
+    for hours in (5, 4):
+        _push(pg, moved, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert _orders(pg)[ROZOK]["name"] == "Rožok starý názov"
+    assert _binding(pg, ROZOK) is None
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "28" in reason and "27" in reason
+
+
+def test_an_unbound_number_named_like_the_new_carrier_is_bound_to_it(pg):
+    """Review 25 🔵: the rožok recreated in CODEX as card 127 under 27's own name, card 27 gone
+    — our unbound rožok is the same product: bound to 127, no rename."""
+    _first_post_deploy(pg, [dict(r, card_code="127") if r["card_code"] == "27" else r
+                            for r in V1], runs=3)
+    assert _binding(pg, ROZOK)[0] == "127"
+    assert _orders(pg)[ROZOK]["name"] == "Rožok so slaninou 70g"
+
+
+def test_no_renumber_merges_onto_an_unbound_number_waiting_for_its_carrier(pg):
+    """Review 25 🟡: card 27 (our rožok) moved ROZOK → ROZOK_NEW and card 31 (our chlieb)
+    moved CHLIEB → ROZOK — our unbound ROZOK waits (new carrier), and our chlieb's renumber
+    merged into it in the same plan (the rožok renamed to the chlieb, bound to 31). It never
+    lands on a number another group of this plan identified as another card either."""
+    v2 = [dict(r, code=ROZOK_NEW) if r["card_code"] == "27"
+          else dict(r, code=ROZOK) if r["card_code"] == "31" else r for r in V1]
+    _first_post_deploy(pg, v2, runs=1)
+    assert _orders(pg)[ROZOK]["name"] == "Rožok so slaninou 70g"
+    assert ("orders", ROZOK) in _waits(pg)
+    _push(pg, v2, hours_old=3)
+    codex_sync.run(pg, _cfg())
+    orders = _orders(pg)
+    assert orders[ROZOK_NEW]["name"] == "Rožok so slaninou 70g"
+    assert _binding(pg, ROZOK_NEW)[0] == "27"
+    # the chlieb's renumber onto ROZOK — the number this plan identified as card 27 — is a
+    # human's call (a chain in one push), never a merge
+    assert ROZOK not in orders and orders[CHLIEB]["name"] == "Chlieb pšeničný 1000g"
+    assert "nie 31" in _review_reason(pg, "orders", CHLIEB)
