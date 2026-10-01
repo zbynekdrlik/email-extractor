@@ -21,6 +21,7 @@ paths:
   - "email-extractor/app/orders/codex_sync_memory.py"
   - "email-extractor/app/orders/codex_sync_texts.py"
   - "email-extractor/app/orders/codex_sync_list.py"
+  - "email-extractor/app/orders/codex_sync_kos.py"
   - "email-extractor/tests/test_codex_sync.py"
 ---
 
@@ -348,7 +349,9 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   all-zero plan never hides one (reviews 23-30). The run log keeps `RUNS_KEEP_DAYS` (90) + the newest run of
   each status. Module map: `codex_sync_list` (what the list says: rows, history, bindings, pick
   events) → `codex_sync_plan` (what to do) → `codex_sync` (does it); `codex_sync_memory`
-  (memory rules), `codex_sync_texts` (Slovak texts). Read the dry-run with
+  (memory rules), `codex_sync_texts` (Slovak texts), `codex_sync_kos` (`KosRules`, the
+  planner's mixin for our Kôš numbers a card takes over / a pick restored — split at the plan's
+  size budget, review 41). Read the dry-run with
   `SELECT id, ran_at, status, report FROM codex_sync_runs ORDER BY id DESC LIMIT 1`. Turning it
   on is the OWNER's decision (after reviewing the dry-run on the ticket) — never flip it in a
   lane. A `would_block: true` in a dry-run means the first apply would stop at the breaker.
