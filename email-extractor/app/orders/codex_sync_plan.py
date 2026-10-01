@@ -417,85 +417,96 @@ class _ScopePlanner:
                     code, sorted(carriers), self._pick_advice(code, sorted(carriers))))
                 return None
             card = named[0]
-        elif carriers:
-            sole = self._sole_carrier(code, item, next(iter(carriers)))
-            if sole is None:
-                return None
-            card = sole
         else:
-            last = cx.owners.get(code, [])
-            if len(last) > 1:
-                self.plan.add_review(item, texts.last_owners(code, sorted(last)))
-            if len(last) != 1:
-                return None                    # no stredisko-1 history, or ambiguous
-            card = last[0]
+            found = self._by_history(code, item, next(iter(carriers)) if carriers else None)
+            if found is None:
+                return None
+            card = found
         self._seed(item, card)
         return card
 
-    def _sole_carrier(self, code: str, item: dict, card: str) -> str | None:
-        """An UNBOUND number whose code has ONE stredisko-1 carrier `card` now. Another card
-        carried the code a snapshot ago → it waits (one push is no proof); another card carried
-        it before that → the code changed carrier, and the number is the product its NAME is:
-        the carrier now, or exactly one earlier carrier (then it follows THAT card — renumber /
-        gone), else a human decides. Review 25 🟡: binding it to whoever holds the code now
-        renamed our rožok to the pagáč that reused its code (round 1's 🔴) on the first
-        post-deploy lists, when every number is unbound."""
+    def _by_history(self, code: str, item: dict, now: str | None) -> str | None:
+        """An UNBOUND number whose code has ONE stredisko-1 carrier `now` on this list, or none
+        (`now` None): which card it IS, from every card that ever carried the code
+        (`Codex.carried`) — never "who holds the code now / held it last" (reviews 25 / 28:
+        that bound our rožok to the pagáč that reused its code, round 1's 🔴, on the first
+        post-deploy lists when every number is unbound — also when the pagáč moved on).
+        - One list is no proof: another card on the code a list ago (a new carrier), or the
+          last carrier missing from this list only → it waits (protected, `waiting`).
+        - One card ever carried it → that card.
+        - Else its NAME: the carrier now if named so, else the one historic carrier named so
+          — unless that card took the code over from ANOTHER product still in CODEX or gone
+          from it (the #467 drift button offers the code's holder; round 9's rule, reviews
+          26-28: a human; one missing once → it waits) — else a human decides."""
         cx, name = self.cx, item["name"]
-        earlier = sorted(c for c in cx.carried.get(code, {}) if c != card)
-        recent = [c for c in earlier if not cx.absent_before(c, code)]
-        if recent:
-            self.plan.wait(item, texts.why_new_carrier(code, card, recent))
-            self.waiting.update({g: "carrier" for g in item["gtins"]})
-            return None
-        if not earlier:
-            return card
-        if is_named(name, cx.rows(card, code)):
-            # our name is the carrier now's — unless an earlier carrier of ANOTHER product
-            # lives on in CODEX: the name may come from the #467 drift button, which offers the
-            # code's current holder (round 9's rule, for an unbound number — review 26). Gone
-            # = gone twice: one missing list is no proof (review 27 🟡 — decided on it, the
-            # number was bound to the reuser for good)
-            other = [c for c in earlier
-                     if not cx.gone_twice(c) and not cx.same_product(c, card, code)]
-            missing = [c for c in other if cx.glitched(c)]
-            if missing:
-                self.plan.wait(item, texts.why_glitch(", ".join(missing)))
-                self.waiting.update({g: "carrier" for g in item["gtins"]})
+        hist = sorted(cx.carried.get(code, {}))
+        earlier = [c for c in hist if c != now]
+        if now is not None:
+            recent = [c for c in earlier if not cx.absent_before(c, code)]
+            if recent:
+                self._wait_carrier(item, texts.why_new_carrier(code, now, recent))
                 return None
-            if not other:
-                return card
-            self.plan.add_review(item, texts.carrier_named_now(
-                self.scope.name, item["gtin"], name, code, card, other,
-                self._carrier_way_out(code, card, other, earlier)))
-            return None
+        else:
+            missing = [c for c in cx.owners.get(code, []) if cx.glitched(c)]
+            if missing:
+                self._wait_carrier(item, texts.why_glitch(", ".join(missing)))
+                return None
+        if len(hist) <= 1:
+            return now if now is not None else (hist[0] if hist else None)
         ours = codex_cards.name_key(name)
-        named = [c for c in earlier if ours and ours in cx.product(c, code)]
-        if len(named) == 1:
-            return named[0]
-        self.plan.add_review(item, texts.carrier_changed(
-            self.scope.name, item["gtin"], code, card, cx.name_of(card, code), earlier, named,
-            self._carrier_way_out(code, card, earlier, earlier)))
-        return None
+        named = [c for c in hist if ours and ours in cx.product(c, code)]
+        if now is not None and now in named:
+            card = now
+        elif len(named) == 1:
+            card = named[0]
+        else:
+            self.plan.add_review(item, texts.carrier_changed(
+                self.scope.name, item["gtin"], code, now,
+                cx.name_of(now, code) if now else "", earlier, named,
+                self._carrier_way_out(code, now, earlier, earlier),
+                last=sorted(cx.owners.get(code, []))))
+            return None
+        took_over = [d for d in hist if d != card and not cx.same_product(d, card, code)
+                     and cx.first_seen.get((d, code), NEVER) < cx.first_seen.get((card, code),
+                                                                                 NEVER)]
+        missing = [d for d in took_over if cx.glitched(d)]
+        if missing:
+            self._wait_carrier(item, texts.why_glitch(", ".join(missing)))
+            return None
+        if took_over:
+            self.plan.add_review(item, texts.carrier_named_now(
+                self.scope.name, item["gtin"], name, code, card, took_over,
+                self._carrier_way_out(code, now, took_over, earlier), carries=card == now))
+            return None
+        return card
 
-    def _carrier_way_out(self, code: str, card: str, candidates: list[str],
+    def _wait_carrier(self, item: dict, why: str) -> None:
+        """One list is no proof: the number waits — reported, and protected from a renumber
+        landing on it (`waiting`, review 25)."""
+        self.plan.wait(item, why)
+        self.waiting.update({g: "carrier" for g in item["gtins"]})
+
+    def _carrier_way_out(self, code: str, now: str | None, candidates: list[str],
                          earlier: list[str]) -> str:
         """The ways out of a carrier-change review, each what the next list then decides:
         rename our card to a candidate's name that ONLY it bears among the code's earlier
-        carriers (and the carrier now does not) → bound to it (`_sole_carrier`); the pick of
-        the code — the carrier now (`_pick_advice`) → bound to it; never a rename to the
-        carrier now's name (the drift-button shape — a human again, review 26), never to a card
-        gone from CODEX (review 27 — review 10's rule)."""
+        carriers (and the carrier now does not) → bound to it (`_by_history`); the pick of the
+        code — the carrier now (`_pick_advice`) → bound to it; never a rename to the carrier
+        now's name (the drift-button shape — a human again, review 26), never to a card gone
+        from CODEX (review 27 — review 10's rule)."""
         cx = self.cx
-        now = {codex_cards.name_key(r.name) for r in cx.rows(card, code)}
+        names_now = {codex_cards.name_key(r.name) for r in cx.rows(now, code)} if now else set()
         renames = []
         for c in candidates:
             if cx.gone_twice(c):
                 continue
             label = cx.name_of(c, code)
             key = codex_cards.name_key(label)
-            if key and key not in now and sum(key in cx.product(e, code) for e in earlier) == 1:
+            if (key and key not in names_now
+                    and sum(key in cx.product(e, code) for e in earlier) == 1):
                 renames.append((c, label))
-        return texts.carrier_way_out(renames, self._pick_advice(code, [card]))
+        return texts.carrier_way_out(renames,
+                                     self._pick_advice(code, [now]) if now else None)
 
     def _settle(self, code: str, group: list[dict]) -> tuple[dict, list[dict]] | None:
         """Pass 1 for one group: which CODEX card it IS (`_identify`) and the reset a pick /

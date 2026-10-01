@@ -102,12 +102,6 @@ def multi_carrier(code: str, carriers: list[str], pick: str) -> str:
             f"sa priradí; ak majú v CODEXe rovnaký názov: {pick}.")
 
 
-def last_owners(code: str, last: list[str]) -> str:
-    return (f"kód {code} už v stredisku 1 CODEXu nie je a naposledy ho niesli karty "
-            f"{', '.join(last)} — nevieme, ktorá je naša; ak kartu už nepotrebujete, zmažte ju "
-            f"(Kôš).")
-
-
 def gone(scope: str, card: str, code: str, now: list[str], *, pick: str | None,
          same_one: bool) -> str:
     """Our CODEX card left stredisko 1 for good, the code lives on elsewhere."""
@@ -245,21 +239,30 @@ def why_new_carrier(code: str, card: str, before: list[str]) -> str:
             f"niesla karta CODEX {', '.join(before)} — čaká sa na ďalší zoznam")
 
 
-def carrier_way_out(renames: list[tuple[str, str]], pick: str) -> str:
-    """The ways out of a carrier-change review (`_carrier_way_out` computed which work)."""
+def carrier_way_out(renames: list[tuple[str, str]], pick: str | None) -> str:
+    """The ways out of a carrier-change review (`_carrier_way_out` computed which work; no
+    pick when no card carries the code now)."""
     parts = [f"Ak je to výrobok karty CODEX {c}, premenuj našu kartu (Produkty) na „{label}“ — "
              f"pri ďalšom zozname kariet sa priradí ku karte CODEX {c}." for c, label in renames]
-    parts.append(pick[:1].upper() + pick[1:] + ".")
+    if pick:
+        parts.append(pick[:1].upper() + pick[1:] + ".")
     parts.append("Ak kartu nepotrebujete, zmažte ju (Kôš).")
     return " ".join(parts)
 
 
-def carrier_changed(scope: str, gtin: str, code: str, card: str, card_name: str,
-                    earlier: list[str], named: list[str], way_out: str) -> str:
-    """An unbound number whose code changed carrier: our name matches none of the earlier
-    carriers, or several (same-named duplicates)."""
-    head = (f"kód {code} teraz nesie karta CODEX {card} („{card_name}“), predtým ho niesla "
-            f"karta CODEX {', '.join(earlier)} — ")
+def carrier_changed(scope: str, gtin: str, code: str, card: str | None, card_name: str,
+                    earlier: list[str], named: list[str], way_out: str, *,
+                    last: list[str]) -> str:
+    """An unbound number whose code changed carrier — `card` carries it now, or none does
+    (`last` carried it last): our name matches none of the cards, or several (same-named)."""
+    if card is not None:
+        head = (f"kód {code} teraz nesie karta CODEX {card} („{card_name}“), predtým ho niesla "
+                f"karta CODEX {', '.join(earlier)} — ")
+    else:
+        before = [c for c in earlier if c not in last]
+        head = (f"kód {code} už v stredisku 1 CODEXu nie je a naposledy ho niesla karta CODEX "
+                f"{', '.join(last)}" + (f", predtým {', '.join(before)}" if before else "")
+                + " — ")
     which = (f"naša karta sa volá rovnako ako karty CODEX {', '.join(named)}, nevieme, ktorá "
              f"je naša (pomôže aj oprava názvov v CODEXe)." if named
              else "názov našej karty nesedí so žiadnou z nich, nevieme, ktorá je naša.")
@@ -267,13 +270,15 @@ def carrier_changed(scope: str, gtin: str, code: str, card: str, card_name: str,
 
 
 def carrier_named_now(scope: str, gtin: str, name: str, code: str, card: str,
-                      other: list[str], way_out: str) -> str:
-    """An unbound number named like the code's carrier now, while an earlier carrier of
-    another product lives on in CODEX — the name may come from the #467 drift button."""
-    return (f"naša karta „{name}“ sa volá ako karta CODEX {card}, ktorá kód {code} nesie teraz, "
-            f"no predtým ho niesla karta CODEX {', '.join(other)} — iný výrobok, ktorý v CODEXe "
-            f"stále je; názov mohol prísť z tlačidla „Prevziať názov z CODEXu“, nevieme, ktorá "
-            f"je naša. {way_out} {_taught(scope, gtin)}")
+                      other: list[str], way_out: str, *, carries: bool) -> str:
+    """An unbound number named like a card that took the code over from another product
+    (`other`, still in CODEX or gone) — the name may come from the #467 drift button, which
+    offers the code's holder. `carries` = that card carries the code now."""
+    holds = "nesie teraz" if carries else "niesla naposledy"
+    return (f"naša karta „{name}“ sa volá ako karta CODEX {card}, ktorá kód {code} {holds}, "
+            f"no predtým ho niesla karta CODEX {', '.join(other)} — iný výrobok; názov mohol "
+            f"prísť z tlačidla „Prevziať názov z CODEXu“, nevieme, ktorá je naša. {way_out} "
+            f"{_taught(scope, gtin)}")
 
 
 def _taught(scope: str, gtin: str) -> str:
