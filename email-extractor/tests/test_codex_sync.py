@@ -25,7 +25,7 @@ from datetime import UTC, date, datetime, timedelta
 import psycopg
 
 from app import db
-from app.board.services import audit
+from app.board.services import audit, catalog
 from app.config import Config
 from app.httpapi import create_app
 from app.orders import (
@@ -4023,6 +4023,8 @@ def test_an_unknown_kos_card_with_delivery_history_only_is_said_never_silent(pg)
     for scope in ("dl", "orders"):     # review 40 🔵: the orders note was unpinned
         holds = [h for h in _last_report(pg)["holds"] if h["scope"] == scope]
         assert holds and "Bageta cesnaková 100g" in holds[0]["why"], (scope, holds)
+    # review 42 🔵: no taught rows — nothing for a human to fix, no review
+    assert not _review_reason(pg, "dl", ROZOK) and not _review_reason(pg, "orders", ROZOK)
 
 
 def test_a_kos_number_whose_card_left_codex_is_overwritten_when_its_code_is_reused(pg):
@@ -4058,6 +4060,8 @@ def test_a_kos_number_whose_card_left_codex_is_overwritten_when_its_code_is_reus
     assert _binding(pg, KOS_BAGETA, "dl")[:2] == ("27", True)
     reason = _review_reason(pg, "dl", ROZOK)
     assert "„Bageta cesnaková 100g“" in reason and "iný výrobok" in reason, reason
+    # review 42 🔵: named unlike card 27 — never told it is a drift-button name
+    assert "Prevziať názov" not in reason, reason
 
 
 def test_a_pick_that_restored_another_products_kos_card_is_reset_and_its_rows_reviewed(pg):
@@ -4279,9 +4283,87 @@ def test_a_kept_restored_card_is_said_even_with_no_taught_rows(pg):
     assert "naučených" not in reason, reason
 
 
-def test_a_card_fixed_after_the_pick_is_never_reset(pg):
-    """Review 41 🟡: the warehouse fixed the restored card after the pick (Produkty — an
-    audited update): its fix wins, never reset to blank by the next sync; a human is told."""
+def _kos_croissant(pg, name="Croissant 60g"):
+    """Our croissant CROISSANT (DL) with curated data, in the Kôš under `name`."""
+    dl_snapshot.upsert_dl_catalog_card(pg, CROISSANT, name, doplnok="croissant", mass=0.06,
+                                       sklad="1", cena=0.4)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    dl_snapshot.retire_dl_catalog_card(pg, CROISSANT)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+
+
+def test_a_dry_run_between_the_pick_and_the_apply_never_loses_the_told_review(pg):
+    """Review 42 🟡: a restore-pick whose data the sync keeps stored its binding in the
+    dry-run after the pick — the apply no longer saw the pick and the human was never told
+    (a dry-run sends no alert). A judged pick's binding is stored by an applied run only: its
+    review reaches the ops message once."""
+    _seed_catalogs(pg)
+    _kos_croissant(pg)
+    cards = V1 + [_row(CROISSANT, "50", "Croissant maslový 60g")]
+    _push(pg, cards, hours_old=6)
+    codex_sync.run(pg, _cfg(apply=False))
+    card_guard.add_from_codex(pg, "dl", CROISSANT, actor="sklad")
+    _push(pg, cards, hours_old=5.5)
+    codex_sync.run(pg, _cfg(apply=False))
+    _push(pg, cards, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    assert "„Croissant 60g“" in _review_reason(pg, "dl", CROISSANT)
+    assert "obnovil z Koša" in _last_alert(pg)
+
+
+def test_a_card_of_another_name_that_once_carried_the_code_is_no_evidence(pg):
+    """Review 42 🔵 (pins the name filter of the evidence): an unrelated pagáč once carried our
+    croissant's code; the croissant, Kôš-named „Croissant 60g" (a drift), is picked back as
+    card 50 — the pagáč is no evidence the croissant is another product: its data stays."""
+    _seed_catalogs(pg)
+    _kos_croissant(pg)
+    _push(pg, V1 + [_row(CROISSANT, "90", "Pagáč nový 60g")], hours_old=7)
+    codex_sync.run(pg, _cfg())
+    cards = V1 + [_row(CROISSANT, "50", "Croissant maslový 60g")]
+    _push(pg, cards, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    card_guard.add_from_codex(pg, "dl", CROISSANT, actor="sklad")
+    _push(pg, cards, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    assert _dl_card(pg, CROISSANT)[1:] == ("croissant", 0.06, 0.4)
+
+
+def test_a_recreated_card_that_carried_the_code_under_our_name_is_no_evidence(pg):
+    """Review 42 🔵 (pins `not same_product` of the evidence): card 49 carried the code under
+    our name „Croissant 60g" and lives on as the same product („Croissant maslový 60g") — CODEX
+    recreated the croissant as card 50. The same product is never evidence of another one."""
+    _seed_catalogs(pg)
+    _kos_croissant(pg)
+    _push(pg, V1 + [_row(CROISSANT, "49", "Croissant 60g")], hours_old=7)
+    codex_sync.run(pg, _cfg())
+    cards = V1 + [_row(CROISSANT, "50", "Croissant maslový 60g"),
+                  _row("9990000000284", "49", "Croissant maslový 60g")]
+    _push(pg, cards, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    card_guard.add_from_codex(pg, "dl", CROISSANT, actor="sklad")
+    _push(pg, cards, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    assert _dl_card(pg, CROISSANT)[1:] == ("croissant", 0.06, 0.4)
+
+
+def test_a_pick_restoring_our_card_under_the_codex_name_is_quiet(pg):
+    """Review 42 🔵 (pins `if ours`): the most common restore-pick — our own card, Kôš-named as
+    CODEX names it — keeps its data and raises no review."""
+    _seed_catalogs(pg)
+    _kos_croissant(pg, name="Croissant maslový 60g")
+    cards = V1 + [_row(CROISSANT, "50", "Croissant maslový 60g")]
+    _push(pg, cards, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    card_guard.add_from_codex(pg, "dl", CROISSANT, actor="sklad")
+    _push(pg, cards, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    assert _dl_card(pg, CROISSANT)[1:] == ("croissant", 0.06, 0.4)
+    assert not _review_reason(pg, "dl", CROISSANT)
+
+
+def _picked_then(pg, edit):
+    """The bageta restored by a pick in the dry-run window, then `edit(pg)` (a Produkty save),
+    then the apply."""
     _kos_bageta(pg)
     _seed_catalogs(pg)
     _push(pg, V1 + [_row(KOS_BAGETA, "86", "Bageta cesnaková 100g")], hours_old=6)
@@ -4289,16 +4371,31 @@ def test_a_card_fixed_after_the_pick_is_never_reset(pg):
     _push(pg, BAGETA_REUSED, hours_old=5)
     codex_sync.run(pg, _cfg(apply=False))
     card_guard.add_from_codex(pg, "dl", KOS_BAGETA, actor="sklad")
-    dl_snapshot.upsert_dl_catalog_card(pg, KOS_BAGETA, "Rožok so slaninou 70g",
-                                       doplnok="rožok veľký", mass=0.07, sklad="1", cena=0.36)
-    dl_snapshot.dl_rebuild_from_overrides(pg)
-    audit.record(pg, actor="sklad", table="dl_catalog_overrides", row_id=KOS_BAGETA,
-                 action="update", before={"doplnok": "bageta"}, after={"doplnok": "rožok veľký"})
+    edit(pg)
     _push(pg, BAGETA_REUSED, hours_old=4)
     codex_sync.run(pg, _cfg())
+
+
+def test_a_card_fixed_after_the_pick_is_never_reset(pg):
+    """Review 41 🟡: the warehouse fixed the restored card after the pick (Produkty): its fix
+    wins, never reset to blank by the next sync; a human is told. Review 42 (contract of the
+    fixture changed): through the real board save (`catalog.upsert`), never a hand-written
+    audit row of a shape the board never wrote."""
+    _picked_then(pg, lambda pg: catalog.upsert(pg, "dl", {
+        "gtin": KOS_BAGETA, "name": "Rožok so slaninou 70g", "doplnok": "rožok veľký",
+        "mass": 0.07, "sklad": "1", "cena": 0.36}, actor="sklad"))
     assert _dl_card(pg, KOS_BAGETA)[1:] == ("rožok veľký", 0.07, 0.36)
     reason = _review_reason(pg, "dl", KOS_BAGETA)
     assert "„Bageta cesnaková 100g“" in reason and "vynulujú" not in reason, reason
+
+
+def test_a_name_only_save_after_the_pick_never_cancels_the_reset(pg):
+    """Review 42 🔵: after the pick Produkty flags the card's name as drifted — „Prevziať názov
+    z CODEXu" (a name-only save) is the predictable next click. It is no fix of the data: the
+    evidenced reset still happens."""
+    _picked_then(pg, lambda pg: catalog.upsert(pg, "dl", {
+        "gtin": KOS_BAGETA, "name": "Rožok so slaninou 70g"}, actor="sklad"))
+    assert _dl_card(pg, KOS_BAGETA) == OUR_ROZOK_DL
 
 
 def test_a_pick_older_than_the_history_is_never_reset(pg):
