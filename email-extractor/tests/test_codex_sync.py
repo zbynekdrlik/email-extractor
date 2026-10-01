@@ -3821,6 +3821,9 @@ def test_a_card_on_the_code_before_the_history_began_blocks_the_one_card_rule(pg
     reason = _review_reason(pg, "orders", ROZOK)
     assert "staršom ako začiatok sledovania" in reason and "27" in reason, reason
     assert "sa volá ako karta CODEX 27" in reason, reason
+    # review 36: renamed like the pagáč it would be bound to 90, which took the code over from
+    # 27 — another human; a way out that does not work is never offered
+    assert "na „Pagáč nový 60g“" not in reason, reason
 
 
 def test_a_card_on_the_code_before_the_history_began_never_lets_its_reuser_remove_ours(pg):
@@ -3846,3 +3849,47 @@ def test_an_arrival_wait_names_a_card_seen_before_the_history_began(pg):
     codex_sync.run(pg, _cfg())
     why = _waits(pg).get(("dl", BAGETA), "")
     assert "od začiatku sledovania ho nenesla" in why and "91" in why, why
+
+
+# --- review 36: a card seen before the history began carried the code FIRST -----------------
+
+def test_a_card_seen_before_the_history_began_reveals_a_take_over(pg):
+    """Review 36 🔵: our rožok was renamed with the #467 drift button to the pagáč 90, the
+    holder of ROZOK at the history's beginning — and a list older than the beginning shows
+    card 27 (the rožok) on ROZOK. `_took_over` read 27's clamped first sighting (the
+    beginning) as „seeded together" with 90: bound to the pagáč with the rožok's alias, and
+    removed once the pagáč left CODEX. 27 carried the code FIRST: the pagáč took it over → a
+    human (round 9's rule), nothing removed."""
+    _seed_catalogs(pg)
+    _drift_click(pg, ROZOK, "Pagáč nový 60g")
+    _push(pg, MOVED_BEFORE, hours_old=6)
+    codex_sync._record_history(pg)
+    _push(pg, V1, hours_old=8)
+    assert codex_sync.run(pg, _cfg())["mode"] == "skipped"
+    for hours in (5, 4):
+        _push(pg, MOVED_BEFORE, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert _binding(pg, ROZOK) is None
+    assert "pred ňou niesla karta CODEX 27" in _review_reason(pg, "orders", ROZOK)
+    gone = [r for r in MOVED_BEFORE if r["card_code"] != "90"]
+    for hours in (3, 2):
+        _push(pg, gone, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert ROZOK in _orders(pg) and _last_report(pg)["removals"] == []
+
+
+def test_a_review_naming_a_card_seen_before_the_history_began_speaks_of_several(pg):
+    """Review 36 🔵 (pins the count): the pagáč 90 on the code now, the rožok 27 only before
+    we watched, our name matches neither — the head names two cards, so „nesedí so žiadnou
+    z nich", never the one-card wording."""
+    _seed_catalogs(pg)
+    _drift_click(pg, ROZOK, "Bageta stará")
+    _push(pg, MOVED_BEFORE, hours_old=6)
+    codex_sync._record_history(pg)
+    _push(pg, V1, hours_old=8)
+    codex_sync.run(pg, _cfg())
+    for hours in (5, 4):
+        _push(pg, MOVED_BEFORE, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "nesedí so žiadnou z nich" in reason, reason
