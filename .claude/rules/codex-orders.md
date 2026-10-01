@@ -531,7 +531,12 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   new pickable code Y (`card_guard.pickable`, C's NEWEST when several) → renumber (create / merge
   into our Y bound to C / restore our Y from the Kôš), every old number to the Kôš + binding
   inactive, every memory row X→Y — but a Y another card ALSO carries, or our Y bound to another
-  card → review (never a silent merge of two products). C missing from stredisko 1 in TWO
+  card → review (never a silent merge of two products). Our Kôš Y never identified (no binding,
+  no pick — deleted before the deploy, its code freed in CODEX and REUSED for C) is restored
+  only as C's product by name (`_kos_other`; a bare marker named by its last snapshot) or when
+  it has no taught rows (its delivery history then said in the report — a hold note); another
+  product's taught rows → review, nothing moves, cancelling them lets the next list renumber
+  (round 38: the deleted bageta's taught wording came back recalling the rožok). C missing from stredisko 1 in TWO
   consecutive snapshots (`prev_as_of`; one missing push is an export glitch) → removal when X is
   nowhere in CODEX, a silent rebind when exactly one card now carries X under OUR name (card
   recreated), else review. A code with no carrier and no history is never touched (#467

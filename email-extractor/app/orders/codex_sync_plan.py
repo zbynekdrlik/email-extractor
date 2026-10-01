@@ -59,6 +59,7 @@ from .codex_sync_memory import (
     Split,
     held_clause,
     memory_split,
+    rows_on,
     taught_clause,
 )
 
@@ -625,6 +626,9 @@ class _ScopePlanner:
             # way out is read once the whole plan is done (`_other_card_review`)
             self.other_card.append((item, succ, str(other), card))
             return
+        if target is None and binned is not None and other is None and self._kos_other(
+                item, binned, card, succ):
+            return
         hit_name = str((hit or {}).get("name") or "")
         if hit_known is not None and self._contested(hit_known, hit_name, succ):
             # our card with the new code — live, or its Kôš copy (review 8) — was renamed by a
@@ -676,6 +680,38 @@ class _ScopePlanner:
             self.live[to] = dict(_fields(group[0]), gtin=to)
             self.binned = [b for b in self.binned if str(b["gtin"]) != to]
         self.identity[to] = (card, succ)
+
+    def _kos_other(self, item: dict, binned: dict, card: str, succ: str) -> bool:
+        """Our Kôš number under the new code that was never identified (no binding, no pick —
+        e.g. deleted before the deploy, its code freed in CODEX and then REUSED for this card):
+        restored as ours only when it is this card's product by name, or has no taught rows —
+        another product's taught rows would be adopted by our card, a wording of a deleted
+        product recalling ours (review 38: the bageta's wording shipped as the rožok) → a human,
+        nothing moves (True). Its delivery history only → the renumber goes on, the history
+        said in the report (review 12's rule)."""
+        at = str(binned["gtin"])
+        name = self._kos_name(binned)
+        key = codex_cards.name_key(name)
+        if key and key in self.cx.product(card, succ):
+            return False
+        taught, shipped = rows_on(self.conn, self.scope, at)
+        if taught:
+            self.plan.add_review(item, texts.renumber_kos_other(
+                item["gtin"], succ, card, self.cx.name_of(card, succ), name, taught))
+            return True
+        if shipped:
+            self._hold_note(dict(item, gtin=at, name=name), at, shipped,
+                            texts.why_kos_other(at, name, card))
+        return False
+
+    def _kos_name(self, card: dict) -> str:
+        """A Kôš card's name — a bare retirement marker's from the newest snapshot that had it."""
+        name = str(card.get("name") or "").strip()
+        if name:
+            return name
+        last = (snapshot.last_known_card if self.scope.name == "orders"
+                else dl_snapshot.last_known_dl_card)(self.conn, str(card["gtin"]))
+        return str(last["name"]) if last else ""
 
     def _other_card_review(self, item: dict, succ: str, other: str, card: str) -> None:
         """The review of a renumber whose target is ANOTHER CODEX card's number — its way out

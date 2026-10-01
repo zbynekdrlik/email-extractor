@@ -10,6 +10,7 @@ moves).
 - `taught_clause` / `TAUGHT_SOURCES` — a curated warehouse decision (answers, „Doučiť", the
   sheet import — `memory.CURATED_SOURCES`); anything else is delivery history.
 - `memory_split` — what a move of some numbers carries vs what it holds (taught / shipped).
+- `rows_on` — the taught / shipped rows a number has (a Kôš card a renumber would restore).
 """
 from __future__ import annotations
 
@@ -83,6 +84,19 @@ class Split:
     def at(self, fallback: str) -> str:
         """Where the held rows are — a legacy „0"+code twin named as such (review 15)."""
         return ", ".join(self.held_at) or fallback
+
+
+def rows_on(conn, scope: Scope, gtin: str) -> tuple[int, int]:
+    """(taught, shipped): the live mapping rows of our number `gtin` in the scope's memory."""
+    taught = shipped = 0
+    for t in scope.memory:
+        a, b = conn.execute(
+            f"SELECT count(*) FILTER (WHERE {taught_clause(t)}), "
+            f"count(*) FILTER (WHERE NOT ({taught_clause(t)})) "
+            f"FROM {t} WHERE gtin = %s AND deleted_at IS NULL", (gtin,)).fetchone()
+        taught += int(a or 0)
+        shipped += int(b or 0)
+    return taught, shipped
 
 
 def memory_split(conn, scope: Scope, gtins: list[str], hold: datetime | None) -> Split:

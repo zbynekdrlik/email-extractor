@@ -4016,3 +4016,38 @@ def test_an_unknown_kos_card_with_delivery_history_only_is_said_never_silent(pg)
     assert ROZOK not in _dl(pg) and _dl(pg)[KOS_BAGETA]["name"] == "Rožok so slaninou 70g"
     holds = [h for h in _last_report(pg)["holds"] if h["scope"] == "dl"]
     assert holds and "Bageta cesnaková 100g" in holds[0]["why"], holds
+
+
+KOS_ROZOK = "9990000000260"    # synthetic: an older number of our rožok, deleted
+
+
+def test_an_unknown_kos_card_of_the_same_product_is_restored_with_its_rows(pg):
+    """Review 38 (pins the name rule — a bare marker's name too): our older rožok number in
+    the Kôš is a bare retirement marker (a snapshot-only card), named by the snapshot that had
+    it — card 27's product: the renumber restores it, its taught rows are ours."""
+    _seed_catalogs(pg)
+    dl_snapshot._freeze(pg, [
+        {"gtin": ROZOK, "name": "Rožok so slaninou 70g", "doplnok": "rožok slanina",
+         "mass": 0.07, "sklad": "1", "cena": 0.35},
+        {"gtin": KOS_ROZOK, "name": "Rožok so slaninou 70g", "doplnok": "", "mass": None,
+         "sklad": "1", "cena": None},
+    ], [])
+    pg.execute(
+        "INSERT INTO dl_item_memory (supplier_ean, item_key, item_raw, gtin, card, delivered_on, "
+        "cnt, source, created_at) VALUES ('S9', 'rozok slaninovy', 'Rožok slaninový', %s, "
+        "'Rožok', %s, 1, 'human', %s)", (KOS_ROZOK, date(2026, 9, 1), _BEFORE))
+    assert dl_snapshot.retire_dl_catalog_card(pg, KOS_ROZOK)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    assert pg.execute("SELECT name FROM dl_catalog_overrides WHERE gtin = %s",
+                      (KOS_ROZOK,)).fetchone()[0] == ""
+    _push(pg, V1, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    moved = [dict(r, code=KOS_ROZOK) if r["card_code"] == "27" else r for r in V1]
+    _push(pg, moved, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    dl = _dl(pg)
+    assert ROZOK not in dl and dl[KOS_ROZOK]["name"] == "Rožok so slaninou 70g"
+    assert not _review_reason(pg, "dl", ROZOK)
+    gtins = {c["gtin"] for c in dl_snapshot.dl_catalog_for_management(pg)}
+    recalled = dl_memory.resolve(pg, "S9", "Rožok slaninový", catalog_gtins=gtins)
+    assert recalled is not None and recalled.gtin == KOS_ROZOK

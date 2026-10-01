@@ -156,6 +156,28 @@ def renumber_other_card(scope: str, succ: str, other: str, card: str, card_name:
             f"ho pri otázke cez „Vybrať kartu z CODEXu“ — {result}.")
 
 
+def _kos_label(name: str) -> str:
+    return f"„{name}“" if name else "bez názvu"
+
+
+def renumber_kos_other(gtin: str, succ: str, card: str, card_name: str, kos_name: str,
+                       taught: int) -> str:
+    """Our number's CODEX card got the new code `succ`, but our never-identified Kôš card
+    under `succ` is another product with taught rows — restored as ours it would adopt them
+    (review 38). Cancelling them lets the next list renumber."""
+    kos = _kos_label(kos_name)
+    return (f"karta CODEX {card} („{card_name}“) má nový kód {succ}, ale náš kód {succ} je v "
+            f"Koši ako {kos} — iný výrobok — a má {taught} naučených priradení: prečíslovanie "
+            f"{gtin} → {succ} čaká, nič sa nemení (obnovená karta by ich prevzala). Naučené "
+            f"priradenia k číslu {succ} patria karte {kos}: {CHECK_TAUGHT} a zruš ich — potom "
+            f"sa {gtin} pri ďalšom zozname kariet prečísluje na {succ} (kartu {succ} v Koši "
+            f"prepíše).")
+
+
+def why_kos_other(at: str, kos_name: str, card: str) -> str:
+    return f"číslo {at} v Koši bolo {_kos_label(kos_name)} — iný výrobok než karta CODEX {card}"
+
+
 def renumber_contested(succ: str, card: str, hit_name: str, was: str, live: bool) -> str:
     """Our number with the new code (live or its Kôš copy) a human renamed after the retire."""
     where = "" if live else "v Koši "
