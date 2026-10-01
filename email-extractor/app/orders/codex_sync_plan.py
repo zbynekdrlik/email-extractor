@@ -394,6 +394,9 @@ class _ScopePlanner:
         # our number now ANOTHER product -> (its old CODEX card, the #477 pick time; None for
         # a rename rebind — `_reset_from`)
         self.repicked: dict[str, tuple[str, datetime | None]] = {}
+        # our numbers whose #477 pick waits out a glitch this list — nothing may land on them
+        # (review 22 🟡: a merge's binding superseded the waiting pick, its reset never ran)
+        self.waiting: set[str] = set()
 
     def run(self) -> None:
         groups = _groups(self.catalog, self.scope.name)
@@ -544,10 +547,11 @@ class _ScopePlanner:
                 if cx.glitched(known.card) or (old is not None and old.card != known.card
                                                and cx.glitched(old.card)):
                     # the picked card — or the one it replaces — missing from ONE list is a
-                    # glitch: the pick waits (no seed, no reset), the next list settles it
-                    # (review 20 🟡: the reset kept the old product's sklad; review 21 🔵: the
-                    # rows review called the replaced product gone from CODEX — both final once
-                    # the binding is stored)
+                    # glitch: the pick waits (no seed, no reset, no renumber onto it — review
+                    # 22), the next list settles it (review 20 🟡: the reset kept the old
+                    # product's sklad; review 21 🔵: the rows review called the replaced product
+                    # gone from CODEX — both final once the binding is stored)
+                    self.waiting.update(item["gtins"])
                     return None
                 replaces = old is not None and old.card != known.card
                 self._seed(item, known.card, replaces=replaces)
@@ -682,6 +686,8 @@ class _ScopePlanner:
         target = _ours(self.live.values(), self.scope.name).get(succ)
         binned = _ours(self.binned, self.scope.name).get(succ)
         hit = target if target is not None else binned
+        if hit is not None and str(hit["gtin"]) in self.waiting:
+            return                           # its pick settles first (next list) — review 22
         hit_known = self._known(str(hit["gtin"])) if hit is not None else None
         other = hit_known.card if hit_known is not None else None
         if other not in (None, card):
