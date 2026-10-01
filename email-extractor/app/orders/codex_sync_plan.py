@@ -680,12 +680,8 @@ class _ScopePlanner(KosRules):
                                                          taken[1]))
         if hit is not None:
             self._adopted_review(item, str(hit["gtin"]), card, succ)
-            # known only through a restore-pick never judged (undone in the Kôš / deleted again
-            # before any applied run) = never identified (review 43: its rows adopted silently)
-            unjudged = (target is None and hit_known is not None and hit_known.picked
-                        and hit_known.old is None)
-            if target is None and (other != card or unjudged):
-                self._kos_review(item, hit, card, succ, None if unjudged else other)
+            if target is None:
+                self._kos_hit_review(item, hit, hit_known, card, succ, other)
         if target is not None:
             fill = _fill(self.scope, target, group[0])
             if fill:

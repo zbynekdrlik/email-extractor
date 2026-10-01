@@ -29,15 +29,17 @@ from . import dl_item_conflict, dl_memory, dl_supplier_memory, memory, snapshot
 log = logging.getLogger("orders.teach")
 
 
-def _audit_change(conn, *, action, qid, message_id, by="", after=None):
+def _audit_change(conn, *, action, qid, message_id, by="", after=None,
+                  table="order_questions", row_id=None):
     """#442: thin, best-effort audit-log hook for the teach answer/undo paths — every human
-    teaching decision lands one `audit_log` row. Imported LAZILY (audit is a leaf module in
-    app.board.services, no import cycle) and wrapped so a failed audit write can NEVER break
-    the teaching operation it merely records."""
+    teaching decision lands one `audit_log` row (on the question; `table`/`row_id` another row
+    it changed — #478: the card a #462 mass answer writes). Imported LAZILY (audit is a leaf
+    module in app.board.services, no import cycle) and wrapped so a failed audit write can
+    NEVER break the teaching operation it merely records."""
     try:
         from ..board.services import audit
-        audit.record(conn, actor=(by or "auto:teach"), table="order_questions",
-                     row_id=qid, action=action, question_id=qid,
+        audit.record(conn, actor=(by or "auto:teach"), table=table,
+                     row_id=qid if row_id is None else row_id, action=action, question_id=qid,
                      message_id=message_id, after=after)
     except Exception:
         log.exception("audit hook failed (%s, question %s)", action, qid)
@@ -1251,24 +1253,14 @@ def _apply_dl_mass(conn, cfg, q: dict, choice: str, by: str) -> dict:
         return {}
     from . import dl_snapshot
     if dl_snapshot.set_dl_card_mass(conn, gtin, mass):
-        _audit_card_mass(conn, gtin, mass, by, q["id"])
+        # the CARD changed too: the #478 CODEX sync reads it as a human fix of its data (review
+        # 43: a reset wiped the answer) — `after` only, the question's undo is the way back
+        _audit_change(conn, action="update", qid=q["id"], message_id=q.get("message_id"),
+                      by=by, after={"gtin": gtin, "mass": mass},
+                      table="dl_catalog_overrides", row_id=gtin)
     from . import dl_worker
     released = dl_worker.release_for_question(conn, cfg, q["id"])
     return {"released": released}
-
-
-def _audit_card_mass(conn, gtin: str, mass: float | None, by: str, qid) -> None:
-    """The answered (or undone) mass written onto the CARD leaves an `update` row on the card
-    too — the #478 CODEX sync reads it as a human fix of the card's data (review 43: a reset
-    of a pick-restored card wiped the warehouse's answer). `after` only — the question's own
-    undo is the way back, never a Kôš restore of this row. Best-effort like `_audit_change`."""
-    try:
-        from ..board.services import audit
-        audit.record(conn, actor=(by or "auto:teach"), table="dl_catalog_overrides",
-                     row_id=gtin, action="update", question_id=qid,
-                     after={"gtin": gtin, "mass": mass}, note="hmotnosť z odpovede (#462)")
-    except Exception:
-        log.exception("audit hook failed (dl_mass card %s, question %s)", gtin, qid)
 
 
 def _undo_dl_mass(conn, q: dict) -> dict:
@@ -1279,7 +1271,9 @@ def _undo_dl_mass(conn, q: dict) -> dict:
     payload = q.get("payload") or {}
     gtin = str(payload.get("gtin") or "")
     if gtin and dl_snapshot.set_dl_card_mass(conn, gtin, None):
-        _audit_card_mass(conn, gtin, None, "", q["id"])
+        _audit_change(conn, action="update", qid=q["id"], message_id=q.get("message_id"),
+                      after={"gtin": gtin, "mass": None}, table="dl_catalog_overrides",
+                      row_id=gtin)
     conn.execute(
         """UPDATE order_questions
               SET status = 'open', answer = NULL, answered_by = NULL, answered_at = NULL,

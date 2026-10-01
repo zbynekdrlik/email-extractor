@@ -24,7 +24,7 @@ from .codex_sync_memory import SYNC_ACTOR, rows_on
 
 if TYPE_CHECKING:
     from .codex_sync_list import Codex, Event
-    from .codex_sync_plan import Plan, Scope
+    from .codex_sync_plan import Known, Plan, Scope
 
 
 @dataclass
@@ -53,8 +53,28 @@ class KosRules:
     def _took_over(self, code: str, card: str) -> list[str]:
         raise NotImplementedError       # the planner's identity rule
 
+    def _kos_hit_review(self, item: dict, binned: dict, hit_known: Known | None, card: str,
+                        succ: str, other: str | None) -> None:
+        """Our Kôš number `binned` a renumber of `card` onto `succ` restores: not known as
+        `card` (`other`: unknown, or a card that left CODEX) → `_kos_review`. Known as `card` only
+        through a RESTORE-pick never judged (undone in the Kôš / deleted again before any applied
+        run): what it was BEFORE the pick decides — never identified (review 43), or the card its
+        binding names (review 44: a re-pick over another card's binding hid its rows) — counting
+        only its rows from before the pick. A FRESH pick made it `card` (review 44: no review)."""
+        if other != card:
+            self._kos_review(item, binned, card, succ, other)
+            return
+        if hit_known is None or not hit_known.picked:
+            return
+        ev = self.cx.events.get((self.scope.table, str(binned["gtin"])))
+        old = hit_known.old
+        if ev is None or not ev.restored or (old is not None and old.card == card):
+            return
+        self._kos_review(item, binned, card, succ, old.card if old is not None else None,
+                         since=ev.at)
+
     def _kos_review(self, item: dict, binned: dict, card: str, succ: str,
-                    known: str | None) -> None:
+                    known: str | None, *, since: datetime | None = None) -> None:
         """Our Kôš number under the new code that was never identified (no binding, no pick —
         e.g. deleted before the deploy, its code freed in CODEX and then REUSED for this card),
         or is a card that left CODEX for good (`known`, review 40), is restored as ours: CODEX's
@@ -77,7 +97,7 @@ class KosRules:
             if ours:
                 return
         self._kos_rows(item, str(binned["gtin"]), card, name, drift, others, picked=False,
-                       succ=succ)
+                       since=since, succ=succ)
 
     def _restored_pick(self, item: dict, gtin: str, code: str, card: str, ev: Event) -> bool:
         """A #477 pick of `card` that restored our NEVER-identified Kôš card `gtin` as it was,

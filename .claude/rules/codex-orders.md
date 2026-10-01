@@ -559,9 +559,12 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   stored it, the apply never reset, and the one-time review never reached ops); its review is
   written once the WHOLE plan is done (`KosPick` → `_kos_pick_reviews`: the rows sit where the
   same plan's renumber moves them, round 43) and counts only rows from BEFORE the pick (the
-  warehouse's own answer at that question is ours). A Kôš number known ONLY through a pick never
-  judged (undone in the Kôš / deleted again before any applied run) is never identified:
-  `_kos_review` decides (round 43: its rows adopted silently). Texts say what the Kôš card is:
+  warehouse's own answer at that question is ours). A Kôš number known as C ONLY through a
+  RESTORE-pick never judged (undone in the Kôš / deleted again before any applied run) is
+  decided by what it was BEFORE the pick (`KosRules._kos_hit_review`): never identified, or the
+  card its binding names — counting only its rows from before the pick (rounds 43-44: its rows
+  adopted silently, also behind a re-pick over another card's binding — the very delete + pick
+  the other-card review advises); a FRESH pick made it C (no review). Texts say what the Kôš card is:
   another card's product / a drift-button name / only a different name (we do not know) /
   nameless. `card_guard.CURATED_FIELDS` is the ONE list of curated fields: the board audits it,
   the sync fills / resets / reads it (round 43: four hand-kept copies). C missing from stredisko 1 in TWO
