@@ -535,3 +535,17 @@ then wedged after 8 tests (`pg_stat_activity`: an `idle in transaction` `FOR UPD
 `held_orders` from the orphan + a `TRUNCATE` waiting on it). Always find the real process with
 `ps -eo pid,ppid,etimes,cmd | grep '[p]ython -m pytest'` (or `pgrep -f 'python -m pytest'`), kill
 THAT, `pg_terminate_backend` the leftovers, and wait on the python pid — never on `$!`.
+
+## Proving a new test actually pins a fix — a module-swap pytest plugin, no mutmut (#478)
+
+A test written for a review finding can pass on the fixed code AND on a broken variant of it
+(round 46's test had one review line, so it fit under the 40-line cap whether or not the fix's
+`keep=` existed — two mutants survived the whole module). The cheap, diff-scoped check used for
+47 review rounds of #478: a scratch pytest plugin (`-p <plugin>` with the scratch dir on
+`PYTHONPATH`) that, at import, reads the worktree module, `assert`s the target snippet occurs
+EXACTLY once, `str.replace`s it with the mutant, writes the copy to scratch, and loads it via
+`importlib.util.spec_from_file_location` into `sys.modules[<module>]` + `setattr(<package>,
+<short>, mod)` (both, or `from app.orders import x` callers still see the original). Select the
+mutant with an env var (`MUTANT=k0`), run only the relevant tests with `-x`, and expect a
+FAILED line per mutant. Keep the plugin in the scratchpad, never in the repo, and add the
+pin test only when a mutant survives — the mutant's name + what it breaks goes in the commit.
