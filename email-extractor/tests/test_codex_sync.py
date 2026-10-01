@@ -3947,11 +3947,12 @@ BAGETA_TAUGHT = "Bageta cesnaková"          # the bageta's taught wording (a n�
 BAGETA_SHIPPED = "Bageta cesnaková veľká"    # a wording only its delivery history knows
 
 
-def _kos_bageta(pg, *, taught=True, shipped=False, name="Bageta cesnaková 100g"):
+def _kos_bageta(pg, *, taught=True, shipped=False, name="Bageta cesnaková 100g",
+                deleted=True):
     """Our bageta KOS_BAGETA (orders + DL) with its mapping rows (orders + DL), deleted (Kôš)
     and never bound — the warehouse deleted it before the deploy (the #467 cleanup of freed
     codes). Rows keyed exactly as the matcher keys them (review 39 🔵: a made-up key made the
-    recall check vacuous). `name`: what it was called when deleted."""
+    recall check vacuous). `name`: what it was called when deleted; `deleted=False`: live."""
     snapshot.upsert_catalog_card(pg, KOS_BAGETA, name, alias="bageta cesnak")
     snapshot.rebuild_from_overrides(pg)
     dl_snapshot.upsert_dl_catalog_card(pg, KOS_BAGETA, name,
@@ -3969,6 +3970,8 @@ def _kos_bageta(pg, *, taught=True, shipped=False, name="Bageta cesnaková 100g"
                 "INSERT INTO item_memory (customer_ean, item_key, item_raw, gtin, card, "
                 "delivered_on, source, created_at) VALUES ('C9', %s, %s, %s, 'Bageta', %s, %s, "
                 "%s)", (memory.item_key(raw), raw, KOS_BAGETA, date(2026, 9, 1), source, _BEFORE))
+    if not deleted:
+        return
     snapshot.retire_catalog_card(pg, KOS_BAGETA)
     snapshot.rebuild_from_overrides(pg)
     dl_snapshot.retire_dl_catalog_card(pg, KOS_BAGETA)
@@ -4583,3 +4586,123 @@ def test_a_fresh_pick_at_a_reused_code_is_no_kos_restore(pg):
     codex_sync.run(pg, _cfg())
     assert not _review_reason(pg, "dl", KOS_BAGETA)
     assert _dl_card(pg, KOS_BAGETA) == OUR_ROZOK_DL
+
+
+# --- review 44 ------------------------------------------------------------------------------
+
+def _answer_after_pick(pg, scope):
+    """The warehouse's own answer at the pick's question — a taught row AFTER the pick."""
+    if scope == "dl":
+        pg.execute(
+            "INSERT INTO dl_item_memory (supplier_ean, item_key, item_raw, gtin, card, "
+            "delivered_on, cnt, source, created_at) VALUES ('S7', %s, 'Rožok slanina', %s, "
+            "'Rožok', %s, 1, 'human', %s)", (memory.item_key("Rožok slanina"), KOS_BAGETA,
+                                            date(2026, 9, 2), datetime.now(UTC) + timedelta(seconds=1)))
+    else:
+        pg.execute(
+            "INSERT INTO item_memory (customer_ean, item_key, item_raw, gtin, card, delivered_on, "
+            "source, created_at) VALUES ('C7', %s, 'Rožok slanina', %s, 'Rožok', %s, 'human', %s)",
+            (memory.item_key("Rožok slanina"), KOS_BAGETA, date(2026, 9, 2),
+             datetime.now(UTC) + timedelta(seconds=1)))
+
+
+def _bound_bageta_repicked(pg, undo):
+    """Our bageta, BOUND to card 86, removed by the sync when 86 left CODEX; its code then
+    reused for card 27. In the dry-run window the warehouse re-picks card 27 there in both
+    catalogs (restoring the bageta), answers with it, then takes the restore back (`undo`).
+    Then the apply."""
+    _kos_bageta(pg, deleted=False)
+    _seed_catalogs(pg)
+    _push(pg, V1 + [_row(KOS_BAGETA, "86", "Bageta cesnaková 100g")], hours_old=8)
+    codex_sync.run(pg, _cfg())
+    for hours in (7, 6):
+        _push(pg, V1, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert KOS_BAGETA not in _dl(pg) and _binding(pg, KOS_BAGETA, "dl")[:2] == ("86", False)
+    _push(pg, BAGETA_REUSED, hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    for scope in ("dl", "orders"):
+        card_guard.add_from_codex(pg, scope, KOS_BAGETA, actor="sklad")
+        _answer_after_pick(pg, scope)
+        undo(pg, scope)
+    _push(pg, BAGETA_REUSED, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    for scope in ("dl", "orders"):
+        reason = _review_reason(pg, scope, ROZOK)
+        assert "„Bageta cesnaková 100g“" in reason, (scope, reason)
+        # only the bageta's own row — the warehouse's answer after the pick is ours
+        assert "1 naučených priradení" in reason, (scope, reason)
+
+
+def test_an_undone_repick_of_a_bound_kos_number_never_hides_its_rows(pg):
+    """Review 44 🟡: a re-pick over another card's binding (our bageta bound to card 86, 86
+    gone, its code reused for card 27), undone in the Kôš: known as card 27 through that pick
+    (the old binding behind it), `other == card` — the bageta's taught rows were adopted with
+    no review, in both catalogs (the sync's own review advises exactly this delete + pick)."""
+    def undo(pg, scope):
+        table = "dl_catalog_overrides" if scope == "dl" else "catalog_overrides"
+        aid = pg.execute("SELECT id FROM audit_log WHERE table_name = %s AND row_id = %s AND "
+                         "action = 'create' AND actor = 'sklad' ORDER BY id DESC LIMIT 1",
+                         (table, KOS_BAGETA)).fetchone()[0]
+        audit.restore(pg, aid, by="sklad")
+    _bound_bageta_repicked(pg, undo)
+
+
+def test_a_repick_of_a_bound_kos_number_deleted_again_never_hides_its_rows(pg):
+    """Review 44 🟡: the same, the re-picked card deleted again on Produkty."""
+    _bound_bageta_repicked(
+        pg, lambda pg, scope: catalog.delete(pg, scope, KOS_BAGETA, actor="sklad"))
+
+
+def test_a_fresh_pick_deleted_again_is_no_kos_restore(pg):
+    """Review 44 🔵: card 27 moved onto a reused code with NO Kôš card of ours on it; the
+    warehouse picked 27 there (a FRESH card, never a restore), answered with it and deleted the
+    duplicate. The picker made it card 27 — never told it may be another product (the review
+    said the name may come from the drift button)."""
+    _seed_catalogs(pg)
+    _push(pg, V1 + [_row(KOS_BAGETA, "86", "Bageta cesnaková 100g")], hours_old=6)
+    codex_sync.run(pg, _cfg())
+    _push(pg, BAGETA_REUSED, hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    card_guard.add_from_codex(pg, "dl", KOS_BAGETA, actor="sklad")
+    _answer_after_pick(pg, "dl")
+    catalog.delete(pg, "dl", KOS_BAGETA, actor="sklad")
+    _push(pg, BAGETA_REUSED, hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert ROZOK not in _dl(pg) and KOS_BAGETA in _dl(pg)
+    assert not _review_reason(pg, "dl", ROZOK)
+
+
+def test_a_judged_picks_delivery_history_note_names_its_new_number(pg):
+    """Review 44 🔵 (pins the round-43 hold note): a judged restore-pick with delivery history
+    only, renumbered in the same plan — the note names the number the rows move to."""
+    _seed_catalogs(pg)
+    _kos_croissant(pg)
+    pg.execute(
+        "INSERT INTO dl_item_memory (supplier_ean, item_key, item_raw, gtin, card, delivered_on, "
+        "cnt, source, created_at) VALUES ('S9', %s, 'Croissant', %s, 'Croissant', %s, 1, "
+        "'ship', %s)", (memory.item_key("Croissant"), CROISSANT, date(2026, 9, 1), _BEFORE))
+    _push(pg, V1 + [_row(CROISSANT, "50", "Croissant maslový 60g")], hours_old=6)
+    codex_sync.run(pg, _cfg(apply=False))
+    card_guard.add_from_codex(pg, "dl", CROISSANT, actor="sklad")
+    _push(pg, V1 + [_row(CROISSANT_NEW, "50", "Croissant maslový 60g")], hours_old=5)
+    codex_sync.run(pg, _cfg())
+    holds = [h for h in _last_report(pg)["holds"] if h["scope"] == "dl"]
+    assert holds and holds[0]["at"] == CROISSANT_NEW and holds[0]["moved"], holds
+
+
+def test_a_dl_mass_answer_and_its_undo_are_audited_on_the_card(pg):
+    """Review 44 🔵 (pins the undo's audit): the #462 answer and its undo each leave an
+    `update` on the card — a human change of its data, read by the CODEX sync."""
+    _seed_catalogs(pg)
+    qid = teach.ask_dl_mass(pg, message_id="mk478b", supplier_ean="9000000000001",
+                            supplier_name="Dodávateľ X", gtin=MUKA, card="Múka",
+                            wording="muka", quantity=1, unit="ks")
+    pg.execute("UPDATE order_questions SET status = 'answered' WHERE id = %s", (qid,))
+    cfg = Config(pg_dsn=PG_DSN or "", data_dir="/tmp", ops_channel_id=77)
+    teach.KINDS["dl_mass"].apply(pg, cfg, teach.get(pg, qid), "25", "sklad")
+    teach.KINDS["dl_mass"].undo(pg, teach.get(pg, qid))
+    rows = pg.execute("SELECT after->>'mass' FROM audit_log WHERE table_name = "
+                      "'dl_catalog_overrides' AND row_id = %s AND action = 'update' "
+                      "ORDER BY id", (MUKA,)).fetchall()
+    assert [r[0] for r in rows] == ["25.0", None]
