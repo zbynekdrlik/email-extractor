@@ -3059,6 +3059,10 @@ def test_an_unbound_number_renamed_to_the_reusers_name_goes_to_a_human(pg):
     # review 27 🔵: the pick way out keeps data the review suspects is the rožok's — the taught
     # rows are pointed at, like the bound contest review does
     assert "Naučené" in reason
+    # review 29 🔵: the text says the pagáč carries the code NOW, and never advises renaming
+    # our card to the name it already has
+    assert "ktorá ho teraz nesie" in reason
+    assert "na „Pagáč syrový 60g“ — pri ďalšom" not in reason
 
 
 def test_an_other_card_review_reads_the_catalog_the_whole_plan_leaves(pg):
@@ -3257,3 +3261,78 @@ def test_a_dl_carrier_review_points_at_the_dl_curated_fields(pg):
         _push(pg, v2, hours_old=hours)
         codex_sync.run(pg, _cfg())
     assert "jej doplnok / hmotnosť / cena (Produkty)" in _review_reason(pg, "dl", BAGETA)
+
+
+# --- review 29: ONE rule for an unbound number, whatever the number of carriers now ----------
+
+def test_a_duplicate_carrier_never_turns_a_drift_review_into_a_binding(pg):
+    """Review 29 🟡: the drift-renamed unbound ROZOK (named like the pagáč that took the code
+    over from the rožok) — a duplicate carrier 80 shows up on ONE list: the multi-carrier rule
+    bound it to the pagáč by name (no history rules), and the first apply then renumbered it to
+    the pagáč's next code with the rožok's alias and wordings. Still a human's call."""
+    _seed_catalogs(pg)
+    _seed_memory(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync._record_history(pg)
+    _push(pg, _reused(V1), hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    _drift_click(pg, ROZOK, "Pagáč syrový 60g")
+    _push(pg, _reused(V1) + [_row(ROZOK, "80", "Bageta šunková 120g")], hours_old=4)
+    codex_sync.run(pg, _cfg(apply=False))
+    assert _binding(pg, ROZOK) is None
+    assert "27" in _review_reason(pg, "orders", ROZOK)
+    for hours in (3, 2):
+        _push(pg, _reused(V1, pagac_code=PAGAC_W), hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert PAGAC_W not in _orders(pg) and _binding(pg, ROZOK) is None
+    assert set(_gtins(pg, "item_memory")) == {ROZOK}
+
+
+def test_cards_seeded_together_never_count_as_a_take_over(pg):
+    """Review 29 🔵 (pins the tie rule): ROZOK sat on cards 27 and 28 in the pre-deploy list
+    (the migration seed — one `first_seen` for both); 28 leaves — our rožok, named like 27, is
+    bound to 27 with no review (neither took the code over from the other)."""
+    _seed_catalogs(pg)
+    _push(pg, V1 + [_row(ROZOK, "28", "Bageta šunková 120g")], hours_old=6)
+    codex_sync._record_history(pg)
+    for hours in (5, 4):
+        _push(pg, V1, hours_old=hours)
+        codex_sync.run(pg, _cfg(apply=False))
+    assert _binding(pg, ROZOK)[0] == "27"
+    assert not _review_reason(pg, "orders", ROZOK)
+
+
+def test_a_take_over_review_names_who_carries_the_code_now(pg):
+    """Review 29 🔵: our unbound ROZOK drift-named like the pagáč (79, which took ROZOK over
+    from the rožok and moved on); card 80 carries ROZOK now — the review said the pagáč carried
+    it „last" and never named 80, whose pick it then advised."""
+    _seed_catalogs(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync._record_history(pg)
+    _push(pg, _reused(V1), hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    _drift_click(pg, ROZOK, "Pagáč syrový 60g")
+    v3 = _reused(V1, pagac_code=PAGAC_W) + [_row(ROZOK, "80", "Bageta šunková 120g")]
+    for hours in (4, 3):
+        _push(pg, v3, hours_old=hours)
+        codex_sync.run(pg, _cfg(apply=False))
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "teraz ho nesie karta CODEX 80" in reason and "pred ňou niesla karta CODEX 27" in reason
+
+
+def test_a_code_no_card_carries_names_its_last_and_earlier_carriers(pg):
+    """Review 29 🔵 (pins the no-carrier review text): ROZOK went 27 → the pagáč → nobody; our
+    „Bageta stará" is named like neither — the review names the pagáč as the last carrier and
+    the rožok before it."""
+    _seed_catalogs(pg)
+    snapshot.upsert_catalog_card(pg, ROZOK, "Bageta stará")
+    snapshot.rebuild_from_overrides(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync._record_history(pg)
+    _push(pg, _reused(V1), hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    for hours in (4, 3):
+        _push(pg, _reused(V1, pagac_code=PAGAC_W), hours_old=hours)
+        codex_sync.run(pg, _cfg(apply=False))
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "naposledy ho niesla karta CODEX 79, predtým 27" in reason
