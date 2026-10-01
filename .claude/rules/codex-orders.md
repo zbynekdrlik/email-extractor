@@ -539,7 +539,13 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   to a human and its delivery history is said (a hold note) — rounds 38-39: silently the
   bageta's wording recalled the rožok; a BLOCK instead held every order line of ours on a code
   CODEX no longer has, protected nothing in orders (orders recall never reads the catalog)
-  and led the warehouse to a pick restoring the bageta's data. C missing from stredisko 1 in TWO
+  and led the warehouse to a pick restoring the bageta's data. The SAME treatment (round 40)
+  for our Kôš Y KNOWN as a card that left CODEX for good (`gone_twice` — no two live products;
+  products compared with `same_product`; blocked, every line on the dead code was held) and
+  for a #477 pick that RESTORED our never-identified Kôš card as it was (`Event.restored` +
+  its name then, `_kos_verdict` in `_identify`'s picked branch): reset like a re-pick of
+  another product (`reset_kos`), its taught rows to a human (`texts.kos_picked`) — kept, the
+  merge filled only blanks and the bageta's mass / cena stayed on the rožok. C missing from stredisko 1 in TWO
   consecutive snapshots (`prev_as_of`; one missing push is an export glitch) → removal when X is
   nowhere in CODEX, a silent rebind when exactly one card now carries X under OUR name (card
   recreated), else review. A code with no carrier and no history is never touched (#467

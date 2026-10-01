@@ -160,6 +160,9 @@ class Binding:
 class Event:
     at: datetime
     card: str | None     # the CODEX card a #477 pick named; None for a legacy creation
+    # the pick restored our Kôš card as it was (its name then) — not a fresh card (review 40)
+    restored: bool = False
+    name: str = ""
 
 
 def is_named(name: str, rows: list[Row]) -> bool:
@@ -242,14 +245,17 @@ def _events(conn) -> dict[tuple[str, str], Event]:
     pick included) — never the sync's own writes. A Kôš „Vrátiť" (`restore`) is NOT a new card:
     it reverts one change of the same card (review 4 🟡: counting it reset a valid binding and
     re-bound our rožok to the pagáč that reused its code); a number the sync retired that comes
-    back is re-identified through its inactive binding anyway."""
+    back is re-identified through its inactive binding anyway. A pick that RESTORED our Kôš
+    card says so (`after.restored`, with the card's name then — review 40)."""
     rows = conn.execute(
-        """SELECT DISTINCT ON (table_name, row_id) table_name, row_id, ts, after->>'codex_card'
+        """SELECT DISTINCT ON (table_name, row_id) table_name, row_id, ts, after->>'codex_card',
+                  COALESCE(after->>'restored', '') = 'true', COALESCE(after->>'name', '')
              FROM audit_log
             WHERE table_name IN ('catalog_overrides', 'dl_catalog_overrides')
               AND action = 'create' AND actor <> %s
             ORDER BY table_name, row_id, id DESC""", (SYNC_ACTOR,)).fetchall()
-    return {(t, str(g)): Event(ts, card or None) for t, g, ts, card in rows}
+    return {(t, str(g)): Event(ts, card or None, bool(restored), name or "")
+            for t, g, ts, card, restored, name in rows}
 
 
 def load(conn, cards: codex_cards.CodexCards, as_of: datetime,

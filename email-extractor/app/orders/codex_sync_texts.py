@@ -181,6 +181,18 @@ def kos_adopted(gtin: str, succ: str, card: str, card_name: str, kos_name: str, 
             f"{card}: {CHECK_TAUGHT}.")
 
 
+def kos_picked(at: str, code: str, card: str, card_name: str, kos_name: str, taught: int,
+               drift: Sequence[str]) -> str:
+    """A #477 pick of card `card` restored our never-identified Kôš card `at` as it was — by
+    its name then another product: its data reset like a re-pick of another product, its
+    taught rows stay — a human checks them (review 40)."""
+    label, what = _kos_what(kos_name, card, code, drift)
+    return (f"výber karty CODEX {card} („{card_name}“) obnovil z Koša našu kartu {at} {label} "
+            f"— {what}: jej údaje sa vynulujú ako pri výbere inej karty, no jej {taught} "
+            f"naučených priradení ostáva — môžu patriť jej, nie karte CODEX {card}: "
+            f"{CHECK_TAUGHT}.")
+
+
 def why_kos_other(at: str, kos_name: str, card: str, drift: Sequence[str]) -> str:
     label, what = _kos_what(kos_name, card, at, drift)
     return f"pod číslom {at} bola v Koši karta {label} — {what}"

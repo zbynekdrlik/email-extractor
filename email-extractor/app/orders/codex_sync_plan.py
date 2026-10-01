@@ -381,13 +381,23 @@ class _ScopePlanner:
                     return None
                 replaces = old is not None and old.card != known.card
                 self._seed(item, known.card, replaces=replaces)
+                ev = cx.events[(self.scope.table, gtin)]
                 if old is not None and replaces and not cx.same_product(old.card, known.card,
                                                                         code):
                     # our number used to be ANOTHER product: the pick restored its old Kôš
                     # card „as it was" — its curated data belongs to that product (review 4).
                     # Products compared, never OUR name: a human rename before the delete +
                     # pick would hide it (review 7)
-                    self._reset_from(item, old.card, cx.events[(self.scope.table, gtin)].at)
+                    self._reset_from(item, old.card, ev.at)
+                elif old is None and ev.restored:
+                    # the pick restored our NEVER-identified Kôš card as it was: by its name then
+                    # another product (`_kos_verdict`) → reset like a re-pick of another
+                    # product, its taught rows to a human (review 40: kept silently, a merge
+                    # filled only blanks — the bageta's mass / cena on our rožok)
+                    ours, drift = self._kos_verdict(ev.name, known.card, code)
+                    if not ours:
+                        item["reset_kos"] = True
+                        self._kos_rows(item, gtin, known.card, ev.name, drift, picked=True)
                 return known.card
             others = cx.carriers(code) - {known.card}
             if (cx.gone_twice(known.card) and len(others) == 1
@@ -543,7 +553,8 @@ class _ScopePlanner:
             return None
         self.settled.update({g: card for g in gtins})
         item["codex_card"] = card
-        if item.pop("reset_from", None) is not None:
+        reset = item.pop("reset_from", None) is not None
+        if item.pop("reset_kos", False) or reset:
             # every number of the group — a legacy twin keeps no old-product data either
             for g in gtins:
                 self._reset(dict(item, gtin=g), self.live[g])
@@ -620,10 +631,13 @@ class _ScopePlanner:
         # — review 25: an unbound number settled as another card was merged into)
         other = (hit_known.card if hit_known is not None and hit_known.card is not None
                  else self.settled.get(at))
-        if other not in (None, card):
+        if other not in (None, card) and not (target is None and self.cx.gone_twice(str(other))):
             # our card with the new code is ANOTHER CODEX card (e.g. a #477 pick of the
             # product that held the code before) — never a silent merge of two products. The
-            # way out is read once the whole plan is done (`_other_card_review`)
+            # way out is read once the whole plan is done (`_other_card_review`). Not for our
+            # Kôš number whose card left CODEX for good (review 40: no two live products — it
+            # is overwritten like an unknown one, `_kos_review`; blocked, every line of ours on
+            # the dead code was held)
             self.other_card.append((item, succ, str(other), card))
             return
         hit_name = str((hit or {}).get("name") or "")
@@ -664,8 +678,8 @@ class _ScopePlanner:
                                                          taken[1]))
         if hit is not None:
             self._adopted_review(item, str(hit["gtin"]), card, succ)
-            if target is None and other is None:
-                self._kos_review(item, hit, card, succ)
+            if target is None and other != card:
+                self._kos_review(item, hit, card, succ, other)
         if target is not None:
             fill = _fill(self.scope, target, group[0])
             if fill:
@@ -680,29 +694,50 @@ class _ScopePlanner:
             self.binned = [b for b in self.binned if str(b["gtin"]) != to]
         self.identity[to] = (card, succ)
 
-    def _kos_review(self, item: dict, binned: dict, card: str, succ: str) -> None:
+    def _kos_review(self, item: dict, binned: dict, card: str, succ: str,
+                    known: str | None) -> None:
         """Our Kôš number under the new code that was never identified (no binding, no pick —
-        e.g. deleted before the deploy, its code freed in CODEX and then REUSED for this card)
-        is restored as ours: CODEX's truth, OUR data over the dead card's. When it is not this
-        card's product — by name, never a name the #467 drift button may have given (this card
-        took the code over from another product, `_took_over` — review 39) — its taught rows,
-        adopted as they sit, go to a human (review 38: silently, the bageta's wording recalled
-        the rožok; the review-11 rule for adopted rows — review 39: a BLOCK held every order line
-        of ours on a code CODEX no longer has, protected nothing in orders, whose recall never
-        reads the catalog, and led the warehouse to a pick restoring the bageta's data); its
-        delivery history is said in the report (review 12)."""
-        at = str(binned["gtin"])
+        e.g. deleted before the deploy, its code freed in CODEX and then REUSED for this card),
+        or is a card that left CODEX for good (`known`, review 40), is restored as ours: CODEX's
+        truth, OUR data over the dead card's. When it is not this card's product (`known`:
+        products compared; else `_kos_verdict`) its taught rows, adopted as they sit, go to a
+        human (review 38: silently, the bageta's wording recalled the rožok; the review-11 rule
+        for adopted rows — review 39: a BLOCK held every order line of ours on a code CODEX no
+        longer has, protected nothing in orders, whose recall never reads the catalog, and led
+        the warehouse to a pick restoring the bageta's data) — `_kos_rows`."""
         name = self._kos_name(binned)
+        if known is not None:
+            if self.cx.same_product(known, card, succ):
+                return
+            drift: list[str] = []
+        else:
+            ours, drift = self._kos_verdict(name, card, succ)
+            if ours:
+                return
+        self._kos_rows(item, str(binned["gtin"]), card, name, drift, picked=False, succ=succ)
+
+    def _kos_verdict(self, name: str, card: str, code: str) -> tuple[bool, list[str]]:
+        """Is our never-identified Kôš card named `name` CODEX card `card`'s product on `code`?
+        By name — never a name the #467 drift button may have lent it: `card` took the code over
+        from another product (`_took_over`, review 39) → (ours, drift = those earlier carriers
+        when only the name says it is ours)."""
         key = codex_cards.name_key(name)
-        took = self._took_over(succ, card)
-        named_like = bool(key) and key in self.cx.product(card, succ)
-        if named_like and not took:
-            return
-        drift = took if named_like else []
+        took = self._took_over(code, card)
+        named_like = bool(key) and key in self.cx.product(card, code)
+        return named_like and not took, (took if named_like else [])
+
+    def _kos_rows(self, item: dict, at: str, card: str, name: str, drift: list[str], *,
+                  picked: bool, succ: str = "") -> None:
+        """Another product's rows under our number `at` (a Kôš card our card takes over — a
+        renumber onto it, or a #477 pick that restored it): taught → a human checks them;
+        delivery history → said in the report (review 12)."""
         taught, shipped = rows_on(self.conn, self.scope, at)
+        code = codex_cards.normalize_code(at) or at
         if taught:
-            self.plan.add_review(item, texts.kos_adopted(
-                item["gtin"], succ, card, self.cx.name_of(card, succ), name, taught, drift))
+            card_name = self.cx.name_of(card, code)
+            self.plan.add_review(item, texts.kos_picked(
+                at, code, card, card_name, name, taught, drift) if picked else texts.kos_adopted(
+                item["gtin"], succ, card, card_name, name, taught, drift))
         if shipped:
             self._hold_note(dict(item, gtin=at, name=name), at, shipped,
                             texts.why_kos_other(at, name, card, drift))
