@@ -363,19 +363,22 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   card took ours) as a name drift and renamed our rožok to „Pagáč"; round 2 fixed that with
   history recency ("the card that held it last") and was STILL wrong — a reuse chain seen in
   the dry-run, or a vanished card, dragged our card, its name and memory onto the other product.
-  An UNBOUND number (every number on the first post-deploy lists) is bound ONCE: among several
-  carriers now, the one our name picks; with one carrier now OR NONE, `_by_history` decides
-  from every card that ever carried the code (`Codex.carried`), never "who holds it now /
-  held it last" (rounds 25 / 28: a reuse — also one that moved on — dragged our rožok to the
-  pagáč): one list is no proof (a new carrier since the last list, or the last carrier missing
-  once → WAIT, protected); one card ever carried it → that card; else our NAME — the carrier
-  now if named so, else the one historic carrier named so — unless that card took the code
-  over from ANOTHER product (first seen before it; in CODEX or gone — the #467 drift button
-  offers the code's holder, round 9's rule → a human, rounds 26-28; one missing once → WAIT);
-  else a human, with ways out that work (`_carrier_way_out`: rename to a name only that
-  earlier carrier bears — never one gone from CODEX, never the carrier now's name — or the
-  pick of the carrier now; plus the curated-fields / taught-rows pointer). Stored in every mode
-  (identity, not catalog data), and from then on the sync follows THAT card. Pass 1's verdict (`settled` / `unsettled` /
+  An UNBOUND number (every number on the first post-deploy lists) is bound ONCE by ONE rule,
+  `_by_history`, whatever the number of carriers now (none / one / several — round 29: the
+  old multi-carrier branch bound by name with no history rules, a one-list duplicate carrier
+  turned a drift review into a binding): from every card that ever carried the code
+  (`Codex.carried`), never "who holds it now / held it last" (rounds 25 / 28: a reuse — also
+  one that moved on — dragged our rožok to the pagáč): one list is no proof (a card that left
+  the code since the last list, or — no carrier now — the last carrier missing once → WAIT,
+  protected); one card ever carried it → that card; else our NAME — the one carrier now named
+  so, else the one card ever named so — unless that card took the code over from ANOTHER
+  product (`_took_over`: first seen before it — cards seeded together never count; in CODEX or
+  gone — the #467 drift button offers the code's holder, round 9's rule → a human, rounds
+  26-29; one missing once → WAIT); else a human, with ways out that work (`_carrier_way_out`:
+  rename only to a name ONE historic card bears — never our own, never a gone card, never one
+  that took the code over — or the pick among the carriers now; plus the curated-fields /
+  taught-rows pointer). Stored in every mode (identity, not catalog data), and from then on the
+  sync follows THAT card. Pass 1's verdict (`settled` / `unsettled` /
   `waiting`) is what `_renumber` reads for a target bound only in THIS plan — never a merge
   onto a number not settled this list. Any future "same code, other card/name" logic must go
   through the binding, never re-derive ownership from the list.
