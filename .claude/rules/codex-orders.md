@@ -383,8 +383,10 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   it, else the pick's rule over the card's own rows; never the old code's current holder,
   rounds 19-21: the picked card may move on / go inactive before a dry-run-deferred reset); a
   picked card OR the card it replaces missing from ONE list (`Codex.glitched`) — the pick
-  waits, no seed, no reset (rounds 20-21: settled then, the old sklad / a "gone from CODEX,
-  delete its rows" review became final with the stored binding) (the pick
+  waits, no seed, no reset, and NO renumber lands on the waiting number (`waiting`, round 22:
+  a merge's binding superseded the pick and its reset never ran) (rounds 20-21: settled then,
+  the old sklad / a "gone from CODEX, delete its rows" review became final with the stored
+  binding) (the pick
   restored the Kôš card "as it was"); a re-pick of the SAME product under a second CODEX card
   keeps its data. Resets are applied before renumbers and a renumber in the same plan carries
   the reset card.
