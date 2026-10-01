@@ -840,8 +840,11 @@ def test_a_code_gone_whose_last_carriers_are_several_is_reviewed_not_silently_st
     snapshot.rebuild_from_overrides(pg)
     _push(pg, V1 + [_row(ROZOK, "28", "Bageta šunková 120g")], hours_old=5)
     codex_sync.run(pg, _cfg())
-    _push(pg, [r for r in V1 if r["code"] != ROZOK], hours_old=3)
-    codex_sync.run(pg, _cfg())
+    # review 28 (contract changed): the two cards missing from ONE list is no proof — the number
+    # waits one list, then a human decides
+    for hours in (3, 2):
+        _push(pg, [r for r in V1 if r["code"] != ROZOK], hours_old=hours)
+        codex_sync.run(pg, _cfg())
     report = pg.execute("SELECT report FROM codex_sync_runs ORDER BY id DESC LIMIT 1"
                         ).fetchone()[0]
     reasons = [r["reason"] for r in report["review"]
@@ -2987,6 +2990,7 @@ def test_a_renumber_waiting_on_a_new_carrier_wait_promises_nothing(pg):
     _bageta_taken_by_the_rozok(pg, runs=1)
     why = _waits(pg)[("orders", ROZOK)]
     assert BAGETA in why and "priradí" not in why
+    assert "má nového nositeľa" in why, "the carrier wait, not a review the number lacks"
 
 
 def test_no_renumber_merges_onto_an_unbound_number_a_human_must_decide(pg):
@@ -3163,3 +3167,93 @@ def test_a_pick_advice_says_a_restored_card_bound_to_another_product_is_cleared(
     _push(pg, v, hours_old=2)
     codex_sync.run(pg, _cfg())
     assert _orders(pg)[ROZOK]["alias"] == ""
+
+
+# --- review 28: an unbound number whose code has NO carrier now — the history decides too ----
+
+def test_an_unbound_number_follows_its_card_when_the_reuser_moves_on(pg):
+    """Review 28 🟡: card 27 (our rožok) moved ROZOK → ROZOK_NEW, the pagáč (79) took ROZOK and
+    then moved on to PAGAC_W — no card carries ROZOK now and the unbound number was bound to the
+    code's LAST carrier, the pagáč: renumbered to PAGAC_W as the pagáč with the rožok's data and
+    wordings. Its name says card 27: it follows card 27."""
+    _seed_catalogs(pg)
+    _seed_memory(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync._record_history(pg)
+    _push(pg, _reused(V1), hours_old=5)
+    codex_sync.run(pg, _cfg())
+    _push(pg, _reused(V1, pagac_code=PAGAC_W), hours_old=4)
+    codex_sync.run(pg, _cfg())
+    orders = _orders(pg)
+    assert PAGAC_W not in orders and orders[ROZOK_NEW]["name"] == "Rožok so slaninou 70g"
+    assert _binding(pg, ROZOK_NEW)[0] == "27"
+    assert set(_gtins(pg, "item_memory")) == {ROZOK_NEW}
+
+
+def test_an_unbound_number_waits_while_the_codes_last_carrier_is_missing_once(pg):
+    """Review 28 🟡: … the pagáč missing from ONE list, no card on ROZOK — the dry-run bound
+    the number to the pagáč (its last carrier) for good. It waits; then follows card 27."""
+    _seed_catalogs(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync._record_history(pg)
+    _push(pg, _reused(V1), hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    _push(pg, [r for r in _reused(V1) if r["card_code"] != "79"], hours_old=4)
+    codex_sync.run(pg, _cfg(apply=False))
+    assert _binding(pg, ROZOK) is None
+    assert "79" in _waits(pg).get(("orders", ROZOK), "")
+    _push(pg, _reused(V1), hours_old=3)
+    codex_sync.run(pg, _cfg())
+    assert _orders(pg)[ROZOK_NEW]["name"] == "Rožok so slaninou 70g"
+    assert _binding(pg, ROZOK_NEW)[0] == "27"
+
+
+def test_a_drift_renamed_unbound_number_whose_old_card_left_codex_goes_to_a_human(pg):
+    """Review 28 🔵: card 27 left CODEX for good and the pagáč took ROZOK; during the wait the
+    drift button renamed our orders ROZOK to the pagáč — it was bound to the pagáč keeping the
+    rožok's alias and wordings (a bound number in this shape is reset + its rows reviewed).
+    Whose data it carries is unknown: a human decides, pointed at the curated fields."""
+    _seed_catalogs(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync._record_history(pg)
+    gone = [dict(r, code=ROZOK) if r["card_code"] == "79" else r
+            for r in V1 if r["card_code"] != "27"]
+    _push(pg, gone, hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    _drift_click(pg, ROZOK, "Pagáč syrový 60g")
+    _push(pg, gone, hours_old=4)
+    codex_sync.run(pg, _cfg(apply=False))
+    assert _binding(pg, ROZOK) is None
+    reason = _review_reason(pg, "orders", ROZOK)
+    assert "27" in reason and "jej alias (Produkty)" in reason
+
+
+def test_a_pick_advice_restoring_a_card_of_the_same_product_says_so(pg):
+    """Review 28 🔵 (pins `Pick.same`): card 27 left CODEX; ROZOK is carried by 80 under 27's
+    own name (the card the picker offers) and by 81 — the gone review's pick restores our
+    ROZOK (bound to 27) as card 80: the same product, its data stays — said so."""
+    _baseline(pg)
+    v = [r for r in V1 if r["card_code"] != "27"] + [
+        _row(ROZOK, "80", "Rožok so slaninou 70g"), _row(ROZOK, "81", "Zemiaková placka 90g")]
+    for hours in (4, 3):
+        _push(pg, v, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert _pick_card(pg) == "80"
+    assert "jej údaje ostanú (ten istý výrobok)" in _review_reason(pg, "orders", ROZOK)
+
+
+def test_a_dl_carrier_review_points_at_the_dl_curated_fields(pg):
+    """Review 28 🔵 (pins the per-catalog pointer): a DL carrier-change review names doplnok /
+    hmotnosť / cena, not the orders alias."""
+    _seed_catalogs(pg)
+    dl_snapshot.upsert_dl_catalog_card(pg, BAGETA, "Bageta stará", doplnok="", mass=None,
+                                       sklad="1", cena=None)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    _push(pg, V1 + [_row(BAGETA, "88", "Bageta šunková 120g")], hours_old=6)
+    codex_sync._record_history(pg)
+    v2 = [dict(r, code=BAGETA) if r["card_code"] == "27" else r for r in V1] + [
+        _row(BAGETA_ELSE, "88", "Bageta šunková 120g")]
+    for hours in (5, 4):
+        _push(pg, v2, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert "jej doplnok / hmotnosť / cena (Produkty)" in _review_reason(pg, "dl", BAGETA)
