@@ -22,11 +22,20 @@ import logging
 import os
 from datetime import UTC, date, datetime, timedelta
 
+import psycopg
+
 from app import db
 from app.board.services import audit
 from app.config import Config
 from app.httpapi import create_app
-from app.orders import card_guard, codex_cards, codex_sync, dl_snapshot, snapshot
+from app.orders import (
+    card_guard,
+    codex_cards,
+    codex_sync,
+    codex_sync_list,
+    dl_snapshot,
+    snapshot,
+)
 
 PG_DSN = os.environ.get("PG_TEST_DSN")
 NOW = datetime.now(UTC)
@@ -3620,7 +3629,7 @@ def test_an_older_list_never_sets_back_a_name_last_seen_at_the_beginning(pg):
     assert _history_name(pg, "27", ROZOK) == "Rožok slaninový 70g"
 
 
-def test_another_strediskos_older_history_never_moves_stredisko_1s_beginning(pg):
+def test_another_strediskos_older_history_never_moves_stredisko_1s_beginning(pg, caplog):
     """Review 33 🔵: `Codex.seeded_at` is stredisko 1's beginning — the clamp is per stredisko:
     with stredisko 4 seen first, an older list's new stredisko-1 pair is recorded at stredisko
     1's beginning, never at stredisko 4's earlier one (that moved `seeded_at` back)."""
@@ -3631,5 +3640,103 @@ def test_another_strediskos_older_history_never_moves_stredisko_1s_beginning(pg)
     codex_sync._record_history(pg)
     seed = _stredisko_1_beginning(pg)
     _push(pg, V1 + [_row(BAGETA, "95", "Starý kus 10g")], hours_old=7)
-    codex_sync._record_history(pg)
+    with caplog.at_level(logging.WARNING, logger="orders.codex_sync"):
+        codex_sync._record_history(pg)
     assert _stredisko_1_beginning(pg) == seed == NOW - timedelta(hours=6)
+    # review 34 🔵: the clamp is per stredisko — so is its warning (stredisko 4 began earlier)
+    assert any("older than the history" in r.getMessage() for r in caplog.records)
+
+
+# --- review 34: a card seen before the history began AND again since is no seed card -----
+
+PAGAC_ON_BAGETA = _row(BAGETA, "90", "Pagáč nový 60g")
+
+
+def test_a_card_seen_before_the_history_began_and_again_since_is_an_arrival(pg):
+    """Review 34 🟡: card 90 was on our missing card's code in a list OLDER than the history's
+    beginning, then again in a list since. Its clamped first sighting (the beginning) made it
+    „the ONE card on the code since the history began": our DL card was bound and renamed at
+    once — no one-list wait, no name check. It ARRIVED (no list since the beginning had a
+    carrier): it waits one list, then a human decides — exactly as without the older list."""
+    _missing_bageta(pg)
+    _push(pg, V1, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    _push(pg, V1 + [PAGAC_ON_BAGETA], hours_old=7)
+    assert codex_sync.run(pg, _cfg())["mode"] == "skipped"
+    _push(pg, V1 + [PAGAC_ON_BAGETA], hours_old=4)
+    codex_sync.run(pg, _cfg())
+    assert _binding(pg, BAGETA, "dl") is None
+    assert "doteraz ho nenesla" in _waits(pg).get(("dl", BAGETA), "")
+    assert _dl(pg)[BAGETA]["name"] == "Bageta stará"
+    _push(pg, V1 + [PAGAC_ON_BAGETA], hours_old=3)
+    codex_sync.run(pg, _cfg())
+    assert _binding(pg, BAGETA, "dl") is None and _review_reason(pg, "dl", BAGETA)
+    assert _dl(pg)[BAGETA]["name"] == "Bageta stará"
+
+
+def test_a_card_seen_before_the_history_began_and_again_since_never_removes_ours(pg):
+    """Review 34 🟡: the same card 90 then leaves CODEX — the binding the clamped sighting made
+    removed our missing DL card for good (the Kôš refuses it, #467). Never bound → never
+    removed."""
+    _missing_bageta(pg)
+    _push(pg, V1, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    _push(pg, V1 + [PAGAC_ON_BAGETA], hours_old=7)
+    codex_sync.run(pg, _cfg())
+    _push(pg, V1 + [PAGAC_ON_BAGETA], hours_old=4)
+    codex_sync.run(pg, _cfg())
+    for hours in (3, 2):
+        _push(pg, V1, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert BAGETA in _dl(pg), "removed on a card that was never on its code since the beginning"
+    assert _last_report(pg)["removals"] == []
+
+
+def test_a_sighting_before_the_history_began_never_hides_a_take_over(pg):
+    """Review 34 🟡: card 27 (our rožok) leaves ROZOK, pagáč 90 carries it — and 90 was on ROZOK
+    in a list older than the history's beginning. The drift button renamed our unbound rožok
+    to the pagáč: `_took_over` read 90's clamped first sighting (the beginning) and saw it
+    „seeded together" with 27 — bound to the pagáč, the rožok alias kept, no human. 90 took
+    the code over from 27 since the beginning: a human decides (round 9's rule)."""
+    _seed_catalogs(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync._record_history(pg)
+    pagac = _row(ROZOK, "90", "Pagáč nový 60g")
+    _push(pg, V1 + [pagac], hours_old=8)
+    assert codex_sync.run(pg, _cfg(apply=False))["mode"] == "skipped"
+    gone = [r for r in V1 if r["card_code"] != "27"] + [pagac]
+    _push(pg, gone, hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    _drift_click(pg, ROZOK, "Pagáč nový 60g")
+    _push(pg, gone, hours_old=4)
+    codex_sync.run(pg, _cfg(apply=False))
+    assert _binding(pg, ROZOK) is None
+    assert "27" in _review_reason(pg, "orders", ROZOK)
+
+
+class _Explaining:
+    """A connection whose INSERT statements are EXPLAINed (client-side bound) before they run."""
+
+    def __init__(self, conn):
+        self.conn, self.plans = conn, []
+
+    def execute(self, sql, params=None):
+        if "INSERT INTO codex_card_history" in sql:
+            cur = psycopg.ClientCursor(self.conn)
+            self.plans.append("\n".join(r[0] for r in cur.execute("EXPLAIN " + sql,
+                                                                  params).fetchall()))
+        return self.conn.execute(sql, params)
+
+
+def test_the_history_reads_each_strediskos_beginning_once_per_list(pg):
+    """Review 34 🟡: the per-stredisko beginning was a correlated subquery — evaluated once per
+    (stredisko, card, code) group, each scanning that stredisko's history: ~1000x slower on a
+    production-size list (3.5 s vs 5 ms for 6000 cards), twice per push, inside the push's
+    request and under the sync's locks. Computed once per list: no SubPlan in the plan."""
+    _seed_catalogs(pg)
+    _push(pg, V1, hours_old=6)
+    codex_sync._record_history(pg)
+    _push(pg, V1, hours_old=5)
+    spy = _Explaining(pg)
+    codex_sync_list.update_history(spy, NOW - timedelta(hours=5))
+    assert spy.plans and not any("SubPlan" in p for p in spy.plans), spy.plans
