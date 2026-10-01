@@ -4739,3 +4739,32 @@ def test_an_undone_pick_renamed_before_the_delete_is_judged_by_its_name_at_the_p
     codex_sync.run(pg, _cfg())
     reason = _review_reason(pg, "dl", ROZOK)
     assert "„Bageta cesnaková 100g“" in reason and "1 naučených priradení" in reason, reason
+
+
+# --- review 46 ------------------------------------------------------------------------------
+
+def test_a_long_ops_message_never_cuts_what_a_human_must_check(pg):
+    """Review 46 🟡: the ops message showed its first 40 lines — the changes first, the reviews
+    last — and the next applied run treats every review of this run as sent: on the first
+    apply (~56 renames expected on prod) every review line was cut and never reached anyone.
+    What a human must act on (reviews, held history) comes first and is never cut; only the
+    list of changes is capped."""
+    extra = [(f"99920000001{i:02d}", f"1{i:02d}") for i in range(45)]
+    _seed_catalogs(pg)
+    for i, (code, _card) in enumerate(extra):
+        snapshot.upsert_catalog_card(pg, code, f"Pečivo {i} staré 50g")
+    snapshot.rebuild_from_overrides(pg)
+
+    def rows(state):
+        return [_row(code, card, f"Pečivo {i} {state} 50g") for i, (code, card) in
+                enumerate(extra)]
+    _push(pg, V1 + rows("staré"), hours_old=5)
+    codex_sync.run(pg, _cfg())
+    # card 27 now carries TWO new codes → a human decides; 45 cards drifted → renames
+    v2 = (_v2_renumbered() + [_row("9990000000109", "27", "Rožok so slaninou 70g")]
+          + rows("nové"))
+    _push(pg, v2, hours_old=3)
+    assert codex_sync.run(pg, _cfg())["renamed"] == 45
+    body = _last_alert(pg)
+    assert "treba skontrolovať" in body and ROZOK in body, body[-600:]
+    assert "… a ďalších" in body
