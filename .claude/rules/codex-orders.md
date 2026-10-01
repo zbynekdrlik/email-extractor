@@ -367,10 +367,12 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   carried it in the previous synced snapshot, one push is no proof; and when another card
   carried it EARLIER the code changed carrier: the number is the product its NAME is — the
   carrier now (unless an earlier carrier of ANOTHER product lives on in CODEX: the name may be
-  the #467 drift button's, round 9's rule → a human, round 26), or exactly one earlier carrier,
+  the #467 drift button's, round 9's rule → a human, round 26; "lives on" = not gone twice, one
+  missing from this list only makes the number WAIT, round 27), or exactly one earlier carrier,
   which it then follows — else a human decides, with ways out that work (`_carrier_way_out`:
-  rename to a name only that earlier carrier bears, or the pick of the carrier now — never a
-  rename to the carrier now's name), `_sole_carrier`, round 25: on the first post-deploy lists
+  rename to a name only that earlier carrier bears — never one gone from CODEX, never the
+  carrier now's name — or the pick of the carrier now; plus the taught-rows pointer),
+  `_sole_carrier`, round 25: on the first post-deploy lists
   every number is unbound and a reuse bound our rožok to the pagáč; or the one our name picks;
   or the history's last
   carrier when the code is already gone), stored in every mode (identity, not catalog data),
