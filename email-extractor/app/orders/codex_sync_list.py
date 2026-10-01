@@ -154,25 +154,31 @@ def update_history(conn, as_of: datetime) -> None:
     first_seen = last_seen = `as_of` (the CODEX data age), a known one advances last_seen — and
     takes the list's name only then: an OLDER re-sent list (recorded since review 12) never sets
     a newer name back (review 13 🟡: `same_product` then judged a recreated card another
-    product and cleared its data). A list OLDER than the history's beginning (a rolled-back
-    ETL, a hand push) records nothing: its new pairs would move that beginning
-    (`Codex.seeded_at`) back and every card on a code since then would count as "arrived"
-    (review 31)."""
+    product and cleared its data). Every ACCEPTED list is recorded — it is pickable the moment
+    it is accepted, so its sightings open reuse windows (round 12; review 32: skipping an old
+    one moved a wording taught from it with the wrong card) — but a pair first seen in a list
+    OLDER than the history's beginning is recorded as first seen AT that beginning: the
+    beginning (`Codex.seeded_at`) never moves back, else every card on a code since then would
+    count as "arrived" (review 31)."""
     begun = conn.execute("SELECT min(first_seen) FROM codex_card_history").fetchone()
     if begun and begun[0] is not None and as_of < begun[0]:
         log.warning("CODEX card history: the list (CODEX data as of %s) is older than the "
-                    "history's beginning (%s) — not recorded (#478)", as_of, begun[0])
-        return
+                    "history's beginning (%s) — its new sightings are recorded at the beginning "
+                    "(#478)", as_of, begun[0])
     conn.execute(
         """INSERT INTO codex_card_history (stredisko, card_code, code, name, first_seen,
                                            last_seen)
-           SELECT stredisko, card_code, code, max(name), %s, %s FROM codex_stock_cards
+           SELECT stredisko, card_code, code, max(name),
+                  GREATEST(%(as_of)s, COALESCE((SELECT min(first_seen) FROM codex_card_history),
+                                               %(as_of)s)),
+                  %(as_of)s
+             FROM codex_stock_cards
             GROUP BY stredisko, card_code, code
            ON CONFLICT (stredisko, card_code, code) DO UPDATE
               SET name = CASE WHEN EXCLUDED.last_seen >= codex_card_history.last_seen
                               THEN EXCLUDED.name ELSE codex_card_history.name END,
                   last_seen = GREATEST(codex_card_history.last_seen, EXCLUDED.last_seen)""",
-        (as_of, as_of))
+        {"as_of": as_of})
 
 
 def newest_seen(conn) -> datetime | None:

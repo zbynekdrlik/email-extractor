@@ -371,8 +371,9 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   one that moved on — dragged our rožok to the pagáč): one list is no proof (a card that left
   the code since the last list, a card arriving on a code no card carried — rounds 30-31, or
   — no carrier now — the last carrier missing once → WAIT, protected); the ONE card on the code
-  since the history began (`Codex.seeded_at`; a list older than that beginning is never
-  recorded, round 31) → that card; else our NAME — the one carrier now named
+  since the history began (`Codex.seeded_at`; a list older than that beginning is still
+  recorded — accepted = pickable, round 12 — with its new sightings at the beginning, so it
+  never moves, rounds 31-32) → that card; else our NAME — the one carrier now named
   so, else the one card ever named so — unless that card took the code over from ANOTHER
   product (`_took_over`: first seen before it — cards seeded together never count; in CODEX or
   gone — the #467 drift button offers the code's holder, round 9's rule → a human, rounds
