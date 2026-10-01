@@ -273,11 +273,13 @@ def test_the_incident_round_trip_x_to_y_and_back(pg):
 
 
 def test_a_renumber_onto_a_code_we_already_have_merges_into_it(pg):
+    """Review 30 (contract changed): our ROZOK_NEW is the #477 pick of card 27's new code (the
+    pick names its CODEX card). A hand-typed, unbound ROZOK_NEW named otherwise is no longer
+    taken for card 27 on the one list where 27 first shows up on its code."""
     _baseline(pg)
     _seed_memory(pg)
-    snapshot.upsert_catalog_card(pg, ROZOK_NEW, "Rožok slaninový (vybraný z CODEXu)")
-    snapshot.rebuild_from_overrides(pg)
     _push(pg, _v2_renumbered(), hours_old=1)
+    card_guard.add_from_codex(pg, "orders", ROZOK_NEW, actor="sklad")
     codex_sync.run(pg, _cfg())
     orders = _orders(pg)
     assert ROZOK not in orders
@@ -3336,3 +3338,52 @@ def test_a_code_no_card_carries_names_its_last_and_earlier_carriers(pg):
         codex_sync.run(pg, _cfg(apply=False))
     reason = _review_reason(pg, "orders", ROZOK)
     assert "naposledy ho niesla karta CODEX 79, predtým 27" in reason
+
+
+# --- review 30: a card arriving on a code no card carried; the footer's Kôš promise ------------
+
+def test_a_card_arriving_on_a_carrierless_code_never_takes_our_number_on_one_list(pg):
+    """Review 30 🟡: our DL „Bageta stará" on a code CODEX had no card for (a #467 „missing"
+    card); card 90 — another product — shows up on that code: on ONE list the number was bound
+    to it and renamed, and when 90 left again it was REMOVED (and a DL number whose code left
+    CODEX never comes back from the Kôš). It waits, then a human decides; nothing removed."""
+    _seed_catalogs(pg)
+    dl_snapshot.upsert_dl_catalog_card(pg, BAGETA, "Bageta stará", doplnok="bageta", mass=None,
+                                       sklad="1", cena=None)
+    dl_snapshot.dl_rebuild_from_overrides(pg)
+    for hours in (8, 7):
+        _push(pg, V1, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    arrived = V1 + [_row(BAGETA, "90", "Pagáč nový 60g")]
+    _push(pg, arrived, hours_old=6)
+    codex_sync.run(pg, _cfg())
+    assert "doteraz ho nenesla žiadna karta" in _waits(pg).get(("dl", BAGETA), "")
+    _push(pg, arrived, hours_old=5)
+    codex_sync.run(pg, _cfg())
+    assert _dl(pg)[BAGETA]["name"] == "Bageta stará" and _binding(pg, BAGETA, "dl") is None
+    assert "90" in _review_reason(pg, "dl", BAGETA)
+    for hours in (4, 3):
+        _push(pg, V1, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    assert BAGETA in _dl(pg), "never removed on the strength of a stranger's card"
+
+
+def test_the_ops_footer_says_a_dl_number_whose_code_left_codex_does_not_come_back(pg):
+    """Review 30 🔵: the footer promised every change can be undone in the Kôš — a DL number
+    whose code left CODEX is refused there (#467); the alert says so when the plan has one."""
+    _baseline(pg)
+    gone = [r for r in V1 if r["card_code"] != "55"]
+    for hours in (4, 3):
+        _push(pg, gone, hours_old=hours)
+        codex_sync.run(pg, _cfg())
+    body = pg.execute("SELECT body_html FROM pending_alerts ORDER BY id DESC LIMIT 1"
+                      ).fetchone()[0]
+    assert "Kôš nevráti (#467)" in body
+    v2 = [dict(r, name="Chlieb pšeničný voľný 1000g") if r["code"] == CHLIEB else r
+          for r in gone]
+    _push(pg, v2, hours_old=2)
+    codex_sync.run(pg, _cfg())
+    body = pg.execute("SELECT body_html FROM pending_alerts ORDER BY id DESC LIMIT 1"
+                      ).fetchone()[0]
+    assert "premenovan" in body or "Chlieb pšeničný voľný" in body
+    assert "#467" not in body, "a rename-only plan has nothing the Kôš refuses"
