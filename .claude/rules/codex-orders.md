@@ -342,9 +342,10 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   ACSKLP (`card_code`) + sklad since #467; #478 needed no new field, only the history.
 - **Rollout switch `codex_sync_apply` (default false = DRY-RUN)**: plan + log + report, ZERO
   catalog/memory/audit/alert writes (a failing dry-run sync too — its `error` run row is the
-  record, review 17); the history is kept either way. A glitch wait (a card missing from one
-  list, a pick / renumber waiting on it) is in the report's `waits` + the log — an all-zero
-  plan never hides one (review 23). The run log keeps `RUNS_KEEP_DAYS` (90) + the newest run of
+  record, review 17); the history is kept either way. A wait (a card missing from one list, an
+  unbound number whose code has a new carrier since the last list, a pick / renumber waiting on
+  either) is in the report's `waits` + the log — an all-zero plan never hides one (reviews
+  23-25). The run log keeps `RUNS_KEEP_DAYS` (90) + the newest run of
   each status. Module map: `codex_sync_list` (what the list says: rows, history, bindings, pick
   events) → `codex_sync_plan` (what to do) → `codex_sync` (does it); `codex_sync_memory`
   (memory rules), `codex_sync_texts` (Slovak texts). Read the dry-run with
@@ -363,10 +364,16 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   history recency ("the card that held it last") and was STILL wrong — a reuse chain seen in
   the dry-run, or a vanished card, dragged our card, its name and memory onto the other product.
   A card is bound ONCE (the code's only stredisko-1 carrier — but only when no other card
-  carried it in the previous synced snapshot, one push is no proof; or the one our name picks;
-  or the history's last carrier when the code is already gone), stored in every mode (identity,
-  not catalog data), and from then on the sync follows THAT card. Any future "same code, other
-  card/name" logic must go through the binding, never re-derive ownership from the list.
+  carried it in the previous synced snapshot, one push is no proof; and when another card
+  carried it EARLIER the code changed carrier: the number is the product its NAME is — the
+  carrier now, or exactly one earlier carrier, which it then follows — else a human decides,
+  `_sole_carrier`, round 25: on the first post-deploy lists every number is unbound and a
+  reuse bound our rožok to the pagáč; or the one our name picks; or the history's last
+  carrier when the code is already gone), stored in every mode (identity, not catalog data),
+  and from then on the sync follows THAT card. Pass 1's verdict (`settled` / `unsettled` /
+  `waiting`) is what `_renumber` reads for a target bound only in THIS plan — never a merge
+  onto a number not settled this list. Any future "same code, other card/name" logic must go
+  through the binding, never re-derive ownership from the list.
 - **Binding lifecycle (rounds 3-5) — ONE resolver, `_ScopePlanner._known`**: a human #477 pick
   newer than the binding (the newest non-sync audit `create` on the override table,
   `codex_sync_list._events`; the pick writes `after.codex_card` = the picked ACSKLP, also when it
