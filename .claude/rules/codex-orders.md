@@ -16,6 +16,13 @@ paths:
   - "email-extractor/tests/test_board_codex_pick.py"
   - "email-extractor/tests/test_orders_codex_gate.py"
   - "email-extractor/app/orders/memory.py"
+  - "email-extractor/app/orders/codex_sync.py"
+  - "email-extractor/app/orders/codex_sync_plan.py"
+  - "email-extractor/app/orders/codex_sync_memory.py"
+  - "email-extractor/app/orders/codex_sync_texts.py"
+  - "email-extractor/app/orders/codex_sync_list.py"
+  - "email-extractor/app/orders/codex_sync_kos.py"
+  - "email-extractor/tests/test_codex_sync.py"
 ---
 
 # CODEX order evidence + the auto-resolve sweep (#342)
@@ -322,3 +329,284 @@ like DL (`card_guard.order_guard` = `codex_cards.live_guard`). Reusable rules:
   re-ship, never reset.
 - History „Doučiť" (teachback) teaches only onto an existing card of the scope's catalog
   (`card_guard.refuse_typed_card(error=TEACH_CARD_ONLY)`, 403 `codex_only`) — see `board.md`.
+## CODEX card sync — names + renumbers follow CODEX automatically (#478)
+
+After every ACCEPTED cards push, `httpapi_codex` calls `codex_sync.run_safely` on the same
+connection: `codex_card_history` (migrate r18, seeded from the stored list) records every
+(stredisko, ACSKLP, code) with first/last seen (the CODEX data age), `codex_sync_plan.build_plan`
+(read-only) decides, `codex_sync` executes + logs `codex_sync_runs` (the whole plan as JSON) +
+ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal line ends with
+`sync=<mode> renamed=… renumbered=… removed=… review=…` — the proof on dev2 that it ran.
+
+- **ACSKLP is unique only WITHIN a stredisko** (live: 400448 = garlic on stredisko 1, crisps on
+  4) — the identity is (stredisko 1, ACSKLP), the #477 pick scope. The push already carried
+  ACSKLP (`card_code`) + sklad since #467; #478 needed no new field, only the history.
+- **Rollout switch `codex_sync_apply` (default false = DRY-RUN)**: plan + log + report, ZERO
+  catalog/memory/audit/alert writes (a failing dry-run sync too — its `error` run row is the
+  record, review 17); the history is kept either way. A wait (a card missing from one list; an
+  unbound number whose code lost a carrier since the last list, or got its first carrier ever
+  — review 30; a pick / renumber waiting on either) is in the report's `waits` + the log — an
+  all-zero plan never hides one (reviews 23-30). The run log keeps `RUNS_KEEP_DAYS` (90) + the newest run of
+  each status. Module map: `codex_sync_list` (what the list says: rows, history, bindings, pick
+  events) → `codex_sync_plan` (what to do) → `codex_sync` (does it); `codex_sync_memory`
+  (memory rules), `codex_sync_texts` (Slovak texts), `codex_sync_kos` (`KosRules`, the
+  planner's mixin for our Kôš numbers a card takes over / a pick restored — split at the plan's
+  size budget, review 41). Read the dry-run with
+  `SELECT id, ran_at, status, report FROM codex_sync_runs ORDER BY id DESC LIMIT 1`. Turning it
+  on is the OWNER's decision (after reviewing the dry-run on the ticket) — never flip it in a
+  lane. A `would_block: true` in a dry-run means the first apply would stop at the breaker.
+- **Circuit breaker** (`codex_sync_max_code_changes` 10 distinct codes, `codex_sync_max_renames`
+  80, add-on options): over either → `blocked`, nothing applied, one ops alert per distinct plan
+  (`dl_alerts.reminder_suppressed`, key = plan digest). A genuine mass change in CODEX → raise
+  the option, the next push applies it, lower it back. The first apply renames ~56 cards (the
+  live drift of 2026-09-30: 21 orders + 35 DL), under 80.
+- **IDENTITY = a stored binding, never "who holds the code now"** (`codex_card_bindings`:
+  (scope, our gtin) → stredisko-1 ACSKLP, `active=false` = a number the sync retired). Two review
+  rounds were spent on this: round 1 read a REUSED code (card 27 moved to a new code, the pagáč
+  card took ours) as a name drift and renamed our rožok to „Pagáč"; round 2 fixed that with
+  history recency ("the card that held it last") and was STILL wrong — a reuse chain seen in
+  the dry-run, or a vanished card, dragged our card, its name and memory onto the other product.
+  An UNBOUND number (every number on the first post-deploy lists) is bound ONCE by ONE rule,
+  `_by_history`, whatever the number of carriers now (none / one / several — round 29: the
+  old multi-carrier branch bound by name with no history rules, a one-list duplicate carrier
+  turned a drift review into a binding): from every card that ever carried the code
+  (`Codex.carried`), never "who holds it now / held it last" (rounds 25 / 28: a reuse — also
+  one that moved on — dragged our rožok to the pagáč): one list is no proof (a card that left
+  the code since the last list, a card arriving on a code no card carried — rounds 30-31, or
+  — no carrier now — the last carrier missing once → WAIT, protected); the ONE card on the code
+  since the history began (`Codex.seeded_at`; a list older than that beginning is still
+  recorded — accepted = pickable, round 12 — with its new sightings at its stredisko's
+  beginning, so it never moves, rounds 31-33. TWO facts per pair: `first_seen` (clamped —
+  the reuse windows read it) and `seen_since` (r18: the first list SINCE the beginning that
+  showed it, NULL until one does). Who our number IS — the CANDIDATES and their "since" —
+  reads only `seen_since` (`Codex.since_seed` / `Codex.seen_from`, `_by_history` +
+  `_took_over`'s candidate): a card seen on the code in such an older list — only there, or
+  also again since — is no "since the beginning" evidence: it bound a #467 "missing" card at
+  once with no name check, then removed it / renumbered it onto another product, and hid a
+  take-over, rounds 33-34. But the UNIQUENESS of "the one card" counts every recorded
+  carrier: a card seen there only before we watched (`unwatched`) is still ANOTHER card —
+  round 35: dropped from the count too, the pagáč that reused our rožok's code got our number
+  and, once gone, removed it; the review / arrival wait name the `unwatched` cards)
+  → that card; else our NAME — the one carrier now named
+  so, else the one card ever named so — unless that card took the code over from ANOTHER
+  product (`_took_over`: first seen before it — cards seeded together never count, but a card
+  seen on the code before we watched (`Codex.before_watch`: no `seen_since`, or one later
+  than its clamped `first_seen`) always came first, round 36; in CODEX or
+  gone — the #467 drift button offers the code's holder, round 9's rule → a human, rounds
+  26-29; one missing once → WAIT — never one seen only before we watched: it took no list
+  since, so with no previous synced list it only LOOKED missing once, round 37); else a
+  human, with ways out that work (`_carrier_way_out`:
+  rename only to a name ONE historic card bears — never our own, never a gone card, never one
+  that took the code over — or the pick among the carriers now; plus the curated-fields /
+  taught-rows pointer). Stored in every mode (identity, not catalog data), and from then on the
+  sync follows THAT card. Pass 1's verdict (`settled` / `unsettled` /
+  `waiting`) is what `_renumber` reads for a target bound only in THIS plan — never a merge
+  onto a number not settled this list. Any future "same code, other card/name" logic must go
+  through the binding, never re-derive ownership from the list.
+- **Binding lifecycle (rounds 3-5) — ONE resolver, `_ScopePlanner._known`**: a human #477 pick
+  newer than the binding (the newest non-sync audit `create` on the override table,
+  `codex_sync_list._events`; the pick writes `after.codex_card` = the picked ACSKLP, also when it
+  restores a Kôš card) names the card exactly; else the binding, ACTIVE OR RETIRED — a Kôš
+  „Vrátiť" of a number the sync retired is still that CODEX card and is merged back into its new
+  number (round 5 🟡: re-identifying it from the list bound it to the pagáč reusing the code).
+  A Kôš `restore` row is never a new card (round 4 🟡). Three places deciding identity with
+  different rules was the root of rounds 3-5 — never add a fourth, extend `_known`.
+  A binding that REPLACES another card's on a PICK is stored only by an APPLIED run, so a pick
+  seen during a dry-run / blocked run still gets its reset later. Bindings are seeded for the
+  whole group, also a member joining later (a twin back from the Kôš) — a legacy „0"+code twin
+  left alone later still follows its card (rounds 9-10). A reset covers every group number. The
+  memory path asks `_known` too: a retired number picked as another product keeps its rows. A
+  pick whose CODEX product differs from the one the data was taught for (`Codex.same_product`:
+  the old card's name while it carried the code — `codex_card_history.name` — vs the picked
+  card's; never OUR current name, a human rename before delete + pick would hide it — round 7)
+  → `resets`: alias / doplnok / mass / cena cleared, sklad := exactly what a fresh pick writes
+  (`_sklad_of`: the picker's sklad for the code the bound card carries NOW — the code or its
+  `_successor` — and only when the card's OWN active named row is among the picker's rows for
+  it, else the pick's rule over the card's own rows; never the old code's current holder,
+  rounds 19-21: the picked card may move on / go inactive before a dry-run-deferred reset); a
+  picked card OR the card it replaces missing from ONE list (`Codex.glitched`) — the pick
+  waits, no seed, no reset, and NO renumber lands on the waiting number (`waiting`, round 22:
+  a merge's binding superseded the pick and its reset never ran) (rounds 20-21: settled then,
+  the old sklad / a "gone from CODEX, delete its rows" review became final with the stored
+  binding) (the pick
+  restored the Kôš card "as it was"); a re-pick of the SAME product under a second CODEX card
+  keeps its data. Resets are applied before renumbers and a renumber in the same plan carries
+  the reset card.
+- **Rename rebind** (our CODEX card left for good AND exactly one card carries our code under
+  OUR name — recreated in CODEX, or a number a human renamed to it as review A asks; checked
+  BEFORE the contest rule, round 8): the SAME product (`same_product`) keeps its data and the
+  binding is durable (every mode, round 6); ANOTHER product is a pick in all but name —
+  `_reset_from` (reset + every row of the number to a human), stored by an applied run only
+  (round 9 🟡: it kept the old product's alias / doplnok, also when it silently resolved a
+  pending contest). A genuinely recreated product under a NEW name loses its curated data too
+  (restorable from the Kôš) — the list cannot tell it from a reuse, and review A says so.
+- **Plan mechanics**: the sync holds `LOCK TABLE codex_stock_cards IN SHARE MODE` (a concurrent
+  push waits). The planner runs TWO passes (round 18 🟡): `_settle` every group (identity +
+  the reset a pick implies), THEN `_follow` (stay / leave / renumber) — a merge onto a number
+  reset in the same plan must read the reset card; in one pass the group ORDER decided whether
+  our data or the old product's kg sklad + mass survived. A merge target that is another CODEX
+  card → review; a merge FILLS the target's blank alias / doplnok / mass / sklad / cena from our
+  card. Numbers a plan retires go to the
+  simulated Kôš (`_vacate`) so a chain in ONE push (024 → NEW while another card takes 024)
+  never re-creates onto the row being retired — round 4 🔴: the upsert kept `deleted_at` and the
+  koláč vanished; the executor also undeletes before any create. The "previous snapshot"
+  (two-snapshot removal, seed rule) comes from `codex_sync_runs` that actually synced — a
+  failed/skipped sync never counts.
+- **What the sync cannot tell goes to a human (rounds 7-10 — each earlier round broke a
+  guess)**: it acts only on its own recorded evidence (bindings, the history, retire-time names,
+  audit rows) and holds the rest. The residual heuristic is the NAME: a board action that
+  changes a number's meaning records no CODEX card except the #477 pick. (1)
+  `_ScopePlanner._contested` is THE rule, checked wherever the sync would mutate a number
+  (identify, a renumber onto it — live or its Kôš copy, a memory move from a Kôš copy). Our name
+  vs our CODEX card C: it IS C's product (C's current rows or its history name — also C's NEW
+  CODEX name) → fine; it names ANOTHER card carrying the code now → contested (the #467 drift
+  button „Prevziať názov z CODEXu" offers exactly that reusing card's name, as if cosmetic — it
+  is TRUE for CODEX imports, so the button stays, but renumbering such a number into C moved the
+  other product's wordings onto C, round 9 🟡, also for an ACTIVE binding in the dry-run window;
+  it may also be a CODEX rename of C beside a same-named duplicate, so the text only says what it
+  sees, round 10); a number the sync RETIRED renamed since (≠ `codex_card_bindings.
+  retired_name`; a plain Kôš undo of a card whose name had drifted is no rename, round 8) →
+  contested. Never contested: a blank Kôš marker, a pick, C missing from ONE snapshot. A
+  contested number → review with the way out per case (rename to C's name = rejoins C while C
+  lives; delete + pick at a question = reset; a code no card carries says so); no memory move
+  from it, no renumber onto it. (2) Mapping rows OLDER than a re-pick, or ALL rows of every
+  number of a group a rename rebind turned into another product (`_repicked_review`) → review
+  with the count, where they are after this plan and where they can go (never to a card gone
+  from CODEX) — never moved: `created_at` cannot tell whose a row is. (3) The REUSE HOLD (rounds
+  10-12 🟡; the rules live in `codex_sync_memory`, read by the planner AND the executor so a
+  dry-run count is exactly what the apply moves): `Codex.taken(C, X)` = CODEX gave X to another
+  card D after C last carried it; the window opens when D was first SEEN on X. That needs the
+  history of EVERY accepted push: `codex_sync._record_history` writes it in its own committed
+  step before the sync — the list is pickable the moment it is accepted, so a sync that then
+  fails / skips must not lose the sighting (review 12). A row on X decided since then
+  (`held_clause`: `created_at` after it — NULL = old; a DL row's document `delivered_on` after
+  it — never `item_memory.delivered_on`, an order's REQUESTED day; or a non-sync audit row on it
+  then — a Naučené edit keeps `created_at`) may be D's (a #477 pick of X SELECTS our existing
+  number and teaches D's wording with NO rename) — the card's renumber and the retired-number
+  memory path move only the older rows (`Split`); held rows stay on X. TAUGHT = what the
+  matcher trusts (`TAUGHT_SOURCES` = `memory.CURATED_SOURCES`: human, sheet-import, História
+  „Doučiť" teachback — review 12: teachback counted as history was held with no review);
+  held taught rows get a review with the way out per kind (Naučené; a „Doučiť" row via the Kôš);
+  held SHIPPED rows (and a NULL source) are delivery history — never sent to Naučené, and where
+  nothing else is said about them they go to `Plan.holds` (report + ONE ops line under the
+  number they really sit on — `at`, a same-push renumber carries them — deduped by scope + code
+  + count against the last applied run, whose renumber `held` lines count too; review 13). A
+  restore / merge onto a number whose code another card held
+  since C first had it (`Codex.foreign` — a round trip X → Y → X, the #478 incident's shape)
+  flags its taught rows decided since then (`_adopted_review`) — adopted, never silently. In
+  practice the hold matters in the dry-run / blocked / reviewed-renumber windows and for
+  duplicate carriers. Residual: `dl_memory.remember` promoting / reviving an existing row keeps
+  its `created_at`, so an answer about a delivery from BEFORE the reuse (same date) counts as
+  C's; a round trip that completes while no renumber ran (dry-run) adopts D's rows with no
+  flag; history keeps only first/last seen per (card, code) — and its `name` advances ONLY with
+  `last_seen` (an older re-sent list, recorded too, must never set a newer name back:
+  `same_product` reads it — review 13 🟡). The class closes only when every
+  memory writer records the CODEX card a row was taught for (the binding / the pick's
+  `codex_card` — a cross-cutting schema change, follow-up candidate). One review entry per card
+  keeps every reason in `reasons`; the ops alert dedups PER reason. A renumber carries only OUR
+  group's numbers (+ the canonical number a human deleted, only while it still IS the card) and
+  a memory move only the rows that qualified themselves (no unchecked `| code` union — round 9).
+- **A text that tells the warehouse what an action WILL do is computed, never written as prose
+  (rounds 13-17 — six rounds found false claims)**: WHAT A PICK DOES is the picker's own pure
+  rule `card_guard.pick_target` (select a live number the scope's EDI can carry / restore our
+  Kôš card / add a NEW card with only the CODEX name + sklad — a DL 14-char twin is never
+  selected or restored), which `add_from_codex` decides through and the planner runs over its
+  simulated catalog (`_pick`, every live number of the code — `_numbers` — sent to the Kôš
+  first; round 17: re-deriving it in prose missed a live legacy twin and a DL twin-only card).
+  `_pick_advice` (the #477 picker offers ONE card per code — `card_guard.pickable`; a restored
+  card keeps its data when the card it is bound to after this plan (`_bound`) is the same
+  product — „ten istý výrobok" — or when it is bound to nothing — no product claim then, round
+  26; the cleared fields named per catalog; a card the picker cannot offer is named
+  "zaradí len oprava v CODEXe"; a repick review never advises a code whose pick SELECTS another
+  number of ours), `_gone_reason` (no stredisko-1 carrier / one / several),
+  `Split.held_at` (the numbers held rows really sit on — a legacy twin), a hold note's `at` +
+  `moved` read from the same-push renumber, `codex_name` on a renumber line, and a footer that
+  promises a redo only for renames / renumbers (a Kôš undo of a RESET is not redone — the
+  binding it came with is stored by then). `CHECK_TAUGHT` is the one way-out text for taught
+  rows (Naučené; a História „Doučiť" row via the Kôš). The Slovak strings live in
+  `codex_sync_texts` — pure functions over FACTS the planner passes in (offered card + its
+  name, `same`, `home`, `no_carrier`…); a new review reason = derive the fact in the planner,
+  add a text function there, never an f-string in `codex_sync_plan` (it is near the size budget).
+- **What is decided, per catalog, per CODEX code our cards carry** (cards grouped per
+  `normalize_code`, the canonical ≤13-char number supplies the data, `codex_cards.index_by_code`),
+  with our card bound to card C: C still carries X → rename to C's stredisko-1 name when ours
+  drifted (#467 `name_key`, `_name_order`; orders alias untouched via `alias=None`). C carries a
+  new pickable code Y (`card_guard.pickable`, C's NEWEST when several) → renumber (create / merge
+  into our Y bound to C / restore our Y from the Kôš), every old number to the Kôš + binding
+  inactive, every memory row X→Y — but a Y another card ALSO carries, or our Y bound to another
+  card → review (never a silent merge of two products). Our Kôš Y never identified (no binding,
+  no pick — deleted before the deploy, its code freed in CODEX and REUSED for C) is restored
+  with OUR data (CODEX's truth); when it is not C's product (`_kos_review`: by name — a bare
+  marker named by its last snapshot — and never a name C's take-over of the code may have
+  lent it via the #467 drift button, `_took_over`) its taught rows, adopted as they sit, go
+  to a human and its delivery history is said (a hold note) — rounds 38-39: silently the
+  bageta's wording recalled the rožok; a BLOCK instead held every order line of ours on a code
+  CODEX no longer has, protected nothing in orders (orders recall never reads the catalog)
+  and led the warehouse to a pick restoring the bageta's data. The SAME treatment (round 40)
+  for our Kôš Y KNOWN as a card that left CODEX for good (`gone_twice` — no two live products;
+  products compared with `same_product`, never `_contested`; blocked, every line on the dead
+  code was held — rounds 40-41) and for a #477 pick that RESTORED our never-identified Kôš card
+  as it was (`Event.restored` + its name then; `KosRules._restored_pick` in `_identify`'s
+  picked branch): not C's product by that name → reset like a re-pick of another product
+  (`reset_kos`) ONLY on evidence — the name is another card's that carried the code
+  (`_kos_verdict`'s `others`), the pick is not older than the history, no human edit of its
+  DATA since (`_edited_since`: an audited `update` on the card whose `after` carries a
+  `card_guard.CURATED_FIELDS` field — the board's Produkty save and the #462 dl_mass answer
+  write one; a name-only „Prevziať názov z CODEXu" save is no fix, rounds 42-43) — else its
+  data stays and a human is told (round 41: a missing name match wiped our own croissant
+  restored under a drifted name, and a warehouse fix); a JUDGED pick's binding (reset or told)
+  is stored by an APPLIED run only (`replaces`, the review-5 rule — rounds 41-42: a dry-run
+  stored it, the apply never reset, and the one-time review never reached ops); its review is
+  written once the WHOLE plan is done (`KosPick` → `_kos_pick_reviews`: the rows sit where the
+  same plan's renumber moves them, round 43) and counts only rows from BEFORE the pick (the
+  warehouse's own answer at that question is ours). A Kôš number known as C ONLY through a
+  RESTORE-pick never judged (undone in the Kôš / deleted again before any applied run) is
+  decided by what it was BEFORE the pick (`KosRules._kos_hit_review`): never identified, or the
+  card its binding names — by its name AT the pick (`Event.name`, round 45: renamed after the
+  pick, then deleted, it passed as C's product), counting only its rows from before the pick (rounds 43-44: its rows
+  adopted silently, also behind a re-pick over another card's binding — the very delete + pick
+  the other-card review advises); a FRESH pick made it C (no review). Texts say what the Kôš card is:
+  another card's product / a drift-button name / only a different name (we do not know) /
+  nameless. `card_guard.CURATED_FIELDS` is the ONE list of curated fields: the board audits it,
+  the sync fills / resets / reads it (round 43: four hand-kept copies). C missing from stredisko 1 in TWO
+  consecutive snapshots (`prev_as_of`; one missing push is an export glitch) → removal when X is
+  nowhere in CODEX, a silent rebind when exactly one card now carries X under OUR name (card
+  recreated), else review. A code with no carrier and no history is never touched (#467
+  "missing"; a carrier seen only in a list older than the history's beginning counts as no
+  history — round 33). An OLDER snapshot than the history's newest → sync skipped.
+  `update_history` reads each stredisko's beginning ONCE per list (a CTE join — a per-row
+  correlated subquery was ~1000x slower on a 6k-card list, inside the push's request, round
+  34); its "older than the history" warning is per stredisko too.
+- **Memory**: a rewrite X→Y whose mapping already exists under Y (UNIQUE — soft-deleted rows
+  count too) soft-deletes the X row; a SOFT-DELETED twin under Y is revived (audited `create`)
+  or an X→Y→X round trip loses the mapping entirely (round-1 🟡, probe-proven). Memory rows of a
+  number the sync RETIRED (inactive binding — written later from a frozen question / held order)
+  follow its card's live number on the next push (`mode: memory`); a code that was never our
+  card's is never moved. A move NEVER has its target among its sources (round 8 🔴: card 27
+  back on its old number planned X → X, every row found ITSELF as the duplicate and the card
+  lost all its mappings — `_memory` skips rows already on the live number, `_rewrite_memory`
+  excludes `new` and `id <> rid`). Invariant pinned by a test: an applied sync never lowers the
+  live mapping rows except where the same mapping lives on under the new number; the report's
+  `merged` + the ops message's „N presunutých, M zlúčených" tell the two apart.
+- **Ops alerts**: one per applied run with changes (+ review items not in the previous applied
+  run), one per distinct blocked plan (worded as what WOULD change — `_change_lines(applied=
+  False)`, round 9), one per failing-sync episode — all `reminder_suppressed`
+  where they could repeat. The message says honestly that a Kôš undo is redone by the next list
+  while CODEX stays the same (only a CODEX fix or `codex_sync_apply=false` stops it). What a
+  human must act on (review + hold lines) comes FIRST and is never cut; only the change lines
+  are capped at `MAX_ALERT_LINES` (`_html(keep=)`, round 46: the reviews came last, the 40-line
+  cap cut them on the first ~56-rename apply, and the dedup then counted them as sent).
+- **Every write is audited and Kôš-restorable — except a DL number whose code left CODEX**
+  (#467 `audit._refuse_dead_dl_code` refuses it, 409: every DL removal, a DL renumber's old
+  number when its code left CODEX — the ops footer says so, `codex_sync._dl_dead`, review 30):
+  renames/memory rewrites = `update` (before/after), new card = `create`, retired number /
+  duplicate memory row = `delete`. `audit._restore_update`
+  now runs its UPDATE on a savepoint and turns a UNIQUE clash into `RestoreError(409)` (a
+  memory gtin written back while the mapping was re-learned under it).
+- **Tests** (`tests/test_codex_sync.py`, synthetic codes 999…): `_baseline` = push V1 + one
+  applied sync (seeds history + bindings, no change). Both review rounds' probes are the
+  regression set: reused code followed by card (also only-seen-in-dry-run chains), vanished card
+  never follows the code, shared new code never merged, swap reviewed in orders / followed in DL,
+  stredisko-4 name, one-push duplicate, recreated card rebound, older snapshot, twin,
+  garbled-rename breaker, blocked dedup, would_block, retired-number memory, round trip with a
+  duplicate, 409 restore, rollback + error alert. A removal test must push TWICE (two snapshots).

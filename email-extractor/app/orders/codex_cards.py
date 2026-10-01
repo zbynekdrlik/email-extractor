@@ -310,10 +310,17 @@ def pickable(conn, sklady: tuple[int, ...] | None = None) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for code, rs in by_code.items():
         rs.sort(key=lambda r: _name_order(r[1] == 1, r[3], r[2]))
-        in_sklady = {r[1] for r in rs}
         out[code] = {"code": code, "name": rs[0][2], "card_code": rs[0][0],
-                     "sklad": KG_SKLAD if KG_SKLAD in in_sklady else min(in_sklady)}
+                     "sklad": pick_sklad(r[1] for r in rs)}
     return out
+
+
+def pick_sklad(sklady) -> int:
+    """The sklad a DL card takes from CODEX rows with these sklady — `KG_SKLAD` when one is
+    kg-tracked (a kg card must stay kg-tracked), else the lowest. The ONE rule for the #477 pick
+    and the #478 sync's reset."""
+    in_sklady = set(sklady)
+    return KG_SKLAD if KG_SKLAD in in_sklady else min(in_sklady)
 
 
 def load(conn, now: datetime | None = None) -> CodexCards | None:

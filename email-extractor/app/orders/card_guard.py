@@ -67,6 +67,14 @@ _SCOPES: dict[str, dict] = {
     "dl": {"sklady": None, "max_code": desadv_edi.GTIN_FIELD_WIDTH,
            "table": "dl_catalog_overrides", "label": "dodacie listy"},
 }
+# scope -> a card's CURATED data fields beyond its name — the ONE list the board's Produkty
+# save audits (`board.services.catalog.upsert`) and the #478 CODEX sync fills on a merge /
+# clears on a reset / reads as "a human fixed the data" (`codex_sync_kos._edited_since`).
+# Review 43: four hand-kept copies, nothing tying what the board audits to what the sync reads.
+CURATED_FIELDS: dict[str, tuple[str, ...]] = {
+    "orders": ("alias",),
+    "dl": ("doplnok", "mass", "sklad", "cena"),
+}
 
 
 class CreateBlocked(CardRefused):
@@ -126,15 +134,35 @@ def _card(conn, scope: str, gtin: str) -> dict:
     return next((r for r in catalog(conn, scope) if str(r.get("gtin")) == gtin), {})
 
 
-def _ours(conn, scope: str, *, deleted: bool = False) -> dict[str, dict]:
-    """Our (live or Kôš) cards by CODEX code — only numbers the scope's EDI can carry: a legacy
-    „0"+13-digit DL twin is 14 chars, which no DESADV line can ship, so it is never the card a
-    pick selects or restores (the canonical CODEX card is added instead)."""
-    rows = _deleted(conn, scope) if deleted else catalog(conn, scope)
+def index_ours(scope: str, rows: list[dict]) -> dict[str, dict]:
+    """Our (live or Kôš) cards `rows` by CODEX code — only numbers the scope's EDI can carry: a
+    legacy „0"+13-digit DL twin is 14 chars, which no DESADV line can ship, so it is never the
+    card a pick selects or restores (the canonical CODEX card is added instead); the canonical
+    number wins over a legacy twin (`codex_cards.index_by_code`). Pure — the CODEX card sync
+    (#478) runs it over its simulated catalog."""
     limit = _spec(scope)["max_code"]
     if limit is not None:
         rows = [r for r in rows if len(str(r.get("gtin") or "")) <= limit]
     return codex_cards.index_by_code(rows)
+
+
+def pick_target(scope: str, code: str, live: list[dict],
+                binned: list[dict]) -> tuple[str, dict | None]:
+    """What a „Vybrať kartu z CODEXu" pick of `code` does to `scope`'s catalog, given our live
+    and Kôš cards — THE rule `add_from_codex` applies, and the one the CODEX card sync's texts
+    describe (#478 review 17: re-deriving it in prose told the warehouse wrong things):
+    ("select", our live card) — nothing is written; ("restore", our Kôš card) — restored as it
+    was; ("new", None) — a new card with only the CODEX name (+ sklad for DL)."""
+    card = index_ours(scope, live).get(code)
+    if card is not None:
+        return "select", card
+    card = index_ours(scope, binned).get(code)
+    return ("restore", card) if card is not None else ("new", None)
+
+
+def _ours(conn, scope: str, *, deleted: bool = False) -> dict[str, dict]:
+    """Our live (or Kôš) cards by CODEX code — `index_ours` over the stored catalog."""
+    return index_ours(scope, _deleted(conn, scope) if deleted else catalog(conn, scope))
 
 
 def _last_known_name(conn, scope: str, gtin: str) -> str:
@@ -203,12 +231,12 @@ def add_from_codex(conn, scope: str, code, *, actor: str) -> dict:
         raise CardRefused({"error": (
             f"Kód {code} nie je medzi aktívnymi kartami CODEXu pre {spec['label']} — vyber "
             f"kartu zo zoznamu „Vybrať kartu z CODEXu“.")})
-    ours = _ours(conn, scope).get(norm)
-    if ours is not None:
+    kind, ours = pick_target(scope, norm, catalog(conn, scope), _deleted(conn, scope))
+    if kind == "select" and ours is not None:
         log.info("CODEX pick %s: already our card %s „%s“ — selected, nothing written",
                  norm, ours.get("gtin"), ours.get("name", ""))
         return {"gtin": str(ours["gtin"]), "name": ours.get("name", ""), "created": False}
-    binned = _ours(conn, scope, deleted=True).get(norm)
+    binned = ours if kind == "restore" else None
     from ..board.services import audit  # lazy: the audit leaf, like orders.teach does
     if binned is not None:
         gtin = str(binned["gtin"])

@@ -16,7 +16,7 @@ import hmac
 from flask import Flask, jsonify, request
 
 from .httpapi_common import Deps
-from .orders import codex_cards, codex_orders
+from .orders import codex_cards, codex_orders, codex_sync
 
 # #467: the cards push is one ~1 MB body (~6k rows); anything past this is not a CODEX list.
 MAX_CARDS_BODY = 16 * 1024 * 1024
@@ -72,7 +72,11 @@ def register(app: Flask, deps: Deps) -> None:
                 res = codex_cards.replace_cards(c, payload["cards"],
                                                 source_as_of=payload.get("source_as_of"),
                                                 force=force)
+                # #478: mirror the accepted list onto the cards we already have (names,
+                # renumbers, removed codes) — dry-run unless `codex_sync_apply`; a sync failure
+                # never fails the push (the list is already replaced; the next push retries)
+                sync = codex_sync.run_safely(c, deps.cfg)
         except codex_cards.ReplaceRefused as e:
             return jsonify(error=str(e)), e.status
         return jsonify(rows=res["rows"], codes=res["codes"],
-                       received=len(payload["cards"])), 200
+                       received=len(payload["cards"]), sync=sync), 200

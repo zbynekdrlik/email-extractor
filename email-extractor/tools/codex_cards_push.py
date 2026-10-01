@@ -180,8 +180,12 @@ def run(url: str, token: str, db_path: str = DEFAULT_DB_PATH, query=None, as_of=
                 "error": "no usable stock-card rows — nothing posted"}
     body = {"source_as_of": _iso_utc(as_of()), "cards": cards}
     resp = poster(url, {"X-Token": token, "Content-Type": "application/json"}, body) or {}
-    return {"fetched": len(rows), "cards": len(cards), "rows": int(resp.get("rows", 0) or 0),
-            "codes": int(resp.get("codes", 0) or 0)}
+    res = {"fetched": len(rows), "cards": len(cards), "rows": int(resp.get("rows", 0) or 0),
+           "codes": int(resp.get("codes", 0) or 0)}
+    if isinstance(resp.get("sync"), dict):
+        # #478: the add-on's CODEX card sync result for this list (dry-run / apply / ...)
+        res["sync"] = resp["sync"]
+    return res
 
 
 def pushed_line(res: dict, url: str) -> str:
@@ -192,8 +196,15 @@ def pushed_line(res: dict, url: str) -> str:
     # (unlike `.hostname`/`.port`) never raises, so a pushed batch always gets its line.
     parts = urlsplit(url)
     target = f"{parts.scheme}://{parts.netloc.rpartition('@')[2]}"
-    return (f"pushed: fetched={res['fetched']} cards={res['cards']} rows={res['rows']} "
+    line = (f"pushed: fetched={res['fetched']} cards={res['cards']} rows={res['rows']} "
             f"codes={res['codes']} to={target}")
+    sync = res.get("sync")
+    if isinstance(sync, dict):
+        # #478: the journal proves the add-on's card sync ran and what it did
+        line += (f" sync={sync.get('mode', '?')} renamed={sync.get('renamed', 0)} "
+                 f"renumbered={sync.get('renumbered', 0)} removed={sync.get('removed', 0)} "
+                 f"review={sync.get('review', 0)}")
+    return line
 
 
 def main(argv=None) -> int:

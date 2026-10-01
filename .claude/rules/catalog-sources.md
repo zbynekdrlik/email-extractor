@@ -27,7 +27,10 @@ Ciabatta 3636/3643 incident: two cards added to the sheet only → 2 orders held
 - **A NEW card enters the catalog ONLY by „Vybrať kartu z CODEXu" on a board question (#477,
   owner order 2026-09-30)** — `orders/card_guard.add_from_codex` writes exactly the picked CODEX
   code + CODEX name (orders = CODEX stredisko 1 / sklad 1; DL = stredisko 1, `sklad` from CODEX),
-  audited, one card per human pick (never a bulk import, #337). EVERY typed creation answers 403
+  audited, one card per human pick (never a bulk import, #337). WHAT a pick does — select our
+  live number / restore our Kôš card / add a new one — is the pure `card_guard.pick_target`
+  (over `index_ours`: only numbers the scope's EDI can carry); the #478 CODEX sync's review texts
+  call it too, so change the rule THERE, never in a second copy. EVERY typed creation answers 403
   „Nové karty sa pridávajú len výberom z CODEXu": the Produkty tabs (no „Pridať" any more), the
   question's `new_product`/`new_item` bodies, and a NEW number on `POST /api/znalosti/products` /
   `dl-products`. The nástenka „Produkty" tabs (`/nastenka/produkty-objednavky` /
@@ -51,6 +54,11 @@ column, migrate revision 8) makes it editable via `/znalosti` products.
   „don't touch, inherit the snapshot row's baked-in alias"; a non-NULL string (incl `""`) =
   „override wins" (`""` = an explicit clear). The merged alias is always `or ""`-guarded so
   `None` never reaches `match.py`.
+- **A NULL override alias inherits the SNAPSHOT row — and a delete's rebuild drops that row**
+  (#478 review 18: the CODEX sync's name-only rename writes exactly such an override; a pick or
+  a Kôš undo then restored the card with NO alias). `snapshot.heal_blank_marker` (run by every
+  un-delete: `undelete_catalog_card`, `audit._heal_blank_card`) refills a NULL alias from
+  `last_known_card` as well as a bare marker's name — never overwriting a set value.
 - **API tri-state** (`POST /api/znalosti/products`): the `alias`/`doplnok` KEY being ABSENT →
   don't touch (pass `alias=None`); PRESENT (even `""`) → set/clear it. The `/znalosti` UI
   prefills the input with the current effective alias and always sends it (a name-only UI edit

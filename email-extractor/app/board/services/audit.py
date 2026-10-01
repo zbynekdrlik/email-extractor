@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 
+from psycopg import errors
 from psycopg.types.json import Json
 
 log = logging.getLogger("board.audit")
@@ -293,8 +294,16 @@ def _restore_update(conn, table_name, row_id, before) -> None:
         sets.append(f"{key} = %s")
         values.append(Json(val) if cols[key] == "jsonb" and val is not None else val)
     values.append(str(row_id))
-    conn.execute(
-        f"UPDATE {table_name} SET {', '.join(sets)} WHERE {pk_col}::text = %s", values)
+    try:
+        # a savepoint of its own: a restore that would duplicate a UNIQUE row (#478 — a memory
+        # row's gtin written back while the same mapping was learned again under it since)
+        # leaves the connection usable and answers a clean 409 instead of a raw 500
+        with conn.transaction():
+            conn.execute(
+                f"UPDATE {table_name} SET {', '.join(sets)} WHERE {pk_col}::text = %s", values)
+    except errors.UniqueViolation as e:
+        raise RestoreError(409, "rovnaký záznam už existuje — vrátenie by vytvorilo "
+                                "duplicitu") from e
     _rebuild_snapshot(conn, table_name)
 
 
