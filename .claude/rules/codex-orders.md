@@ -592,7 +592,10 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   run), one per distinct blocked plan (worded as what WOULD change — `_change_lines(applied=
   False)`, round 9), one per failing-sync episode — all `reminder_suppressed`
   where they could repeat. The message says honestly that a Kôš undo is redone by the next list
-  while CODEX stays the same (only a CODEX fix or `codex_sync_apply=false` stops it).
+  while CODEX stays the same (only a CODEX fix or `codex_sync_apply=false` stops it). What a
+  human must act on (review + hold lines) comes FIRST and is never cut; only the change lines
+  are capped at `MAX_ALERT_LINES` (`_html(keep=)`, round 46: the reviews came last, the 40-line
+  cap cut them on the first ~56-rename apply, and the dedup then counted them as sent).
 - **Every write is audited and Kôš-restorable — except a DL number whose code left CODEX**
   (#467 `audit._refuse_dead_dl_code` refuses it, 409: every DL removal, a DL renumber's old
   number when its code left CODEX — the ops footer says so, `codex_sync._dl_dead`, review 30):

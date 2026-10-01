@@ -310,9 +310,14 @@ def _dl_dead(plan: sp.Plan) -> bool:
                    for r in plan.renumbers))
 
 
-def _html(head: str, lines: list[str], *, dl_dead: bool = False) -> str:
-    more = len(lines) - MAX_ALERT_LINES
-    shown = lines[:MAX_ALERT_LINES] + ([f"… a ďalších {more}"] if more > 0 else [])
+def _html(head: str, lines: list[str], *, dl_dead: bool = False, keep: int = 0) -> str:
+    """The ops message: the first `keep` lines (what a human must act on — reviews, held
+    history) always in full and first, then the changes capped at `MAX_ALERT_LINES` (review 46:
+    the reviews came last and were cut, while the next applied run counts them as sent)."""
+    rest = lines[keep:]
+    more = len(rest) - MAX_ALERT_LINES
+    shown = (lines[:keep] + rest[:MAX_ALERT_LINES]
+             + ([f"… a ďalších {more} zmien"] if more > 0 else []))
     # what a Kôš undo really does, per kind (review 15 🔵: a reset undone is NOT redone — the
     # binding the reset came with is stored by then; review 30 🔵: a DL number whose code left
     # CODEX does not come back at all)
@@ -410,15 +415,16 @@ def _alert(conn, cfg, plan: sp.Plan, mode: str, run_id: int, known: set[tuple],
                                 dl_dead=_dl_dead(plan)),
                           message_id=key)
         return
-    lines = (_change_lines(plan)
-             + _hold_lines([h for h in plan.holds
-                            if _hold_key(h["scope"], h["code"], h["held"]["shipped"])
-                            not in known])
-             + _review_lines(_fresh_review(plan.review, known)))
+    # what a human must act on first, never cut (review 46) — the dedup above counts it as sent
+    act = (_review_lines(_fresh_review(plan.review, known))
+           + _hold_lines([h for h in plan.holds
+                          if _hold_key(h["scope"], h["code"], h["held"]["shipped"])
+                          not in known]))
+    lines = act + _change_lines(plan)
     if lines:
         dl_alerts.enqueue(conn, channel, ALERT_KIND, _html(
             "&#128260; Karty podľa CODEXu (#478) — zmeny z posledného zoznamu kariet:", lines,
-            dl_dead=_dl_dead(plan)), message_id=f"{ALERT_KEY}:{run_id}")
+            dl_dead=_dl_dead(plan), keep=len(act)), message_id=f"{ALERT_KEY}:{run_id}")
 
 
 # --- the run log -------------------------------------------------------------------------------
