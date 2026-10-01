@@ -2822,6 +2822,22 @@ def test_a_card_missing_from_one_list_is_reported_as_waiting(pg, caplog):
     assert any("waits" in r.getMessage() and ROZOK in r.getMessage() for r in caplog.records)
 
 
+def test_an_unbound_card_whose_code_changed_carrier_in_one_list_is_reported_as_waiting(pg):
+    """Review 24 🔵: ROZOK sat on cards 27 and 28 (our name matches neither — reviewed); one
+    list without card 27 leaves 28 the only carrier — one push is no proof, nothing is bound —
+    and the report says the number waits (its open review vanished with no trace before)."""
+    _seed_catalogs(pg)
+    snapshot.upsert_catalog_card(pg, ROZOK, "Rožok starý názov")
+    snapshot.rebuild_from_overrides(pg)
+    shared = V1 + [_row(ROZOK, "28", "Bageta šunková 120g")]
+    _push(pg, shared, hours_old=5)
+    codex_sync.run(pg, _cfg(apply=False))
+    _push(pg, [r for r in shared if r["card_code"] != "27"], hours_old=3)
+    codex_sync.run(pg, _cfg(apply=False))
+    why = _waits(pg).get(("orders", ROZOK), "")
+    assert "28" in why and "27" in why
+
+
 def test_a_pick_waiting_out_a_glitch_is_reported(pg):
     """Review 23 🔵: a pick whose picked card is missing from one list waits — reported."""
     _picked_as_the_muka(pg, "1")
