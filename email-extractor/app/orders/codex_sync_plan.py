@@ -405,8 +405,11 @@ class _ScopePlanner:
             card = named[0]
         elif carriers:
             card = next(iter(carriers))
-            if any(not cx.absent_before(c, code) for c in cx.carried.get(code, {}) if c != card):
-                return None                    # another card carried it a snapshot ago
+            before = sorted(c for c in cx.carried.get(code, {})
+                            if c != card and not cx.absent_before(c, code))
+            if before:                         # another card carried it a snapshot ago
+                self.plan.wait(item, texts.why_new_carrier(code, card, before))
+                return None
         else:
             last = cx.owners.get(code, [])
             if len(last) > 1:

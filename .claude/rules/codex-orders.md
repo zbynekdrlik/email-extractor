@@ -369,7 +369,7 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   card/name" logic must go through the binding, never re-derive ownership from the list.
 - **Binding lifecycle (rounds 3-5) — ONE resolver, `_ScopePlanner._known`**: a human #477 pick
   newer than the binding (the newest non-sync audit `create` on the override table,
-  `codex_sync_plan._events`; the pick writes `after.codex_card` = the picked ACSKLP, also when it
+  `codex_sync_list._events`; the pick writes `after.codex_card` = the picked ACSKLP, also when it
   restores a Kôš card) names the card exactly; else the binding, ACTIVE OR RETIRED — a Kôš
   „Vrátiť" of a number the sync retired is still that CODEX card and is merged back into its new
   number (round 5 🟡: re-identifying it from the list bound it to the pagáč reusing the code).

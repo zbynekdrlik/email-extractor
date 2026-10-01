@@ -236,6 +236,12 @@ def why_glitch(card: str) -> str:
     return f"karta CODEX {card} v tomto zozname chýba (raz) — čaká sa na ďalší zoznam"
 
 
+def why_new_carrier(code: str, card: str, before: list[str]) -> str:
+    """An unbound number whose code's only carrier changed in ONE list — one push is no proof."""
+    return (f"kód {code} teraz nesie len karta CODEX {card}, v predchádzajúcom zozname ho "
+            f"niesla aj karta CODEX {', '.join(before)} — čaká sa na ďalší zoznam")
+
+
 def why_pick_waits(picked: str, missing: str) -> str:
     """A #477 pick waits while the picked card or the card it replaces is missing once."""
     return (f"výber karty CODEX {picked} sa vyrieši s ďalším zoznamom — karta CODEX {missing} "

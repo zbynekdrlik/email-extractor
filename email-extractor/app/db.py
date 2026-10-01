@@ -291,8 +291,9 @@ CODEX_STOCK_CARDS = [
 # whichever card holds the code most recently (a code can be REUSED for another product);
 # `active=false` = our number the sync retired (a later memory row of it still follows the
 # card). `codex_sync_runs` is the
-# append-only log of every sync (`app/orders/codex_sync.py`): dry-run or applied, the whole
-# plan as JSON — what the ticket / the operator reads before the apply switch goes on.
+# log of every sync (`app/orders/codex_sync.py`): dry-run or applied, the whole plan as JSON —
+# what the ticket / the operator reads before the apply switch goes on; pruned to a window
+# (`codex_sync.RUNS_KEEP_DAYS` + the newest run of each status).
 CODEX_CARD_HISTORY = [
     """
     CREATE TABLE IF NOT EXISTS codex_card_history (
