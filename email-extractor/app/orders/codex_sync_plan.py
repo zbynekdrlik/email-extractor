@@ -33,7 +33,8 @@ CODEX card C:
   back from the Kôš under a name that is no longer its CODEX card's, and the mapping rows
   older than a #477 re-pick of our number as another product (review 7).
 
-A code with no stredisko-1 carrier and no history (the #467 "missing" cards) is never touched.
+A code with no stredisko-1 carrier and no history (the #467 "missing" cards) is never touched —
+a card seen on it only in a list older than the history's beginning counts as none (review 33).
 Nothing here ever adds a CODEX card we do not already have (#337).
 """
 from __future__ import annotations
@@ -419,10 +420,11 @@ class _ScopePlanner:
 
     def _by_history(self, code: str, item: dict, carriers: set[str]) -> str | None:
         """THE rule for an UNBOUND number (every number on the first post-deploy lists): which
-        CODEX card it IS, from every card that ever carried its code (`Codex.carried`) — the
-        carriers now (none, one or several) and before — never "who holds the code now / held
-        it last" (reviews 25 / 28 / 29: a reuser — also one that moved on, or one beside a
-        duplicate carrier — dragged our rožok along, round 1's 🔴).
+        CODEX card it IS, from every card that carried its code since the history began
+        (`Codex.since_seed` — a sighting only in a list older than that is no evidence, review
+        33) — the carriers now (none, one or several) and before — never "who holds the code
+        now / held it last" (reviews 25 / 28 / 29: a reuser — also one that moved on, or one
+        beside a duplicate carrier — dragged our rožok along, round 1's 🔴).
         - One list is no proof: a card that left the code since the last list, a card arriving
           on a code no card carried before (review 30: a #467 "missing" card bound to it and
           then removed), or (no carrier now) a last carrier missing from this list only → it
@@ -435,7 +437,7 @@ class _ScopePlanner:
         - Else a human decides, with ways out that work (`_carrier_way_out`)."""
         cx, name = self.cx, item["name"]
         now = sorted(carriers)
-        hist = sorted(cx.carried.get(code, {}))
+        hist = cx.since_seed(code)               # a pre-history-only sighting: no evidence
         if not hist:
             return None                          # no stredisko-1 history: never touched
         earlier = [c for c in hist if c not in carriers]

@@ -57,6 +57,14 @@ class Codex:
     def carriers(self, code: str) -> set[str]:
         return {r.card for r in self.by_code.get(code, [])}
 
+    def since_seed(self, code: str) -> list[str]:
+        """The cards seen carrying `code` in a list since the history began. A card seen on it
+        only in a list OLDER than the beginning (recorded as first seen AT the beginning, so
+        its reuse window opens — review 32) is no evidence of who our number is: it bound a
+        #467 "missing" card with no name check, then removed / renumbered it (review 33)."""
+        seed = self.seeded_at or NEVER
+        return sorted(c for c, t in self.carried.get(code, {}).items() if t >= seed)
+
     def product(self, card: str, code: str) -> set[str]:
         """The product names (#467 `name_key`) of CODEX `card`: its current rows + its name
         while it carried `code` (the history keeps it after the card moved on)."""
@@ -157,23 +165,26 @@ def update_history(conn, as_of: datetime) -> None:
     product and cleared its data). Every ACCEPTED list is recorded — it is pickable the moment
     it is accepted, so its sightings open reuse windows (round 12; review 32: skipping an old
     one moved a wording taught from it with the wrong card) — but a pair first seen in a list
-    OLDER than the history's beginning is recorded as first seen AT that beginning: the
-    beginning (`Codex.seeded_at`) never moves back, else every card on a code since then would
-    count as "arrived" (review 31)."""
+    OLDER than the history's beginning is recorded as first seen AT that beginning — its
+    stredisko's own, the one `Codex.seeded_at` reads for stredisko 1 (review 33): the beginning
+    never moves back, else every card on a code since then would count as "arrived" (review 31).
+    Only first_seen is clamped — last_seen stays the list's age (the name rule above). Such a
+    pair is no identity evidence (`Codex.since_seed`, review 33)."""
     begun = conn.execute("SELECT min(first_seen) FROM codex_card_history").fetchone()
     if begun and begun[0] is not None and as_of < begun[0]:
         log.warning("CODEX card history: the list (CODEX data as of %s) is older than the "
                     "history's beginning (%s) — its new sightings are recorded at the beginning "
                     "(#478)", as_of, begun[0])
+    # GREATEST ignores NULL: a stredisko with no history yet records the list's own age
     conn.execute(
         """INSERT INTO codex_card_history (stredisko, card_code, code, name, first_seen,
                                            last_seen)
-           SELECT stredisko, card_code, code, max(name),
-                  GREATEST(%(as_of)s, COALESCE((SELECT min(first_seen) FROM codex_card_history),
-                                               %(as_of)s)),
+           SELECT c.stredisko, c.card_code, c.code, max(c.name),
+                  GREATEST(%(as_of)s, (SELECT min(h.first_seen) FROM codex_card_history h
+                                        WHERE h.stredisko = c.stredisko)),
                   %(as_of)s
-             FROM codex_stock_cards
-            GROUP BY stredisko, card_code, code
+             FROM codex_stock_cards c
+            GROUP BY c.stredisko, c.card_code, c.code
            ON CONFLICT (stredisko, card_code, code) DO UPDATE
               SET name = CASE WHEN EXCLUDED.last_seen >= codex_card_history.last_seen
                               THEN EXCLUDED.name ELSE codex_card_history.name END,

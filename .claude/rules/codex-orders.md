@@ -372,8 +372,11 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   the code since the last list, a card arriving on a code no card carried — rounds 30-31, or
   — no carrier now — the last carrier missing once → WAIT, protected); the ONE card on the code
   since the history began (`Codex.seeded_at`; a list older than that beginning is still
-  recorded — accepted = pickable, round 12 — with its new sightings at the beginning, so it
-  never moves, rounds 31-32) → that card; else our NAME — the one carrier now named
+  recorded — accepted = pickable, round 12 — with its new sightings at its stredisko's
+  beginning, so it never moves, rounds 31-33; `_by_history` reads only `Codex.since_seed` —
+  a card seen on the code ONLY in such an older list is no evidence: it bound a #467 "missing"
+  card with no name check, then removed it / renumbered it onto another product, round 33)
+  → that card; else our NAME — the one carrier now named
   so, else the one card ever named so — unless that card took the code over from ANOTHER
   product (`_took_over`: first seen before it — cards seeded together never count; in CODEX or
   gone — the #467 drift button offers the code's holder, round 9's rule → a human, rounds
@@ -520,7 +523,8 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   consecutive snapshots (`prev_as_of`; one missing push is an export glitch) → removal when X is
   nowhere in CODEX, a silent rebind when exactly one card now carries X under OUR name (card
   recreated), else review. A code with no carrier and no history is never touched (#467
-  "missing"). An OLDER snapshot than the history's newest → sync skipped.
+  "missing"; a carrier seen only in a list older than the history's beginning counts as no
+  history — round 33). An OLDER snapshot than the history's newest → sync skipped.
 - **Memory**: a rewrite X→Y whose mapping already exists under Y (UNIQUE — soft-deleted rows
   count too) soft-deletes the X row; a SOFT-DELETED twin under Y is revived (audited `create`)
   or an X→Y→X round trip loses the mapping entirely (round-1 🟡, probe-proven). Memory rows of a
