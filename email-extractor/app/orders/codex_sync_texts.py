@@ -156,25 +156,31 @@ def renumber_other_card(scope: str, succ: str, other: str, card: str, card_name:
             f"ho pri otázke cez „Vybrať kartu z CODEXu“ — {result}.")
 
 
-def _kos_what(kos_name: str, card: str, succ: str, drift: Sequence[str]) -> tuple[str, str]:
-    """(label, what it is) of our never-identified Kôš card under `succ`: no name → we never
-    compared the products (review 39); named like card `card` that took the code over from
-    `drift` → the name may come from the #467 drift button; else another product."""
+def _kos_what(kos_name: str, card: str, succ: str, drift: Sequence[str],
+              others: Sequence[str]) -> tuple[str, str]:
+    """(label, what it is) of our Kôš card under `succ` that is not card `card`'s product by
+    name: no name → we never compared the products (review 39); named like `card`, which took
+    the code over from `drift` → the name may come from the #467 drift button; named like
+    `others` (cards of another product that carried the code) → that product; else only the
+    name differs — we do not know (review 41: a drifted name of our own card is no proof)."""
     if not kos_name:
         return "bez názvu", "nevieme, aký výrobok to bol"
     if drift:
         return (f"„{kos_name}“", f"názov ako karta CODEX {card}, no kód {succ} pred ňou niesla "
                 f"karta CODEX {', '.join(drift)} (iný výrobok) — názov mohol prísť z tlačidla "
                 f"„Prevziať názov z CODEXu“")
-    return f"„{kos_name}“", "iný výrobok"
+    if others:
+        return f"„{kos_name}“", f"výrobok karty CODEX {', '.join(others)} — iný výrobok"
+    return (f"„{kos_name}“", f"iný názov než karta CODEX {card} — nevieme, či je to ten istý "
+            f"výrobok")
 
 
 def kos_adopted(gtin: str, succ: str, card: str, card_name: str, kos_name: str, taught: int,
-                drift: Sequence[str]) -> str:
-    """Our number goes to `succ`, where our never-identified Kôš card of another product sat:
-    OUR data replaces its, its taught rows stay under `succ` (adopted as they sit) — a human
-    checks them (reviews 38-39, the review-11 rule)."""
-    label, what = _kos_what(kos_name, card, succ, drift)
+                drift: Sequence[str], others: Sequence[str]) -> str:
+    """Our number goes to `succ`, where our Kôš card not of this product (by name) sat: OUR
+    data replaces its, its taught rows stay under `succ` (adopted as they sit) — a human checks
+    them (reviews 38-39, the review-11 rule)."""
+    label, what = _kos_what(kos_name, card, succ, drift, others)
     return (f"naše číslo {gtin} sa prečísluje na {succ} (karta CODEX {card} „{card_name}“), kde "
             f"máme v Koši kartu {label} — {what}: jej údaje prepíšu naše, no jej {taught} "
             f"naučených priradení pod číslom {succ} ostáva — môžu patriť jej, nie karte CODEX "
@@ -182,19 +188,23 @@ def kos_adopted(gtin: str, succ: str, card: str, card_name: str, kos_name: str, 
 
 
 def kos_picked(at: str, code: str, card: str, card_name: str, kos_name: str, taught: int,
-               drift: Sequence[str]) -> str:
+               drift: Sequence[str], others: Sequence[str], *, reset: bool) -> str:
     """A #477 pick of card `card` restored our never-identified Kôš card `at` as it was — by
-    its name then another product: its data reset like a re-pick of another product, its
-    taught rows stay — a human checks them (review 40)."""
-    label, what = _kos_what(kos_name, card, code, drift)
+    its name then not `card`'s product: its data reset like a re-pick of another product only
+    on evidence (`reset`, review 41), its taught rows from before the pick stay — a human checks
+    them (review 40)."""
+    label, what = _kos_what(kos_name, card, code, drift, others)
+    data = ("jej údaje sa vynulujú ako pri výbere inej karty" if reset else
+            f"jej údaje (Produkty) ostávajú — ak nie sú údajmi karty CODEX {card}, oprav ich")
+    rows = (f"; jej {taught} naučených priradení spred výberu ostáva — môžu patriť jej, nie "
+            f"karte CODEX {card}: {CHECK_TAUGHT}" if taught else "")
     return (f"výber karty CODEX {card} („{card_name}“) obnovil z Koša našu kartu {at} {label} "
-            f"— {what}: jej údaje sa vynulujú ako pri výbere inej karty, no jej {taught} "
-            f"naučených priradení ostáva — môžu patriť jej, nie karte CODEX {card}: "
-            f"{CHECK_TAUGHT}.")
+            f"— {what}: {data}{rows}.")
 
 
-def why_kos_other(at: str, kos_name: str, card: str, drift: Sequence[str]) -> str:
-    label, what = _kos_what(kos_name, card, at, drift)
+def why_kos_other(at: str, kos_name: str, card: str, drift: Sequence[str],
+                  others: Sequence[str]) -> str:
+    label, what = _kos_what(kos_name, card, at, drift, others)
     return f"pod číslom {at} bola v Koši karta {label} — {what}"
 
 

@@ -544,11 +544,19 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   CODEX no longer has, protected nothing in orders (orders recall never reads the catalog)
   and led the warehouse to a pick restoring the bageta's data. The SAME treatment (round 40)
   for our Kôš Y KNOWN as a card that left CODEX for good (`gone_twice` — no two live products;
-  products compared with `same_product`; blocked, every line on the dead code was held) and
-  for a #477 pick that RESTORED our never-identified Kôš card as it was (`Event.restored` +
-  its name then, `_kos_verdict` in `_identify`'s picked branch): reset like a re-pick of
-  another product (`reset_kos`), its taught rows to a human (`texts.kos_picked`) — kept, the
-  merge filled only blanks and the bageta's mass / cena stayed on the rožok. C missing from stredisko 1 in TWO
+  products compared with `same_product`, never `_contested`; blocked, every line on the dead
+  code was held — rounds 40-41) and for a #477 pick that RESTORED our never-identified Kôš card
+  as it was (`Event.restored` + its name then; `KosRules._restored_pick` in `_identify`'s
+  picked branch): not C's product by that name → reset like a re-pick of another product
+  (`reset_kos`) ONLY on evidence — the name is another card's that carried the code
+  (`_kos_verdict`'s `others`), the pick is not older than the history, no human edit
+  (audited `update`) since — else its data stays and a human is told (round 41: a missing name
+  match wiped our own croissant restored under a drifted name, and a warehouse fix); a reset's
+  binding is stored by an APPLIED run only (`replaces`, the review-5 rule — round 41: a
+  dry-run stored it and the apply never reset); the review counts only rows from BEFORE the
+  pick (the warehouse's own answer at that question is ours). Texts say what the Kôš card is:
+  another card's product / a drift-button name / only a different name (we do not know) /
+  nameless. C missing from stredisko 1 in TWO
   consecutive snapshots (`prev_as_of`; one missing push is an export glitch) → removal when X is
   nowhere in CODEX, a silent rebind when exactly one card now carries X under OUR name (card
   recreated), else review. A code with no carrier and no history is never touched (#467

@@ -381,8 +381,13 @@ class _ScopePlanner(KosRules):
                     self.plan.wait(item, texts.why_pick_waits(known.card, missing))
                     return None
                 replaces = old is not None and old.card != known.card
-                self._seed(item, known.card, replaces=replaces)
                 ev = cx.events[(self.scope.table, gtin)]
+                # the pick restored our NEVER-identified Kôš card as it was (reviews 40-41): a
+                # reset it implies is stored with its binding by an applied run only (review 5's
+                # rule — review 41: a dry-run's binding hid the pick from the apply)
+                reset_kos = (old is None and ev.restored
+                             and self._restored_pick(item, gtin, code, known.card, ev))
+                self._seed(item, known.card, replaces=replaces or reset_kos)
                 if old is not None and replaces and not cx.same_product(old.card, known.card,
                                                                         code):
                     # our number used to be ANOTHER product: the pick restored its old Kôš
@@ -390,9 +395,6 @@ class _ScopePlanner(KosRules):
                     # Products compared, never OUR name: a human rename before the delete +
                     # pick would hide it (review 7)
                     self._reset_from(item, old.card, ev.at)
-                elif old is None and ev.restored:
-                    # the pick restored our NEVER-identified Kôš card as it was (review 40)
-                    self._restored_pick(item, gtin, code, known.card, ev)
                 return known.card
             others = cx.carriers(code) - {known.card}
             if (cx.gone_twice(known.card) and len(others) == 1
@@ -626,17 +628,19 @@ class _ScopePlanner(KosRules):
         # — review 25: an unbound number settled as another card was merged into)
         other = (hit_known.card if hit_known is not None and hit_known.card is not None
                  else self.settled.get(at))
-        if other not in (None, card) and not (target is None and self.cx.gone_twice(str(other))):
+        # our Kôš number whose card left CODEX for good: no two live products — overwritten like
+        # an unknown one, `_kos_review` decides (review 40: blocked, every line of ours on the
+        # dead code was held; review 41: `_contested` blocked it too, with an untrue text)
+        gone_kos = (target is None and other not in (None, card)
+                    and self.cx.gone_twice(str(other)))
+        if other not in (None, card) and not gone_kos:
             # our card with the new code is ANOTHER CODEX card (e.g. a #477 pick of the
             # product that held the code before) — never a silent merge of two products. The
-            # way out is read once the whole plan is done (`_other_card_review`). Not for our
-            # Kôš number whose card left CODEX for good (review 40: no two live products — it
-            # is overwritten like an unknown one, `_kos_review`; blocked, every line of ours on
-            # the dead code was held)
+            # way out is read once the whole plan is done (`_other_card_review`)
             self.other_card.append((item, succ, str(other), card))
             return
         hit_name = str((hit or {}).get("name") or "")
-        if hit_known is not None and self._contested(hit_known, hit_name, succ):
+        if hit_known is not None and not gone_kos and self._contested(hit_known, hit_name, succ):
             # our card with the new code — live, or its Kôš copy (review 8) — was renamed by a
             # human after the sync retired it: never merged into / restored over / renamed, a
             # human settles it first (review 7)

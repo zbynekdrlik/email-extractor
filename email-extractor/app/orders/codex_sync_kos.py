@@ -12,11 +12,13 @@ pick that RESTORED such a Kôš card as it was is judged the same way (review 40
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from . import codex_cards, dl_snapshot, snapshot
 from . import codex_sync_texts as texts
-from .codex_sync_memory import rows_on
+from .codex_sync_list import NEVER
+from .codex_sync_memory import SYNC_ACTOR, rows_on
 
 if TYPE_CHECKING:
     from .codex_sync_list import Codex, Event
@@ -48,48 +50,79 @@ class KosRules:
         if known is not None:
             if self.cx.same_product(known, card, succ):
                 return
-            drift: list[str] = []
+            key = codex_cards.name_key(name)
+            named_like = bool(key) and key in self.cx.product(card, succ)
+            # named like this card (the #467 drift button) → the card it really was named so
+            drift, others = ([known], []) if named_like else ([], [known])
         else:
-            ours, drift = self._kos_verdict(name, card, succ)
+            ours, drift, others = self._kos_verdict(name, card, succ)
             if ours:
                 return
-        self._kos_rows(item, str(binned["gtin"]), card, name, drift, picked=False, succ=succ)
+        self._kos_rows(item, str(binned["gtin"]), card, name, drift, others, picked=False,
+                       succ=succ)
 
-    def _restored_pick(self, item: dict, gtin: str, code: str, card: str, ev: Event) -> None:
-        """A #477 pick of `card` that restored our NEVER-identified Kôš card `gtin` as it was: by
-        its name then another product (`_kos_verdict`) → reset like a re-pick of another product,
-        its taught rows to a human (review 40: kept silently, a merge filled only blanks — the
-        bageta's mass / cena on our rožok)."""
-        ours, drift = self._kos_verdict(ev.name, card, code)
-        if not ours:
+    def _restored_pick(self, item: dict, gtin: str, code: str, card: str, ev: Event) -> bool:
+        """A #477 pick of `card` that restored our NEVER-identified Kôš card `gtin` as it was,
+        by its name then not `card`'s product (`_kos_verdict`). Reset like a re-pick of another
+        product only on EVIDENCE — its name is another card's that carried the code — for a pick
+        since the history began, never over a human's edit since the pick (review 41: a missing
+        name match wiped our own croissant restored under a drifted name, and a warehouse fix);
+        else its data stays and a human is told. True = reset (its binding: an applied run
+        only). Review 40: kept silently, a merge filled only blanks — the bageta's mass / cena on
+        our rožok."""
+        ours, drift, others = self._kos_verdict(ev.name, card, code)
+        if ours:
+            return False
+        reset = (bool(others) and ev.at >= (self.cx.seeded_at or NEVER)
+                 and not self._edited_since(gtin, ev.at))
+        if reset:
             item["reset_kos"] = True
-            self._kos_rows(item, gtin, card, ev.name, drift, picked=True)
+        self._kos_rows(item, gtin, card, ev.name, drift, others, picked=True, reset=reset,
+                       since=ev.at)
+        return reset
 
-    def _kos_verdict(self, name: str, card: str, code: str) -> tuple[bool, list[str]]:
+    def _kos_verdict(self, name: str, card: str, code: str
+                     ) -> tuple[bool, list[str], list[str]]:
         """Is our never-identified Kôš card named `name` CODEX card `card`'s product on `code`?
         By name — never a name the #467 drift button may have lent it: `card` took the code over
         from another product (`_took_over`, review 39) → (ours, drift = those earlier carriers
-        when only the name says it is ours)."""
+        when only the name says it is ours, others = the cards of another product that carried
+        the code under that name — the evidence it is not ours, review 41)."""
         key = codex_cards.name_key(name)
         took = self._took_over(code, card)
         named_like = bool(key) and key in self.cx.product(card, code)
-        return named_like and not took, (took if named_like else [])
+        others = ([d for d in sorted(self.cx.carried.get(code, {}))
+                   if d != card and not self.cx.same_product(d, card, code)
+                   and key in self.cx.product(d, code)] if key else [])
+        return named_like and not took, (took if named_like else []), others
 
-    def _kos_rows(self, item: dict, at: str, card: str, name: str, drift: list[str], *,
-                  picked: bool, succ: str = "") -> None:
+    def _edited_since(self, gtin: str, at: datetime) -> bool:
+        """A human edited our card `gtin` (Produkty — an audited `update`) since `at`."""
+        return self.conn.execute(
+            "SELECT 1 FROM audit_log WHERE table_name = %s AND row_id = %s AND action = 'update' "
+            "AND actor <> %s AND ts > %s LIMIT 1",
+            (self.scope.table, gtin, SYNC_ACTOR, at)).fetchone() is not None
+
+    def _kos_rows(self, item: dict, at: str, card: str, name: str, drift: list[str],
+                  others: list[str], *, picked: bool, reset: bool = False,
+                  since: datetime | None = None, succ: str = "") -> None:
         """Another product's rows under our number `at` (a Kôš card our card takes over — a
-        renumber onto it, or a #477 pick that restored it): taught → a human checks them;
+        renumber onto it, or a #477 pick that restored it — only its rows from before the pick:
+        the warehouse's own answer at that question is never the other product's, review 41):
+        taught → a human checks them (a pick whose data is not reset: always — its data too);
         delivery history → said in the report (review 12)."""
-        taught, shipped = rows_on(self.conn, self.scope, at)
+        taught, shipped = rows_on(self.conn, self.scope, at, before=since)
         code = codex_cards.normalize_code(at) or at
-        if taught:
-            card_name = self.cx.name_of(card, code)
+        card_name = self.cx.name_of(card, code)
+        if picked and (taught or not reset):
             self.plan.add_review(item, texts.kos_picked(
-                at, code, card, card_name, name, taught, drift) if picked else texts.kos_adopted(
-                item["gtin"], succ, card, card_name, name, taught, drift))
+                at, code, card, card_name, name, taught, drift, others, reset=reset))
+        elif not picked and taught:
+            self.plan.add_review(item, texts.kos_adopted(
+                item["gtin"], succ, card, card_name, name, taught, drift, others))
         if shipped:
             self._hold_note(dict(item, gtin=at, name=name), at, shipped,
-                            texts.why_kos_other(at, name, card, drift))
+                            texts.why_kos_other(at, name, card, drift, others))
 
     def _kos_name(self, card: dict) -> str:
         """A Kôš card's name — a bare retirement marker's from the newest snapshot that had it."""

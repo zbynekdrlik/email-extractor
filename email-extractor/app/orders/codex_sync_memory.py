@@ -86,14 +86,17 @@ class Split:
         return ", ".join(self.held_at) or fallback
 
 
-def rows_on(conn, scope: Scope, gtin: str) -> tuple[int, int]:
-    """(taught, shipped): the live mapping rows of our number `gtin` in the scope's memory."""
+def rows_on(conn, scope: Scope, gtin: str, before: datetime | None = None) -> tuple[int, int]:
+    """(taught, shipped): the live mapping rows of our number `gtin` in the scope's memory —
+    only those created before `before` when given (a NULL `created_at` is an old row)."""
     taught = shipped = 0
     for t in scope.memory:
         a, b = conn.execute(
             f"SELECT count(*) FILTER (WHERE {taught_clause(t)}), "
             f"count(*) FILTER (WHERE NOT ({taught_clause(t)})) "
-            f"FROM {t} WHERE gtin = %s AND deleted_at IS NULL", (gtin,)).fetchone()
+            f"FROM {t} WHERE gtin = %(g)s AND deleted_at IS NULL AND (%(b)s::timestamptz IS NULL"
+            f" OR COALESCE(created_at, '-infinity') < %(b)s::timestamptz)",
+            {"g": gtin, "b": before}).fetchone()
         taught += int(a or 0)
         shipped += int(b or 0)
     return taught, shipped
