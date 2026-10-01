@@ -2760,6 +2760,8 @@ def test_a_pick_waits_while_the_card_it_replaces_is_missing_once(pg):
     codex_sync.run(pg, _cfg())
     assert "už v CODEXe nie je" not in _review_reason(pg, "dl", CHLIEB)
     assert _dl(pg)[CHLIEB]["doplnok"] == "chlieb", "nothing happens on a glitch"
+    # review 24 🔵: the report names the REPLACED card as the missing one
+    assert "karta CODEX 31 v tomto zozname chýba" in _waits(pg)[("dl", CHLIEB)]
     _push(pg, both, hours_old=5)
     codex_sync.run(pg, _cfg())
     assert f"kód {ROZOK_NEW} (karta CODEX 31)" in _review_reason(pg, "dl", CHLIEB)
@@ -2794,6 +2796,10 @@ def test_a_renumber_never_merges_onto_a_pick_waiting_out_a_glitch(pg):
         card_guard.add_from_codex(pg, scope, CHLIEB, actor="sklad")
     _push(pg, rest + [_row(CHLIEB, "27", "Rožok so slaninou 70g")], hours_old=7)
     codex_sync.run(pg, _cfg())
+    # review 24 🔵: both waits are reported — the pick (card 31 missing) and the renumber onto it
+    waits = _waits(pg)
+    assert "karta CODEX 31 v tomto zozname chýba" in waits[("dl", CHLIEB)]
+    assert "prečíslovanie" in waits[("dl", ROZOK)] and CHLIEB in waits[("dl", ROZOK)]
     steady = rest + [_row(CHLIEB, "27", "Rožok so slaninou 70g"),
                      _row(ROZOK_NEW, "31", "Chlieb pšeničný 1000g")]
     for hours in (6, 5):
