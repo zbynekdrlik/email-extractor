@@ -254,8 +254,8 @@ def carrier_way_out(renames: list[tuple[str, str]], pick: str) -> str:
     return " ".join(parts)
 
 
-def carrier_changed(code: str, card: str, card_name: str, earlier: list[str],
-                    named: list[str], way_out: str) -> str:
+def carrier_changed(scope: str, gtin: str, code: str, card: str, card_name: str,
+                    earlier: list[str], named: list[str], way_out: str) -> str:
     """An unbound number whose code changed carrier: our name matches none of the earlier
     carriers, or several (same-named duplicates)."""
     head = (f"kód {code} teraz nesie karta CODEX {card} („{card_name}“), predtým ho niesla "
@@ -263,16 +263,24 @@ def carrier_changed(code: str, card: str, card_name: str, earlier: list[str],
     which = (f"naša karta sa volá rovnako ako karty CODEX {', '.join(named)}, nevieme, ktorá "
              f"je naša (pomôže aj oprava názvov v CODEXe)." if named
              else "názov našej karty nesedí so žiadnou z nich, nevieme, ktorá je naša.")
-    return f"{head}{which} {way_out}"
+    return f"{head}{which} {way_out} {_taught(scope, gtin)}"
 
 
-def carrier_named_now(name: str, code: str, card: str, alive: list[str], way_out: str) -> str:
+def carrier_named_now(scope: str, gtin: str, name: str, code: str, card: str,
+                      other: list[str], way_out: str) -> str:
     """An unbound number named like the code's carrier now, while an earlier carrier of
     another product lives on in CODEX — the name may come from the #467 drift button."""
     return (f"naša karta „{name}“ sa volá ako karta CODEX {card}, ktorá kód {code} nesie teraz, "
-            f"no predtým ho niesla karta CODEX {', '.join(alive)} — iný výrobok, ktorý v CODEXe "
+            f"no predtým ho niesla karta CODEX {', '.join(other)} — iný výrobok, ktorý v CODEXe "
             f"stále je; názov mohol prísť z tlačidla „Prevziať názov z CODEXu“, nevieme, ktorá "
-            f"je naša. {way_out}")
+            f"je naša. {way_out} {_taught(scope, gtin)}")
+
+
+def _taught(scope: str, gtin: str) -> str:
+    """The pointer every review of a number whose product is in doubt carries — its curated
+    data / taught rows may be the other product's (the bound `contest` review's, review 27)."""
+    return (f"Naučené priradenia k číslu {gtin}: {CHECK_TAUGHT}; jej {_CURATED[scope]} "
+            f"(Produkty) skontroluj tiež.")
 
 
 def why_pick_waits(picked: str, missing: str) -> str:

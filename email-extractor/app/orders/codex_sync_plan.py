@@ -452,20 +452,28 @@ class _ScopePlanner:
         if is_named(name, cx.rows(card, code)):
             # our name is the carrier now's — unless an earlier carrier of ANOTHER product
             # lives on in CODEX: the name may come from the #467 drift button, which offers the
-            # code's current holder (round 9's rule, for an unbound number — review 26)
-            alive = [c for c in earlier
-                     if c in cx.by_card and not cx.same_product(c, card, code)]
-            if not alive:
+            # code's current holder (round 9's rule, for an unbound number — review 26). Gone
+            # = gone twice: one missing list is no proof (review 27 🟡 — decided on it, the
+            # number was bound to the reuser for good)
+            other = [c for c in earlier
+                     if not cx.gone_twice(c) and not cx.same_product(c, card, code)]
+            missing = [c for c in other if cx.glitched(c)]
+            if missing:
+                self.plan.wait(item, texts.why_glitch(", ".join(missing)))
+                self.waiting.update({g: "carrier" for g in item["gtins"]})
+                return None
+            if not other:
                 return card
             self.plan.add_review(item, texts.carrier_named_now(
-                name, code, card, alive, self._carrier_way_out(code, card, alive, earlier)))
+                self.scope.name, item["gtin"], name, code, card, other,
+                self._carrier_way_out(code, card, other, earlier)))
             return None
         ours = codex_cards.name_key(name)
         named = [c for c in earlier if ours and ours in cx.product(c, code)]
         if len(named) == 1:
             return named[0]
         self.plan.add_review(item, texts.carrier_changed(
-            code, card, cx.name_of(card, code), earlier, named,
+            self.scope.name, item["gtin"], code, card, cx.name_of(card, code), earlier, named,
             self._carrier_way_out(code, card, earlier, earlier)))
         return None
 
@@ -475,11 +483,14 @@ class _ScopePlanner:
         rename our card to a candidate's name that ONLY it bears among the code's earlier
         carriers (and the carrier now does not) → bound to it (`_sole_carrier`); the pick of
         the code — the carrier now (`_pick_advice`) → bound to it; never a rename to the
-        carrier now's name (the drift-button shape — a human again, review 26)."""
+        carrier now's name (the drift-button shape — a human again, review 26), never to a card
+        gone from CODEX (review 27 — review 10's rule)."""
         cx = self.cx
         now = {codex_cards.name_key(r.name) for r in cx.rows(card, code)}
         renames = []
         for c in candidates:
+            if cx.gone_twice(c):
+                continue
             label = cx.name_of(c, code)
             key = codex_cards.name_key(label)
             if key and key not in now and sum(key in cx.product(e, code) for e in earlier) == 1:
