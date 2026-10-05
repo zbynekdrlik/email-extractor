@@ -363,9 +363,11 @@ def test_our_own_earlier_shipment_matches_by_number_date_total_or_content(pg):
     dup = _dup(pg, _doc(doc_number=""))
     assert dup.source == "desadv" and dup.match == "number"
     assert "Už odoslané do ORIONu" in dup.reason()
-    # round 4: only the invoice number shared while both print different DL numbers — a
-    # collective invoice's other delivery note, judged by the date rules (none here)
-    assert _dup(pg, _doc()) is None
+    # round 5: only the invoice number shared while both print different DL numbers — from
+    # ANOTHER mail it stays a number match (a re-sent / corrected version whose DL reference
+    # the model read differently); within ONE mail it is a collective invoice's other DL
+    assert _dup(pg, _doc()).match == "number"
+    assert _dup(pg, _doc(), message_id="inv-a") is None
     assert _dup(pg, _doc(doc_number="9990001111")).match == "number"
     pg.execute("DELETE FROM desadv_sent")
     _sent(pg, "9990001111", "dl-scan", delivery=TODAY, total=100.3)

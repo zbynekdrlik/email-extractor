@@ -247,17 +247,133 @@ def test_a_dl_sibling_deduped_onto_an_invoices_question_is_released(pg, tmp_path
 
 
 def test_a_dl_conflict_review_is_never_rerun_by_a_sibling_release(pg, tmp_path):
-    """A DL that ended in a dedup conflict (posted for a human) has no question — every
-    same-sender answer would re-run and RE-POST it."""
+    """A DL that ended in a REAL dedup conflict (posted for a human: the priceless scan of a
+    same-day delivery in other units after its invoice shipped) has no question — every
+    same-sender answer would re-run and RE-POST it. Writer and reader proven together."""
     _setup(pg)
-    pg.execute("INSERT INTO messages (message_id, category, subject, from_addr, combined_text, "
-               "processed, proc_status, created_at) VALUES ('dl-c', 'dodacie_listy', "
-               "'Dodací list', %s, 'x', true, 'review', now() - interval '2 hours')",
-               (SUPPLIER_EMAIL,))
-    pg.execute("INSERT INTO email_events (message_id, workflow, stage, status, outcome, "
-               "rollup) VALUES ('dl-c', 'delivery_notes', 'invoice_dedup', 'review', 'x', "
-               "false)")
-    dl_questions._release_stuck_siblings(pg, "another-mail", SUPPLIER_EMAIL)
+    _push_receipts(tmp_path)
+    _message(pg, tmp_path, "inv-1", created_at=_ago(hours=3))
+    uploads, posts = [], []
+    kar = _one(YESTERDAY, "4400000001", "2400000001", qty=1, unit_price=50.0)
+    kar["items"][0]["unit"] = "KAR"
+    client = FakeClient([{"documents": [kar]},
+                         _inv(YESTERDAY, "7700000001", "", priced=False)], runs=2)
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    _message(pg, tmp_path, "dl-c", category="dodacie_listy", subject="Dodací list",
+             text="Dodací list", created_at=_ago(hours=1))
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert pg.execute("SELECT processed, proc_status FROM messages WHERE message_id = 'dl-c'"
+                      ).fetchone() == (True, "review")
+    assert dl_questions._release_stuck_siblings(pg, "another-mail", SUPPLIER_EMAIL) == 0
     processed = pg.execute("SELECT processed FROM messages WHERE message_id = 'dl-c'"
                            ).fetchone()[0]
     assert processed is True
+
+
+# --- round 5: versions whose DL reference the model read differently ----------------------
+
+def test_a_resend_whose_dl_reference_drifted_is_still_a_duplicate(pg, tmp_path):
+    """A plain resend of the shipped invoice; the model read its DL reference as the invoice
+    number this time (and another day). The shared invoice number from ANOTHER mail stays a
+    number match — the same total and goods: a duplicate, never a second DESADV."""
+    _setup(pg)
+    _push_receipts(tmp_path)
+    _message(pg, tmp_path, "inv-1", created_at=_ago(hours=3))
+    uploads, posts = [], []
+    client = FakeClient([_inv(YESTERDAY, "4400000001", "2400000001"),
+                         _inv(datetime.now(UTC), "2400000001", "2400000001")], runs=2)
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    _message(pg, tmp_path, "inv-1-resend", created_at=_ago(hours=1))
+    _push_receipts(tmp_path)
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert len(uploads) == 1, "a resend of the same invoice shipped a second DESADV"
+    assert _run_outcome(pg, "inv-1-resend") == "duplicate"
+
+
+def test_a_corrected_version_with_a_drifted_dl_reference_is_reviewed(pg, tmp_path):
+    _setup(pg)
+    _push_receipts(tmp_path)
+    _message(pg, tmp_path, "inv-v1", created_at=_ago(hours=3))
+    uploads, posts = [], []
+    client = FakeClient([_inv(YESTERDAY, "4400000001", "2400000001"),
+                         _inv(YESTERDAY, "2400000001", "2400000001", qty=90)], runs=2)
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    _message(pg, tmp_path, "inv-v2", subject="Opravená faktúra 2400000001",
+             created_at=_ago(minutes=30))
+    _push_receipts(tmp_path)
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert len(uploads) == 1, "a corrected version of the SAME invoice shipped a 2nd DESADV"
+    assert _run_outcome(pg, "inv-v2") == "review"
+
+
+def test_the_older_version_with_a_drifted_dl_reference_never_ships_after_the_newer(
+        pg, tmp_path):
+    _setup(pg)
+    _message(pg, tmp_path, "inv-v1", created_at=_ago(hours=3))
+    _message(pg, tmp_path, "inv-v2", subject="Opravená faktúra", created_at=_ago(hours=1))
+    _push_receipts(tmp_path)
+    uploads, posts = [], []
+    client = FakeClient([_inv(YESTERDAY, "4400000001", "2400000001", qty=90),
+                         _inv(YESTERDAY, "2400000001", "2400000001")], runs=2)
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert len(uploads) == 1, "the superseded version shipped with its old content"
+    assert _run_outcome(pg, "inv-v1") == "duplicate"
+
+
+# --- round 5: CODEX links and old shipments -------------------------------------------------
+
+def test_a_receipt_of_the_same_invoice_for_another_dl_days_apart_is_reviewed(pg, tmp_path):
+    """The same sum but D1's receipt is days before D2: a collective invoice's other delivery,
+    not provably D1 — a human decides, never silent."""
+    _setup(pg)
+    _message(pg, tmp_path, "inv-d2")
+    _push_receipts(tmp_path, [_receipt("261009005", datetime.now(UTC) - timedelta(days=5),
+                                       ["7700000001"], "2400000001")])
+    uploads, posts = [], []
+    assert _tick(pg, tmp_path, FakeClient([_inv(YESTERDAY, "7700000002", "2400000001")]),
+                 uploads, posts) == 1
+    assert uploads == []
+    assert _run_outcome(pg, "inv-d2") == "review"
+    assert len(posts) == 1 and "inému dodaciemu listu" in posts[0]
+
+
+def test_codex_importing_an_old_shipment_without_facts_is_reviewed_not_silent(pg, tmp_path):
+    """A shipment of ours from before #485 (no facts) that CODEX imported: the same total on
+    that receipt's day proves nothing about today's other invoice — a review."""
+    _setup(pg)
+    _message(pg, tmp_path, "inv-old", created_at=_ago(hours=30))
+    pg.execute("INSERT INTO desadv_sent (supplier_ean, doc_number, filename, message_id, "
+               "sent_at, uploaded_at) VALUES (%s, '4400000001', 'x.txt', 'inv-old', "
+               "now() - interval '30 hours', now() - interval '30 hours')", (SUPPLIER_EAN,))
+    pg.execute("INSERT INTO dl_invoice_runs (message_id, outcome) VALUES ('inv-old', 'ok')")
+    _message(pg, tmp_path, "inv-new", created_at=_ago(hours=1))
+    _push_receipts(tmp_path, [_receipt("261009001", YESTERDAY, ["4400000001"])])
+    uploads, posts = [], []
+    client = FakeClient([_inv(YESTERDAY, "4400000002", "2400000002")])
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert uploads == []
+    assert _run_outcome(pg, "inv-new") == "review"
+    assert len(posts) == 1 and "bez údajov" in posts[0]
+
+
+# --- round 5: an invoice deduped onto another invoice's board question ---------------------
+
+def test_an_invoice_deduped_onto_another_invoices_question_is_requeued_by_the_answer(
+        pg, tmp_path):
+    _setup(pg)
+    for mid, hours in (("inv-a", 3), ("inv-b", 2), ("inv-c", 2)):
+        _message(pg, tmp_path, mid, created_at=_ago(hours=hours))
+        pg.execute("INSERT INTO dl_invoice_runs (message_id, outcome, finished_at) "
+                   "VALUES (%s, 'review', now())", (mid,))
+    # inv-c's run ended in a dedup conflict — a human's, never re-run
+    pg.execute("INSERT INTO email_events (message_id, workflow, stage, status, outcome, "
+               "rollup) VALUES ('inv-c', 'delivery_notes', %s, 'review', 'x', false)",
+               (dl_invoice.STAGE,))
+    qid = pg.execute(
+        "INSERT INTO order_questions (message_id, kind, wording, status, customer_ean, "
+        "item_key) VALUES ('inv-a', 'dl_item', 'Rožok 50g', 'answered', %s, 'rozok 50g') "
+        "RETURNING id", (SUPPLIER_EAN,)).fetchone()[0]
+    dl_questions.release_for_question(pg, _cfg(tmp_path), qid)
+    runs = dict(pg.execute("SELECT message_id, outcome FROM dl_invoice_runs").fetchall())
+    assert runs == {"inv-a": None, "inv-b": None, "inv-c": "review"}
