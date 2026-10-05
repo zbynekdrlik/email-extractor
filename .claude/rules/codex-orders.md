@@ -31,6 +31,12 @@ paths:
   - "email-extractor/tests/test_codex_receipts_push.py"
   - "email-extractor/tests/test_invoice_dedup_regression.py"
   - "email-extractor/tests/test_invoice_dedup_versions.py"
+  - "email-extractor/tests/test_invoice_dedup_ambiguity.py"
+  - "email-extractor/tests/test_invoice_dedup_edges.py"
+  - "email-extractor/app/orders/dl_document.py"
+  - "email-extractor/app/orders/dl_message.py"
+  - "email-extractor/app/orders/dl_questions.py"
+  - "email-extractor/app/orders/dl_worker.py"
 ---
 
 # CODEX order evidence + the auto-resolve sweep (#342)
@@ -657,9 +663,13 @@ must never ship a SECOND delivery: the warehouse may already have typed it into 
     numbers): the same day with sums that cannot be compared and other content → conflict;
   - **CODEX's import of our own shipment** never decides by its DL number (our row with the
     facts does) but its INVOICE link to OUR invoice counts;
-  - a **collective invoice** (one invoice number, several DL numbers): against our row it is no
-    number match (the date rules judge it); against a receipt the totals decide — the same sum
-    → duplicate (LESAFFRE prints another DL number on the invoice than CODEX has), else
+  - a **collective invoice** (one invoice number, several DL numbers): within ONE mail (or on
+    the DL path) no number match against our row (the date rules judge it) — from ANOTHER mail
+    the shared invoice number stays a number match (a resend / corrected version whose DL
+    reference the model read differently, round 5); against a receipt the sum AND the date
+    decide — the same sum within ±1 day → duplicate (LESAFFRE prints another DL number on the
+    invoice than CODEX has), else conflict;
+  - CODEX's import of an **old shipment of ours without facts** (before #485) can only be a
     conflict;
   - a **corrected version** (the same number from a LATER mail, other total / items) →
     conflict; the early gate (no content yet) defers what only the content can tell;
@@ -689,7 +699,8 @@ must never ship a SECOND delivery: the warehouse may already have typed it into 
   for a human: a „Re: dobropis" thread may carry a real invoice), or a negative total.
   `ucto@slovnormal.sk` (`delivery_notes_invoice_ignored_senders`) is never claimed.
 - **Board clicks on an invoice mail** go through the run ledger (`dl_invoice_runs`): an answer
-  re-queues it (`requeue_invoice`, + the same-sender DL sibling release), „Netýka sa skladu" /
+  re-queues it (`requeue_invoice`, + the same-sender sibling release of DL mails AND of
+  invoice mails whose ask deduped onto it, `_requeue_stuck_invoice_siblings`), „Netýka sa skladu" /
   „Neviem" record the outcome there — `messages.processed` / rollup belong to the n8n
   invoice-forward flow. A mail that already has a run is exempt from `invoice_dl_since` (a
   re-stamp never strands an answered invoice); one the claim can never take (too old, flag

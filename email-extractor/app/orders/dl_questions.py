@@ -6,7 +6,7 @@ import logging
 import psycopg
 from psycopg.types.json import Json
 
-from . import dl_match, dl_nonwarehouse, dl_report, dl_snapshot, llm, report
+from . import dl_invoice, dl_match, dl_nonwarehouse, dl_report, dl_snapshot, llm, report
 from .dl_message import CATEGORY, INVOICE_CATEGORY, _as_message, _run_and_finish
 
 log = logging.getLogger("orders.dl_worker")
@@ -181,13 +181,49 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
 
 
 def _release_siblings_of(conn, cfg, message_id: str, kind: str, from_addr: str) -> None:
-    """#265/#365: release the same-sender stuck siblings after a `dl_*` answer.
+    """#265/#365: release the same-sender stuck siblings after a `dl_*` answer — the DL mails
+    and (#485) the invoice-as-DL mails whose ask deduped onto the answered question.
     #399: a scanner sender (tlaciaren@) forwards mail from EVERY supplier, so from_addr
     correlation is meaningless — skip the by-addr sibling release."""
     if kind not in ("dl_supplier", "dl_item", "dl_mass"):
         return
     if from_addr.strip().lower() not in _scanner_senders(cfg):
         _release_stuck_siblings(conn, message_id, from_addr)
+        _requeue_stuck_invoice_siblings(conn, cfg, message_id, from_addr)
+
+
+def _requeue_stuck_invoice_siblings(conn, cfg, exclude_message_id: str,
+                                    sender_email: str) -> int:
+    """#485: the invoice mirror of `_release_stuck_siblings` — a same-sender invoice-as-DL
+    mail whose run ended `review` with NO question of its own (its ask deduped onto the one
+    just answered) goes back to the invoice queue (`requeue_invoice`: the gate and the claim
+    keep a re-run safe). The same exclusions as the DL sibling release (a logged error, an age
+    guard) plus a dedup verdict (a conflict review is a human's, never re-run / re-posted);
+    only mails the claim can still take (`delivery_notes_max_age_days`)."""
+    sender_email = (sender_email or "").strip()
+    if not sender_email:
+        return 0
+    max_age = int(getattr(cfg, "delivery_notes_max_age_days", 14) or 14) if cfg else 14
+    rows = conn.execute(
+        """SELECT m.message_id FROM dl_invoice_runs r
+             JOIN messages m ON m.message_id = r.message_id
+            WHERE r.outcome = 'review' AND m.category = %s
+              AND m.message_id <> %s AND lower(m.from_addr) = lower(%s)
+              AND m.created_at > now() - make_interval(days => %s)
+              AND NOT EXISTS (SELECT 1 FROM order_questions oq
+                              WHERE oq.message_id = m.message_id)
+              AND NOT EXISTS (SELECT 1 FROM email_events e
+                              WHERE e.message_id = m.message_id
+                                AND (e.status IN ('error', 'age_guard') OR e.stage = %s))
+            ORDER BY m.created_at ASC LIMIT %s""",
+        (INVOICE_CATEGORY, exclude_message_id, sender_email, max_age, dl_invoice.STAGE,
+         _STUCK_SIBLING_LIMIT)).fetchall()
+    for (mid,) in rows:
+        requeue_invoice(conn, mid, cfg)
+    if rows:
+        log.info("invoice-as-DL: re-queued %d same-sender sibling invoice(s) of %s",
+                 len(rows), exclude_message_id)
+    return len(rows)
 
 
 def requeue_invoice(conn, message_id: str, cfg=None) -> None:
@@ -475,9 +511,10 @@ def _release_stuck_siblings(conn, exclude_message_id: str, sender_email: str) ->
                                 AND e2.status = 'age_guard')
               AND NOT EXISTS (SELECT 1 FROM email_events e3
                               WHERE e3.message_id = messages.message_id
-                                AND e3.stage = 'invoice_dedup')
+                                AND e3.stage = %s)
             ORDER BY created_at ASC LIMIT %s""",
-        (CATEGORY, exclude_message_id, sender_email, _STUCK_SIBLING_LIMIT)).fetchall()
+        (CATEGORY, exclude_message_id, sender_email, dl_invoice.STAGE,
+         _STUCK_SIBLING_LIMIT)).fetchall()
     if not rows:
         return 0
     ids = [r[0] for r in rows]
@@ -655,9 +692,9 @@ def _release_stuck_siblings_by_name(conn, card_ean: str, card_name: str) -> int:
                                 AND e2.status = 'age_guard')
               AND NOT EXISTS (SELECT 1 FROM email_events e3
                               WHERE e3.message_id = messages.message_id
-                                AND e3.stage = 'invoice_dedup')
+                                AND e3.stage = %s)
             ORDER BY created_at ASC LIMIT %s""",
-        (CATEGORY, _STUCK_SIBLING_CANDIDATE_LIMIT)).fetchall()
+        (CATEGORY, dl_invoice.STAGE, _STUCK_SIBLING_CANDIDATE_LIMIT)).fetchall()
     ids = [mid for (mid, fname) in rows
            if dl_match.supplier_name_key(fname or "") == name_key][:_STUCK_SIBLING_LIMIT]
     if not ids:

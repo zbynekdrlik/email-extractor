@@ -272,9 +272,9 @@ def missing_supplier_sweep(conn, cfg, now: datetime | None = None) -> int:
     if live(conn, now) is None:
         return 0
     n = 0
+    covered = covered_eans(conn)
     for ean, name in flagged_suppliers(conn):
-        if conn.execute("SELECT 1 FROM codex_receipts WHERE supplier_eans @> ARRAY[%s]::text[] "
-                        "LIMIT 1", (ean,)).fetchone():
+        if ean in covered:
             continue
         key = f"{MISSING_KEY}:{ean}"
         if dl_alerts.reminder_suppressed(conn, cfg, MISSING_KIND, key, now=now):
