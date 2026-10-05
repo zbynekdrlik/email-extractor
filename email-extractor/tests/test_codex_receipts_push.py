@@ -88,6 +88,15 @@ def test_run_refuses_to_post_an_empty_window():
     assert posted == [] and res["receipts"] == 0 and "nothing posted" in res["error"]
 
 
+def test_run_never_posts_a_copy_of_unknown_age():
+    """No finished sp001 load in meta.etl_runs: the add-on could not tell how far CODEX's data
+    reaches (it would pass as fresh) — nothing is posted."""
+    posted = []
+    res = push.run("u", "t", query=lambda: [_row()], as_of=lambda: None,
+                   poster=lambda *a: posted.append(a))
+    assert posted == [] and res["stored"] == 0 and "etl_runs" in res["error"]
+
+
 def test_main_without_url_or_token_is_a_usage_error(monkeypatch):
     monkeypatch.delenv("CODEX_PUSH_URL", raising=False)
     monkeypatch.delenv("CODEX_RECEIPTS_PUSH_URL", raising=False)
@@ -138,7 +147,7 @@ def _codex_db(path):
                    IPORCFAKT BIGINT, ACFAKTDPH VARCHAR, AVSYMB VARCHAR, NVYMZAK1 DOUBLE,
                    NVYMZAK2 DOUBLE, NVYMZAK3 DOUBLE, NVYMZAK4 DOUBLE)""")
     con.execute("""CREATE TABLE meta.etl_runs (table_name VARCHAR, status VARCHAR,
-                   finished_at TIMESTAMP)""")
+                   started_at TIMESTAMP, finished_at TIMESTAMP)""")
     ts = datetime.datetime.combine(d, datetime.time(9, 0))
     rows = [  # NCD, ICPOL, NICO, NCDLIST, DUCTOBD, NSUMAP, SDRUHFAKT, SROK, IPORC, UDATUMAKT, SDPOH
         (261000001, 1, 12345678, 526013012, d, 100.0, 1, 2026, 26100001, ts, 10),
@@ -158,7 +167,7 @@ def _codex_db(path):
         (12345678, 1, 2026, 26100001, "526013012", "526013012", None, 150.0, 6.7, None),
         (12345678, 1, 2026, 26100001, "526013012", "526013012", None, 150.0, 6.7, None)])
     con.execute("INSERT INTO meta.etl_runs VALUES ('sp001', 'ok', TIMESTAMP '2026-10-04 "
-                "16:19:49')")
+                "16:04:12', TIMESTAMP '2026-10-04 16:19:49')")
     con.close()
 
 
@@ -178,4 +187,5 @@ def test_the_sql_groups_one_receipt_per_ncd_without_fanout(tmp_path):
     assert (r["invoice_number"], r["invoice_total"]) == ("526013012", 156.7)
     garbage = by_number["261000002"]
     assert garbage["dl_numbers"] == [] and garbage["invoice_number"] == ""
-    assert push.query_as_of(str(path)) == datetime.datetime(2026, 10, 4, 16, 19, 49)
+    # the load's START — a receipt typed during the ~15-min load may be missing from it
+    assert push.query_as_of(str(path)) == datetime.datetime(2026, 10, 4, 16, 4, 12)

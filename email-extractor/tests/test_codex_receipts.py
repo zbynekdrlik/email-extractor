@@ -320,15 +320,21 @@ def test_a_receipt_matches_by_date_within_a_day_and_total_within_tolerance(pg):
 
 def test_a_multi_day_receipt_and_an_invoice_split_over_two_receipts_still_match(pg):
     """EKVIA shape: the stock lines and the transport line sit in two receipts of the SAME
-    invoice — neither total alone matches, the invoice's total (or their sum) does."""
+    invoice — neither total alone matches, the invoice's total (or their sum) does. (A
+    document printing no invoice number of its own: one that does would match the link by
+    number, and one printing ANOTHER number is another delivery — round 2.)"""
+    doc = _doc(invoice_number="")
     _push(pg, [_receipt("261004462", total=95.4, invoice_number="777777777"),
                _receipt("261101190", total=4.6, invoice_number="777777777")])
-    assert _dup(pg, _doc()).match == "date_total"
+    assert _dup(pg, doc).match == "date_total"
+    assert _dup(pg, _doc(invoice_number="777777777")).match == "number"
+    assert _dup(pg, _doc(invoice_number="888888888")) is None, \
+        "receipts linked to another invoice are another delivery"
     _push(pg, [_receipt("261004463", total=50.0, invoice_total=100.0)], force=True)
-    assert _dup(pg, _doc()).match == "date_total"
+    assert _dup(pg, doc).match == "date_total"
     _push(pg, [_receipt(day=TODAY - timedelta(days=3), receipt_date_to=(
         TODAY - timedelta(days=1)).isoformat())], force=True)
-    assert _dup(pg, _doc()).match == "date_total"
+    assert _dup(pg, doc).match == "date_total"
 
 
 def test_another_suppliers_receipt_never_matches(pg):
@@ -374,9 +380,14 @@ def test_only_this_very_documents_own_row_is_left_to_the_claim(pg):
 
 
 def test_the_dl_path_check_sees_only_invoice_derived_rows(pg):
-    _sent(pg, "9990001111", "dl-a", delivery=TODAY, total=100.0)
+    """`invoice_only` = rows shipped from an INVOICE mail (its category) — not "a row with an
+    invoice number": an invoice may print none, and a DL's row may carry one."""
+    for mid, category in (("dl-a", "dodacie_listy"), ("inv-a", "invoices")):
+        pg.execute("INSERT INTO messages (message_id, category, subject, from_addr) "
+                   "VALUES (%s, %s, 's', 'x@y.sk')", (mid, category))
+    _sent(pg, "9990001111", "dl-a", delivery=TODAY, total=100.0, invoice="2400765432")
     assert _dup(pg, _doc(), invoice_only=True, receipts=False) is None
-    _sent(pg, "9990002222", "inv-a", delivery=TODAY, total=100.0, invoice="2400765432")
+    _sent(pg, "9990002222", "inv-a", delivery=TODAY, total=100.0)
     assert _dup(pg, _doc(doc_number="5550001111", invoice_number=""),
                 invoice_only=True, receipts=False).ref == "9990002222"
 
