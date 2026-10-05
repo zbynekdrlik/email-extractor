@@ -107,12 +107,17 @@ def _skip_answered_item_keys(conn, message_id: str) -> set[str]:
     the line stays genuinely unmatched (there is no card for it). A real-card answer stores
     the GTIN as the choice, `close_message_sklad_unknown`/`not_warehouse` store a different
     jsonb shape with no `choice` key at all — neither equals the sentinel, so only a real
-    "pošli bez nej" answer is returned here."""
+    "pošli bez nej" answer is returned here. #485: also a question of ANOTHER mail this
+    message's hold waited on (its ask deduped onto it — the hold event's `question_ids`)."""
     rows = conn.execute(
         """SELECT item_key FROM order_questions
-            WHERE message_id = %s AND kind = 'dl_item' AND status = 'answered'
-              AND answer->>'choice' = %s""",
-        (message_id, teach.DL_ITEM_SHIP_WITHOUT)).fetchall()
+            WHERE kind = 'dl_item' AND status = 'answered' AND answer->>'choice' = %s
+              AND (message_id = %s
+                   OR id IN (SELECT w.qid::int FROM email_events e,
+                                    jsonb_array_elements_text(
+                                        COALESCE(e.detail->'question_ids', '[]')) AS w(qid)
+                              WHERE e.message_id = %s AND e.stage = 'review'))""",
+        (teach.DL_ITEM_SHIP_WITHOUT, message_id, message_id)).fetchall()
     return {r[0] for r in rows}
 
 

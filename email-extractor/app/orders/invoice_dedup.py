@@ -170,16 +170,36 @@ def is_credit_note_doc(doc: dict) -> bool:
 
 
 def signature(content: str) -> list[list]:
-    """The content signature of a generated DESADV: its LIN [card code, quantity] pairs,
-    sorted. Quantities are as `generate()` wrote them — converted to kg where R84 converts
-    (kg-tracked cards: kg / tonne / per-piece mass), otherwise the printed count — and the
-    unit is deliberately NOT part of the pair: „2 KAR" vs „2 ks" of one card on one day is
-    treated as the same goods (erring to "duplicate"), „2 KAR" vs „24 ks" is not recognised."""
+    """The content signature of a generated DESADV: its LIN [card code, quantity, unit]
+    triples, sorted. Quantities are as `generate()` wrote them — converted to kg where R84
+    converts (kg-tracked cards: kg / tonne / per-piece mass), otherwise the printed count. The
+    SAME goods (`_same_goods`) compare [card, quantity] only — „2 KAR" vs „2 ks" of one card
+    on one day errs to "duplicate"; „1 KAR" vs „100 ks" is not the same goods, but the same
+    cards in other units (`_other_units`) mark a scan / invoice pair whose sums cannot be
+    compared as a maybe."""
     out = []
-    for code, qty in desadv_edi.lin_quantities(content):
+    for code, qty, unit in desadv_edi.lin_quantities(content):
         q = _num(qty)
-        out.append([code, round(q, 3) if q is not None else qty])
-    return sorted(out, key=lambda p: (p[0], str(p[1])))
+        out.append([code, round(q, 3) if q is not None else qty, unit.lower()])
+    return sorted(out, key=lambda p: (p[0], str(p[1]), p[2]))
+
+
+def _goods(items) -> list:
+    return sorted([[p[0], p[1]] for p in items], key=lambda p: (p[0], str(p[1])))
+
+
+def _same_goods(a, b) -> bool:
+    """The same [card, quantity] lines (the unit aside — older rows stored pairs)."""
+    return bool(a) and bool(b) and _goods(a) == _goods(b)
+
+
+def _other_units(a, b) -> bool:
+    """The same cards, but some printed in another unit (a scan in ks, its invoice in KAR)."""
+    if not a or not b or {p[0] for p in a} != {p[0] for p in b}:
+        return False
+    ua = {(p[0], p[2]) for p in a if len(p) > 2}
+    ub = {(p[0], p[2]) for p in b if len(p) > 2}
+    return bool(ua) and bool(ub) and ua != ub
 
 
 @dataclass
@@ -334,14 +354,14 @@ def _own_number(rows: list[_Row], ours: set[str], dl_number: str, day: date | No
         dup = Duplicate(SOURCE_DESADV, "number", row.doc, {"number": sorted(hit)[0]})
         if invoice_only:
             if (row.delivered and day and row.delivered != day and content is not None
-                    and row.items and content != row.items):
+                    and row.items and not _same_goods(content, row.items)):
                 dup.conflict = "iný deň dodania a iné položky"
         elif _later(received_at, row.shipped_from):
             dup.conflict = _conflict(total, (row.amount,))
             if not dup.conflict and row.items:
                 if content is None:
                     return None, True
-                if content != row.items:
+                if not _same_goods(content, row.items):
                     dup.conflict = "iné položky"
         if not dup.conflict and row.unsure:
             dup.conflict = UNSURE
@@ -424,22 +444,23 @@ def _own_date(rows: list[_Row], invoice: str, day: date | None, total: float | N
               content: list | None, doc_from_invoice: bool,
               message_id: str = "") -> tuple[Duplicate | None, bool]:
     """(verdict, deferred) for our rows of the SAME delivery day — and, across a DL scan and an
-    invoice, of the day before / after (only the same total / content, as a conflict). Within
-    ONE invoice mail the invoice PDF (an invoice number) and its DL PDF (none) are the two
-    sources too."""
+    invoice, of the day before / after (the same total, the same goods, or — sums that cannot
+    be compared — the same cards in other units: a conflict). Two documents of ONE mail a day
+    apart count as the two sources too (an invoice PDF and its DL PDF; the model may fill an
+    invoice number on both)."""
     ambiguous, deferred = None, False
     for row in rows:
         if day is None or row.delivered is None:
             continue
         if row.delivered != day:
-            cross = row.from_invoice != doc_from_invoice or (
-                row.message_id == message_id and bool(row.invoice) != bool(digits(invoice)))
+            cross = row.from_invoice != doc_from_invoice or row.message_id == message_id
             if not cross or not _near(day, row.delivered):
                 continue
             # a DL scan and an invoice of one delivery a day apart (dispatch vs delivery date)
             both = total is not None and row.amount is not None
             if (both and _close(total, (row.amount,)) is not None) or (
-                    content is not None and row.items and row.items == content):
+                    content is not None and _same_goods(content, row.items)) or (
+                    not both and content is not None and _other_units(content, row.items)):
                 ambiguous = ambiguous or Duplicate(
                     SOURCE_DESADV, "near_day", row.doc,
                     {"delivery_date": row.delivered.isoformat()},
@@ -452,7 +473,7 @@ def _own_date(rows: list[_Row], invoice: str, day: date | None, total: float | N
         if both and _close(total, (row.amount,)) is not None:
             dup = Duplicate(SOURCE_DESADV, "date_total", row.doc,
                             {"delivery_date": iso, "total": row.amount})
-        elif content is not None and row.items and row.items == content:
+        elif content is not None and _same_goods(content, row.items):
             dup = Duplicate(SOURCE_DESADV, "date_content", row.doc, {"delivery_date": iso})
         elif content is None:
             deferred = True     # the content (once the EDI is built) may still match

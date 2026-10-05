@@ -401,6 +401,9 @@ CODEX_RECEIPTS = [
     "ALTER TABLE desadv_sent ADD COLUMN IF NOT EXISTS invoice_number TEXT",
     "ALTER TABLE desadv_sent ADD COLUMN IF NOT EXISTS items JSONB",
     "ALTER TABLE dl_supplier_overrides ADD COLUMN IF NOT EXISTS invoice_dl_since TIMESTAMPTZ",
+    # a board answer re-queues an invoice: CODEX's data must cover the ANSWER (the warehouse
+    # may have typed the delivery in by hand meanwhile), not just the mail's arrival
+    "ALTER TABLE dl_invoice_runs ADD COLUMN IF NOT EXISTS requeued_at TIMESTAMPTZ",
     "UPDATE dl_supplier_overrides SET invoice_dl_since = now() "
     "WHERE invoice_is_delivery_note AND invoice_dl_since IS NULL",
 ]

@@ -781,7 +781,9 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None,
       an invoice a human just answered for;
     - with `codex_as_of` (the fresh CODEX receipts' data age, `delivery_notes_invoice_wait_
       for_codex`): only invoices CODEX's data already covers — a receipt typed by hand the
-      same morning is visible before its invoice is judged (the ETL runs ~14:15 / ~18:00);
+      same morning is visible before its invoice is judged (the ETL runs ~14:15 / ~18:00); a
+      re-queued invoice (a board answer) waits for data newer than the re-queue
+      (`dl_invoice_runs.requeued_at` — the warehouse may have typed it in by hand meanwhile);
     - our accounting mailbox (`ignored_invoice_senders`) is never an invoice-as-DL;
     - the NEWEST waiting invoice first: when two versions WAIT together, the newest ships and
       the older then meets its `desadv_sent` row by number (never a second DESADV); a newer
@@ -821,12 +823,14 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None,
              FROM messages m
              JOIN unnest(%s::text[], %s::timestamptz[]) AS f(addr, since)
                ON f.addr = lower(m.from_addr)
+             LEFT JOIN dl_invoice_runs q ON q.message_id = m.message_id
             WHERE m.category = 'invoices'
               AND m.created_at > now() - make_interval(days => %s)
               AND (m.created_at >= COALESCE(f.since, '-infinity'::timestamptz)
                    OR EXISTS (SELECT 1 FROM dl_invoice_runs r0
                                WHERE r0.message_id = m.message_id))
-              AND m.created_at <= COALESCE(%s::timestamptz, 'infinity'::timestamptz)
+              AND GREATEST(m.created_at, q.requeued_at)
+                  <= COALESCE(%s::timestamptz, 'infinity'::timestamptz)
               AND NOT EXISTS (SELECT 1 FROM dl_invoice_runs r
                                WHERE r.message_id = m.message_id
                                  AND (r.outcome IS NOT NULL

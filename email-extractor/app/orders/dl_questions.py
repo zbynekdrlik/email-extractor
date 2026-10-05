@@ -151,7 +151,10 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
         # as an invoice left a transient model failure stranded on an already finished ledger
         # row (review 1).
         if len(msg_row) > 8 and msg_row[8] == INVOICE_CATEGORY:
-            requeue_invoice(conn, message_id, cfg)
+            if not _hold_waits_on_open(conn, message_id):
+                # (a hold still waiting on another mail's open question is re-queued by
+                # THAT answer — `_requeue_stuck_invoice_siblings`)
+                requeue_invoice(conn, message_id, cfg)
             # a DL mail of the same sender whose ask deduped onto THIS question is released
             # exactly as for a DL (below) — the invoice going back to its queue must not
             # strand it
@@ -210,7 +213,8 @@ def _requeue_stuck_invoice_siblings(conn, cfg, exclude_message_id: str, qid: int
     rows = conn.execute(
         """SELECT m.message_id FROM dl_invoice_runs r
              JOIN messages m ON m.message_id = r.message_id
-            WHERE r.outcome = 'review' AND m.category = %s AND m.message_id <> %s
+            WHERE r.outcome IN ('review', 'partial') AND m.category = %s
+              AND m.message_id <> %s
               AND m.created_at > now() - make_interval(days => %s)
               AND EXISTS (SELECT 1 FROM email_events h
                           WHERE h.message_id = m.message_id AND h.stage = 'review'
@@ -236,17 +240,33 @@ def _requeue_stuck_invoice_siblings(conn, cfg, exclude_message_id: str, qid: int
     return len(rows)
 
 
+def _hold_waits_on_open(conn, message_id: str) -> bool:
+    """Does this invoice's LATEST run hold on a question that is still open (its own or one
+    of another mail it deduped onto)?"""
+    return conn.execute(
+        """SELECT 1 FROM dl_invoice_runs r
+             JOIN email_events h ON h.message_id = r.message_id AND h.stage = 'review'
+                                AND h.ts >= r.claimed_at
+             JOIN jsonb_array_elements_text(COALESCE(h.detail->'question_ids', '[]'))
+                  AS w(qid) ON true
+             JOIN order_questions oq ON oq.id = w.qid::int AND oq.status = 'open'
+            WHERE r.message_id = %s LIMIT 1""", (message_id,)).fetchone() is not None
+
+
 def requeue_invoice(conn, message_id: str, cfg=None) -> None:
     """#485: put an invoice-as-DL mail back on the DL engine's invoice queue — its
     `dl_invoice_runs` row reopened (no outcome, attempts reset, the claim already stale) so
-    `dl_message._claim_invoice` takes it on the next tick, with every hold and the duplicate
-    gate. A board answer is a human's "try again", so the attempt count starts over."""
+    `dl_message._claim_invoice` takes it — with every hold and the duplicate gate — once
+    CODEX's data is newer than this re-queue (`requeued_at`: the warehouse may have typed the
+    delivery in by hand while it waited). A board answer is a human's "try again", so the
+    attempt count starts over."""
     conn.execute(
-        """INSERT INTO dl_invoice_runs (message_id, claimed_at, attempts)
-           VALUES (%s, now() - interval '1 day', 0)
+        """INSERT INTO dl_invoice_runs (message_id, claimed_at, attempts, requeued_at)
+           VALUES (%s, now() - interval '1 day', 0, now())
            ON CONFLICT (message_id) DO UPDATE
               SET outcome = NULL, finished_at = NULL, attempts = 0,
-                  claimed_at = now() - interval '1 day'""", (message_id,))
+                  claimed_at = now() - interval '1 day', requeued_at = now()""",
+        (message_id,))
     log.info("invoice-as-DL %s re-queued after a board answer", message_id)
     _alert_if_stranded(conn, cfg, message_id)
 
@@ -357,6 +377,8 @@ def close_message_not_warehouse(conn, qid: int) -> dict:
             WHERE message_id = %s AND kind IN ('dl_item', 'dl_supplier', 'dl_mass')
               AND status = 'open'
             RETURNING id""", ("sklad", message_id)).fetchall()
+    for (closed_qid,) in closed:
+        _requeue_stuck_invoice_siblings(conn, None, message_id, closed_qid)
     _mark_handled(conn, message_id, stage="not_warehouse", status="not_warehouse",
                   outcome="netýka sa skladu — vybavené bez EDI (sklad)",
                   detail={"closed_questions": len(closed)})
@@ -404,6 +426,8 @@ def close_message_sklad_unknown(conn, qid: int) -> dict:
             WHERE message_id = %s AND kind IN ('dl_item', 'dl_supplier', 'dl_mass')
               AND status = 'open'
             RETURNING id""", ("sklad", message_id)).fetchall()
+    for (closed_qid,) in closed:
+        _requeue_stuck_invoice_siblings(conn, None, message_id, closed_qid)
     _mark_handled(conn, message_id, stage="sklad_unknown", status="review",
                   outcome="Sklad nevie identifikovať dodací list — odložený na ručné "
                           "doriešenie (nájdeš ho v dennom súhrne).",

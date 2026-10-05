@@ -662,10 +662,11 @@ must never ship a SECOND delivery: the warehouse may already have typed it into 
     shipment of another day / another invoice (its `NCDLIST` = our doc number);
   - **one delivery in two documents** (a priceless DL scan in ks + an invoice in KAR, other
     numbers): the same day with sums that cannot be compared and other content → conflict;
-    across the two sources (a DL scan vs an invoice — also an invoice mail's invoice PDF vs
-    its DL PDF, told apart by the invoice number) ±1 day with the same total / content →
-    conflict (LESAFFRE prints the dispatch date) — so a priceless scan of the next day's
-    standing order is a review too (that day's invoice still ships, nothing is lost);
+    across the two sources (a DL scan vs an invoice — also two documents of ONE mail) ±1
+    day with the same total, the same goods, or — sums that cannot be compared — the same
+    cards in OTHER UNITS (the signature is `[card, quantity, unit]`; the same goods compare
+    card + quantity only) → conflict (LESAFFRE prints the dispatch date) — so a priceless
+    scan of the next day's standing order is a review too (that day's invoice still ships);
   - **CODEX's import of our own shipment** never decides by its DL number (our row with the
     facts does) but its INVOICE link to OUR invoice counts;
   - a **collective invoice** (one invoice number, several DL numbers): within ONE mail (or on
@@ -693,6 +694,10 @@ must never ship a SECOND delivery: the warehouse may already have typed it into 
   gate — `_tick_invoice` claims none of its invoices (`covered_eans`), a document resolving to
   such a supplier is reviewed (`Receipts.covers`), `missing_supplier_sweep` alerts ops; the late
   check returns a not-shipped review when the copy went stale meanwhile.
+- **A re-queued invoice waits for fresh CODEX data**: `requeue_invoice` stamps
+  `dl_invoice_runs.requeued_at`; the claim needs `GREATEST(created_at, requeued_at) <= as_of`
+  — the warehouse may have typed the held delivery in by hand before answering (the hold text
+  says „NEnahráva do ORIONu"), and only a copy newer than the answer can show it.
 - **Facts on our own rows**: `desadv.record_facts` (delivery_date, total_amount, items, and
   `invoice_number` only when the invoice printed one) right after the claim. `invoice_only`
   (the DL path's twin check) = rows of `invoices`-category mails, never "has an invoice number".
@@ -707,9 +712,12 @@ must never ship a SECOND delivery: the warehouse may already have typed it into 
   re-queues it (`requeue_invoice`, + the same-sender DL sibling release); on EVERY `dl_*`
   answer — independent of the question owner's own state and of the sender (a question
   dedupes on its wording / card, not the envelope) — `_requeue_stuck_invoice_siblings`
-  re-queues the invoices whose LATEST run's hold waits on that question once ALL the
-  questions of that hold are answered (the #365 / #462 hold and cannot-create review events
-  record `question_ids`); any other review stays a human's, „Netýka sa skladu" /
+  re-queues the invoices (`review` / `partial` runs) whose LATEST run's hold waits on that
+  question once ALL the questions of that hold are answered (the #365 / #462 hold and
+  cannot-create review events record `question_ids`; a close as „Netýka sa skladu" /
+  „Neviem" frees them too; the owner's own re-queue waits while its hold waits on another
+  mail's open question; a „pošli bez" answer of the shared question skips the line for every
+  invoice that waited on it); any other review stays a human's, „Netýka sa skladu" /
   „Neviem" record the outcome there — `messages.processed` / rollup belong to the n8n
   invoice-forward flow. A mail that already has a run is exempt from `invoice_dl_since` (a
   re-stamp never strands an answered invoice); one the claim can never take (too old, flag
