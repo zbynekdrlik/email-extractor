@@ -80,20 +80,30 @@ def test_a_standing_order_invoiced_on_two_days_ships_both_days(pg, tmp_path):
     assert _run_outcome(pg, "inv-tue") == "ok"
 
 
-def test_a_dl_scan_of_the_next_days_standing_order_ships_after_the_invoice(pg, tmp_path):
-    """The DL path checks our invoice-derived rows — by the SAME day only: a priceless scan of
-    Tuesday's identical goods is no twin of Monday's invoice."""
+def test_a_dl_scan_of_the_next_days_standing_order_is_never_lost(pg, tmp_path):
+    """A priceless scan of Tuesday's identical goods a day after Monday's invoice shipped: the
+    next delivery of a standing order — or the same delivery whose scan and invoice carry dates
+    a day apart (round 6). Not provable: never a silent skip (round 2) and never a second
+    DESADV — a review; Tuesday's own invoice still ships."""
     _setup(pg)
     _push_receipts(tmp_path)
     _message(pg, tmp_path, "inv-mon", created_at=_ago(hours=3))
     uploads, posts = [], []
     client = FakeClient([_doc_on(TWO_DAYS_AGO, "4400000001", "2400000001"),
-                         _doc_on(YESTERDAY, "7700000002", "", priced=False)], runs=2)
+                         _doc_on(YESTERDAY, "7700000002", "", priced=False),
+                         _doc_on(YESTERDAY, "4400000002", "2400000002")], runs=3)
     assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    shipped_posts = len(posts)
     _message(pg, tmp_path, "dl-tue", category="dodacie_listy", subject="Dodací list",
              text="Dodací list 7700000002", created_at=_ago(hours=1))
     assert _tick(pg, tmp_path, client, uploads, posts) == 1
-    assert len(uploads) == 2, "the DL path skipped Tuesday's delivery as Monday's twin"
+    assert len(uploads) == 1
+    new = posts[shipped_posts:]
+    assert len(new) == 1 and "o deň inak" in new[0], "the scan vanished silently"
+    _message(pg, tmp_path, "inv-tue", created_at=_ago(minutes=30))
+    _push_receipts(tmp_path)
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert len(uploads) == 2, "Tuesday's delivery was lost"
 
 
 def test_codex_importing_our_monday_desadv_never_blocks_tuesdays_invoice(pg, tmp_path):

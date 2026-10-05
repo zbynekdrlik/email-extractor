@@ -11,11 +11,14 @@ inside a caller's transaction across the upload; a stale orphan claim was ignore
 
 Synthetic data only (made-up supplier, numbers, addresses) — this repo is public.
 """
+import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 from test_invoice_dedup_regression import (
+    ITEM_GTIN,
+    ITEM_MATCHED,
     OTHER_EAN,
     SUPPLIER_EAN,
     SUPPLIER_EMAIL,
@@ -359,21 +362,132 @@ def test_codex_importing_an_old_shipment_without_facts_is_reviewed_not_silent(pg
 
 # --- round 5: an invoice deduped onto another invoice's board question ---------------------
 
-def test_an_invoice_deduped_onto_another_invoices_question_is_requeued_by_the_answer(
+NO_MATCH = {"gtin": "NO_MATCH", "matchConfidence": 0.0, "matchReason": "žiadna zhoda"}
+
+
+def _yeast(day, dl, invoice, qty):
+    doc = _one(day, dl, invoice, qty=qty)
+    doc["items"][0]["name"] = "Kvasnice Rekord 1kg"
+    return {"documents": [doc]}
+
+
+def test_an_invoice_deduped_onto_another_invoices_question_ships_after_the_answer(
         pg, tmp_path):
+    """End to end (writer + reader): two invoices of one supplier with the same unknown line —
+    the second one's ask dedupes onto the first one's question and both are held; the answer
+    re-queues BOTH and both ship."""
+    from app.orders import teach
     _setup(pg)
-    for mid, hours in (("inv-a", 3), ("inv-b", 2), ("inv-c", 2)):
-        _message(pg, tmp_path, mid, created_at=_ago(hours=hours))
+    _message(pg, tmp_path, "inv-1", created_at=_ago(hours=3))
+    _message(pg, tmp_path, "inv-2", created_at=_ago(hours=2))
+    _push_receipts(tmp_path)
+    client = FakeClient([_yeast(YESTERDAY, "4400000002", "2400000002", 40),
+                         _yeast(TWO_DAYS_AGO, "4400000001", "2400000001", 100),
+                         _yeast(YESTERDAY, "4400000002", "2400000002", 40),
+                         _yeast(TWO_DAYS_AGO, "4400000001", "2400000001", 100)], runs=4)
+    client._answers["dl_item"] = [NO_MATCH, NO_MATCH] + [ITEM_MATCHED] * 4
+    uploads, posts = [], []
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    questions = pg.execute("SELECT id, message_id, kind, wording, payload, candidates "
+                           "FROM order_questions").fetchall()
+    assert uploads == [] and len(questions) == 1, "the second ask did not dedupe"
+    q = dict(zip(("id", "message_id", "kind", "wording", "payload", "candidates"),
+                 questions[0], strict=True))
+    pg.execute("UPDATE order_questions SET status = 'answered', answer = %s::jsonb "
+               "WHERE id = %s", (json.dumps({"choice": ITEM_GTIN}), q["id"]))
+    teach.KINDS["dl_item"].apply(pg, _cfg(tmp_path), q, ITEM_GTIN, "sklad")
+    for _ in range(3):
+        _tick(pg, tmp_path, client, uploads, posts)
+    assert len(uploads) == 2, "the invoice deduped onto the answered question stays stranded"
+
+
+def test_only_the_invoices_waiting_on_the_answered_question_are_requeued(pg, tmp_path):
+    """Other same-sender reviews without a question of their own (a money-gate breach, a
+    stale-copy hold, a dedup conflict, one waiting on ANOTHER question) are a human's — never
+    re-run nor re-posted by an answer."""
+    _setup(pg)
+    for mid in ("inv-a", "inv-b", "inv-c", "inv-d", "inv-e"):
+        _message(pg, tmp_path, mid, created_at=_ago(hours=2))
         pg.execute("INSERT INTO dl_invoice_runs (message_id, outcome, finished_at) "
                    "VALUES (%s, 'review', now())", (mid,))
-    # inv-c's run ended in a dedup conflict — a human's, never re-run
-    pg.execute("INSERT INTO email_events (message_id, workflow, stage, status, outcome, "
-               "rollup) VALUES ('inv-c', 'delivery_notes', %s, 'review', 'x', false)",
-               (dl_invoice.STAGE,))
     qid = pg.execute(
         "INSERT INTO order_questions (message_id, kind, wording, status, customer_ean, "
         "item_key) VALUES ('inv-a', 'dl_item', 'Rožok 50g', 'answered', %s, 'rozok 50g') "
         "RETURNING id", (SUPPLIER_EAN,)).fetchone()[0]
+    events = (("inv-b", "review", "review", {"held": True, "question_ids": [qid]}),
+              ("inv-c", "review", "review", {"reason": "money gate"}),
+              ("inv-d", dl_invoice.STAGE, "review", {"question_ids": [qid]}),
+              ("inv-e", "review", "review", {"held": True, "question_ids": [qid + 1000]}))
+    for mid, stage, status, detail in events:
+        pg.execute("INSERT INTO email_events (message_id, workflow, stage, status, outcome, "
+                   "detail, rollup) VALUES (%s, 'delivery_notes', %s, %s, 'x', %s::jsonb, "
+                   "false)", (mid, stage, status, json.dumps(detail)))
     dl_questions.release_for_question(pg, _cfg(tmp_path), qid)
     runs = dict(pg.execute("SELECT message_id, outcome FROM dl_invoice_runs").fetchall())
-    assert runs == {"inv-a": None, "inv-b": None, "inv-c": "review"}
+    assert runs == {"inv-a": None, "inv-b": None, "inv-c": "review", "inv-d": "review",
+                    "inv-e": "review"}
+
+
+# --- round 6: one delivery as a scan and an invoice a day apart ------------------------------
+
+def test_a_scan_and_its_invoice_dated_a_day_apart_never_ship_twice(pg, tmp_path):
+    """LESAFFRE shape: the priceless scan (number Y, dated D) shipped; the invoice of the same
+    goods prints another DL number and the date D+1; CODEX imported the scan. Not provably
+    the same delivery — a review, never a second DESADV."""
+    _setup(pg)
+    _push_receipts(tmp_path)
+    _message(pg, tmp_path, "dl-1", category="dodacie_listy", subject="Dodací list",
+             text="Dodací list", created_at=_ago(hours=30))
+    uploads, posts = [], []
+    client = FakeClient([_inv(TWO_DAYS_AGO, "7700000001", "", priced=False),
+                         _inv(YESTERDAY, "4400000001", "2400000001")], runs=2)
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    shipped_posts = len(posts)
+    _message(pg, tmp_path, "inv-1", created_at=_ago(hours=1))
+    _push_receipts(tmp_path, [_receipt("261009001", TWO_DAYS_AGO, ["7700000001"])])
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert len(uploads) == 1, "the same goods went to ORION twice"
+    assert _run_outcome(pg, "inv-1") == "review"
+    assert len(posts) - shipped_posts == 1
+
+
+def test_codex_importing_an_old_scan_with_another_total_is_reviewed(pg, tmp_path):
+    """Transition: a scan shipped before #485 (no facts); CODEX's import of it carries OUR
+    catalog-price total (not the invoice's): within ±1 day it is a conflict whatever the
+    total — never a silent second DESADV."""
+    _setup(pg)
+    _message(pg, tmp_path, "dl-old", category="dodacie_listy", subject="Dodací list",
+             text="Dodací list", created_at=_ago(hours=40))
+    pg.execute("UPDATE messages SET processed = true WHERE message_id = 'dl-old'")
+    pg.execute("INSERT INTO desadv_sent (supplier_ean, doc_number, filename, message_id, "
+               "sent_at, uploaded_at) VALUES (%s, '7700000001', 'x.txt', 'dl-old', "
+               "now() - interval '40 hours', now() - interval '40 hours')", (SUPPLIER_EAN,))
+    _message(pg, tmp_path, "inv-1", created_at=_ago(hours=1))
+    _push_receipts(tmp_path, [_receipt("261009001", YESTERDAY, ["7700000001"], total=41.0)])
+    uploads, posts = [], []
+    assert _tick(pg, tmp_path, FakeClient([_inv(YESTERDAY, "4400000001", "2400000001")]),
+                 uploads, posts) == 1
+    assert uploads == []
+    assert _run_outcome(pg, "inv-1") == "review"
+
+
+def test_a_resent_collective_invoice_meets_each_dls_own_twin(pg, tmp_path):
+    """The collective invoice (DL1 + DL2) shipped; its resend: each DL meets its OWN row, never
+    DL1's through the shared invoice number (a plain duplicate each, no false review)."""
+    _setup(pg)
+    _push_receipts(tmp_path)
+    _message(pg, tmp_path, "inv-coll", created_at=_ago(hours=3))
+    docs = {"documents": [_one(TWO_DAYS_AGO, "7700000001", "2400000001"),
+                          _one(YESTERDAY, "7700000002", "2400000001", qty=40)]}
+    uploads, posts = [], []
+    client = FakeClient([docs, docs], runs=4)
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert len(uploads) == 2
+    shipped_posts = len(posts)
+    _message(pg, tmp_path, "inv-coll-2", created_at=_ago(hours=1))
+    _push_receipts(tmp_path)
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert len(uploads) == 2
+    assert posts[shipped_posts:] == []
+    assert _run_outcome(pg, "inv-coll-2") == "duplicate"
