@@ -1,18 +1,23 @@
-"""#485: the dev2 CODEX supplier-receipts push tool — CI-testable via the DI seam, no duckdb.
+"""#485: the dev2 CODEX supplier-receipts push tool — CI-testable via the DI seam, and its SQL
+run for real against a synthetic DuckDB file (duckdb is a dev dependency; the tool itself
+imports it lazily so the add-on image never needs it).
 
 Synthetic rows only (made-up suppliers, numbers) — this repo is public.
 """
 import datetime
+
+import duckdb
 
 from tools import codex_receipts_push as push
 
 
 def _row(**kw):
     base = {"receipt_number": 261004409.0, "supplier_ico": 12345678.0,
-            "supplier_ean": " 2000000000991 ", "supplier_name": " Testovací dodávateľ ",
+            "supplier_eans": [" 2000000000991 ", "2000000000777", ""],
+            "supplier_name": " Testovací dodávateľ ",
             "receipt_date": datetime.date(2026, 9, 9),
             "receipt_date_to": datetime.date(2026, 9, 10),
-            "dl_number": 526013012, "invoice_number": "526013012",
+            "dl_numbers": [526013012, 1144195], "invoice_number": "526013012",
             "invoice_vs": "0526013012", "total": 191.7000001, "invoice_total": 191.7,
             "line_count": 2, "entered_at": datetime.datetime(2026, 9, 11, 14, 38, 20),
             "sdpoh": 10}
@@ -20,31 +25,33 @@ def _row(**kw):
     return base
 
 
-def test_module_imports_without_duckdb_or_requests():
+def test_module_imports_without_requests():
     assert hasattr(push, "build_receipts") and hasattr(push, "run")
 
 
-def test_build_receipts_normalizes_codex_doubles_dates_and_money():
+def test_build_receipts_normalizes_codex_doubles_lists_dates_and_money():
     out = push.build_receipts([_row()])
     assert out == [{
         "receipt_number": "261004409", "supplier_ico": "12345678",
-        "supplier_ean": "2000000000991", "supplier_name": "Testovací dodávateľ",
+        "supplier_eans": ["2000000000777", "2000000000991"],
+        "supplier_name": "Testovací dodávateľ",
         "receipt_date": "2026-09-09", "receipt_date_to": "2026-09-10",
-        "dl_number": "526013012", "invoice_number": "526013012",
+        "dl_numbers": ["1144195", "526013012"], "invoice_number": "526013012",
         "invoice_vs": "0526013012", "total": 191.7, "invoice_total": 191.7,
         "line_count": 2, "entered_at": "2026-09-11T14:38:20+02:00", "sdpoh": 10}]
 
 
 def test_build_receipts_keeps_missing_links_empty_and_skips_unusable_rows():
     out = push.build_receipts([
-        _row(dl_number=None, invoice_number=None, invoice_vs=None, total=None,
-             invoice_total=None, receipt_date_to=None, entered_at=None),
+        _row(supplier_eans=None, dl_numbers=None, invoice_number=None, invoice_vs=None,
+             total=None, invoice_total=None, receipt_date_to=None, entered_at=None),
         _row(receipt_number=None),
         _row(receipt_date=None),
     ])
     assert len(out) == 1
     r = out[0]
-    assert (r["dl_number"], r["invoice_number"], r["invoice_vs"]) == ("", "", "")
+    assert (r["supplier_eans"], r["dl_numbers"], r["invoice_number"], r["invoice_vs"]) == (
+        [], [], "", "")
     assert r["total"] is None and r["invoice_total"] is None
     assert r["receipt_date_to"] == r["receipt_date"] and r["entered_at"] is None
 
@@ -111,13 +118,64 @@ def test_main_prints_the_pushed_line(monkeypatch, capsys):
         "pushed: fetched=1 receipts=1 stored=1 to=https://addon.example")
 
 
-def test_the_query_dedups_firma_and_faktury_before_joining():
-    """The fan-out trap (codex-orders.md): raw.firma NICO and raw.faktury (NICO, SROK,
-    IPORCFAKT) carry duplicate rows — both are grouped BEFORE the join, and the receipt lines
-    are grouped per (NCD, NICO) so one receipt is one row; never the SLOVNORMAL own IČO."""
-    sql = push._SQL
-    assert "FROM raw.firma GROUP BY NICO" in sql
-    assert "GROUP BY NICO, SROK, IPORCFAKT" in sql
-    assert "GROUP BY NCD, NICO" in sql
-    assert f"NICO <> {push.OWN_ICO}" in sql
-    assert "NMNOZ" not in sql, "NMNOZ is mis-decoded in CODEX — never read it"
+# --- the SQL itself, against a synthetic codex-bridge DuckDB ------------------------------
+
+def _codex_db(path):
+    """The columns the push reads, with the traps CODEX really has: duplicate raw.firma rows
+    per NICO (two EDI EANs), duplicate raw.faktury rows, two lines per receipt (one dated a day
+    later), an own-IČO transfer, a garbage NCDLIST, a receipt whose invoice is not booked yet,
+    and one older than the window."""
+    today = datetime.date.today()
+    d = today - datetime.timedelta(days=5)
+    con = duckdb.connect(str(path))
+    con.execute("CREATE SCHEMA raw")
+    con.execute("CREATE SCHEMA meta")
+    con.execute("""CREATE TABLE raw.sp001 (NCD DOUBLE, ICPOL BIGINT, NICO DOUBLE,
+                   NCDLIST DOUBLE, DUCTOBD DATE, NSUMAP DOUBLE, SDRUHFAKT BIGINT, SROK BIGINT,
+                   IPORCFAKT BIGINT, UDATUMAKT TIMESTAMP, SDPOH BIGINT)""")
+    con.execute("CREATE TABLE raw.firma (NICO DOUBLE, AEDIEAN VARCHAR, ANAZORG VARCHAR)")
+    con.execute("""CREATE TABLE raw.faktury (NICO DOUBLE, SDRUHFAKT BIGINT, SROK BIGINT,
+                   IPORCFAKT BIGINT, ACFAKTDPH VARCHAR, AVSYMB VARCHAR, NVYMZAK1 DOUBLE,
+                   NVYMZAK2 DOUBLE, NVYMZAK3 DOUBLE, NVYMZAK4 DOUBLE)""")
+    con.execute("""CREATE TABLE meta.etl_runs (table_name VARCHAR, status VARCHAR,
+                   finished_at TIMESTAMP)""")
+    ts = datetime.datetime.combine(d, datetime.time(9, 0))
+    rows = [  # NCD, ICPOL, NICO, NCDLIST, DUCTOBD, NSUMAP, SDRUHFAKT, SROK, IPORC, UDATUMAKT, SDPOH
+        (261000001, 1, 12345678, 526013012, d, 100.0, 1, 2026, 26100001, ts, 10),
+        (261000001, 2, 12345678, 526013012, d + datetime.timedelta(days=1), 56.7, 1, 2026,
+         26100001, ts, 10),
+        (261000002, 1, 12345678, 1e30, d, 10.0, None, None, None, ts, 10),
+        (261000003, 1, 31697143, 77, d, 999.0, None, None, None, ts, 10),
+        (261000004, 1, 12345678, 5, today - datetime.timedelta(days=90), 1.0, None, None,
+         None, ts, 10),
+        (261000005, 1, 12345678, 6, d, 1.0, None, None, None, ts, 50),
+    ]
+    con.executemany("INSERT INTO raw.sp001 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    con.executemany("INSERT INTO raw.firma VALUES (?, ?, ?)", [
+        (12345678, "2000000000991", "Dodávateľ"), (12345678, "2000000000777", "Dodávateľ"),
+        (12345678, None, "Dodávateľ")])
+    con.executemany("INSERT INTO raw.faktury VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [
+        (12345678, 1, 2026, 26100001, "526013012", "526013012", None, 150.0, 6.7, None),
+        (12345678, 1, 2026, 26100001, "526013012", "526013012", None, 150.0, 6.7, None)])
+    con.execute("INSERT INTO meta.etl_runs VALUES ('sp001', 'ok', TIMESTAMP '2026-10-04 "
+                "16:19:49')")
+    con.close()
+
+
+def test_the_sql_groups_one_receipt_per_ncd_without_fanout(tmp_path):
+    path = tmp_path / "codex.duckdb"
+    _codex_db(path)
+    out = push.build_receipts(push.query_duckdb(str(path), 60))
+    by_number = {r["receipt_number"]: r for r in out}
+    assert set(by_number) == {"261000001", "261000002"}, \
+        "own-IČO transfers, out-of-window receipts and non-purchase moves are excluded"
+    r = by_number["261000001"]
+    assert r["total"] == 156.7, "lines summed once each — no fan-out from duplicate rows"
+    assert r["line_count"] == 2
+    assert r["receipt_date_to"] > r["receipt_date"]
+    assert r["supplier_eans"] == ["2000000000777", "2000000000991"]
+    assert r["dl_numbers"] == ["526013012"]
+    assert (r["invoice_number"], r["invoice_total"]) == ("526013012", 156.7)
+    garbage = by_number["261000002"]
+    assert garbage["dl_numbers"] == [] and garbage["invoice_number"] == ""
+    assert push.query_as_of(str(path)) == datetime.datetime(2026, 10, 4, 16, 19, 49)

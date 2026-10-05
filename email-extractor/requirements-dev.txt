@@ -7,3 +7,6 @@ xlwt>=1.3
 playwright>=1.40
 pytest-playwright>=0.5
 mypy==2.3.0
+# #485: the CODEX receipts push SQL is tested against a synthetic DuckDB file (the tool
+# itself imports duckdb lazily — dev2 has it, the add-on image never needs it)
+duckdb>=1.1

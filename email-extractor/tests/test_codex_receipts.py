@@ -1,21 +1,32 @@
 """#485: the CODEX supplier-receipts copy + the invoice-as-DL duplicate gate's rules.
 
-`codex_receipts` (the pushed copy: atomic replace, freshness, fail-closed, the ops alert),
+`codex_receipts` (the pushed copy: atomic replace, freshness, fail-closed, the ops alerts),
 `invoice_dedup` (the pure rules + the match against receipts and our own `desadv_sent`),
-`desadv.record_facts` (the facts our own shipments carry) and the endpoint's guards.
-The end-to-end pipeline cases live in `test_invoice_dedup_regression.py`.
+`dl_invoice` (credit notes, the invoice's sources, the stale hold), `desadv.record_facts` /
+`desadv_edi.lin_quantities` (the facts our own shipments carry), `dl_snapshot.set_invoice_flag`
+and the endpoint's guards. The end-to-end pipeline cases live in
+`test_invoice_dedup_regression.py`.
 
 Synthetic data only (made-up suppliers, numbers) — this repo is public.
 """
 import logging
 import os
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from app.config import Config
 from app.httpapi import create_app
-from app.orders import codex_receipts, desadv, dl_message, invoice_dedup
+from app.orders import (
+    codex_receipts,
+    codex_snapshot,
+    desadv,
+    desadv_edi,
+    dl_invoice,
+    dl_message,
+    dl_snapshot,
+    invoice_dedup,
+)
 
 EAN = "2000000000991"
 NOW = datetime.now(UTC)
@@ -30,8 +41,8 @@ def _cfg(**kw):
 
 
 def _receipt(number="261004409", ean=EAN, day=None, **kw):
-    r = {"receipt_number": number, "supplier_ico": "12345678", "supplier_ean": ean,
-         "receipt_date": (day or TODAY).isoformat(), "dl_number": "", "total": 100.0}
+    r = {"receipt_number": number, "supplier_ico": "12345678", "supplier_eans": [ean],
+         "receipt_date": (day or TODAY).isoformat(), "dl_numbers": [], "total": 100.0}
     r.update(kw)
     return r
 
@@ -42,10 +53,11 @@ def _push(pg, receipts=None, as_of=None, force=False):
         source_as_of=(as_of or NOW).isoformat(), days=60, force=force)
 
 
-def _flag(pg):
-    pg.execute("INSERT INTO dl_supplier_overrides (ean_edi, name, emails, city, "
-               "invoice_is_delivery_note) VALUES (%s, 'Dodávateľ', '{}', 'Mesto', true)",
-               (EAN,))
+def _flag(pg, ean=EAN):
+    return pg.execute(
+        "INSERT INTO dl_supplier_overrides (ean_edi, name, emails, city, "
+        "invoice_is_delivery_note) VALUES (%s, 'Dodávateľ', '{}', 'Mesto', true) "
+        "RETURNING id", (ean,)).fetchone()[0]
 
 
 # --- the copy: atomic replace + guards ----------------------------------------------------
@@ -64,6 +76,15 @@ def test_rows_without_a_number_or_a_date_are_skipped_and_duplicates_collapse(pg)
                      {"receipt_number": "9", "receipt_date": "neviem"}, "junk"])
     assert res == {"stored": 1}
     assert pg.execute("SELECT total FROM codex_receipts").fetchone()[0] == 2
+
+
+def test_list_fields_keep_every_ean_and_dl_number(pg):
+    _push(pg, [_receipt(supplier_eans=["2000000000777", EAN, "", EAN],
+                        dl_numbers=["526013012", "", "1144195"])])
+    row = pg.execute("SELECT supplier_eans, dl_numbers FROM codex_receipts").fetchone()
+    assert row == (["2000000000777", EAN], ["1144195", "526013012"])
+    assert [r.receipt_number for r in
+            codex_receipts.live(pg).for_supplier(pg, "2000000000777")] == ["261004409"]
 
 
 def test_an_empty_push_is_refused_and_keeps_the_previous_copy(pg, caplog):
@@ -85,6 +106,13 @@ def test_a_drastically_smaller_push_is_refused_unless_forced(pg):
     assert _push(pg, [_receipt("1"), _receipt("2")], force=True) == {"stored": 2}
 
 
+def test_both_codex_snapshots_share_one_refusal_type():
+    from app.orders import codex_cards
+    assert codex_receipts.ReplaceRefused is codex_cards.ReplaceRefused \
+        is codex_snapshot.ReplaceRefused
+    assert codex_receipts.STALE_HOURS == codex_cards.STALE_HOURS == codex_snapshot.STALE_HOURS
+
+
 # --- freshness: fail CLOSED -----------------------------------------------------------------
 
 def test_never_pushed_or_stale_receipts_are_not_live(pg):
@@ -92,7 +120,9 @@ def test_never_pushed_or_stale_receipts_are_not_live(pg):
     _push(pg, as_of=NOW - timedelta(hours=codex_receipts.STALE_HOURS + 1))
     assert codex_receipts.live(pg) is None
     _push(pg, as_of=NOW - timedelta(hours=codex_receipts.STALE_HOURS - 1))
-    assert codex_receipts.live(pg) is not None
+    live = codex_receipts.live(pg)
+    assert live is not None and abs((live.as_of - (NOW - timedelta(
+        hours=codex_receipts.STALE_HOURS - 1))).total_seconds()) < 1
 
 
 def test_a_future_source_time_can_never_keep_the_receipts_fresh(pg):
@@ -109,9 +139,9 @@ def test_the_hold_warning_is_rate_limited(pg, caplog):
     assert sum("never pushed" in r.getMessage() for r in caplog.records) == 1
 
 
-def _alerts(pg):
-    return pg.execute("SELECT channel_id, body_html FROM pending_alerts WHERE kind = %s",
-                      (codex_receipts.ALERT_KIND,)).fetchall()
+def _alerts(pg, kind=codex_receipts.ALERT_KIND):
+    return pg.execute("SELECT channel_id, body_html, message_id FROM pending_alerts "
+                      "WHERE kind = %s", (kind,)).fetchall()
 
 
 def test_stale_sweep_alerts_ops_once_per_episode_only_while_an_invoice_flag_is_on(pg):
@@ -134,6 +164,23 @@ def test_stale_sweep_is_quiet_for_fresh_receipts_and_gives_a_new_install_grace(p
     pg.execute("DELETE FROM pending_alerts")
     _push(pg)
     assert codex_receipts.stale_sweep(pg, _cfg()) is False
+
+
+def test_a_flagged_supplier_codex_has_no_receipt_for_is_reported_once(pg):
+    """Its EDI EAN on our card matches no raw.firma AEDIEAN → the gate is blind to its CODEX
+    receipts; ops is told once (not a hold — our ledger + numbers still guard)."""
+    _flag(pg, EAN)
+    _flag(pg, "2000000000555")
+    _push(pg, [_receipt(ean="2000000000555")])
+    assert codex_receipts.missing_supplier_sweep(pg, _cfg()) == 1
+    assert codex_receipts.missing_supplier_sweep(pg, _cfg()) == 0, "deduped"
+    rows = _alerts(pg, codex_receipts.MISSING_KIND)
+    assert len(rows) == 1 and EAN in rows[0][1] and rows[0][2].endswith(EAN)
+
+
+def test_the_missing_supplier_sweep_is_silent_without_a_fresh_copy(pg):
+    _flag(pg)
+    assert codex_receipts.missing_supplier_sweep(pg, _cfg()) == 0
 
 
 # --- the endpoint -------------------------------------------------------------------------
@@ -170,12 +217,12 @@ def test_numbers_compare_on_digits_without_prefixes_or_leading_zeros():
     assert invoice_dedup.digits("0100237291") == "100237291"
     assert invoice_dedup.digits("FV 2026/00123") == "202600123"
     assert invoice_dedup.digits("1234") == "", "too short to identify a document"
-    assert invoice_dedup.numbers_of("", None, "526013012", "0526013012") == {"526013012"}
+    assert invoice_dedup.numbers_of("", None, ["526013012", "0526013012"]) == {"526013012"}
 
 
 def test_dates_totals_and_tolerance():
-    assert invoice_dedup.parse_day("09.09.2026") == date(2026, 9, 9)
-    assert invoice_dedup.parse_day("2026-09-09") == date(2026, 9, 9)
+    assert invoice_dedup.parse_day("09.09.2026") == TODAY.replace(year=2026, month=9, day=9)
+    assert invoice_dedup.parse_day("2026-09-09").isoformat() == "2026-09-09"
     assert invoice_dedup.parse_day("31.02.2026") is None
     assert invoice_dedup.doc_total({"documentTotalWithoutVAT": 191.7}) == 191.7
     assert invoice_dedup.doc_total({"documentTotalWithoutVAT": 0,
@@ -193,12 +240,48 @@ def test_credit_notes_by_word_and_by_sign():
     assert not invoice_dedup.is_credit_note_doc({"documentTotalWithoutVAT": 225.0})
 
 
-def test_a_credit_note_is_recognised_from_an_attachment_name_alone():
-    msg = {"subject": "Doklad", "combined_text": ""}
-    assert dl_message.dl_invoice.credit_note_reason(
-        msg, [{"filename": "Dobropis_123.pdf", "machine_text": ""}])
-    assert dl_message.dl_invoice.credit_note_reason(
-        msg, [{"filename": "Faktura_123.pdf", "machine_text": "Faktúra"}]) is None
+def test_credit_notes_are_split_off_by_subject_body_name_or_header_only():
+    inv = {"filename": "Faktura_123.pdf", "machine_text": "Faktúra 123\n" + "x" * 400
+           + "\nReklamácie riešime dobropisom."}
+    cn = {"filename": "1326100113.pdf", "machine_text": "Faktúra - dobropis 1/1"}
+    named = {"filename": "Dobropis_77.pdf", "machine_text": "Opravný doklad"}
+    msg = {"subject": "Doklady", "combined_text": "Subject: Doklady\n\nBody: v prílohe"}
+    assert dl_invoice.split_credit_notes(msg, [inv, cn, named]) == ([inv], None)
+    assert dl_invoice.split_credit_notes(msg, [cn]) == ([], dl_invoice.CREDIT_REASON)
+    whole = {"subject": "Dobropis č. 25260025", "combined_text": ""}
+    assert dl_invoice.split_credit_notes(whole, [inv])[1] == dl_invoice.CREDIT_REASON
+    body = {"subject": "Doklad", "combined_text": "Body: Zasielame dobropis\n\nAttachments:\n"}
+    assert dl_invoice.split_credit_notes(body, [inv])[1] == dl_invoice.CREDIT_REASON
+    in_attachment_text_only = {"subject": "Faktúra", "combined_text":
+                               "Body: dobrý deň\n\nAttachments:\n===== f.pdf =====\n"
+                               "... riešime dobropisom ..."}
+    assert dl_invoice.split_credit_notes(in_attachment_text_only, [inv]) == ([inv], None)
+
+
+def test_an_invoice_is_read_from_its_text_documents_and_a_scan_only_mail_keeps_its_scans():
+    pdf = {"filename": "f.pdf", "machine_text": "Faktúra 123", "needs_vision": False}
+    banner = {"filename": "b.jpg", "machine_text": "[needs AI Vision: b.jpg]",
+              "needs_vision": True}
+    blank = {"filename": "c.jpg", "machine_text": "", "needs_vision": False}
+    assert dl_invoice.invoice_sources([banner, pdf, blank]) == [pdf]
+    assert dl_invoice.invoice_sources([banner, blank]) == [banner, blank]
+
+
+def test_the_content_signature_reads_card_and_quantity_back_from_the_edi():
+    built = desadv_edi.build(
+        {"customerName": "X", "customerEanEdi": EAN},
+        {"docNumber": "4400123456", "deliveryDate": "05.10.2026"},
+        [{"gtin": "8588000000002", "name": "B", "quantity": 7, "unit": "ks",
+          "unitPrice": 1.0, "totalPrice": 7.0, "mass": 0.1},
+         {"gtin": "8588000000001", "name": "A", "quantity": 100, "unit": "ks",
+          "unitPrice": 0.5, "totalPrice": 50.0, "mass": 0.05}],
+        [{"gtin": "8588000000001", "name": "A", "sklad": "1", "cena": "0.5"},
+         {"gtin": "8588000000002", "name": "B", "sklad": "1", "cena": "1"}])
+    assert desadv_edi.lin_quantities(built.content) == [
+        ("8588000000002", "7.000"), ("8588000000001", "100.000")]
+    assert invoice_dedup.signature(built.content) == [
+        ["8588000000001", 100.0], ["8588000000002", 7.0]]
+    assert invoice_dedup.signature("") == []
 
 
 # --- find_duplicate against the receipts and our own ledger -------------------------------
@@ -209,19 +292,19 @@ def _doc(doc_number="4400123456", invoice_number="2400765432", day=None, total=1
             "documentTotalWithoutVAT": total, "items": []}
 
 
-def _dup(pg, doc, message_id="m1"):
-    return invoice_dedup.find_duplicate(pg, codex_receipts.live(pg), EAN, doc, message_id)
+def _dup(pg, doc, message_id="m1", content=None, invoice_only=False, receipts=True):
+    return invoice_dedup.find_duplicate(
+        pg, codex_receipts.live(pg) if receipts else None, EAN, doc, message_id,
+        doc_number=doc.get("docNumber") or "AVIZO1", content=content,
+        invoice_only=invoice_only)
 
 
 def test_a_receipt_matches_by_any_number_field(pg):
-    for field in ("dl_number", "invoice_number", "invoice_vs"):
-        _push(pg, [_receipt(day=TODAY - timedelta(days=20), total=1.0,
-                            **{field: "2400765432"})], force=True)
+    for fields in ({"dl_numbers": ["2400765432"]}, {"invoice_number": "2400765432"},
+                   {"invoice_vs": "2400765432"}, {"dl_numbers": ["1", "4400123456"]}):
+        _push(pg, [_receipt(day=TODAY - timedelta(days=20), total=1.0, **fields)], force=True)
         dup = _dup(pg, _doc())
-        assert dup and dup.source == "codex" and dup.match == "number", field
-    _push(pg, [_receipt(day=TODAY - timedelta(days=20), total=1.0, dl_number="4400123456")],
-          force=True)
-    assert _dup(pg, _doc()).match == "number", "the DL number printed on the invoice too"
+        assert dup and dup.source == "codex" and dup.match == "number", fields
 
 
 def test_a_receipt_matches_by_date_within_a_day_and_total_within_tolerance(pg):
@@ -249,18 +332,20 @@ def test_a_multi_day_receipt_and_an_invoice_split_over_two_receipts_still_match(
 
 
 def test_another_suppliers_receipt_never_matches(pg):
-    _push(pg, [_receipt(ean="2000000000555", dl_number="2400765432")])
+    _push(pg, [_receipt(ean="2000000000555", dl_numbers=["2400765432"])])
     assert _dup(pg, _doc()) is None
 
 
-def _sent(pg, doc_number, message_id, delivery=None, total=None, invoice=None):
+def _sent(pg, doc_number, message_id, delivery=None, total=None, invoice=None, items=None):
+    from psycopg.types.json import Json
     pg.execute("INSERT INTO desadv_sent (supplier_ean, doc_number, filename, message_id, "
-               "uploaded_at, delivery_date, total_amount, invoice_number) "
-               "VALUES (%s, %s, 'f.txt', %s, now(), %s, %s, %s)",
-               (EAN, doc_number, message_id, delivery, total, invoice))
+               "uploaded_at, delivery_date, total_amount, invoice_number, items) "
+               "VALUES (%s, %s, 'f.txt', %s, now(), %s, %s, %s, %s)",
+               (EAN, doc_number, message_id, delivery, total, invoice,
+                Json(items) if items else None))
 
 
-def test_our_own_earlier_shipment_matches_by_number_or_by_date_and_total(pg):
+def test_our_own_earlier_shipment_matches_by_number_date_total_or_content(pg):
     _push(pg, [_receipt(ean="2000000000555")])
     _sent(pg, "9990001111", "dl-scan", invoice="2400765432")
     dup = _dup(pg, _doc())
@@ -269,25 +354,34 @@ def test_our_own_earlier_shipment_matches_by_number_or_by_date_and_total(pg):
     pg.execute("DELETE FROM desadv_sent")
     _sent(pg, "9990001111", "dl-scan", delivery=TODAY, total=100.3)
     assert _dup(pg, _doc()).match == "date_total"
+    pg.execute("DELETE FROM desadv_sent")
+    _sent(pg, "9990001111", "dl-scan", delivery=TODAY, items=[["8588000000001", 100.0]])
+    assert _dup(pg, _doc()) is None, "a priceless row needs the content"
+    dup = _dup(pg, _doc(), content=[["8588000000001", 100.0]])
+    assert dup.match == "date_content" and "rovnaké položky" in dup.reason()
+    assert _dup(pg, _doc(), content=[["8588000000001", 90.0]]) is None
 
 
-def test_this_messages_own_earlier_claim_is_left_to_the_claim(pg):
-    """A retry of THIS message after a partial ship (or a stale orphan claim it must be able
-    to reclaim) is the claim's business (`already_shipped_this_run`), never a dedup skip."""
+def test_only_this_very_documents_own_row_is_left_to_the_claim(pg):
+    """A retry of THIS document (or its stale orphan claim) is the claim's business; another
+    document of the SAME mail is a twin like any other (invoice + DL PDF in one mail)."""
     _push(pg, [_receipt(ean="2000000000555")])
     _sent(pg, "4400123456", "m1", delivery=TODAY, total=100.0, invoice="2400765432")
     assert _dup(pg, _doc(), message_id="m1") is None
     assert _dup(pg, _doc(), message_id="m2").source == "desadv"
+    other_doc_same_mail = _doc(doc_number="7700112233", invoice_number="")
+    assert _dup(pg, other_doc_same_mail, message_id="m1").match == "date_total"
 
 
-def test_an_old_ledger_row_without_facts_matches_by_number_only(pg):
-    _push(pg, [_receipt(ean="2000000000555")])
-    _sent(pg, "9990001111", "dl-old")
-    assert _dup(pg, _doc()) is None
-    assert _dup(pg, _doc(doc_number="9990001111")).match == "number"
+def test_the_dl_path_check_sees_only_invoice_derived_rows(pg):
+    _sent(pg, "9990001111", "dl-a", delivery=TODAY, total=100.0)
+    assert _dup(pg, _doc(), invoice_only=True, receipts=False) is None
+    _sent(pg, "9990002222", "inv-a", delivery=TODAY, total=100.0, invoice="2400765432")
+    assert _dup(pg, _doc(doc_number="5550001111", invoice_number=""),
+                invoice_only=True, receipts=False).ref == "9990002222"
 
 
-# --- record_facts --------------------------------------------------------------------------
+# --- record_facts, the stale hold, the flag writer ---------------------------------------
 
 def test_record_facts_writes_only_the_claimants_row(pg):
     pg.execute("INSERT INTO desadv_sent (supplier_ean, doc_number, filename, message_id) "
@@ -296,20 +390,50 @@ def test_record_facts_writes_only_the_claimants_row(pg):
                                delivery_date=TODAY, total_amount=1.0) is False
     assert desadv.record_facts(pg, EAN, "4400123456", message_id="m1",
                                delivery_date=TODAY, total_amount=100.0,
-                               invoice_number="2400765432") is True
-    row = pg.execute("SELECT delivery_date, total_amount, invoice_number FROM desadv_sent"
-                     ).fetchone()
-    assert row == (TODAY, 100.0, "2400765432")
+                               invoice_number="2400765432",
+                               items=[["8588000000001", 100.0]]) is True
+    row = pg.execute("SELECT delivery_date, total_amount, invoice_number, items "
+                     "FROM desadv_sent").fetchone()
+    assert row == (TODAY, 100.0, "2400765432", [["8588000000001", 100.0]])
     assert desadv.record_facts(pg, "", "x") is False
+
+
+def test_a_document_reaching_the_gate_with_stale_receipts_is_held_for_a_human(pg):
+    _push(pg, as_of=NOW - timedelta(hours=codex_receipts.STALE_HOURS + 1))
+    posts = []
+    out = dl_invoice.gate(pg, _cfg(), {"message_id": "m1", "subject": "Faktúra",
+                                       "from_addr": "x@y.sk"}, _doc(), EAN,
+                          post=lambda cfg, html: posts.append(html))
+    assert out["outcome"] == "review" and out["held"] is True
+    assert len(posts) == 1 and "nie sú aktuálne" in posts[0]
+
+
+def test_the_flag_writer_stamps_since_once_and_clears_it(pg):
+    rid = pg.execute("INSERT INTO dl_supplier_overrides (ean_edi, name, emails, city) "
+                     "VALUES (%s, 'D', '{}', 'M') RETURNING id", (EAN,)).fetchone()[0]
+
+    def state():
+        return pg.execute("SELECT invoice_is_delivery_note, invoice_dl_since FROM "
+                          "dl_supplier_overrides WHERE id = %s", (rid,)).fetchone()
+
+    dl_snapshot.set_invoice_flag(pg, rid, True)
+    on, since = state()
+    assert on is True and since is not None
+    pg.execute("UPDATE dl_supplier_overrides SET invoice_dl_since = invoice_dl_since "
+               "- interval '1 day' WHERE id = %s", (rid,))
+    kept = state()[1]
+    dl_snapshot.set_invoice_flag(pg, rid, True)
+    assert state()[1] == kept, "a save that keeps the flag on keeps its start"
+    dl_snapshot.set_invoice_flag(pg, rid, False)
+    assert state() == (False, None)
 
 
 def test_aggregate_status_of_the_invoice_skips():
     agg = dl_message._aggregate_status
     assert agg([{"outcome": "credit_note"}]) == "credit_note"
-    assert agg([{"outcome": "superseded"}]) == "superseded"
     assert agg([{"outcome": "credit_note"}, {"outcome": "duplicate"}]) == "duplicate"
     assert agg([{"outcome": "credit_note"}, {"outcome": "review"}]) == "review"
-    assert agg([{"outcome": "ok"}, {"outcome": "superseded"}]) == "ok"
+    assert agg([{"outcome": "ok"}, {"outcome": "credit_note"}]) == "ok"
     assert agg([{"outcome": "not_warehouse"}, {"outcome": "credit_note"}]) == "not_warehouse"
 
 
