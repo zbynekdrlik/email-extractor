@@ -150,7 +150,8 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
             # a DL mail of the same sender whose ask deduped onto THIS question is released
             # exactly as for a DL (below) — the invoice going back to its queue must not
             # strand it
-            _release_siblings_of(conn, cfg, message_id, kind, message.get("from_addr", ""))
+            _release_siblings_of(conn, cfg, message_id, kind, message.get("from_addr", ""),
+                                 qid)
             return []
         snapshot_id = dl_snapshot.latest_snapshot_id(conn)
         if not snapshot_id:
@@ -176,11 +177,12 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
         # re-runs the deterministic rung on the REAL document (now with the just-taught
         # memory), so a false-positive from_addr match never ships a wrong EDI, and the
         # `desadv.claim_send_or_identify` claim still refuses any already-shipped re-upload.
-        _release_siblings_of(conn, cfg, message_id, kind, message.get("from_addr", ""))
+        _release_siblings_of(conn, cfg, message_id, kind, message.get("from_addr", ""), qid)
         return (result or {}).get("documents", [])
 
 
-def _release_siblings_of(conn, cfg, message_id: str, kind: str, from_addr: str) -> None:
+def _release_siblings_of(conn, cfg, message_id: str, kind: str, from_addr: str,
+                         qid: int) -> None:
     """#265/#365: release the same-sender stuck siblings after a `dl_*` answer — the DL mails
     and (#485) the invoice-as-DL mails whose ask deduped onto the answered question.
     #399: a scanner sender (tlaciaren@) forwards mail from EVERY supplier, so from_addr
@@ -189,17 +191,18 @@ def _release_siblings_of(conn, cfg, message_id: str, kind: str, from_addr: str) 
         return
     if from_addr.strip().lower() not in _scanner_senders(cfg):
         _release_stuck_siblings(conn, message_id, from_addr)
-        _requeue_stuck_invoice_siblings(conn, cfg, message_id, from_addr)
+        _requeue_stuck_invoice_siblings(conn, cfg, message_id, from_addr, qid)
 
 
 def _requeue_stuck_invoice_siblings(conn, cfg, exclude_message_id: str,
-                                    sender_email: str) -> int:
-    """#485: the invoice mirror of `_release_stuck_siblings` — a same-sender invoice-as-DL
-    mail whose run ended `review` with NO question of its own (its ask deduped onto the one
-    just answered) goes back to the invoice queue (`requeue_invoice`: the gate and the claim
-    keep a re-run safe). The same exclusions as the DL sibling release (a logged error, an age
-    guard) plus a dedup verdict (a conflict review is a human's, never re-run / re-posted);
-    only mails the claim can still take (`delivery_notes_max_age_days`)."""
+                                    sender_email: str, qid: int) -> int:
+    """#485: the invoice mirror of `_release_stuck_siblings`, TARGETED — a same-sender
+    invoice-as-DL mail whose run ended `review` HOLDING on exactly the question just answered
+    (its ask deduped onto it; the hold's event records `question_ids`) goes back to the invoice
+    queue (`requeue_invoice`: the gate and the claim keep a re-run safe). Any other review
+    (a money-gate breach, a stale-copy hold, a dedup conflict, …) is a human's and is never
+    re-run nor re-posted. No open question of its own, no logged error / age guard / dedup
+    verdict, only mails the claim can still take (`delivery_notes_max_age_days`)."""
     sender_email = (sender_email or "").strip()
     if not sender_email:
         return 0
@@ -210,14 +213,17 @@ def _requeue_stuck_invoice_siblings(conn, cfg, exclude_message_id: str,
             WHERE r.outcome = 'review' AND m.category = %s
               AND m.message_id <> %s AND lower(m.from_addr) = lower(%s)
               AND m.created_at > now() - make_interval(days => %s)
+              AND EXISTS (SELECT 1 FROM email_events h
+                          WHERE h.message_id = m.message_id AND h.stage = 'review'
+                            AND h.detail->'question_ids' @> jsonb_build_array(%s::int))
               AND NOT EXISTS (SELECT 1 FROM order_questions oq
-                              WHERE oq.message_id = m.message_id)
+                              WHERE oq.message_id = m.message_id AND oq.status = 'open')
               AND NOT EXISTS (SELECT 1 FROM email_events e
                               WHERE e.message_id = m.message_id
                                 AND (e.status IN ('error', 'age_guard') OR e.stage = %s))
             ORDER BY m.created_at ASC LIMIT %s""",
-        (INVOICE_CATEGORY, exclude_message_id, sender_email, max_age, dl_invoice.STAGE,
-         _STUCK_SIBLING_LIMIT)).fetchall()
+        (INVOICE_CATEGORY, exclude_message_id, sender_email, max_age, int(qid),
+         dl_invoice.STAGE, _STUCK_SIBLING_LIMIT)).fetchall()
     for (mid,) in rows:
         requeue_invoice(conn, mid, cfg)
     if rows:

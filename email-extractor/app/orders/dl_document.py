@@ -206,13 +206,15 @@ def _held_reason(held_items: list[dict], codex_held_items: list[dict],
 
 def _ask_pending_lines(conn, message_id: str, supplier_decision, pending_asks: list,
                        catalog: list[dict], catalog_gtins: set[str], codex,
-                       delivery_date: str) -> tuple[list[dict], list[dict]]:
+                       delivery_date: str, asked: list[int] | None = None
+                       ) -> tuple[list[dict], list[dict]]:
     """Raise the deferred dl_item board questions (LIVE path only) and return the lines that
     got a real question — `(held_items, codex_held_items)`: the #365 hold keys on a line having
     a qid (fresh or deduped-onto), never on the raw match verdict; a `codex_missing` line
     (#467) is returned separately for its own hold reason. With a live CODEX guard the
     question offers ONLY cards CODEX has, ranked by the CODEX name too (a card whose OUR name
-    went stale still surfaces first); without one it is the plain R65 shortlist."""
+    went stale still surfaces first); without one it is the plain R65 shortlist. #485:
+    `asked` collects the qids the lines wait on (fresh or deduped onto another mail's)."""
     held: list[dict] = []
     codex_held: list[dict] = []
     for item, recalled, note, conflict_gtins, rule in pending_asks:
@@ -235,6 +237,8 @@ def _ask_pending_lines(conn, message_id: str, supplier_decision, pending_asks: l
                                 keep=codex.has if codex is not None else None)
         if qid is not None:
             (codex_held if rule == "codex_missing" else held).append(item)
+            if asked is not None:
+                asked.append(int(qid))
     return held, codex_held
 
 
@@ -387,7 +391,9 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             supplier_decision.note, "", doc_number, delivery_date, from_addr, subject,
             link=link, cmr=cmr, history_link="" if supplier_qid else hlink), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
-              outcome=supplier_decision.note, detail={"doc_number": doc_number},
+              outcome=supplier_decision.note,
+              detail={"doc_number": doc_number,
+                      "question_ids": [int(supplier_qid)] if supplier_qid else []},
               rollup=False, workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": doc_number, "supplier_name": "",
                "reason": supplier_decision.note}
@@ -578,10 +584,11 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # excluded from the EDI and the document ships partial exactly as before.
     held_items: list[dict] = []
     codex_held_items: list[dict] = []
+    held_qids: list[int] = []      # #485: the questions a hold waits on (sibling re-queue)
     if not shadow:
         held_items, codex_held_items = _ask_pending_lines(
             conn, message["message_id"], supplier_decision, pending_asks, catalog,
-            catalog_gtins, codex, delivery_date)
+            catalog_gtins, codex, delivery_date, asked=held_qids)
 
     # #462: a MATCHED kg-tracked card whose per-piece mass could not be safely resolved
     # (`decision.mass is None` — `dl_match._mass_kg` refused a guessed value), delivered in
@@ -605,6 +612,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                     delivery_date=delivery_date)
                 if qid is not None:
                     mass_hold_items.append(item)
+                    held_qids.append(int(qid))
 
     if not built.can_create:
         # #337: name the retired products explicitly in the review, so a document that is
@@ -628,7 +636,8 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             from_addr, subject, link=link, cmr=cmr,
             history_link="" if asked else hlink), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
-              outcome=reason, detail={"doc_number": built.doc_number},
+              outcome=reason, detail={"doc_number": built.doc_number,
+                                      "question_ids": held_qids},
               rollup=False, workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": built.doc_number,
                "supplier_name": supplier_decision.name, "reason": reason}
@@ -675,7 +684,8 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             subject, link=link, cmr=cmr), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, detail={"doc_number": built.doc_number, "held": True,
-              "held_items": all_held_names}, rollup=False, workflow=dl_report.WORKFLOW)
+              "held_items": all_held_names, "question_ids": held_qids},
+              rollup=False, workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": built.doc_number,
                "supplier_name": supplier_decision.name, "reason": reason, "held": True}
 

@@ -38,13 +38,17 @@ the delivery in by hand at 13:34, we uploaded a DESADV from the invoice (found i
     conflict (a standing order's previous receipt is no proof). Never a receipt linked to
     ANOTHER invoice than ours, never CODEX's import of our shipment of ANOTHER day or of
     another invoice; CODEX's import of an old shipment of ours that carries no facts (before
-    #485) can only be a conflict.
-  - **Date, our rows** (the SAME delivery day only): the same total or the same content
+    #485) within ±1 day is a conflict whatever its total (its total came from our catalog
+    prices, not the invoice).
+  - **Date, our rows** (the SAME delivery day): the same total or the same content
     (`signature`: the [card, quantity] pairs of the generated EDI — what a priceless DL scan
     still has) is a duplicate, a conflict when the two carry different invoice numbers (a
     reissue, or a second delivery that day); totals that cannot be compared (a priceless
     scan) with other content (other units) is a conflict; two known, different totals with
-    other content is another delivery.
+    other content is another delivery. A DL scan and an invoice of one delivery may carry
+    dates a day apart (LESAFFRE prints the dispatch date): across the two sources (our row
+    from a DL mail vs an invoice, or the reverse) ±1 day with the same total or the same
+    content is a conflict — between two invoices (a standing order) it stays the same day.
   - The early gate (before supplier / item matching, `content=None`) settles only what needs no
     content and defers the rest; `dl_invoice.twin_shipped` re-judges everything once the EDI is
     built (before any board question) and again under the per-supplier ship lock right before
@@ -227,6 +231,7 @@ class _Row(NamedTuple):
     items: list | None
     shipped_from: datetime | None      # when the mail it shipped from arrived
     unsure: bool                       # never confirmed, past the stale window: maybe in ORION
+    from_invoice: bool                 # shipped from an invoice mail (else a DL mail)
 
 
 UNSURE = "odoslanie do ORIONu nebolo potvrdené"
@@ -282,19 +287,20 @@ def _ledger(conn, supplier_ean: str, message_id: str, doc_number: str,
     those shipped from an invoice mail."""
     rows = conn.execute(
         "SELECT d.message_id, d.doc_number, d.invoice_number, d.delivery_date, "
-        "d.total_amount, d.items, "
-        "(SELECT m.created_at FROM messages m WHERE m.message_id = d.message_id), "
-        "(d.uploaded_at IS NULL AND d.sent_at <= now() - make_interval(mins => %s)) "
-        "FROM desadv_sent d WHERE d.supplier_ean = %s "
+        "d.total_amount, d.items, m.created_at, "
+        "(d.uploaded_at IS NULL AND d.sent_at <= now() - make_interval(mins => %s)), "
+        "COALESCE(m.category = 'invoices', false) "
+        "FROM desadv_sent d LEFT JOIN messages m ON m.message_id = d.message_id "
+        "WHERE d.supplier_ean = %s "
         "AND d.sent_at > now() - make_interval(days => %s) "
         "AND NOT (d.message_id IS NOT DISTINCT FROM %s AND d.doc_number = %s)"
-        + (" AND EXISTS (SELECT 1 FROM messages m WHERE m.message_id = d.message_id "
-           "AND m.category = 'invoices')" if invoice_only else "")
+        + (" AND m.category = 'invoices'" if invoice_only else "")
         + " ORDER BY d.id",
         (desadv.CLAIM_STALE_MINUTES, supplier_ean, LEDGER_DAYS, message_id,
          doc_number)).fetchall()
     return [_Row(str(r[0] or ""), str(r[1]), r[2], r[3],
-                 float(r[4]) if r[4] is not None else None, _items(r[5]), r[6], bool(r[7]))
+                 float(r[4]) if r[4] is not None else None, _items(r[5]), r[6], bool(r[7]),
+                 bool(r[8]))
             for r in rows]
 
 
@@ -312,8 +318,10 @@ def _explaining(receipt, rows: list[_Row]) -> list[_Row]:
 def _own_number(rows: list[_Row], ours: set[str], dl_number: str, day: date | None,
                 total: float | None, content: list | None, received_at, invoice_only: bool,
                 message_id: str) -> tuple[Duplicate | None, bool]:
-    """(verdict, deferred): deferred = only the EDI's content can tell (early gate)."""
-    for row in rows:
+    """(verdict, deferred): deferred = only the EDI's content can tell (early gate). Rows whose
+    DL number matches come first (a resent collective invoice's DL2 meets its own twin, not
+    DL1 through the shared invoice number)."""
+    for row in sorted(rows, key=lambda r: digits(r.doc) not in ours):
         hit = ours & numbers_of(row.doc, row.invoice)
         if not hit:
             continue
@@ -393,10 +401,11 @@ def _codex_date(receipts: list, invoice: str, day: date | None, total: float | N
             continue        # CODEX's copy of our shipment of another day / another invoice
         same = _close(total, (r.total, r.invoice_total,
                               by_invoice.get(digits(r.invoice_number))))
-        if same is None:
+        if same is None and not factless:
             continue
         dup = Duplicate(SOURCE_CODEX, "date_total", r.receipt_number,
-                        {"receipt_date": r.receipt_date.isoformat(), "total": same})
+                        {"receipt_date": r.receipt_date.isoformat(),
+                         "total": same if same is not None else r.total})
         if factless:
             dup.conflict = "príjemka je import nášho staršieho dodacieho listu bez údajov"
         elif _near(day, r.receipt_date, r.receipt_date_to, window=0):
@@ -409,11 +418,26 @@ def _codex_date(receipts: list, invoice: str, day: date | None, total: float | N
 
 
 def _own_date(rows: list[_Row], invoice: str, day: date | None, total: float | None,
-              content: list | None) -> tuple[Duplicate | None, bool]:
-    """(verdict, deferred) for our rows of the SAME delivery day."""
+              content: list | None, doc_from_invoice: bool) -> tuple[Duplicate | None, bool]:
+    """(verdict, deferred) for our rows of the SAME delivery day — and, across a DL scan and an
+    invoice, of the day before / after (only the same total / content, as a conflict)."""
     ambiguous, deferred = None, False
     for row in rows:
-        if day is None or row.delivered != day:
+        if day is None or row.delivered is None:
+            continue
+        if row.delivered != day:
+            if row.from_invoice == doc_from_invoice or not _near(day, row.delivered):
+                continue
+            # a DL scan and an invoice of one delivery a day apart (dispatch vs delivery date)
+            both = total is not None and row.amount is not None
+            if (both and _close(total, (row.amount,)) is not None) or (
+                    content is not None and row.items and row.items == content):
+                ambiguous = ambiguous or Duplicate(
+                    SOURCE_DESADV, "date", row.doc,
+                    {"delivery_date": row.delivered.isoformat()},
+                    "dodací list a faktúra s dátumom dodania o deň inak")
+            elif content is None and not both:
+                deferred = True
             continue
         both = total is not None and row.amount is not None
         iso = row.delivered.isoformat()
@@ -479,7 +503,7 @@ def find_duplicate(conn, receipts, supplier_ean: str, doc: dict, message_id: str
         elif linked is not None:
             conflicts.append(linked)
     if dup is None and not deferred:
-        own, deferred = _own_date(rows, invoice, day, total, content)
+        own, deferred = _own_date(rows, invoice, day, total, content, not invoice_only)
         found = [d for d in (own, _codex_date(codex, invoice, day, total, rows)) if d]
         plain = [d for d in found if not d.conflict]
         conflicts += [d for d in found if d.conflict]
