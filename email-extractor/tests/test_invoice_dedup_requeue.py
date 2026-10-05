@@ -514,3 +514,65 @@ def test_the_plain_dl_path_keeps_asking_a_deduped_line_after_a_ship_without(pg, 
     asked = pg.execute("SELECT count(*) FROM order_questions WHERE message_id = 'dlB' "
                        "AND status = 'open'").fetchone()[0]
     assert asked == 1, "the plain DL path changed: dlB shipped without being asked"
+
+
+# --- round 10 -------------------------------------------------------------------------------
+
+def test_an_invoice_of_a_shipped_dl_scans_number_is_a_duplicate_whatever_its_sum(
+        pg, tmp_path):
+    """The DL scan (priced) shipped at 50 €; its invoice prints the same DL number and adds a
+    transport line (54.60 €) — the same document by number, as on the DL path in the other
+    order: a duplicate, no „corrected version" review."""
+    _setup(pg)
+    _push_receipts(tmp_path)
+    _message(pg, tmp_path, "dl-1", category="dodacie_listy", subject="Dodací list",
+             text="Dodací list", created_at=_ago(hours=3))
+    invoice = _one(YESTERDAY, "7700000001", "2400000001")
+    invoice["items"].append({"name": "PREPRAVNÉ", "quantity": 1, "unit": "ks",
+                             "vatRate": 20, "unitPrice": 4.6, "totalPrice": 4.6})
+    invoice["documentTotalWithoutVAT"] = 54.6
+    uploads, posts = [], []
+    client = FakeClient([{"documents": [_one(YESTERDAY, "7700000001", "")]},
+                         {"documents": [invoice]}], runs=2)
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    shipped_posts = len(posts)
+    _message(pg, tmp_path, "inv-1", created_at=_ago(hours=1))
+    _push_receipts(tmp_path)
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert len(uploads) == 1
+    assert _run_outcome(pg, "inv-1") == "duplicate"
+    assert posts[shipped_posts:] == []
+
+
+def test_an_invoice_with_no_document_never_writes_the_invoice_flows_state(pg, tmp_path):
+    """No delivery note recognised in the invoice: a review for the warehouse, never the n8n
+    invoice flow's proc_status / outcome (its rollup)."""
+    _setup(pg)
+    _message(pg, tmp_path, "inv-0")
+    pg.execute("UPDATE messages SET proc_status = 'ok', proc_outcome = 'preposlané' "
+               "WHERE message_id = 'inv-0'")
+    _push_receipts(tmp_path)
+    uploads, posts = [], []
+    assert _tick(pg, tmp_path, FakeClient([{"documents": []}]), uploads, posts) == 1
+    assert pg.execute("SELECT proc_status, proc_outcome FROM messages WHERE message_id = "
+                      "'inv-0'").fetchone() == ("ok", "preposlané")
+
+
+def test_a_receipt_booked_over_many_days_is_no_same_day_proof(pg, tmp_path):
+    """Zeelandia books a receipt over three weeks (receipt_date … receipt_date_to): an invoice
+    inside that span with the same sum is not provably that receipt — a review, never a
+    silent drop."""
+    _setup(pg)
+    _message(pg, tmp_path, "inv-span")
+    _push_receipts(tmp_path, [{
+        "receipt_number": "261004158", "supplier_ico": "12345678",
+        "supplier_eans": [SUPPLIER_EAN],
+        "receipt_date": (YESTERDAY - timedelta(days=10)).date().isoformat(),
+        "receipt_date_to": (YESTERDAY + timedelta(days=5)).date().isoformat(),
+        "dl_numbers": ["990000123"], "total": 50.0}])
+    uploads, posts = [], []
+    assert _tick(pg, tmp_path, FakeClient([{"documents": [
+        _one(YESTERDAY, "4400000001", "2400000001")]}]), uploads, posts) == 1
+    assert uploads == []
+    assert _run_outcome(pg, "inv-span") == "review"
+    assert len(posts) == 1 and "261004158" in posts[0]
