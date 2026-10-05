@@ -360,7 +360,7 @@ CODEX_CARD_HISTORY = [
 # `codex_receipt_syncs` is the append-only push ledger (`source_as_of` = when the ETL loaded
 # sp001 = the data age the fail-closed checks measure). `desadv_sent` gains the delivery FACTS
 # of every document we ship — delivery date, total without VAT, the invoice number of an
-# invoice-as-DL and `items` (the shipped [card, quantity] pairs read back from the generated
+# invoice-as-DL and `items` (the shipped [card, quantity, unit] lines read back from the
 # EDI, the content signature) — written right after the claim, so a later document of the SAME
 # goods is recognised even when the numbers differ and a DL scan carries no prices.
 # `dl_supplier_overrides.invoice_dl_since` = when the supplier's invoice flag went on: only

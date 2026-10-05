@@ -21,10 +21,10 @@ the delivery in by hand at 13:34, we uploaded a DESADV from the invoice (found i
   - **Number** (digits only, ≥ 5 digits, leading zeros ignored): the document's DL / invoice
     number equals a CODEX receipt's DL number / linked invoice number / VS, or one of our
     `desadv_sent` rows' doc / invoice number (our rows of the last `LEDGER_DAYS` — small
-    suppliers' counters overlap over months). Our shipment from an EARLIER mail with another
-    total / other items is a corrected version → conflict (on the invoice path; on the DL path
-    a scan of what the invoice shipped is a plain duplicate unless it is of another day AND
-    other goods). Only the INVOICE number shared while both carry different DL numbers: within
+    suppliers' counters overlap over months). Between two INVOICES, our shipment from an
+    EARLIER mail with another total / other items is a corrected version → conflict; a DL scan
+    and the invoice of its DL number (either order — their sums differ by nature: transport,
+    prices) are a plain duplicate unless of another day AND other goods. Only the INVOICE number shared while both carry different DL numbers: within
     ONE mail (or on the DL path) a collective invoice's other delivery note — no match, the
     date rules judge it; from another mail it stays a number match (a re-sent or corrected
     version whose DL reference the model read differently). Against a receipt the sum and the
@@ -34,7 +34,8 @@ the delivery in by hand at 13:34, we uploaded a DESADV from the invoice (found i
     to OUR invoice still counts.
   - **Date, CODEX**: a receipt within ±1 day (CODEX books the day it is typed) whose total,
     its invoice's total or the sum of the receipts sharing that invoice is within
-    max(0.50 €, 1 %) — the SAME day is a duplicate (the incident shape), a neighbouring day a
+    max(0.50 €, 1 %) — the receipt's OWN date (`receipt_date`; a receipt booked over several
+    days counts as neighbouring) is a duplicate (the incident shape), a neighbouring day a
     conflict (a standing order's previous receipt is no proof). Never a receipt linked to
     ANOTHER invoice than ours, never CODEX's import of our shipment of ANOTHER day or of
     another invoice; CODEX's import of an old shipment of ours that carries no facts (before
@@ -355,7 +356,10 @@ def _own_number(rows: list[_Row], ours: set[str], dl_number: str, day: date | No
                 and (invoice_only or row.message_id == message_id)):
             continue        # only the invoice number: another DL of a collective invoice
         dup = Duplicate(SOURCE_DESADV, "number", row.doc, {"number": sorted(hit)[0]})
-        if invoice_only:
+        if invoice_only or not row.from_invoice:
+            # a DL scan vs the invoice of its DL number (either order): the same document by
+            # number — their sums differ by nature (transport, prices), only another day AND
+            # other goods make it a maybe
             if (row.delivered and day and row.delivered != day and content is not None
                     and row.items and not _same_goods(content, row.items)):
                 dup.conflict = "iný deň dodania a iné položky"
@@ -434,8 +438,8 @@ def _codex_date(receipts: list, invoice: str, day: date | None, total: float | N
         if factless:
             dup.conflict = (f"príjemka z {r.receipt_date:%d.%m.} je bez údajov o faktúre — "
                             f"sumu ani položky nemožno porovnať")
-        elif _near(day, r.receipt_date, r.receipt_date_to, window=0):
-            return dup
+        elif day == r.receipt_date:
+            return dup          # the incident shape: typed by hand the day of the delivery
         else:
             dup.conflict = (f"príjemka je z {r.receipt_date:%d.%m.}, dodávka z {day:%d.%m.}"
                             if day else "iný deň")

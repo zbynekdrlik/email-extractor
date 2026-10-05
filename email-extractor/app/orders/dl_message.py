@@ -308,7 +308,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
             # copies the LAST rollup) — this is CORRECT: it keeps the message visible on
             # the dashboard's review list. The event row is the sole exclusion key.
             _event(conn, shadow, mid, stage="review", status="age_guard",
-                  outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
+                  outcome=reason, rollup=not invoice_mode, workflow=dl_report.WORKFLOW)
             return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
                    "documents": [{"outcome": "review", "reason": reason,
                                   "over_age_cutoff": True}], "items": []}
@@ -418,7 +418,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
             reason, from_addr=message.get("from_addr", ""),
             subject=message.get("subject", ""), link=link, history_link=hlink), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
-              outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
+              outcome=reason, rollup=not invoice_mode, workflow=dl_report.WORKFLOW)
         return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
                "documents": [{"outcome": "review", "reason": reason}], "items": []}
 
@@ -445,7 +445,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
             reason, from_addr=message.get("from_addr", ""),
             subject=message.get("subject", ""), link=link, history_link=hlink), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
-              outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
+              outcome=reason, rollup=not invoice_mode, workflow=dl_report.WORKFLOW)
         # #297 review finding: merge with `documents_out` (never overwrite it) — it
         # may already hold empty-spreadsheet review flags from earlier in this
         # function (reachable when a message has an unreadable/empty .xls attachment
@@ -535,7 +535,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
             reason, from_addr=message.get("from_addr", ""),
             subject=message.get("subject", ""), link=link, history_link=hlink), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
-              outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
+              outcome=reason, rollup=not invoice_mode, workflow=dl_report.WORKFLOW)
         documents_out.append({"outcome": "review", "reason": reason})
     else:
         # #238: a UNIVERSAL, supplier-format-independent completeness check —

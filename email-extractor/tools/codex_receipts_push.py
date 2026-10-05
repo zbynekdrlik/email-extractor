@@ -31,7 +31,8 @@ CODEX shape (verified live 2026-10-05):
   variable symbol, usually equal); NVYMZAK1..4 = VAT bases (their sum = the invoice total
   without VAT). Duplicate rows exist → grouped per (NICO, SROK, IPORCFAKT).
 - `raw.firma` — AEDIEAN = the supplier's EDI EAN = the add-on's `supplier_ean`. NICO is not
-  unique there (branches) → grouped per NICO, MAX(AEDIEAN).
+  unique there (branches, some with another EAN) → grouped per NICO, every distinct
+  AEDIEAN (`supplier_eans`).
 The snapshot time is `meta.etl_runs` (`table_name='sp001'`, naive UTC).
 
 Config (the SAME EnvironmentFile as the orders/cards pushes, so no new secret):
@@ -196,7 +197,7 @@ def _iso_local(value) -> str | None:
 
 
 def _iso_utc(value) -> str | None:
-    """meta.etl_runs.finished_at (naive UTC) -> an ISO string with +00:00."""
+    """meta.etl_runs.started_at (naive UTC) -> an ISO string with +00:00."""
     if value is None:
         return None
     if isinstance(value, datetime.datetime):
