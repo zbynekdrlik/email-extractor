@@ -773,9 +773,11 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None,
       for_codex`): only invoices CODEX's data already covers — a receipt typed by hand the
       same morning is visible before its invoice is judged (the ETL runs ~14:15 / ~18:00);
     - our accounting mailbox (`ignored_invoice_senders`) is never an invoice-as-DL;
-    - the NEWEST waiting invoice first: an older version of the same invoice then meets the
-      newer's `desadv_sent` row by number (never a second DESADV, the newest content wins),
-      and a newer mail that ships nothing never blocks the older one."""
+    - the NEWEST waiting invoice first: when two versions WAIT together, the newest ships and
+      the older then meets its `desadv_sent` row by number (never a second DESADV); a newer
+      mail that ships nothing never blocks the older one. A newer version arriving AFTER the
+      older shipped is a conflict for a human (`invoice_dedup`), never a silent second
+      upload."""
     from . import claim
     from .dl_questions import is_scanner_sender
 

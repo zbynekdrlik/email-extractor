@@ -199,6 +199,12 @@ def live(conn, now: datetime | None = None) -> Receipts | None:
         _warn_hold("never", now, "CODEX receipts were never pushed — invoice-as-DL is held "
                    "(fail-closed) until the first push (#485)")
         return None
+    if sync["source_as_of"] is None:
+        # a push that cannot say how old CODEX's data is must never pass as "fresh as of the
+        # push" — fail-closed means an unknown age is too old (the cards list may fail open)
+        _warn_hold("unknown", now, "CODEX receipts carry no ETL time (source_as_of) — "
+                   "invoice-as-DL is held (fail-closed) until a push that has one (#485)")
+        return None
     as_of = codex_snapshot.data_as_of(sync["source_as_of"], sync["synced_at"])
     if codex_snapshot.is_stale(as_of, now):
         _warn_hold("stale", now, "CODEX receipts are stale (CODEX data as of %s, > %d h) — "

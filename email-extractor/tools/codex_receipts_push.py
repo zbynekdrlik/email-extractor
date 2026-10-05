@@ -110,7 +110,9 @@ SELECT h.receipt_number, CAST(CAST(h.nico AS BIGINT) AS VARCHAR) AS supplier_ico
                 AND fak.IPORCFAKT = h.fak_key.iporc
  ORDER BY h.receipt_date, h.receipt_number
 """
-_AS_OF_SQL = ("SELECT max(finished_at) FROM meta.etl_runs "
+# The run's START: sp001 is read during its ~15-min load, so a receipt typed meanwhile may be
+# missing — the data is only provably complete up to when the load began.
+_AS_OF_SQL = ("SELECT max(started_at) FROM meta.etl_runs "
               "WHERE table_name = 'sp001' AND status = 'ok'")
 _DIGITS_RE = re.compile(r"(\d+)(?:\.0+)?")
 
@@ -129,7 +131,7 @@ def query_duckdb(db_path: str, days: int) -> list[dict]:
 
 
 def query_as_of(db_path: str):
-    """When the codex-bridge ETL last loaded sp001 (naive UTC), or None."""
+    """When the codex-bridge ETL last STARTED loading sp001 (naive UTC), or None."""
     import duckdb  # noqa: PLC0415 - lazy on purpose (CI has no duckdb)
 
     con = duckdb.connect(db_path, read_only=True)
@@ -261,7 +263,13 @@ def run(url: str, token: str, db_path: str = DEFAULT_DB_PATH, days: int = DEFAUL
     if not receipts:
         return {"fetched": len(rows), "receipts": 0, "stored": 0,
                 "error": "no usable receipt rows — nothing posted"}
-    body = {"source_as_of": _iso_utc(as_of()), "days": int(days), "receipts": receipts}
+    source_as_of = _iso_utc(as_of())
+    if not source_as_of:
+        # the add-on judges invoices by how far CODEX's data reaches — a copy of unknown age
+        # would pass as fresh; the add-on also refuses to trust one (fail-closed)
+        return {"fetched": len(rows), "receipts": len(receipts), "stored": 0,
+                "error": "meta.etl_runs has no finished sp001 load — nothing posted"}
+    body = {"source_as_of": source_as_of, "days": int(days), "receipts": receipts}
     resp = poster(url, {"X-Token": token, "Content-Type": "application/json"}, body) or {}
     return {"fetched": len(rows), "receipts": len(receipts),
             "stored": int(resp.get("stored", 0) or 0)}

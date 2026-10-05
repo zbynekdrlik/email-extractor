@@ -13,22 +13,12 @@ from __future__ import annotations
 from ...httpapi_common import _fold, _parse_emails_field
 from ...orders import dl_snapshot, snapshot
 from . import audit
-from .partners import PartnerError, matches, name_and_ean
-from .partners import row as _row
+from .partners import PartnerError, matches, name_and_ean, row
 
 PAGE = 50   # suppliers per page
 
 _COLS = ("orig_ean_edi", "orig_city", "ean_edi", "name", "emails", "city",
-         "retired", "invoice_is_delivery_note", "invoice_dl_since")
-
-
-def row(conn, table: str, cols: tuple[str, ...], where: str, params) -> dict | None:
-    """`partners.row` with timestamps as ISO text — the audit before/after dicts are JSON
-    (`invoice_dl_since`, #485), and a Kôš restore writes the text back into the column."""
-    r = _row(conn, table, cols, where, params)
-    if r is None:
-        return None
-    return {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in r.items()}
+         "retired", "invoice_is_delivery_note")
 
 
 def _dl_counts(conn) -> dict[str, int]:

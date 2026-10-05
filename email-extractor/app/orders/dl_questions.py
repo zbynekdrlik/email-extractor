@@ -146,7 +146,7 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
         # as an invoice left a transient model failure stranded on an already finished ledger
         # row (review 1).
         if len(msg_row) > 8 and msg_row[8] == INVOICE_CATEGORY:
-            requeue_invoice(conn, message_id)
+            requeue_invoice(conn, message_id, cfg)
             return []
         snapshot_id = dl_snapshot.latest_snapshot_id(conn)
         if not snapshot_id:
@@ -182,7 +182,7 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
         return (result or {}).get("documents", [])
 
 
-def requeue_invoice(conn, message_id: str) -> None:
+def requeue_invoice(conn, message_id: str, cfg=None) -> None:
     """#485: put an invoice-as-DL mail back on the DL engine's invoice queue — its
     `dl_invoice_runs` row reopened (no outcome, attempts reset, the claim already stale) so
     `dl_message._claim_invoice` takes it on the next tick, with every hold and the duplicate
@@ -194,6 +194,50 @@ def requeue_invoice(conn, message_id: str) -> None:
               SET outcome = NULL, finished_at = NULL, attempts = 0,
                   claimed_at = now() - interval '1 day'""", (message_id,))
     log.info("invoice-as-DL %s re-queued after a board answer", message_id)
+    # the claim only takes invoices within `delivery_notes_max_age_days` and received since the
+    # supplier's flag went on — a re-queued mail outside that window would wait unseen
+    stranded = conn.execute(
+        """SELECT m.created_at < now() - make_interval(days => %s)
+                  OR EXISTS (SELECT 1 FROM dl_supplier_overrides o
+                              WHERE lower(m.from_addr) = ANY(SELECT lower(e)
+                                                               FROM unnest(o.emails) e)
+                                AND o.invoice_dl_since > m.created_at)
+             FROM messages m WHERE m.message_id = %s""",
+        (int(getattr(cfg, "delivery_notes_max_age_days", 14) or 14) if cfg else 14,
+         message_id)).fetchone()
+    if stranded and stranded[0]:
+        log.warning("invoice-as-DL %s re-queued but OUTSIDE the claim window (older than "
+                    "delivery_notes_max_age_days, or before its supplier's invoice_dl_since) "
+                    "— it will not be picked up; resolve it by hand", message_id)
+
+
+def _mark_handled(conn, message_id: str, *, stage: str, status: str, outcome: str,
+                  detail: dict) -> None:
+    """Mark a DL message handled WITHOUT EDI after a terminal board click. #485: an
+    invoice-as-DL mail belongs to the n8n invoice-forward flow — its `messages.processed` /
+    rollup are never ours (#406 F1); its own `dl_invoice_runs` row records the outcome and the
+    event stays non-rollup, exactly like every other invoice-as-DL finish."""
+    row = conn.execute("SELECT category FROM messages WHERE message_id = %s",
+                       (message_id,)).fetchone()
+    invoice = bool(row) and row[0] == INVOICE_CATEGORY
+    if invoice:
+        # the run already finished (as the review that raised the question) — the click is
+        # its final outcome; never re-claimed (the claim takes rows without an outcome only)
+        conn.execute(
+            """INSERT INTO dl_invoice_runs (message_id, outcome, finished_at)
+               VALUES (%s, %s, now())
+               ON CONFLICT (message_id) DO UPDATE
+                  SET outcome = EXCLUDED.outcome, finished_at = now()""",
+            (message_id, stage))
+    else:
+        conn.execute(
+            """UPDATE messages
+                  SET processed = true, processed_at = now(), processed_by = %s,
+                      processing_at = NULL
+                WHERE message_id = %s""", (CATEGORY, message_id))
+    report.log_event(conn, message_id, stage=stage, status=status, outcome=outcome,
+                     detail={**detail, **({"invoice_mode": True} if invoice else {})},
+                     rollup=not invoice, workflow=dl_report.WORKFLOW)
 
 
 def close_message_not_warehouse(conn, qid: int) -> dict:
@@ -239,15 +283,9 @@ def close_message_not_warehouse(conn, qid: int) -> dict:
             WHERE message_id = %s AND kind IN ('dl_item', 'dl_supplier', 'dl_mass')
               AND status = 'open'
             RETURNING id""", ("sklad", message_id)).fetchall()
-    conn.execute(
-        """UPDATE messages
-              SET processed = true, processed_at = now(), processed_by = %s,
-                  processing_at = NULL
-            WHERE message_id = %s""", (CATEGORY, message_id))
-    report.log_event(conn, message_id, stage="not_warehouse", status="not_warehouse",
-                     outcome="netýka sa skladu — vybavené bez EDI (sklad)",
-                     detail={"closed_questions": len(closed)},
-                     rollup=True, workflow=dl_report.WORKFLOW)
+    _mark_handled(conn, message_id, stage="not_warehouse", status="not_warehouse",
+                  outcome="netýka sa skladu — vybavené bez EDI (sklad)",
+                  detail={"closed_questions": len(closed)})
     log.info("DL message %s marked not_warehouse (sklad); %s question(s) closed, no EDI",
              message_id, len(closed))
     return {"closed": len(closed), "message_id": message_id}
@@ -292,16 +330,10 @@ def close_message_sklad_unknown(conn, qid: int) -> dict:
             WHERE message_id = %s AND kind IN ('dl_item', 'dl_supplier', 'dl_mass')
               AND status = 'open'
             RETURNING id""", ("sklad", message_id)).fetchall()
-    conn.execute(
-        """UPDATE messages
-              SET processed = true, processed_at = now(), processed_by = %s,
-                  processing_at = NULL
-            WHERE message_id = %s""", (CATEGORY, message_id))
-    report.log_event(conn, message_id, stage="sklad_unknown", status="review",
-                     outcome="Sklad nevie identifikovať dodací list — odložený na ručné "
-                             "doriešenie (nájdeš ho v dennom súhrne).",
-                     detail={"closed_questions": len(closed)},
-                     rollup=True, workflow=dl_report.WORKFLOW)
+    _mark_handled(conn, message_id, stage="sklad_unknown", status="review",
+                  outcome="Sklad nevie identifikovať dodací list — odložený na ručné "
+                          "doriešenie (nájdeš ho v dennom súhrne).",
+                  detail={"closed_questions": len(closed)})
     log.info("DL message %s deferred (sklad Neviem); %s question(s) closed, no EDI",
              message_id, len(closed))
     return {"closed": len(closed), "message_id": message_id}

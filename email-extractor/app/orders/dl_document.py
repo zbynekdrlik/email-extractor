@@ -503,6 +503,43 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         return _skip_not_warehouse(conn, shadow, message, doc_number,
                                    supplier_decision.name)
 
+    header = {"customerName": supplier_decision.name,
+             "customerEanEdi": supplier_decision.ean_edi}
+    # #262: an informal delivery announcement (mail body text, no printed document)
+    # extracts with NO docNumber at all — synthesize a STABLE identity here, keyed on
+    # the message itself, BEFORE build() ever sees an empty docNumber. This is the
+    # ONLY call site build() has, so its own `extraction_doc_number or
+    # _generate_doc_number(...)` wall-clock fallback (R83) is never reached from the
+    # live worker any more — see `desadv_edi.generate_stable_doc_number()`'s own
+    # docstring for why a wall-clock value is unsafe here (a stale-claim reclaim or
+    # an R17 retry would change the desadv_sent dedup key on every attempt).
+    stable_doc_number = doc_number or desadv_edi.generate_stable_doc_number(
+        message["message_id"])
+    extraction = {"docNumber": stable_doc_number, "deliveryDate": delivery_date}
+    built = desadv_edi.build(header, extraction, matched_items, catalog)
+
+    # #485: with the EDI built (a pure function — built here, BEFORE any board question is
+    # asked) — is one of OUR shipments already these goods (number / same day + total / same
+    # day + the same [card, quantity] content, which a priceless DL scan still has)? An
+    # invoice checks every row of the supplier; a DL only our INVOICE-derived rows (the invoice
+    # shipped first, its DL scan arrives later — LESAFFRE sends both). A twin raises no
+    # question; a plain DL with no invoice-derived row of its supplier is untouched. LIVE only.
+    if not shadow:
+        twin = dl_invoice.twin_shipped(conn, message, doc, supplier_decision.ean_edi, built,
+                                       invoice_only=not invoice_mode)
+        if twin is not None:
+            if twin.conflict:
+                # the same number already shipped with other goods / another sum — a human
+                # checks CODEX, nothing ships (on either path)
+                return dl_invoice.review_conflict(conn, cfg, message, doc, twin, post=post,
+                                                  link=link, history_link=hlink)
+            if invoice_mode:
+                return dl_invoice.skip_twin(conn, message, doc, twin)
+            dl_report.log_duplicate(conn, message["message_id"], built.doc_number,
+                                    supplier_decision.ean_edi, twin=twin.as_dict())
+            return {"outcome": "duplicate", "doc_number": built.doc_number,
+                    "supplier_name": supplier_decision.name, "dedup": twin.as_dict()}
+
     # #365: the sklad can answer a dl_item question with "nemá kartu — pošli bez tejto
     # položky"; that skip is recorded on the (now answered) question row and read back here
     # on the message's reprocess, so a deliberately-skipped line is shipped WITHOUT it
@@ -559,21 +596,6 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                     delivery_date=delivery_date)
                 if qid is not None:
                     mass_hold_items.append(item)
-
-    header = {"customerName": supplier_decision.name,
-             "customerEanEdi": supplier_decision.ean_edi}
-    # #262: an informal delivery announcement (mail body text, no printed document)
-    # extracts with NO docNumber at all — synthesize a STABLE identity here, keyed on
-    # the message itself, BEFORE build() ever sees an empty docNumber. This is the
-    # ONLY call site build() has, so its own `extraction_doc_number or
-    # _generate_doc_number(...)` wall-clock fallback (R83) is never reached from the
-    # live worker any more — see `desadv_edi.generate_stable_doc_number()`'s own
-    # docstring for why a wall-clock value is unsafe here (a stale-claim reclaim or
-    # an R17 retry would change the desadv_sent dedup key on every attempt).
-    stable_doc_number = doc_number or desadv_edi.generate_stable_doc_number(
-        message["message_id"])
-    extraction = {"docNumber": stable_doc_number, "deliveryDate": delivery_date}
-    built = desadv_edi.build(header, extraction, matched_items, catalog)
 
     if not built.can_create:
         # #337: name the retired products explicitly in the review, so a document that is
@@ -648,22 +670,6 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         return {"outcome": "review", "doc_number": built.doc_number,
                "supplier_name": supplier_decision.name, "reason": reason, "held": True}
 
-    # #485: right before the claim, with the EDI built — is one of OUR shipments already these
-    # goods (number / date + total / date + the same [card, quantity] content, which a priceless
-    # DL scan still has)? An invoice checks every row of the supplier (and closes the window
-    # between its early gate and here); a DL only our INVOICE-derived rows (the invoice shipped
-    # first, its DL scan arrives later — LESAFFRE sends both). A plain DL with no invoice-derived
-    # row of its supplier is untouched.
-    twin = dl_invoice.twin_shipped(conn, message, doc, supplier_decision.ean_edi, built,
-                                   invoice_only=not invoice_mode)
-    if twin is not None:
-        if invoice_mode:
-            return dl_invoice.skip_twin(conn, message, doc, twin)
-        dl_report.log_duplicate(conn, message["message_id"], built.doc_number,
-                                supplier_decision.ean_edi, twin=twin.as_dict())
-        return {"outcome": "duplicate", "doc_number": built.doc_number,
-                "supplier_name": supplier_decision.name, "dedup": twin.as_dict()}
-
     claimed, holder = desadv.claim_send_or_identify(
         conn, supplier_decision.ean_edi, built.doc_number, built.filename,
         message_id=message["message_id"])
@@ -696,10 +702,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                         message_id=message["message_id"],
                         delivery_date=invoice_dedup.parse_day(delivery_date),
                         total_amount=invoice_dedup.doc_total(doc),
-                        # an invoice-derived row ALWAYS carries an invoice number (the DL
-                        # path's twin check keys on it); a DL's stays NULL
-                        invoice_number=((doc.get("invoiceNumber") or built.doc_number)
-                                        if invoice_mode else ""),
+                        invoice_number=(doc.get("invoiceNumber") or "") if invoice_mode else "",
                         items=invoice_dedup.signature(built.content))
 
     upload_name = desadv_edi.upload_name(built.filename)
