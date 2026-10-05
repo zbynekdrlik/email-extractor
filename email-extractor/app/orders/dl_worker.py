@@ -372,7 +372,12 @@ def _tick_invoice(conn, cfg, client, snapshot_id, catalog, suppliers,
     # after the last ETL waits for the next push, so a receipt typed by hand the same morning
     # is visible first — `delivery_notes_invoice_wait_for_codex`)
     wait = bool(getattr(cfg, "delivery_notes_invoice_wait_for_codex", True)) if cfg else True
-    message = _claim_invoice(conn, effective_suppliers, cfg=cfg,
+    # ... and only for flagged suppliers some receipt carries: one whose EAN no CODEX receipt
+    # has is invisible to the gate — its invoices wait too (`missing_supplier_sweep` alerts)
+    covered = codex_receipts.covered_eans(conn)
+    judged = [s for s in effective_suppliers
+              if not s.get("invoice_is_delivery_note") or str(s.get("ean_edi") or "") in covered]
+    message = _claim_invoice(conn, judged, cfg=cfg,
                              codex_as_of=receipts.as_of if wait else None)
     if not message:
         return 0

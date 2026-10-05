@@ -81,6 +81,13 @@ class Receipts:
                         float(r[7]) if r[7] is not None else None,
                         float(r[8]) if r[8] is not None else None) for r in rows]
 
+    def covers(self, conn, supplier_ean: str) -> bool:
+        """Does any receipt carry this supplier's EAN? If not, the gate cannot see its CODEX
+        receipts at all (an EAN that differs from every `raw.firma.AEDIEAN`) — fail-closed."""
+        return conn.execute(
+            "SELECT 1 FROM codex_receipts WHERE supplier_eans @> ARRAY[%s]::text[] LIMIT 1",
+            (str(supplier_ean or ""),)).fetchone() is not None
+
 
 def _day(value) -> date | None:
     if value in (None, ""):
@@ -249,11 +256,18 @@ def stale_sweep(conn, cfg, now: datetime | None = None) -> bool:
     return True
 
 
+def covered_eans(conn) -> set[str]:
+    """Every supplier EAN at least one receipt of the copy carries."""
+    return {str(r[0]) for r in conn.execute(
+        "SELECT DISTINCT unnest(supplier_eans) FROM codex_receipts").fetchall()}
+
+
 def missing_supplier_sweep(conn, cfg, now: datetime | None = None) -> int:
     """A flagged supplier with NO receipt in the (fresh) copy means the gate cannot see that
     supplier's CODEX receipts at all — most likely its EDI EAN on our card differs from every
-    `raw.firma.AEDIEAN` of its IČO. Not a hold (our own ledger + numbers still guard), but ops
-    must know: one alert per supplier, workday-morning reminders. Returns how many enqueued."""
+    `raw.firma.AEDIEAN` of its IČO. Fail-closed like a stale copy: its invoices wait
+    (`dl_worker._tick_invoice` claims none, `Receipts.covers`), and ops must know — one alert
+    per supplier, workday-morning reminders. Returns how many enqueued."""
     from . import dl_alerts, report
     if live(conn, now) is None:
         return 0
@@ -268,7 +282,7 @@ def missing_supplier_sweep(conn, cfg, now: datetime | None = None) -> int:
         body = (f"<p>&#9888;&#65039; Dodávateľ <b>{escape(name)}</b> (EAN {escape(ean)}) má "
                 f"zapnutú faktúru ako dodací list (#485), ale v príjemkách z CODEXu za posledných "
                 f"60 dní nemá ani jednu príjemku pod týmto EAN &mdash; kontrola duplicity voči "
-                f"CODEXu ho nevidí. Over v CODEXe EAN kód EDI dodávateľa (raw.firma AEDIEAN) "
+                f"CODEXu ho nevidí, jeho faktúry preto čakajú. Over v CODEXe EAN kód EDI dodávateľa (raw.firma AEDIEAN) "
                 f"oproti karte dodávateľa na nástenke.</p>")
         dl_alerts.enqueue(conn, report.ops_channel(cfg), MISSING_KIND, body, message_id=key)
         log.warning("CODEX receipts: flagged supplier %s (%s) has no receipt in the copy — "

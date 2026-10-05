@@ -5,15 +5,19 @@ The rules live in `invoice_dedup` (pure reads); this module turns a verdict into
 engine's document outcome + event, exactly like the other terminal skips (`_skip_not_
 warehouse`): no Odoo post for a skip (the warehouse already has those goods — a post would be
 noise), one non-rollup `email_events` row (the invoice flow owns the rollup, #406 F1), and the
-document dict `_aggregate_status` folds into the invoice run's outcome. Only a HOLD (the CODEX
-receipts are not fresh while a document reached the gate) and a CONFLICT (the same number
-already arrived with another sum / other items — a corrected invoice) post a review: a human
-decides, nothing is shipped. LIVE only — `dl_message` / `dl_document` never call it in shadow;
-the DL path (`dodacie_listy`) uses only `twin_shipped(invoice_only=True)` (+ `review_conflict`).
+document dict `_aggregate_status` folds into the invoice run's outcome. A HOLD (the CODEX
+receipts are not fresh, or the supplier's EAN is on no receipt, while a document reached the
+gate) and a CONFLICT (`invoice_dedup.Duplicate.conflict`: maybe the same delivery, not
+provable) post a review: a human decides, nothing is shipped. A mail whose only hint of a
+credit note is its own words is posted too (`MAIL_CREDIT_REASON`). LIVE only — `dl_message` /
+`dl_document` never call it in shadow; the DL path (`dodacie_listy`) uses `twin_shipped` /
+`claim_unless_twin` with `invoice_only=True` (+ `review_conflict`).
 """
 from __future__ import annotations
 
 import logging
+
+from psycopg.pq import TransactionStatus
 
 from . import codex_receipts, desadv, desadv_edi, dl_report, invoice_dedup
 from .dl_correction import _mail_body_only
@@ -26,6 +30,7 @@ CREDIT_REASON = "Dobropis — nie je to dodávka, do ORIONu sa nenahráva."
 MAIL_CREDIT_REASON = ("E-mail hovorí o dobropise — doklad sa ako dobropis do ORIONu NEnahráva. "
                       "Ak je to v skutočnosti faktúra za dodávku, prijmi ju v CODEXe ručne.")
 SHIP_LOCK = "desadv-ship:"      # + supplier EAN: twin check → claim → facts, one at a time
+UNCOVERED_REASON = "dodávateľ nemá v príjemkách z CODEXu ani jednu príjemku pod svojím EAN"
 STALE_REASON = ("Príjemky z CODEXu nie sú aktuálne (starší zoznam než 30 h alebo ešte "
                 "neprišiel) — faktúra sa z bezpečnosti NEnahráva do ORIONu ako dodací list, "
                 "aby nevznikla duplicita. Skontroluj v CODEXe, či je dodávka prijatá, a v "
@@ -132,6 +137,12 @@ def gate(conn, cfg, message: dict, doc: dict, supplier_ean: str, *,
                 "held": True}
     if not supplier_ean:
         return None
+    if not receipts.covers(conn, supplier_ean):
+        # the claim waits for an uncovered flagged supplier; this is the supplier the
+        # document RESOLVED to — its CODEX receipts are invisible to the gate: a human decides
+        return review_conflict(conn, cfg, message, doc,
+                               invoice_dedup.unverifiable(UNCOVERED_REASON), post=post,
+                               link=link, history_link=history_link)
     dup = invoice_dedup.find_duplicate(conn, receipts, supplier_ean, doc,
                                        message["message_id"],
                                        doc_number=claim_number(message, doc),
@@ -153,7 +164,7 @@ def review_conflict(conn, cfg, message: dict, doc: dict, dup: invoice_dedup.Dupl
     warehouse is told to check CODEX by hand. No board question — there is nothing to pick."""
     reason = dup.reason() + "."
     doc_number = doc.get("docNumber") or ""
-    log.warning("invoice/DL %s doc %s: number already arrived with different content (%s) — "
+    log.warning("invoice/DL %s doc %s: maybe already received / shipped, not provable (%s) — "
                 "not shipped, review posted", message["message_id"], doc_number,
                 dup.as_dict())
     _post(cfg, False, lambda: dl_report.build_review(
@@ -176,7 +187,14 @@ def twin_shipped(conn, message: dict, doc: dict, supplier_ean: str, built, *,
     judges against the CODEX receipts and every row of the supplier (what the early `gate`
     deferred is decided here); the DL path only against our INVOICE-derived rows (an invoice
     shipped first, its DL scan arriving later — LESAFFRE sends both)."""
-    receipts = None if invoice_only else codex_receipts.live(conn)
+    receipts = None
+    if not invoice_only:
+        receipts = codex_receipts.live(conn)
+        if receipts is None:
+            # the copy went stale while this invoice was being processed: never a blind ship
+            return invoice_dedup.unverifiable("príjemky z CODEXu nie sú aktuálne")
+        if not receipts.covers(conn, supplier_ean):
+            return invoice_dedup.unverifiable(UNCOVERED_REASON)
     return invoice_dedup.find_duplicate(conn, receipts, supplier_ean, doc,
                                         message["message_id"], doc_number=built.doc_number,
                                         content=invoice_dedup.signature(built.content),
@@ -191,7 +209,14 @@ def claim_unless_twin(conn, message: dict, doc: dict, supplier_ean: str, built, 
     transaction holding an advisory lock on the supplier, so two documents of one delivery
     processed at the same moment (the worker's invoice and a board-answer DL reprocess) never
     both see "no twin" — the second one waits and then sees the first one's row WITH its facts.
-    Returns (twin, claimed, holder); `facts` = `desadv.record_facts`' keyword arguments."""
+    Returns (twin, claimed, holder); `facts` = `desadv.record_facts`' keyword arguments.
+
+    The claim must be COMMITTED before the upload (`claim_send_or_identify`'s two-phase
+    contract), so the caller's connection must not already be inside a transaction — the lock
+    and the claim would otherwise stay open across the upload. Refused loudly."""
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        raise RuntimeError("claim_unless_twin needs an autocommit connection outside a "
+                           "transaction (the claim must commit before the upload)")
     with conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",
                      (SHIP_LOCK + str(supplier_ean or ""),))

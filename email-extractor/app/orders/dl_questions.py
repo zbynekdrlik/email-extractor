@@ -147,6 +147,10 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
         # row (review 1).
         if len(msg_row) > 8 and msg_row[8] == INVOICE_CATEGORY:
             requeue_invoice(conn, message_id, cfg)
+            # a DL mail of the same sender whose ask deduped onto THIS question is released
+            # exactly as for a DL (below) — the invoice going back to its queue must not
+            # strand it
+            _release_siblings_of(conn, cfg, message_id, kind, message.get("from_addr", ""))
             return []
         snapshot_id = dl_snapshot.latest_snapshot_id(conn)
         if not snapshot_id:
@@ -172,14 +176,18 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
         # re-runs the deterministic rung on the REAL document (now with the just-taught
         # memory), so a false-positive from_addr match never ships a wrong EDI, and the
         # `desadv.claim_send_or_identify` claim still refuses any already-shipped re-upload.
-        if kind in ("dl_supplier", "dl_item", "dl_mass"):
-            from_addr = message.get("from_addr", "")
-            # #399: a scanner sender (tlaciaren@) forwards mail from EVERY supplier,
-            # so from_addr correlation is meaningless — skip the by-addr sibling release.
-            scanner_senders = _scanner_senders(cfg)
-            if from_addr.strip().lower() not in scanner_senders:
-                _release_stuck_siblings(conn, message_id, from_addr)
+        _release_siblings_of(conn, cfg, message_id, kind, message.get("from_addr", ""))
         return (result or {}).get("documents", [])
+
+
+def _release_siblings_of(conn, cfg, message_id: str, kind: str, from_addr: str) -> None:
+    """#265/#365: release the same-sender stuck siblings after a `dl_*` answer.
+    #399: a scanner sender (tlaciaren@) forwards mail from EVERY supplier, so from_addr
+    correlation is meaningless — skip the by-addr sibling release."""
+    if kind not in ("dl_supplier", "dl_item", "dl_mass"):
+        return
+    if from_addr.strip().lower() not in _scanner_senders(cfg):
+        _release_stuck_siblings(conn, message_id, from_addr)
 
 
 def requeue_invoice(conn, message_id: str, cfg=None) -> None:
@@ -465,6 +473,9 @@ def _release_stuck_siblings(conn, exclude_message_id: str, sender_email: str) ->
               AND NOT EXISTS (SELECT 1 FROM email_events e2
                               WHERE e2.message_id = messages.message_id
                                 AND e2.status = 'age_guard')
+              AND NOT EXISTS (SELECT 1 FROM email_events e3
+                              WHERE e3.message_id = messages.message_id
+                                AND e3.stage = 'invoice_dedup')
             ORDER BY created_at ASC LIMIT %s""",
         (CATEGORY, exclude_message_id, sender_email, _STUCK_SIBLING_LIMIT)).fetchall()
     if not rows:
@@ -642,6 +653,9 @@ def _release_stuck_siblings_by_name(conn, card_ean: str, card_name: str) -> int:
               AND NOT EXISTS (SELECT 1 FROM email_events e2
                               WHERE e2.message_id = messages.message_id
                                 AND e2.status = 'age_guard')
+              AND NOT EXISTS (SELECT 1 FROM email_events e3
+                              WHERE e3.message_id = messages.message_id
+                                AND e3.stage = 'invoice_dedup')
             ORDER BY created_at ASC LIMIT %s""",
         (CATEGORY, _STUCK_SIBLING_CANDIDATE_LIMIT)).fetchall()
     ids = [mid for (mid, fname) in rows
