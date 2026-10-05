@@ -271,6 +271,8 @@ def test_two_documents_of_one_delivery_at_the_same_moment_claim_once(pg, tmp_pat
     import time
 
     from _race import run_racers
+    _setup(pg)
+    _push_receipts(tmp_path)        # the invoice path's late check needs a fresh, covering copy
     real = dl_invoice.twin_shipped
 
     def slow_twin(*a, **kw):

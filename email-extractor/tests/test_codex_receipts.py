@@ -359,10 +359,14 @@ def _sent(pg, doc_number, message_id, delivery=None, total=None, invoice=None, i
 
 def test_our_own_earlier_shipment_matches_by_number_date_total_or_content(pg):
     _push(pg, [_receipt(ean="2000000000555")])
-    _sent(pg, "9990001111", "dl-scan", invoice="2400765432")
-    dup = _dup(pg, _doc())
+    _sent(pg, "9990001111", "inv-a", invoice="2400765432")
+    dup = _dup(pg, _doc(doc_number=""))
     assert dup.source == "desadv" and dup.match == "number"
     assert "Už odoslané do ORIONu" in dup.reason()
+    # round 4: only the invoice number shared while both print different DL numbers — a
+    # collective invoice's other delivery note, judged by the date rules (none here)
+    assert _dup(pg, _doc()) is None
+    assert _dup(pg, _doc(doc_number="9990001111")).match == "number"
     pg.execute("DELETE FROM desadv_sent")
     _sent(pg, "9990001111", "dl-scan", delivery=TODAY, total=100.3)
     assert _dup(pg, _doc()).match == "date_total"
@@ -383,17 +387,20 @@ def test_our_own_earlier_shipment_matches_by_number_date_total_or_content(pg):
         "two known different sums and other goods are another delivery"
 
 
-def test_a_stale_orphan_claim_is_no_shipment(pg):
-    """A claim never confirmed (a crash between the claim and the upload) and older than the
-    claim's stale window: those goods are not in ORION — they must not block another document.
-    A FRESH unconfirmed claim (mid-upload) does."""
+def test_a_stale_orphan_claim_is_a_conflict_not_a_shipment(pg):
+    """A claim never confirmed and older than the claim's stale window: a crash between the
+    claim and the upload (not in ORION) or between the upload and the confirmation (in ORION)
+    — not provable either way (round 4): never a silent skip, never a blind second DESADV. A
+    FRESH unconfirmed claim (mid-upload) is a plain twin."""
     _push(pg, [_receipt(ean="2000000000555")])
     pg.execute("INSERT INTO desadv_sent (supplier_ean, doc_number, filename, message_id, "
                "sent_at, delivery_date, total_amount) VALUES (%s, '9990001111', 'f.txt', "
                "'dl-x', now() - interval '1 hour', %s, 100.0)", (EAN, TODAY))
-    assert _dup(pg, _doc()) is None
+    dup = _dup(pg, _doc())
+    assert dup.match == "date_total" and "nebolo potvrdené" in dup.conflict
     pg.execute("UPDATE desadv_sent SET sent_at = now()")
-    assert _dup(pg, _doc()).match == "date_total"
+    dup = _dup(pg, _doc())
+    assert dup.match == "date_total" and not dup.conflict
 
 
 def test_only_this_very_documents_own_row_is_left_to_the_claim(pg):

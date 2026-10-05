@@ -61,14 +61,25 @@ def _setup(pg):
     dl_snapshot.dl_rebuild_from_overrides(pg)
 
 
+# An old, unrelated receipt of OUR supplier: the copy must carry the supplier's EAN at all, or
+# its invoices wait (round 4 — an EAN CODEX does not know is invisible to the gate).
+COVERAGE_RECEIPT = {"receipt_number": "261000099", "supplier_ico": "12345678",
+                    "supplier_eans": [SUPPLIER_EAN],
+                    "receipt_date": (YESTERDAY - timedelta(days=40)).date().isoformat(),
+                    "dl_numbers": ["990000099"], "total": 1.0}
+
+
 def _push_receipts(tmp_path, receipts=None):
     """A FRESH CODEX receipts snapshot through the real machine endpoint, its data as of NOW
     (so it covers every mail inserted before it). Without any receipt for our supplier it is
-    only the 'fresh' precondition (the gate fails closed on a stale/missing snapshot)."""
-    receipts = receipts or [{"receipt_number": "261000001", "supplier_ico": "11111111",
-                             "supplier_eans": ["2000000000001"],
-                             "receipt_date": DELIVERY_ISO, "dl_numbers": ["123456789"],
-                             "total": 1.0}]
+    only the 'fresh' precondition (the gate fails closed on a stale/missing snapshot); an old
+    unrelated receipt of our supplier rides along when none carries its EAN (coverage)."""
+    receipts = list(receipts or [{"receipt_number": "261000001", "supplier_ico": "11111111",
+                                  "supplier_eans": ["2000000000001"],
+                                  "receipt_date": DELIVERY_ISO, "dl_numbers": ["123456789"],
+                                  "total": 1.0}])
+    if not any(SUPPLIER_EAN in r.get("supplier_eans", []) for r in receipts):
+        receipts.append(COVERAGE_RECEIPT)
     app = create_app(_cfg(tmp_path))
     r = app.test_client().post(
         "/api/codex/receipts", headers={"X-Token": "tok"},
