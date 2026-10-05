@@ -378,7 +378,8 @@ def _tick_invoice(conn, cfg, client, snapshot_id, catalog, suppliers,
     judged = [s for s in effective_suppliers
               if not s.get("invoice_is_delivery_note") or str(s.get("ean_edi") or "") in covered]
     message = _claim_invoice(conn, judged, cfg=cfg,
-                             codex_as_of=receipts.as_of if wait else None)
+                             codex_as_of=receipts.as_of if wait else None,
+                             requeue_as_of=receipts.as_of)
     if not message:
         return 0
 

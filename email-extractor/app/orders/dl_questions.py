@@ -203,8 +203,8 @@ def _requeue_stuck_invoice_siblings(conn, cfg, exclude_message_id: str, qid: int
     """#485: TARGETED, by the exact question — an invoice-as-DL mail (any sender: a question
     dedupes on its wording / card / supplier e-mail, not on the envelope) whose LATEST run
     ended `review` holding on the question just answered (fresh or deduped onto it; every hold
-    / ask review event records `question_ids`), with EVERY question that hold waits on now
-    answered, goes back to the invoice queue (`requeue_invoice`: the gate and the claim keep a
+    / ask review event records `question_ids`), with EVERY question its latest run waits on
+    (any document of the mail) now answered, goes back to the invoice queue (`requeue_invoice`: the gate and the claim keep a
     re-run safe). Any other review (a money-gate breach, a stale-copy hold, a dedup conflict,
     …) is a human's and is never re-run nor re-posted. Not the question's own mail (its own
     path re-queues it), no logged error / age guard / dedup conflict in that run, only mails
@@ -219,12 +219,15 @@ def _requeue_stuck_invoice_siblings(conn, cfg, exclude_message_id: str, qid: int
               AND EXISTS (SELECT 1 FROM email_events h
                           WHERE h.message_id = m.message_id AND h.stage = 'review'
                             AND h.ts >= r.claimed_at
-                            AND h.detail->'question_ids' @> jsonb_build_array(%s::int)
-                            AND NOT EXISTS (
-                                SELECT 1 FROM jsonb_array_elements_text(
-                                                  h.detail->'question_ids') AS w(qid)
-                                  JOIN order_questions oq ON oq.id = w.qid::int
-                                 WHERE oq.status = 'open'))
+                            AND h.detail->'question_ids' @> jsonb_build_array(%s::int))
+              AND NOT EXISTS (SELECT 1 FROM email_events h2
+                                JOIN jsonb_array_elements_text(
+                                         COALESCE(h2.detail->'question_ids', '[]'))
+                                     AS w(qid) ON true
+                                JOIN order_questions oq ON oq.id = w.qid::int
+                                                       AND oq.status = 'open'
+                               WHERE h2.message_id = m.message_id AND h2.stage = 'review'
+                                 AND h2.ts >= r.claimed_at)
               AND NOT EXISTS (SELECT 1 FROM email_events e
                               WHERE e.message_id = m.message_id AND e.ts >= r.claimed_at
                                 AND (e.status IN ('error', 'age_guard')

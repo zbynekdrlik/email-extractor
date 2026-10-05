@@ -455,7 +455,8 @@ def lin_quantities(content: str) -> list[tuple[str, str, str]]:
     """#485: (card code, quantity text, unit text) of EVERY LIN record, in file order — the
     inverse of `generate()`'s layout, split like `lin_codes` (on `\\n` only). The quantity is
     as `generate()` wrote it — kg for a kg-tracked card R84 converts, the printed count
-    otherwise — and the unit the item's own (W11; `kg` / `L` where `generate()` overrides it).
+    otherwise — and the unit the item's own text (W11; only the tonne and multipack branches
+    override it, so a per-piece-mass line keeps `ks` beside a kg quantity).
     `invoice_dedup.signature` documents what that does and does not equate."""
     out: list[tuple[str, str, str]] = []
     for raw in str(content or "").split("\n"):

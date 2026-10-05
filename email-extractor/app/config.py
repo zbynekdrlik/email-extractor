@@ -164,8 +164,9 @@ class Config:
     delivery_notes_invoice_ignored_senders: str = "ucto@slovnormal.sk"
     # #485: take an invoice as a delivery note only once the CODEX receipts' data (ETL ~14:15 /
     # ~18:00 + the 14:50 / 18:35 push) covers the invoice's arrival — a receipt the warehouse
-    # typed by hand the same morning is then visible to the duplicate gate. false = judge an
-    # invoice at once (only the 30 h staleness rule holds it).
+    # typed by hand the same morning is then visible to the duplicate gate. false = judge a
+    # NEW invoice at once (only the 30 h staleness rule holds it); a RE-QUEUED one (a board
+    # answer) always waits for data newer than the re-queue.
     delivery_notes_invoice_wait_for_codex: bool = True
     # #129/#235: the DL-sheet counterpart of catalog_sheet_id above — same "unread,
     # never removed" precedent, see that field's own comment.

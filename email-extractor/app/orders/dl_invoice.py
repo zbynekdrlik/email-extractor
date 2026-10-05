@@ -183,7 +183,7 @@ def review_conflict(conn, cfg, message: dict, doc: dict, dup: invoice_dedup.Dupl
 def twin_shipped(conn, message: dict, doc: dict, supplier_ean: str, built, *,
                  invoice_only: bool) -> invoice_dedup.Duplicate | None:
     """With the EDI built: is this document already received / shipped — the full rules, now
-    with its [card, quantity] content (a DL scan without prices still has it)? The invoice path
+    with its [card, quantity, unit] lines (a DL scan without prices still has it)? The invoice path
     judges against the CODEX receipts and every row of the supplier (what the early `gate`
     deferred is decided here); the DL path only against our INVOICE-derived rows (an invoice
     shipped first, its DL scan arriving later — LESAFFRE sends both)."""

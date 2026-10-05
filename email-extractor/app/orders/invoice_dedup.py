@@ -41,14 +41,17 @@ the delivery in by hand at 13:34, we uploaded a DESADV from the invoice (found i
     #485) within ±1 day is a conflict whatever its total (its total came from our catalog
     prices, not the invoice).
   - **Date, our rows** (the SAME delivery day): the same total or the same content
-    (`signature`: the [card, quantity] pairs of the generated EDI — what a priceless DL scan
-    still has) is a duplicate, a conflict when the two carry different invoice numbers (a
-    reissue, or a second delivery that day); totals that cannot be compared (a priceless
-    scan) with other content (other units) is a conflict; two known, different totals with
-    other content is another delivery. A DL scan and an invoice of one delivery may carry
-    dates a day apart (LESAFFRE prints the dispatch date): across the two sources (our row
-    from a DL mail vs an invoice, or the reverse) ±1 day with the same total or the same
-    content is a conflict — between two invoices (a standing order) it stays the same day.
+    (`signature`: the [card, quantity, unit] lines of the generated EDI, compared on card +
+    quantity — what a priceless DL scan still has) is a duplicate, a conflict when the two
+    carry different invoice numbers (a reissue, or a second delivery that day); totals that
+    cannot be compared (a priceless scan) with other content (other units) is a conflict; two
+    known, different totals with other content is another delivery. A DL scan and an invoice
+    of one delivery may carry dates a day apart (LESAFFRE prints the dispatch date): across
+    the two sources (our row from a DL mail vs an invoice, or the reverse; also two documents
+    of ONE mail) ±1 day with the same total, the same goods, or — sums that cannot be
+    compared — the same cards in other units is a conflict; between two invoices of two
+    mails (a standing order) it stays the same day. Known residual: a priceless scan missing
+    one of the invoice's lines, a day apart, in other units, is not recognised.
   - The early gate (before supplier / item matching, `content=None`) settles only what needs no
     content and defers the rest; `dl_invoice.twin_shipped` re-judges everything once the EDI is
     built (before any board question) and again under the per-supplier ship lock right before

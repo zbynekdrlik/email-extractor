@@ -758,7 +758,7 @@ def _sweep_exhausted_invoices(conn, channel_id: int) -> int:
 
 
 def _claim_invoice(conn, suppliers: list[dict], cfg=None,
-                   codex_as_of=None) -> dict | None:
+                   codex_as_of=None, requeue_as_of=None) -> dict | None:
     """Select one unclaimed `category='invoices'` message from a flagged supplier.
 
     Uses the independent `dl_invoice_runs` ledger — NEVER touches `messages.processed`
@@ -783,7 +783,8 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None,
       for_codex`): only invoices CODEX's data already covers — a receipt typed by hand the
       same morning is visible before its invoice is judged (the ETL runs ~14:15 / ~18:00); a
       re-queued invoice (a board answer) waits for data newer than the re-queue
-      (`dl_invoice_runs.requeued_at` — the warehouse may have typed it in by hand meanwhile);
+      (`dl_invoice_runs.requeued_at` vs `requeue_as_of` — ALWAYS, whatever `wait_for_codex`
+      says: the warehouse may have typed the held delivery in by hand meanwhile);
     - our accounting mailbox (`ignored_invoice_senders`) is never an invoice-as-DL;
     - the NEWEST waiting invoice first: when two versions WAIT together, the newest ships and
       the older then meets its `desadv_sent` row by number (never a second DESADV); a newer
@@ -829,8 +830,9 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None,
               AND (m.created_at >= COALESCE(f.since, '-infinity'::timestamptz)
                    OR EXISTS (SELECT 1 FROM dl_invoice_runs r0
                                WHERE r0.message_id = m.message_id))
-              AND GREATEST(m.created_at, q.requeued_at)
-                  <= COALESCE(%s::timestamptz, 'infinity'::timestamptz)
+              AND m.created_at <= COALESCE(%s::timestamptz, 'infinity'::timestamptz)
+              AND (q.requeued_at IS NULL
+                   OR q.requeued_at <= COALESCE(%s::timestamptz, 'infinity'::timestamptz))
               AND NOT EXISTS (SELECT 1 FROM dl_invoice_runs r
                                WHERE r.message_id = m.message_id
                                  AND (r.outcome IS NOT NULL
@@ -838,7 +840,7 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None,
                                          - make_interval(mins => %s)
                                       OR r.attempts >= %s))
             ORDER BY m.created_at DESC LIMIT 1""",
-        (flagged_emails, since, max_age, codex_as_of, CLAIM_STALE_MINUTES,
+        (flagged_emails, since, max_age, codex_as_of, requeue_as_of, CLAIM_STALE_MINUTES,
          MAX_ATTEMPTS)).fetchone()
 
     if not row:

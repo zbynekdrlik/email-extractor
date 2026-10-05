@@ -301,7 +301,7 @@ def record_facts(conn, supplier_ean: str, doc_number: str, *, message_id: str = 
                  invoice_number: str = "", items: list | None = None) -> bool:
     """#485: remember the delivery FACTS of a document this message just claimed — its
     delivery date, total without VAT, (for an invoice-as-DL) the invoice number and the
-    content signature (`items`: the [card, quantity] pairs of its EDI) — on its own
+    content signature (`items`: the [card, quantity, unit] lines of its EDI) — on its own
     `desadv_sent` row, so `invoice_dedup` recognises a LATER document of the same goods by date
     + total or date + content even when the numbers differ (a DL scan vs the invoice). Written
     right after the claim, before the upload: a released claim deletes the row with its facts,

@@ -695,9 +695,14 @@ must never ship a SECOND delivery: the warehouse may already have typed it into 
   such a supplier is reviewed (`Receipts.covers`), `missing_supplier_sweep` alerts ops; the late
   check returns a not-shipped review when the copy went stale meanwhile.
 - **A re-queued invoice waits for fresh CODEX data**: `requeue_invoice` stamps
-  `dl_invoice_runs.requeued_at`; the claim needs `GREATEST(created_at, requeued_at) <= as_of`
-  — the warehouse may have typed the held delivery in by hand before answering (the hold text
-  says „NEnahráva do ORIONu"), and only a copy newer than the answer can show it.
+  `dl_invoice_runs.requeued_at`; the claim needs `requeued_at <= as_of` ALWAYS (even with
+  `delivery_notes_invoice_wait_for_codex=false`, which only concerns new mails) — the
+  warehouse may have typed the held delivery in by hand before answering (the hold text says
+  „NEnahráva do ORIONu"), and only a copy newer than the answer can show it. An invoice is
+  re-queued only when NO question of its latest run (any document of the mail) is open.
+- **Known residual**: a priceless scan missing one of the invoice's lines, a day apart, in
+  other units, is not recognised (four coincidences at once); the shared „pošli bez" skip is
+  invoice-path only (the plain DL path asks a deduped line again, as before #485).
 - **Facts on our own rows**: `desadv.record_facts` (delivery_date, total_amount, items, and
   `invoice_number` only when the invoice printed one) right after the claim. `invoice_only`
   (the DL path's twin check) = rows of `invoices`-category mails, never "has an invoice number".

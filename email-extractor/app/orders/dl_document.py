@@ -107,13 +107,16 @@ def _skip_answered_item_keys(conn, message_id: str) -> set[str]:
     the line stays genuinely unmatched (there is no card for it). A real-card answer stores
     the GTIN as the choice, `close_message_sklad_unknown`/`not_warehouse` store a different
     jsonb shape with no `choice` key at all — neither equals the sentinel, so only a real
-    "pošli bez nej" answer is returned here. #485: also a question of ANOTHER mail this
-    message's hold waited on (its ask deduped onto it — the hold event's `question_ids`)."""
+    "pošli bez nej" answer is returned here. #485: for an INVOICE mail also a question of
+    ANOTHER mail its hold waited on (its ask deduped onto it — the hold event's
+    `question_ids`); the plain DL path keeps its own questions only."""
     rows = conn.execute(
         """SELECT item_key FROM order_questions
             WHERE kind = 'dl_item' AND status = 'answered' AND answer->>'choice' = %s
               AND (message_id = %s
-                   OR id IN (SELECT w.qid::int FROM email_events e,
+                   OR id IN (SELECT w.qid::int FROM email_events e
+                               JOIN messages m ON m.message_id = e.message_id
+                                              AND m.category = 'invoices',
                                     jsonb_array_elements_text(
                                         COALESCE(e.detail->'question_ids', '[]')) AS w(qid)
                               WHERE e.message_id = %s AND e.stage = 'review'))""",
@@ -545,7 +548,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
 
     # #485: with the EDI built (a pure function — built here, BEFORE any board question is
     # asked) — is this document already received / shipped (`invoice_dedup`: number / same
-    # day + total / same day + the same [card, quantity] content, which a priceless DL scan
+    # day + total / same day + the same [card, quantity] goods, which a priceless DL scan
     # still has)? An invoice is judged against the CODEX receipts and every row of the
     # supplier; a DL only against our INVOICE-derived rows (the invoice shipped first, its DL
     # scan arrives later — LESAFFRE sends both). A twin raises no question; a plain DL with no
@@ -693,7 +696,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                "supplier_name": supplier_decision.name, "reason": reason, "held": True}
 
     # #485: the twin check again, the claim and the delivery facts on OUR ledger row (date,
-    # total without VAT, the invoice's own number, the [card, quantity] content) as ONE step
+    # total without VAT, the invoice's own number, the [card, quantity, unit] lines) as ONE step
     # under the supplier's ship lock — a later document of the same goods is recognised even
     # when its number differs (a DL scan vs its invoice), also one processed at this very moment.
     twin, claimed, holder = dl_invoice.claim_unless_twin(
