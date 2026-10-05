@@ -23,8 +23,9 @@ the delivery in by hand at 13:34, we uploaded a DESADV from the invoice (found i
     `desadv_sent` rows' doc / invoice number (our rows of the last `LEDGER_DAYS` — small
     suppliers' counters overlap over months). Between two INVOICES, our shipment from an
     EARLIER mail with another total / other items is a corrected version → conflict; a DL scan
-    and the invoice of its DL number (either order — their sums differ by nature: transport,
-    prices) are a plain duplicate unless of another day AND other goods. Only the INVOICE number shared while both carry different DL numbers: within
+    and an invoice that share a number (either order, also the invoice's own number equal to
+    the scan's DL number — their sums differ by nature: transport, prices) are a plain
+    duplicate unless of another day AND other goods (a conflict; the early gate defers it). Only the INVOICE number shared while both carry different DL numbers: within
     ONE mail (or on the DL path) a collective invoice's other delivery note — no match, the
     date rules judge it; from another mail it stays a number match (a re-sent or corrected
     version whose DL reference the model read differently). Against a receipt the sum and the
@@ -360,9 +361,11 @@ def _own_number(rows: list[_Row], ours: set[str], dl_number: str, day: date | No
             # a DL scan vs the invoice of its DL number (either order): the same document by
             # number — their sums differ by nature (transport, prices), only another day AND
             # other goods make it a maybe
-            if (row.delivered and day and row.delivered != day and content is not None
-                    and row.items and not _same_goods(content, row.items)):
-                dup.conflict = "iný deň dodania a iné položky"
+            if row.delivered and day and row.delivered != day and row.items:
+                if content is None:
+                    return None, True       # only the built EDI can tell (early gate)
+                if not _same_goods(content, row.items):
+                    dup.conflict = "iný deň dodania a iné položky"
         elif _later(received_at, row.shipped_from):
             dup.conflict = _conflict(total, (row.amount,))
             if not dup.conflict and row.items:

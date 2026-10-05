@@ -655,11 +655,12 @@ must never ship a SECOND delivery: the warehouse may already have typed it into 
 - **The rules** (`invoice_dedup.find_duplicate`; its module docstring is the full spec) give
   THREE verdicts — provably the same delivery → silent duplicate; maybe the same
   (`Duplicate.conflict`) → a review on the warehouse channel, never shipped, never silent;
-  provably different → ships. Four review rounds shaped them; the cases worth remembering:
+  provably different → ships. Eleven review rounds shaped them; the cases worth remembering:
   - a **standing order** (the same goods every day) — our rows match by date only on the SAME
-    day; a CODEX receipt ±1 day matches only the SAME day silently (a neighbouring day is a
-    conflict), never when linked to ANOTHER invoice, never when it IS CODEX's import of our
-    shipment of another day / another invoice (its `NCDLIST` = our doc number);
+    day; a CODEX receipt ±1 day matches silently only on its own `receipt_date` (a
+    neighbouring day, or a receipt booked over several days, is a conflict), never when
+    linked to ANOTHER invoice, never when it IS CODEX's import of our shipment of another day
+    / another invoice (its `NCDLIST` = our doc number);
   - **one delivery in two documents** (a priceless DL scan in ks + an invoice in KAR, other
     numbers): the same day with sums that cannot be compared and other content → conflict;
     across the two sources (a DL scan vs an invoice — also two documents of ONE mail) ±1
@@ -677,11 +678,14 @@ must never ship a SECOND delivery: the warehouse may already have typed it into 
     invoice than CODEX has), else conflict;
   - CODEX's import of an **old shipment of ours without facts** (before #485) within ±1 day
     is a conflict whatever its total (it carries our catalog prices);
-  - a **corrected version** (the same number from a LATER mail, other total / items) →
-    conflict; the early gate (no content yet) defers what only the content can tell;
-  - the **DL path** (`invoice_only`): a number match is a plain duplicate unless it is of
-    another day AND other goods; its conflicts are excluded from the sibling-release queries
-    (no re-run / re-post);
+  - a **corrected version** (two INVOICES sharing a number, the later mail with another total
+    / items) → conflict; the early gate (no content yet) defers what only the content can
+    tell;
+  - a **DL scan and an invoice sharing a number** (either order — also the invoice's own
+    number equal to the scan's DL number; their sums differ by nature: transport, prices) — a
+    plain duplicate unless of another day AND other goods (a conflict, deferred at the early
+    gate); on the DL path (`invoice_only`) the conflicts are excluded from the sibling-release
+    queries (no re-run / re-post);
   - a match with a **stale orphan claim** (unconfirmed past `desadv.CLAIM_STALE_MINUTES`) →
     conflict (the bytes may or may not be in ORION).
 - **Serialised per supplier**: `dl_invoice.claim_unless_twin` runs the twin check, the claim and
