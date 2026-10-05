@@ -108,6 +108,7 @@ from __future__ import annotations
 import logging
 
 from . import (
+    codex_receipts,
     dl_alerts,
     dl_extract,  # noqa: F401 (re-export for dl_worker.dl_extract monkeypatch)
     dl_snapshot,
@@ -359,6 +360,13 @@ def _tick_invoice(conn, cfg, client, snapshot_id, catalog, suppliers,
     # #412 FIX-1: park any rows stranded at MAX_ATTEMPTS by an ungraceful death
     channel_id = int(getattr(cfg, "delivery_notes_channel_id", 0) or 0) if cfg else 0
     _sweep_exhausted_invoices(conn, channel_id)
+
+    # #485: fail-CLOSED — without a fresh CODEX receipts snapshot the duplicate gate cannot
+    # tell an invoice the warehouse already took in by hand, so NO invoice is claimed: they
+    # wait in the queue (no model call, no attempt spent) until the next push; ops is told by
+    # `codex_receipts.stale_sweep`. The DL path above never reaches here.
+    if codex_receipts.live(conn) is None:
+        return 0
 
     message = _claim_invoice(conn, effective_suppliers, cfg=cfg)
     if not message:

@@ -1,0 +1,20 @@
+[Unit]
+Description=Push CODEX supplier receipts (prijemky) to the email-extractor add-on (#485)
+Documentation=https://github.com/zbynekdrlik/email-extractor/issues/485
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=newlevel
+Group=newlevel
+# The SAME EnvironmentFile as codex-orders-push / codex-cards-push (mode-600, never committed):
+# CODEX_PUSH_URL / CODEX_PUSH_TOKEN / CODEX_DUCKDB_PATH. The receipts URL is derived from
+# CODEX_PUSH_URL (.../api/codex/orders -> .../api/codex/receipts) unless CODEX_RECEIPTS_PUSH_URL
+# is set; CODEX_RECEIPTS_DAYS (default 60) is the lookback.
+EnvironmentFile=/home/newlevel/.secrets/codex-orders-push.env
+ExecStart=/usr/bin/python3 /home/newlevel/codex-orders-push/codex_receipts_push.py
+# Read-only DuckDB + one HTTP POST; a failed slot is retried by the next one (the add-on holds
+# invoice-as-DL fail-CLOSED + alerts ops after 30 h without a fresh snapshot).
+TimeoutStartSec=300
+Nice=10

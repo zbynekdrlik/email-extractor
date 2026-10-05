@@ -1,0 +1,14 @@
+[Unit]
+Description=Timer: push CODEX supplier receipts after each codex-bridge ETL run (#485)
+Documentation=https://github.com/zbynekdrlik/email-extractor/issues/485
+
+[Timer]
+# codex-bridge ETL starts at 14:15 and 18:00 Europe/Prague and loads sp001 last (~15 min:
+# 18:05 -> 18:19 measured 2026-10-04); the orders/cards pushes run at 14:40/14:42 and
+# 18:25/18:27 — this one at 14:50 / 18:35, after sp001, never together with the other readers.
+OnCalendar=*-*-* 14:50:00 Europe/Prague
+OnCalendar=*-*-* 18:35:00 Europe/Prague
+Persistent=true
+
+[Install]
+WantedBy=timers.target

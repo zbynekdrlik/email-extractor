@@ -10,11 +10,13 @@ from . import (
     desadv_edi,
     dl_alerts,
     dl_extract,
+    dl_invoice,
     dl_match,
     dl_memory,
     dl_nonwarehouse,
     dl_report,
     dl_snapshot,
+    invoice_dedup,
     report,
     teach,
 )
@@ -241,7 +243,7 @@ def _ask_pending_lines(conn, message_id: str, supplier_decision, pending_asks: l
 def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list[dict],
                       suppliers: list[dict], shadow: bool, all_items: list[dict],
                       upload=None, post=None, list_dirs=None,
-                      history_link: str | None = None) -> dict:
+                      history_link: str | None = None, invoice_mode: bool = False) -> dict:
     subject, from_addr = message.get("subject", ""), message.get("from_addr", "")
     doc_number = doc.get("docNumber") or ""
     delivery_date = doc.get("deliveryDate", "")
@@ -269,6 +271,19 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     hlink = history_link
     if hlink is None:
         hlink = "" if shadow else _dl_history_link(conn, cfg, message["message_id"])
+
+    # #485: an invoice-derived document passes the duplicate gate FIRST — a credit note, an
+    # older version of a re-sent invoice, or goods CODEX / our own ledger already has never
+    # raise a board question nor claim (`dl_invoice`, rules in `invoice_dedup`); stale CODEX
+    # receipts hold it (fail-closed). LIVE only. The claimed supplier keys the duplicate check
+    # here; a supplier the match below resolves differently is re-checked after it.
+    gate_ean = ""
+    if invoice_mode and not shadow:
+        gate_ean = str((message.get("_invoice_supplier") or {}).get("ean_edi") or "")
+        skipped = dl_invoice.gate(conn, cfg, message, doc, gate_ean, post=post, link=link,
+                                  history_link=hlink)
+        if skipped is not None:
+            return skipped
 
     if doc.get("status") == "needsReview":
         reason = doc.get("reviewReason") or "Dokument potrebuje kontrolu"
@@ -360,6 +375,15 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
               rollup=False, workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": doc_number, "supplier_name": "",
                "reason": supplier_decision.note}
+
+    if invoice_mode and not shadow and supplier_decision.ean_edi != gate_ean:
+        # #485: the document resolved to another supplier than the one whose flag claimed the
+        # mail (or a reprocess carries no claimed supplier) — its own receipts decide
+        skipped = dl_invoice.gate(conn, cfg, message, doc, supplier_decision.ean_edi,
+                                  duplicate_only=True, post=post, link=link,
+                                  history_link=hlink)
+        if skipped is not None:
+            return skipped
 
     matched_items: list[dict] = []
     decisions: list[tuple[dict, dl_match.Decision]] = []
@@ -648,6 +672,15 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                                     supplier_decision.ean_edi)
         return {"outcome": "duplicate", "doc_number": built.doc_number,
                "supplier_name": supplier_decision.name}
+
+    # #485: the delivery facts on OUR ledger row (date, total without VAT, invoice number), so a
+    # later invoice of the same goods is recognised by date + total even when its number differs
+    # (a DL scan shipped first). Best-effort — never fails the shipment.
+    desadv.record_facts(conn, supplier_decision.ean_edi, built.doc_number,
+                        message_id=message["message_id"],
+                        delivery_date=invoice_dedup.parse_day(delivery_date),
+                        total_amount=invoice_dedup.doc_total(doc),
+                        invoice_number=doc.get("invoiceNumber") or "")
 
     upload_name = desadv_edi.upload_name(built.filename)
     upload_dir = getattr(cfg, "orion_dl_dir", upload_mod.DL_DIR)

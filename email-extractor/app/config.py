@@ -158,6 +158,10 @@ class Config:
     # senders (tlaciaren@ that forwards from all suppliers). Sibling release skips
     # from_addr correlation for these — from_addr is meaningless for them.
     delivery_notes_scanner_senders: str = ""
+    # #485: comma-separated addresses whose mail is NEVER taken as an invoice-as-DL — our own
+    # accounting mailbox forwards supplier invoices (FW: …) that are no new delivery. Applied
+    # on top of the exact supplier-card email match (`dl_message._claim_invoice`).
+    delivery_notes_invoice_ignored_senders: str = "ucto@slovnormal.sk"
     # #129/#235: the DL-sheet counterpart of catalog_sheet_id above — same "unread,
     # never removed" precedent, see that field's own comment.
     dl_catalog_gid: str = ""
@@ -342,6 +346,10 @@ class Config:
             delivery_notes_scanner_senders=str(
                 _get(o, "delivery_notes_scanner_senders",
                      "DELIVERY_NOTES_SCANNER_SENDERS", "") or ""),
+            delivery_notes_invoice_ignored_senders=str(
+                _get(o, "delivery_notes_invoice_ignored_senders",
+                     "DELIVERY_NOTES_INVOICE_IGNORED_SENDERS", "ucto@slovnormal.sk")
+                or "ucto@slovnormal.sk"),
             dl_catalog_gid=str(_get(o, "dl_catalog_gid", "DL_CATALOG_GID", "") or ""),
             orion_dl_dir=_get(o, "orion_dl_dir", "ORION_DL_DIR",
                               "C:\\ORION\\COMMUNICATOR\\data\\in_DL"),

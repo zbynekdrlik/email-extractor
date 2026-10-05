@@ -81,6 +81,7 @@ options:
   delivery_notes_shadow_days: 3
   delivery_notes_max_age_days: 14
   delivery_notes_scanner_senders: ""
+  delivery_notes_invoice_ignored_senders: "ucto@slovnormal.sk"
   dl_catalog_gid: ""
   question_stale_working_days: 2
   question_escalate_working_days: 4
@@ -155,6 +156,9 @@ schema:
   delivery_notes_shadow_days: int?
   delivery_notes_max_age_days: int?
   delivery_notes_scanner_senders: str?
+  # #485: addresses whose mail is never taken as an invoice-as-DL (our accounting mailbox
+  # forwarding supplier invoices). Comma-separated, default "ucto@slovnormal.sk".
+  delivery_notes_invoice_ignored_senders: str?
   dl_catalog_gid: str?
   question_stale_working_days: int?
   question_escalate_working_days: int?

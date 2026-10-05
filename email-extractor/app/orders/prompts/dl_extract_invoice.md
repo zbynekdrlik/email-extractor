@@ -62,7 +62,11 @@ Keďže text je FAKTÚRA, z ktorej sa odvádza dodací list:
   faktúre nie je, použi číslo faktúry.
 - **`deliveryDate`** = dátum dodania (hľadaj „dátum dodania", „dodané dňa", „delivery date",
   „dátum dodávky"). Ak nie je, použi dátum vystavenia faktúry.
-- **`documentTotalWithoutVAT`** = základ dane (suma bez DPH) z päty faktúry.
+- **`documentTotalWithoutVAT`** = základ dane (suma bez DPH) z päty faktúry. Pri dobropise
+  (opravnom doklade so zápornou sumou) ho vráť ZÁPORNÝ, presne ako je vytlačený.
+- **`invoiceNumber`** = číslo FAKTÚRY (číslo dokladu faktúry, „Faktúra č.", „Číslo
+  faktúry", prípadne variabilný symbol, ak iné číslo faktúry na doklade nie je) — VŽDY ho
+  vyplň, aj keď je rovnaké ako `docNumber`. Nikdy ho nevymýšľaj.
 
 ## Toto NIE JE dodací list — nikdy neextrahuj ako `documents`
 
@@ -86,6 +90,7 @@ položka s množstvom), vráť `documents: []` — nikdy nevytváraj dokument "n
 
 - `supplierName` / `supplierCity` / `supplierEmail` — dodávateľ z hlavičky dokumentu.
 - `docNumber` — viď „Špeciálne pravidlá pre faktúru" vyššie.
+- `invoiceNumber` — viď „Špeciálne pravidlá pre faktúru" vyššie.
 - `deliveryDate` — viď „Špeciálne pravidlá pre faktúru" vyššie. Formát DD.MM.YYYY.
 - `deliveryTime` — čas dodania, ak je vytlačený, inak prázdny reťazec.
 - `documentTotalWithoutVAT` — viď „Špeciálne pravidlá pre faktúru" vyššie.

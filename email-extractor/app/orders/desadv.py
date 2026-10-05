@@ -293,3 +293,33 @@ def has_confirmed_collision(conn, supplier_ean: str, doc_number: str) -> bool:
         "AND uploaded_at IS NOT NULL AND doc_number != %s", (ean, doc)).fetchall()
     return any(desadv_edi._matches_stable_prefix(filename or "", prefix)
               for (filename,) in rows)
+
+
+def record_facts(conn, supplier_ean: str, doc_number: str, *, message_id: str = "",
+                 delivery_date=None, total_amount: float | None = None,
+                 invoice_number: str = "") -> bool:
+    """#485: remember the delivery FACTS of a document this message just claimed — its
+    delivery date, total without VAT and (for an invoice-as-DL) the invoice number — on its
+    own `desadv_sent` row, so the invoice dedup gate (`invoice_dedup`) can recognise a LATER
+    invoice of the same goods by date + total even when the numbers differ (a DL scan shipped
+    first, the invoice prints another number). Written right after the claim, before the
+    upload: a released claim deletes the row with its facts, a confirmed one keeps them.
+    Scoped to the claimant (`message_id`) so a stranger's row is never overwritten. Returns
+    True when a row was updated; never raises (the facts are an extra signal, never a reason
+    to fail a shipment)."""
+    ean, doc = str(supplier_ean or ""), str(doc_number or "")
+    if not ean or not doc:
+        return False
+    try:
+        row = conn.execute(
+            "UPDATE desadv_sent SET delivery_date = %s, total_amount = %s, "
+            "invoice_number = NULLIF(%s, '') "
+            "WHERE supplier_ean = %s AND doc_number = %s "
+            "AND message_id IS NOT DISTINCT FROM NULLIF(%s, '') RETURNING id",
+            (delivery_date, total_amount, str(invoice_number or ""), ean, doc,
+             str(message_id or ""))).fetchone()
+    except Exception:
+        log.exception("desadv.record_facts failed for %s/%s — the shipment continues",
+                      ean, doc)
+        return False
+    return row is not None

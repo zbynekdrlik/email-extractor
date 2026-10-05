@@ -6,7 +6,7 @@ import re
 from datetime import UTC, datetime
 
 from .. import store
-from . import dl_extract, dl_report, dl_snapshot, report, worker
+from . import dl_extract, dl_invoice, dl_report, dl_snapshot, invoice_dedup, report, worker
 from .dl_correction import _correction_review_reason, _looks_like_correction, _mail_body_only
 from .dl_document import _process_document
 from .dl_events import _dl_history_link, _event, _flag_attachment, _post
@@ -15,6 +15,11 @@ from .dl_retry import _check_retry, _RetryLater
 log = logging.getLogger("orders.dl_worker")
 
 CATEGORY = "dodacie_listy"
+INVOICE_CATEGORY = "invoices"     # #406: an invoice-as-DL mail
+# #485: the terminal "deliberately not shipped" document outcomes (a W7 duplicate + the
+# invoice gate's credit note / older version) — nothing was sent, nothing needs a human
+_INVOICE_SKIPS = ("duplicate", invoice_dedup.OUTCOME_CREDIT_NOTE,
+                  invoice_dedup.OUTCOME_SUPERSEDED)
 CLAIM_STALE_MINUTES = 30          # R10
 MAX_ATTEMPTS = 5                  # R11 (quarantine)
 SHADOW_DAYS = 3
@@ -186,6 +191,11 @@ def _aggregate_status(documents_out: list[dict]) -> str:
         # see the retry/idempotency note above) is not a clean "ok" — nothing was
         # actually sent this run.
         return "duplicate"
+    # #485: an invoice-as-DL message whose documents are all deliberately NOT shipped (a credit
+    # note, an older version of a re-sent invoice, goods already received) is a clean terminal
+    # skip — its own outcome when there is one kind, else "duplicate" (nothing was sent).
+    if all(o in _INVOICE_SKIPS for o in outcomes):
+        return str(outcomes[0]) if len(set(outcomes)) == 1 else "duplicate"
     # #314: a message whose documents are all terminally non-warehouse (a remembered
     # non-warehouse supplier, short-circuited before any question/upload) is a CLEAN
     # terminal skip — never "review" (nothing needs a human) and never "ok" (nothing
@@ -194,7 +204,7 @@ def _aggregate_status(documents_out: list[dict]) -> str:
     # counts it exactly like a hand-marked "netýka sa skladu". A mixed message (a real
     # shipment alongside a skip — only possible for a multi-supplier mail, not the single-
     # supplier norm) falls through to the ok/partial branches so the shipment still counts.
-    if (all(o in ("not_warehouse", "duplicate") for o in outcomes)
+    if (all(o in ("not_warehouse", *_INVOICE_SKIPS) for o in outcomes)
             and "not_warehouse" in outcomes):
         return "not_warehouse"
     # #314 adversarial-review finding: a mixed message (an auto-skipped not_warehouse doc
@@ -202,7 +212,7 @@ def _aggregate_status(documents_out: list[dict]) -> str:
     # wins so the digest and every proc_status='review'-keyed sweep still see the human
     # work. `not_warehouse` is added to the review branch's tuple (the all-nw branch above
     # still fires first for a purely non-warehouse message).
-    if (all(o in ("review", "duplicate", "not_warehouse") for o in outcomes)
+    if (all(o in ("review", "not_warehouse", *_INVOICE_SKIPS) for o in outcomes)
             and "review" in outcomes):
         return "review"
     if any(o == "partial" for o in outcomes) or ("review" in outcomes and
@@ -454,6 +464,17 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     # (claim, shadow peek, release_for_question) is covered uniformly — a corpus/eval message
     # has no such event, so `cmr_mode` stays False there and the corpus is byte-identical.
     cmr_mode = _rescued_as_cmr(conn, message["message_id"])
+    # #485: a credit note (dobropis) mailed through the invoice flow is no delivery — caught
+    # here from the subject / text / file names BEFORE any model call; never shipped (the
+    # negative-total check after extraction is `dl_invoice.gate`'s). LIVE only.
+    if invoice_mode and not shadow:
+        credit = dl_invoice.credit_note_reason(message, sources)
+        if credit:
+            dl_invoice.skip_message(conn, message, invoice_dedup.OUTCOME_CREDIT_NOTE, credit)
+            this_doc = {"outcome": invoice_dedup.OUTCOME_CREDIT_NOTE, "reason": credit}
+            return {"kind": "dl", "dl_snapshot_id": snapshot_id,
+                   "status": _aggregate_status(documents_out + [this_doc]),
+                   "documents": documents_out + [this_doc], "items": []}
     extraction = dl_extract.extract_email(client, sources,
                                             invoice_mode=invoice_mode, cmr_mode=cmr_mode)
 
@@ -488,7 +509,8 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                                                 suppliers, shadow, all_items,
                                                 upload=upload, post=post,
                                                 history_link=hlink,
-                                                list_dirs=list_dirs))
+                                                list_dirs=list_dirs,
+                                                invoice_mode=invoice_mode))
 
     if not documents_out:
         # #258: the text of the failure must say where it actually looked — a text-
@@ -687,6 +709,18 @@ def _invoice_supplier_emails(suppliers: list[dict]) -> dict[str, dict]:
     return result
 
 
+DEFAULT_IGNORED_INVOICE_SENDERS = "ucto@slovnormal.sk"
+
+
+def ignored_invoice_senders(cfg) -> set[str]:
+    """#485: addresses whose mail is never an invoice-as-DL (`delivery_notes_invoice_ignored_
+    senders`, default our accounting mailbox `ucto@slovnormal.sk`) — lowercased."""
+    raw = str(getattr(cfg, "delivery_notes_invoice_ignored_senders",
+                      DEFAULT_IGNORED_INVOICE_SENDERS) if cfg is not None
+              else DEFAULT_IGNORED_INVOICE_SENDERS)
+    return {a.strip().lower() for a in (raw or "").split(",") if a.strip()}
+
+
 def _sweep_exhausted_invoices(conn, channel_id: int) -> int:
     """Park any dl_invoice_runs rows that exhausted MAX_ATTEMPTS without finishing.
 
@@ -732,10 +766,11 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None) -> dict | None:
     if not email_map:
         return None
 
-    # F4: strip scanner senders from the match set
-    if cfg:
-        email_map = {e: s for e, s in email_map.items()
-                     if not is_scanner_sender(cfg, e)}
+    # F4: strip scanner senders from the match set; #485: and our own accounting mailbox —
+    # its FW: of a supplier invoice is no new delivery, even if the address landed on a card
+    ignored = ignored_invoice_senders(cfg)
+    email_map = {e: s for e, s in email_map.items()
+                 if e not in ignored and not (cfg and is_scanner_sender(cfg, e))}
     if not email_map:
         return None
 

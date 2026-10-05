@@ -7,7 +7,13 @@ import psycopg
 from psycopg.types.json import Json
 
 from . import dl_match, dl_nonwarehouse, dl_report, dl_snapshot, llm, report
-from .dl_message import CATEGORY, _as_message, _run_and_finish
+from .dl_message import (
+    CATEGORY,
+    INVOICE_CATEGORY,
+    _as_message,
+    _invoice_supplier_emails,
+    _run_and_finish,
+)
 
 log = logging.getLogger("orders.dl_worker")
 
@@ -131,13 +137,24 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
             return []
         msg_row = conn.execute(
             """SELECT message_id, subject, from_addr, from_name, combined_text,
-                      body_text, has_attachments, created_at FROM messages
+                      body_text, has_attachments, created_at, category FROM messages
                 WHERE message_id = %s""", (message_id,)).fetchone()
         if not msg_row:
             return []
         message = _as_message(msg_row[:7],
                               created_at=msg_row[7] if len(msg_row) > 7 else None)
         assert message is not None  # msg_row proven present above ⟹ _as_message returns a dict
+        # #485: an invoice-as-DL mail (#406) reprocesses AS an invoice — its own extraction
+        # prompt, its own `dl_invoice_runs` ledger (never `messages.processed`, owned by the
+        # n8n invoice flow) and, above all, the duplicate gate. Before, the reprocess ran the
+        # plain DL path and bypassed all three.
+        invoice_mode = len(msg_row) > 8 and msg_row[8] == INVOICE_CATEGORY
+        if invoice_mode:
+            supplier = _invoice_supplier_emails(
+                dl_snapshot.dl_suppliers_for_management(conn)).get(
+                    (message.get("from_addr") or "").strip().lower())
+            if supplier:
+                message["_invoice_supplier"] = supplier
         snapshot_id = dl_snapshot.latest_snapshot_id(conn)
         if not snapshot_id:
             log.warning("release_for_question(%s): no DL catalog snapshot yet — cannot "
@@ -149,7 +166,7 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
             client = llm.from_config(cfg)
         result = _run_and_finish(conn, cfg, client, message, snapshot_id, catalog,
                                  suppliers, upload=upload, post=post,
-                                 list_dirs=list_dirs)
+                                 list_dirs=list_dirs, invoice_mode=invoice_mode)
         # #265 gap 2 (dl_supplier) + #365 (dl_item): a same-sender sibling message whose
         # own `dl_item`/`dl_supplier` question DEDUPED onto THIS message's open question
         # (`ask_generic`'s `ON CONFLICT ... DO NOTHING`) has NO `order_questions` row of its

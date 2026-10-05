@@ -1,5 +1,5 @@
-"""`POST /api/codex/orders` (#342) + `POST /api/codex/cards` (#467) — the machine endpoints the
-codex-bridge push tools write to.
+"""`POST /api/codex/orders` (#342) + `POST /api/codex/cards` (#467) + `POST /api/codex/receipts`
+(#485) — the machine endpoints the codex-bridge push tools write to.
 
 `tools/codex_orders_push.py` (on the dev/ERP box, next to the codex-bridge DuckDB) reads
 order headers read-only and POSTs a compact JSON batch here on its own systemd timer. Auth
@@ -16,7 +16,7 @@ import hmac
 from flask import Flask, jsonify, request
 
 from .httpapi_common import Deps
-from .orders import codex_cards, codex_orders, codex_sync
+from .orders import codex_cards, codex_orders, codex_receipts, codex_sync
 
 # #467: the cards push is one ~1 MB body (~6k rows); anything past this is not a CODEX list.
 MAX_CARDS_BODY = 16 * 1024 * 1024
@@ -80,3 +80,28 @@ def register(app: Flask, deps: Deps) -> None:
             return jsonify(error=str(e)), e.status
         return jsonify(rows=res["rows"], codes=res["codes"],
                        received=len(payload["cards"]), sync=sync), 200
+
+    @app.post("/api/codex/receipts")
+    def codex_receipts_replace():
+        # #485: the CODEX supplier receipts of the last ~60 days (`tools/codex_receipts_
+        # push.py`) — what the invoice-as-DL dedup gate compares an invoice with. Same
+        # header-only machine token and body cap as the cards push; the body REPLACES the copy
+        # atomically (a receipt deleted in CODEX must stop blocking invoices), an empty or
+        # drastically smaller push is refused, `?force=1` overrides the shrink guard.
+        if not _token_ok(allow_query=False):
+            return jsonify(error="forbidden"), 403
+        if (request.content_length or 0) > MAX_CARDS_BODY:
+            return jsonify(error="body too large"), 413
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or not isinstance(payload.get("receipts"), list):
+            return jsonify(error="body must be {\"receipts\": [...]}"), 400
+        force = request.args.get("force") in ("1", "true", "yes")
+        days = payload.get("days")
+        try:
+            with deps.db() as c:
+                res = codex_receipts.replace_receipts(
+                    c, payload["receipts"], source_as_of=payload.get("source_as_of"),
+                    days=days if isinstance(days, int) else None, force=force)
+        except codex_receipts.ReplaceRefused as e:
+            return jsonify(error=str(e)), e.status
+        return jsonify(stored=res["stored"], received=len(payload["receipts"])), 200

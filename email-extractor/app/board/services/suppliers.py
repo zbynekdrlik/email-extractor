@@ -51,6 +51,27 @@ def _before(conn, override_id, orig_ean_edi, orig_city) -> dict | None:
     return None
 
 
+def _identity(card: dict | None) -> tuple | None:
+    """WHO a supplier card is — the fields the retro-release (`_release`) keys on."""
+    if not card:
+        return None
+    return (str(card.get("ean_edi") or ""), str(card.get("name") or "").strip(),
+            tuple(sorted(str(e).strip().lower() for e in card.get("emails") or [])),
+            str(card.get("city") or "").strip())
+
+
+def _effective_card(conn, body: dict) -> dict | None:
+    """The card as the board shows it before this save — for a sheet-only card (no override
+    row yet) the snapshot row the body names by its original identity."""
+    if body.get("override_id") is not None or body.get("orig_ean_edi") is None:
+        return None
+    for r in dl_snapshot.dl_suppliers_for_management(conn):
+        if (r.get("override_id") is None and r.get("orig_ean_edi") == body.get("orig_ean_edi")
+                and (r.get("orig_city") or "") == (body.get("orig_city") or "")):
+            return r
+    return None
+
+
 def save_supplier(conn, cfg, actor: str, body: dict) -> dict:
     name, ean = name_and_ean(body, "dodávateľ")
     from ...orders.dl_questions import is_scanner_sender
@@ -58,6 +79,7 @@ def save_supplier(conn, cfg, actor: str, body: dict) -> dict:
               if not is_scanner_sender(cfg, e)]   # #407 — never store a scanner address
     before = _before(conn, body.get("override_id"),
                      body.get("orig_ean_edi"), body.get("orig_city"))
+    prior = _identity(before or _effective_card(conn, body))
     try:
         rid = dl_snapshot.upsert_dl_supplier(
             conn, override_id=body.get("override_id"), orig_ean_edi=body.get("orig_ean_edi"),
@@ -72,8 +94,12 @@ def save_supplier(conn, cfg, actor: str, body: dict) -> dict:
         conn.execute("UPDATE dl_supplier_overrides SET invoice_is_delivery_note = %s "
                      "WHERE id = %s", (bool(body["invoice_is_delivery_note"]), rid))
     dl_snapshot.dl_rebuild_from_overrides(conn)
-    _release(conn, cfg, ean, name, emails)
     after = row(conn, "dl_supplier_overrides", _COLS, "id = %s", (rid,))
+    if prior is None or prior != _identity(after):
+        # #485: only a save that changes WHO the card is (EAN / name / e-mails / city) can
+        # unstick a mail waiting on it; a flag-only toggle (e.g. `invoice_is_delivery_note`)
+        # must not re-run a supplier's old stuck review mails (and re-post them to the sklad)
+        _release(conn, cfg, ean, name, emails)
     action = "update" if before else "create"
     audit.record(conn, actor=actor, table="dl_supplier_overrides", row_id=rid, action=action,
                  before=before, after=after)

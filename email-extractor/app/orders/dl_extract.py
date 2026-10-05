@@ -28,6 +28,7 @@ offline with a scripted fake client, no network.
 """
 from __future__ import annotations
 
+import copy
 import io
 import logging
 import re
@@ -149,6 +150,14 @@ DL_SCHEMA = {
     },
     "required": ["documents"],
 }
+
+# #485: an invoice-as-DL document also carries the INVOICE number — next to `docNumber` (the
+# DL number printed on the invoice, else the invoice number) the duplicate gate compares BOTH
+# with CODEX receipts, whose DL field often holds the invoice number. Invoice mode ONLY: the
+# plain DL / CMR schema (and with it the e2e-dl corpus cache keys) stays byte-identical.
+DL_INVOICE_SCHEMA: dict = copy.deepcopy(DL_SCHEMA)
+DL_INVOICE_SCHEMA["properties"]["documents"]["items"]["properties"]["invoiceNumber"] = {
+    "type": "string"}
 
 
 def extract_prompt(invoice_mode: bool = False, cmr_mode: bool = False) -> str:
@@ -569,7 +578,7 @@ def run_extraction(client, source_text: str, *, invoice_mode: bool = False,
     user = f"--- DELIVERY NOTE TEXT ---\n{source_text}\n--- END ---"
     extracted = client.json_call(
         extract_prompt(invoice_mode=invoice_mode, cmr_mode=cmr_mode), user,
-        DL_SCHEMA, name="dl_documents")
+        DL_INVOICE_SCHEMA if invoice_mode else DL_SCHEMA, name="dl_documents")
     documents = []
     for raw_doc in extracted.get("documents") or []:
         doc = dict(raw_doc)

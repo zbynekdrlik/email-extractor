@@ -414,6 +414,12 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None, connect=None) -
                 # discipline confirm.sweep above already uses (shadow/n8n modes never
                 # write to messages the way this sweep's own query expects).
                 dl_worker.stuck_classified_sweep(conn, cfg)
+                # #485: the CODEX receipts the invoice-as-DL duplicate gate needs are
+                # missing/stale → invoices are HELD (fail-closed, dl_worker._tick_invoice);
+                # ops hears it once per stale episode + workday-morning reminders. Silent
+                # while no supplier has `invoice_is_delivery_note` on (nothing is held).
+                from . import codex_receipts
+                codex_receipts.stale_sweep(conn, cfg)
             handled = tick(conn, cfg, pipeline=pipeline)
             handled = static_worker.tick(conn, cfg) or handled
             # #204: shadow ALSO needs a tick (it never claims, but it does need to be
