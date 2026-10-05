@@ -576,3 +576,94 @@ def test_a_receipt_booked_over_many_days_is_no_same_day_proof(pg, tmp_path):
     assert uploads == []
     assert _run_outcome(pg, "inv-span") == "review"
     assert len(posts) == 1 and "261004158" in posts[0]
+
+
+# --- round 11: a DL scan and an invoice sharing a number on another day ----------------------
+
+def _scan_then_invoice(pg, tmp_path, scan_doc, invoice_doc):
+    _setup(pg)
+    _push_receipts(tmp_path)
+    _message(pg, tmp_path, "dl-1", category="dodacie_listy", subject="Dodací list",
+             text="Dodací list", created_at=_ago(hours=5))
+    uploads, posts = [], []
+    client = FakeClient([{"documents": [scan_doc]}, {"documents": [invoice_doc]}], runs=2)
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert len(uploads) == 1
+    shipped_posts = len(posts)
+    _message(pg, tmp_path, "inv-1", created_at=_ago(hours=1))
+    _push_receipts(tmp_path)
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    return uploads, posts[shipped_posts:]
+
+
+def test_an_invoice_whose_own_number_is_an_older_scans_dl_number_is_reviewed(pg, tmp_path):
+    """Another number series: the invoice's OWN number has the digits of an older scan's DL
+    number — another day, other goods: a genuinely different delivery is never dropped
+    silently (the early gate defers to the built EDI, which sees other goods)."""
+    uploads, new_posts = _scan_then_invoice(
+        pg, tmp_path, _one(TWO_DAYS_AGO, "2400000001", "", qty=100),
+        _one(YESTERDAY, "4400000001", "2400000001", qty=30))
+    assert len(uploads) == 1
+    assert _run_outcome(pg, "inv-1") == "review" and len(new_posts) == 1
+
+
+def test_an_invoice_printing_a_scans_dl_number_another_day_other_goods_is_reviewed(
+        pg, tmp_path):
+    uploads, new_posts = _scan_then_invoice(
+        pg, tmp_path, _one(TWO_DAYS_AGO, "7700000001", "", qty=100),
+        _one(YESTERDAY, "7700000001", "2400000001", qty=30))
+    assert _run_outcome(pg, "inv-1") == "review" and len(new_posts) == 1
+
+
+def test_the_same_with_a_priceless_scan_is_reviewed(pg, tmp_path):
+    uploads, new_posts = _scan_then_invoice(
+        pg, tmp_path, _one(TWO_DAYS_AGO, "7700000001", "", qty=100, priced=False),
+        _one(YESTERDAY, "7700000001", "2400000001", qty=30))
+    assert _run_outcome(pg, "inv-1") == "review" and len(new_posts) == 1
+
+
+def test_a_dl_scan_printing_an_invoice_rows_dl_number_another_day_other_goods_is_reviewed(
+        pg, tmp_path):
+    """The DL path: the scan of ANOTHER delivery printing a shipped invoice's DL number."""
+    _setup(pg)
+    _push_receipts(tmp_path)
+    _message(pg, tmp_path, "inv-1", created_at=_ago(hours=5))
+    uploads, posts = [], []
+    client = FakeClient([{"documents": [_one(TWO_DAYS_AGO, "7700000001", "2400000001")]},
+                         {"documents": [_one(YESTERDAY, "7700000001", "", qty=30,
+                                             priced=False)]}], runs=2)
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    shipped_posts = len(posts)
+    _message(pg, tmp_path, "dl-1", category="dodacie_listy", subject="Dodací list",
+             text="Dodací list", created_at=_ago(hours=1))
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert len(uploads) == 1 and len(posts) - shipped_posts == 1
+
+
+def _invoice_flow_state(pg, mid):
+    return pg.execute("SELECT proc_status, proc_outcome FROM messages WHERE message_id = %s",
+                      (mid,)).fetchone()
+
+
+def test_an_empty_invoice_mail_never_writes_the_invoice_flows_state(pg, tmp_path):
+    _setup(pg)
+    _message(pg, tmp_path, "inv-n", text="", attachments=())
+    pg.execute("UPDATE messages SET proc_status = 'ok', proc_outcome = 'preposlané' "
+               "WHERE message_id = 'inv-n'")
+    _push_receipts(tmp_path)
+    uploads, posts = [], []
+    assert _tick(pg, tmp_path, FakeClient([]), uploads, posts) == 1
+    assert _invoice_flow_state(pg, "inv-n") == ("ok", "preposlané")
+
+
+def test_a_correction_invoice_mail_never_writes_the_invoice_flows_state(pg, tmp_path):
+    _setup(pg)
+    _message(pg, tmp_path, "inv-c", subject="OPRAVA HMOTNOSTI", attachments=(),
+             text="Rožok 50g = 90 ks (nie 100 ks), zvyšok bez zmien")
+    pg.execute("UPDATE messages SET proc_status = 'ok', proc_outcome = 'preposlané' "
+               "WHERE message_id = 'inv-c'")
+    _push_receipts(tmp_path)
+    uploads, posts = [], []
+    assert _tick(pg, tmp_path, FakeClient([]), uploads, posts) == 1
+    assert uploads == []
+    assert _invoice_flow_state(pg, "inv-c") == ("ok", "preposlané")
