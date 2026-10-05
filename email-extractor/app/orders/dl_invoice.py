@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 
-from . import codex_receipts, desadv_edi, dl_report, invoice_dedup
+from . import codex_receipts, desadv, desadv_edi, dl_report, invoice_dedup
 from .dl_correction import _mail_body_only
 from .dl_events import _event, _post
 
@@ -23,6 +23,9 @@ log = logging.getLogger("orders.dl_worker")
 
 STAGE = "invoice_dedup"
 CREDIT_REASON = "Dobropis — nie je to dodávka, do ORIONu sa nenahráva."
+MAIL_CREDIT_REASON = ("E-mail hovorí o dobropise — doklad sa ako dobropis do ORIONu NEnahráva. "
+                      "Ak je to v skutočnosti faktúra za dodávku, prijmi ju v CODEXe ručne.")
+SHIP_LOCK = "desadv-ship:"      # + supplier EAN: twin check → claim → facts, one at a time
 STALE_REASON = ("Príjemky z CODEXu nie sú aktuálne (starší zoznam než 30 h alebo ešte "
                 "neprišiel) — faktúra sa z bezpečnosti NEnahráva do ORIONu ako dodací list, "
                 "aby nevznikla duplicita. Skontroluj v CODEXe, či je dodávka prijatá, a v "
@@ -52,23 +55,28 @@ def invoice_sources(attachments: list[dict]) -> list[dict]:
 def split_credit_notes(message: dict, sources: list[dict]) -> tuple[list[dict], str | None]:
     """Before extraction (no model call is spent on a credit note): one attachment is a credit
     note when its file name or HEADER says „dobropis" (LESAFFRE prints „Faktúra - dobropis" as
-    the title) — that attachment is dropped, the invoices of a mixed mail still go on. A mail
-    with a SINGLE source is also one when its subject or OWN text says so (a forwarded `Dobropis
-    č. …` whose PDF does not repeat the word — Forbak); with several sources the mail's words
-    cannot tell which one is meant („Faktúra a dobropis"), so only the per-attachment rule and
-    the negative total (`gate`) decide. Returns (the sources to extract, a credit-note reason
-    when none is left)."""
-    body = _mail_body_only(message.get("combined_text", ""))
-    if len(sources) <= 1 and invoice_dedup.is_credit_note_text(message.get("subject", ""),
-                                                                 body):
-        return [], CREDIT_REASON
+    the title) — that attachment is dropped, the invoices of a mixed mail still go on
+    (`CREDIT_REASON` when none is left). A mail with a SINGLE source whose own words say so (a
+    forwarded `Dobropis č. …` whose PDF does not repeat the word — Forbak) is one too, but only
+    the mail's words decide there — a „Re: dobropis" thread or a „dobropis pošleme zvlášť"
+    line may sit on a real invoice — so it returns `MAIL_CREDIT_REASON`, which the caller posts
+    for a human (never a silent loss). With several sources the mail's words cannot tell which
+    one is meant („Faktúra a dobropis"): only the per-attachment rule and the negative total
+    (`gate`) decide. Returns (the sources to extract, the credit-note reason when none is
+    left)."""
     kept = [a for a in sources if not invoice_dedup.is_credit_note_text(
         a.get("filename") or "",
         (a.get("machine_text") or "")[:invoice_dedup.CREDIT_HEADER_CHARS])]
     if len(kept) < len(sources):
         log.info("invoice-as-DL %s: %d credit-note attachment(s) dropped",
                  message.get("message_id"), len(sources) - len(kept))
-    return kept, (CREDIT_REASON if sources and not kept else None)
+    if sources and not kept:
+        return [], CREDIT_REASON
+    body = _mail_body_only(message.get("combined_text", ""))
+    if len(sources) <= 1 and invoice_dedup.is_credit_note_text(message.get("subject", ""),
+                                                                 body):
+        return [], MAIL_CREDIT_REASON
+    return kept, None
 
 
 def skip_message(conn, message: dict, outcome: str, reason: str) -> None:
@@ -163,17 +171,40 @@ def review_conflict(conn, cfg, message: dict, doc: dict, dup: invoice_dedup.Dupl
 
 def twin_shipped(conn, message: dict, doc: dict, supplier_ean: str, built, *,
                  invoice_only: bool) -> invoice_dedup.Duplicate | None:
-    """Right before the claim, with the EDI built: does one of OUR shipments already carry
-    these goods — by number, date + total, or date + the SAME [card, quantity] content (a DL
-    scan without prices)? The invoice path asks against every row of the supplier (and closes
-    the window between the early `gate` and the claim, where item matching runs); the DL path
-    only against our INVOICE-derived rows (an invoice shipped first, its DL scan arriving
-    later — LESAFFRE sends both)."""
-    return invoice_dedup.find_duplicate(conn, None, supplier_ean, doc, message["message_id"],
-                                        doc_number=built.doc_number,
+    """With the EDI built: is this document already received / shipped — the full rules, now
+    with its [card, quantity] content (a DL scan without prices still has it)? The invoice path
+    judges against the CODEX receipts and every row of the supplier (what the early `gate`
+    deferred is decided here); the DL path only against our INVOICE-derived rows (an invoice
+    shipped first, its DL scan arriving later — LESAFFRE sends both)."""
+    receipts = None if invoice_only else codex_receipts.live(conn)
+    return invoice_dedup.find_duplicate(conn, receipts, supplier_ean, doc,
+                                        message["message_id"], doc_number=built.doc_number,
                                         content=invoice_dedup.signature(built.content),
                                         invoice_only=invoice_only,
                                         received_at=message.get("created_at"))
+
+
+def claim_unless_twin(conn, message: dict, doc: dict, supplier_ean: str, built, *,
+                      invoice_only: bool, facts: dict
+                      ) -> tuple[invoice_dedup.Duplicate | None, bool, str]:
+    """The twin check, the DESADV claim and our row's facts as ONE step per supplier: a
+    transaction holding an advisory lock on the supplier, so two documents of one delivery
+    processed at the same moment (the worker's invoice and a board-answer DL reprocess) never
+    both see "no twin" — the second one waits and then sees the first one's row WITH its facts.
+    Returns (twin, claimed, holder); `facts` = `desadv.record_facts`' keyword arguments."""
+    with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))",
+                     (SHIP_LOCK + str(supplier_ean or ""),))
+        twin = twin_shipped(conn, message, doc, supplier_ean, built, invoice_only=invoice_only)
+        if twin is not None:
+            return twin, False, ""
+        claimed, holder = desadv.claim_send_or_identify(
+            conn, supplier_ean, built.doc_number, built.filename,
+            message_id=message["message_id"])
+        if claimed:
+            desadv.record_facts(conn, supplier_ean, built.doc_number,
+                                message_id=message["message_id"], **facts)
+    return None, claimed, holder
 
 
 def skip_twin(conn, message: dict, doc: dict, dup: invoice_dedup.Duplicate) -> dict:

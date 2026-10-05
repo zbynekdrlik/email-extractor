@@ -475,6 +475,13 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     if invoice_mode and not shadow:
         sources, credit = dl_invoice.split_credit_notes(message, sources)
         if credit:
+            if credit == dl_invoice.MAIL_CREDIT_REASON:
+                # only the mail's words said „dobropis" — a human sees it (a real invoice in
+                # a „Re: dobropis" thread must never vanish silently)
+                _post(cfg, shadow, lambda: dl_report.build_review(
+                    credit, from_addr=message.get("from_addr", ""),
+                    subject=message.get("subject", ""), link=link, history_link=hlink),
+                    post=post)
             dl_invoice.skip_message(conn, message, invoice_dedup.OUTCOME_CREDIT_NOTE, credit)
             this_doc = {"outcome": invoice_dedup.OUTCOME_CREDIT_NOTE, "reason": credit}
             return {"kind": "dl", "dl_snapshot_id": snapshot_id,
@@ -769,6 +776,9 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None,
     #485, three more filters + an order:
     - only invoices received since the supplier's flag went on (`invoice_dl_since`) — turning
       it on never ships a backlog the warehouse already entered by hand (2-workday horizon);
+      a mail that already has a run (claimed before, re-queued by a board answer) is no
+      backlog and is exempt — a re-stamp (deploy, flag toggle, revived card) must not strand
+      an invoice a human just answered for;
     - with `codex_as_of` (the fresh CODEX receipts' data age, `delivery_notes_invoice_wait_
       for_codex`): only invoices CODEX's data already covers — a receipt typed by hand the
       same morning is visible before its invoice is judged (the ETL runs ~14:15 / ~18:00);
@@ -813,7 +823,9 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None,
                ON f.addr = lower(m.from_addr)
             WHERE m.category = 'invoices'
               AND m.created_at > now() - make_interval(days => %s)
-              AND m.created_at >= COALESCE(f.since, '-infinity'::timestamptz)
+              AND (m.created_at >= COALESCE(f.since, '-infinity'::timestamptz)
+                   OR EXISTS (SELECT 1 FROM dl_invoice_runs r0
+                               WHERE r0.message_id = m.message_id))
               AND m.created_at <= COALESCE(%s::timestamptz, 'infinity'::timestamptz)
               AND NOT EXISTS (SELECT 1 FROM dl_invoice_runs r
                                WHERE r.message_id = m.message_id

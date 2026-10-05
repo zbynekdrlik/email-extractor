@@ -240,6 +240,22 @@ def _ask_pending_lines(conn, message_id: str, supplier_decision, pending_asks: l
 
 # --- one document (R60-R97) -------------------------------------------------
 
+def _twin_outcome(conn, cfg, message: dict, doc: dict, supplier_decision, built, twin, *,
+                  invoice_mode: bool, post, link: str, hlink: str) -> dict:
+    """#485: the document dict for a document that is already received / shipped. Not provably
+    the same delivery (`twin.conflict`) → a review for a human, nothing ships (either path); an
+    invoice's twin → its own skip; a DL's twin → the W7 duplicate log, naming the invoice."""
+    if twin.conflict:
+        return dl_invoice.review_conflict(conn, cfg, message, doc, twin, post=post, link=link,
+                                          history_link=hlink)
+    if invoice_mode:
+        return dl_invoice.skip_twin(conn, message, doc, twin)
+    dl_report.log_duplicate(conn, message["message_id"], built.doc_number,
+                            supplier_decision.ean_edi, twin=twin.as_dict())
+    return {"outcome": "duplicate", "doc_number": built.doc_number,
+            "supplier_name": supplier_decision.name, "dedup": twin.as_dict()}
+
+
 def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list[dict],
                       suppliers: list[dict], shadow: bool, all_items: list[dict],
                       upload=None, post=None, list_dirs=None,
@@ -519,26 +535,19 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     built = desadv_edi.build(header, extraction, matched_items, catalog)
 
     # #485: with the EDI built (a pure function — built here, BEFORE any board question is
-    # asked) — is one of OUR shipments already these goods (number / same day + total / same
-    # day + the same [card, quantity] content, which a priceless DL scan still has)? An
-    # invoice checks every row of the supplier; a DL only our INVOICE-derived rows (the invoice
-    # shipped first, its DL scan arrives later — LESAFFRE sends both). A twin raises no
-    # question; a plain DL with no invoice-derived row of its supplier is untouched. LIVE only.
+    # asked) — is this document already received / shipped (`invoice_dedup`: number / same
+    # day + total / same day + the same [card, quantity] content, which a priceless DL scan
+    # still has)? An invoice is judged against the CODEX receipts and every row of the
+    # supplier; a DL only against our INVOICE-derived rows (the invoice shipped first, its DL
+    # scan arrives later — LESAFFRE sends both). A twin raises no question; a plain DL with no
+    # invoice-derived row of its supplier is untouched. LIVE only. Judged again under the ship
+    # lock right before the claim (`dl_invoice.claim_unless_twin`).
     if not shadow:
         twin = dl_invoice.twin_shipped(conn, message, doc, supplier_decision.ean_edi, built,
                                        invoice_only=not invoice_mode)
         if twin is not None:
-            if twin.conflict:
-                # the same number already shipped with other goods / another sum — a human
-                # checks CODEX, nothing ships (on either path)
-                return dl_invoice.review_conflict(conn, cfg, message, doc, twin, post=post,
-                                                  link=link, history_link=hlink)
-            if invoice_mode:
-                return dl_invoice.skip_twin(conn, message, doc, twin)
-            dl_report.log_duplicate(conn, message["message_id"], built.doc_number,
-                                    supplier_decision.ean_edi, twin=twin.as_dict())
-            return {"outcome": "duplicate", "doc_number": built.doc_number,
-                    "supplier_name": supplier_decision.name, "dedup": twin.as_dict()}
+            return _twin_outcome(conn, cfg, message, doc, supplier_decision, built, twin,
+                                 invoice_mode=invoice_mode, post=post, link=link, hlink=hlink)
 
     # #365: the sklad can answer a dl_item question with "nemá kartu — pošli bez tejto
     # položky"; that skip is recorded on the (now answered) question row and read back here
@@ -670,9 +679,19 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         return {"outcome": "review", "doc_number": built.doc_number,
                "supplier_name": supplier_decision.name, "reason": reason, "held": True}
 
-    claimed, holder = desadv.claim_send_or_identify(
-        conn, supplier_decision.ean_edi, built.doc_number, built.filename,
-        message_id=message["message_id"])
+    # #485: the twin check again, the claim and the delivery facts on OUR ledger row (date,
+    # total without VAT, the invoice's own number, the [card, quantity] content) as ONE step
+    # under the supplier's ship lock — a later document of the same goods is recognised even
+    # when its number differs (a DL scan vs its invoice), also one processed at this very moment.
+    twin, claimed, holder = dl_invoice.claim_unless_twin(
+        conn, message, doc, supplier_decision.ean_edi, built, invoice_only=not invoice_mode,
+        facts={"delivery_date": invoice_dedup.parse_day(delivery_date),
+               "total_amount": invoice_dedup.doc_total(doc),
+               "invoice_number": (doc.get("invoiceNumber") or "") if invoice_mode else "",
+               "items": invoice_dedup.signature(built.content)})
+    if twin is not None:
+        return _twin_outcome(conn, cfg, message, doc, supplier_decision, built, twin,
+                             invoice_mode=invoice_mode, post=post, link=link, hlink=hlink)
     if not claimed:
         # #216: a claim refusal has TWO different causes, and only one of them is a
         # genuine W7 duplicate. R17's transient retry re-processes the WHOLE message
@@ -694,16 +713,6 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                                     supplier_decision.ean_edi)
         return {"outcome": "duplicate", "doc_number": built.doc_number,
                "supplier_name": supplier_decision.name}
-
-    # #485: the delivery facts on OUR ledger row (date, total without VAT, invoice number), so a
-    # later invoice of the same goods is recognised by date + total even when its number differs
-    # (a DL scan shipped first). Best-effort — never fails the shipment.
-    desadv.record_facts(conn, supplier_decision.ean_edi, built.doc_number,
-                        message_id=message["message_id"],
-                        delivery_date=invoice_dedup.parse_day(delivery_date),
-                        total_amount=invoice_dedup.doc_total(doc),
-                        invoice_number=(doc.get("invoiceNumber") or "") if invoice_mode else "",
-                        items=invoice_dedup.signature(built.content))
 
     upload_name = desadv_edi.upload_name(built.filename)
     upload_dir = getattr(cfg, "orion_dl_dir", upload_mod.DL_DIR)

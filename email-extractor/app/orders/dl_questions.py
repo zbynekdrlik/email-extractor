@@ -194,21 +194,41 @@ def requeue_invoice(conn, message_id: str, cfg=None) -> None:
               SET outcome = NULL, finished_at = NULL, attempts = 0,
                   claimed_at = now() - interval '1 day'""", (message_id,))
     log.info("invoice-as-DL %s re-queued after a board answer", message_id)
-    # the claim only takes invoices within `delivery_notes_max_age_days` and received since the
-    # supplier's flag went on — a re-queued mail outside that window would wait unseen
-    stranded = conn.execute(
-        """SELECT m.created_at < now() - make_interval(days => %s)
-                  OR EXISTS (SELECT 1 FROM dl_supplier_overrides o
-                              WHERE lower(m.from_addr) = ANY(SELECT lower(e)
-                                                               FROM unnest(o.emails) e)
-                                AND o.invoice_dl_since > m.created_at)
-             FROM messages m WHERE m.message_id = %s""",
-        (int(getattr(cfg, "delivery_notes_max_age_days", 14) or 14) if cfg else 14,
-         message_id)).fetchone()
-    if stranded and stranded[0]:
-        log.warning("invoice-as-DL %s re-queued but OUTSIDE the claim window (older than "
-                    "delivery_notes_max_age_days, or before its supplier's invoice_dl_since) "
-                    "— it will not be picked up; resolve it by hand", message_id)
+    _alert_if_stranded(conn, cfg, message_id)
+
+
+def _alert_if_stranded(conn, cfg, message_id: str) -> None:
+    """A re-queued invoice the claim will never take — older than
+    `delivery_notes_max_age_days`, or its sender no longer on a live supplier card taking
+    invoices (flag switched off, card retired) — must not wait unseen after a human answered
+    for it: one durable alert on the delivery-notes channel (`dl_alerts`, deduped per mail)."""
+    from html import escape
+
+    from . import dl_alerts
+    max_age = int(getattr(cfg, "delivery_notes_max_age_days", 14) or 14) if cfg else 14
+    row = conn.execute(
+        """SELECT m.created_at < now() - make_interval(days => %s),
+                  NOT EXISTS (SELECT 1 FROM dl_supplier_overrides o
+                               WHERE o.invoice_is_delivery_note AND NOT o.retired
+                                 AND o.deleted_at IS NULL
+                                 AND lower(m.from_addr) = ANY(SELECT lower(e)
+                                                                FROM unnest(o.emails) e)),
+                  m.subject, m.from_addr
+             FROM messages m WHERE m.message_id = %s""", (max_age, message_id)).fetchone()
+    if not row or not (row[0] or row[1]):
+        return
+    why = (f"je staršia ako {max_age} dní" if row[0]
+           else "jej dodávateľ už faktúry ako dodacie listy neberie")
+    log.warning("invoice-as-DL %s re-queued but the claim will never take it (%s) — alerting",
+                message_id, why)
+    if dl_alerts.already_pending(conn, "dl_invoice_stranded", message_id):
+        return
+    channel = int(getattr(cfg, "delivery_notes_channel_id", 0) or 0) if cfg else 0
+    dl_alerts.enqueue(
+        conn, channel, "dl_invoice_stranded",
+        f"<b>Faktúra po odpovedi na nástenke sa automaticky NEspracuje</b> ({escape(why)})<br>"
+        f"Od: {escape(str(row[3] or ''))}, predmet: {escape(str(row[2] or ''))}<br>"
+        f"Ak je to dodávka, prijmi ju v CODEXe ručne.", message_id=message_id)
 
 
 def _mark_handled(conn, message_id: str, *, stage: str, status: str, outcome: str,

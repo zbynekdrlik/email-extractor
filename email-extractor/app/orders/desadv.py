@@ -313,13 +313,17 @@ def record_facts(conn, supplier_ean: str, doc_number: str, *, message_id: str = 
     if not ean or not doc:
         return False
     try:
-        row = conn.execute(
-            "UPDATE desadv_sent SET delivery_date = %s, total_amount = %s, "
-            "invoice_number = NULLIF(%s, ''), items = %s "
-            "WHERE supplier_ean = %s AND doc_number = %s "
-            "AND message_id IS NOT DISTINCT FROM NULLIF(%s, '') RETURNING id",
-            (delivery_date, total_amount, str(invoice_number or ""),
-             Json(items) if items else None, ean, doc, str(message_id or ""))).fetchone()
+        # its own savepoint: inside the caller's transaction (the claim, `dl_invoice.
+        # claim_unless_twin`) a failure here must never abort — and so roll back — the claim
+        with conn.transaction():
+            row = conn.execute(
+                "UPDATE desadv_sent SET delivery_date = %s, total_amount = %s, "
+                "invoice_number = NULLIF(%s, ''), items = %s "
+                "WHERE supplier_ean = %s AND doc_number = %s "
+                "AND message_id IS NOT DISTINCT FROM NULLIF(%s, '') RETURNING id",
+                (delivery_date, total_amount, str(invoice_number or ""),
+                 Json(items) if items else None, ean, doc,
+                 str(message_id or ""))).fetchone()
     except Exception:
         log.exception("desadv.record_facts failed for %s/%s — the shipment continues",
                       ean, doc)
