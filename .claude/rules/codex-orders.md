@@ -657,8 +657,8 @@ must never ship a SECOND delivery: the warehouse may already have typed it into 
   (`Duplicate.conflict`) → a review on the warehouse channel, never shipped, never silent;
   provably different → ships. Eleven review rounds shaped them; the cases worth remembering:
   - a **standing order** (the same goods every day) — our rows match by date only on the SAME
-    day; a CODEX receipt ±1 day matches silently only on its own `receipt_date` (a
-    neighbouring day, or a receipt booked over several days, is a conflict), never when
+    day; a CODEX receipt ±1 day matches silently only on its own `receipt_date` (any other
+    day of a multi-day receipt, or a neighbouring day, is a conflict), never when
     linked to ANOTHER invoice, never when it IS CODEX's import of our shipment of another day
     / another invoice (its `NCDLIST` = our doc number);
   - **one delivery in two documents** (a priceless DL scan in ks + an invoice in KAR, other

@@ -612,6 +612,7 @@ def test_an_invoice_printing_a_scans_dl_number_another_day_other_goods_is_review
     uploads, new_posts = _scan_then_invoice(
         pg, tmp_path, _one(TWO_DAYS_AGO, "7700000001", "", qty=100),
         _one(YESTERDAY, "7700000001", "2400000001", qty=30))
+    assert len(uploads) == 1
     assert _run_outcome(pg, "inv-1") == "review" and len(new_posts) == 1
 
 
@@ -619,7 +620,19 @@ def test_the_same_with_a_priceless_scan_is_reviewed(pg, tmp_path):
     uploads, new_posts = _scan_then_invoice(
         pg, tmp_path, _one(TWO_DAYS_AGO, "7700000001", "", qty=100, priced=False),
         _one(YESTERDAY, "7700000001", "2400000001", qty=30))
+    assert len(uploads) == 1
     assert _run_outcome(pg, "inv-1") == "review" and len(new_posts) == 1
+
+
+def test_an_invoice_printing_a_scans_dl_number_a_day_later_with_its_goods_is_a_duplicate(
+        pg, tmp_path):
+    """Pin: the LESAFFRE dispatch-date pair — the scan and its invoice share the DL number,
+    a day apart, the SAME goods: a silent duplicate (no review, no second DESADV)."""
+    uploads, new_posts = _scan_then_invoice(
+        pg, tmp_path, _one(TWO_DAYS_AGO, "7700000001", "", qty=100, priced=False),
+        _one(YESTERDAY, "7700000001", "2400000001", qty=100))
+    assert len(uploads) == 1 and new_posts == []
+    assert _run_outcome(pg, "inv-1") == "duplicate"
 
 
 def test_a_dl_scan_printing_an_invoice_rows_dl_number_another_day_other_goods_is_reviewed(

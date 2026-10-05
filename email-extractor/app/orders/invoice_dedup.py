@@ -25,7 +25,8 @@ the delivery in by hand at 13:34, we uploaded a DESADV from the invoice (found i
     EARLIER mail with another total / other items is a corrected version → conflict; a DL scan
     and an invoice that share a number (either order, also the invoice's own number equal to
     the scan's DL number — their sums differ by nature: transport, prices) are a plain
-    duplicate unless of another day AND other goods (a conflict; the early gate defers it). Only the INVOICE number shared while both carry different DL numbers: within
+    duplicate unless of another day AND other goods (a conflict; the early gate defers it).
+    Only the INVOICE number shared while both carry different DL numbers: within
     ONE mail (or on the DL path) a collective invoice's other delivery note — no match, the
     date rules judge it; from another mail it stays a number match (a re-sent or corrected
     version whose DL reference the model read differently). Against a receipt the sum and the
