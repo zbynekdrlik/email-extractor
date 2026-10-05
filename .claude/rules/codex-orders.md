@@ -33,6 +33,7 @@ paths:
   - "email-extractor/tests/test_invoice_dedup_versions.py"
   - "email-extractor/tests/test_invoice_dedup_ambiguity.py"
   - "email-extractor/tests/test_invoice_dedup_edges.py"
+  - "email-extractor/tests/test_invoice_dedup_requeue.py"
   - "email-extractor/app/orders/dl_document.py"
   - "email-extractor/app/orders/dl_message.py"
   - "email-extractor/app/orders/dl_questions.py"
@@ -661,7 +662,8 @@ must never ship a SECOND delivery: the warehouse may already have typed it into 
     shipment of another day / another invoice (its `NCDLIST` = our doc number);
   - **one delivery in two documents** (a priceless DL scan in ks + an invoice in KAR, other
     numbers): the same day with sums that cannot be compared and other content → conflict;
-    across the two sources (a DL scan vs an invoice) ±1 day with the same total / content →
+    across the two sources (a DL scan vs an invoice — also an invoice mail's invoice PDF vs
+    its DL PDF, told apart by the invoice number) ±1 day with the same total / content →
     conflict (LESAFFRE prints the dispatch date) — so a priceless scan of the next day's
     standing order is a review too (that day's invoice still ships, nothing is lost);
   - **CODEX's import of our own shipment** never decides by its DL number (our row with the
@@ -702,9 +704,12 @@ must never ship a SECOND delivery: the warehouse may already have typed it into 
   for a human: a „Re: dobropis" thread may carry a real invoice), or a negative total.
   `ucto@slovnormal.sk` (`delivery_notes_invoice_ignored_senders`) is never claimed.
 - **Board clicks on an invoice mail** go through the run ledger (`dl_invoice_runs`): an answer
-  re-queues it (`requeue_invoice`, + the same-sender sibling release of DL mails AND of the
-  invoice mails whose hold waits on EXACTLY that question — every hold / ask review event
-  records `question_ids`; `_requeue_stuck_invoice_siblings`), „Netýka sa skladu" /
+  re-queues it (`requeue_invoice`, + the same-sender DL sibling release); on EVERY `dl_*`
+  answer — independent of the question owner's own state and of the sender (a question
+  dedupes on its wording / card, not the envelope) — `_requeue_stuck_invoice_siblings`
+  re-queues the invoices whose LATEST run's hold waits on that question once ALL the
+  questions of that hold are answered (the #365 / #462 hold and cannot-create review events
+  record `question_ids`); any other review stays a human's, „Netýka sa skladu" /
   „Neviem" record the outcome there — `messages.processed` / rollup belong to the n8n
   invoice-forward flow. A mail that already has a run is exempt from `invoice_dl_since` (a
   re-stamp never strands an answered invoice); one the claim can never take (too old, flag

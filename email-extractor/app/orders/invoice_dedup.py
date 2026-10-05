@@ -200,13 +200,15 @@ class Duplicate:
                     "je dodávka prijatá, a v prípade potreby ju vybav ručne")
         if self.source == SOURCE_CODEX:
             how = {"number": "rovnaké číslo dokladu",
-                   "date_total": "dátum príjemky a suma"}[self.match]
+                   "date_total": "dátum príjemky a suma",
+                   "import": "import nášho staršieho dodacieho listu"}[self.match]
             text = f"Už prijaté v CODEXe (príjemka {self.ref}, {how})"
         else:
             how = {"number": "rovnaké číslo dokladu",
                    "date_total": "rovnaký dátum dodania a suma",
                    "date_content": "rovnaký dátum dodania a rovnaké položky",
-                   "date": "rovnaký dátum dodania"}[self.match]
+                   "date": "rovnaký dátum dodania",
+                   "near_day": "dátum dodania o deň inak"}[self.match]
             text = f"Už odoslané do ORIONu (dodací list {self.ref}, {how})"
         if self.conflict:
             text += (f" — nie je však isté, že ide o tú istú dodávku ({self.conflict}). Do "
@@ -403,11 +405,12 @@ def _codex_date(receipts: list, invoice: str, day: date | None, total: float | N
                               by_invoice.get(digits(r.invoice_number))))
         if same is None and not factless:
             continue
-        dup = Duplicate(SOURCE_CODEX, "date_total", r.receipt_number,
-                        {"receipt_date": r.receipt_date.isoformat(),
-                         "total": same if same is not None else r.total})
+        dup = Duplicate(SOURCE_CODEX, "import" if factless else "date_total",
+                        r.receipt_number, {"receipt_date": r.receipt_date.isoformat(),
+                                           "total": same if same is not None else r.total})
         if factless:
-            dup.conflict = "príjemka je import nášho staršieho dodacieho listu bez údajov"
+            dup.conflict = (f"príjemka z {r.receipt_date:%d.%m.} je bez údajov o faktúre — "
+                            f"sumu ani položky nemožno porovnať")
         elif _near(day, r.receipt_date, r.receipt_date_to, window=0):
             return dup
         else:
@@ -418,24 +421,29 @@ def _codex_date(receipts: list, invoice: str, day: date | None, total: float | N
 
 
 def _own_date(rows: list[_Row], invoice: str, day: date | None, total: float | None,
-              content: list | None, doc_from_invoice: bool) -> tuple[Duplicate | None, bool]:
+              content: list | None, doc_from_invoice: bool,
+              message_id: str = "") -> tuple[Duplicate | None, bool]:
     """(verdict, deferred) for our rows of the SAME delivery day — and, across a DL scan and an
-    invoice, of the day before / after (only the same total / content, as a conflict)."""
+    invoice, of the day before / after (only the same total / content, as a conflict). Within
+    ONE invoice mail the invoice PDF (an invoice number) and its DL PDF (none) are the two
+    sources too."""
     ambiguous, deferred = None, False
     for row in rows:
         if day is None or row.delivered is None:
             continue
         if row.delivered != day:
-            if row.from_invoice == doc_from_invoice or not _near(day, row.delivered):
+            cross = row.from_invoice != doc_from_invoice or (
+                row.message_id == message_id and bool(row.invoice) != bool(digits(invoice)))
+            if not cross or not _near(day, row.delivered):
                 continue
             # a DL scan and an invoice of one delivery a day apart (dispatch vs delivery date)
             both = total is not None and row.amount is not None
             if (both and _close(total, (row.amount,)) is not None) or (
                     content is not None and row.items and row.items == content):
                 ambiguous = ambiguous or Duplicate(
-                    SOURCE_DESADV, "date", row.doc,
+                    SOURCE_DESADV, "near_day", row.doc,
                     {"delivery_date": row.delivered.isoformat()},
-                    "dodací list a faktúra s dátumom dodania o deň inak")
+                    "dodací list a faktúra tej istej dodávky môžu niesť dátumy o deň inak")
             elif content is None and not both:
                 deferred = True
             continue
@@ -503,7 +511,8 @@ def find_duplicate(conn, receipts, supplier_ean: str, doc: dict, message_id: str
         elif linked is not None:
             conflicts.append(linked)
     if dup is None and not deferred:
-        own, deferred = _own_date(rows, invoice, day, total, content, not invoice_only)
+        own, deferred = _own_date(rows, invoice, day, total, content, not invoice_only,
+                                  message_id)
         found = [d for d in (own, _codex_date(codex, invoice, day, total, rows)) if d]
         plain = [d for d in found if not d.conflict]
         conflicts += [d for d in found if d.conflict]

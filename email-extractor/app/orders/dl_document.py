@@ -391,9 +391,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             supplier_decision.note, "", doc_number, delivery_date, from_addr, subject,
             link=link, cmr=cmr, history_link="" if supplier_qid else hlink), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
-              outcome=supplier_decision.note,
-              detail={"doc_number": doc_number,
-                      "question_ids": [int(supplier_qid)] if supplier_qid else []},
+              outcome=supplier_decision.note, detail={"doc_number": doc_number},
               rollup=False, workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": doc_number, "supplier_name": "",
                "reason": supplier_decision.note}
