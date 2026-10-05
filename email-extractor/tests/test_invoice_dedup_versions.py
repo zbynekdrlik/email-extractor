@@ -173,7 +173,7 @@ def test_a_corrected_invoice_after_the_first_version_shipped_is_reviewed_not_sil
     assert len(uploads) == 1, "a corrected version must never ship a second DESADV"
     assert _run_outcome(pg, "inv-v2") == "review"
     new = posts[shipped_posts:]
-    assert len(new) == 1 and "OPRAVENÁ" in new[0] and "45.00" in new[0]
+    assert len(new) == 1 and "opravená verzia" in new[0] and "45.00" in new[0]
 
 
 def test_an_older_version_met_after_the_newer_shipped_stays_a_silent_duplicate(pg, tmp_path):
@@ -352,7 +352,7 @@ def test_sklad_unknown_on_an_invoice_mail_never_writes_the_invoice_flows_state(p
     assert _run_outcome(pg, "inv-su") == "sklad_unknown"
 
 
-def test_a_board_answer_on_an_invoice_outside_the_claim_window_is_logged(pg, tmp_path,
+def test_a_board_answer_on_an_invoice_outside_the_claim_window_is_alerted(pg, tmp_path,
                                                                           caplog):
     _setup(pg)
     _message(pg, tmp_path, "inv-old", created_at=_ago(days=20))
@@ -364,7 +364,10 @@ def test_a_board_answer_on_an_invoice_outside_the_claim_window_is_logged(pg, tmp
         "RETURNING id", (SUPPLIER_EAN,)).fetchone()[0]
     with caplog.at_level(logging.WARNING, logger="orders.dl_worker"):
         dl_questions.release_for_question(pg, _cfg(tmp_path), qid)
-    assert any("OUTSIDE the claim window" in r.getMessage() for r in caplog.records)
+    assert any("will never take it" in r.getMessage() for r in caplog.records)
+    alert = pg.execute("SELECT body_html FROM pending_alerts WHERE kind = "
+                       "'dl_invoice_stranded'").fetchone()
+    assert alert and "staršia ako 14 dní" in alert[0], "the warehouse is never told"
 
 
 # --- the day's stats ------------------------------------------------------------------------

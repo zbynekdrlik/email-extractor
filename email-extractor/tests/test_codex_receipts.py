@@ -248,10 +248,13 @@ def test_credit_notes_are_split_off_by_subject_body_name_or_header_only():
     msg = {"subject": "Doklady", "combined_text": "Subject: Doklady\n\nBody: v prílohe"}
     assert dl_invoice.split_credit_notes(msg, [inv, cn, named]) == ([inv], None)
     assert dl_invoice.split_credit_notes(msg, [cn]) == ([], dl_invoice.CREDIT_REASON)
+    # only the mail's words say it (round 3): not extracted, but the reason the caller POSTS
     whole = {"subject": "Dobropis č. 25260025", "combined_text": ""}
-    assert dl_invoice.split_credit_notes(whole, [inv])[1] == dl_invoice.CREDIT_REASON
+    assert dl_invoice.split_credit_notes(whole, [inv]) == ([], dl_invoice.MAIL_CREDIT_REASON)
     body = {"subject": "Doklad", "combined_text": "Body: Zasielame dobropis\n\nAttachments:\n"}
-    assert dl_invoice.split_credit_notes(body, [inv])[1] == dl_invoice.CREDIT_REASON
+    assert dl_invoice.split_credit_notes(body, [inv])[1] == dl_invoice.MAIL_CREDIT_REASON
+    assert dl_invoice.split_credit_notes(whole, [cn]) == ([], dl_invoice.CREDIT_REASON), \
+        "the attachment's own header says so — a silent skip"
     in_attachment_text_only = {"subject": "Faktúra", "combined_text":
                                "Body: dobrý deň\n\nAttachments:\n===== f.pdf =====\n"
                                "... riešime dobropisom ..."}
@@ -312,6 +315,9 @@ def test_a_receipt_matches_by_date_within_a_day_and_total_within_tolerance(pg):
     dup = _dup(pg, _doc())
     assert dup and dup.match == "date_total" and dup.ref == "261004409"
     assert "Už prijaté v CODEXe" in dup.reason()
+    assert dup.conflict, "a neighbouring day's receipt proves nothing — a human looks"
+    _push(pg, [_receipt(day=TODAY, total=100.6)], force=True)
+    assert not _dup(pg, _doc()).conflict, "the same day + the same total: the incident"
     _push(pg, [_receipt(day=TODAY - timedelta(days=2), total=100.0)], force=True)
     assert _dup(pg, _doc()) is None, "two days off is another delivery"
     _push(pg, [_receipt(day=TODAY, total=101.01)], force=True)
@@ -365,7 +371,29 @@ def test_our_own_earlier_shipment_matches_by_number_date_total_or_content(pg):
     assert _dup(pg, _doc()) is None, "a priceless row needs the content"
     dup = _dup(pg, _doc(), content=[["8588000000001", 100.0]])
     assert dup.match == "date_content" and "rovnaké položky" in dup.reason()
-    assert _dup(pg, _doc(), content=[["8588000000001", 90.0]]) is None
+    assert not dup.conflict
+    # round 3: the sums cannot be compared (a priceless row) and the content differs (other
+    # units) — maybe the same delivery: never shipped, never silent
+    dup = _dup(pg, _doc(), content=[["8588000000001", 90.0]])
+    assert dup.match == "date" and dup.conflict and "nie je však isté" in dup.reason()
+    pg.execute("DELETE FROM desadv_sent")
+    _sent(pg, "9990001111", "dl-scan", delivery=TODAY, total=60.0,
+          items=[["8588000000001", 90.0]])
+    assert _dup(pg, _doc(), content=[["8588000000001", 100.0]]) is None, \
+        "two known different sums and other goods are another delivery"
+
+
+def test_a_stale_orphan_claim_is_no_shipment(pg):
+    """A claim never confirmed (a crash between the claim and the upload) and older than the
+    claim's stale window: those goods are not in ORION — they must not block another document.
+    A FRESH unconfirmed claim (mid-upload) does."""
+    _push(pg, [_receipt(ean="2000000000555")])
+    pg.execute("INSERT INTO desadv_sent (supplier_ean, doc_number, filename, message_id, "
+               "sent_at, delivery_date, total_amount) VALUES (%s, '9990001111', 'f.txt', "
+               "'dl-x', now() - interval '1 hour', %s, 100.0)", (EAN, TODAY))
+    assert _dup(pg, _doc()) is None
+    pg.execute("UPDATE desadv_sent SET sent_at = now()")
+    assert _dup(pg, _doc()).match == "date_total"
 
 
 def test_only_this_very_documents_own_row_is_left_to_the_claim(pg):
