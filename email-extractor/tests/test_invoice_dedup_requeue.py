@@ -408,3 +408,109 @@ def test_an_expired_question_never_writes_the_invoice_flows_state(pg, tmp_path):
     assert question_alerts.expire_stale(pg, _cfg(tmp_path)) == 1
     assert pg.execute("SELECT processed, proc_status FROM messages WHERE message_id = 'inv-e'"
                       ).fetchone() == (False, None)
+
+
+# --- round 9 --------------------------------------------------------------------------------
+
+def test_closing_the_owner_as_neviem_requeues_the_invoice_waiting_on_it(pg, tmp_path):
+    _setup(pg)
+    _message(pg, tmp_path, "inv-b", created_at=_ago(hours=3))
+    _message(pg, tmp_path, "inv-a", created_at=_ago(hours=2))
+    _push_receipts(tmp_path)
+    doc_a = _lines(YESTERDAY, "4400000002", "2400000002", ["Kvasnice X"])
+    doc_b = _lines(TWO_DAYS_AGO, "4400000001", "2400000001", ["Rožok 50g", "Kvasnice X"])
+    client = FakeClient([doc_a, doc_b], runs=2)
+    client._answers["dl_item"] = [NO_MATCH, ITEM_MATCHED, NO_MATCH]
+    uploads, posts = [], []
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    qid = pg.execute("SELECT id FROM order_questions").fetchone()[0]
+    dl_questions.close_message_sklad_unknown(pg, qid)
+    assert _run_outcome(pg, "inv-b") is None, "the invoice waiting on the closed question"
+
+
+def test_a_requeued_invoice_waits_for_fresh_codex_data_even_without_wait_for_codex(
+        pg, tmp_path, monkeypatch):
+    """`delivery_notes_invoice_wait_for_codex=false` drops the wait for a NEW mail — never the
+    wait of a re-queued one (the warehouse may have typed it in by hand while it was held)."""
+    _setup(pg)
+    _message(pg, tmp_path, "inv-1", created_at=_ago(hours=2))
+    _push_receipts(tmp_path)
+    doc = _lines(YESTERDAY, "4400000001", "2400000001", ["Rožok 50g", "Kvasnice X"])
+    client = FakeClient([doc, doc], runs=2)
+    client._answers["dl_item"] = [ITEM_MATCHED, NO_MATCH] + [ITEM_MATCHED] * 4
+    uploads, posts = [], []
+    assert _tick(pg, tmp_path, client, uploads, posts,
+                 delivery_notes_invoice_wait_for_codex=False) == 1
+    _wire_release(monkeypatch, client, uploads, posts)
+    _answer(pg, tmp_path, "Kvasnice X")
+    assert _tick(pg, tmp_path, client, uploads, posts,
+                 delivery_notes_invoice_wait_for_codex=False) == 0
+    assert uploads == []
+
+
+def test_an_invoice_waits_while_another_document_of_its_mail_still_waits_on_a_question(
+        pg, tmp_path, monkeypatch):
+    """One invoice mail, two documents: A held on its OWN open question Y, B on another mail's
+    X. Answering X must not re-run the mail (A would hold again and re-post); answering Y
+    then re-queues it."""
+    _setup(pg)
+    _message(pg, tmp_path, "inv-x", created_at=_ago(hours=3))
+    _message(pg, tmp_path, "inv-own", created_at=_ago(hours=2))
+    _push_receipts(tmp_path)
+    own = _lines(YESTERDAY, "4400000009", "2400000009", ["Kvasnice X"])
+    doc_a = _lines(TWO_DAYS_AGO, "4400000001", "2400000001",
+                   ["Rožok 50g", "Kvasnice Y"])["documents"][0]
+    doc_b = _lines(YESTERDAY, "4400000002", "2400000002",
+                   ["Rožok 50g", "Kvasnice X"])["documents"][0]
+    doc_b["items"][0].update(quantity=20, totalPrice=10.0)
+    doc_b["documentTotalWithoutVAT"] = 15.0
+    client = FakeClient([own, {"documents": [doc_a, doc_b]}], runs=4)
+    client._answers["dl_item"] = [NO_MATCH, ITEM_MATCHED, NO_MATCH, ITEM_MATCHED, NO_MATCH]
+    uploads, posts = [], []
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    _wire_release(monkeypatch, client, uploads, posts)
+    _answer(pg, tmp_path, "Kvasnice X")
+    assert _run_outcome(pg, "inv-x") == "review", "re-run while document A still waits on Y"
+    _answer(pg, tmp_path, "Kvasnice Y")
+    assert _run_outcome(pg, "inv-x") is None
+
+
+def test_the_plain_dl_path_keeps_asking_a_deduped_line_after_a_ship_without(pg, tmp_path):
+    """A non-flagged supplier's DL whose ask deduped onto another DL's question answered „pošli
+    bez": the DL path behaves as before #485 — the line is asked again for that DL."""
+    from psycopg.types.json import Json
+    from test_dl_worker import SUPPLIER_MATCHED, _attach, _bev_doc, _msg, _snapshot
+    from test_dl_worker import FakeClient as DLClient
+    from test_dl_worker import _cfg as dl_cfg
+    _snapshot(pg)
+    cfg = dl_cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    items = [{"name": "Rožok 50g", "quantity": 10, "unit": "ks", "unitPrice": 0.5,
+              "totalPrice": 5.0, "vatRate": 10},
+             {"name": "Neznámy nápoj XYZ", "quantity": 6, "unit": "ks", "unitPrice": 2.0,
+              "totalPrice": 12.0, "vatRate": 10}]
+
+    def client(number):
+        return DLClient({"dl_documents": [_bev_doc(doc_number=number, items=items)],
+                         "dl_supplier": [SUPPLIER_MATCHED],
+                         "dl_item": [ITEM_MATCHED, NO_MATCH]})
+
+    def upload(cfg, name, content, dir_override=None):
+        uploads.append(name)
+
+    uploads: list = []
+    _msg(pg, mid="dlA")
+    _attach(pg, tmp_path, "dlA")
+    dl_worker.tick(pg, cfg, client=client("0100000060"), upload=upload)
+    _msg(pg, mid="dlB")
+    _attach(pg, tmp_path, "dlB")
+    dl_worker.tick(pg, cfg, client=client("0100000061"), upload=upload)
+    qid = pg.execute("SELECT id FROM order_questions WHERE message_id = 'dlA'").fetchone()[0]
+    pg.execute("UPDATE order_questions SET status = 'answered', answer = %s WHERE id = %s",
+               (Json({"choice": teach.DL_ITEM_SHIP_WITHOUT}), qid))
+    dl_worker.release_for_question(pg, cfg, qid, client=client("0100000060"), upload=upload)
+    dl_worker.tick(pg, cfg, client=client("0100000061"), upload=upload)
+    asked = pg.execute("SELECT count(*) FROM order_questions WHERE message_id = 'dlB' "
+                       "AND status = 'open'").fetchone()[0]
+    assert asked == 1, "the plain DL path changed: dlB shipped without being asked"
