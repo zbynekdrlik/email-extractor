@@ -33,7 +33,7 @@ from test_invoice_dedup_regression import (
     _tick,
 )
 
-from app.orders import dl_snapshot, dl_worker, teach
+from app.orders import dl_questions, dl_snapshot, dl_worker, question_alerts, teach
 
 YESTERDAY = datetime.now(UTC) - timedelta(days=1)
 TWO_DAYS_AGO = datetime.now(UTC) - timedelta(days=2)
@@ -71,6 +71,9 @@ def _answer(pg, tmp_path, wording, choice=ITEM_GTIN, kind="dl_item"):
 
 
 def _ship_all(pg, tmp_path, client, uploads, posts, ticks=4):
+    """The next CODEX push (a re-queued invoice waits for data newer than its re-queue, round
+    8), then the worker's ticks."""
+    _push_receipts(tmp_path)
     for _ in range(ticks):
         _tick(pg, tmp_path, client, uploads, posts)
 
@@ -191,6 +194,8 @@ def test_a_mass_hold_records_its_question_and_is_requeued(pg, tmp_path):
     held = pg.execute("SELECT detail->'question_ids' FROM email_events WHERE message_id = "
                       "'inv-m' AND stage = 'review' AND detail ? 'held'").fetchone()
     assert held and held[0] == [qid[0]]
+    _answer(pg, tmp_path, "Droždie Rekord 1 kg", choice="10", kind="dl_mass")
+    assert _run_outcome(pg, "inv-m") is None, "the answered mass hold was not re-queued"
 
 
 # --- one invoice mail: its invoice PDF and its DL PDF a day apart ---------------------------
@@ -210,3 +215,196 @@ def test_an_invoice_pdf_and_its_dl_pdf_a_day_apart_in_one_mail_are_reviewed(pg, 
     assert len(uploads) == 1, "one delivery shipped twice from one mail"
     conflict = [p for p in posts if "o deň inak" in p]
     assert len(conflict) == 1 and "rovnaký dátum" not in conflict[0]
+
+
+# --- round 8: a re-queued invoice and CODEX's data -------------------------------------------
+
+def test_a_requeued_invoice_waits_for_codex_data_newer_than_the_answer(
+        pg, tmp_path, monkeypatch):
+    """Held on the board; the warehouse types the delivery in by hand AND answers. The
+    re-queued invoice must be judged against a copy newer than the answer — never the old one
+    that cannot contain the hand receipt."""
+    _setup(pg)
+    _message(pg, tmp_path, "inv-1", created_at=_ago(hours=2))
+    _push_receipts(tmp_path)
+    doc = _lines(YESTERDAY, "4400000001", "2400000001", ["Rožok 50g", "Kvasnice X"])
+    client = FakeClient([doc, doc], runs=2)
+    client._answers["dl_item"] = [ITEM_MATCHED, NO_MATCH] + [ITEM_MATCHED] * 4
+    uploads, posts = [], []
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    _wire_release(monkeypatch, client, uploads, posts)
+    _answer(pg, tmp_path, "Kvasnice X")
+    assert _tick(pg, tmp_path, client, uploads, posts) == 0, "judged against the old copy"
+    _push_receipts(tmp_path, [{                       # the next ETL: the hand receipt
+        "receipt_number": "261009009", "supplier_ico": "12345678",
+        "supplier_eans": [SUPPLIER_EAN], "receipt_date": YESTERDAY.date().isoformat(),
+        "dl_numbers": ["999000111"], "total": 10.0}])
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert uploads == [], "the delivery typed in by hand went to ORION a second time"
+    assert _run_outcome(pg, "inv-1") == "duplicate"
+
+
+# --- round 8: a scan in ks and its invoice in KAR a day apart --------------------------------
+
+def _kar_invoice(day, dl, invoice):
+    doc = _one(day, dl, invoice, qty=1, unit_price=50.0)
+    doc["items"][0]["unit"] = "KAR"
+    return {"documents": [doc]}
+
+
+def test_a_ks_scan_then_its_kar_invoice_a_day_apart_never_ship_twice(pg, tmp_path):
+    _setup(pg)
+    _push_receipts(tmp_path)
+    _message(pg, tmp_path, "dl-1", category="dodacie_listy", subject="Dodací list",
+             text="Dodací list", created_at=_ago(hours=3))
+    uploads, posts = [], []
+    client = FakeClient([{"documents": [_one(TWO_DAYS_AGO, "7700000001", "", priced=False)]},
+                         _kar_invoice(YESTERDAY, "4400000001", "2400000001")], runs=2)
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    _message(pg, tmp_path, "inv-1", created_at=_ago(hours=1))
+    _push_receipts(tmp_path)
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert len(uploads) == 1, "the same delivery went to ORION twice"
+    assert _run_outcome(pg, "inv-1") == "review"
+
+
+def test_a_kar_invoice_then_its_ks_scan_a_day_apart_never_ship_twice(pg, tmp_path):
+    _setup(pg)
+    _push_receipts(tmp_path)
+    _message(pg, tmp_path, "inv-1", created_at=_ago(hours=3))
+    uploads, posts = [], []
+    client = FakeClient([_kar_invoice(YESTERDAY, "4400000001", "2400000001"),
+                         {"documents": [_one(TWO_DAYS_AGO, "7700000001", "", priced=False)]}],
+                        runs=2)
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    shipped_posts = len(posts)
+    _message(pg, tmp_path, "dl-1", category="dodacie_listy", subject="Dodací list",
+             text="Dodací list", created_at=_ago(hours=1))
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert len(uploads) == 1, "the same delivery went to ORION twice (DL path)"
+    assert len(posts) - shipped_posts == 1
+
+
+def test_an_invoice_pdf_and_its_dl_pdf_both_read_with_the_invoice_number_are_reviewed(
+        pg, tmp_path):
+    """The invoice prompt asks for the invoice number on EVERY document — a DL PDF read with
+    it must still count as the second source of the same mail."""
+    _setup(pg)
+    _push_receipts(tmp_path)
+    _message(pg, tmp_path, "inv-2pdf", created_at=_ago(hours=1))
+    invoice = _one(YESTERDAY, "4400000001", "2400000001")
+    dl_pdf = _one(TWO_DAYS_AGO, "7700000001", "2400000001", priced=False)
+    uploads, posts = [], []
+    assert _tick(pg, tmp_path, FakeClient([{"documents": [invoice, dl_pdf]}], runs=2),
+                 uploads, posts) == 1
+    assert len(uploads) == 1, "one delivery shipped twice from one mail"
+
+
+# --- round 8: the board ---------------------------------------------------------------------
+
+def test_a_partial_run_whose_held_document_waits_on_another_mails_question_is_requeued(
+        pg, tmp_path, monkeypatch):
+    """One mail, two documents: A ships, B holds on a line whose ask deduped onto another
+    mail's question — the run ends `partial`; the answer still re-queues it (A meets its own
+    claim, B ships)."""
+    _setup(pg)
+    _message(pg, tmp_path, "inv-p", created_at=_ago(hours=3))
+    _message(pg, tmp_path, "inv-own", created_at=_ago(hours=2))
+    _push_receipts(tmp_path)
+    own = _lines(YESTERDAY, "4400000009", "2400000009", ["Kvasnice X"])
+    doc_a = _one(TWO_DAYS_AGO, "4400000001", "2400000001", qty=10)
+    doc_b = _lines(YESTERDAY, "4400000002", "2400000002",
+                   ["Rožok 50g", "Kvasnice X"])["documents"][0]
+    doc_b["items"][0].update(quantity=20, totalPrice=10.0)
+    doc_b["documentTotalWithoutVAT"] = 15.0
+    pair = {"documents": [doc_a, doc_b]}
+    client = FakeClient([own, pair, own, pair], runs=8)
+    client._answers["dl_item"] = [NO_MATCH, ITEM_MATCHED, ITEM_MATCHED, NO_MATCH] + \
+        [ITEM_MATCHED] * 20
+    uploads, posts = [], []
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert _run_outcome(pg, "inv-p") == "partial" and len(uploads) == 1
+    _wire_release(monkeypatch, client, uploads, posts)
+    _answer(pg, tmp_path, "Kvasnice X")
+    assert _run_outcome(pg, "inv-p") is None, "the partial run's held document is stranded"
+
+
+def test_a_ship_without_answer_ships_the_invoice_whose_ask_deduped_onto_it(
+        pg, tmp_path, monkeypatch):
+    """„Nemá kartu — pošli bez tejto položky" on a question of ANOTHER mail: the invoice that
+    waited on it ships without the line — never a fresh question for it."""
+    _setup(pg)
+    _message(pg, tmp_path, "inv-b", created_at=_ago(hours=3))
+    _message(pg, tmp_path, "inv-a", created_at=_ago(hours=2))
+    _push_receipts(tmp_path)
+    doc_a = _lines(YESTERDAY, "4400000002", "2400000002", ["Rožok 50g", "Kvasnice X"])
+    doc_b = _lines(TWO_DAYS_AGO, "4400000001", "2400000001", ["Rožok 50g", "Kvasnice X"])
+    doc_b["documents"][0]["items"][0].update(quantity=30, totalPrice=15.0)
+    doc_b["documents"][0]["documentTotalWithoutVAT"] = 20.0
+    client = FakeClient([doc_a, doc_b, doc_a, doc_b], runs=4)
+    client._answers["dl_item"] = [ITEM_MATCHED, NO_MATCH, ITEM_MATCHED, NO_MATCH] + \
+        [ITEM_MATCHED, NO_MATCH] * 4
+    uploads, posts = [], []
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    _wire_release(monkeypatch, client, uploads, posts)
+    _answer(pg, tmp_path, "Kvasnice X", choice=teach.DL_ITEM_SHIP_WITHOUT)
+    _ship_all(pg, tmp_path, client, uploads, posts)
+    assert len(uploads) == 2, "the invoice that waited on the shared question never shipped"
+    assert pg.execute("SELECT count(*) FROM order_questions WHERE status = 'open'"
+                      ).fetchone()[0] == 0, "the line was asked again"
+
+
+def test_closing_the_owner_as_not_warehouse_requeues_the_invoice_waiting_on_it(
+        pg, tmp_path):
+    _setup(pg)
+    _message(pg, tmp_path, "inv-b", created_at=_ago(hours=3))
+    _message(pg, tmp_path, "inv-a", created_at=_ago(hours=2))
+    _push_receipts(tmp_path)
+    doc_a = _lines(YESTERDAY, "4400000002", "2400000002", ["Kvasnice X"])
+    doc_b = _lines(TWO_DAYS_AGO, "4400000001", "2400000001", ["Rožok 50g", "Kvasnice X"])
+    client = FakeClient([doc_a, doc_b], runs=2)
+    client._answers["dl_item"] = [NO_MATCH, ITEM_MATCHED, NO_MATCH]
+    uploads, posts = [], []
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    qid = pg.execute("SELECT id FROM order_questions").fetchone()[0]
+    dl_questions.close_message_not_warehouse(pg, qid)
+    assert _run_outcome(pg, "inv-b") is None, "the invoice waiting on the closed question"
+
+
+def test_the_owner_waits_while_its_hold_still_waits_on_another_mails_question(
+        pg, tmp_path, monkeypatch):
+    """inv-b owns question Y and its X deduped onto inv-a's X: answering Y must not re-run
+    inv-b (it would hold again and re-post); answering X then re-queues both."""
+    _setup(pg)
+    _message(pg, tmp_path, "inv-b", created_at=_ago(hours=3))
+    _message(pg, tmp_path, "inv-a", created_at=_ago(hours=2))
+    _push_receipts(tmp_path)
+    doc_a = _lines(YESTERDAY, "4400000002", "2400000002", ["Rožok 50g", "Kvasnice X"])
+    doc_b = _lines(TWO_DAYS_AGO, "4400000001", "2400000001",
+                   ["Rožok 50g", "Kvasnice X", "Kvasnice Y"])
+    client = FakeClient([doc_a, doc_b], runs=2)
+    client._answers["dl_item"] = [ITEM_MATCHED, NO_MATCH, ITEM_MATCHED, NO_MATCH, NO_MATCH]
+    uploads, posts = [], []
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    assert _tick(pg, tmp_path, client, uploads, posts) == 1
+    _wire_release(monkeypatch, client, uploads, posts)
+    _answer(pg, tmp_path, "Kvasnice Y")
+    assert _run_outcome(pg, "inv-b") == "review", "re-run while still waiting on X"
+    _answer(pg, tmp_path, "Kvasnice X")
+    assert _run_outcome(pg, "inv-b") is None and _run_outcome(pg, "inv-a") is None
+
+
+def test_an_expired_question_never_writes_the_invoice_flows_state(pg, tmp_path):
+    _setup(pg)
+    _message(pg, tmp_path, "inv-e", created_at=_ago(days=8))
+    pg.execute("INSERT INTO dl_invoice_runs (message_id, outcome) VALUES ('inv-e', 'review')")
+    pg.execute(
+        "INSERT INTO order_questions (message_id, kind, wording, status, customer_ean, "
+        "item_key, created_at) VALUES ('inv-e', 'dl_item', 'Kvasnice X', 'open', %s, "
+        "'kvasnice x', now() - interval '8 days')", (SUPPLIER_EAN,))
+    assert question_alerts.expire_stale(pg, _cfg(tmp_path)) == 1
+    assert pg.execute("SELECT processed, proc_status FROM messages WHERE message_id = 'inv-e'"
+                      ).fetchone() == (False, None)

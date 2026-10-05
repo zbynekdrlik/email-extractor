@@ -230,6 +230,7 @@ def test_an_invoice_held_on_the_board_when_its_supplier_was_stamped_ships_after_
     pg.execute("UPDATE dl_supplier_overrides SET invoice_dl_since = now()")
     _push_receipts(tmp_path)
     dl_questions.release_for_question(pg, _cfg(tmp_path), qid)
+    _push_receipts(tmp_path)          # round 8: a re-queued invoice waits for the next copy
     uploads, posts = [], []
     assert _tick(pg, tmp_path, FakeClient([_doc()]), uploads, posts) == 1
     assert len(uploads) == 1, "the answered, held invoice never ships (stranded)"

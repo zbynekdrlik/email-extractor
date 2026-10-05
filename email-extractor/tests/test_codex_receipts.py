@@ -281,9 +281,9 @@ def test_the_content_signature_reads_card_and_quantity_back_from_the_edi():
         [{"gtin": "8588000000001", "name": "A", "sklad": "1", "cena": "0.5"},
          {"gtin": "8588000000002", "name": "B", "sklad": "1", "cena": "1"}])
     assert desadv_edi.lin_quantities(built.content) == [
-        ("8588000000002", "7.000"), ("8588000000001", "100.000")]
+        ("8588000000002", "7.000", "ks"), ("8588000000001", "100.000", "ks")]
     assert invoice_dedup.signature(built.content) == [
-        ["8588000000001", 100.0], ["8588000000002", 7.0]]
+        ["8588000000001", 100.0, "ks"], ["8588000000002", 7.0, "ks"]]
     assert invoice_dedup.signature("") == []
 
 

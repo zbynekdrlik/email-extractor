@@ -397,6 +397,7 @@ def test_an_invoice_deduped_onto_another_invoices_question_ships_after_the_answe
     pg.execute("UPDATE order_questions SET status = 'answered', answer = %s::jsonb "
                "WHERE id = %s", (json.dumps({"choice": ITEM_GTIN}), q["id"]))
     teach.KINDS["dl_item"].apply(pg, _cfg(tmp_path), q, ITEM_GTIN, "sklad")
+    _push_receipts(tmp_path)          # round 8: a re-queued invoice waits for the next copy
     for _ in range(3):
         _tick(pg, tmp_path, client, uploads, posts)
     assert len(uploads) == 2, "the invoice deduped onto the answered question stays stranded"

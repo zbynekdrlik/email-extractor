@@ -238,7 +238,8 @@ def test_a_receipt_of_another_supplier_never_blocks_an_invoice(pg, tmp_path):
     assert len(uploads) == 1
     row = pg.execute("SELECT doc_number, delivery_date::text, total_amount, invoice_number, "
                      "items FROM desadv_sent").fetchone()
-    assert row == (DL_NUMBER, DELIVERY_ISO, 50.0, INVOICE_NUMBER, [[ITEM_GTIN, 100.0]]), \
+    assert row == (DL_NUMBER, DELIVERY_ISO, 50.0, INVOICE_NUMBER,
+                   [[ITEM_GTIN, 100.0, "ks"]]), \
         "the shipped document's facts are kept for the next document's dedup"
 
 
@@ -577,6 +578,7 @@ def test_a_board_answer_requeues_an_invoice_as_an_invoice(pg, tmp_path):
     client = FakeClient([Exception("Rate limit reached for gpt"), _doc()])
     assert dl_questions.release_for_question(pg, _cfg(tmp_path), qid, client=client) == []
     assert uploads == [] and client.calls == [], "nothing runs inline any more"
+    _push_receipts(tmp_path)          # round 8: a re-queued invoice waits for the next copy
     assert _tick(pg, tmp_path, client, uploads, posts) == 0          # transient → retry later
     assert _run_outcome(pg, "inv-19") is None
     pg.execute("UPDATE dl_invoice_runs SET claimed_at = now() - interval '31 minutes'")
