@@ -648,6 +648,22 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         return {"outcome": "review", "doc_number": built.doc_number,
                "supplier_name": supplier_decision.name, "reason": reason, "held": True}
 
+    # #485: right before the claim, with the EDI built — is one of OUR shipments already these
+    # goods (number / date + total / date + the same [card, quantity] content, which a priceless
+    # DL scan still has)? An invoice checks every row of the supplier (and closes the window
+    # between its early gate and here); a DL only our INVOICE-derived rows (the invoice shipped
+    # first, its DL scan arrives later — LESAFFRE sends both). A plain DL with no invoice-derived
+    # row of its supplier is untouched.
+    twin = dl_invoice.twin_shipped(conn, message, doc, supplier_decision.ean_edi, built,
+                                   invoice_only=not invoice_mode)
+    if twin is not None:
+        if invoice_mode:
+            return dl_invoice.skip_twin(conn, message, doc, twin)
+        dl_report.log_duplicate(conn, message["message_id"], built.doc_number,
+                                supplier_decision.ean_edi, twin=twin.as_dict())
+        return {"outcome": "duplicate", "doc_number": built.doc_number,
+                "supplier_name": supplier_decision.name, "dedup": twin.as_dict()}
+
     claimed, holder = desadv.claim_send_or_identify(
         conn, supplier_decision.ean_edi, built.doc_number, built.filename,
         message_id=message["message_id"])
@@ -680,7 +696,11 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                         message_id=message["message_id"],
                         delivery_date=invoice_dedup.parse_day(delivery_date),
                         total_amount=invoice_dedup.doc_total(doc),
-                        invoice_number=doc.get("invoiceNumber") or "")
+                        # an invoice-derived row ALWAYS carries an invoice number (the DL
+                        # path's twin check keys on it); a DL's stays NULL
+                        invoice_number=((doc.get("invoiceNumber") or built.doc_number)
+                                        if invoice_mode else ""),
+                        items=invoice_dedup.signature(built.content))
 
     upload_name = desadv_edi.upload_name(built.filename)
     upload_dir = getattr(cfg, "orion_dl_dir", upload_mod.DL_DIR)

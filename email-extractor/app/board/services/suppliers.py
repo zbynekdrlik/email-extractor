@@ -13,12 +13,22 @@ from __future__ import annotations
 from ...httpapi_common import _fold, _parse_emails_field
 from ...orders import dl_snapshot, snapshot
 from . import audit
-from .partners import PartnerError, matches, name_and_ean, row
+from .partners import PartnerError, matches, name_and_ean
+from .partners import row as _row
 
 PAGE = 50   # suppliers per page
 
 _COLS = ("orig_ean_edi", "orig_city", "ean_edi", "name", "emails", "city",
-         "retired", "invoice_is_delivery_note")
+         "retired", "invoice_is_delivery_note", "invoice_dl_since")
+
+
+def row(conn, table: str, cols: tuple[str, ...], where: str, params) -> dict | None:
+    """`partners.row` with timestamps as ISO text — the audit before/after dicts are JSON
+    (`invoice_dl_since`, #485), and a Kôš restore writes the text back into the column."""
+    r = _row(conn, table, cols, where, params)
+    if r is None:
+        return None
+    return {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in r.items()}
 
 
 def _dl_counts(conn) -> dict[str, int]:
@@ -57,7 +67,7 @@ def _identity(card: dict | None) -> tuple | None:
         return None
     return (str(card.get("ean_edi") or ""), str(card.get("name") or "").strip(),
             tuple(sorted(str(e).strip().lower() for e in card.get("emails") or [])),
-            str(card.get("city") or "").strip())
+            str(card.get("city") or "").strip(), bool(card.get("retired")))
 
 
 def _effective_card(conn, body: dict) -> dict | None:
@@ -91,8 +101,7 @@ def save_supplier(conn, cfg, actor: str, body: dict) -> dict:
     except snapshot.InvalidCustomer as e:
         raise PartnerError(400, str(e)) from e
     if "invoice_is_delivery_note" in body:
-        conn.execute("UPDATE dl_supplier_overrides SET invoice_is_delivery_note = %s "
-                     "WHERE id = %s", (bool(body["invoice_is_delivery_note"]), rid))
+        dl_snapshot.set_invoice_flag(conn, rid, bool(body["invoice_is_delivery_note"]))
     dl_snapshot.dl_rebuild_from_overrides(conn)
     after = row(conn, "dl_supplier_overrides", _COLS, "id = %s", (rid,))
     if prior is None or prior != _identity(after):

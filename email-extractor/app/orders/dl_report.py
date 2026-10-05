@@ -190,13 +190,22 @@ def post(cfg, html: str, transport=None) -> dict | None:
 
 # --- W7: duplicate documents reported in the DAILY digest, never immediately ------
 
-def log_duplicate(conn, message_id: str, doc_number: str, supplier_ean: str) -> None:
+def log_duplicate(conn, message_id: str, doc_number: str, supplier_ean: str,
+                  twin: dict | None = None) -> None:
+    """W7: a document another message already shipped. `twin` (#485): it was a DIFFERENT
+    number — our earlier shipment of the same goods from an invoice (`invoice_dedup`), named
+    in the event so the digest line can be traced."""
+    outcome = (f"Dodací list {doc_number} od dodávateľa {supplier_ean} už bol odoslaný "
+               "skôr — preskočené (nahlásené v dennom súhrne)")
+    detail: dict = {"doc_number": doc_number, "supplier_ean": supplier_ean}
+    if twin:
+        outcome = (f"Dodací list {doc_number} od dodávateľa {supplier_ean}: tie isté položky už "
+                   f"odišli do ORIONu z faktúry (dodací list {twin.get('ref')}) — preskočené "
+                   "(nahlásené v dennom súhrne)")
+        detail["twin"] = twin
     report.log_event(
-        conn, message_id, stage="duplicate_skip", status="ok",
-        outcome=f"Dodací list {doc_number} od dodávateľa {supplier_ean} už bol odoslaný "
-                "skôr — preskočené (nahlásené v dennom súhrne)",
-        detail={"doc_number": doc_number, "supplier_ean": supplier_ean},
-        rollup=False, workflow=WORKFLOW)
+        conn, message_id, stage="duplicate_skip", status="ok", outcome=outcome,
+        detail=detail, rollup=False, workflow=WORKFLOW)
 
 
 def log_already_shipped_this_run(conn, message_id: str, doc_number: str,

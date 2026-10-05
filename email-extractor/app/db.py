@@ -352,25 +352,30 @@ CODEX_CARD_HISTORY = [
 # #485 (revision 19): the invoice-as-DL duplicate gate. `codex_receipts` is the CODEX supplier
 # receipt (príjemka) headers of the last ~60 days, pushed by `tools/codex_receipts_push.py`
 # (dev2) to `POST /api/codex/receipts`; `app/orders/codex_receipts.py` REPLACES it atomically.
-# One row per (receipt number, supplier IČO): `supplier_ean` = raw.firma.AEDIEAN = our DL
-# supplier EAN, `dl_number` = what the warehouse typed as the DL number (often the INVOICE
-# number), `invoice_number`/`invoice_vs` = the linked booked invoice, `total` = Σ NSUMAP of the
-# receipt lines, `invoice_total` = that invoice's base without VAT. `codex_receipt_syncs` is
-# the append-only push ledger (`source_as_of` = when the ETL loaded sp001 = the data age the
-# fail-closed staleness check measures). `desadv_sent` gains the delivery FACTS of every
-# document we ship (delivery date, total without VAT, the invoice number of an invoice-as-DL)
-# — written right after the claim, so the gate can also match our OWN earlier shipment by
-# date + total when the numbers differ (a DL scan vs the invoice of the same goods).
+# One row per (receipt number, supplier IČO): `supplier_eans` = EVERY raw.firma.AEDIEAN of that
+# IČO (a NICO repeats per branch, some carry conflicting EANs — our DL supplier EAN must find
+# the receipt whichever one it is), `dl_numbers` = what the warehouse typed as the DL number
+# (often the INVOICE number), `invoice_number`/`invoice_vs` = the linked booked invoice,
+# `total` = Σ NSUMAP of the receipt lines, `invoice_total` = that invoice's base without VAT.
+# `codex_receipt_syncs` is the append-only push ledger (`source_as_of` = when the ETL loaded
+# sp001 = the data age the fail-closed checks measure). `desadv_sent` gains the delivery FACTS
+# of every document we ship — delivery date, total without VAT, the invoice number of an
+# invoice-as-DL and `items` (the shipped [card, quantity] pairs read back from the generated
+# EDI, the content signature) — written right after the claim, so a later document of the SAME
+# goods is recognised even when the numbers differ and a DL scan carries no prices.
+# `dl_supplier_overrides.invoice_dl_since` = when the supplier's invoice flag went on: only
+# invoices received since then are taken (turning the flag on never ships a backlog); the cards
+# already flagged get the migration time.
 CODEX_RECEIPTS = [
     """
     CREATE TABLE IF NOT EXISTS codex_receipts (
         receipt_number   TEXT NOT NULL,
         supplier_ico     TEXT NOT NULL DEFAULT '',
-        supplier_ean     TEXT NOT NULL DEFAULT '',
+        supplier_eans    TEXT[] NOT NULL DEFAULT '{}',
         supplier_name    TEXT NOT NULL DEFAULT '',
         receipt_date     DATE NOT NULL,
         receipt_date_to  DATE,
-        dl_number        TEXT NOT NULL DEFAULT '',
+        dl_numbers       TEXT[] NOT NULL DEFAULT '{}',
         invoice_number   TEXT NOT NULL DEFAULT '',
         invoice_vs       TEXT NOT NULL DEFAULT '',
         total            NUMERIC(14, 2),
@@ -380,8 +385,8 @@ CODEX_RECEIPTS = [
         PRIMARY KEY (receipt_number, supplier_ico)
     )
     """,
-    "CREATE INDEX IF NOT EXISTS idx_codex_receipts_supplier "
-    "ON codex_receipts (supplier_ean, receipt_date)",
+    "CREATE INDEX IF NOT EXISTS idx_codex_receipts_supplier_eans "
+    "ON codex_receipts USING gin (supplier_eans)",
     """
     CREATE TABLE IF NOT EXISTS codex_receipt_syncs (
         id            BIGSERIAL PRIMARY KEY,
@@ -394,6 +399,10 @@ CODEX_RECEIPTS = [
     "ALTER TABLE desadv_sent ADD COLUMN IF NOT EXISTS delivery_date DATE",
     "ALTER TABLE desadv_sent ADD COLUMN IF NOT EXISTS total_amount NUMERIC(14, 2)",
     "ALTER TABLE desadv_sent ADD COLUMN IF NOT EXISTS invoice_number TEXT",
+    "ALTER TABLE desadv_sent ADD COLUMN IF NOT EXISTS items JSONB",
+    "ALTER TABLE dl_supplier_overrides ADD COLUMN IF NOT EXISTS invoice_dl_since TIMESTAMPTZ",
+    "UPDATE dl_supplier_overrides SET invoice_dl_since = now() "
+    "WHERE invoice_is_delivery_note AND invoice_dl_since IS NULL",
 ]
 
 

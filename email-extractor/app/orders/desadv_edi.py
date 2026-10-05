@@ -443,6 +443,29 @@ def lin_codes(content: str) -> list[str]:
     return out
 
 
+# Where the quantity sits in a LIN record (`generate()`: code, "0"x14, 23 blanks, "Z", 22 blanks,
+# the 9-char price, "5"x5, then `_format_qty`'s 12 chars).
+LIN_QTY_AT = 96
+LIN_QTY_WIDTH = 12
+
+
+def lin_quantities(content: str) -> list[tuple[str, str]]:
+    """#485: (card code, quantity text) of EVERY LIN record, in file order — the inverse of
+    `generate()`'s layout, split like `lin_codes` (on `\\n` only). The quantity is already in
+    the card's own unit (R84 normalized it), so two documents of the same goods printed in
+    different units read back the same (`invoice_dedup.signature`)."""
+    out: list[tuple[str, str]] = []
+    for raw in str(content or "").split("\n"):
+        line = raw.rstrip("\r")
+        if not line.startswith("LIN"):
+            continue
+        code = line[LIN_CODE_AT:LIN_CODE_AT + GTIN_FIELD_WIDTH].strip()
+        qty = line[LIN_QTY_AT:LIN_QTY_AT + LIN_QTY_WIDTH].strip()
+        if code:
+            out.append((code, qty))
+    return out
+
+
 # --- naming (R89) ----------------------------------------------------------
 
 def generate_stable_doc_number(message_id: str) -> str:

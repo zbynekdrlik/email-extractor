@@ -18,8 +18,7 @@ CATEGORY = "dodacie_listy"
 INVOICE_CATEGORY = "invoices"     # #406: an invoice-as-DL mail
 # #485: the terminal "deliberately not shipped" document outcomes (a W7 duplicate + the
 # invoice gate's credit note / older version) — nothing was sent, nothing needs a human
-_INVOICE_SKIPS = ("duplicate", invoice_dedup.OUTCOME_CREDIT_NOTE,
-                  invoice_dedup.OUTCOME_SUPERSEDED)
+_INVOICE_SKIPS = ("duplicate", invoice_dedup.OUTCOME_CREDIT_NOTE)
 CLAIM_STALE_MINUTES = 30          # R10
 MAX_ATTEMPTS = 5                  # R11 (quarantine)
 SHADOW_DAYS = 3
@@ -192,8 +191,8 @@ def _aggregate_status(documents_out: list[dict]) -> str:
         # actually sent this run.
         return "duplicate"
     # #485: an invoice-as-DL message whose documents are all deliberately NOT shipped (a credit
-    # note, an older version of a re-sent invoice, goods already received) is a clean terminal
-    # skip — its own outcome when there is one kind, else "duplicate" (nothing was sent).
+    # note, goods already received / already sent) is a clean terminal skip — its own outcome
+    # when there is one kind, else "duplicate" (nothing was sent).
     if all(o in _INVOICE_SKIPS for o in outcomes):
         return str(outcomes[0]) if len(set(outcomes)) == 1 else "duplicate"
     # #314: a message whose documents are all terminally non-warehouse (a remembered
@@ -326,6 +325,11 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     # _decode_attachment`) never sets `method` at all, so it is always treated as
     # usable — unaffected by this filter.
     usable_attachments = [a for a in attachments if (a.get("method") or "") != "skipped"]
+    # #485: an invoice mail is read from its TEXT document(s) — an image riding along (a
+    # marketing banner) is no delivery note and would cost a vision call + a false "no DL in
+    # this attachment" review per invoice. A mail of scans only keeps them (`dl_invoice`).
+    if invoice_mode and not shadow:
+        usable_attachments = dl_invoice.invoice_sources(usable_attachments)
 
     documents_out: list[dict] = []
 
@@ -465,10 +469,11 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     # has no such event, so `cmr_mode` stays False there and the corpus is byte-identical.
     cmr_mode = _rescued_as_cmr(conn, message["message_id"])
     # #485: a credit note (dobropis) mailed through the invoice flow is no delivery — caught
-    # here from the subject / text / file names BEFORE any model call; never shipped (the
-    # negative-total check after extraction is `dl_invoice.gate`'s). LIVE only.
+    # here from the subject / the mail's own text (whole mail) or an attachment's file name /
+    # header (that attachment) BEFORE any model call; never shipped (the negative-total check
+    # after extraction is `dl_invoice.gate`'s). LIVE only.
     if invoice_mode and not shadow:
-        credit = dl_invoice.credit_note_reason(message, sources)
+        sources, credit = dl_invoice.split_credit_notes(message, sources)
         if credit:
             dl_invoice.skip_message(conn, message, invoice_dedup.OUTCOME_CREDIT_NOTE, credit)
             this_doc = {"outcome": invoice_dedup.OUTCOME_CREDIT_NOTE, "reason": credit}
@@ -745,7 +750,8 @@ def _sweep_exhausted_invoices(conn, channel_id: int) -> int:
     return len(rows)
 
 
-def _claim_invoice(conn, suppliers: list[dict], cfg=None) -> dict | None:
+def _claim_invoice(conn, suppliers: list[dict], cfg=None,
+                   codex_as_of=None) -> dict | None:
     """Select one unclaimed `category='invoices'` message from a flagged supplier.
 
     Uses the independent `dl_invoice_runs` ledger — NEVER touches `messages.processed`
@@ -758,7 +764,18 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None) -> dict | None:
     #412: stale-reclaim support — also selects messages whose `dl_invoice_runs` row is
     stale (outcome IS NULL, claimed_at older than CLAIM_STALE_MINUTES, attempts <
     MAX_ATTEMPTS). Uses `claim.ledger_claim` for the atomic INSERT-or-reclaim.
-    Returns `attempts` in the message dict."""
+    Returns `attempts` in the message dict.
+
+    #485, three more filters + an order:
+    - only invoices received since the supplier's flag went on (`invoice_dl_since`) — turning
+      it on never ships a backlog the warehouse already entered by hand (2-workday horizon);
+    - with `codex_as_of` (the fresh CODEX receipts' data age, `delivery_notes_invoice_wait_
+      for_codex`): only invoices CODEX's data already covers — a receipt typed by hand the
+      same morning is visible before its invoice is judged (the ETL runs ~14:15 / ~18:00);
+    - our accounting mailbox (`ignored_invoice_senders`) is never an invoice-as-DL;
+    - the NEWEST waiting invoice first: an older version of the same invoice then meets the
+      newer's `desadv_sent` row by number (never a second DESADV, the newest content wins),
+      and a newer mail that ships nothing never blocks the older one."""
     from . import claim
     from .dl_questions import is_scanner_sender
 
@@ -778,6 +795,9 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None) -> dict | None:
     # F9: use cfg.delivery_notes_max_age_days instead of hardcoded 14.
     max_age = int(getattr(cfg, "delivery_notes_max_age_days", 14) or 14) if cfg else 14
     flagged_emails = list(email_map.keys())
+    # #485: per address, the moment its supplier's flag went on (NULL = a pre-#485 card the
+    # migration did not stamp: no lower bound, the old behaviour)
+    since = [email_map[e].get("invoice_dl_since") for e in flagged_emails]
 
     # #412: also select messages with a STALE dl_invoice_runs row (reclaimable).
     # A row blocks selection only when it is finished (outcome IS NOT NULL),
@@ -787,17 +807,21 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None) -> dict | None:
                   m.combined_text, m.body_text, m.has_attachments,
                   m.created_at
              FROM messages m
+             JOIN unnest(%s::text[], %s::timestamptz[]) AS f(addr, since)
+               ON f.addr = lower(m.from_addr)
             WHERE m.category = 'invoices'
               AND m.created_at > now() - make_interval(days => %s)
-              AND lower(m.from_addr) = ANY(%s)
+              AND m.created_at >= COALESCE(f.since, '-infinity'::timestamptz)
+              AND m.created_at <= COALESCE(%s::timestamptz, 'infinity'::timestamptz)
               AND NOT EXISTS (SELECT 1 FROM dl_invoice_runs r
                                WHERE r.message_id = m.message_id
                                  AND (r.outcome IS NOT NULL
                                       OR r.claimed_at > now()
                                          - make_interval(mins => %s)
                                       OR r.attempts >= %s))
-            ORDER BY m.created_at ASC LIMIT 1""",
-        (max_age, flagged_emails, CLAIM_STALE_MINUTES, MAX_ATTEMPTS)).fetchone()
+            ORDER BY m.created_at DESC LIMIT 1""",
+        (flagged_emails, since, max_age, codex_as_of, CLAIM_STALE_MINUTES,
+         MAX_ATTEMPTS)).fetchone()
 
     if not row:
         return None

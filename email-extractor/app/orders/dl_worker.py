@@ -365,10 +365,15 @@ def _tick_invoice(conn, cfg, client, snapshot_id, catalog, suppliers,
     # tell an invoice the warehouse already took in by hand, so NO invoice is claimed: they
     # wait in the queue (no model call, no attempt spent) until the next push; ops is told by
     # `codex_receipts.stale_sweep`. The DL path above never reaches here.
-    if codex_receipts.live(conn) is None:
+    receipts = codex_receipts.live(conn)
+    if receipts is None:
         return 0
-
-    message = _claim_invoice(conn, effective_suppliers, cfg=cfg)
+    # ... and, by default, only invoices CODEX's data already covers (an invoice that arrived
+    # after the last ETL waits for the next push, so a receipt typed by hand the same morning
+    # is visible first — `delivery_notes_invoice_wait_for_codex`)
+    wait = bool(getattr(cfg, "delivery_notes_invoice_wait_for_codex", True)) if cfg else True
+    message = _claim_invoice(conn, effective_suppliers, cfg=cfg,
+                             codex_as_of=receipts.as_of if wait else None)
     if not message:
         return 0
 

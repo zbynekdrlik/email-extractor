@@ -420,6 +420,7 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None, connect=None) -
                 # while no supplier has `invoice_is_delivery_note` on (nothing is held).
                 from . import codex_receipts
                 codex_receipts.stale_sweep(conn, cfg)
+                codex_receipts.missing_supplier_sweep(conn, cfg)
             handled = tick(conn, cfg, pipeline=pipeline)
             handled = static_worker.tick(conn, cfg) or handled
             # #204: shadow ALSO needs a tick (it never claims, but it does need to be

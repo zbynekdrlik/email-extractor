@@ -74,9 +74,10 @@ hdr AS (
          NICO                                            AS nico,
          min(DUCTOBD)                                    AS receipt_date,
          max(DUCTOBD)                                    AS receipt_date_to,
-         max(CAST(NCDLIST AS BIGINT))                    AS dl_number,
-         max(SROK) FILTER (WHERE SDRUHFAKT = 1)          AS srok,
-         max(IPORCFAKT) FILTER (WHERE SDRUHFAKT = 1)     AS iporcfakt,
+         list(DISTINCT TRY_CAST(NCDLIST AS BIGINT))
+           FILTER (WHERE TRY_CAST(NCDLIST AS BIGINT) IS NOT NULL) AS dl_numbers,
+         min(struct_pack(srok := SROK, iporc := IPORCFAKT))
+           FILTER (WHERE SDRUHFAKT = 1 AND IPORCFAKT IS NOT NULL) AS fak_key,
          sum(NSUMAP)                                     AS total,
          count(*)                                        AS line_count,
          min(UDATUMAKT)                                  AS entered_at,
@@ -85,7 +86,10 @@ hdr AS (
    GROUP BY NCD, NICO
 ),
 firm AS (
-  SELECT NICO, max(AEDIEAN) AS ean, max(trim(ANAZORG)) AS name
+  SELECT NICO,
+         list(DISTINCT trim(AEDIEAN))
+           FILTER (WHERE AEDIEAN IS NOT NULL AND trim(AEDIEAN) <> '') AS eans,
+         max(trim(ANAZORG)) AS name
     FROM raw.firma GROUP BY NICO
 ),
 fak AS (
@@ -96,13 +100,14 @@ fak AS (
     FROM raw.faktury WHERE SDRUHFAKT = 1 GROUP BY NICO, SROK, IPORCFAKT
 )
 SELECT h.receipt_number, CAST(CAST(h.nico AS BIGINT) AS VARCHAR) AS supplier_ico,
-       firm.ean AS supplier_ean, firm.name AS supplier_name,
-       h.receipt_date, h.receipt_date_to, h.dl_number,
+       firm.eans AS supplier_eans, firm.name AS supplier_name,
+       h.receipt_date, h.receipt_date_to, h.dl_numbers,
        fak.invoice_number, fak.invoice_vs, h.total, fak.invoice_total,
        h.line_count, h.entered_at, h.sdpoh
   FROM hdr h
   LEFT JOIN firm ON firm.NICO = h.nico
-  LEFT JOIN fak ON fak.NICO = h.nico AND fak.SROK = h.srok AND fak.IPORCFAKT = h.iporcfakt
+  LEFT JOIN fak ON fak.NICO = h.nico AND fak.SROK = h.fak_key.srok
+                AND fak.IPORCFAKT = h.fak_key.iporc
  ORDER BY h.receipt_date, h.receipt_number
 """
 _AS_OF_SQL = ("SELECT max(finished_at) FROM meta.etl_runs "
@@ -143,6 +148,12 @@ def _number(value) -> str:
     s = str(value).strip()
     m = _DIGITS_RE.fullmatch(s)
     return m.group(1) if m else s
+
+
+def _numbers(value) -> list[str]:
+    """A DuckDB LIST (or None / a scalar) of numbers → their distinct texts, sorted."""
+    items = value if isinstance(value, (list, tuple)) else [value]
+    return sorted({n for n in (_number(v) for v in items) if n})
 
 
 def _money(value) -> float | None:
@@ -205,11 +216,12 @@ def build_receipts(rows: list[dict]) -> list[dict]:
         out.append({
             "receipt_number": number,
             "supplier_ico": _number(r.get("supplier_ico")),
-            "supplier_ean": str(r.get("supplier_ean") or "").strip(),
+            "supplier_eans": sorted({str(e).strip() for e in (r.get("supplier_eans") or [])
+                                     if str(e or "").strip()}),
             "supplier_name": str(r.get("supplier_name") or "").strip()[:300],
             "receipt_date": receipt_date,
             "receipt_date_to": _date(r.get("receipt_date_to")) or receipt_date,
-            "dl_number": _number(r.get("dl_number")),
+            "dl_numbers": _numbers(r.get("dl_numbers")),
             "invoice_number": _number(r.get("invoice_number")),
             "invoice_vs": _number(r.get("invoice_vs")),
             "total": _money(r.get("total")),

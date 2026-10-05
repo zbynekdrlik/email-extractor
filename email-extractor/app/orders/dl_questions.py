@@ -7,13 +7,7 @@ import psycopg
 from psycopg.types.json import Json
 
 from . import dl_match, dl_nonwarehouse, dl_report, dl_snapshot, llm, report
-from .dl_message import (
-    CATEGORY,
-    INVOICE_CATEGORY,
-    _as_message,
-    _invoice_supplier_emails,
-    _run_and_finish,
-)
+from .dl_message import CATEGORY, INVOICE_CATEGORY, _as_message, _run_and_finish
 
 log = logging.getLogger("orders.dl_worker")
 
@@ -144,17 +138,16 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
         message = _as_message(msg_row[:7],
                               created_at=msg_row[7] if len(msg_row) > 7 else None)
         assert message is not None  # msg_row proven present above ⟹ _as_message returns a dict
-        # #485: an invoice-as-DL mail (#406) reprocesses AS an invoice — its own extraction
-        # prompt, its own `dl_invoice_runs` ledger (never `messages.processed`, owned by the
-        # n8n invoice flow) and, above all, the duplicate gate. Before, the reprocess ran the
-        # plain DL path and bypassed all three.
-        invoice_mode = len(msg_row) > 8 and msg_row[8] == INVOICE_CATEGORY
-        if invoice_mode:
-            supplier = _invoice_supplier_emails(
-                dl_snapshot.dl_suppliers_for_management(conn)).get(
-                    (message.get("from_addr") or "").strip().lower())
-            if supplier:
-                message["_invoice_supplier"] = supplier
+        # #485: an invoice-as-DL mail (#406) is never reprocessed inline — it goes BACK TO ITS
+        # QUEUE (`requeue_invoice`), so the next DL tick runs it exactly like a fresh invoice:
+        # its own extraction prompt, its `dl_invoice_runs` ledger (never `messages.processed`,
+        # owned by the n8n invoice flow), the fresh-CODEX holds and the duplicate gate. Before,
+        # the reprocess ran the plain DL path and bypassed all of them; reprocessing it inline
+        # as an invoice left a transient model failure stranded on an already finished ledger
+        # row (review 1).
+        if len(msg_row) > 8 and msg_row[8] == INVOICE_CATEGORY:
+            requeue_invoice(conn, message_id)
+            return []
         snapshot_id = dl_snapshot.latest_snapshot_id(conn)
         if not snapshot_id:
             log.warning("release_for_question(%s): no DL catalog snapshot yet — cannot "
@@ -166,7 +159,7 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
             client = llm.from_config(cfg)
         result = _run_and_finish(conn, cfg, client, message, snapshot_id, catalog,
                                  suppliers, upload=upload, post=post,
-                                 list_dirs=list_dirs, invoice_mode=invoice_mode)
+                                 list_dirs=list_dirs)
         # #265 gap 2 (dl_supplier) + #365 (dl_item): a same-sender sibling message whose
         # own `dl_item`/`dl_supplier` question DEDUPED onto THIS message's open question
         # (`ask_generic`'s `ON CONFLICT ... DO NOTHING`) has NO `order_questions` row of its
@@ -187,6 +180,20 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
             if from_addr.strip().lower() not in scanner_senders:
                 _release_stuck_siblings(conn, message_id, from_addr)
         return (result or {}).get("documents", [])
+
+
+def requeue_invoice(conn, message_id: str) -> None:
+    """#485: put an invoice-as-DL mail back on the DL engine's invoice queue — its
+    `dl_invoice_runs` row reopened (no outcome, attempts reset, the claim already stale) so
+    `dl_message._claim_invoice` takes it on the next tick, with every hold and the duplicate
+    gate. A board answer is a human's "try again", so the attempt count starts over."""
+    conn.execute(
+        """INSERT INTO dl_invoice_runs (message_id, claimed_at, attempts)
+           VALUES (%s, now() - interval '1 day', 0)
+           ON CONFLICT (message_id) DO UPDATE
+              SET outcome = NULL, finished_at = NULL, attempts = 0,
+                  claimed_at = now() - interval '1 day'""", (message_id,))
+    log.info("invoice-as-DL %s re-queued after a board answer", message_id)
 
 
 def close_message_not_warehouse(conn, qid: int) -> dict:
