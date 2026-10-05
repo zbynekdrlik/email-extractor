@@ -33,6 +33,7 @@ import logging
 import time
 
 import psycopg
+from psycopg.types.json import Json
 
 from . import claim as claim_mod
 from . import desadv_edi
@@ -293,3 +294,38 @@ def has_confirmed_collision(conn, supplier_ean: str, doc_number: str) -> bool:
         "AND uploaded_at IS NOT NULL AND doc_number != %s", (ean, doc)).fetchall()
     return any(desadv_edi._matches_stable_prefix(filename or "", prefix)
               for (filename,) in rows)
+
+
+def record_facts(conn, supplier_ean: str, doc_number: str, *, message_id: str = "",
+                 delivery_date=None, total_amount: float | None = None,
+                 invoice_number: str = "", items: list | None = None) -> bool:
+    """#485: remember the delivery FACTS of a document this message just claimed — its
+    delivery date, total without VAT, (for an invoice-as-DL) the invoice number and the
+    content signature (`items`: the [card, quantity, unit] lines of its EDI) — on its own
+    `desadv_sent` row, so `invoice_dedup` recognises a LATER document of the same goods by date
+    + total or date + content even when the numbers differ (a DL scan vs the invoice). Written
+    right after the claim, before the upload: a released claim deletes the row with its facts,
+    a confirmed one keeps them.
+    Scoped to the claimant (`message_id`) so a stranger's row is never overwritten. Returns
+    True when a row was updated; never raises (the facts are an extra signal, never a reason
+    to fail a shipment)."""
+    ean, doc = str(supplier_ean or ""), str(doc_number or "")
+    if not ean or not doc:
+        return False
+    try:
+        # its own savepoint: inside the caller's transaction (the claim, `dl_invoice.
+        # claim_unless_twin`) a failure here must never abort — and so roll back — the claim
+        with conn.transaction():
+            row = conn.execute(
+                "UPDATE desadv_sent SET delivery_date = %s, total_amount = %s, "
+                "invoice_number = NULLIF(%s, ''), items = %s "
+                "WHERE supplier_ean = %s AND doc_number = %s "
+                "AND message_id IS NOT DISTINCT FROM NULLIF(%s, '') RETURNING id",
+                (delivery_date, total_amount, str(invoice_number or ""),
+                 Json(items) if items else None, ean, doc,
+                 str(message_id or ""))).fetchone()
+    except Exception:
+        log.exception("desadv.record_facts failed for %s/%s — the shipment continues",
+                      ean, doc)
+        return False
+    return row is not None

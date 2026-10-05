@@ -6,8 +6,8 @@ import logging
 import psycopg
 from psycopg.types.json import Json
 
-from . import dl_match, dl_nonwarehouse, dl_report, dl_snapshot, llm, report
-from .dl_message import CATEGORY, _as_message, _run_and_finish
+from . import dl_invoice, dl_match, dl_nonwarehouse, dl_report, dl_snapshot, llm, report
+from .dl_message import CATEGORY, INVOICE_CATEGORY, _as_message, _run_and_finish
 
 log = logging.getLogger("orders.dl_worker")
 
@@ -121,6 +121,11 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
     if not qrow:
         return []
     message_id, kind = qrow[0], qrow[1]
+    if kind in ("dl_supplier", "dl_item", "dl_mass"):
+        # #485: an invoice whose hold waits on THIS question (fresh or deduped onto it) — of
+        # any sender — goes back to its queue once ALL the questions its hold waits on are
+        # answered, whatever the owner of this question still waits for
+        _requeue_stuck_invoice_siblings(conn, cfg, message_id, qid)
     with psycopg.connect(cfg.pg_dsn) as lock_tx:
         lock_tx.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (message_id,))
         still_open = conn.execute(
@@ -131,13 +136,30 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
             return []
         msg_row = conn.execute(
             """SELECT message_id, subject, from_addr, from_name, combined_text,
-                      body_text, has_attachments, created_at FROM messages
+                      body_text, has_attachments, created_at, category FROM messages
                 WHERE message_id = %s""", (message_id,)).fetchone()
         if not msg_row:
             return []
         message = _as_message(msg_row[:7],
                               created_at=msg_row[7] if len(msg_row) > 7 else None)
         assert message is not None  # msg_row proven present above ⟹ _as_message returns a dict
+        # #485: an invoice-as-DL mail (#406) is never reprocessed inline — it goes BACK TO ITS
+        # QUEUE (`requeue_invoice`), so the next DL tick runs it exactly like a fresh invoice:
+        # its own extraction prompt, its `dl_invoice_runs` ledger (never `messages.processed`,
+        # owned by the n8n invoice flow), the fresh-CODEX holds and the duplicate gate. Before,
+        # the reprocess ran the plain DL path and bypassed all of them; reprocessing it inline
+        # as an invoice left a transient model failure stranded on an already finished ledger
+        # row (review 1).
+        if len(msg_row) > 8 and msg_row[8] == INVOICE_CATEGORY:
+            if not _hold_waits_on_open(conn, message_id):
+                # (a hold still waiting on another mail's open question is re-queued by
+                # THAT answer — `_requeue_stuck_invoice_siblings`)
+                requeue_invoice(conn, message_id, cfg)
+            # a DL mail of the same sender whose ask deduped onto THIS question is released
+            # exactly as for a DL (below) — the invoice going back to its queue must not
+            # strand it
+            _release_siblings_of(conn, cfg, message_id, kind, message.get("from_addr", ""))
+            return []
         snapshot_id = dl_snapshot.latest_snapshot_id(conn)
         if not snapshot_id:
             log.warning("release_for_question(%s): no DL catalog snapshot yet — cannot "
@@ -162,14 +184,157 @@ def release_for_question(conn, cfg, qid: int, client=None, upload=None,
         # re-runs the deterministic rung on the REAL document (now with the just-taught
         # memory), so a false-positive from_addr match never ships a wrong EDI, and the
         # `desadv.claim_send_or_identify` claim still refuses any already-shipped re-upload.
-        if kind in ("dl_supplier", "dl_item", "dl_mass"):
-            from_addr = message.get("from_addr", "")
-            # #399: a scanner sender (tlaciaren@) forwards mail from EVERY supplier,
-            # so from_addr correlation is meaningless — skip the by-addr sibling release.
-            scanner_senders = _scanner_senders(cfg)
-            if from_addr.strip().lower() not in scanner_senders:
-                _release_stuck_siblings(conn, message_id, from_addr)
+        _release_siblings_of(conn, cfg, message_id, kind, message.get("from_addr", ""))
         return (result or {}).get("documents", [])
+
+
+def _release_siblings_of(conn, cfg, message_id: str, kind: str, from_addr: str) -> None:
+    """#265/#365: release the same-sender stuck DL siblings after a `dl_*` answer (the
+    invoice-as-DL siblings are re-queued by the exact question, `_requeue_stuck_invoice_
+    siblings`). #399: a scanner sender (tlaciaren@) forwards mail from EVERY supplier, so
+    from_addr correlation is meaningless — skip the by-addr sibling release."""
+    if kind not in ("dl_supplier", "dl_item", "dl_mass"):
+        return
+    if from_addr.strip().lower() not in _scanner_senders(cfg):
+        _release_stuck_siblings(conn, message_id, from_addr)
+
+
+def _requeue_stuck_invoice_siblings(conn, cfg, exclude_message_id: str, qid: int) -> int:
+    """#485: TARGETED, by the exact question — an invoice-as-DL mail (any sender: a question
+    dedupes on its wording / card / supplier e-mail, not on the envelope) whose LATEST run
+    ended `review` holding on the question just answered (fresh or deduped onto it; every hold
+    / ask review event records `question_ids`), with EVERY question its latest run waits on
+    (any document of the mail) now answered, goes back to the invoice queue (`requeue_invoice`: the gate and the claim keep a
+    re-run safe). Any other review (a money-gate breach, a stale-copy hold, a dedup conflict,
+    …) is a human's and is never re-run nor re-posted. Not the question's own mail (its own
+    path re-queues it), no logged error / age guard / dedup conflict in that run, only mails
+    the claim can still take (`delivery_notes_max_age_days`)."""
+    max_age = int(getattr(cfg, "delivery_notes_max_age_days", 14) or 14) if cfg else 14
+    rows = conn.execute(
+        """SELECT m.message_id FROM dl_invoice_runs r
+             JOIN messages m ON m.message_id = r.message_id
+            WHERE r.outcome IN ('review', 'partial') AND m.category = %s
+              AND m.message_id <> %s
+              AND m.created_at > now() - make_interval(days => %s)
+              AND EXISTS (SELECT 1 FROM email_events h
+                          WHERE h.message_id = m.message_id AND h.stage = 'review'
+                            AND h.ts >= r.claimed_at
+                            AND h.detail->'question_ids' @> jsonb_build_array(%s::int))
+              AND NOT EXISTS (SELECT 1 FROM email_events h2
+                                JOIN jsonb_array_elements_text(
+                                         COALESCE(h2.detail->'question_ids', '[]'))
+                                     AS w(qid) ON true
+                                JOIN order_questions oq ON oq.id = w.qid::int
+                                                       AND oq.status = 'open'
+                               WHERE h2.message_id = m.message_id AND h2.stage = 'review'
+                                 AND h2.ts >= r.claimed_at)
+              AND NOT EXISTS (SELECT 1 FROM email_events e
+                              WHERE e.message_id = m.message_id AND e.ts >= r.claimed_at
+                                AND (e.status IN ('error', 'age_guard')
+                                     OR (e.stage = %s AND e.status = 'review')))
+            ORDER BY m.created_at ASC LIMIT %s""",
+        (INVOICE_CATEGORY, exclude_message_id, max_age, int(qid), dl_invoice.STAGE,
+         _STUCK_SIBLING_LIMIT)).fetchall()
+    for (mid,) in rows:
+        requeue_invoice(conn, mid, cfg)
+    if rows:
+        log.info("invoice-as-DL: re-queued %d same-sender sibling invoice(s) of %s",
+                 len(rows), exclude_message_id)
+    return len(rows)
+
+
+def _hold_waits_on_open(conn, message_id: str) -> bool:
+    """Does this invoice's LATEST run hold on a question that is still open (its own or one
+    of another mail it deduped onto)?"""
+    return conn.execute(
+        """SELECT 1 FROM dl_invoice_runs r
+             JOIN email_events h ON h.message_id = r.message_id AND h.stage = 'review'
+                                AND h.ts >= r.claimed_at
+             JOIN jsonb_array_elements_text(COALESCE(h.detail->'question_ids', '[]'))
+                  AS w(qid) ON true
+             JOIN order_questions oq ON oq.id = w.qid::int AND oq.status = 'open'
+            WHERE r.message_id = %s LIMIT 1""", (message_id,)).fetchone() is not None
+
+
+def requeue_invoice(conn, message_id: str, cfg=None) -> None:
+    """#485: put an invoice-as-DL mail back on the DL engine's invoice queue — its
+    `dl_invoice_runs` row reopened (no outcome, attempts reset, the claim already stale) so
+    `dl_message._claim_invoice` takes it — with every hold and the duplicate gate — once
+    CODEX's data is newer than this re-queue (`requeued_at`: the warehouse may have typed the
+    delivery in by hand while it waited). A board answer is a human's "try again", so the
+    attempt count starts over."""
+    conn.execute(
+        """INSERT INTO dl_invoice_runs (message_id, claimed_at, attempts, requeued_at)
+           VALUES (%s, now() - interval '1 day', 0, now())
+           ON CONFLICT (message_id) DO UPDATE
+              SET outcome = NULL, finished_at = NULL, attempts = 0,
+                  claimed_at = now() - interval '1 day', requeued_at = now()""",
+        (message_id,))
+    log.info("invoice-as-DL %s re-queued after a board answer", message_id)
+    _alert_if_stranded(conn, cfg, message_id)
+
+
+def _alert_if_stranded(conn, cfg, message_id: str) -> None:
+    """A re-queued invoice the claim will never take — older than
+    `delivery_notes_max_age_days`, or its sender no longer on a live supplier card taking
+    invoices (flag switched off, card retired) — must not wait unseen after a human answered
+    for it: one durable alert on the delivery-notes channel (`dl_alerts`, deduped per mail)."""
+    from html import escape
+
+    from . import dl_alerts
+    max_age = int(getattr(cfg, "delivery_notes_max_age_days", 14) or 14) if cfg else 14
+    row = conn.execute(
+        """SELECT m.created_at < now() - make_interval(days => %s),
+                  NOT EXISTS (SELECT 1 FROM dl_supplier_overrides o
+                               WHERE o.invoice_is_delivery_note AND NOT o.retired
+                                 AND o.deleted_at IS NULL
+                                 AND lower(m.from_addr) = ANY(SELECT lower(e)
+                                                                FROM unnest(o.emails) e)),
+                  m.subject, m.from_addr
+             FROM messages m WHERE m.message_id = %s""", (max_age, message_id)).fetchone()
+    if not row or not (row[0] or row[1]):
+        return
+    why = (f"je staršia ako {max_age} dní" if row[0]
+           else "jej dodávateľ už faktúry ako dodacie listy neberie")
+    log.warning("invoice-as-DL %s re-queued but the claim will never take it (%s) — alerting",
+                message_id, why)
+    if dl_alerts.already_pending(conn, "dl_invoice_stranded", message_id):
+        return
+    channel = int(getattr(cfg, "delivery_notes_channel_id", 0) or 0) if cfg else 0
+    dl_alerts.enqueue(
+        conn, channel, "dl_invoice_stranded",
+        f"<b>Faktúra po odpovedi na nástenke sa automaticky NEspracuje</b> ({escape(why)})<br>"
+        f"Od: {escape(str(row[3] or ''))}, predmet: {escape(str(row[2] or ''))}<br>"
+        f"Ak je to dodávka, prijmi ju v CODEXe ručne.", message_id=message_id)
+
+
+def _mark_handled(conn, message_id: str, *, stage: str, status: str, outcome: str,
+                  detail: dict) -> None:
+    """Mark a DL message handled WITHOUT EDI after a terminal board click. #485: an
+    invoice-as-DL mail belongs to the n8n invoice-forward flow — its `messages.processed` /
+    rollup are never ours (#406 F1); its own `dl_invoice_runs` row records the outcome and the
+    event stays non-rollup, exactly like every other invoice-as-DL finish."""
+    row = conn.execute("SELECT category FROM messages WHERE message_id = %s",
+                       (message_id,)).fetchone()
+    invoice = bool(row) and row[0] == INVOICE_CATEGORY
+    if invoice:
+        # the run already finished (as the review that raised the question) — the click is
+        # its final outcome; never re-claimed (the claim takes rows without an outcome only)
+        conn.execute(
+            """INSERT INTO dl_invoice_runs (message_id, outcome, finished_at)
+               VALUES (%s, %s, now())
+               ON CONFLICT (message_id) DO UPDATE
+                  SET outcome = EXCLUDED.outcome, finished_at = now()""",
+            (message_id, stage))
+    else:
+        conn.execute(
+            """UPDATE messages
+                  SET processed = true, processed_at = now(), processed_by = %s,
+                      processing_at = NULL
+                WHERE message_id = %s""", (CATEGORY, message_id))
+    report.log_event(conn, message_id, stage=stage, status=status, outcome=outcome,
+                     detail={**detail, **({"invoice_mode": True} if invoice else {})},
+                     rollup=not invoice, workflow=dl_report.WORKFLOW)
 
 
 def close_message_not_warehouse(conn, qid: int) -> dict:
@@ -215,15 +380,11 @@ def close_message_not_warehouse(conn, qid: int) -> dict:
             WHERE message_id = %s AND kind IN ('dl_item', 'dl_supplier', 'dl_mass')
               AND status = 'open'
             RETURNING id""", ("sklad", message_id)).fetchall()
-    conn.execute(
-        """UPDATE messages
-              SET processed = true, processed_at = now(), processed_by = %s,
-                  processing_at = NULL
-            WHERE message_id = %s""", (CATEGORY, message_id))
-    report.log_event(conn, message_id, stage="not_warehouse", status="not_warehouse",
-                     outcome="netýka sa skladu — vybavené bez EDI (sklad)",
-                     detail={"closed_questions": len(closed)},
-                     rollup=True, workflow=dl_report.WORKFLOW)
+    for (closed_qid,) in closed:
+        _requeue_stuck_invoice_siblings(conn, None, message_id, closed_qid)
+    _mark_handled(conn, message_id, stage="not_warehouse", status="not_warehouse",
+                  outcome="netýka sa skladu — vybavené bez EDI (sklad)",
+                  detail={"closed_questions": len(closed)})
     log.info("DL message %s marked not_warehouse (sklad); %s question(s) closed, no EDI",
              message_id, len(closed))
     return {"closed": len(closed), "message_id": message_id}
@@ -268,16 +429,12 @@ def close_message_sklad_unknown(conn, qid: int) -> dict:
             WHERE message_id = %s AND kind IN ('dl_item', 'dl_supplier', 'dl_mass')
               AND status = 'open'
             RETURNING id""", ("sklad", message_id)).fetchall()
-    conn.execute(
-        """UPDATE messages
-              SET processed = true, processed_at = now(), processed_by = %s,
-                  processing_at = NULL
-            WHERE message_id = %s""", (CATEGORY, message_id))
-    report.log_event(conn, message_id, stage="sklad_unknown", status="review",
-                     outcome="Sklad nevie identifikovať dodací list — odložený na ručné "
-                             "doriešenie (nájdeš ho v dennom súhrne).",
-                     detail={"closed_questions": len(closed)},
-                     rollup=True, workflow=dl_report.WORKFLOW)
+    for (closed_qid,) in closed:
+        _requeue_stuck_invoice_siblings(conn, None, message_id, closed_qid)
+    _mark_handled(conn, message_id, stage="sklad_unknown", status="review",
+                  outcome="Sklad nevie identifikovať dodací list — odložený na ručné "
+                          "doriešenie (nájdeš ho v dennom súhrne).",
+                  detail={"closed_questions": len(closed)})
     log.info("DL message %s deferred (sklad Neviem); %s question(s) closed, no EDI",
              message_id, len(closed))
     return {"closed": len(closed), "message_id": message_id}
@@ -389,8 +546,12 @@ def _release_stuck_siblings(conn, exclude_message_id: str, sender_email: str) ->
               AND NOT EXISTS (SELECT 1 FROM email_events e2
                               WHERE e2.message_id = messages.message_id
                                 AND e2.status = 'age_guard')
+              AND NOT EXISTS (SELECT 1 FROM email_events e3
+                              WHERE e3.message_id = messages.message_id
+                                AND e3.stage = %s)
             ORDER BY created_at ASC LIMIT %s""",
-        (CATEGORY, exclude_message_id, sender_email, _STUCK_SIBLING_LIMIT)).fetchall()
+        (CATEGORY, exclude_message_id, sender_email, dl_invoice.STAGE,
+         _STUCK_SIBLING_LIMIT)).fetchall()
     if not rows:
         return 0
     ids = [r[0] for r in rows]
@@ -566,8 +727,11 @@ def _release_stuck_siblings_by_name(conn, card_ean: str, card_name: str) -> int:
               AND NOT EXISTS (SELECT 1 FROM email_events e2
                               WHERE e2.message_id = messages.message_id
                                 AND e2.status = 'age_guard')
+              AND NOT EXISTS (SELECT 1 FROM email_events e3
+                              WHERE e3.message_id = messages.message_id
+                                AND e3.stage = %s)
             ORDER BY created_at ASC LIMIT %s""",
-        (CATEGORY, _STUCK_SIBLING_CANDIDATE_LIMIT)).fetchall()
+        (CATEGORY, dl_invoice.STAGE, _STUCK_SIBLING_CANDIDATE_LIMIT)).fetchall()
     ids = [mid for (mid, fname) in rows
            if dl_match.supplier_name_key(fname or "") == name_key][:_STUCK_SIBLING_LIMIT]
     if not ids:

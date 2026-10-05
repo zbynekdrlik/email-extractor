@@ -183,6 +183,7 @@ def restore(conn, audit_id: int, by: str = "admin") -> bool:
         raise RestoreError(404, f"audit záznam #{audit_id} neexistuje")
     table_name, row_id, action, before, question_id = row
     qid = question_id if question_id is not None else row_id
+    was_taking_invoices = _takes_invoices(conn, table_name, row_id)
     if action == "delete":
         _refuse_dead_dl_code(conn, table_name, row_id)
         _restore_soft_delete(conn, table_name, row_id, undelete=True)
@@ -207,9 +208,25 @@ def restore(conn, audit_id: int, by: str = "admin") -> bool:
         raise RestoreError(400, f"akciu '{action}' nemožno vrátiť (nezvratná operácia)")
     else:
         raise RestoreError(400, f"akciu '{action}' nevieme vrátiť")
+    if not was_taking_invoices and _takes_invoices(conn, table_name, row_id):
+        # #485: a restore that brings back a supplier card taking its invoices as delivery
+        # notes (an un-delete, or an update reverted to "flag on") restarts the clock exactly
+        # like switching the flag on (`dl_snapshot.set_invoice_flag`) — never the backlog
+        # since the card's old start
+        conn.execute("UPDATE dl_supplier_overrides SET invoice_dl_since = now() "
+                     "WHERE id::text = %s", (str(row_id),))
     record(conn, actor=by, table=table_name, row_id=row_id, action="restore",
            note=f"vrátené z audit #{audit_id}", question_id=question_id)
     return True
+
+
+def _takes_invoices(conn, table_name, row_id) -> bool:
+    """#485: is this a LIVE supplier card that takes its invoices as delivery notes?"""
+    if table_name != "dl_supplier_overrides" or row_id is None:
+        return False
+    return conn.execute(
+        "SELECT 1 FROM dl_supplier_overrides WHERE id::text = %s AND invoice_is_delivery_note "
+        "AND NOT retired AND deleted_at IS NULL", (str(row_id),)).fetchone() is not None
 
 
 def _refuse_dead_dl_code(conn, table_name, row_id) -> None:

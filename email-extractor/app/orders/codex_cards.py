@@ -44,15 +44,14 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from html import escape
-from zoneinfo import ZoneInfo
 
-from . import dl_match
+from . import codex_snapshot, dl_match
 
 log = logging.getLogger("orders.codex_cards")
 
-STALE_HOURS = 30
+STALE_HOURS = codex_snapshot.STALE_HOURS
 # A push carrying fewer than this share of the previous push's codes is refused (a half-loaded
 # ETL snapshot would otherwise turn most real codes "missing" and hold every DL). `force`
 # overrides it for a genuine mass removal.
@@ -70,17 +69,15 @@ SIMILAR_MIN_SCORE = 30.0
 PICK_STREDISKO = 1
 KG_SKLAD = 100
 _REVISION_NAME = "add_codex_stock_cards"
-_LOCAL_TZ = ZoneInfo("Europe/Bratislava")
 _CODE_RE = re.compile(r"(\d+)(?:\.0+)?")
 _UNIT_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(kg|gr|g|ml|l)\b")
 
 
-class ReplaceRefused(Exception):
-    """The push was refused; `status` is the HTTP code the endpoint answers with."""
-
-    def __init__(self, message: str, status: int):
-        super().__init__(message)
-        self.status = status
+# The shared CODEX-snapshot mechanics (#485): the refusal the endpoint maps to an HTTP code,
+# timestamp parsing, the local time label — one copy for the cards and the receipts.
+ReplaceRefused = codex_snapshot.ReplaceRefused
+_ts = codex_snapshot.parse_ts
+_local = codex_snapshot.local_label
 
 
 class CardRefused(Exception):
@@ -128,35 +125,12 @@ def _int(value) -> int:
         return 0
 
 
-def _ts(value) -> datetime | None:
-    """ISO text / datetime → an aware datetime (a naive one is taken as UTC); else None."""
-    if value in (None, ""):
-        return None
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        try:
-            dt = datetime.fromisoformat(str(value))
-        except ValueError:
-            log.warning("codex cards: unparsable timestamp %r ignored", value)
-            return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
-
-
-def _local(dt: datetime | None) -> str:
-    if dt is None:
-        return "?"
-    loc = dt.astimezone(_LOCAL_TZ)
-    return f"{loc.day}.{loc.month}. {loc:%H:%M}"
-
-
 # --- the push: a full, atomic replace ----------------------------------------------------
 
 def _data_as_of(sync: dict) -> datetime:
     """The CODEX data-age anchor: the ETL snapshot time, never later than when the push reached
     us — a future `source_as_of` (a clock/timezone bug in the push) must not pin it fresh."""
-    src, got = sync["source_as_of"], sync["synced_at"]
-    return min(src, got) if src else got
+    return codex_snapshot.data_as_of(sync["source_as_of"], sync["synced_at"])
 
 
 def latest_sync(conn) -> dict | None:
@@ -338,10 +312,9 @@ def load(conn, now: datetime | None = None) -> CodexCards | None:
         if name and name not in bucket:
             bucket.append(name)
     as_of = _data_as_of(sync)
-    now = now or datetime.now(UTC)
     return CodexCards(names={k: tuple(v) for k, v in names.items()}, as_of=as_of,
                       synced_at=sync["synced_at"],
-                      stale=(now - as_of) > timedelta(hours=STALE_HOURS))
+                      stale=codex_snapshot.is_stale(as_of, now))
 
 
 def live_guard(conn, now: datetime | None = None) -> CodexCards | None:
@@ -449,33 +422,22 @@ def freshness(conn, now: datetime | None = None) -> dict:
     if sync is None:
         return meta_for(None)
     as_of = _data_as_of(sync)
-    stale = ((now or datetime.now(UTC)) - as_of) > timedelta(hours=STALE_HOURS)
-    return _meta(as_of, sync["synced_at"], stale, sync["code_count"])
+    return _meta(as_of, sync["synced_at"], codex_snapshot.is_stale(as_of, now),
+                 sync["code_count"])
 
 
 # --- the ops alert for a stopped push -------------------------------------------------------
-
-def _installed_at(conn) -> datetime | None:
-    row = conn.execute("SELECT applied_at FROM schema_version WHERE name = %s",
-                       (_REVISION_NAME,)).fetchone()
-    return row[0] if row else None
-
 
 def stale_sweep(conn, cfg, now: datetime | None = None) -> bool:
     """Enqueue ONE ops alert (the durable `pending_alerts` outbox) when the CODEX list is older
     than `STALE_HOURS` — or never arrived that long after the feature went live (the grace
     right after a deploy, before the first push). Re-reminded at most once per workday
     morning (`dl_alerts.reminder_suppressed`). Returns True when it enqueued."""
-    from . import dl_alerts, report
     now = now or datetime.now(UTC)
     sync = latest_sync(conn)
-    anchor = _data_as_of(sync) if sync else _installed_at(conn)
-    if anchor is None or now - anchor <= timedelta(hours=STALE_HOURS):
-        return False
-    # one dedup key per stale EPISODE (the snapshot it is stuck on): a later episode alerts at
-    # once instead of waiting for the next morning as a "reminder" of an old delivered alert
-    key = f"{ALERT_KEY}:{anchor.isoformat()}"
-    if dl_alerts.reminder_suppressed(conn, cfg, ALERT_KIND, key, now=now):
+    anchor = (_data_as_of(sync) if sync
+              else codex_snapshot.installed_at(conn, _REVISION_NAME))
+    if anchor is None:
         return False
     hours = int((now - anchor).total_seconds() // 3600)
     state = (f"je zastaraný (údaje z CODEXu k {escape(_local(anchor))}, pred {hours} h)"
@@ -485,6 +447,10 @@ def stale_sweep(conn, cfg, now: datetime | None = None) -> bool:
             "nástenka prijme aj kód, ktorý v CODEXe neexistuje, a dodací list či objednávku s "
             "takou kartou CODEX pri importe odmietne. "
             "Skontroluj na dev2 <code>codex-cards-push.timer</code> a codex-bridge ETL.</p>")
-    dl_alerts.enqueue(conn, report.ops_channel(cfg), ALERT_KIND, body, message_id=key)
+    # one dedup key per stale EPISODE (the snapshot it is stuck on): a later episode alerts at
+    # once instead of waiting for the next morning as a "reminder" of an old delivered alert
+    if not codex_snapshot.stale_alert(conn, cfg, kind=ALERT_KIND, key_prefix=ALERT_KEY,
+                                      anchor=anchor, body=body, now=now):
+        return False
     log.warning("CODEX stock-card list %s — ops alert enqueued", "stale" if sync else "missing")
     return True

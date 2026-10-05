@@ -10,11 +10,13 @@ from . import (
     desadv_edi,
     dl_alerts,
     dl_extract,
+    dl_invoice,
     dl_match,
     dl_memory,
     dl_nonwarehouse,
     dl_report,
     dl_snapshot,
+    invoice_dedup,
     report,
     teach,
 )
@@ -105,12 +107,20 @@ def _skip_answered_item_keys(conn, message_id: str) -> set[str]:
     the line stays genuinely unmatched (there is no card for it). A real-card answer stores
     the GTIN as the choice, `close_message_sklad_unknown`/`not_warehouse` store a different
     jsonb shape with no `choice` key at all — neither equals the sentinel, so only a real
-    "pošli bez nej" answer is returned here."""
+    "pošli bez nej" answer is returned here. #485: for an INVOICE mail also a question of
+    ANOTHER mail its hold waited on (its ask deduped onto it — the hold event's
+    `question_ids`); the plain DL path keeps its own questions only."""
     rows = conn.execute(
         """SELECT item_key FROM order_questions
-            WHERE message_id = %s AND kind = 'dl_item' AND status = 'answered'
-              AND answer->>'choice' = %s""",
-        (message_id, teach.DL_ITEM_SHIP_WITHOUT)).fetchall()
+            WHERE kind = 'dl_item' AND status = 'answered' AND answer->>'choice' = %s
+              AND (message_id = %s
+                   OR id IN (SELECT w.qid::int FROM email_events e
+                               JOIN messages m ON m.message_id = e.message_id
+                                              AND m.category = 'invoices',
+                                    jsonb_array_elements_text(
+                                        COALESCE(e.detail->'question_ids', '[]')) AS w(qid)
+                              WHERE e.message_id = %s AND e.stage = 'review'))""",
+        (teach.DL_ITEM_SHIP_WITHOUT, message_id, message_id)).fetchall()
     return {r[0] for r in rows}
 
 
@@ -204,13 +214,15 @@ def _held_reason(held_items: list[dict], codex_held_items: list[dict],
 
 def _ask_pending_lines(conn, message_id: str, supplier_decision, pending_asks: list,
                        catalog: list[dict], catalog_gtins: set[str], codex,
-                       delivery_date: str) -> tuple[list[dict], list[dict]]:
+                       delivery_date: str, asked: list[int] | None = None
+                       ) -> tuple[list[dict], list[dict]]:
     """Raise the deferred dl_item board questions (LIVE path only) and return the lines that
     got a real question — `(held_items, codex_held_items)`: the #365 hold keys on a line having
     a qid (fresh or deduped-onto), never on the raw match verdict; a `codex_missing` line
     (#467) is returned separately for its own hold reason. With a live CODEX guard the
     question offers ONLY cards CODEX has, ranked by the CODEX name too (a card whose OUR name
-    went stale still surfaces first); without one it is the plain R65 shortlist."""
+    went stale still surfaces first); without one it is the plain R65 shortlist. #485:
+    `asked` collects the qids the lines wait on (fresh or deduped onto another mail's)."""
     held: list[dict] = []
     codex_held: list[dict] = []
     for item, recalled, note, conflict_gtins, rule in pending_asks:
@@ -233,15 +245,33 @@ def _ask_pending_lines(conn, message_id: str, supplier_decision, pending_asks: l
                                 keep=codex.has if codex is not None else None)
         if qid is not None:
             (codex_held if rule == "codex_missing" else held).append(item)
+            if asked is not None:
+                asked.append(int(qid))
     return held, codex_held
 
 
 # --- one document (R60-R97) -------------------------------------------------
 
+def _twin_outcome(conn, cfg, message: dict, doc: dict, supplier_decision, built, twin, *,
+                  invoice_mode: bool, post, link: str, hlink: str) -> dict:
+    """#485: the document dict for a document that is already received / shipped. Not provably
+    the same delivery (`twin.conflict`) → a review for a human, nothing ships (either path); an
+    invoice's twin → its own skip; a DL's twin → the W7 duplicate log, naming the invoice."""
+    if twin.conflict:
+        return dl_invoice.review_conflict(conn, cfg, message, doc, twin, post=post, link=link,
+                                          history_link=hlink)
+    if invoice_mode:
+        return dl_invoice.skip_twin(conn, message, doc, twin)
+    dl_report.log_duplicate(conn, message["message_id"], built.doc_number,
+                            supplier_decision.ean_edi, twin=twin.as_dict())
+    return {"outcome": "duplicate", "doc_number": built.doc_number,
+            "supplier_name": supplier_decision.name, "dedup": twin.as_dict()}
+
+
 def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list[dict],
                       suppliers: list[dict], shadow: bool, all_items: list[dict],
                       upload=None, post=None, list_dirs=None,
-                      history_link: str | None = None) -> dict:
+                      history_link: str | None = None, invoice_mode: bool = False) -> dict:
     subject, from_addr = message.get("subject", ""), message.get("from_addr", "")
     doc_number = doc.get("docNumber") or ""
     delivery_date = doc.get("deliveryDate", "")
@@ -269,6 +299,19 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     hlink = history_link
     if hlink is None:
         hlink = "" if shadow else _dl_history_link(conn, cfg, message["message_id"])
+
+    # #485: an invoice-derived document passes the duplicate gate FIRST — a credit note, an
+    # older version of a re-sent invoice, or goods CODEX / our own ledger already has never
+    # raise a board question nor claim (`dl_invoice`, rules in `invoice_dedup`); stale CODEX
+    # receipts hold it (fail-closed). LIVE only. The claimed supplier keys the duplicate check
+    # here; a supplier the match below resolves differently is re-checked after it.
+    gate_ean = ""
+    if invoice_mode and not shadow:
+        gate_ean = str((message.get("_invoice_supplier") or {}).get("ean_edi") or "")
+        skipped = dl_invoice.gate(conn, cfg, message, doc, gate_ean, post=post, link=link,
+                                  history_link=hlink)
+        if skipped is not None:
+            return skipped
 
     if doc.get("status") == "needsReview":
         reason = doc.get("reviewReason") or "Dokument potrebuje kontrolu"
@@ -360,6 +403,15 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
               rollup=False, workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": doc_number, "supplier_name": "",
                "reason": supplier_decision.note}
+
+    if invoice_mode and not shadow and supplier_decision.ean_edi != gate_ean:
+        # #485: the document resolved to another supplier than the one whose flag claimed the
+        # mail (or a reprocess carries no claimed supplier) — its own receipts decide
+        skipped = dl_invoice.gate(conn, cfg, message, doc, supplier_decision.ean_edi,
+                                  duplicate_only=True, post=post, link=link,
+                                  history_link=hlink)
+        if skipped is not None:
+            return skipped
 
     matched_items: list[dict] = []
     decisions: list[tuple[dict, dl_match.Decision]] = []
@@ -479,6 +531,36 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         return _skip_not_warehouse(conn, shadow, message, doc_number,
                                    supplier_decision.name)
 
+    header = {"customerName": supplier_decision.name,
+             "customerEanEdi": supplier_decision.ean_edi}
+    # #262: an informal delivery announcement (mail body text, no printed document)
+    # extracts with NO docNumber at all — synthesize a STABLE identity here, keyed on
+    # the message itself, BEFORE build() ever sees an empty docNumber. This is the
+    # ONLY call site build() has, so its own `extraction_doc_number or
+    # _generate_doc_number(...)` wall-clock fallback (R83) is never reached from the
+    # live worker any more — see `desadv_edi.generate_stable_doc_number()`'s own
+    # docstring for why a wall-clock value is unsafe here (a stale-claim reclaim or
+    # an R17 retry would change the desadv_sent dedup key on every attempt).
+    stable_doc_number = doc_number or desadv_edi.generate_stable_doc_number(
+        message["message_id"])
+    extraction = {"docNumber": stable_doc_number, "deliveryDate": delivery_date}
+    built = desadv_edi.build(header, extraction, matched_items, catalog)
+
+    # #485: with the EDI built (a pure function — built here, BEFORE any board question is
+    # asked) — is this document already received / shipped (`invoice_dedup`: number / same
+    # day + total / same day + the same [card, quantity] goods, which a priceless DL scan
+    # still has)? An invoice is judged against the CODEX receipts and every row of the
+    # supplier; a DL only against our INVOICE-derived rows (the invoice shipped first, its DL
+    # scan arrives later — LESAFFRE sends both). A twin raises no question; a plain DL with no
+    # invoice-derived row of its supplier is untouched. LIVE only. Judged again under the ship
+    # lock right before the claim (`dl_invoice.claim_unless_twin`).
+    if not shadow:
+        twin = dl_invoice.twin_shipped(conn, message, doc, supplier_decision.ean_edi, built,
+                                       invoice_only=not invoice_mode)
+        if twin is not None:
+            return _twin_outcome(conn, cfg, message, doc, supplier_decision, built, twin,
+                                 invoice_mode=invoice_mode, post=post, link=link, hlink=hlink)
+
     # #365: the sklad can answer a dl_item question with "nemá kartu — pošli bez tejto
     # položky"; that skip is recorded on the (now answered) question row and read back here
     # on the message's reprocess, so a deliberately-skipped line is shipped WITHOUT it
@@ -508,10 +590,11 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # excluded from the EDI and the document ships partial exactly as before.
     held_items: list[dict] = []
     codex_held_items: list[dict] = []
+    held_qids: list[int] = []      # #485: the questions a hold waits on (sibling re-queue)
     if not shadow:
         held_items, codex_held_items = _ask_pending_lines(
             conn, message["message_id"], supplier_decision, pending_asks, catalog,
-            catalog_gtins, codex, delivery_date)
+            catalog_gtins, codex, delivery_date, asked=held_qids)
 
     # #462: a MATCHED kg-tracked card whose per-piece mass could not be safely resolved
     # (`decision.mass is None` — `dl_match._mass_kg` refused a guessed value), delivered in
@@ -535,21 +618,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                     delivery_date=delivery_date)
                 if qid is not None:
                     mass_hold_items.append(item)
-
-    header = {"customerName": supplier_decision.name,
-             "customerEanEdi": supplier_decision.ean_edi}
-    # #262: an informal delivery announcement (mail body text, no printed document)
-    # extracts with NO docNumber at all — synthesize a STABLE identity here, keyed on
-    # the message itself, BEFORE build() ever sees an empty docNumber. This is the
-    # ONLY call site build() has, so its own `extraction_doc_number or
-    # _generate_doc_number(...)` wall-clock fallback (R83) is never reached from the
-    # live worker any more — see `desadv_edi.generate_stable_doc_number()`'s own
-    # docstring for why a wall-clock value is unsafe here (a stale-claim reclaim or
-    # an R17 retry would change the desadv_sent dedup key on every attempt).
-    stable_doc_number = doc_number or desadv_edi.generate_stable_doc_number(
-        message["message_id"])
-    extraction = {"docNumber": stable_doc_number, "deliveryDate": delivery_date}
-    built = desadv_edi.build(header, extraction, matched_items, catalog)
+                    held_qids.append(int(qid))
 
     if not built.can_create:
         # #337: name the retired products explicitly in the review, so a document that is
@@ -573,7 +642,8 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             from_addr, subject, link=link, cmr=cmr,
             history_link="" if asked else hlink), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
-              outcome=reason, detail={"doc_number": built.doc_number},
+              outcome=reason, detail={"doc_number": built.doc_number,
+                                      "question_ids": held_qids},
               rollup=False, workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": built.doc_number,
                "supplier_name": supplier_decision.name, "reason": reason}
@@ -620,13 +690,24 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
             subject, link=link, cmr=cmr), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, detail={"doc_number": built.doc_number, "held": True,
-              "held_items": all_held_names}, rollup=False, workflow=dl_report.WORKFLOW)
+              "held_items": all_held_names, "question_ids": held_qids},
+              rollup=False, workflow=dl_report.WORKFLOW)
         return {"outcome": "review", "doc_number": built.doc_number,
                "supplier_name": supplier_decision.name, "reason": reason, "held": True}
 
-    claimed, holder = desadv.claim_send_or_identify(
-        conn, supplier_decision.ean_edi, built.doc_number, built.filename,
-        message_id=message["message_id"])
+    # #485: the twin check again, the claim and the delivery facts on OUR ledger row (date,
+    # total without VAT, the invoice's own number, the [card, quantity, unit] lines) as ONE step
+    # under the supplier's ship lock — a later document of the same goods is recognised even
+    # when its number differs (a DL scan vs its invoice), also one processed at this very moment.
+    twin, claimed, holder = dl_invoice.claim_unless_twin(
+        conn, message, doc, supplier_decision.ean_edi, built, invoice_only=not invoice_mode,
+        facts={"delivery_date": invoice_dedup.parse_day(delivery_date),
+               "total_amount": invoice_dedup.doc_total(doc),
+               "invoice_number": (doc.get("invoiceNumber") or "") if invoice_mode else "",
+               "items": invoice_dedup.signature(built.content)})
+    if twin is not None:
+        return _twin_outcome(conn, cfg, message, doc, supplier_decision, built, twin,
+                             invoice_mode=invoice_mode, post=post, link=link, hlink=hlink)
     if not claimed:
         # #216: a claim refusal has TWO different causes, and only one of them is a
         # genuine W7 duplicate. R17's transient retry re-processes the WHOLE message

@@ -23,6 +23,21 @@ paths:
   - "email-extractor/app/orders/codex_sync_list.py"
   - "email-extractor/app/orders/codex_sync_kos.py"
   - "email-extractor/tests/test_codex_sync.py"
+  - "email-extractor/tools/codex_receipts_push.py"
+  - "email-extractor/app/orders/codex_receipts.py"
+  - "email-extractor/app/orders/invoice_dedup.py"
+  - "email-extractor/app/orders/dl_invoice.py"
+  - "email-extractor/tests/test_codex_receipts.py"
+  - "email-extractor/tests/test_codex_receipts_push.py"
+  - "email-extractor/tests/test_invoice_dedup_regression.py"
+  - "email-extractor/tests/test_invoice_dedup_versions.py"
+  - "email-extractor/tests/test_invoice_dedup_ambiguity.py"
+  - "email-extractor/tests/test_invoice_dedup_edges.py"
+  - "email-extractor/tests/test_invoice_dedup_requeue.py"
+  - "email-extractor/app/orders/dl_document.py"
+  - "email-extractor/app/orders/dl_message.py"
+  - "email-extractor/app/orders/dl_questions.py"
+  - "email-extractor/app/orders/dl_worker.py"
 ---
 
 # CODEX order evidence + the auto-resolve sweep (#342)
@@ -129,6 +144,7 @@ it again:
 |---|---|---|---|
 | `codex_orders_push.py` (#342) | `/home/newlevel/codex-orders-push/` | `codex-orders-push.{service,timer}` (not in git) | 14:40 / 18:25 |
 | `codex_cards_push.py` (#467) | same dir | `email-extractor/tools/systemd/codex-cards-push.{service,timer}` | 14:42 / 18:27 |
+| `codex_receipts_push.py` (#485) | same dir | `email-extractor/tools/systemd/codex-receipts-push.{service,timer}` | 14:50 / 18:35 |
 
 (Re)install after a change: `cp email-extractor/tools/codex_cards_push.py
 /home/newlevel/codex-orders-push/` + `sudo cp email-extractor/tools/systemd/codex-cards-push.*
@@ -610,3 +626,113 @@ ONE ops alert (`pending_alerts` kind `codex_card_sync`). The push tool's journal
   stredisko-4 name, one-push duplicate, recreated card rebound, older snapshot, twin,
   garbled-rename breaker, blocked dedup, would_block, retired-number memory, round trip with a
   duplicate, 409 restore, rollback + error alert. A removal test must push TWICE (two snapshots).
+
+## CODEX receipts + the invoice-as-DL duplicate gate (#485)
+
+An invoice taken as a delivery note (`dl_supplier_overrides.invoice_is_delivery_note`, #406)
+must never ship a SECOND delivery: the warehouse may already have typed it into CODEX by hand
+(incident Zeelandia 9.9. — typed at 13:34, our DESADV from the invoice at 19:27). Pieces:
+
+- **`tools/codex_receipts_push.py`** (dev2, same install as the cards push above; units
+  `codex-receipts-push.{service,timer}` at 14:50 / 18:35, the receipts URL derived from
+  `CODEX_PUSH_URL`): `raw.sp001` purchase receipts (SDPOH 10/12/13/14, own IČO 31697143
+  excluded) of the last 60 days, ONE row per (NCD, NICO) — `NSUMAP` summed, never `NMNOZ`;
+  `dl_numbers` = the distinct `NCDLIST` values (often the INVOICE number the warehouse typed
+  into the DL field); `supplier_eans` = EVERY `raw.firma.AEDIEAN` of the IČO (NICO rows are
+  duplicated in `raw.firma`, a few with different EANs — a list, matched with
+  `supplier_eans @> ARRAY[ean]`); the invoice link via `SDRUHFAKT = 1` + `SROK`/`IPORCFAKT` →
+  `raw.faktury` (`ACFAKTDPH` = supplier invoice number, `AVSYMB`, `NVYMZAK1..4` total). Full
+  replace (`POST /api/codex/receipts`, X-Token; 400 empty, 409 on a > 50 % shrink unless
+  `?force=1`). `source_as_of` = `meta.etl_runs.started_at` of the last ok sp001 load (the load
+  takes ~15 min — a receipt typed during it may be missing; `meta.etl_runs` keeps only the
+  latest run). No ETL time → nothing posted.
+- **Fail-CLOSED** (unlike the cards list, which fails open): `codex_receipts.live()` is None
+  when never pushed, older than 30 h, or without `source_as_of` → `_tick_invoice` claims no
+  invoice at all (no attempt spent); a document already past the claim gets a review
+  (`dl_invoice.STALE_REASON`). `stale_sweep` alerts ops only while some supplier is flagged.
+  With `delivery_notes_invoice_wait_for_codex` (default on) an invoice is claimed only once
+  CODEX's data covers its arrival (`created_at <= as_of`) — a same-morning hand receipt is seen.
+- **The rules** (`invoice_dedup.find_duplicate`; its module docstring is the full spec) give
+  THREE verdicts — provably the same delivery → silent duplicate; maybe the same
+  (`Duplicate.conflict`) → a review on the warehouse channel, never shipped, never silent;
+  provably different → ships. Eleven review rounds shaped them; the cases worth remembering:
+  - a **standing order** (the same goods every day) — our rows match by date only on the SAME
+    day; a CODEX receipt ±1 day matches silently only on its own `receipt_date` (any other
+    day of a multi-day receipt, or a neighbouring day, is a conflict), never when
+    linked to ANOTHER invoice, never when it IS CODEX's import of our shipment of another day
+    / another invoice (its `NCDLIST` = our doc number);
+  - **one delivery in two documents** (a priceless DL scan in ks + an invoice in KAR, other
+    numbers): the same day with sums that cannot be compared and other content → conflict;
+    across the two sources (a DL scan vs an invoice — also two documents of ONE mail) ±1
+    day with the same total, the same goods, or — sums that cannot be compared — the same
+    cards in OTHER UNITS (the signature is `[card, quantity, unit]`; the same goods compare
+    card + quantity only) → conflict (LESAFFRE prints the dispatch date) — so a priceless
+    scan of the next day's standing order is a review too (that day's invoice still ships);
+  - **CODEX's import of our own shipment** never decides by its DL number (our row with the
+    facts does) but its INVOICE link to OUR invoice counts;
+  - a **collective invoice** (one invoice number, several DL numbers): within ONE mail (or on
+    the DL path) no number match against our row (the date rules judge it) — from ANOTHER mail
+    the shared invoice number stays a number match (a resend / corrected version whose DL
+    reference the model read differently, round 5); against a receipt the sum AND the date
+    decide — the same sum within ±1 day → duplicate (LESAFFRE prints another DL number on the
+    invoice than CODEX has), else conflict;
+  - CODEX's import of an **old shipment of ours without facts** (before #485) within ±1 day
+    is a conflict whatever its total (it carries our catalog prices);
+  - a **corrected version** (two INVOICES sharing a number, the later mail with another total
+    / items) → conflict; the early gate (no content yet) defers what only the content can
+    tell;
+  - a **DL scan and an invoice sharing a number** (either order — also the invoice's own
+    number equal to the scan's DL number; their sums differ by nature: transport, prices) — a
+    plain duplicate unless of another day AND other goods (a conflict, deferred at the early
+    gate); on the DL path (`invoice_only`) the conflicts are excluded from the sibling-release
+    queries (no re-run / re-post);
+  - a match with a **stale orphan claim** (unconfirmed past `desadv.CLAIM_STALE_MINUTES`) →
+    conflict (the bytes may or may not be in ORION).
+- **Serialised per supplier**: `dl_invoice.claim_unless_twin` runs the twin check, the claim and
+  `record_facts` in ONE transaction under `pg_advisory_xact_lock('desadv-ship:'+ean)` (twin
+  check also earlier, before any board question); refuses to run inside a caller's
+  transaction (the claim must commit before the upload); `record_facts` has its own savepoint.
+  The race test (`test_two_documents_of_one_delivery_at_the_same_moment_claim_once`) fails on a
+  copy with the lock removed.
+- **Fail-closed coverage**: a flagged supplier whose EAN no receipt carries is invisible to the
+  gate — `_tick_invoice` claims none of its invoices (`covered_eans`), a document resolving to
+  such a supplier is reviewed (`Receipts.covers`), `missing_supplier_sweep` alerts ops; the late
+  check returns a not-shipped review when the copy went stale meanwhile.
+- **A re-queued invoice waits for fresh CODEX data**: `requeue_invoice` stamps
+  `dl_invoice_runs.requeued_at`; the claim needs `requeued_at <= as_of` ALWAYS (even with
+  `delivery_notes_invoice_wait_for_codex=false`, which only concerns new mails) — the
+  warehouse may have typed the held delivery in by hand before answering (the hold text says
+  „NEnahráva do ORIONu"), and only a copy newer than the answer can show it. An invoice is
+  re-queued only when NO question of its latest run (any document of the mail) is open.
+- **Known residual**: a priceless scan missing one of the invoice's lines, a day apart, in
+  other units, is not recognised (four coincidences at once); the shared „pošli bez" skip is
+  invoice-path only (the plain DL path asks a deduped line again, as before #485).
+- **Facts on our own rows**: `desadv.record_facts` (delivery_date, total_amount, items, and
+  `invoice_number` only when the invoice printed one) right after the claim. `invoice_only`
+  (the DL path's twin check) = rows of `invoices`-category mails, never "has an invoice number".
+- **The flag's clock** `invoice_dl_since`: `set_invoice_flag` stamps it when the flag goes on;
+  the claim takes only invoices received since (no backlog). It is NOT an audited column —
+  a Kôš restore or an upsert that brings a flagged card back to life restamps `now()`.
+- **Credit notes** never ship: „dobropis" in an attachment's name / first 300 chars (silent),
+  in the mail's subject/own text when the mail has ONE document (`MAIL_CREDIT_REASON` — posted
+  for a human: a „Re: dobropis" thread may carry a real invoice), or a negative total.
+  `ucto@slovnormal.sk` (`delivery_notes_invoice_ignored_senders`) is never claimed.
+- **Board clicks on an invoice mail** go through the run ledger (`dl_invoice_runs`): an answer
+  re-queues it (`requeue_invoice`, + the same-sender DL sibling release); on EVERY `dl_*`
+  answer — independent of the question owner's own state and of the sender (a question
+  dedupes on its wording / card, not the envelope) — `_requeue_stuck_invoice_siblings`
+  re-queues the invoices (`review` / `partial` runs) whose LATEST run's hold waits on that
+  question once ALL the questions of that hold are answered (the #365 / #462 hold and
+  cannot-create review events record `question_ids`; a close as „Netýka sa skladu" /
+  „Neviem" frees them too; the owner's own re-queue waits while its hold waits on another
+  mail's open question; a „pošli bez" answer of the shared question skips the line for every
+  invoice that waited on it); any other review stays a human's, „Netýka sa skladu" /
+  „Neviem" record the outcome there — `messages.processed` / rollup belong to the n8n
+  invoice-forward flow. A mail that already has a run is exempt from `invoice_dl_since` (a
+  re-stamp never strands an answered invoice); one the claim can never take (too old, flag
+  off) raises a durable `dl_invoice_stranded` alert.
+- **Live check** (read-only): `SELECT count(*), max(receipt_date) FROM codex_receipts` +
+  `SELECT synced_at, source_as_of, row_count FROM codex_receipt_syncs ORDER BY id DESC LIMIT 1`;
+  a dry run of the gate in the container = `find_duplicate(conn, codex_receipts.live(conn),
+  ean, doc, mid, doc_number=…)` per document of the last 30 days (no claim, no upload).
+

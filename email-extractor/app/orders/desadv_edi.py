@@ -443,6 +443,34 @@ def lin_codes(content: str) -> list[str]:
     return out
 
 
+# Where the quantity sits in a LIN record (`generate()`: code, "0"x14, 23 blanks, "Z", 22 blanks,
+# the 9-char price, "5"x5, then `_format_qty`'s 12 chars).
+LIN_QTY_AT = 96
+LIN_QTY_WIDTH = 12
+LIN_UNIT_AT = 108
+LIN_UNIT_WIDTH = 3
+
+
+def lin_quantities(content: str) -> list[tuple[str, str, str]]:
+    """#485: (card code, quantity text, unit text) of EVERY LIN record, in file order — the
+    inverse of `generate()`'s layout, split like `lin_codes` (on `\\n` only). The quantity is
+    as `generate()` wrote it — kg for a kg-tracked card R84 converts, the printed count
+    otherwise — and the unit the item's own text (W11; only the tonne and multipack branches
+    override it, so a per-piece-mass line keeps `ks` beside a kg quantity).
+    `invoice_dedup.signature` documents what that does and does not equate."""
+    out: list[tuple[str, str, str]] = []
+    for raw in str(content or "").split("\n"):
+        line = raw.rstrip("\r")
+        if not line.startswith("LIN"):
+            continue
+        code = line[LIN_CODE_AT:LIN_CODE_AT + GTIN_FIELD_WIDTH].strip()
+        qty = line[LIN_QTY_AT:LIN_QTY_AT + LIN_QTY_WIDTH].strip()
+        unit = line[LIN_UNIT_AT:LIN_UNIT_AT + LIN_UNIT_WIDTH].strip()
+        if code:
+            out.append((code, qty, unit))
+    return out
+
+
 # --- naming (R89) ----------------------------------------------------------
 
 def generate_stable_doc_number(message_id: str) -> str:

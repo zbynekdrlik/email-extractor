@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import logging
 
-from . import dl_alerts, dl_worker
+from . import dl_alerts, dl_invoice, dl_worker, invoice_dedup
 from .pipeline import ASK_THE_WAREHOUSE
 
 log = logging.getLogger("orders.reliability")
@@ -133,16 +133,23 @@ def dl_provenance_stats_for_day(conn, day: str = "",
         (day,)).fetchone()
     runs_n, errors_n = (int(x or 0) for x in run_row)
 
+    # #485: the invoice-as-DL gate's verdicts (`dl_invoice.STAGE` events) — an invoice already
+    # taken in / already shipped, a credit note, a corrected version a human must check
     events_row = conn.execute(
         """SELECT count(*) FILTER (WHERE stage = 'duplicate_skip'),
                   count(*) FILTER (WHERE stage = 'announced_mismatch'),
-                  count(*) FILTER (WHERE stage = 'sklad_unknown')
+                  count(*) FILTER (WHERE stage = 'sklad_unknown'),
+                  count(*) FILTER (WHERE stage = %s AND status = 'duplicate'),
+                  count(*) FILTER (WHERE stage = %s AND status = %s),
+                  count(*) FILTER (WHERE stage = %s AND status = 'review')
              FROM email_events
             WHERE workflow = 'delivery_notes'
               AND to_char(ts, 'YYYY-MM-DD')
                   = coalesce(nullif(%s, ''), to_char(now(), 'YYYY-MM-DD'))""",
-        (day,)).fetchone()
-    dup_n, mismatch_n, sklad_unknown_n = (int(x or 0) for x in events_row)
+        (dl_invoice.STAGE, dl_invoice.STAGE, invoice_dedup.OUTCOME_CREDIT_NOTE,
+         dl_invoice.STAGE, day)).fetchone()
+    (dup_n, mismatch_n, sklad_unknown_n, inv_dup_n, inv_credit_n,
+     inv_conflict_n) = (int(x or 0) for x in events_row)
 
     # #305: each „Neviem"-deferred DL logs one rollup `stage='sklad_unknown'` event, so
     # this is the count of delivery notes the warehouse set aside that day for Marek's
@@ -150,7 +157,9 @@ def dl_provenance_stats_for_day(conn, day: str = "",
     stats = {"day": day or _today(conn), "runs": runs_n, "errors": errors_n,
             "items": items_n, "deterministic": det_n, "llm": llm_n, "review": review_n,
             "duplicates": dup_n, "announced_mismatch": mismatch_n,
-            "sklad_unknown": sklad_unknown_n}
+            "sklad_unknown": sklad_unknown_n,
+            "invoice_duplicates": inv_dup_n, "invoice_credit_notes": inv_credit_n,
+            "invoice_conflicts": inv_conflict_n}
     if include_current_health:
         stats.update(dl_current_health(conn))
     return stats

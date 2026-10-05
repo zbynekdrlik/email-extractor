@@ -108,6 +108,7 @@ from __future__ import annotations
 import logging
 
 from . import (
+    codex_receipts,
     dl_alerts,
     dl_extract,  # noqa: F401 (re-export for dl_worker.dl_extract monkeypatch)
     dl_snapshot,
@@ -360,7 +361,25 @@ def _tick_invoice(conn, cfg, client, snapshot_id, catalog, suppliers,
     channel_id = int(getattr(cfg, "delivery_notes_channel_id", 0) or 0) if cfg else 0
     _sweep_exhausted_invoices(conn, channel_id)
 
-    message = _claim_invoice(conn, effective_suppliers, cfg=cfg)
+    # #485: fail-CLOSED — without a fresh CODEX receipts snapshot the duplicate gate cannot
+    # tell an invoice the warehouse already took in by hand, so NO invoice is claimed: they
+    # wait in the queue (no model call, no attempt spent) until the next push; ops is told by
+    # `codex_receipts.stale_sweep`. The DL path above never reaches here.
+    receipts = codex_receipts.live(conn)
+    if receipts is None:
+        return 0
+    # ... and, by default, only invoices CODEX's data already covers (an invoice that arrived
+    # after the last ETL waits for the next push, so a receipt typed by hand the same morning
+    # is visible first — `delivery_notes_invoice_wait_for_codex`)
+    wait = bool(getattr(cfg, "delivery_notes_invoice_wait_for_codex", True)) if cfg else True
+    # ... and only for flagged suppliers some receipt carries: one whose EAN no CODEX receipt
+    # has is invisible to the gate — its invoices wait too (`missing_supplier_sweep` alerts)
+    covered = codex_receipts.covered_eans(conn)
+    judged = [s for s in effective_suppliers
+              if not s.get("invoice_is_delivery_note") or str(s.get("ean_edi") or "") in covered]
+    message = _claim_invoice(conn, judged, cfg=cfg,
+                             codex_as_of=receipts.as_of if wait else None,
+                             requeue_as_of=receipts.as_of)
     if not message:
         return 0
 

@@ -1,5 +1,5 @@
 name: Email OCR Extractor
-version: "0.9.177"
+version: "0.9.178"
 slug: email_extractor
 description: Reads an IMAP mailbox, OCR-extracts the body + all attachments, and writes Postgres for n8n. Bundles its own Postgres on /data (leave pg_dsn empty, set pg_password).
 url: https://github.com/zbynekdrlik/email-extractor
@@ -81,6 +81,8 @@ options:
   delivery_notes_shadow_days: 3
   delivery_notes_max_age_days: 14
   delivery_notes_scanner_senders: ""
+  delivery_notes_invoice_ignored_senders: "ucto@slovnormal.sk"
+  delivery_notes_invoice_wait_for_codex: true
   dl_catalog_gid: ""
   question_stale_working_days: 2
   question_escalate_working_days: 4
@@ -155,6 +157,12 @@ schema:
   delivery_notes_shadow_days: int?
   delivery_notes_max_age_days: int?
   delivery_notes_scanner_senders: str?
+  # #485: addresses whose mail is never taken as an invoice-as-DL (our accounting mailbox
+  # forwarding supplier invoices). Comma-separated, default "ucto@slovnormal.sk".
+  delivery_notes_invoice_ignored_senders: str?
+  # #485: take an invoice as a DL only once the CODEX receipts' data covers its arrival
+  # (default true; false = at once, only the 30 h staleness rule holds it).
+  delivery_notes_invoice_wait_for_codex: bool?
   dl_catalog_gid: str?
   question_stale_working_days: int?
   question_escalate_working_days: int?

@@ -352,11 +352,7 @@ def register(app: Flask, deps: Deps) -> None:
                 # explicitly present in the body — a card-editor save that doesn't send
                 # the key must not silently clear an existing flag (F3, review finding).
                 if "invoice_is_delivery_note" in body:
-                    c.execute(
-                        """UPDATE dl_supplier_overrides
-                              SET invoice_is_delivery_note = %s
-                            WHERE id = %s""",
-                        (bool(body["invoice_is_delivery_note"]), rid))
+                    dl_snapshot.set_invoice_flag(c, rid, bool(body["invoice_is_delivery_note"]))
                 dl_snapshot.dl_rebuild_from_overrides(c)
                 # #322 + #323: a newly-added/edited CODEX card retro-releases stuck DL
                 # messages (no nástenka answer needed). Three rungs, all reusing the #265

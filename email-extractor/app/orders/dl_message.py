@@ -6,7 +6,7 @@ import re
 from datetime import UTC, datetime
 
 from .. import store
-from . import dl_extract, dl_report, dl_snapshot, report, worker
+from . import dl_extract, dl_invoice, dl_report, dl_snapshot, invoice_dedup, report, worker
 from .dl_correction import _correction_review_reason, _looks_like_correction, _mail_body_only
 from .dl_document import _process_document
 from .dl_events import _dl_history_link, _event, _flag_attachment, _post
@@ -15,6 +15,10 @@ from .dl_retry import _check_retry, _RetryLater
 log = logging.getLogger("orders.dl_worker")
 
 CATEGORY = "dodacie_listy"
+INVOICE_CATEGORY = "invoices"     # #406: an invoice-as-DL mail
+# #485: the terminal "deliberately not shipped" document outcomes (a W7 duplicate + the
+# invoice gate's credit note / older version) — nothing was sent, nothing needs a human
+_INVOICE_SKIPS = ("duplicate", invoice_dedup.OUTCOME_CREDIT_NOTE)
 CLAIM_STALE_MINUTES = 30          # R10
 MAX_ATTEMPTS = 5                  # R11 (quarantine)
 SHADOW_DAYS = 3
@@ -186,6 +190,11 @@ def _aggregate_status(documents_out: list[dict]) -> str:
         # see the retry/idempotency note above) is not a clean "ok" — nothing was
         # actually sent this run.
         return "duplicate"
+    # #485: an invoice-as-DL message whose documents are all deliberately NOT shipped (a credit
+    # note, goods already received / already sent) is a clean terminal skip — its own outcome
+    # when there is one kind, else "duplicate" (nothing was sent).
+    if all(o in _INVOICE_SKIPS for o in outcomes):
+        return str(outcomes[0]) if len(set(outcomes)) == 1 else "duplicate"
     # #314: a message whose documents are all terminally non-warehouse (a remembered
     # non-warehouse supplier, short-circuited before any question/upload) is a CLEAN
     # terminal skip — never "review" (nothing needs a human) and never "ok" (nothing
@@ -194,7 +203,7 @@ def _aggregate_status(documents_out: list[dict]) -> str:
     # counts it exactly like a hand-marked "netýka sa skladu". A mixed message (a real
     # shipment alongside a skip — only possible for a multi-supplier mail, not the single-
     # supplier norm) falls through to the ok/partial branches so the shipment still counts.
-    if (all(o in ("not_warehouse", "duplicate") for o in outcomes)
+    if (all(o in ("not_warehouse", *_INVOICE_SKIPS) for o in outcomes)
             and "not_warehouse" in outcomes):
         return "not_warehouse"
     # #314 adversarial-review finding: a mixed message (an auto-skipped not_warehouse doc
@@ -202,7 +211,7 @@ def _aggregate_status(documents_out: list[dict]) -> str:
     # wins so the digest and every proc_status='review'-keyed sweep still see the human
     # work. `not_warehouse` is added to the review branch's tuple (the all-nw branch above
     # still fires first for a purely non-warehouse message).
-    if (all(o in ("review", "duplicate", "not_warehouse") for o in outcomes)
+    if (all(o in ("review", "not_warehouse", *_INVOICE_SKIPS) for o in outcomes)
             and "review" in outcomes):
         return "review"
     if any(o == "partial" for o in outcomes) or ("review" in outcomes and
@@ -299,7 +308,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
             # copies the LAST rollup) — this is CORRECT: it keeps the message visible on
             # the dashboard's review list. The event row is the sole exclusion key.
             _event(conn, shadow, mid, stage="review", status="age_guard",
-                  outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
+                  outcome=reason, rollup=not invoice_mode, workflow=dl_report.WORKFLOW)
             return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
                    "documents": [{"outcome": "review", "reason": reason,
                                   "over_age_cutoff": True}], "items": []}
@@ -316,6 +325,11 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     # _decode_attachment`) never sets `method` at all, so it is always treated as
     # usable — unaffected by this filter.
     usable_attachments = [a for a in attachments if (a.get("method") or "") != "skipped"]
+    # #485: an invoice mail is read from its TEXT document(s) — an image riding along (a
+    # marketing banner) is no delivery note and would cost a vision call + a false "no DL in
+    # this attachment" review per invoice. A mail of scans only keeps them (`dl_invoice`).
+    if invoice_mode and not shadow:
+        usable_attachments = dl_invoice.invoice_sources(usable_attachments)
 
     documents_out: list[dict] = []
 
@@ -404,7 +418,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
             reason, from_addr=message.get("from_addr", ""),
             subject=message.get("subject", ""), link=link, history_link=hlink), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
-              outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
+              outcome=reason, rollup=not invoice_mode, workflow=dl_report.WORKFLOW)
         return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
                "documents": [{"outcome": "review", "reason": reason}], "items": []}
 
@@ -431,7 +445,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
             reason, from_addr=message.get("from_addr", ""),
             subject=message.get("subject", ""), link=link, history_link=hlink), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
-              outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
+              outcome=reason, rollup=not invoice_mode, workflow=dl_report.WORKFLOW)
         # #297 review finding: merge with `documents_out` (never overwrite it) — it
         # may already hold empty-spreadsheet review flags from earlier in this
         # function (reachable when a message has an unreadable/empty .xls attachment
@@ -454,6 +468,25 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     # (claim, shadow peek, release_for_question) is covered uniformly — a corpus/eval message
     # has no such event, so `cmr_mode` stays False there and the corpus is byte-identical.
     cmr_mode = _rescued_as_cmr(conn, message["message_id"])
+    # #485: a credit note (dobropis) mailed through the invoice flow is no delivery — caught
+    # here from the subject / the mail's own text (whole mail) or an attachment's file name /
+    # header (that attachment) BEFORE any model call; never shipped (the negative-total check
+    # after extraction is `dl_invoice.gate`'s). LIVE only.
+    if invoice_mode and not shadow:
+        sources, credit = dl_invoice.split_credit_notes(message, sources)
+        if credit:
+            if credit == dl_invoice.MAIL_CREDIT_REASON:
+                # only the mail's words said „dobropis" — a human sees it (a real invoice in
+                # a „Re: dobropis" thread must never vanish silently)
+                _post(cfg, shadow, lambda: dl_report.build_review(
+                    credit, from_addr=message.get("from_addr", ""),
+                    subject=message.get("subject", ""), link=link, history_link=hlink),
+                    post=post)
+            dl_invoice.skip_message(conn, message, invoice_dedup.OUTCOME_CREDIT_NOTE, credit)
+            this_doc = {"outcome": invoice_dedup.OUTCOME_CREDIT_NOTE, "reason": credit}
+            return {"kind": "dl", "dl_snapshot_id": snapshot_id,
+                   "status": _aggregate_status(documents_out + [this_doc]),
+                   "documents": documents_out + [this_doc], "items": []}
     extraction = dl_extract.extract_email(client, sources,
                                             invoice_mode=invoice_mode, cmr_mode=cmr_mode)
 
@@ -488,7 +521,8 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                                                 suppliers, shadow, all_items,
                                                 upload=upload, post=post,
                                                 history_link=hlink,
-                                                list_dirs=list_dirs))
+                                                list_dirs=list_dirs,
+                                                invoice_mode=invoice_mode))
 
     if not documents_out:
         # #258: the text of the failure must say where it actually looked — a text-
@@ -501,7 +535,7 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
             reason, from_addr=message.get("from_addr", ""),
             subject=message.get("subject", ""), link=link, history_link=hlink), post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
-              outcome=reason, rollup=True, workflow=dl_report.WORKFLOW)
+              outcome=reason, rollup=not invoice_mode, workflow=dl_report.WORKFLOW)
         documents_out.append({"outcome": "review", "reason": reason})
     else:
         # #238: a UNIVERSAL, supplier-format-independent completeness check —
@@ -687,6 +721,18 @@ def _invoice_supplier_emails(suppliers: list[dict]) -> dict[str, dict]:
     return result
 
 
+DEFAULT_IGNORED_INVOICE_SENDERS = "ucto@slovnormal.sk"
+
+
+def ignored_invoice_senders(cfg) -> set[str]:
+    """#485: addresses whose mail is never an invoice-as-DL (`delivery_notes_invoice_ignored_
+    senders`, default our accounting mailbox `ucto@slovnormal.sk`) — lowercased."""
+    raw = str(getattr(cfg, "delivery_notes_invoice_ignored_senders",
+                      DEFAULT_IGNORED_INVOICE_SENDERS) if cfg is not None
+              else DEFAULT_IGNORED_INVOICE_SENDERS)
+    return {a.strip().lower() for a in (raw or "").split(",") if a.strip()}
+
+
 def _sweep_exhausted_invoices(conn, channel_id: int) -> int:
     """Park any dl_invoice_runs rows that exhausted MAX_ATTEMPTS without finishing.
 
@@ -711,7 +757,8 @@ def _sweep_exhausted_invoices(conn, channel_id: int) -> int:
     return len(rows)
 
 
-def _claim_invoice(conn, suppliers: list[dict], cfg=None) -> dict | None:
+def _claim_invoice(conn, suppliers: list[dict], cfg=None,
+                   codex_as_of=None, requeue_as_of=None) -> dict | None:
     """Select one unclaimed `category='invoices'` message from a flagged supplier.
 
     Uses the independent `dl_invoice_runs` ledger — NEVER touches `messages.processed`
@@ -724,7 +771,26 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None) -> dict | None:
     #412: stale-reclaim support — also selects messages whose `dl_invoice_runs` row is
     stale (outcome IS NULL, claimed_at older than CLAIM_STALE_MINUTES, attempts <
     MAX_ATTEMPTS). Uses `claim.ledger_claim` for the atomic INSERT-or-reclaim.
-    Returns `attempts` in the message dict."""
+    Returns `attempts` in the message dict.
+
+    #485, three more filters + an order:
+    - only invoices received since the supplier's flag went on (`invoice_dl_since`) — turning
+      it on never ships a backlog the warehouse already entered by hand (2-workday horizon);
+      a mail that already has a run (claimed before, re-queued by a board answer) is no
+      backlog and is exempt — a re-stamp (deploy, flag toggle, revived card) must not strand
+      an invoice a human just answered for;
+    - with `codex_as_of` (the fresh CODEX receipts' data age, `delivery_notes_invoice_wait_
+      for_codex`): only invoices CODEX's data already covers — a receipt typed by hand the
+      same morning is visible before its invoice is judged (the ETL runs ~14:15 / ~18:00); a
+      re-queued invoice (a board answer) waits for data newer than the re-queue
+      (`dl_invoice_runs.requeued_at` vs `requeue_as_of` — ALWAYS, whatever `wait_for_codex`
+      says: the warehouse may have typed the held delivery in by hand meanwhile);
+    - our accounting mailbox (`ignored_invoice_senders`) is never an invoice-as-DL;
+    - the NEWEST waiting invoice first: when two versions WAIT together, the newest ships and
+      the older then meets its `desadv_sent` row by number (never a second DESADV); a newer
+      mail that ships nothing never blocks the older one. A newer version arriving AFTER the
+      older shipped is a conflict for a human (`invoice_dedup`), never a silent second
+      upload."""
     from . import claim
     from .dl_questions import is_scanner_sender
 
@@ -732,10 +798,11 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None) -> dict | None:
     if not email_map:
         return None
 
-    # F4: strip scanner senders from the match set
-    if cfg:
-        email_map = {e: s for e, s in email_map.items()
-                     if not is_scanner_sender(cfg, e)}
+    # F4: strip scanner senders from the match set; #485: and our own accounting mailbox —
+    # its FW: of a supplier invoice is no new delivery, even if the address landed on a card
+    ignored = ignored_invoice_senders(cfg)
+    email_map = {e: s for e, s in email_map.items()
+                 if e not in ignored and not (cfg and is_scanner_sender(cfg, e))}
     if not email_map:
         return None
 
@@ -743,6 +810,9 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None) -> dict | None:
     # F9: use cfg.delivery_notes_max_age_days instead of hardcoded 14.
     max_age = int(getattr(cfg, "delivery_notes_max_age_days", 14) or 14) if cfg else 14
     flagged_emails = list(email_map.keys())
+    # #485: per address, the moment its supplier's flag went on (NULL = a pre-#485 card the
+    # migration did not stamp: no lower bound, the old behaviour)
+    since = [email_map[e].get("invoice_dl_since") for e in flagged_emails]
 
     # #412: also select messages with a STALE dl_invoice_runs row (reclaimable).
     # A row blocks selection only when it is finished (outcome IS NOT NULL),
@@ -752,17 +822,26 @@ def _claim_invoice(conn, suppliers: list[dict], cfg=None) -> dict | None:
                   m.combined_text, m.body_text, m.has_attachments,
                   m.created_at
              FROM messages m
+             JOIN unnest(%s::text[], %s::timestamptz[]) AS f(addr, since)
+               ON f.addr = lower(m.from_addr)
+             LEFT JOIN dl_invoice_runs q ON q.message_id = m.message_id
             WHERE m.category = 'invoices'
               AND m.created_at > now() - make_interval(days => %s)
-              AND lower(m.from_addr) = ANY(%s)
+              AND (m.created_at >= COALESCE(f.since, '-infinity'::timestamptz)
+                   OR EXISTS (SELECT 1 FROM dl_invoice_runs r0
+                               WHERE r0.message_id = m.message_id))
+              AND m.created_at <= COALESCE(%s::timestamptz, 'infinity'::timestamptz)
+              AND (q.requeued_at IS NULL
+                   OR q.requeued_at <= COALESCE(%s::timestamptz, 'infinity'::timestamptz))
               AND NOT EXISTS (SELECT 1 FROM dl_invoice_runs r
                                WHERE r.message_id = m.message_id
                                  AND (r.outcome IS NOT NULL
                                       OR r.claimed_at > now()
                                          - make_interval(mins => %s)
                                       OR r.attempts >= %s))
-            ORDER BY m.created_at ASC LIMIT 1""",
-        (max_age, flagged_emails, CLAIM_STALE_MINUTES, MAX_ATTEMPTS)).fetchone()
+            ORDER BY m.created_at DESC LIMIT 1""",
+        (flagged_emails, since, max_age, codex_as_of, requeue_as_of, CLAIM_STALE_MINUTES,
+         MAX_ATTEMPTS)).fetchone()
 
     if not row:
         return None

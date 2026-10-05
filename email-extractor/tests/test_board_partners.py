@@ -337,3 +337,53 @@ def test_the_dodavatelia_tab_page_renders_with_supplier_scope(pg):
     body = c.get("/nastenka/dodavatelia").data.decode()
     assert 'data-scope="suppliers"' in body
     assert "/static/board/tab-partners.js" in body
+
+
+# --- #485: a flag-only save of a SHEET-ONLY card must not re-run old stuck mail -----------
+
+_SHEET_SUPPLIERS = ("Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,"
+                    "Číslo mobilu,E-mail\n"
+                    "Hárkový dodávateľ,8590000000301,Mesto,,,,stary@dod.sk\n")
+
+
+def _stuck_mail(pg, mid, from_addr):
+    pg.execute("INSERT INTO messages (message_id, category, subject, from_addr, "
+               "combined_text, processed, proc_status) VALUES (%s, 'dodacie_listy', "
+               "'Re: objednávka', %s, 'text', true, 'review')", (mid, from_addr))
+
+
+def _processed(pg, mid):
+    return pg.execute("SELECT processed FROM messages WHERE message_id=%s",
+                      (mid,)).fetchone()[0]
+
+
+def test_a_flag_only_save_of_a_sheet_only_supplier_card_releases_nothing(pg):
+    """The live EKVIA / hammy / LESAFFRE cards exist only in the sheet snapshot (no override
+    row): the first save creates one. When it changes nothing about WHO the supplier is —
+    only `invoice_is_delivery_note` — it must not re-run the supplier's old stuck review mail
+    (and re-post it to the warehouse). A save that adds an e-mail still releases (#322)."""
+    dl_snapshot.import_snapshot(pg, "GTIN,Názov,doplnok,hmotnost,Sklad,Cena\n"
+                                "8588000000001,Rožok 50g,,0.05,1,0.50\n",
+                                "GTIN,Sklad,Názov,doplnok\n", _SHEET_SUPPLIERS)
+    _stuck_mail(pg, "stuck-old", "stary@dod.sk")
+    _stuck_mail(pg, "stuck-new", "faktury@dod.sk")
+    card = next(s for s in dl_snapshot.dl_suppliers_for_management(pg)
+                if s["ean_edi"] == "8590000000301")
+    assert card["override_id"] is None
+    c = _client()
+    _login(c)
+    body = {"orig_ean_edi": card["orig_ean_edi"], "orig_city": card["orig_city"],
+            "ean_edi": "8590000000301", "name": "Hárkový dodávateľ", "city": "Mesto",
+            "emails": "stary@dod.sk", "invoice_is_delivery_note": True}
+    r = c.post("/api/board/suppliers", json=body)
+    assert r.status_code == 200 and r.get_json()["action"] == "create"
+    assert _processed(pg, "stuck-old") is True, "a flag-only save re-queued a stuck mail"
+    flagged = [s for s in dl_snapshot.dl_suppliers_for_management(pg)
+               if s.get("invoice_is_delivery_note")]
+    assert [s["ean_edi"] for s in flagged] == ["8590000000301"]
+    # adding the invoice address changes the identity → the #322 release still runs for it
+    r = c.post("/api/board/suppliers", json={
+        **body, "override_id": r.get_json()["id"],
+        "emails": "stary@dod.sk, faktury@dod.sk"})
+    assert r.status_code == 200
+    assert _processed(pg, "stuck-new") is False, "a new e-mail must still unstick its mail"

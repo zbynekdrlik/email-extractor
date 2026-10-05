@@ -443,11 +443,11 @@ def _load_dl_supplier_overrides(conn) -> list[dict]:
     rows = conn.execute(
         """SELECT id, orig_ean_edi, orig_city, ean_edi, name, emails, city,
                   (retired OR deleted_at IS NOT NULL),
-                  invoice_is_delivery_note
+                  invoice_is_delivery_note, invoice_dl_since
            FROM dl_supplier_overrides ORDER BY id""").fetchall()
     return [{"id": r[0], "orig_ean_edi": r[1], "orig_city": r[2], "ean_edi": r[3] or "",
              "name": r[4], "emails": list(r[5] or []), "city": r[6] or "", "retired": r[7],
-             "invoice_is_delivery_note": bool(r[8])}
+             "invoice_is_delivery_note": bool(r[8]), "invoice_dl_since": r[9]}
             for r in rows]
 
 
@@ -474,7 +474,8 @@ def _merge_dl_suppliers(base: list[dict], overrides: list[dict]) -> list[dict]:
         out.append({"ean_edi": o["ean_edi"], "name": o["name"], "emails": o["emails"],
                     "city": o["city"], "override_id": o["id"],
                     "orig_ean_edi": o["orig_ean_edi"], "orig_city": o["orig_city"],
-                    "invoice_is_delivery_note": o.get("invoice_is_delivery_note", False)})
+                    "invoice_is_delivery_note": o.get("invoice_is_delivery_note", False),
+                    "invoice_dl_since": o.get("invoice_dl_since")})
     return out
 
 
@@ -557,7 +558,7 @@ def upsert_dl_supplier(conn, *, override_id: int | None, orig_ean_edi: str | Non
                 row = conn.execute(
                     """UPDATE dl_supplier_overrides
                           SET ean_edi=%s, name=%s, emails=%s, city=%s, retired=false,
-                              updated_at=now()
+                              updated_at=now(), """ + _REVIVE_STAMP + """
                         WHERE id=%s RETURNING id""",
                     (ean_edi, name, emails, city, override_id)).fetchone()
         except psycopg.errors.UniqueViolation:
@@ -602,7 +603,8 @@ def upsert_dl_supplier(conn, *, override_id: int | None, orig_ean_edi: str | Non
                     raise snapshot.DuplicateEan(ean_edi, conflict)
                 row = conn.execute(
                     """UPDATE dl_supplier_overrides
-                          SET name=%s, emails=%s, city=%s, retired=false, updated_at=now()
+                          SET name=%s, emails=%s, city=%s, retired=false, updated_at=now(),
+                              """ + _REVIVE_STAMP + """
                         WHERE id=%s RETURNING id""",
                     (name, emails, city, conflict["override_id"])).fetchone()
                 return int(row[0])
@@ -640,10 +642,38 @@ def upsert_dl_supplier(conn, *, override_id: int | None, orig_ean_edi: str | Non
                ON CONFLICT (orig_ean_edi, orig_city) WHERE orig_ean_edi IS NOT NULL
                DO UPDATE SET ean_edi=EXCLUDED.ean_edi, name=EXCLUDED.name,
                               emails=EXCLUDED.emails, city=EXCLUDED.city,
-                              retired=false, updated_at=now()
+                              retired=false, updated_at=now(), """ + _REVIVE_STAMP + """
                RETURNING id""",
             (orig_ean_edi, orig_city, ean_edi, name, emails, city)).fetchone()
     return int(row[0])
+
+
+# #485: a card that comes back to life (an upsert un-retiring it) while it takes invoices as
+# delivery notes restarts the clock, exactly like switching the flag on — never the backlog
+# since its old start. SET expressions read the row as it was BEFORE the update.
+_REVIVE_STAMP = ("invoice_dl_since = CASE WHEN (dl_supplier_overrides.retired OR "
+                 "dl_supplier_overrides.deleted_at IS NOT NULL) AND "
+                 "dl_supplier_overrides.invoice_is_delivery_note THEN now() "
+                 "ELSE dl_supplier_overrides.invoice_dl_since END")
+
+
+def set_invoice_flag(conn, override_id: int, enabled: bool) -> None:
+    """THE writer of `invoice_is_delivery_note` (#406) — the board's supplier save and the
+    legacy /znalosti route both go through it. #485: switching it ON stamps
+    `invoice_dl_since = now()`, so only invoices received from then on are taken as delivery
+    notes (turning the flag on never ships the supplier's backlog — goods the warehouse already
+    entered by hand); a save that keeps a LIVE card on keeps the stamp (a retired / deleted
+    card counts as off); switching it off clears it."""
+    conn.execute(
+        """UPDATE dl_supplier_overrides
+              SET invoice_dl_since = CASE WHEN NOT %s THEN NULL
+                                          WHEN invoice_is_delivery_note
+                                               AND invoice_dl_since IS NOT NULL
+                                               AND NOT retired AND deleted_at IS NULL
+                                          THEN invoice_dl_since ELSE now() END,
+                  invoice_is_delivery_note = %s
+            WHERE id = %s""", (bool(enabled), bool(enabled), override_id))
+    log.info("dl supplier override %s: invoice_is_delivery_note=%s", override_id, bool(enabled))
 
 
 def retire_dl_supplier(conn, *, override_id: int | None, orig_ean_edi: str | None,

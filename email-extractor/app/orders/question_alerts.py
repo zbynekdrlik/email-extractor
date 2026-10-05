@@ -313,12 +313,19 @@ def expire_stale(conn, cfg, now: datetime | None = None) -> int:
                    "dni bez odpovede) — správa je na ručné vybavenie; systém ju už "
                    "nepripomína.")
         for message_id, qids in per_message.items():
-            conn.execute(
-                """UPDATE messages SET processed = true, processed_at = now(),
-                       processed_by = %s, processing_at = NULL
-                    WHERE message_id = %s""", (EXPIRED_BY, message_id))
+            # #485: an invoice-as-DL mail belongs to the n8n invoice-forward flow — its
+            # processed flag / rollup are never ours (the run ledger already says `review`)
+            invoice = conn.execute(
+                "SELECT 1 FROM messages WHERE message_id = %s AND category = 'invoices'",
+                (message_id,)).fetchone() is not None
+            if not invoice:
+                conn.execute(
+                    """UPDATE messages SET processed = true, processed_at = now(),
+                           processed_by = %s, processing_at = NULL
+                        WHERE message_id = %s""", (EXPIRED_BY, message_id))
             report.log_event(conn, message_id, stage="review", status="review",
-                             outcome=outcome, detail={"expired_questions": qids}, rollup=True)
+                             outcome=outcome, detail={"expired_questions": qids},
+                             rollup=not invoice)
 
     # #421: a held order whose gating question(s) expired must not stay `held` forever.
     # Runs EVERY tick (NOT gated on this sweep's expired_ids) so a STAGGERED dedup case — an
