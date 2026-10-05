@@ -21,6 +21,11 @@ Config lives in `/data/options.json` INSIDE the container, not in git.
 
 `build` in `.github/workflows/ci.yml` only pushes `ghcr.io/zbynekdrlik/email-extractor-amd64:<version>`
 on a `main` push (reads the version from `config.yaml`) — wait for that job green first.
+A `build` job sitting `queued` then `cancelled` with no runner is GitHub's runner-assignment
+incident, not the code: the job's check-run annotation reads "The job was not acquired by
+Runner of type hosted even after multiple attempts" (`gh api repos/<o>/<r>/check-runs/<job
+id>/annotations`; githubstatus.com shows "Incident with Actions") — `gh run rerun <id>
+--failed` once (2026-10-05, 0.9.178).
 
 ```bash
 ssh <ha-user>@<ha-host>          # values: memory ha-server-access.md; sshpass -p "$PW" if no key
@@ -56,6 +61,17 @@ not build a check or a link on it.
 - Playwright: log in on `https://email-pz.newlevel.media/login` (`dash_password`, memory), the
   dashboard's two warehouse links (`sklad_link`/`dl_sklad_link` — built from `request.host_url`)
   must start with `https://email-pz.newlevel.media/`.
+- **Logging the MCP browser in without the password entering the transcript:** write
+  `dash_password` from the container's `/data/options.json` into a mode-600 scratch file over
+  ssh (print only its byte count), then in ONE `browser_run_code_unsafe` open that file in a
+  second page (`file:///…`, read `document.body.innerText`), fill `/login`, never return the
+  value; delete the file right after. That sandbox has no `require` / `process` / dynamic
+  `import()` — the browser's own `file://` read is the only local-file path.
+- **The Playwright MCP browser can be missing on dev2** ("Browser … is not installed"). Install
+  the build the RUNNING server expects — its version from `ps -eo args | grep playwright/mcp`
+  (e.g. `@playwright/mcp@0.0.81`), then `npx -y @playwright/mcp@<that version>
+  install-browser chromium`; a bare `npx @playwright/mcp install-browser` fetches the LATEST
+  build (another `chromium-<n>`) and the server still fails.
 
 **Why the https links need TWO pieces (#470):** Flask trusts the tunnel's `X-Forwarded-*` via
 `ProxyFix(x_for=1, x_proto=1, x_host=1)` in `create_app`, AND `start()` passes

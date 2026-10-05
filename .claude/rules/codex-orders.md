@@ -734,5 +734,22 @@ must never ship a SECOND delivery: the warehouse may already have typed it into 
 - **Live check** (read-only): `SELECT count(*), max(receipt_date) FROM codex_receipts` +
   `SELECT synced_at, source_as_of, row_count FROM codex_receipt_syncs ORDER BY id DESC LIMIT 1`;
   a dry run of the gate in the container = `find_duplicate(conn, codex_receipts.live(conn),
-  ean, doc, mid, doc_number=…)` per document of the last 30 days (no claim, no upload).
+  ean, doc, mid, doc_number=…)` per document of the last 30 days (no claim, no upload). With
+  `content=None` (the early gate) a number match with our own DL-scan row of another day is
+  DEFERRED (returns None, logs "deferred to the built EDI") — catch that log line
+  (`orders.invoice_dedup`) or the dry run reports a false "would ship". First live run
+  (0.9.178, 2026-10-05): 13 of 14 hand-entered invoices blocked by the receipt's document
+  number; the 14th (no receipt yet) was older than `invoice_dl_since` — never claimed.
+- **Turning a supplier on** = the board supplier API (`POST /api/board/suppliers` with the
+  card's CURRENT fields + `invoice_is_delivery_note: true`, admin session from `POST /login`).
+  The invoice claim matches the sender EXACTLY against the card's e-mails, and sheet-only cards
+  often carry none (EKVIA, LESAFFRE had `emails=[]`) — add the invoicing address, or the flag
+  does nothing. Adding it changes the card's identity, so `save_supplier` runs the #322/#323
+  retro-release (`release_for_supplier_card`: open `dl_supplier` questions, stuck
+  `dodacie_listy` mails by address and by name) — check those read-only FIRST; a flag-only
+  save (same fields) skips it. Read back `invoice_is_delivery_note` + `invoice_dl_since` from
+  `dl_supplier_overrides`, then confirm no new `dl_invoice_runs` / `desadv_sent` rows.
+- **Service lines on invoices** (EKVIA „PREPRAVNÉ"): no card → the #365 hold + a `dl_item`
+  question per invoice; „pošli bez tejto položky" applies to that ONE mail only, so it recurs
+  weekly until a persistent not-a-warehouse-line answer exists.
 
