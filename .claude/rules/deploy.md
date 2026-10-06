@@ -70,8 +70,9 @@ not build a check or a link on it.
 - **The Playwright MCP browser can be missing on dev2** ("Browser … is not installed"). Install
   the build the RUNNING server expects — its version from `ps -eo args | grep playwright/mcp`
   (e.g. `@playwright/mcp@0.0.81`), then `npx -y @playwright/mcp@<that version>
-  install-browser chromium`; a bare `npx @playwright/mcp install-browser` fetches the LATEST
-  build (another `chromium-<n>`) and the server still fails.
+  install-browser chrome-for-testing` (the name the error message itself gives — 2026-10-06 it
+  restored `chromium-1244` for 0.0.81); a bare `npx @playwright/mcp install-browser` fetches the
+  LATEST build (another `chromium-<n>`) and the server still fails.
 
 **Why the https links need TWO pieces (#470):** Flask trusts the tunnel's `X-Forwarded-*` via
 `ProxyFix(x_for=1, x_proto=1, x_host=1)` in `create_app`, AND `start()` passes
