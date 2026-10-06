@@ -169,6 +169,9 @@ only when all three pushes succeeded; a trigger for an already-pushed generation
 `skip:` and pushes nothing; a failed push leaves it unrecorded so the next trigger (path
 noise or the timer) repeats the whole round; a 30 s debounce waits for the file to settle.
 Never modify the codex-bridge units (a foreign project) — this repo only WATCHES its file.
+Live proof (6.10., 0.9.180): the ETL replaced the file at 18:46:07, the `.path` unit started
+the round the same second, all three pushed by 18:46:43; prod `codex_receipt_syncs` /
+`codex_card_syncs` `source_as_of` = 18:07 of THAT ETL (the old timers had left 5.10. 18:08).
 
 (Re)install after a change: `cp email-extractor/tools/codex_*.py /home/newlevel/codex-orders-push/`
 + `sudo cp email-extractor/tools/systemd/codex-*.{path,service,timer} /etc/systemd/system/ &&

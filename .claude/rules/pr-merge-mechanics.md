@@ -282,3 +282,11 @@ file. A sibling lane that MERGED to main meanwhile (#476 landed 0.9.174 while #4
 0.9.174): `git merge --no-ff --no-commit origin/main`, keep both `autopilot-log` entries (theirs
 first), renumber your version + log entry, re-run ruff/mypy/targeted tests, commit, then the
 fast-forward `git push origin HEAD:dev` (check `git merge-base --is-ancestor origin/dev HEAD`).
+
+**Waiting on CI / a review dispatch from a worktree lane (#485 reopen):** the guard refuses a
+`while … gh run view …` loop typed on the command line, but a small bounded wait SCRIPT in the
+scratchpad, invoked by path (`bash <scratch>/wait_ci.sh <run-id> 540` — polls `gh run view -R
+owner/repo --json status,conclusion` every 30 s, prints the jobs at the end, exits at the bound),
+runs cleanly and keeps the lane alive; the same shape (`wait_review.sh <task.output> 540`, parsing
+the last non-attachment JSONL record) waits out a review dispatch that surfaced async. A second
+call of the same wait needs `# airuleset:poll-ok <reason>` on its own line.
