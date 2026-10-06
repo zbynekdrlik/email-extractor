@@ -736,8 +736,9 @@ def test_board_dl_item_not_stock_answer_learns_a_supplier_rule_in_the_browser(
     page.wait_for_selector(f"#q-card-{qid} .q-answer:has-text('{label}')")
 
     page.goto(f"{live_server}/nastenka/naucene-sklad")
-    page.wait_for_selector(".r-label:has-text('Nie je skladová položka')")
-    assert page.locator(".r-row:has-text('PREPRAVNÉ e2e')").count() == 1
+    page.wait_for_selector(".r-row:has-text('PREPRAVNÉ e2e')")
+    row = page.locator(".r-row:has-text('PREPRAVNÉ e2e')")
+    assert row.count() == 1 and label in row.inner_text()
 
     assert console == [], f"browser console not clean: {console}"
 

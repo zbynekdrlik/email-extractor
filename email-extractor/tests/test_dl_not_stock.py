@@ -10,8 +10,9 @@ supplier excludes the line before matching — no model call, no question, no ho
 supplier with the same wording is still asked.
 
 Drives the REAL board endpoints + worker (`dl_worker.tick` / `release_for_question`) against a
-real Postgres with scripted model answers. All fixtures are SYNTHETIC (made-up GTINs/EANs/
-names) — this repo is public.
+real Postgres with scripted model answers. Synthetic data only — made-up GTINs/EANs/cards;
+the supplier name/address are the shared `test_dl_worker` fixtures (as every DL test uses), no
+real customer mail — this repo is public.
 """
 from __future__ import annotations
 
@@ -175,7 +176,10 @@ def test_the_answer_learns_an_audited_supplier_rule_listed_in_naucene_sklad(pg, 
         "AND action='create' AND question_id=%s", (str(rid), qid)).fetchone()[0] == 1
     listed = rules.list_rules(pg, scope="dl", kind="dl_alias")["items"]
     row = next(x for x in listed if x["id"] == rid)
-    assert "Nie je skladová položka" in row["label"] and row["key"]["wording"] == SERVICE
+    assert row["target"] == LABEL and row["key"]["wording"] == SERVICE
+    assert row["origin"]["question_id"] == qid, "Naučené links the rule to its question"
+    found = rules.list_rules(pg, scope="dl", kind="dl_alias", q="vynechat")["items"]
+    assert [x["id"] for x in found] == [rid], "the rule is found by its label"
 
 
 def test_the_rule_is_never_read_as_a_card(pg, monkeypatch):
@@ -313,3 +317,150 @@ def test_the_kos_removes_the_rule_but_the_answering_mail_keeps_its_ship_without(
     uploaded, _ = _tick(pg, tmp_path, "dl8",
                         _client(_doc("0100000888"), _llm(G_ROLL), NO_MATCH))
     assert uploaded == [] and [w for _, w in _open_dl_items(pg)] == [SERVICE]
+
+
+# --- review round 1 (same branch) --------------------------------------------------------------
+
+def test_a_document_of_only_ruled_lines_is_a_silent_not_warehouse_skip(pg, tmp_path, monkeypatch):
+    """A transport-only document of a ruled supplier has nothing for the warehouse: a terminal,
+    digest-visible `not_warehouse` skip — never a ❗ „0 z 0" review nobody can answer, never a
+    question, never an upload, never a model call for the line."""
+    _snapshot(pg)
+    _teach_not_stock(pg, monkeypatch)
+    doc = _doc("0100000889")
+    doc["documents"][0]["items"] = doc["documents"][0]["items"][1:]          # the service line
+    doc["documents"][0]["documentTotalWithoutVAT"] = 12.0
+    client = _client(doc)
+    uploaded, posted = _tick(pg, tmp_path, "dl9", client)
+    assert uploaded == [] and posted == [], "nothing to ship, nothing to tell the sklad"
+    assert "dl_item" not in client.calls
+    assert _open_dl_items(pg) == []
+    assert pg.execute("SELECT processed, proc_status FROM messages WHERE message_id='dl9'"
+                      ).fetchone() == (True, "not_warehouse")
+    outcome = pg.execute("SELECT outcome FROM email_events WHERE message_id='dl9' "
+                         "AND stage='not_warehouse'").fetchone()[0]
+    assert "neskladové" in outcome
+
+
+def test_re_asserting_a_dormant_rule_is_audited_and_its_undo_only_reverts_the_re_assert(
+        pg, monkeypatch):
+    """A card taught after the rule makes it dormant; a later question answered „vždy vynechať"
+    again RE-ASSERTS it (the newest decision) — audited as an `update`. Undoing THAT answer puts
+    the rule back to dormant; the rule the first question created stays."""
+    q1 = _teach_not_stock(pg, monkeypatch)
+    rid = _rule_rows(pg)[0][0]
+    assert dl_memory.add_dl_alias(pg, SUPPLIER_EAN, SERVICE, G_BREAD, BREAD) is not None
+    key = memory.item_key(SERVICE)
+    assert dl_memory.not_stock_keys(pg, SUPPLIER_EAN) == set(), "the newer card wins"
+    q2 = _teach_not_stock(pg, monkeypatch, mid="q-src2", memory_conflict=True)
+    assert dl_memory.not_stock_keys(pg, SUPPLIER_EAN) == {key}, "re-asserted as newest"
+    assert [x[0] for x in _rule_rows(pg)] == [rid], "never a second rule row"
+    assert pg.execute("SELECT action, question_id FROM audit_log WHERE table_name="
+                      "'dl_item_memory' AND row_id=%s ORDER BY id", (str(rid),)
+                      ).fetchall() == [("create", q1), ("update", q2)]
+    r = _board().post(f"/api/board/questions/{q2}/undo")
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert [x[0] for x in _rule_rows(pg)] == [rid], "q1's rule stays"
+    assert dl_memory.not_stock_keys(pg, SUPPLIER_EAN) == set(), "dormant again under the card"
+    assert teach.get(pg, q1)["status"] == "answered"
+
+
+def test_undoing_a_plain_card_answer_never_removes_the_rule(pg, monkeypatch):
+    """The plain dl_item undo deletes the human rows of its wording — never the rule, which
+    leaves only by its own undo / the Kôš / Naučené."""
+    _teach_not_stock(pg, monkeypatch)
+    q2 = _ask(pg, mid="q-src2")          # the rule is never a taught card: asked again
+    r, _ = _answer(pg, monkeypatch, q2, {"choice": G_ROLL})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    r = _board().post(f"/api/board/questions/{q2}/undo")
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert len(_rule_rows(pg)) == 1, "the rule survived another question's undo"
+
+
+def test_naucene_refuses_typing_the_sentinel_into_an_alias(pg, monkeypatch):
+    """A typed number never turns a card alias into a silent-drop rule (no confirmation there);
+    editing the rule row itself (its wording) still works."""
+    rid = dl_memory.add_dl_alias(pg, SUPPLIER_EAN, "Rožok", G_ROLL, ROLL)
+    c = _board()
+    r = c.post(f"/api/board/rules/dl_alias/{rid}",
+               json={"wording": "Rožok", "gtin": NOT_STOCK, "card": ""})
+    assert r.status_code == 400, r.get_data(as_text=True)
+    assert pg.execute("SELECT gtin FROM dl_item_memory WHERE id=%s", (rid,)).fetchone()[0] \
+        == G_ROLL
+    _teach_not_stock(pg, monkeypatch)
+    rule = _rule_rows(pg)[0][0]
+    r = c.post(f"/api/board/rules/dl_alias/{rule}",
+               json={"wording": "PREPRAVNÉ SLUŽBY", "gtin": NOT_STOCK, "card": LABEL})
+    assert r.status_code == 200, r.get_data(as_text=True)
+
+
+def test_the_rule_leaves_the_line_off_in_shadow_too(pg, tmp_path, monkeypatch):
+    """Shadow (the preview / eval path) reads the learned rule like human memory: the line is
+    off, no model call for it — and shadow still writes nothing."""
+    _snapshot(pg)
+    _teach_not_stock(pg, monkeypatch)
+    _msg(pg, mid="dl10")
+    _attach(pg, tmp_path, "dl10")
+    client = _client(_doc("0100000890"), _llm(G_ROLL))
+    uploaded, posted = [], []
+    dl_worker.tick(pg, _cfg(delivery_notes_engine="n8n", delivery_notes_shadow=True,
+                            data_dir=str(tmp_path)), client=client,
+                   upload=lambda *a, **k: uploaded.append(a),
+                   post=lambda *a, **k: posted.append(a))
+    assert uploaded == [] and posted == []
+    assert client.calls.count("dl_item") == 1
+    run = pg.execute("SELECT id, shadow, result->'documents'->0->>'outcome' FROM order_runs"
+                     ).fetchone()
+    assert run[1] is True and run[2] == "ok"
+    items = dict(pg.execute("SELECT name, rule FROM order_items WHERE run_id=%s",
+                            (run[0],)).fetchall())
+    assert items[SERVICE] == "not_stock"
+
+
+def test_weekly_invoices_of_a_ruled_supplier_ship_without_the_service_line(
+        pg, tmp_path, monkeypatch):
+    """The ticket's own flow (#485 invoice taken as a delivery note): two invoices of one
+    supplier hold on ONE shared transport-line question; „vždy vynechať" re-queues and ships
+    BOTH without it; next week's invoice ships with the line never reaching the model and no
+    question."""
+    from test_invoice_dedup_edges import _ago
+    from test_invoice_dedup_regression import ITEM_MATCHED as INV_ITEM
+    from test_invoice_dedup_regression import FakeClient as InvoiceClient
+    from test_invoice_dedup_regression import _message, _push_receipts, _setup, _supplier
+    from test_invoice_dedup_regression import _tick as _invoice_tick
+    from test_invoice_dedup_requeue import TWO_DAYS_AGO, YESTERDAY, _lines, _wire_release
+    from test_invoice_dedup_requeue import _answer as _invoice_answer
+
+    _setup(pg)
+    _message(pg, tmp_path, "inv-b", created_at=_ago(hours=3))
+    _message(pg, tmp_path, "inv-a", created_at=_ago(hours=2))
+    _push_receipts(tmp_path)
+    doc_a = _lines(YESTERDAY, "4400000002", "2400000002", ["Rožok 50g", SERVICE])
+    doc_b = _lines(TWO_DAYS_AGO, "4400000001", "2400000001", ["Rožok 50g", SERVICE])
+    doc_b["documents"][0]["items"][0].update(quantity=30, totalPrice=15.0)
+    doc_b["documents"][0]["documentTotalWithoutVAT"] = 20.0
+    client = InvoiceClient([doc_a, doc_b, doc_a, doc_b], runs=4)
+    client._answers["dl_item"] = [INV_ITEM, NO_MATCH, INV_ITEM, NO_MATCH]
+    uploads, posts = [], []
+    assert _invoice_tick(pg, tmp_path, client, uploads, posts) == 1
+    assert _invoice_tick(pg, tmp_path, client, uploads, posts) == 1
+    assert uploads == [] and len(_open_dl_items(pg)) == 1, "both held on ONE question"
+    _wire_release(monkeypatch, client, uploads, posts)
+    client._answers["dl_item"] = [INV_ITEM] * 2          # the service line is never matched
+    _invoice_answer(pg, tmp_path, SERVICE, choice=teach.DL_ITEM_NOT_STOCK)
+    _push_receipts(tmp_path)
+    for _ in range(4):
+        _invoice_tick(pg, tmp_path, client, uploads, posts)
+    assert len(uploads) == 2, "both held invoices shipped without the transport line"
+    assert _open_dl_items(pg) == []
+    _message(pg, tmp_path, "inv-c", created_at=_ago(minutes=30))
+    doc_c = _lines(_ago(days=3), "4400000003", "2400000003", ["Rožok 50g", SERVICE])
+    client._answers["dl_documents"].append(doc_c)
+    client._answers["dl_item"] = [INV_ITEM]
+    client._answers["dl_supplier"] = [_supplier()]
+    calls_before = client.calls.count("dl_item")
+    _push_receipts(tmp_path)
+    assert _invoice_tick(pg, tmp_path, client, uploads, posts) == 1
+    assert len(uploads) == 3, "next week's invoice ships at once"
+    assert client.calls.count("dl_item") - calls_before == 1, "only the stock line is matched"
+    assert _open_dl_items(pg) == []
