@@ -30,6 +30,7 @@ Config (env / EnvironmentFile, so the token is never committed):
 from __future__ import annotations
 
 import argparse
+import datetime
 import os
 import sys
 from urllib.parse import urlsplit
@@ -77,6 +78,12 @@ SELECT CAST(h.order_number AS BIGINT) AS order_number,
 """
 
 
+# #485: when the codex-bridge ETL loaded the order headers (naive UTC) — logged only, so the
+# journal proves which ETL cycle a push sent (the add-on's orders endpoint takes no time).
+_AS_OF_SQL = ("SELECT max(finished_at) FROM meta.etl_runs "
+              "WHERE table_name = 'sp002' AND status = 'ok'")
+
+
 def query_duckdb(db_path: str, days: int) -> list[dict]:
     """Read the order headers from the codex-bridge DuckDB, read-only. Lazy-imports duckdb
     so the module imports (and its pure functions test) without it. Returns list of dicts."""
@@ -89,6 +96,29 @@ def query_duckdb(db_path: str, days: int) -> list[dict]:
         return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
     finally:
         con.close()
+
+
+def query_as_of(db_path: str):
+    """When the codex-bridge ETL last loaded sp002 (naive UTC), or None."""
+    import duckdb  # noqa: PLC0415 - lazy on purpose (CI has no duckdb)
+
+    con = duckdb.connect(db_path, read_only=True)
+    try:
+        row = con.execute(_AS_OF_SQL).fetchone()
+        return row[0] if row else None
+    finally:
+        con.close()
+
+
+def _iso_utc(value) -> str | None:
+    """meta.etl_runs.finished_at (naive UTC) -> an ISO string with +00:00."""
+    if value is None:
+        return None
+    if isinstance(value, datetime.datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=datetime.UTC)
+        return value.isoformat()
+    return str(value)
 
 
 def _iso(value) -> str | None:
@@ -149,13 +179,19 @@ def post_orders(url: str, token: str, orders: list[dict], poster=None,
 
 
 def run(url: str, token: str, days: int = DEFAULT_DAYS, db_path: str = DEFAULT_DB_PATH,
-        query=None, poster=None) -> dict:
-    """Fetch → normalize → push. `query()`/`poster(...)` are injectable for tests."""
+        query=None, poster=None, as_of=None) -> dict:
+    """Fetch → normalize → push. `query()`/`poster(...)`/`as_of()` are injectable for tests.
+    `as_of()` (main passes `query_as_of`) only feeds the journal line's `source_as_of`."""
     query = query or (lambda: query_duckdb(db_path, days))
     rows = query()
+    source_as_of = _iso_utc(as_of()) if as_of else None
     orders = build_orders(rows)
     upserted = post_orders(url, token, orders, poster=poster)
-    return {"fetched": len(rows), "orders": len(orders), "upserted": upserted}
+    res: dict[str, int | str] = {"fetched": len(rows), "orders": len(orders),
+                                 "upserted": upserted}
+    if source_as_of:
+        res["source_as_of"] = source_as_of
+    return res
 
 
 def pushed_line(res: dict, url: str) -> str:
@@ -166,8 +202,10 @@ def pushed_line(res: dict, url: str) -> str:
     # (unlike `.hostname`/`.port`) never raises, so a pushed batch always gets its line.
     parts = urlsplit(url)
     target = f"{parts.scheme}://{parts.netloc.rpartition('@')[2]}"
+    # #485: the ETL time the orders were taken at — the journal proves the push sent fresh data
+    as_of = f"source_as_of={res['source_as_of']} " if res.get("source_as_of") else ""
     return (f"pushed: fetched={res['fetched']} orders={res['orders']} "
-            f"upserted={res['upserted']} to={target}")
+            f"upserted={res['upserted']} {as_of}to={target}")
 
 
 def main(argv=None) -> int:
@@ -189,7 +227,8 @@ def main(argv=None) -> int:
         print("error: CODEX_PUSH_URL and CODEX_PUSH_TOKEN (or --url/--token) are required",
               file=sys.stderr)
         return 2
-    res = run(args.url, args.token, days=args.days, db_path=args.db)
+    res = run(args.url, args.token, days=args.days, db_path=args.db,
+              as_of=lambda: query_as_of(args.db))
     print(pushed_line(res, args.url))
     return 0
 

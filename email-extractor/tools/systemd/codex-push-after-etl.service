@@ -17,5 +17,7 @@ StateDirectory=codex-push-after-etl
 # codex-push-after-etl.timer (safety net). Waits ~30 s for the file to settle, then runs
 # orders -> cards -> receipts (each up to 300 s); a generation already pushed = a logged no-op.
 ExecStart=/usr/bin/python3 /home/newlevel/codex-orders-push/codex_push_after_etl.py
-TimeoutStartSec=1200
+# >= the round's worst case: MAX_ROUNDS 2 x (6 x 30 s settle + 3 x 300 s pushes) = 2160 s
+# (pinned by test_the_service_timeout_covers_the_rounds_worst_case).
+TimeoutStartSec=2400
 Nice=10

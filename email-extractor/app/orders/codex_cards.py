@@ -6,7 +6,8 @@ skladová karta s EAN kódom 3698" — DL 126049732 sat in `in_DL`, code 3698 th
 only 24.-28.9.). Nothing in the add-on knew which codes CODEX has, so neither the board's
 „➕ Nová karta" nor the DL engine could notice a dead code.
 
-`tools/codex_cards_push.py` (dev2 systemd timer, the #342 push pattern) reads `raw.sm002`
+`tools/codex_cards_push.py` (dev2, the #342 push pattern; run when the codex-bridge ETL
+replaced its DuckDB — `tools/codex_push_after_etl.py`, #485) reads `raw.sm002`
 read-only from the codex-bridge DuckDB and POSTs the FULL list to `POST /api/codex/cards`;
 `replace_cards` swaps it in atomically (a REPLACE, never a merge — a code that left CODEX must
 leave here too, the exact incident class). Consumers:
@@ -26,8 +27,9 @@ leave here too, the exact incident class). Consumers:
 **Fail OPEN, never closed.** A list that never arrived, or whose CODEX snapshot is older than
 `STALE_HOURS`, turns every check OFF (`live_guard` → None + `log.warning`) — a stopped push must
 never hold every delivery note. `stale_sweep` (worker tick) raises ONE ops alert for it.
-`STALE_HOURS = 30`: the codex-bridge ETL loads sm002 at 14:15 and 18:00 Europe/Prague and the
-push follows at 14:42 / 18:27, so the longest NORMAL data age is ~20.5 h (18:00 → next 14:42);
+`STALE_HOURS = 30`: the codex-bridge ETL starts at 14:15 and 18:00 Europe/Prague (sm002 is
+loaded ~10 min in) and the push follows the moment the ETL replaced its DuckDB (~15:05 /
+~18:50, #485), so the longest NORMAL data age is ~21 h (sm002 of ~18:10 → next ~15:05);
 30 h tolerates one missed slot plus ETL jitter, two missed slots cross it.
 
 **What "exists" means:** the code is the NEANKOD of ANY pushed sm002 row — any stredisko/sklad,
@@ -364,7 +366,7 @@ def check_card_code(conn, code, *texts: str, catalog=None, now=None, doc: str = 
         "error": (f"Kód {code} v CODEXe neexistuje — žiadna skladová karta ho nemá ako EAN "
                   f"kód, takže CODEX by pri importe odmietol {doc}. "
                   f"Použi kód karty z CODEXu (zoznam kariet je k {_local(cards.as_of)} a "
-                  f"obnovuje sa dvakrát denne, okolo 14:45 a 18:30 — kartu, ktorú si v CODEXe "
+                  f"obnovuje sa dvakrát denne, okolo 15:05 a 18:50 — kartu, ktorú si v CODEXe "
                   f"založil práve teraz, uvidíme až po tejto aktualizácii)."),
         "codex": {"code": str(code), "missing": True,
                   "as_of": cards.as_of.isoformat() if cards.as_of else None,
@@ -446,7 +448,8 @@ def stale_sweep(conn, cfg, now: datetime | None = None) -> bool:
             "kódov kariet dodacích listov (#467) aj objednávok (#479) je dočasne VYPNUTÁ: "
             "nástenka prijme aj kód, ktorý v CODEXe neexistuje, a dodací list či objednávku s "
             "takou kartou CODEX pri importe odmietne. "
-            "Skontroluj na dev2 <code>codex-cards-push.timer</code> a codex-bridge ETL.</p>")
+            "Skontroluj na dev2 <code>codex-push-after-etl.path</code> / <code>.timer</code> "
+            "(<code>journalctl -u codex-push-after-etl.service</code>) a codex-bridge ETL.</p>")
     # one dedup key per stale EPISODE (the snapshot it is stuck on): a later episode alerts at
     # once instead of waiting for the next morning as a "reminder" of an old delivered alert
     if not codex_snapshot.stale_alert(conn, cfg, kind=ALERT_KIND, key_prefix=ALERT_KEY,

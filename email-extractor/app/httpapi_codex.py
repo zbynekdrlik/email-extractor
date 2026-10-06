@@ -2,7 +2,7 @@
 (#485) — the machine endpoints the codex-bridge push tools write to.
 
 `tools/codex_orders_push.py` (on the dev/ERP box, next to the codex-bridge DuckDB) reads
-order headers read-only and POSTs a compact JSON batch here on its own systemd timer. Auth
+order headers read-only and POSTs a compact JSON batch here after each codex-bridge ETL. Auth
 is the EXISTING static machine token (`cfg.api_token`, `X-Token` header) — the same pattern
 `httpapi_files.py` already uses for n8n's file endpoints, extended to a POST (never a new
 auth scheme). No open-by-default: an add-on with no `api_token` configured rejects every

@@ -26,18 +26,23 @@ A generation that changed DURING the round (a second ETL replace) is pushed agai
 
 The pushes run as child processes of this one (same interpreter, same EnvironmentFile), so their
 own `pushed: …` lines land in this unit's journal, between the `trigger:` and `round:` lines.
-The three `codex-*-push.service` units stay for a manual one-off push (no guard there).
+A round holds a lock in the state directory, so a manual run waits for the service's round
+(and vice versa) instead of pushing the same data alongside it. The three
+`codex-*-push.service` units stay for a manual one-off push (no guard there); `--force`
+re-pushes a generation that was already pushed.
 
 Config (environment, from the push EnvironmentFile + systemd):
   CODEX_DUCKDB_PATH          default /var/lib/codex-bridge/codex.duckdb (must equal the path
                              the .path unit watches)
-  STATE_DIRECTORY            set by systemd `StateDirectory=` — holds `last-generation`
+  STATE_DIRECTORY            set by systemd `StateDirectory=` — holds `last-generation`; a
+                             manual run without it uses the same /var/lib/codex-push-after-etl
   CODEX_PUSH_SETTLE_SECONDS  debounce, default 30
 """
 from __future__ import annotations
 
 import argparse
 import datetime
+import fcntl
 import os
 import subprocess
 import sys
@@ -46,11 +51,14 @@ from pathlib import Path
 
 DEFAULT_DB_PATH = "/var/lib/codex-bridge/codex.duckdb"
 DEFAULT_SETTLE_SECONDS = 30
+DEFAULT_STATE_DIR = "/var/lib/codex-push-after-etl"   # = the service's StateDirectory=
 STATE_FILE = "last-generation"
+LOCK_FILE = ".round.lock"
 PUSH_SCRIPTS = ("codex_orders_push.py", "codex_cards_push.py", "codex_receipts_push.py")
 PUSH_TIMEOUT_SECONDS = 300   # what each push unit's TimeoutStartSec allowed
-MAX_ROUNDS = 3               # a generation changing under a round more often than this = broken
-MAX_SETTLE_CHECKS = 10
+MAX_ROUNDS = 2               # one re-push when the ETL replaced the file during a round
+MAX_SETTLE_CHECKS = 6
+# the unit's TimeoutStartSec must cover MAX_ROUNDS x (MAX_SETTLE_CHECKS x settle + pushes)
 
 
 def _say(line: str) -> None:
@@ -98,13 +106,18 @@ def default_scripts() -> list[str]:
 
 
 def _run_script(script: str) -> int:
-    """Run one push tool as a child process; its output goes straight to our journal."""
+    """Run one push tool as a child process; its output goes straight to our journal. A push
+    that hangs is killed at PUSH_TIMEOUT_SECONDS (124), one that cannot start at all is 127 —
+    either way the other pushes still run."""
     try:
         return subprocess.run([sys.executable, script], check=False,
                               timeout=PUSH_TIMEOUT_SECONDS).returncode
     except subprocess.TimeoutExpired:
         _say(f"error: {Path(script).name} still running after {PUSH_TIMEOUT_SECONDS}s — killed")
         return 124
+    except OSError as e:
+        _say(f"error: {Path(script).name} could not start ({e})")
+        return 127
 
 
 def settled_generation(db_path: str, settle: float, sleep) -> str:
@@ -131,35 +144,49 @@ def _label(script: str) -> str:
 def run_round(db_path: str, state_dir: str, *, scripts=None, runner=None,
               settle: float = DEFAULT_SETTLE_SECONDS, sleep=time.sleep,
               force: bool = False) -> int:
-    """One guarded push round. Returns the process exit code (0 = pushed or nothing to do)."""
+    """One guarded push round. Returns the process exit code (0 = pushed or nothing to do).
+    Serialised by a lock in `state_dir`: a second round (a manual run next to the service's)
+    waits, then normally finds the generation pushed and skips."""
     scripts = list(scripts or default_scripts())
     runner = runner or _run_script
-    try:
-        for _ in range(MAX_ROUNDS):
+    Path(state_dir).mkdir(parents=True, exist_ok=True)
+    with open(Path(state_dir) / LOCK_FILE, "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _locked_round(db_path, state_dir, scripts, runner, settle, sleep, force)
+
+
+def _locked_round(db_path, state_dir, scripts, runner, settle, sleep, force) -> int:
+    for _ in range(MAX_ROUNDS):
+        try:
             gen = settled_generation(db_path, settle, sleep)
             mtime = file_mtime(db_path)
-            if not force and gen == read_state(state_dir):
-                _say(f"skip: generation {gen} (file_mtime={mtime}) already pushed")
-                return 0
-            force = False
-            _say(f"trigger: generation={gen} file_mtime={mtime}")
-            results = {_label(s): runner(s) for s in scripts}
-            summary = " ".join(f"{k}={'ok' if rc == 0 else f'exit {rc}'}"
-                               for k, rc in results.items())
-            if any(rc != 0 for rc in results.values()):
-                _say(f"round: generation={gen} file_mtime={mtime} FAILED {summary} — "
-                     "not recorded, the next trigger repeats the round")
-                return 1
+        except FileNotFoundError:
+            _say(f"error: the CODEX DuckDB file {db_path} is missing — nothing pushed")
+            return 1
+        if not force and gen == read_state(state_dir):
+            _say(f"skip: generation {gen} (file_mtime={mtime}) already pushed")
+            return 0
+        force = False
+        _say(f"trigger: generation={gen} file_mtime={mtime}")
+        results = {_label(s): runner(s) for s in scripts}
+        summary = " ".join(f"{k}={'ok' if rc == 0 else f'exit {rc}'}"
+                           for k, rc in results.items())
+        if any(rc != 0 for rc in results.values()):
+            _say(f"round: generation={gen} file_mtime={mtime} FAILED {summary} — "
+                 "not recorded, the next trigger repeats the round")
+            return 1
+        try:
             after = generation(db_path)
-            if after == gen:
-                write_state(state_dir, gen, mtime)
-                _say(f"round: generation={gen} file_mtime={mtime} {summary}")
-                return 0
-            _say(f"round: generation advanced during the round ({gen} -> {after}) — "
-                 "pushing the new one")
-    except FileNotFoundError as e:
-        _say(f"error: the CODEX DuckDB file is missing ({e.filename}) — nothing pushed")
-        return 1
+        except FileNotFoundError:
+            _say(f"error: the CODEX DuckDB file {db_path} vanished after the pushes "
+                 f"({summary}) — not recorded, the next trigger repeats the round")
+            return 1
+        if after == gen:
+            write_state(state_dir, gen, mtime)
+            _say(f"round: generation={gen} file_mtime={mtime} {summary}")
+            return 0
+        _say(f"round: generation advanced during the round ({gen} -> {after}) — "
+             "pushing the new one")
     _say(f"error: the DuckDB file kept changing for {MAX_ROUNDS} rounds — not recorded")
     return 1
 
@@ -168,8 +195,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="Push CODEX orders, cards and receipts once per codex-bridge ETL (#485)")
     ap.add_argument("--db", default=os.environ.get("CODEX_DUCKDB_PATH", DEFAULT_DB_PATH))
-    ap.add_argument("--state-dir", default=os.environ.get("STATE_DIRECTORY") or str(
-        Path.home() / ".local" / "state" / "codex-push-after-etl"))
+    ap.add_argument("--state-dir",
+                    default=os.environ.get("STATE_DIRECTORY") or DEFAULT_STATE_DIR)
     ap.add_argument("--settle", type=float, default=float(
         os.environ.get("CODEX_PUSH_SETTLE_SECONDS", DEFAULT_SETTLE_SECONDS)))
     ap.add_argument("--force", action="store_true",
