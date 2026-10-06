@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 
 from flask import Flask, abort, jsonify, request, session
+from psycopg import errors as pg_errors
 from psycopg.types.json import Json
 
 from .httpapi_common import _EAN_STRIP_RE, Deps, _parse_emails_field
@@ -891,6 +892,14 @@ def register(app: Flask, deps: Deps) -> dict:
                 q = kind.undo(c, q0) if kind else teach.undo(c, qid)
         except teach.NotACandidate as e:
             return jsonify(error=str(e)), 404
+        except pg_errors.UniqueViolation:
+            # #488: one OPEN question per (partner, wording) — reopening this one while another
+            # is open collides; the transaction rolled back, nothing changed. A plain 409, never
+            # a raw 500: answer the open one instead.
+            log.warning("undo of question %s refused: another question for its wording is "
+                        "open", qid)
+            return jsonify(error="Na tento riadok už čaká otvorená otázka — odpovedz na ňu "
+                                 "(táto odpoveď sa nevrátila)."), 409
         return jsonify(ok=True, question=q)
 
     @app.post("/api/orders/question/<int:qid>/undo")

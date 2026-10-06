@@ -1097,16 +1097,18 @@ the question halves + the engine helper (`partition`), `teach` only dispatches (
   (non-partial UNIQUE identity) with a fresh `created_at`; a LIVE rule is never duplicated but
   RE-ASSERTED (`created_at = now()`, audited `update` with the old `created_at` as `before`, so
   the Kôš restore makes it dormant again).
-- **Undo of an answer** (`dl_not_stock.undo_answer`), per rule row THAT answer wrote (its audit
-  `create`/`update`): the row stays only while ANOTHER decision that still stands backs it
-  (`dl_memory.not_stock_backed`: a question still answered `not_stock` — not undone, not
-  re-answered — or the admin seed, whose audit rows carry no question), whatever order the
-  answers are undone in; else it goes (`forget_not_stock(row_id=…)`, soft + audited `delete`).
-  A backed row this answer re-asserted last gets its old `created_at` back (`audit.restore` of
-  that `update`). No audit row at all → forget, the safe direction. The #465
-  `restore_superseded` (undo of a conflict answer that superseded the rule) brings a rule back
-  only while such a decision backs it. The Kôš „already reverted?" guard compares a timestamp
-  column with its recorded ISO string as a time (`audit._same`), so a repeat restore is a 409.
+- **Undo of an answer ALWAYS takes the rule back** (`dl_not_stock.undo_answer` →
+  `forget_not_stock`: every live rule row of the wording, soft + audited `delete` tied to the
+  question, Kôš-restorable) — whoever else also decided it (another answer, the seed). Five
+  review rounds tried "keep it while another standing decision backs it" by reading the audit
+  history (newer writes, still-answered questions, seeds, same-day revivals, deletes in
+  between); every round found a new order of undos / Kôš actions that kept a rule nobody stood
+  behind — a SILENT DROP. The deterministic contract fails safe by construction (the line is
+  held and asked again) and needs no history. Same for #465 `restore_superseded`: undoing a
+  conflict CARD answer never revives a superseded rule (the Kôš can, by hand). Undo while
+  another question for the wording is open = 409 (one open question per wording), never a 500.
+  The Kôš „already reverted?" guard compares a timestamp column with its recorded ISO string as
+  a time (`audit._same`), so a repeat restore of a re-assert is a 409.
 - **The sentinel is never a card.** `dl_memory.resolve` skips `gtin = 'not_stock'` on every rung
   — even with `catalog_gtins=None` (the retired-card recall, the ask pre-check) — so the #465
   verdict, the #467 CODEX guard and `ask_dl_item` never see it. **Any NEW reader of
@@ -1138,9 +1140,8 @@ the question halves + the engine helper (`partition`), `teach` only dispatches (
   actor="admin")` inside the add-on container (the same function the answer uses, audited); read
   back `dl_memory.not_stock_keys(conn, ean)` + the `audit_log` `create` row. Never a raw INSERT.
   If a `dl_item` question for that wording is already OPEN, answer IT „vždy vynechať" instead — a
-  seed alone leaves that mail held (only the answer releases it). A seed OWNS the rule like a
-  standing answer: undoing an older answer on that row leaves a seeded rule in place (delete it
-  in Naučené / the Kôš to take it back).
+  seed alone leaves that mail held (only the answer releases it). Undoing an answer for that
+  wording takes a seeded rule back too (the safe direction) — re-seed or restore it in the Kôš.
 - **Test gotcha:** a helper that creates a question's OWN mail for a later `dl_worker.tick` must
   insert it `processed = true` (a question is raised while its mail is processed) — an
   unprocessed `dodacie_listy` row is claimed by the next tick instead of the mail under test.

@@ -373,11 +373,11 @@ def restore_superseded(conn, question_id: int, by: str = "auto:teach") -> list[i
     from ..board.services import audit  # lazy: a leaf module, no import cycle
     restored = []
     for audit_id, mem_id, gtin in rows:
-        if gtin == NOT_STOCK and not not_stock_backed(conn, mem_id):
-            # #488: a superseded „vždy vynechať" rule comes back only while a decision that
-            # still stands backs it — never a rule whose answer was taken back meanwhile
-            log.info("superseded not-stock rule %s not restored — no standing decision backs "
-                     "it", mem_id)
+        if gtin == NOT_STOCK:
+            # #488: a superseded „vždy vynechať" rule is never revived by undoing the card
+            # answer — a rule is born only by a confirmed answer / the seed (the line is asked
+            # again, the safe direction); the Kôš can still restore it by hand
+            log.info("superseded not-stock rule %s not restored by the undo", mem_id)
             continue
         try:
             audit.restore(conn, int(audit_id), by=by)
@@ -533,37 +533,19 @@ def remember_not_stock(conn, supplier_ean: str, wording: str, *, actor: str, que
 
 
 def forget_not_stock(conn, supplier_ean: str, wording: str, *, actor: str, question_id=None,
-                     message_id=None, row_id: int | None = None) -> list[int]:
-    """Soft-delete the live rule for (supplier, wording) — only row `row_id` when given (the row
-    one answer wrote), else every live one — each with a `delete` audit row (the Kôš „Vrátiť"
-    brings it back). Returns the removed ids."""
+                     message_id=None) -> list[int]:
+    """Soft-delete every live rule row for (supplier, wording), each with a `delete` audit row
+    (the Kôš „Vrátiť" brings it back). Returns the removed ids."""
     rows = conn.execute(
         "UPDATE dl_item_memory SET deleted_at = now() WHERE supplier_ean = %s AND item_key = %s"
-        " AND gtin = %s AND deleted_at IS NULL AND (%s::bigint IS NULL OR id = %s::bigint)"
-        " RETURNING id",
-        (str(supplier_ean), item_key(wording), NOT_STOCK, row_id, row_id)).fetchall()
+        " AND gtin = %s AND deleted_at IS NULL RETURNING id",
+        (str(supplier_ean), item_key(wording), NOT_STOCK)).fetchall()
     ids = [int(r[0]) for r in rows]
     for rid in ids:
         _audit(conn, actor=actor, row_id=rid, action="delete", question_id=question_id,
                message_id=message_id, note="#488 pravidlo „vždy vynechať“ zrušené")
     log.warning("not-stock rule for %r (%s) removed: rows %s", wording, supplier_ean, ids)
     return ids
-
-
-def not_stock_backed(conn, row_id, exclude_question=None) -> bool:
-    """Does a decision that still STANDS back rule row `row_id` — a `create`/`update` audit row
-    of it written by a question still answered „vždy vynechať" (not undone, not re-answered
-    otherwise; never `exclude_question`, the one being undone), or by the seed (no question: an
-    explicit admin decision through `remember_not_stock`)? A rule row is never edited (Naučené
-    refuses) and the Kôš writes `delete`/`restore` rows, so no other `create`/`update` on it
-    exists."""
-    return conn.execute(
-        "SELECT 1 FROM audit_log a LEFT JOIN order_questions oq ON oq.id = a.question_id "
-        "WHERE a.table_name = 'dl_item_memory' AND a.row_id = %s "
-        "AND a.action IN ('create', 'update') "
-        "AND (a.question_id IS NULL OR (oq.status = 'answered' AND oq.answer->>'choice' = %s "
-        "     AND oq.id IS DISTINCT FROM %s)) "
-        "LIMIT 1", (str(row_id), NOT_STOCK, exclude_question)).fetchone() is not None
 
 
 def not_stock_keys(conn, supplier_ean: str) -> set[str]:

@@ -79,41 +79,13 @@ def apply_answer(conn, cfg, q: dict, by: str) -> dict:
 
 
 def undo_answer(conn, q: dict, by: str = "auto:teach") -> None:
-    """Undo of a „vždy vynechať" answer — for every rule row THIS answer wrote (its audit
-    `create`/`update` rows), the rule stays only while ANOTHER decision that still stands backs
-    it (`dl_memory.not_stock_backed`: a question still answered „vždy vynechať", or the admin
-    seed); otherwise it goes (soft, audited, Kôš-restorable) — never a silently kept drop the
-    sklad took back, whatever order its answers are undone in. A backed rule this answer only
-    re-asserted last gets its previous `created_at` back (the Kôš's own sanctioned restore of
-    that `update`), so the precedence it had before returns. With no audit row at all (the
-    best-effort audit write failed) the wording's rule is forgotten — the SAFE direction (the
-    line is held and asked again). The caller reopens the question."""
-    qid = q.get("id")
+    """Undo of a „vždy vynechať" answer ALWAYS takes the rule back — every live rule row of the
+    question's (supplier, wording), soft + audited (`delete` rows tied to the question, so the
+    Kôš „Vrátiť" brings it back), whoever else also decided it (another answer, the admin seed).
+    The SAFE direction by construction: the line is held and asked again — never a silently kept
+    drop the sklad just took back, and nothing to infer from the audit history. The caller
+    reopens the question."""
     payload = q.get("payload") or {}
-    rows = conn.execute(
-        "SELECT DISTINCT ON (row_id) row_id, id, action FROM audit_log "
-        "WHERE table_name = 'dl_item_memory' AND question_id = %s "
-        "AND action IN ('create', 'update') ORDER BY row_id, id DESC", (qid,)).fetchall()
-    if not rows:
-        dl_memory.forget_not_stock(conn, payload.get("supplier_ean", ""), q.get("wording", ""),
-                                   actor=by, question_id=qid, message_id=q.get("message_id"))
-        return
-    for row_id, audit_id, action in rows:
-        if not dl_memory.not_stock_backed(conn, row_id, exclude_question=qid):
-            dl_memory.forget_not_stock(conn, payload.get("supplier_ean", ""),
-                                       q.get("wording", ""), actor=by, question_id=qid,
-                                       message_id=q.get("message_id"), row_id=int(row_id))
-            continue
-        newest = conn.execute(
-            "SELECT id FROM audit_log WHERE table_name = 'dl_item_memory' AND row_id = %s "
-            "AND action IN ('create', 'update') ORDER BY id DESC LIMIT 1",
-            (row_id,)).fetchone()
-        if action == "update" and newest and newest[0] == audit_id:
-            from ..board.services import audit  # lazy: a leaf module, no import cycle
-            try:
-                audit.restore(conn, int(audit_id), by=by)
-            except audit.RestoreError as e:
-                log.warning("undo of question %s: re-assert %s not reverted (%s)", qid,
-                            audit_id, e.message)
-        log.info("undo of question %s: rule row %s stays — another standing decision backs "
-                 "it", qid, row_id)
+    dl_memory.forget_not_stock(conn, payload.get("supplier_ean", ""), q.get("wording", ""),
+                               actor=by, question_id=q.get("id"),
+                               message_id=q.get("message_id"))
