@@ -550,18 +550,20 @@ def forget_not_stock(conn, supplier_ean: str, wording: str, *, actor: str, quest
     return ids
 
 
-def not_stock_backed(conn, row_id, newer_than: int = 0) -> bool:
+def not_stock_backed(conn, row_id, exclude_question=None) -> bool:
     """Does a decision that still STANDS back rule row `row_id` — a `create`/`update` audit row
-    of it (newer than audit id `newer_than`) written by a question still answered „vždy
-    vynechať" (not undone, not re-answered otherwise), or by the seed (no question: an explicit
-    admin decision through `remember_not_stock`)? A rule row is never edited (Naučené refuses),
-    so no other `create`/`update` on it exists."""
+    of it written by a question still answered „vždy vynechať" (not undone, not re-answered
+    otherwise; never `exclude_question`, the one being undone), or by the seed (no question: an
+    explicit admin decision through `remember_not_stock`)? A rule row is never edited (Naučené
+    refuses) and the Kôš writes `delete`/`restore` rows, so no other `create`/`update` on it
+    exists."""
     return conn.execute(
         "SELECT 1 FROM audit_log a LEFT JOIN order_questions oq ON oq.id = a.question_id "
         "WHERE a.table_name = 'dl_item_memory' AND a.row_id = %s "
-        "AND a.action IN ('create', 'update') AND a.id > %s "
-        "AND (a.question_id IS NULL OR (oq.status = 'answered' AND oq.answer->>'choice' = %s)) "
-        "LIMIT 1", (str(row_id), int(newer_than), NOT_STOCK)).fetchone() is not None
+        "AND a.action IN ('create', 'update') "
+        "AND (a.question_id IS NULL OR (oq.status = 'answered' AND oq.answer->>'choice' = %s "
+        "     AND oq.id IS DISTINCT FROM %s)) "
+        "LIMIT 1", (str(row_id), NOT_STOCK, exclude_question)).fetchone() is not None
 
 
 def not_stock_keys(conn, supplier_ean: str) -> set[str]:

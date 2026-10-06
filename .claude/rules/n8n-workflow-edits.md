@@ -1096,15 +1096,17 @@ the question halves + the engine helper (`partition`), `teach` only dispatches (
   with an audited `create` (Kôš „Vrátiť" soft-deletes it) and revives a same-day soft-deleted row
   (non-partial UNIQUE identity) with a fresh `created_at`; a LIVE rule is never duplicated but
   RE-ASSERTED (`created_at = now()`, audited `update` with the old `created_at` as `before`, so
-  the Kôš restore makes it dormant again). Undo of an answer reverts exactly what THAT answer did
-  (`dl_not_stock.undo_answer`: its `create` → `forget_not_stock`, soft + audited `delete`; its
-  `update` → `audit.restore` of it) — only on the row that answer wrote, and only while no
-  LATER decision that still stands has written that row since (`dl_memory.not_stock_backed`: a
-  question still answered `not_stock` — not undone, not re-answered — or the admin seed, whose
-  audit rows carry no question); no audit row at all → forget, the safe direction. The #465
+  the Kôš restore makes it dormant again).
+- **Undo of an answer** (`dl_not_stock.undo_answer`), per rule row THAT answer wrote (its audit
+  `create`/`update`): the row stays only while ANOTHER decision that still stands backs it
+  (`dl_memory.not_stock_backed`: a question still answered `not_stock` — not undone, not
+  re-answered — or the admin seed, whose audit rows carry no question), whatever order the
+  answers are undone in; else it goes (`forget_not_stock(row_id=…)`, soft + audited `delete`).
+  A backed row this answer re-asserted last gets its old `created_at` back (`audit.restore` of
+  that `update`). No audit row at all → forget, the safe direction. The #465
   `restore_superseded` (undo of a conflict answer that superseded the rule) brings a rule back
-  only while such a decision backs it. The Kôš „already reverted?" guard compares a timestamp column with its recorded
-  ISO string as a time (`audit._same`), so a repeat restore is a clean 409.
+  only while such a decision backs it. The Kôš „already reverted?" guard compares a timestamp
+  column with its recorded ISO string as a time (`audit._same`), so a repeat restore is a 409.
 - **The sentinel is never a card.** `dl_memory.resolve` skips `gtin = 'not_stock'` on every rung
   — even with `catalog_gtins=None` (the retired-card recall, the ask pre-check) — so the #465
   verdict, the #467 CODEX guard and `ask_dl_item` never see it. **Any NEW reader of

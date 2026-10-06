@@ -79,34 +79,41 @@ def apply_answer(conn, cfg, q: dict, by: str) -> dict:
 
 
 def undo_answer(conn, q: dict, by: str = "auto:teach") -> None:
-    """Undo of a „vždy vynechať" answer takes back exactly what IT did: a rule it created goes
-    (soft, audited); a rule it only re-asserted gets its previous `created_at` back through the
-    Kôš's own sanctioned restore of that `update` row — only on the ROW this answer wrote, and
-    only while no LATER decision that still stands has written that row since
-    (`dl_memory.not_stock_backed`: a question still answered „vždy vynechať", or the admin
-    seed): that decision owns the rule now, so the undo leaves it and logs why. An undone or
-    re-answered question no longer stands; a Naučené edit of a rule row is refused. With no
-    audit row at all (the best-effort audit write failed) the rule is forgotten: the SAFE
-    direction (the line is held and asked again), never a silently kept drop the sklad just took
-    back. The caller reopens the question."""
-    row = conn.execute(
-        "SELECT id, action, row_id FROM audit_log WHERE table_name = 'dl_item_memory' "
-        "AND question_id = %s AND action IN ('create', 'update') ORDER BY id DESC LIMIT 1",
-        (q.get("id"),)).fetchone()
-    if row and dl_memory.not_stock_backed(conn, row[2], newer_than=row[0]):
-        log.warning("undo of question %s: rule row %s was written again by a later decision "
-                    "that still stands — left as it is", q.get("id"), row[2])
-        return
-    if row and row[1] == "update":
-        from ..board.services import audit  # lazy: a leaf module, no import cycle
-        try:
-            audit.restore(conn, int(row[0]), by=by)
-        except audit.RestoreError as e:
-            log.warning("undo of question %s: re-assert %s not reverted (%s)", q.get("id"),
-                        row[0], e.message)
-        return
+    """Undo of a „vždy vynechať" answer — for every rule row THIS answer wrote (its audit
+    `create`/`update` rows), the rule stays only while ANOTHER decision that still stands backs
+    it (`dl_memory.not_stock_backed`: a question still answered „vždy vynechať", or the admin
+    seed); otherwise it goes (soft, audited, Kôš-restorable) — never a silently kept drop the
+    sklad took back, whatever order its answers are undone in. A backed rule this answer only
+    re-asserted last gets its previous `created_at` back (the Kôš's own sanctioned restore of
+    that `update`), so the precedence it had before returns. With no audit row at all (the
+    best-effort audit write failed) the wording's rule is forgotten — the SAFE direction (the
+    line is held and asked again). The caller reopens the question."""
+    qid = q.get("id")
     payload = q.get("payload") or {}
-    dl_memory.forget_not_stock(conn, payload.get("supplier_ean", ""), q.get("wording", ""),
-                               actor=by, question_id=q.get("id"),
-                               message_id=q.get("message_id"),
-                               row_id=int(row[2]) if row else None)
+    rows = conn.execute(
+        "SELECT DISTINCT ON (row_id) row_id, id, action FROM audit_log "
+        "WHERE table_name = 'dl_item_memory' AND question_id = %s "
+        "AND action IN ('create', 'update') ORDER BY row_id, id DESC", (qid,)).fetchall()
+    if not rows:
+        dl_memory.forget_not_stock(conn, payload.get("supplier_ean", ""), q.get("wording", ""),
+                                   actor=by, question_id=qid, message_id=q.get("message_id"))
+        return
+    for row_id, audit_id, action in rows:
+        if not dl_memory.not_stock_backed(conn, row_id, exclude_question=qid):
+            dl_memory.forget_not_stock(conn, payload.get("supplier_ean", ""),
+                                       q.get("wording", ""), actor=by, question_id=qid,
+                                       message_id=q.get("message_id"), row_id=int(row_id))
+            continue
+        newest = conn.execute(
+            "SELECT id FROM audit_log WHERE table_name = 'dl_item_memory' AND row_id = %s "
+            "AND action IN ('create', 'update') ORDER BY id DESC LIMIT 1",
+            (row_id,)).fetchone()
+        if action == "update" and newest and newest[0] == audit_id:
+            from ..board.services import audit  # lazy: a leaf module, no import cycle
+            try:
+                audit.restore(conn, int(audit_id), by=by)
+            except audit.RestoreError as e:
+                log.warning("undo of question %s: re-assert %s not reverted (%s)", qid,
+                            audit_id, e.message)
+        log.info("undo of question %s: rule row %s stays — another standing decision backs "
+                 "it", qid, row_id)
