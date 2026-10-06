@@ -739,6 +739,7 @@ def test_board_dl_item_not_stock_answer_learns_a_supplier_rule_in_the_browser(
     page.wait_for_selector(".r-row:has-text('PREPRAVNÉ e2e')")
     row = page.locator(".r-row:has-text('PREPRAVNÉ e2e')")
     assert row.count() == 1 and label in row.inner_text()
+    assert row.locator(".r-edit").count() == 0, "a rule row offers no editor (delete only)"
 
     assert console == [], f"browser console not clean: {console}"
 

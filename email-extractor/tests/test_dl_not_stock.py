@@ -177,6 +177,7 @@ def test_the_answer_learns_an_audited_supplier_rule_listed_in_naucene_sklad(pg, 
     listed = rules.list_rules(pg, scope="dl", kind="dl_alias")["items"]
     row = next(x for x in listed if x["id"] == rid)
     assert row["target"] == LABEL and row["key"]["wording"] == SERVICE
+    assert row["editable"] is False, "a rule is deleted, never edited — no editor offered"
     assert row["origin"]["question_id"] == qid, "Naučené links the rule to its question"
     found = rules.list_rules(pg, scope="dl", kind="dl_alias", q="vynechat")["items"]
     assert [x["id"] for x in found] == [rid], "the rule is found by its label"
@@ -226,6 +227,8 @@ def test_the_next_document_of_the_supplier_ships_without_the_line_and_asks_nothi
     items = dict(pg.execute("SELECT name, rule FROM order_items").fetchall())
     assert items[SERVICE] == "not_stock", "História shows WHY the line is not on the EDI"
     assert items[ROLL] != "not_stock"
+    order = [n for (n,) in pg.execute("SELECT name FROM order_items ORDER BY id").fetchall()]
+    assert order == [ROLL, SERVICE], "História keeps the document's line order"
 
 
 def test_another_supplier_with_the_same_wording_is_still_asked(pg, tmp_path, monkeypatch):
