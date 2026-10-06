@@ -53,7 +53,9 @@ def test_run_posts_the_whole_list_once_with_the_source_time():
 
     res = push.run("http://addon/api/codex/cards", "tok", query=fake_query,
                    as_of=fake_as_of, poster=fake_poster)
-    assert res == {"fetched": 3, "cards": 2, "rows": 2, "codes": 2}
+    # #485 reopen: the result also carries the ETL time it sent (for the journal line)
+    assert res == {"fetched": 3, "cards": 2, "rows": 2, "codes": 2,
+                   "source_as_of": "2026-09-29T12:23:34+00:00"}
     assert len(posted) == 1, "one POST — the add-on replaces the list atomically"
     url, headers, body = posted[0]
     assert url == "http://addon/api/codex/cards" and headers["X-Token"] == "tok"
