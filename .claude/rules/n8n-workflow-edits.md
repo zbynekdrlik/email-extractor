@@ -1099,9 +1099,11 @@ the question halves + the engine helper (`partition`), `teach` only dispatches (
   the Kôš restore makes it dormant again). Undo of an answer reverts exactly what THAT answer did
   (`dl_not_stock.undo_answer`: its `create` → `forget_not_stock`, soft + audited `delete`; its
   `update` → `audit.restore` of it) — only on the row that answer wrote, and only while no
-  LATER answer that still stands (answered `not_stock`, not undone — joined via
-  `order_questions`) has written that row since (no audit row at all → forget, the safe
-  direction). The Kôš „already reverted?" guard compares a timestamp column with its recorded
+  LATER decision that still stands has written that row since (`dl_memory.not_stock_backed`: a
+  question still answered `not_stock` — not undone, not re-answered — or the admin seed, whose
+  audit rows carry no question); no audit row at all → forget, the safe direction. The #465
+  `restore_superseded` (undo of a conflict answer that superseded the rule) brings a rule back
+  only while such a decision backs it. The Kôš „already reverted?" guard compares a timestamp column with its recorded
   ISO string as a time (`audit._same`), so a repeat restore is a clean 409.
 - **The sentinel is never a card.** `dl_memory.resolve` skips `gtin = 'not_stock'` on every rung
   — even with `catalog_gtins=None` (the retired-card recall, the ask pre-check) — so the #465
@@ -1134,7 +1136,9 @@ the question halves + the engine helper (`partition`), `teach` only dispatches (
   actor="admin")` inside the add-on container (the same function the answer uses, audited); read
   back `dl_memory.not_stock_keys(conn, ean)` + the `audit_log` `create` row. Never a raw INSERT.
   If a `dl_item` question for that wording is already OPEN, answer IT „vždy vynechať" instead — a
-  seed alone leaves that mail held (only the answer releases it).
+  seed alone leaves that mail held (only the answer releases it). A seed OWNS the rule like a
+  standing answer: undoing an older answer on that row leaves a seeded rule in place (delete it
+  in Naučené / the Kôš to take it back).
 - **Test gotcha:** a helper that creates a question's OWN mail for a later `dl_worker.tick` must
   insert it `processed = true` (a question is raised while its mail is processed) — an
   unprocessed `dodacie_listy` row is claimed by the next tick instead of the mail under test.

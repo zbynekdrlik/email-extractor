@@ -82,24 +82,20 @@ def undo_answer(conn, q: dict, by: str = "auto:teach") -> None:
     """Undo of a „vždy vynechať" answer takes back exactly what IT did: a rule it created goes
     (soft, audited); a rule it only re-asserted gets its previous `created_at` back through the
     Kôš's own sanctioned restore of that `update` row — only on the ROW this answer wrote, and
-    only while no LATER answer that still stands (answered „vždy vynechať", not undone) has
-    written that row since: that answer owns the rule now, so the undo leaves it and logs why.
-    Nothing else counts as ownership (a Naučené edit of a rule row is refused; an undone answer
-    no longer stands). With no audit row at all (the best-effort audit write failed) the rule is
-    forgotten: the SAFE direction (the line is held and asked again), never a silently kept drop
-    the sklad just took back. The caller reopens the question."""
+    only while no LATER decision that still stands has written that row since
+    (`dl_memory.not_stock_backed`: a question still answered „vždy vynechať", or the admin
+    seed): that decision owns the rule now, so the undo leaves it and logs why. An undone or
+    re-answered question no longer stands; a Naučené edit of a rule row is refused. With no
+    audit row at all (the best-effort audit write failed) the rule is forgotten: the SAFE
+    direction (the line is held and asked again), never a silently kept drop the sklad just took
+    back. The caller reopens the question."""
     row = conn.execute(
         "SELECT id, action, row_id FROM audit_log WHERE table_name = 'dl_item_memory' "
         "AND question_id = %s AND action IN ('create', 'update') ORDER BY id DESC LIMIT 1",
         (q.get("id"),)).fetchone()
-    if row and conn.execute(
-            "SELECT 1 FROM audit_log a JOIN order_questions oq ON oq.id = a.question_id "
-            "WHERE a.table_name = 'dl_item_memory' AND a.row_id = %s "
-            "AND a.action IN ('create', 'update') AND a.id > %s AND oq.status = 'answered' "
-            "AND oq.answer->>'choice' = %s LIMIT 1",
-            (row[2], row[0], NOT_STOCK)).fetchone():
-        log.warning("undo of question %s: rule row %s was written again by a later answer — "
-                    "left as it is", q.get("id"), row[2])
+    if row and dl_memory.not_stock_backed(conn, row[2], newer_than=row[0]):
+        log.warning("undo of question %s: rule row %s was written again by a later decision "
+                    "that still stands — left as it is", q.get("id"), row[2])
         return
     if row and row[1] == "update":
         from ..board.services import audit  # lazy: a leaf module, no import cycle

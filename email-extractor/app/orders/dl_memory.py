@@ -365,14 +365,20 @@ def restore_superseded(conn, question_id: int, by: str = "auto:teach") -> list[i
     `delete` audit row of this question), never a bespoke UPDATE. Rows already restored by
     hand are skipped. Returns the restored `dl_item_memory` ids."""
     rows = conn.execute(
-        """SELECT DISTINCT ON (m.id) a.id, m.id FROM audit_log a
+        """SELECT DISTINCT ON (m.id) a.id, m.id, m.gtin FROM audit_log a
              JOIN dl_item_memory m ON m.id::text = a.row_id
             WHERE a.table_name = 'dl_item_memory' AND a.action = 'delete'
               AND a.question_id = %s AND m.deleted_at IS NOT NULL
             ORDER BY m.id, a.id DESC""", (question_id,)).fetchall()   # newest per row
     from ..board.services import audit  # lazy: a leaf module, no import cycle
     restored = []
-    for audit_id, mem_id in rows:
+    for audit_id, mem_id, gtin in rows:
+        if gtin == NOT_STOCK and not not_stock_backed(conn, mem_id):
+            # #488: a superseded „vždy vynechať" rule comes back only while a decision that
+            # still stands backs it — never a rule whose answer was taken back meanwhile
+            log.info("superseded not-stock rule %s not restored — no standing decision backs "
+                     "it", mem_id)
+            continue
         try:
             audit.restore(conn, int(audit_id), by=by)
             restored.append(int(mem_id))
@@ -542,6 +548,20 @@ def forget_not_stock(conn, supplier_ean: str, wording: str, *, actor: str, quest
                message_id=message_id, note="#488 pravidlo „vždy vynechať“ zrušené")
     log.warning("not-stock rule for %r (%s) removed: rows %s", wording, supplier_ean, ids)
     return ids
+
+
+def not_stock_backed(conn, row_id, newer_than: int = 0) -> bool:
+    """Does a decision that still STANDS back rule row `row_id` — a `create`/`update` audit row
+    of it (newer than audit id `newer_than`) written by a question still answered „vždy
+    vynechať" (not undone, not re-answered otherwise), or by the seed (no question: an explicit
+    admin decision through `remember_not_stock`)? A rule row is never edited (Naučené refuses),
+    so no other `create`/`update` on it exists."""
+    return conn.execute(
+        "SELECT 1 FROM audit_log a LEFT JOIN order_questions oq ON oq.id = a.question_id "
+        "WHERE a.table_name = 'dl_item_memory' AND a.row_id = %s "
+        "AND a.action IN ('create', 'update') AND a.id > %s "
+        "AND (a.question_id IS NULL OR (oq.status = 'answered' AND oq.answer->>'choice' = %s)) "
+        "LIMIT 1", (str(row_id), int(newer_than), NOT_STOCK)).fetchone() is not None
 
 
 def not_stock_keys(conn, supplier_ean: str) -> set[str]:
