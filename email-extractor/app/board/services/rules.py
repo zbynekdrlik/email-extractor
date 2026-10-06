@@ -15,6 +15,7 @@ Kinds by scope (spec §4):
 from __future__ import annotations
 
 from ...httpapi_common import _fold
+from ...orders import dl_not_stock
 
 PAGE_SIZE = 50
 _CURATED = ("human", "sheet-import")
@@ -128,9 +129,13 @@ def _rows_dl_alias(conn) -> list[dict]:
             "SELECT id, supplier_ean, item_raw, gtin, card, source, created_at "
             "FROM dl_item_memory WHERE deleted_at IS NULL AND source = ANY(%s) "
             "ORDER BY created_at DESC", (list(_CURATED),)).fetchall():
+        # #488: a „nie je skladová položka" rule is a learned DECISION, not an alias of a card
+        rule = r[3] == dl_not_stock.NOT_STOCK
         out.append({
             "kind": "dl_alias", "id": int(r[0]),
-            "label": f"Alias DL položky (dodávateľ {r[1] or '—'})", "target": r[4] or "",
+            "label": (f"{dl_not_stock.LABEL} (dodávateľ {r[1] or '—'})" if rule
+                      else f"Alias DL položky (dodávateľ {r[1] or '—'})"),
+            "target": "" if rule else r[4] or "",
             "key": {"wording": r[2] or "", "ean": r[1] or "", "gtin": r[3] or ""},
             "values": {"wording": r[2] or "", "gtin": r[3] or "", "card": r[4] or ""},
             "origin": {"question_id": None, "message_id": None, "by": "",

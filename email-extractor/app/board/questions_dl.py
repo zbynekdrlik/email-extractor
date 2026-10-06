@@ -12,12 +12,17 @@ The scope→kind partition itself (`DL_KINDS`) is owned by `httpapi_security` an
 """
 from __future__ import annotations
 
+from ..orders.dl_not_stock import LABEL as _NOT_STOCK_LABEL
+
 # `op` is what `tab-questions.js` maps to an answer body; `label` is the button text.
 # Offered candidates are rendered generically by the JS. #477: `codex_pick` („Vybrať kartu z
-# CODEXu") replaces the typed „➕ Nová karta" — a card comes only from the CODEX list.
+# CODEXu") replaces the typed „➕ Nová karta" — a card comes only from the CODEX list. #488:
+# `not_stock` („Nie je skladová položka — vždy vynechať") learns a supplier rule — every later
+# document leaves the line off without asking; `ship_without` stays the one-mail answer.
 DL_CARD_ACTIONS: dict[str, list[dict]] = {
     "dl_item": [{"op": "codex_pick", "label": "Vybrať kartu z CODEXu"},
                 {"op": "ship_without", "label": "Nemá kartu — pošli bez tejto položky"},
+                {"op": "not_stock", "label": _NOT_STOCK_LABEL},
                 {"op": "not_warehouse", "label": "Netýka sa skladu"},
                 {"op": "dl_unknown", "label": "Neviem"}],
     "dl_supplier": [{"op": "new_supplier", "label": "➕ Nový dodávateľ"},

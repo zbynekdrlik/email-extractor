@@ -43,6 +43,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from .dl_not_stock import NOT_STOCK  # #488: the rule's sentinel — never read back as a card
 from .memory import item_key  # same normalization — R66 keys on EXACT wording incl. gramáž
 
 log = logging.getLogger("orders.dl_memory")
@@ -203,6 +204,9 @@ def resolve(conn, supplier_ean: str, item: str, catalog_gtins=None,
     match of one Dobrota roll wording onto a fruit card). `message_id` is the message being
     matched — its OWN answered question counts as confirmation (the reprocess right after the
     sklad answered it), never another message's plain answer (which is exactly the misclick).
+
+    #488: a „nie je skladová položka" rule row (`gtin = NOT_STOCK`) is never a card — every rung
+    skips it, even with no catalog filter (`dl_document` reads the rule via `dl_not_stock.keys`).
     """
     key = item_key(item)
     if not (supplier_ean and key):
@@ -211,9 +215,9 @@ def resolve(conn, supplier_ean: str, item: str, catalog_gtins=None,
         """SELECT gtin, max(card) AS card, max(delivered_on) AS last_day, max(created_at) AS at
              FROM dl_item_memory
             WHERE supplier_ean = %s AND item_key = %s AND source IN ('human', 'teachback')
-              AND deleted_at IS NULL
+              AND deleted_at IS NULL AND gtin <> %s
             GROUP BY gtin ORDER BY at DESC""",
-        (str(supplier_ean), key)).fetchall()
+        (str(supplier_ean), key, NOT_STOCK)).fetchall()
     valid_taught = [r for r in taught_rows
                     if catalog_gtins is None or str(r[0]) in catalog_gtins]
     if valid_taught:
@@ -234,10 +238,10 @@ def resolve(conn, supplier_ean: str, item: str, catalog_gtins=None,
         """SELECT gtin, delivered_on, max(cnt) AS c, max(card) AS card
              FROM dl_item_memory
             WHERE supplier_ean = %s AND item_key = %s AND source <> 'human'
-              AND deleted_at IS NULL
+              AND deleted_at IS NULL AND gtin <> %s
               AND (%s::date IS NULL OR delivered_on < %s::date)
             GROUP BY gtin, delivered_on""",
-        (str(supplier_ean), key, as_of or None, as_of or None)).fetchall()
+        (str(supplier_ean), key, NOT_STOCK, as_of or None, as_of or None)).fetchall()
     if catalog_gtins is not None:
         rows = [r for r in rows if str(r[0]) in catalog_gtins]
     if not rows:

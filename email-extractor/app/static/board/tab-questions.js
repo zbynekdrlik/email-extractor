@@ -237,8 +237,17 @@ const SIMPLE_OPS = {
   line_keep: () => ({ choice: "keep" }),
   line_drop: () => ({ choice: "drop" }),
   ship_without: () => ({ choice: "ship_without" }),
+  not_stock: () => ({ choice: "not_stock" }),
   not_warehouse: () => ({ not_warehouse: true }),
   dl_unknown: () => ({ choice: "unknown" }),
+};
+
+// #488: „vždy vynechať" learns a PERMANENT rule for this supplier's wording — every later
+// delivery note / invoice leaves the line off without asking — so it is confirmed first.
+const CONFIRM_OPS = {
+  not_stock: (q) => window.confirm(`Naozaj vždy vynechávať „${q.wording}“ od tohto dodávateľa?\n\n`
+    + "Tento riadok sa už nebude posielať do ORIONu a nebude sa naň pýtať ani na ďalších "
+    + "dodacích listoch a faktúrach. Zrušiť sa to dá v Naučené sklad alebo v Koši."),
 };
 
 // Partners only — a product card is never typed (#477, `codex_pick` below).
@@ -254,7 +263,10 @@ function actionButton(q, act) {
   }
   if (SIMPLE_OPS[act.op]) {
     return el("button", { class: "q-btn q-btn--act", type: "button",
-      onclick: () => submit(q.id, { ...SIMPLE_OPS[act.op](), ...(q.kind === "item" ? lineEdits(q) : {}) }) },
+      onclick: () => {
+        if (CONFIRM_OPS[act.op] && !CONFIRM_OPS[act.op](q)) return;
+        submit(q.id, { ...SIMPLE_OPS[act.op](), ...(q.kind === "item" ? lineEdits(q) : {}) });
+      } },
       act.label);
   }
   if (FORM_OPS[act.op]) {
@@ -286,6 +298,14 @@ function toggleForm(q, spec, btn) {
   if (inputs[0]) inputs[0].focus();
 }
 
+// A sentinel answer („pošli bez", #488 „vždy vynechať") reads as its button label, never the raw
+// value — the labels come from the server's card actions (op == choice), no second copy here.
+function choiceLabel(q) {
+  const choice = q.answer && q.answer.choice;
+  const act = (state.cardActions[q.kind] || []).find((a) => a.op === choice);
+  return act ? act.label : choice;
+}
+
 // ---- one card ---------------------------------------------------------------------
 function card(q) {
   const box = el("section", { class: "q-card", id: `q-card-${q.id}`,
@@ -299,7 +319,7 @@ function card(q) {
 
   if (state.status === "answered") {
     box.appendChild(el("div", { class: "q-answer" },
-      `Odpovedané: ${q.answer_card || q.answer_gtin || (q.answer && q.answer.choice) || "—"}`));
+      `Odpovedané: ${q.answer_card || q.answer_gtin || choiceLabel(q) || "—"}`));
     box.appendChild(el("div", { class: "q-actions" }, [
       el("button", { class: "q-btn q-btn--undo", type: "button",
         onclick: () => act(q.id, "undo") }, "Vrátiť odpoveď"),
