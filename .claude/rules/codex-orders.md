@@ -4,6 +4,8 @@ paths:
   - "email-extractor/app/orders/codex_cards.py"
   - "email-extractor/tools/codex_orders_push.py"
   - "email-extractor/tools/codex_cards_push.py"
+  - "email-extractor/tools/codex_push_after_etl.py"
+  - "email-extractor/tests/test_codex_push_after_etl.py"
   - "email-extractor/tools/systemd/**"
   - "email-extractor/app/httpapi_codex.py"
   - "email-extractor/tests/test_codex_orders.py"
@@ -140,25 +142,52 @@ add-on's Cloudflare tunnel (the cards push derives `…/api/codex/cards` from it
 payload ever grows. The raw `http://<ha-host>:8099` is being firewalled; never point a push at
 it again:
 
-| tool | copy | units | schedule (Europe/Prague) |
-|---|---|---|---|
-| `codex_orders_push.py` (#342) | `/home/newlevel/codex-orders-push/` | `codex-orders-push.{service,timer}` (not in git) | 14:40 / 18:25 |
-| `codex_cards_push.py` (#467) | same dir | `email-extractor/tools/systemd/codex-cards-push.{service,timer}` | 14:42 / 18:27 |
-| `codex_receipts_push.py` (#485) | same dir | `email-extractor/tools/systemd/codex-receipts-push.{service,timer}` | 14:50 / 18:35 |
+| tool | copy | units (all in `email-extractor/tools/systemd/`) |
+|---|---|---|
+| `codex_push_after_etl.py` (#485) — THE trigger | `/home/newlevel/codex-orders-push/` | `codex-push-after-etl.{path,service,timer}` |
+| `codex_orders_push.py` (#342) | same dir | `codex-orders-push.service` (manual one-off only) |
+| `codex_cards_push.py` (#467) | same dir | `codex-cards-push.service` (manual one-off only) |
+| `codex_receipts_push.py` (#485) | same dir | `codex-receipts-push.service` (manual one-off only) |
 
-(Re)install after a change: `cp email-extractor/tools/codex_cards_push.py
-/home/newlevel/codex-orders-push/` + `sudo cp email-extractor/tools/systemd/codex-cards-push.*
-/etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now
-codex-cards-push.timer`; run once by hand with `sudo systemctl start codex-cards-push.service`
-and read `journalctl -u codex-cards-push.service -n 5` (`pushed: fetched=… codes=…
-to=https://email-pz.newlevel.media` — since #470 the line ends with the target's scheme + host,
-never the path/token, so the journal itself proves which address the push reached). A
+**The pushes run when the codex-bridge ETL REPLACES the DuckDB file, never on their own clock
+(#485 reopen, 2026-10-06).** The ETL starts 14:15 / 18:00 and swaps the file in only when the
+~45-50 min build is done (`os.replace(<db>.new, <db>)`, 15:04 / 18:49 measured); the old
+per-push timers (14:40-14:50 / 18:25-18:35) therefore sent the PREVIOUS cycle's data every
+time (receipts `source_as_of` 5.10. 18:08 after the 6.10. 14:50 push). Now:
+`codex-push-after-etl.path` (`PathChanged=` on the FILE) → `codex-push-after-etl.service` →
+`codex_push_after_etl.py` runs orders → cards → receipts as child processes (their `pushed:`
+lines land in THAT unit's journal, between `trigger:` and `round:`), and
+`codex-push-after-etl.timer` 15:30 / 19:15 starts the same round as a safety net. Measured
+on dev2 with scratch `systemd-run --user --path-property=…` units: `PathChanged=` on the file
+fires on the rename (also when the file has other hardlinks), never on the `.new` build or a
+read-only DuckDB open — but ALSO on every hardlink / unlink of the CURRENT file (the
+codex-bridge MCP server's `.gen-*` pins, odoo_import's `.syncpin` right after each ETL and
+when its run ends: a link-count change is IN_ATTRIB on the inode). A directory watch fires
+on every `.new`/`.wal` write — useless. Hence the GENERATION GUARD: generation = (inode,
+mtime_ns), recorded in `/var/lib/codex-push-after-etl/last-generation` (`StateDirectory=`)
+only when all three pushes succeeded; a trigger for an already-pushed generation logs
+`skip:` and pushes nothing; a failed push leaves it unrecorded so the next trigger (path
+noise or the timer) repeats the whole round; a 30 s debounce waits for the file to settle.
+Never modify the codex-bridge units (a foreign project) — this repo only WATCHES its file.
+
+(Re)install after a change: `cp email-extractor/tools/codex_*.py /home/newlevel/codex-orders-push/`
++ `sudo cp email-extractor/tools/systemd/codex-*.{path,service,timer} /etc/systemd/system/ &&
+sudo systemctl daemon-reload`, then `sudo systemctl reenable codex-push-after-etl.path
+codex-push-after-etl.timer` + `sudo systemctl start codex-push-after-etl.path
+codex-push-after-etl.timer`. Run a round by hand with `sudo systemctl start
+codex-push-after-etl.service` (a no-op `skip:` when that generation was already pushed — to
+re-push it, start the per-push services instead) and read `journalctl -u
+codex-push-after-etl.service -n 20`; ONE push by hand = `sudo systemctl start
+codex-cards-push.service` + `journalctl -u codex-cards-push.service -n 5` (`pushed: fetched=…
+codes=… source_as_of=<ETL time> to=https://email-pz.newlevel.media` — the cards / receipts
+lines name the ETL time they sent, #485; since #470 the target is scheme + host, never the
+path/token, so the journal itself proves which address the push reached). A
 `--dry-run` (`/home/newlevel/codex-orders-push/run.sh`-style env + `--dry-run`) counts without
 POSTing. The add-on image never contains `tools/` (Dockerfile copies `app/` only).
 
 - **From a worktree-isolated worker, `systemctl enable …` is REFUSED** by the worktree guard (it
-  parses `enable` as the bash builtin): use `sudo systemctl reenable codex-cards-push.timer` +
-  `sudo systemctl start codex-cards-push.timer` — same symlink, `systemctl is-enabled` → enabled.
+  parses `enable` as the bash builtin): use `sudo systemctl reenable <unit>` +
+  `sudo systemctl start <unit>` — same symlink, `systemctl is-enabled` → enabled.
 - **Changing a variable in the push EnvironmentFile (a plain key file in newlevel's secrets
   dir)** — `airuleset.py secret` has no "set one key" operation, and `block-vault-store-read.sh`
   refuses any command line that names the file (even `secret exec --file … -- python3 <script>
@@ -633,8 +662,8 @@ An invoice taken as a delivery note (`dl_supplier_overrides.invoice_is_delivery_
 must never ship a SECOND delivery: the warehouse may already have typed it into CODEX by hand
 (incident Zeelandia 9.9. — typed at 13:34, our DESADV from the invoice at 19:27). Pieces:
 
-- **`tools/codex_receipts_push.py`** (dev2, same install as the cards push above; units
-  `codex-receipts-push.{service,timer}` at 14:50 / 18:35, the receipts URL derived from
+- **`tools/codex_receipts_push.py`** (dev2, same install as the cards push above; run by the
+  guarded round after each ETL replacement — see the install section; the receipts URL derived from
   `CODEX_PUSH_URL`): `raw.sp001` purchase receipts (SDPOH 10/12/13/14, own IČO 31697143
   excluded) of the last 60 days, ONE row per (NCD, NICO) — `NSUMAP` summed, never `NMNOZ`;
   `dl_numbers` = the distinct `NCDLIST` values (often the INVOICE number the warehouse typed
