@@ -114,7 +114,9 @@ def test_main_prints_the_pushed_line_with_the_target(monkeypatch, capsys):
     url = "https://email-pz.newlevel.media/api/codex/cards"
     assert push.main(["--url", url, "--token", "tok-not-for-the-log"]) == 0
     out = capsys.readouterr().out.strip()
-    assert out == "pushed: fetched=1 cards=1 rows=1 codes=1 to=https://email-pz.newlevel.media"
+    # #485 reopen: the line also names the ETL time the list was taken at (source_as_of)
+    assert out == ("pushed: fetched=1 cards=1 rows=1 codes=1 "
+                   "source_as_of=2026-09-29T12:15:00+00:00 to=https://email-pz.newlevel.media")
     assert "tok-not-for-the-log" not in out
     assert posted == [url]
 
