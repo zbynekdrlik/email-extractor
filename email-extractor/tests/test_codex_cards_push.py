@@ -53,7 +53,9 @@ def test_run_posts_the_whole_list_once_with_the_source_time():
 
     res = push.run("http://addon/api/codex/cards", "tok", query=fake_query,
                    as_of=fake_as_of, poster=fake_poster)
-    assert res == {"fetched": 3, "cards": 2, "rows": 2, "codes": 2}
+    # #485 reopen: the result also carries the ETL time it sent (for the journal line)
+    assert res == {"fetched": 3, "cards": 2, "rows": 2, "codes": 2,
+                   "source_as_of": "2026-09-29T12:23:34+00:00"}
     assert len(posted) == 1, "one POST — the add-on replaces the list atomically"
     url, headers, body = posted[0]
     assert url == "http://addon/api/codex/cards" and headers["X-Token"] == "tok"
@@ -114,7 +116,9 @@ def test_main_prints_the_pushed_line_with_the_target(monkeypatch, capsys):
     url = "https://email-pz.newlevel.media/api/codex/cards"
     assert push.main(["--url", url, "--token", "tok-not-for-the-log"]) == 0
     out = capsys.readouterr().out.strip()
-    assert out == "pushed: fetched=1 cards=1 rows=1 codes=1 to=https://email-pz.newlevel.media"
+    # #485 reopen: the line also names the ETL time the list was taken at (source_as_of)
+    assert out == ("pushed: fetched=1 cards=1 rows=1 codes=1 "
+                   "source_as_of=2026-09-29T12:15:00+00:00 to=https://email-pz.newlevel.media")
     assert "tok-not-for-the-log" not in out
     assert posted == [url]
 

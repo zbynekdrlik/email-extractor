@@ -73,7 +73,9 @@ def test_run_posts_the_whole_window_once_with_the_source_time_and_days():
                                   _row(receipt_number=None)],
                    as_of=lambda: datetime.datetime(2026, 10, 4, 16, 19, 49),
                    poster=fake_poster)
-    assert res == {"fetched": 3, "receipts": 2, "stored": 2}
+    # #485 reopen: the result also carries the ETL time it sent (for the journal line)
+    assert res == {"fetched": 3, "receipts": 2, "stored": 2,
+                   "source_as_of": "2026-10-04T16:19:49+00:00"}
     assert len(posted) == 1, "one POST — the add-on replaces its copy atomically"
     url, headers, body = posted[0]
     assert url == "https://addon/api/codex/receipts" and headers["X-Token"] == "tok"

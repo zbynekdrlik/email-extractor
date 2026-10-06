@@ -18,8 +18,9 @@ from zoneinfo import ZoneInfo
 
 log = logging.getLogger("orders.codex_snapshot")
 
-# The ETL loads at 14:15 and 18:00 and the pushes follow within ~35 min, so the longest NORMAL
-# data age is ~20.5 h (18:00 → next 14:35); 30 h tolerates one missed slot plus ETL jitter.
+# The ETL starts at 14:15 and 18:00 and the pushes follow the moment it replaced its DuckDB
+# (~15:05 / ~18:50, #485), so the longest NORMAL data age is ~21 h (an 18:0x load → next
+# ~15:05); 30 h tolerates one missed slot plus ETL jitter.
 STALE_HOURS = 30
 _LOCAL_TZ = ZoneInfo("Europe/Bratislava")
 

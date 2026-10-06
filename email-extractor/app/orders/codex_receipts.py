@@ -1,6 +1,7 @@
 """CODEX supplier receipts (príjemky) — what the warehouse already took in (#485).
 
-`tools/codex_receipts_push.py` (dev2 systemd timer, the #342/#467 push pattern) reads the last
+`tools/codex_receipts_push.py` (dev2, the #342/#467 push pattern; run when the codex-bridge ETL
+replaced its DuckDB — `tools/codex_push_after_etl.py`) reads the last
 60 days of receipt headers from the codex-bridge DuckDB read-only and POSTs them to
 `POST /api/codex/receipts`; `replace_receipts` swaps the whole copy in atomically (a REPLACE,
 never a merge — a receipt deleted in CODEX must leave here too, or it would block an invoice
@@ -248,7 +249,8 @@ def stale_sweep(conn, cfg, now: datetime | None = None) -> bool:
     body = (f"<p>&#9888;&#65039; Príjemky z CODEXu {state} &mdash; faktúry ako dodací list "
             f"(#485) sa preto NEspracúvajú (radšej čakať než nahrať duplicitu do ORIONu); "
             f"počkajú vo fronte, kým príde čerstvý zoznam. Dodacie listy bežia ďalej. "
-            "Skontroluj na dev2 <code>codex-receipts-push.timer</code> a codex-bridge ETL.</p>")
+            "Skontroluj na dev2 <code>codex-push-after-etl.path</code> / <code>.timer</code> "
+            "(<code>journalctl -u codex-push-after-etl.service</code>) a codex-bridge ETL.</p>")
     if not codex_snapshot.stale_alert(conn, cfg, kind=ALERT_KIND, key_prefix=ALERT_KEY,
                                       anchor=anchor, body=body, now=now):
         return False

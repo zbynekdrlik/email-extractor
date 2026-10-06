@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Push the CODEX stock-card list from the codex-bridge DuckDB to the add-on (#467).
 
-Runs on dev2 (where `/var/lib/codex-bridge/codex.duckdb` lives) on its OWN systemd timer
-(`tools/systemd/codex-cards-push.timer`: 14:42 / 18:27 Europe/Prague — the #342 orders push's
-cadence + 2 min, ~27 min after each codex-bridge ETL). It reads `raw.sm002` **read-only** — every
+Runs on dev2 (where `/var/lib/codex-bridge/codex.duckdb` lives), started by the guarded push
+round `codex_push_after_etl.py` (after the orders push) the moment the codex-bridge ETL
+replaced that file (#485). It reads `raw.sm002` **read-only** — every
 stock-card row whose EAN kód (`NEANKOD`) is set — and POSTs the WHOLE list in ONE body to
 `POST /api/codex/cards` (X-Token auth). The add-on REPLACES its copy atomically, so a code that
 left CODEX leaves the add-on too (the 3698 incident: card 27 carried it only 24.-28.9.).
@@ -173,15 +173,18 @@ def run(url: str, token: str, db_path: str = DEFAULT_DB_PATH, query=None, as_of=
     query = query or (lambda: query_duckdb(db_path))
     as_of = as_of or (lambda: query_as_of(db_path))
     poster = poster or _requests_post
+    # #485: the ETL time FIRST — if the ETL replaces the file between the two reads, the time
+    # sent is older than the rows (safe), never newer
+    source_as_of = _iso_utc(as_of())
     rows = query()
     cards = build_cards(rows)
     if not cards:
         return {"fetched": len(rows), "cards": 0, "rows": 0, "codes": 0,
                 "error": "no usable stock-card rows — nothing posted"}
-    body = {"source_as_of": _iso_utc(as_of()), "cards": cards}
+    body = {"source_as_of": source_as_of, "cards": cards}
     resp = poster(url, {"X-Token": token, "Content-Type": "application/json"}, body) or {}
     res = {"fetched": len(rows), "cards": len(cards), "rows": int(resp.get("rows", 0) or 0),
-           "codes": int(resp.get("codes", 0) or 0)}
+           "codes": int(resp.get("codes", 0) or 0), "source_as_of": body["source_as_of"]}
     if isinstance(resp.get("sync"), dict):
         # #478: the add-on's CODEX card sync result for this list (dry-run / apply / ...)
         res["sync"] = resp["sync"]
@@ -196,8 +199,10 @@ def pushed_line(res: dict, url: str) -> str:
     # (unlike `.hostname`/`.port`) never raises, so a pushed batch always gets its line.
     parts = urlsplit(url)
     target = f"{parts.scheme}://{parts.netloc.rpartition('@')[2]}"
+    # #485: the ETL time the list was taken at — the journal proves the push sent fresh data
+    as_of = f"source_as_of={res['source_as_of']} " if res.get("source_as_of") else ""
     line = (f"pushed: fetched={res['fetched']} cards={res['cards']} rows={res['rows']} "
-            f"codes={res['codes']} to={target}")
+            f"codes={res['codes']} {as_of}to={target}")
     sync = res.get("sync")
     if isinstance(sync, dict):
         # #478: the journal proves the add-on's card sync ran and what it did

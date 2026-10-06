@@ -1,0 +1,18 @@
+[Unit]
+Description=Push CODEX order headers to the email-extractor add-on (#342)
+Documentation=https://github.com/zbynekdrlik/email-extractor/issues/342
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=newlevel
+Group=newlevel
+# URL + token (mode-600, not committed) + window + duckdb path.
+EnvironmentFile=/home/newlevel/.secrets/codex-orders-push.env
+ExecStart=/usr/bin/python3 /home/newlevel/codex-orders-push/codex_orders_push.py
+# Read-only DuckDB access + one HTTP POST. No timer of its own any more (#485): the guarded
+# round codex-push-after-etl.service runs this tool after each ETL; this unit is for a
+# manual one-off push (`sudo systemctl start codex-orders-push.service`).
+TimeoutStartSec=300
+Nice=10

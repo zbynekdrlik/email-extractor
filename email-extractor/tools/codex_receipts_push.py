@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Push CODEX supplier-receipt headers (príjemky) from the codex-bridge DuckDB to the add-on (#485).
 
-Runs on dev2 (where `/var/lib/codex-bridge/codex.duckdb` lives) on its OWN systemd timer
-(`tools/systemd/codex-receipts-push.timer`: 14:50 / 18:35 Europe/Prague — after the codex-bridge
-ETL has loaded `sp001`, which takes ~15 min from 14:15 / 18:00). It reads the last `--days` (60)
+Runs on dev2 (where `/var/lib/codex-bridge/codex.duckdb` lives), started by the guarded push
+round `codex_push_after_etl.py` (last, after orders + cards) the moment the codex-bridge ETL
+replaced that file (#485 — the old 14:50 / 18:35 timer fired ~15 min before the ETL's build
+was done and sent the previous cycle's receipts). It reads the last `--days` (60)
 of supplier receipts **read-only** and POSTs them in ONE body to `POST /api/codex/receipts`
 (X-Token auth); the add-on REPLACES its copy atomically.
 
@@ -259,12 +260,15 @@ def run(url: str, token: str, db_path: str = DEFAULT_DB_PATH, days: int = DEFAUL
     query = query or (lambda: query_duckdb(db_path, days))
     as_of = as_of or (lambda: query_as_of(db_path))
     poster = poster or _requests_post
+    # #485: the ETL time FIRST — if the ETL replaces the file between the two reads, the time
+    # sent is older than the rows (the invoice gate then waits longer), never newer (it would
+    # trust receipts that are not in the copy)
+    source_as_of = _iso_utc(as_of())
     rows = query()
     receipts = build_receipts(rows)
     if not receipts:
         return {"fetched": len(rows), "receipts": 0, "stored": 0,
                 "error": "no usable receipt rows — nothing posted"}
-    source_as_of = _iso_utc(as_of())
     if not source_as_of:
         # the add-on judges invoices by how far CODEX's data reaches — a copy of unknown age
         # would pass as fresh; the add-on also refuses to trust one (fail-closed)
@@ -273,7 +277,7 @@ def run(url: str, token: str, db_path: str = DEFAULT_DB_PATH, days: int = DEFAUL
     body = {"source_as_of": source_as_of, "days": int(days), "receipts": receipts}
     resp = poster(url, {"X-Token": token, "Content-Type": "application/json"}, body) or {}
     return {"fetched": len(rows), "receipts": len(receipts),
-            "stored": int(resp.get("stored", 0) or 0)}
+            "stored": int(resp.get("stored", 0) or 0), "source_as_of": source_as_of}
 
 
 def pushed_line(res: dict, url: str) -> str:
@@ -282,8 +286,10 @@ def pushed_line(res: dict, url: str) -> str:
     reached (the #470 convention of the cards push)."""
     parts = urlsplit(url)
     target = f"{parts.scheme}://{parts.netloc.rpartition('@')[2]}"
+    # #485: the ETL time the receipts were taken at — the journal proves the push sent fresh data
+    as_of = f"source_as_of={res['source_as_of']} " if res.get("source_as_of") else ""
     return (f"pushed: fetched={res['fetched']} receipts={res['receipts']} "
-            f"stored={res['stored']} to={target}")
+            f"stored={res['stored']} {as_of}to={target}")
 
 
 def main(argv=None) -> int:

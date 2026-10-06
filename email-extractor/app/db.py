@@ -245,7 +245,7 @@ SOFT_DELETE = [
 
 # #467 (revision 17): the CODEX stock-card list. CODEX rejects a WHOLE delivery-note import
 # when one DESADV line carries an EAN kód (NEANKOD) no stock card has (DL 126049732: code 3698,
-# which card 27 carried only 24.-28.9.). `tools/codex_cards_push.py` (dev2 systemd timer) reads
+# which card 27 carried only 24.-28.9.). `tools/codex_cards_push.py` (dev2, after each ETL) reads
 # `raw.sm002` read-only from the codex-bridge DuckDB and POSTs the FULL list to
 # `POST /api/codex/cards`; `app/orders/codex_cards.py` REPLACES it atomically (a code that left
 # CODEX leaves here too — the incident class). One row per (code, stock card, stredisko, sklad)

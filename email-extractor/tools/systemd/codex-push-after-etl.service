@@ -1,0 +1,23 @@
+[Unit]
+Description=Push CODEX orders, cards and receipts once per codex-bridge ETL generation (#485)
+Documentation=https://github.com/zbynekdrlik/email-extractor/issues/485
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=newlevel
+Group=newlevel
+# The SAME EnvironmentFile as the three push units (mode-600, never committed): CODEX_PUSH_URL /
+# CODEX_PUSH_TOKEN / CODEX_DUCKDB_PATH — inherited by the three pushes this runs as children.
+EnvironmentFile=/home/newlevel/.secrets/codex-orders-push.env
+# /var/lib/codex-push-after-etl/last-generation = the ETL generation last pushed successfully.
+StateDirectory=codex-push-after-etl
+# Started by codex-push-after-etl.path (the DuckDB file was replaced) and by
+# codex-push-after-etl.timer (safety net). Waits ~30 s for the file to settle, then runs
+# orders -> cards -> receipts (each up to 300 s); a generation already pushed = a logged no-op.
+ExecStart=/usr/bin/python3 /home/newlevel/codex-orders-push/codex_push_after_etl.py
+# >= the round's worst case: MAX_ROUNDS 2 x (6 x 30 s settle + 3 x 300 s pushes) = 2160 s
+# (pinned by test_the_service_timeout_covers_the_rounds_worst_case).
+TimeoutStartSec=2400
+Nice=10
