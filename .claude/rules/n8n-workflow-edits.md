@@ -1088,7 +1088,7 @@ invoice-as-DL; a deposit, packaging) therefore held every document on a fresh `d
 question. The answer for that is „Nie je skladová položka — vždy vynechať" (`not_stock`). The
 rule's SQL lives in `dl_memory` (the ONE module that writes `dl_item_memory`:
 `remember_not_stock` / `forget_not_stock` / `not_stock_keys`); `app/orders/dl_not_stock.py` holds
-the question halves + the engine helper (`partition`), `teach` only dispatches (over budget):
+the question halves + the engine helper (`leave_off`), `teach` only dispatches (over budget):
 
 - **The rule = a `dl_item_memory` row with the sentinel `gtin = 'not_stock'`**, `source='human'`,
   `card` = the label, keyed by the question's `(supplier_ean, item_key)` — supplier-scoped on
@@ -1121,16 +1121,17 @@ the question halves + the engine helper (`partition`), `teach` only dispatches (
   same wording (Produkty alias, História „Doučiť", an answer) sends the line back to the matcher;
   a #465 memory-conflict question answered with a card also soft-deletes the rule
   (`supersede_taught`, audited, restorable). The plain `_undo_dl_item` DELETE never touches it.
-- **Engine:** `dl_document._process_document` calls `dl_not_stock.partition` ONCE per document:
-  ruled lines are taken out before `dl_memory.resolve` / the model (no LLM call, not in
-  `decisions`/`matched_items`, so the EDI is complete — `ok`, not `partial`), logged and kept in
-  the run items (`rule = 'not_stock'`, História shows why). A document whose EVERY line is ruled
+- **Engine:** `dl_document._process_document` reads `dl_memory.not_stock_keys` ONCE per document
+  and asks `dl_not_stock.leave_off` per line: a ruled line is taken out before
+  `dl_memory.resolve` / the model (no LLM call, not in `decisions`/`matched_items`, so the EDI is
+  complete — `ok`, not `partial`), logged and kept in the run items in its place
+  (`rule = 'not_stock'`, História shows why, in document order). A document whose EVERY line is ruled
   (a transport-only invoice) is the terminal `_skip_not_warehouse` (`not_warehouse`, own outcome
   text) — never a ❗ „0 z 0" review nobody can answer. Applied in shadow too (a learned decision,
   like human memory) — the e2e-dl corpus has no rule rows, byte-identical.
 - **Naučené sklad:** the rule row shows label „Neskladový riadok (dodávateľ …)", target = the rule
   label (searchable), origin = the question from its audit `create` (`LEFT JOIN LATERAL` on
-  `idx_audit_log_row`). Typing `not_stock` into an alias's number, and ANY edit of a rule row,
+  `idx_audit_log_row`), `editable: false` (no „Upraviť" in `tab-rules.js`). Typing `not_stock` into an alias's number, and ANY edit of a rule row,
   are refused (400, `update_dl_item_memory_row`) — a rule is born only by the confirmed board
   answer / the seed; a wrong one is deleted (Kôš restorable).
 - **The answering mail:** `_skip_answered_item_keys` reads BOTH sentinels, so the mail that got

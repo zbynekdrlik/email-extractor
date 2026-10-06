@@ -92,8 +92,11 @@ function row(rule) {
     head.appendChild(el("span", { class: "r-badge", title: "Vzorka bola bez príloh" },
       "0 príloh vo vzorke"));
   }
-  head.appendChild(el("button", { class: "r-btn r-edit", type: "button",
-    onclick: () => toggleEditor(box, rule) }, "Upraviť"));
+  // #488: a „Nie je skladová položka" rule is deleted (Kôš), never edited — no editor offered
+  if (rule.editable !== false) {
+    head.appendChild(el("button", { class: "r-btn r-edit", type: "button",
+      onclick: () => toggleEditor(box, rule) }, "Upraviť"));
+  }
   box.appendChild(head);
   box.appendChild(originBlock(rule));
   return box;

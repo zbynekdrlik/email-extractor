@@ -12,9 +12,10 @@ položky" (`teach.DL_ITEM_SHIP_WITHOUT`), which is read back per MAIL
   sentinel `NOT_STOCK` (never a card — `dl_memory.resolve` skips it on every rung), audited, in
   Naučené sklad, Kôš-restorable. The newest live taught decision for the wording wins, so a card
   taught later sends the line back to the matcher.
-- **The engine** (`partition`, called once per document by `dl_document`) takes the ruled lines
-  out before matching — no model call, no question, no hold — and records them in the run items
-  (rule `not_stock`) so História shows why they are not on the EDI.
+- **The engine** (`dl_document` reads `dl_memory.not_stock_keys` once per document; `leave_off`
+  per line) takes the ruled lines out before matching — no model call, no question, no hold —
+  and records them in the run items in place (rule `not_stock`) so História shows why they are
+  not on the EDI.
 - **The question halves** (`apply_answer` / `undo_answer`); `teach` only dispatches — kept out of
   the already-oversized `teach.py`, the precedent `dl_item_conflict` set.
 
@@ -34,28 +35,20 @@ NOT_STOCK = dl_memory.NOT_STOCK
 LABEL = dl_memory.NOT_STOCK_LABEL
 
 
-def partition(conn, supplier_ean: str, items: list[dict], all_items: list[dict],
-              message_id: str = "") -> tuple[list[dict], int]:
-    """Split a document's lines into the ones to match and the ones this supplier's rule leaves
-    off: returns `(stock_lines, ruled_count)`. Each ruled line is logged and appended to
-    `all_items` (the run's `order_items`, rule `not_stock`) — never matched, never asked, never
-    on the EDI."""
-    keys = dl_memory.not_stock_keys(conn, supplier_ean)
-    if not keys:
-        return list(items), 0
-    stock: list[dict] = []
-    ruled = 0
-    for item in items:
-        if item_key(item.get("name", "")) not in keys:
-            stock.append(item)
-            continue
-        ruled += 1
-        log.info("DL message %s: %r is not a stock line for supplier %s (#488 rule) — left "
-                 "off the EDI, nothing asked", message_id, item.get("name", ""), supplier_ean)
-        all_items.append({"name": item.get("name", ""), "quantity": item.get("quantity"),
-                          "unit": item.get("unit"), "gtin": None, "card": LABEL,
-                          "confidence": 1.0, "rule": NOT_STOCK, "trace": {"not_stock": True}})
-    return stock, ruled
+def leave_off(rule_keys: set[str], item: dict, all_items: list[dict], message_id: str,
+              supplier_ean: str) -> bool:
+    """Is this line ruled „not a stock line" for its supplier (`rule_keys` =
+    `dl_memory.not_stock_keys`, read once per document)? A ruled line is logged and recorded in
+    `all_items` IN ITS PLACE (the run's `order_items`, rule `not_stock` — História keeps the
+    document's line order) and is never matched, never asked, never on the EDI."""
+    if not rule_keys or item_key(item.get("name", "")) not in rule_keys:
+        return False
+    log.info("DL message %s: %r is not a stock line for supplier %s (#488 rule) — left off "
+             "the EDI, nothing asked", message_id, item.get("name", ""), supplier_ean)
+    all_items.append({"name": item.get("name", ""), "quantity": item.get("quantity"),
+                      "unit": item.get("unit"), "gtin": None, "card": LABEL,
+                      "confidence": 1.0, "rule": NOT_STOCK, "trace": {"not_stock": True}})
+    return True
 
 
 def apply_answer(conn, cfg, q: dict, by: str) -> dict:

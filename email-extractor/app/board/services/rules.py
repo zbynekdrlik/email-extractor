@@ -150,6 +150,7 @@ def _rows_dl_alias(conn) -> list[dict]:
             "values": {"wording": r[2] or "", "gtin": r[3] or "", "card": r[4] or ""},
             "origin": {"question_id": r[7], "message_id": r[8], "by": r[9] or "",
                        "created_at": _iso(r[6]), "source": r[5] or ""},
+            **({"editable": False} if rule else {}),   # deleted, never edited (400)
         })
     return out
 

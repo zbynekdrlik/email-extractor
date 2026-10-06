@@ -439,10 +439,13 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # ruled line (a recurring service line: transport, deposit) is left off the EDI before any
     # matching: no model call, no question, no hold. Read in shadow too: a learned decision,
     # like human memory (the e2e-dl corpus has none, so it stays byte-identical).
-    stock_lines, ruled = dl_not_stock.partition(conn, supplier_decision.ean_edi,
-                                                doc.get("items") or [], all_items,
-                                                message["message_id"])
-    for item in stock_lines:
+    not_stock_keys = dl_memory.not_stock_keys(conn, supplier_decision.ean_edi)
+    ruled = 0
+    for item in doc.get("items") or []:
+        if dl_not_stock.leave_off(not_stock_keys, item, all_items, message["message_id"],
+                                  supplier_decision.ean_edi):
+            ruled += 1
+            continue
         # #465: `message_id` — this message's OWN answered question confirms its wording
         # (the reprocess right after the sklad answered it), never another message's.
         recalled = dl_memory.resolve(conn, supplier_decision.ean_edi, item.get("name", ""),
