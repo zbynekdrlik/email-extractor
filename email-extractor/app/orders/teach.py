@@ -1099,7 +1099,7 @@ def _undo_dl_item(conn, q: dict) -> dict:
         conn.execute(
             "DELETE FROM dl_item_memory WHERE supplier_ean = %s AND item_key = %s "
             "AND source = 'human' AND deleted_at IS NULL "   # #465: never a Kôš row
-            "AND gtin <> %s",   # #488: a not-stock rule leaves only by its own undo / Kôš
+            "AND gtin <> %s",   # #488: never another question's rule (own undo / Kôš / Naučené)
             (payload.get("supplier_ean", ""), memory.item_key(q.get("wording", "")),
              DL_ITEM_NOT_STOCK))
     conn.execute(

@@ -81,12 +81,23 @@ def apply_answer(conn, cfg, q: dict, by: str) -> dict:
 def undo_answer(conn, q: dict, by: str = "auto:teach") -> None:
     """Undo of a „vždy vynechať" answer takes back exactly what IT did: a rule it created goes
     (soft, audited); a rule it only re-asserted gets its previous `created_at` back through the
-    Kôš's own sanctioned restore of that `update` row — the rule another question created stays.
-    The caller reopens the question."""
+    Kôš's own sanctioned restore of that `update` row. Only while that write is still the NEWEST
+    `create`/`update` of the rule row — a later answer (a re-assert, a revival after a Kôš removal)
+    owns the rule now, so the undo leaves it and logs why. With no audit row at all (the
+    best-effort audit write failed) the rule is forgotten: the SAFE direction (the line is held
+    and asked again), never a silently kept drop the sklad just took back. The caller reopens the
+    question."""
     row = conn.execute(
-        "SELECT id, action FROM audit_log WHERE table_name = 'dl_item_memory' "
+        "SELECT id, action, row_id FROM audit_log WHERE table_name = 'dl_item_memory' "
         "AND question_id = %s AND action IN ('create', 'update') ORDER BY id DESC LIMIT 1",
         (q.get("id"),)).fetchone()
+    if row and conn.execute(
+            "SELECT 1 FROM audit_log WHERE table_name = 'dl_item_memory' AND row_id = %s "
+            "AND action IN ('create', 'update') AND id > %s LIMIT 1",
+            (row[2], row[0])).fetchone():
+        log.warning("undo of question %s: rule row %s was written again by a later answer — "
+                    "left as it is", q.get("id"), row[2])
+        return
     if row and row[1] == "update":
         from ..board.services import audit  # lazy: a leaf module, no import cycle
         try:

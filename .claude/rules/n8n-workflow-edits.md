@@ -1098,7 +1098,10 @@ the question halves + the engine helper (`partition`), `teach` only dispatches (
   RE-ASSERTED (`created_at = now()`, audited `update` with the old `created_at` as `before`, so
   the Kôš restore makes it dormant again). Undo of an answer reverts exactly what THAT answer did
   (`dl_not_stock.undo_answer`: its `create` → `forget_not_stock`, soft + audited `delete`; its
-  `update` → `audit.restore` of it) — the rule another question created stays.
+  `update` → `audit.restore` of it) — and only while that write is still the NEWEST
+  `create`/`update` of the rule row (a later answer owns it then; no audit row at all → forget,
+  the safe direction). The Kôš „already reverted?" guard compares a timestamp column with its
+  recorded ISO string as a time (`audit._same`), so a repeat restore is a clean 409.
 - **The sentinel is never a card.** `dl_memory.resolve` skips `gtin = 'not_stock'` on every rung
   — even with `catalog_gtins=None` (the retired-card recall, the ask pre-check) — so the #465
   verdict, the #467 CODEX guard and `ask_dl_item` never see it. **Any NEW reader of
@@ -1106,9 +1109,11 @@ the question halves + the engine helper (`partition`), `teach` only dispatches (
   is safe: it moves rows by real card numbers only; `catalog_aliases` lists per card number).
   The generic answer path never CODEX-checks or catalog-looks-up a sentinel choice
   (`teach.DL_ITEM_SENTINELS`).
-- **Newest live curated decision wins** (`dl_not_stock.keys`: `DISTINCT ON (item_key) … ORDER BY
-  created_at DESC` over `source IN ('human','teachback')`) — a card taught LATER for the same
-  wording (Produkty alias, História „Doučiť", an answer) sends the line back to the matcher.
+- **Newest live curated decision wins** (`dl_memory.not_stock_keys`: `DISTINCT ON (item_key) …
+  ORDER BY created_at DESC` over `source IN ('human','teachback')`) — a card taught LATER for the
+  same wording (Produkty alias, História „Doučiť", an answer) sends the line back to the matcher;
+  a #465 memory-conflict question answered with a card also soft-deletes the rule
+  (`supersede_taught`, audited, restorable). The plain `_undo_dl_item` DELETE never touches it.
 - **Engine:** `dl_document._process_document` calls `dl_not_stock.partition` ONCE per document:
   ruled lines are taken out before `dl_memory.resolve` / the model (no LLM call, not in
   `decisions`/`matched_items`, so the EDI is complete — `ok`, not `partial`), logged and kept in
@@ -1118,14 +1123,17 @@ the question halves + the engine helper (`partition`), `teach` only dispatches (
   like human memory) — the e2e-dl corpus has no rule rows, byte-identical.
 - **Naučené sklad:** the rule row shows label „Neskladový riadok (dodávateľ …)", target = the rule
   label (searchable), origin = the question from its audit `create` (`LEFT JOIN LATERAL` on
-  `idx_audit_log_row`). Typing `not_stock` into an alias's number is refused (400,
-  `update_dl_item_memory_row`) — a rule is born only by the confirmed board answer / the seed.
+  `idx_audit_log_row`). Typing `not_stock` into an alias's number, and retargeting a rule to
+  another wording or a typed number, are refused (400, `update_dl_item_memory_row`) — a rule is
+  born only by the confirmed board answer / the seed; a wrong one is deleted (Kôš restorable).
 - **The answering mail:** `_skip_answered_item_keys` reads BOTH sentinels, so the mail that got
   the answer ships without the line even if the rule is later removed in the Kôš.
 - **Seeding a known service line without waiting for a question** = call
   `dl_memory.remember_not_stock(conn, <supplier_ean>, <exact wording from order_runs>,
   actor="admin")` inside the add-on container (the same function the answer uses, audited); read
   back `dl_memory.not_stock_keys(conn, ean)` + the `audit_log` `create` row. Never a raw INSERT.
+  If a `dl_item` question for that wording is already OPEN, answer IT „vždy vynechať" instead — a
+  seed alone leaves that mail held (only the answer releases it).
 - **Test gotcha:** a helper that creates a question's OWN mail for a later `dl_worker.tick` must
   insert it `processed = true` (a question is raised while its mail is processed) — an
   unprocessed `dodacie_listy` row is claimed by the next tick instead of the mail under test.

@@ -456,6 +456,11 @@ def update_dl_item_memory_row(conn, row_id: int, *, item_raw: str, gtin: str,
         # #488: a typed number must never turn an alias into a silent-drop rule — the rule is
         # born only by the board answer (with its confirmation) or `remember_not_stock`
         raise ValueError("„Nie je skladová položka“ vzniká len odpoveďou na otázke na nástenke")
+    if before[2] == NOT_STOCK and (item_key(item_raw) != before[0] or str(gtin) != NOT_STOCK):
+        # #488: nor is a rule retargeted to another wording (it would silently drop a real stock
+        # line) or turned into a typed card — delete it and answer / add the alias instead
+        raise ValueError("Pravidlo „Nie je skladová položka“ sa nedá presmerovať — zmaž ho a "
+                         "odpovedz na otázku (alebo pridaj alias v Produkty sklad)")
     conn.execute(
         "UPDATE dl_item_memory SET item_key = %s, item_raw = %s, gtin = %s, card = %s "
         "WHERE id = %s",
