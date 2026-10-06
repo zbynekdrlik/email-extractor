@@ -598,3 +598,48 @@ def test_a_seeded_rule_survives_the_undo_of_an_older_answer(pg, monkeypatch):
     assert dl_memory.remember_not_stock(pg, SUPPLIER_EAN, SERVICE, actor="admin") == rid
     assert _board().post(f"/api/board/questions/{q1}/undo").status_code == 200
     assert [x[0] for x in _rule_rows(pg)] == [rid], "the seed still stands"
+
+
+# --- review round 5 (same branch) --------------------------------------------------------------
+
+def test_undoing_both_answers_in_either_order_takes_the_rule_back(pg, monkeypatch):
+    """q1 learns the rule, a card makes it dormant, q2 re-asserts it. Undo q1 FIRST: q2 still
+    stands, the rule stays. Then undo q2: nothing stands behind the rule any more — it goes
+    (never left live to start dropping the line again once the card is deleted)."""
+    q1 = _teach_not_stock(pg, monkeypatch)
+    assert dl_memory.add_dl_alias(pg, SUPPLIER_EAN, SERVICE, G_BREAD, BREAD) is not None
+    q2 = _teach_not_stock(pg, monkeypatch, mid="q-src2", memory_conflict=True)
+    c = _board()
+    assert c.post(f"/api/board/questions/{q1}/undo").status_code == 200
+    assert len(_rule_rows(pg)) == 1, "q2 still stands behind the rule"
+    pg.execute("UPDATE order_questions SET status = 'expired' WHERE id = %s", (q1,))
+    assert c.post(f"/api/board/questions/{q2}/undo").status_code == 200
+    assert _rule_rows(pg) == [], "both answers taken back — the rule is gone"
+
+
+def test_a_naucene_delete_and_kos_restore_never_count_as_a_decision(pg, monkeypatch):
+    """A Kôš / Naučené `delete` / `restore` audit row of the rule (no question) is not the seed —
+    after a Naučené delete and its Kôš restore, undoing the answer still takes the rule back."""
+    q1 = _teach_not_stock(pg, monkeypatch)
+    rid = _rule_rows(pg)[0][0]
+    c = _board()
+    assert c.delete(f"/api/board/rules/dl_alias/{rid}").status_code == 200
+    deleted = pg.execute("SELECT id FROM audit_log WHERE table_name='dl_item_memory' "
+                         "AND row_id=%s AND action='delete'", (str(rid),)).fetchone()[0]
+    assert audit.restore(pg, deleted, by="admin") is True
+    assert len(_rule_rows(pg)) == 1
+    assert c.post(f"/api/board/questions/{q1}/undo").status_code == 200
+    assert _rule_rows(pg) == []
+
+
+def test_a_later_answer_that_no_longer_stands_as_answered_does_not_back_the_rule(
+        pg, monkeypatch):
+    """Backing needs the later question still ANSWERED „vždy vynechať" — one that went back to
+    expired (a Kôš revert of its reopen keeps the stored answer) does not keep the rule."""
+    q1 = _teach_not_stock(pg, monkeypatch)
+    assert dl_memory.add_dl_alias(pg, SUPPLIER_EAN, SERVICE, G_BREAD, BREAD) is not None
+    q2 = _teach_not_stock(pg, monkeypatch, mid="q-src2", memory_conflict=True)
+    pg.execute("UPDATE order_questions SET status = 'expired' WHERE id = %s", (q2,))
+    assert teach.get(pg, q2)["answer"]["choice"] == NOT_STOCK
+    assert _board().post(f"/api/board/questions/{q1}/undo").status_code == 200
+    assert _rule_rows(pg) == []
