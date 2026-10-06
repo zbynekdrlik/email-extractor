@@ -1131,7 +1131,9 @@ the question halves + the engine helper (`leave_off`), `teach` only dispatches (
   like human memory) — the e2e-dl corpus has no rule rows, byte-identical.
 - **Naučené sklad:** the rule row shows label „Neskladový riadok (dodávateľ …)", target = the rule
   label (searchable), origin = the question from its audit `create` (`LEFT JOIN LATERAL` on
-  `idx_audit_log_row`), `editable: false` (no „Upraviť" in `tab-rules.js`). Typing `not_stock` into an alias's number, and ANY edit of a rule row,
+  `idx_audit_log_row`), `editable: false` — `tab-rules.js` offers no „Upraviť" but its own
+  „Zmazať" on the row head (the only delete in that tab otherwise lives inside the editor;
+  `editingOpen` also pauses the refresh while a delete confirmation is open). Typing `not_stock` into an alias's number, and ANY edit of a rule row,
   are refused (400, `update_dl_item_memory_row`) — a rule is born only by the confirmed board
   answer / the seed; a wrong one is deleted (Kôš restorable).
 - **The answering mail:** `_skip_answered_item_keys` reads BOTH sentinels, so the mail that got

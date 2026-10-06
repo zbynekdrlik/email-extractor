@@ -26,7 +26,7 @@ const state = { kind: DEFAULT_KIND, q: "", page: 0, meta: {} };
 function editingOpen() {
   if (searchEl && document.activeElement === searchEl) return true;
   if (!listEl) return false;
-  if (listEl.querySelector(".r-editor")) return true;
+  if (listEl.querySelector(".r-editor, .r-confirm")) return true;
   for (const inp of listEl.querySelectorAll("input, select")) {
     if (document.activeElement === inp) return true;
   }
@@ -92,10 +92,14 @@ function row(rule) {
     head.appendChild(el("span", { class: "r-badge", title: "Vzorka bola bez príloh" },
       "0 príloh vo vzorke"));
   }
-  // #488: a „Nie je skladová položka" rule is deleted (Kôš), never edited — no editor offered
+  // #488: a „Nie je skladová položka" rule is deleted (Kôš), never edited — no editor, only its
+  // own „Zmazať" (the confirm the sklad saw when answering points here)
   if (rule.editable !== false) {
     head.appendChild(el("button", { class: "r-btn r-edit", type: "button",
       onclick: () => toggleEditor(box, rule) }, "Upraviť"));
+  } else {
+    head.appendChild(el("button", { class: "r-btn r-del", type: "button",
+      onclick: () => confirmDelete(box, rule) }, "Zmazať"));
   }
   box.appendChild(head);
   box.appendChild(originBlock(rule));
