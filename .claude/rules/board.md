@@ -577,3 +577,17 @@ Ktorá správa kam vedie (rozhoduje KANÁL PRÍJEMCU, nie druh správy):
 - **E2E pasca:** odpoveď na kartu A spúšťa explicitný `load()` (prestavia VŠETKY karty) — otvoriť
   picker karty B skôr, než reload dobehne, znamená, že ho reload zmaže (hľadanie potom renderuje do
   odpojeného uzla). V teste najprv `wait_for_selector("#q-card-A", state="detached")`.
+
+## #488 — „Nie je skladová položka — vždy vynechať" na `dl_item` karte
+
+- **Tlačidlo = `questions_dl.DL_CARD_ACTIONS["dl_item"]` op `not_stock`** (label z `dl_not_stock.LABEL`,
+  JEDNA kópia); `tab-questions.js` ho pošle ako `{choice: "not_stock"}` až po `window.confirm`
+  (`CONFIRM_OPS` — trvalé pravidlo pre dodávateľa, nie jeden mail). E2E: `page.on("dialog")`,
+  `dismiss()` nechá otázku otvorenú.
+- **Zodpovedaná karta ukáže sentinel cez jeho label** (`choiceLabel`: `card_actions` op == choice —
+  `ship_without`, `not_stock`), nikdy surové `not_stock`. Nový sentinel = nový op s rovnakým menom.
+- **Naučené sklad (`rules._rows_dl_alias`)** označí riadok s `gtin = 'not_stock'` ako pravidlo
+  (label „Neskladový riadok (dodávateľ …)", `target` = label pravidla — hľadateľné; pôvod = otázka z
+  audit `create` cez `LEFT JOIN LATERAL`); zmazanie = existujúci soft-delete + Kôš, žiadna nová
+  vetva v `audit.restore` (`create`/`update`/`delete` na `dl_item_memory`). Napísať `not_stock` do
+  čísla aliasu = 400 (pravidlo vzniká len potvrdenou odpoveďou).

@@ -80,16 +80,18 @@ def _document_has_catalog_match(client, message: dict, doc: dict,
 
 
 def _skip_not_warehouse(conn, shadow: bool, message: dict, doc_number: str,
-                        supplier_name: str) -> dict:
+                        supplier_name: str,
+                        outcome_text: str = "netýka sa skladu — automaticky (zapamätaný "
+                                            "dodávateľ), bez EDI") -> dict:
     """#314: terminal handling for a document from a REMEMBERED non-warehouse supplier with
     NO catalog match — no board question, no upload. The `not_warehouse` outcome flows into
     `_aggregate_status` → `_run_and_finish`'s rollup event (`stage/status='not_warehouse'`),
     the SAME event shape #307's manual `close_message_not_warehouse` produces, so it stays
     visible in the daily digest for Marek (req 2) — never a silent drop. `_run_and_finish`
-    marks the message processed as usual."""
+    marks the message processed as usual. #488: also a document whose EVERY line is ruled
+    „not a stock item" for its supplier (`outcome_text` says which)."""
     _event(conn, shadow, message["message_id"], stage="not_warehouse",
-          status="not_warehouse",
-          outcome="netýka sa skladu — automaticky (zapamätaný dodávateľ), bez EDI",
+          status="not_warehouse", outcome=outcome_text,
           detail={"doc_number": doc_number, "supplier_name": supplier_name},
           rollup=False, workflow=dl_report.WORKFLOW)
     return {"outcome": "not_warehouse", "doc_number": doc_number,
@@ -437,14 +439,10 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # ruled line (a recurring service line: transport, deposit) is left off the EDI before any
     # matching: no model call, no question, no hold. Read in shadow too: a learned decision,
     # like human memory (the e2e-dl corpus has none, so it stays byte-identical).
-    not_stock_keys = dl_not_stock.keys(conn, supplier_decision.ean_edi)
-    for item in doc.get("items") or []:
-        if dl_not_stock.excludes(not_stock_keys, item.get("name", "")):
-            log.info("DL message %s: %r is not a stock line for supplier %s (#488 rule) — "
-                     "left off the EDI, nothing asked", message["message_id"],
-                     item.get("name", ""), supplier_decision.ean_edi)
-            all_items.append(dl_not_stock.history_item(item))
-            continue
+    stock_lines, ruled = dl_not_stock.partition(conn, supplier_decision.ean_edi,
+                                                doc.get("items") or [], all_items,
+                                                message["message_id"])
+    for item in stock_lines:
         # #465: `message_id` — this message's OWN answered question confirms its wording
         # (the reprocess right after the sklad answered it), never another message's.
         recalled = dl_memory.resolve(conn, supplier_decision.ean_edi, item.get("name", ""),
@@ -545,6 +543,14 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     if nw_remembered and not has_catalog_match and not has_match_failure:
         return _skip_not_warehouse(conn, shadow, message, doc_number,
                                    supplier_decision.name)
+    if ruled and not decisions:
+        # #488: EVERY line is one the sklad ruled „not a stock item" (e.g. a transport-only
+        # invoice) — nothing for the warehouse to receive: the same terminal, digest-visible
+        # skip, never a ❗ „0 z 0" review that nobody can answer
+        return _skip_not_warehouse(
+            conn, shadow, message, doc_number, supplier_decision.name,
+            outcome_text="netýka sa skladu — všetky riadky sú naučené ako neskladové "
+                         "(„vždy vynechať“), bez EDI")
 
     header = {"customerName": supplier_decision.name,
              "customerEanEdi": supplier_decision.ean_edi}

@@ -125,20 +125,30 @@ def _rows_global(conn) -> list[dict]:
 
 def _rows_dl_alias(conn) -> list[dict]:
     out = []
+    # #488: a row's origin question (and its mail) comes from the audit `create` that wrote it
+    # — the board answer „vždy vynechať" records one; a plain alias has none (origin stays
+    # source/date). One indexed lookup per row (`idx_audit_log_row`).
     for r in conn.execute(
-            "SELECT id, supplier_ean, item_raw, gtin, card, source, created_at "
-            "FROM dl_item_memory WHERE deleted_at IS NULL AND source = ANY(%s) "
-            "ORDER BY created_at DESC", (list(_CURATED),)).fetchall():
-        # #488: a „nie je skladová položka" rule is a learned DECISION, not an alias of a card
+            "SELECT m.id, m.supplier_ean, m.item_raw, m.gtin, m.card, m.source, m.created_at, "
+            "a.question_id, a.message_id, a.actor "
+            "FROM dl_item_memory m LEFT JOIN LATERAL ("
+            "  SELECT question_id, message_id, actor FROM audit_log"
+            "   WHERE table_name = 'dl_item_memory' AND row_id = m.id::text"
+            "     AND action = 'create' AND question_id IS NOT NULL"
+            "   ORDER BY id DESC LIMIT 1) a ON true "
+            "WHERE m.deleted_at IS NULL AND m.source = ANY(%s) "
+            "ORDER BY m.created_at DESC", (list(_CURATED),)).fetchall():
+        # #488: a „nie je skladová položka" rule is a learned DECISION, not an alias of a card —
+        # its target is the rule's label (searchable, shown after the wording)
         rule = r[3] == dl_not_stock.NOT_STOCK
         out.append({
             "kind": "dl_alias", "id": int(r[0]),
-            "label": (f"{dl_not_stock.LABEL} (dodávateľ {r[1] or '—'})" if rule
+            "label": (f"Neskladový riadok (dodávateľ {r[1] or '—'})" if rule
                       else f"Alias DL položky (dodávateľ {r[1] or '—'})"),
-            "target": "" if rule else r[4] or "",
+            "target": dl_not_stock.LABEL if rule else r[4] or "",
             "key": {"wording": r[2] or "", "ean": r[1] or "", "gtin": r[3] or ""},
             "values": {"wording": r[2] or "", "gtin": r[3] or "", "card": r[4] or ""},
-            "origin": {"question_id": None, "message_id": None, "by": "",
+            "origin": {"question_id": r[7], "message_id": r[8], "by": r[9] or "",
                        "created_at": _iso(r[6]), "source": r[5] or ""},
         })
     return out
