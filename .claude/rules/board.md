@@ -590,4 +590,5 @@ Ktorá správa kam vedie (rozhoduje KANÁL PRÍJEMCU, nie druh správy):
   (label „Neskladový riadok (dodávateľ …)", `target` = label pravidla — hľadateľné; pôvod = otázka z
   audit `create` cez `LEFT JOIN LATERAL`); zmazanie = existujúci soft-delete + Kôš, žiadna nová
   vetva v `audit.restore` (`create`/`update`/`delete` na `dl_item_memory`). Napísať `not_stock` do
-  čísla aliasu = 400 (pravidlo vzniká len potvrdenou odpoveďou).
+  čísla aliasu aj akákoľvek úprava riadku pravidla = 400 (pravidlo vzniká len potvrdenou
+  odpoveďou, zlé sa zmaže).

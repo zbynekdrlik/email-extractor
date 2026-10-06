@@ -456,10 +456,12 @@ def update_dl_item_memory_row(conn, row_id: int, *, item_raw: str, gtin: str,
         # #488: a typed number must never turn an alias into a silent-drop rule — the rule is
         # born only by the board answer (with its confirmation) or `remember_not_stock`
         raise ValueError("„Nie je skladová položka“ vzniká len odpoveďou na otázke na nástenke")
-    if before[2] == NOT_STOCK and (item_key(item_raw) != before[0] or str(gtin) != NOT_STOCK):
-        # #488: nor is a rule retargeted to another wording (it would silently drop a real stock
-        # line) or turned into a typed card — delete it and answer / add the alias instead
-        raise ValueError("Pravidlo „Nie je skladová položka“ sa nedá presmerovať — zmaž ho a "
+    if before[2] == NOT_STOCK:
+        # #488: nor is a rule edited at all — retargeted to another wording it would silently
+        # drop a real stock line, turned into a typed number it would be a typed card, and its
+        # label is never shown (Naučené shows the constant); a wrong rule is deleted (Kôš) and
+        # the question answered / the alias added instead
+        raise ValueError("Pravidlo „Nie je skladová položka“ sa neupravuje — zmaž ho a "
                          "odpovedz na otázku (alebo pridaj alias v Produkty sklad)")
     conn.execute(
         "UPDATE dl_item_memory SET item_key = %s, item_raw = %s, gtin = %s, card = %s "
@@ -525,13 +527,15 @@ def remember_not_stock(conn, supplier_ean: str, wording: str, *, actor: str, que
 
 
 def forget_not_stock(conn, supplier_ean: str, wording: str, *, actor: str, question_id=None,
-                     message_id=None) -> list[int]:
-    """Soft-delete every live rule for (supplier, wording), each with a `delete` audit row (the
-    Kôš „Vrátiť" brings it back). Returns the removed ids."""
+                     message_id=None, row_id: int | None = None) -> list[int]:
+    """Soft-delete the live rule for (supplier, wording) — only row `row_id` when given (the row
+    one answer wrote), else every live one — each with a `delete` audit row (the Kôš „Vrátiť"
+    brings it back). Returns the removed ids."""
     rows = conn.execute(
         "UPDATE dl_item_memory SET deleted_at = now() WHERE supplier_ean = %s AND item_key = %s"
-        " AND gtin = %s AND deleted_at IS NULL RETURNING id",
-        (str(supplier_ean), item_key(wording), NOT_STOCK)).fetchall()
+        " AND gtin = %s AND deleted_at IS NULL AND (%s::bigint IS NULL OR id = %s::bigint)"
+        " RETURNING id",
+        (str(supplier_ean), item_key(wording), NOT_STOCK, row_id, row_id)).fetchall()
     ids = [int(r[0]) for r in rows]
     for rid in ids:
         _audit(conn, actor=actor, row_id=rid, action="delete", question_id=question_id,
