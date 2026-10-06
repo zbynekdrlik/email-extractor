@@ -389,8 +389,15 @@ def test_naucene_refuses_typing_the_sentinel_into_an_alias(pg, monkeypatch):
         == G_ROLL
     _teach_not_stock(pg, monkeypatch)
     rule = _rule_rows(pg)[0][0]
-    r = c.post(f"/api/board/rules/dl_alias/{rule}",
-               json={"wording": "PREPRAVNÉ SLUŽBY", "gtin": NOT_STOCK, "card": LABEL})
+    # review 2: nor is a rule retargeted to another wording (a real stock line would then be
+    # dropped silently) or turned into a typed number — delete + answer instead
+    for body in ({"wording": ROLL, "gtin": NOT_STOCK, "card": LABEL},
+                 {"wording": SERVICE, "gtin": G_ROLL, "card": ROLL}):
+        r = c.post(f"/api/board/rules/dl_alias/{rule}", json=body)
+        assert r.status_code == 400, r.get_data(as_text=True)
+    assert dl_memory.not_stock_keys(pg, SUPPLIER_EAN) == {memory.item_key(SERVICE)}
+    r = c.post(f"/api/board/rules/dl_alias/{rule}",       # the label text alone may change
+               json={"wording": SERVICE, "gtin": NOT_STOCK, "card": "Doprava — vynechať"})
     assert r.status_code == 200, r.get_data(as_text=True)
 
 
@@ -464,3 +471,42 @@ def test_weekly_invoices_of_a_ruled_supplier_ship_without_the_service_line(
     assert len(uploads) == 3, "next week's invoice ships at once"
     assert client.calls.count("dl_item") - calls_before == 1, "only the stock line is matched"
     assert _open_dl_items(pg) == []
+
+
+# --- review round 2 (same branch) --------------------------------------------------------------
+
+def test_undoing_an_older_answer_never_removes_a_rule_a_later_answer_owns(pg, monkeypatch):
+    """q1 learns the rule, the Kôš removes it, q2 learns it again (the same row revived). Undoing
+    q1 now must leave q2's rule alone — q1's write is no longer the newest on that row."""
+    q1 = _teach_not_stock(pg, monkeypatch)
+    rid = _rule_rows(pg)[0][0]
+    created = pg.execute("SELECT id FROM audit_log WHERE table_name='dl_item_memory' "
+                         "AND row_id=%s AND action='create'", (str(rid),)).fetchone()[0]
+    assert audit.restore(pg, created, by="admin") is True
+    assert _rule_rows(pg) == []
+    q2 = _teach_not_stock(pg, monkeypatch, mid="q-src2")
+    assert [x[0] for x in _rule_rows(pg)] == [rid], "the same row revived for q2"
+    r = _board().post(f"/api/board/questions/{q1}/undo")
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert [x[0] for x in _rule_rows(pg)] == [rid], "q2's rule survived q1's undo"
+    assert teach.get(pg, q2)["status"] == "answered"
+
+
+def test_a_repeat_kos_restore_of_a_re_assert_is_a_clean_409(pg, monkeypatch):
+    """The Kôš „already reverted?" guard compares the timestamp with its recorded ISO string as a
+    time — a second „Vrátiť" of the same re-assert is refused, never a second write."""
+    import pytest
+
+    _teach_not_stock(pg, monkeypatch)
+    rid = _rule_rows(pg)[0][0]
+    assert dl_memory.add_dl_alias(pg, SUPPLIER_EAN, SERVICE, G_BREAD, BREAD) is not None
+    _teach_not_stock(pg, monkeypatch, mid="q-src2", memory_conflict=True)
+    upd = pg.execute("SELECT id FROM audit_log WHERE table_name='dl_item_memory' AND row_id=%s "
+                     "AND action='update'", (str(rid),)).fetchone()[0]
+    assert audit.restore(pg, upd, by="admin") is True
+    assert dl_memory.not_stock_keys(pg, SUPPLIER_EAN) == set(), "dormant again"
+    with pytest.raises(audit.RestoreError) as e:
+        audit.restore(pg, upd, by="admin")
+    assert e.value.status == 409
+    assert pg.execute("SELECT count(*) FROM audit_log WHERE action='restore' AND row_id=%s",
+                      (str(rid),)).fetchone()[0] == 1
