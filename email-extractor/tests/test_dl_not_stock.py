@@ -123,9 +123,10 @@ def _answer(pg, monkeypatch, qid, body):
 
 
 def _ask(pg, supplier_ean=SUPPLIER_EAN, mid="q-src", **kw):
-    """An open dl_item question for SERVICE of `supplier_ean`, on its own mail."""
-    pg.execute("INSERT INTO messages (message_id, category, subject, from_addr) "
-               "VALUES (%s, 'dodacie_listy', 'DL', 'dodavatel@lunys.sk') "
+    """An open dl_item question for SERVICE of `supplier_ean`, on its own (already processed —
+    a question is raised while its mail is processed) mail."""
+    pg.execute("INSERT INTO messages (message_id, category, subject, from_addr, processed) "
+               "VALUES (%s, 'dodacie_listy', 'DL', 'dodavatel@lunys.sk', true) "
                "ON CONFLICT DO NOTHING", (mid,))
     qid = teach.ask_dl_item(pg, mid, supplier_ean, "Pekáreň Lunys", SERVICE, 1, "ks",
                             [{"gtin": G_ROLL, "name": ROLL}], **kw)
@@ -252,14 +253,18 @@ def test_a_conflicting_history_and_a_live_codex_guard_never_see_the_rule(
 
 def test_a_newer_real_card_for_the_wording_overrides_the_rule(pg, tmp_path, monkeypatch):
     """The newest curated decision for (supplier, wording) wins — a card taught AFTER the rule
-    (a Produkty alias) is matched again, never silently dropped by the older rule."""
+    (a Produkty alias) sends the line back to the matcher, never silently dropped by the older
+    rule. (What the matcher then decides is its own business — this synthetic wording shares no
+    word with the card, so the #236/#465 lexical guards keep it off the EDI; the point here is
+    only that the rule no longer decides it.)"""
     _snapshot(pg)
     _teach_not_stock(pg, monkeypatch)
     assert dl_memory.add_dl_alias(pg, SUPPLIER_EAN, SERVICE, G_BREAD, BREAD) is not None
     client = _client(_doc("0100000885"), _llm(G_ROLL), _llm(G_BREAD))
-    uploaded, _ = _tick(pg, tmp_path, "dl5", client)
-    assert len(uploaded) == 1 and G_BREAD in uploaded[0]
-    assert client.calls.count("dl_item") == 2
+    _tick(pg, tmp_path, "dl5", client)
+    assert client.calls.count("dl_item") == 2, "the line reached the model again"
+    items = dict(pg.execute("SELECT name, rule FROM order_items").fetchall())
+    assert items[SERVICE] != "not_stock"
 
 
 # --- taking it back --------------------------------------------------------------------------
