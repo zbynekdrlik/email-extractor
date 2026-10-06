@@ -1,0 +1,17 @@
+[Unit]
+Description=Timer: safety net for the CODEX push round after each codex-bridge ETL run (#485)
+Documentation=https://github.com/zbynekdrlik/email-extractor/issues/485
+
+[Timer]
+# The pushes normally run from codex-push-after-etl.path the moment the ETL replaced the DuckDB
+# (~15:05 / ~18:50). This timer starts the SAME guarded round after each ETL slot (14:15 / 18:00
+# + the ~50 min build + margin) — a no-op when the path event already pushed that generation, a
+# same-day delivery when it was missed. TZ suffix + Persistent mirror codex-bridge-etl.timer
+# (systemd 255 ignores Timezone=).
+OnCalendar=*-*-* 15:30:00 Europe/Prague
+OnCalendar=*-*-* 19:15:00 Europe/Prague
+Persistent=true
+Unit=codex-push-after-etl.service
+
+[Install]
+WantedBy=timers.target

@@ -13,7 +13,8 @@ Group=newlevel
 # (.../api/codex/orders -> .../api/codex/cards) unless CODEX_CARDS_PUSH_URL is set.
 EnvironmentFile=/home/newlevel/.secrets/codex-orders-push.env
 ExecStart=/usr/bin/python3 /home/newlevel/codex-orders-push/codex_cards_push.py
-# Read-only DuckDB + one HTTP POST of the whole list; a failed slot is retried by the next one
-# (the add-on's staleness check fails OPEN + alerts ops after 30 h without a fresh list).
+# Read-only DuckDB + one HTTP POST of the whole list. No timer of its own any more (#485): the
+# guarded round codex-push-after-etl.service runs this tool after each ETL; this unit is for
+# a manual one-off push (the add-on fails OPEN + alerts ops after 30 h without a fresh list).
 TimeoutStartSec=300
 Nice=10

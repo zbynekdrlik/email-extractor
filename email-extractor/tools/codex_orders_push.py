@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Push CODEX order headers from the codex-bridge DuckDB to the add-on (#342).
 
-Runs on the dev/ERP box (where `/var/lib/codex-bridge/codex.duckdb` lives) on its OWN
-systemd timer, ~20-30 min after each codex-bridge ETL run (14:15 / 18:00 Prague). It reads
+Runs on dev2 (where `/var/lib/codex-bridge/codex.duckdb` lives), started by the guarded push
+round `codex_push_after_etl.py` the moment the codex-bridge ETL replaced that file (#485 —
+the old own timer fired before the ETL had finished and sent the previous cycle). It reads
 the DuckDB **read-only**, pulls the last ~7 days of order HEADERS, bridges each order's
 customer number (NICO) to its EDI EAN via `raw.firma` (NICO → AEDIEAN), and POSTs a compact
 JSON batch to `POST /api/codex/orders` (X-Token auth). The add-on stores it as EVIDENCE that

@@ -1,0 +1,16 @@
+[Unit]
+Description=Push CODEX data to the email-extractor add-on when the codex-bridge ETL replaces its DuckDB (#485)
+Documentation=https://github.com/zbynekdrlik/email-extractor/issues/485
+
+[Path]
+# The codex-bridge ETL (14:15 / 18:00 Europe/Prague, ~45-50 min) builds <db>.new and ends with an
+# atomic os.replace() onto this file. Measured on dev2 (systemd 255): PathChanged= on the FILE
+# fires on that replacement, never on the .new build or a read-only DuckDB open — but also on a
+# hardlink / unlink of the current file (codex-bridge MCP .gen-* pins, odoo_import .syncpin).
+# The service's generation guard (inode + mtime) turns those extra triggers into no-ops.
+# A watch on the DIRECTORY is useless: it fires on every .new / .wal / .gen-* write there.
+PathChanged=/var/lib/codex-bridge/codex.duckdb
+Unit=codex-push-after-etl.service
+
+[Install]
+WantedBy=paths.target
