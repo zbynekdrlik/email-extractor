@@ -592,3 +592,7 @@ Ktorá správa kam vedie (rozhoduje KANÁL PRÍJEMCU, nie druh správy):
   vetva v `audit.restore` (`create`/`update`/`delete` na `dl_item_memory`). Napísať `not_stock` do
   čísla aliasu aj akákoľvek úprava riadku pravidla = 400 (pravidlo vzniká len potvrdenou
   odpoveďou, zlé sa zmaže).
+- **Riadok pravidla v `tab-rules.js`:** `editable: false` → BEZ „Upraviť", ale s VLASTNÝM „Zmazať"
+  v hlavičke riadku (`confirmDelete(box, rule)`) — jediné iné „Zmazať" tej záložky je vnútri
+  editora, takže skrytím editora by pravidlo nešlo zmazať (review 8 #488). `editingOpen()`
+  pozastaví 15 s refresh aj pri otvorenom `.r-confirm` (E2E to pinuje cez `page.clock`).

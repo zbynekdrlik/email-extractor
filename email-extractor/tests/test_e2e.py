@@ -735,6 +735,7 @@ def test_board_dl_item_not_stock_answer_learns_a_supplier_rule_in_the_browser(
     page.locator('.q-chip[data-status="answered"]').click()
     page.wait_for_selector(f"#q-card-{qid} .q-answer:has-text('{label}')")
 
+    page.clock.install()        # the tab's periodic refresh runs on a controlled clock below
     page.goto(f"{live_server}/nastenka/naucene-sklad")
     page.wait_for_selector(".r-row:has-text('PREPRAVNÉ e2e')")
     row = page.locator(".r-row:has-text('PREPRAVNÉ e2e')")
@@ -742,6 +743,8 @@ def test_board_dl_item_not_stock_answer_learns_a_supplier_rule_in_the_browser(
     assert row.locator(".r-edit").count() == 0, "a rule row offers no editor (delete only)"
     # … but it IS deletable right there (the answer's confirm dialog points the sklad here)
     row.locator(".r-del").click()
+    page.clock.run_for(16000)   # past the refresh interval: an open confirmation survives it
+    assert row.locator(".r-confirm").count() == 1, "the refresh must not wipe the confirmation"
     row.locator(".r-del-yes").click()
     page.wait_for_selector(".r-row:has-text('PREPRAVNÉ e2e')", state="detached")
     rid = pg.execute("SELECT id FROM dl_item_memory WHERE gtin = 'not_stock'").fetchone()[0]
