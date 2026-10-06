@@ -544,3 +544,57 @@ def test_undo_takes_back_only_the_row_its_own_answer_wrote(pg, monkeypatch):
     assert _board().post(f"/api/board/questions/{q1}/undo").status_code == 200
     assert [x[0] for x in _rule_rows(pg)] == [row2], "q2's rule survived q1's undo"
     assert teach.get(pg, q2)["status"] == "answered"
+
+
+# --- review round 4 (same branch) --------------------------------------------------------------
+
+def test_another_suppliers_later_answer_never_owns_this_suppliers_rule(pg, monkeypatch):
+    """Ownership is per rule ROW: a later „vždy vynechať" of ANOTHER supplier (its own row) never
+    keeps this supplier's rule alive once its own answer is undone."""
+    q1 = _teach_not_stock(pg, monkeypatch)
+    _teach_not_stock(pg, monkeypatch, supplier_ean=OTHER_SUPPLIER, mid="q-other")
+    assert _board().post(f"/api/board/questions/{q1}/undo").status_code == 200
+    assert _rule_rows(pg) == [], "this supplier's rule went with its own answer"
+    assert len(_rule_rows(pg, supplier_ean=OTHER_SUPPLIER)) == 1, "the other supplier's stays"
+
+
+def test_a_later_answer_changed_to_ship_without_no_longer_owns_the_rule(pg, monkeypatch):
+    """q2 re-asserted q1's rule, was undone and then answered „pošli bez" — it no longer says
+    „vždy vynechať", so undoing q1 takes the rule back."""
+    q1 = _teach_not_stock(pg, monkeypatch)
+    assert dl_memory.add_dl_alias(pg, SUPPLIER_EAN, SERVICE, G_BREAD, BREAD) is not None
+    q2 = _teach_not_stock(pg, monkeypatch, mid="q-src2", memory_conflict=True)
+    c = _board()
+    assert c.post(f"/api/board/questions/{q2}/undo").status_code == 200
+    r, _ = _answer(pg, monkeypatch, q2, {"choice": teach.DL_ITEM_SHIP_WITHOUT})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert c.post(f"/api/board/questions/{q1}/undo").status_code == 200
+    assert _rule_rows(pg) == [], "only a question still answered „vždy vynechať“ owns the rule"
+
+
+def test_undoing_a_conflict_card_answer_never_revives_a_rule_nobody_stands_behind(
+        pg, monkeypatch):
+    """q1 learns the rule; a card is taught later; a memory-conflict question q3 answered with
+    the card supersedes (soft-deletes) the rule; q1 is undone. Undoing q3 brings back the human
+    card answers it superseded — never the rule, whose only answer was taken back."""
+    q1 = _teach_not_stock(pg, monkeypatch)
+    assert dl_memory.add_dl_alias(pg, SUPPLIER_EAN, SERVICE, G_BREAD, BREAD) is not None
+    q3 = _ask(pg, mid="q-src3", memory_conflict=True)
+    r, _ = _answer(pg, monkeypatch, q3, {"choice": G_ROLL})
+    assert r.status_code == 200, r.get_data(as_text=True)
+    assert _rule_rows(pg) == [], "the conflict answer superseded the rule"
+    c = _board()
+    assert c.post(f"/api/board/questions/{q1}/undo").status_code == 200
+    pg.execute("UPDATE order_questions SET status = 'expired' WHERE id = %s", (q1,))
+    assert c.post(f"/api/board/questions/{q3}/undo").status_code == 200
+    assert _rule_rows(pg) == [], "no standing decision backs the rule — it stays gone"
+
+
+def test_a_seeded_rule_survives_the_undo_of_an_older_answer(pg, monkeypatch):
+    """The admin seed (`remember_not_stock` with no question) owns the rule like a standing
+    answer: re-seeding over an answer's rule, then undoing that answer, keeps the rule."""
+    q1 = _teach_not_stock(pg, monkeypatch)
+    rid = _rule_rows(pg)[0][0]
+    assert dl_memory.remember_not_stock(pg, SUPPLIER_EAN, SERVICE, actor="admin") == rid
+    assert _board().post(f"/api/board/questions/{q1}/undo").status_code == 200
+    assert [x[0] for x in _rule_rows(pg)] == [rid], "the seed still stands"
