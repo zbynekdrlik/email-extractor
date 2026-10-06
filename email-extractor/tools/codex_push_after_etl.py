@@ -151,7 +151,11 @@ def run_round(db_path: str, state_dir: str, *, scripts=None, runner=None,
     runner = runner or _run_script
     Path(state_dir).mkdir(parents=True, exist_ok=True)
     with open(Path(state_dir) / LOCK_FILE, "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            _say("waiting: another round holds the lock (the service's or a manual one)")
+            fcntl.flock(lock, fcntl.LOCK_EX)
         return _locked_round(db_path, state_dir, scripts, runner, settle, sleep, force)
 
 

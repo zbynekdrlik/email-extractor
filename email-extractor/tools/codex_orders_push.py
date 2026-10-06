@@ -121,6 +121,16 @@ def _iso_utc(value) -> str | None:
     return str(value)
 
 
+def _journal_as_of(as_of) -> str | None:
+    """The ETL time for the journal line only — a failing read is reported on stderr and the
+    orders are still pushed (the add-on's orders endpoint takes no time)."""
+    try:
+        return _iso_utc(as_of())
+    except Exception as e:  # noqa: BLE001 - journal-only value, reported, push continues
+        print(f"warning: source_as_of unavailable ({e})", file=sys.stderr)
+        return None
+
+
 def _iso(value) -> str | None:
     if value is None:
         return None
@@ -183,8 +193,8 @@ def run(url: str, token: str, days: int = DEFAULT_DAYS, db_path: str = DEFAULT_D
     """Fetch → normalize → push. `query()`/`poster(...)`/`as_of()` are injectable for tests.
     `as_of()` (main passes `query_as_of`) only feeds the journal line's `source_as_of`."""
     query = query or (lambda: query_duckdb(db_path, days))
+    source_as_of = _journal_as_of(as_of) if as_of else None   # first: never newer than rows
     rows = query()
-    source_as_of = _iso_utc(as_of()) if as_of else None
     orders = build_orders(rows)
     upserted = post_orders(url, token, orders, poster=poster)
     res: dict[str, int | str] = {"fetched": len(rows), "orders": len(orders),

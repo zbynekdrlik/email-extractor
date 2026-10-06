@@ -406,7 +406,8 @@ def _alert(conn, cfg, plan: sp.Plan, mode: str, run_id: int, known: set[tuple],
                 f"CODEXu by naraz zmenil {plan.code_changes()} kódov (limit {limits[0]}) "
                 f"a premenoval {len(plan.renames)} kariet (limit {limits[1]}) — vyzerá to na "
                 f"neúplný alebo pokazený export, nič sa nezmenilo. Skontroluj codex-bridge ETL "
-                f"a codex-cards-push na dev2. Ak je to zámer (hromadná zmena v CODEXe), zvýš v "
+                f"a push po ETL na dev2 (journalctl -u codex-push-after-etl.service). Ak je "
+                f"to zámer (hromadná zmena v CODEXe), zvýš v "
                 f"nastaveniach add-onu codex_sync_max_code_changes / codex_sync_max_renames — "
                 f"zmeny sa použijú pri ďalšom zozname kariet.")
         dl_alerts.enqueue(conn, channel, ALERT_KIND,

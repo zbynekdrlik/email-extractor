@@ -173,12 +173,15 @@ def run(url: str, token: str, db_path: str = DEFAULT_DB_PATH, query=None, as_of=
     query = query or (lambda: query_duckdb(db_path))
     as_of = as_of or (lambda: query_as_of(db_path))
     poster = poster or _requests_post
+    # #485: the ETL time FIRST — if the ETL replaces the file between the two reads, the time
+    # sent is older than the rows (safe), never newer
+    source_as_of = _iso_utc(as_of())
     rows = query()
     cards = build_cards(rows)
     if not cards:
         return {"fetched": len(rows), "cards": 0, "rows": 0, "codes": 0,
                 "error": "no usable stock-card rows — nothing posted"}
-    body = {"source_as_of": _iso_utc(as_of()), "cards": cards}
+    body = {"source_as_of": source_as_of, "cards": cards}
     resp = poster(url, {"X-Token": token, "Content-Type": "application/json"}, body) or {}
     res = {"fetched": len(rows), "cards": len(cards), "rows": int(resp.get("rows", 0) or 0),
            "codes": int(resp.get("codes", 0) or 0), "source_as_of": body["source_as_of"]}

@@ -174,8 +174,9 @@ Never modify the codex-bridge units (a foreign project) — this repo only WATCH
 + `sudo cp email-extractor/tools/systemd/codex-*.{path,service,timer} /etc/systemd/system/ &&
 sudo systemctl daemon-reload`, then `sudo systemctl reenable codex-push-after-etl.path
 codex-push-after-etl.timer` + `sudo systemctl start codex-push-after-etl.path
-codex-push-after-etl.timer`. **The first install (2026-10-06) also retired the per-push
-timers**: `sudo systemctl disable --now codex-orders-push.timer codex-cards-push.timer
+codex-push-after-etl.timer`. **Installing the round retires the per-push timers** (done on
+dev2 with the 0.9.180 install; repeat on any box that still has them): `sudo systemctl
+disable --now codex-orders-push.timer codex-cards-push.timer
 codex-receipts-push.timer` + `sudo rm /etc/systemd/system/codex-{orders,cards,receipts}-push.timer`
 + `daemon-reload`; `systemctl list-timers | grep codex-` must show only
 `codex-push-after-etl.timer` (plus codex-bridge's own) — a leftover per-push timer pushes
@@ -187,8 +188,9 @@ the per-push services; a manual run uses the same `/var/lib/codex-push-after-etl
 waits on its `.round.lock` while the service's round runs) and read `journalctl -u
 codex-push-after-etl.service -n 20`; ONE push by hand = `sudo systemctl start
 codex-cards-push.service` + `journalctl -u codex-cards-push.service -n 5` (`pushed: fetched=…
-codes=… source_as_of=<ETL time> to=https://email-pz.newlevel.media` — the cards / receipts
-lines name the ETL time they sent, #485; since #470 the target is scheme + host, never the
+codes=… source_as_of=<ETL time> to=https://email-pz.newlevel.media` — every push line names
+the ETL time it sent, read BEFORE the rows so it is never newer than them, #485; since #470
+the target is scheme + host, never the
 path/token, so the journal itself proves which address the push reached). A
 `--dry-run` (`/home/newlevel/codex-orders-push/run.sh`-style env + `--dry-run`) counts without
 POSTing. The add-on image never contains `tools/` (Dockerfile copies `app/` only).
@@ -239,7 +241,8 @@ forever). Reusable rules:
   sklad rows (card 27: sklad 1/1 yes, 4 and 600 no).
 - **Fail OPEN, never closed**: `codex_cards.live_guard` returns None (checks OFF, `log.warning`)
   when nothing was ever pushed or the CODEX data is older than `STALE_HOURS = 30` (ETL 14:15 /
-  18:00 → longest normal age ~20.5 h; one missed slot tolerated). `stale_sweep` (worker tick,
+  18:00, pushed when it replaced the DuckDB ~15:05 / ~18:50 → longest normal age ~21 h; one
+  missed slot tolerated). `stale_sweep` (worker tick,
   `if orders_python or dl_python:` since #479) enqueues ONE ops alert per stale episode (`pending_alerts` kind
   `codex_cards_stale`, key `codex-cards:<as_of>`, `reminder_suppressed` cadence: the first alert
   of an episode at once, reminders once per workday morning); a never-pushed list gets the same

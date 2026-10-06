@@ -260,12 +260,15 @@ def run(url: str, token: str, db_path: str = DEFAULT_DB_PATH, days: int = DEFAUL
     query = query or (lambda: query_duckdb(db_path, days))
     as_of = as_of or (lambda: query_as_of(db_path))
     poster = poster or _requests_post
+    # #485: the ETL time FIRST — if the ETL replaces the file between the two reads, the time
+    # sent is older than the rows (the invoice gate then waits longer), never newer (it would
+    # trust receipts that are not in the copy)
+    source_as_of = _iso_utc(as_of())
     rows = query()
     receipts = build_receipts(rows)
     if not receipts:
         return {"fetched": len(rows), "receipts": 0, "stored": 0,
                 "error": "no usable receipt rows — nothing posted"}
-    source_as_of = _iso_utc(as_of())
     if not source_as_of:
         # the add-on judges invoices by how far CODEX's data reaches — a copy of unknown age
         # would pass as fresh; the add-on also refuses to trust one (fail-closed)
