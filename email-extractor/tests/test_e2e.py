@@ -689,6 +689,59 @@ def test_board_dl_item_answer_unrelated_to_the_wording_asks_for_confirmation(
     assert console == [], f"browser console not clean: {console}"
 
 
+def test_board_dl_item_not_stock_answer_learns_a_supplier_rule_in_the_browser(
+        live_server, pg, page):
+    """#488: on Otázky sklad a recurring service line (transport) is answered ONCE with „Nie je
+    skladová položka — vždy vynechať": the button asks for confirmation first (cancel keeps the
+    question open), then answers it — the supplier rule lands in `dl_item_memory` (sentinel,
+    source human), the answered card shows the human label (never the raw sentinel) and
+    Naučené sklad lists the rule. Clean console. Synthetic data only."""
+    from app.httpapi import dl_key
+
+    label = "Nie je skladová položka — vždy vynechať"
+    qid = _board_seed_dl_item_question(pg, "be2e-488", "PREPRAVNÉ e2e",
+                                       [("E2EROLL", "Rožok štandart 50g")])
+    dialogs, mode = [], {"accept": False}
+
+    def _on_dialog(d):
+        dialogs.append(d.message)
+        if mode["accept"]:
+            d.accept()
+        else:
+            d.dismiss()
+
+    page.on("dialog", _on_dialog)
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad-dl/{dl_key('e2e-secret')}")
+    page.wait_for_url(re.compile(r"/nastenka"))
+    page.goto(f"{live_server}/nastenka/otazky-sklad")
+    page.wait_for_selector("text=PREPRAVNÉ e2e")
+
+    button = page.locator(f"#q-card-{qid}").locator(f'button:has-text("{label}")')
+    button.click()
+    page.wait_for_timeout(500)
+    assert len(dialogs) == 1 and "PREPRAVNÉ e2e" in dialogs[0], dialogs
+    assert pg.execute("SELECT status FROM order_questions WHERE id=%s",
+                      (qid,)).fetchone()[0] == "open", "a cancelled confirmation answers nothing"
+
+    mode["accept"] = True
+    button.click()
+    row = _wait_answered(pg, page, qid)
+    assert row[0] == "answered" and row[1] == "not_stock", row
+    assert pg.execute(
+        "SELECT source, card FROM dl_item_memory WHERE supplier_ean = '2000000000009' "
+        "AND gtin = 'not_stock' AND deleted_at IS NULL").fetchall() == [("human", label)]
+
+    page.locator('.q-chip[data-status="answered"]').click()
+    page.wait_for_selector(f"#q-card-{qid} .q-answer:has-text('{label}')")
+
+    page.goto(f"{live_server}/nastenka/naucene-sklad")
+    page.wait_for_selector(".r-label:has-text('Nie je skladová položka')")
+    assert page.locator(".r-row:has-text('PREPRAVNÉ e2e')").count() == 1
+
+    assert console == [], f"browser console not clean: {console}"
+
+
 
 # --- #467 / #477: CODEX is the only source of a card's code + name -------------------------
 
