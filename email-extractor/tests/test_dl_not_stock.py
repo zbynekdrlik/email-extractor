@@ -389,16 +389,17 @@ def test_naucene_refuses_typing_the_sentinel_into_an_alias(pg, monkeypatch):
         == G_ROLL
     _teach_not_stock(pg, monkeypatch)
     rule = _rule_rows(pg)[0][0]
-    # review 2: nor is a rule retargeted to another wording (a real stock line would then be
-    # dropped silently) or turned into a typed number — delete + answer instead
+    # review 2/3: nor is a rule edited at all — retargeted to another wording (a real stock line
+    # would be dropped silently), turned into a typed number, or even re-saved unchanged (an edit
+    # audit would block its answer's undo) — delete + answer instead
     for body in ({"wording": ROLL, "gtin": NOT_STOCK, "card": LABEL},
-                 {"wording": SERVICE, "gtin": G_ROLL, "card": ROLL}):
+                 {"wording": SERVICE, "gtin": G_ROLL, "card": ROLL},
+                 {"wording": SERVICE, "gtin": NOT_STOCK, "card": LABEL}):
         r = c.post(f"/api/board/rules/dl_alias/{rule}", json=body)
         assert r.status_code == 400, r.get_data(as_text=True)
     assert dl_memory.not_stock_keys(pg, SUPPLIER_EAN) == {memory.item_key(SERVICE)}
-    r = c.post(f"/api/board/rules/dl_alias/{rule}",       # the label text alone may change
-               json={"wording": SERVICE, "gtin": NOT_STOCK, "card": "Doprava — vynechať"})
-    assert r.status_code == 200, r.get_data(as_text=True)
+    assert pg.execute("SELECT count(*) FROM audit_log WHERE row_id=%s AND action='update'",
+                      (str(rule),)).fetchone()[0] == 0
 
 
 def test_the_rule_leaves_the_line_off_in_shadow_too(pg, tmp_path, monkeypatch):
@@ -510,3 +511,36 @@ def test_a_repeat_kos_restore_of_a_re_assert_is_a_clean_409(pg, monkeypatch):
     assert e.value.status == 409
     assert pg.execute("SELECT count(*) FROM audit_log WHERE action='restore' AND row_id=%s",
                       (str(rid),)).fetchone()[0] == 1
+
+
+# --- review round 3 (same branch) --------------------------------------------------------------
+
+def test_an_undone_later_answer_never_keeps_the_rule_alive(pg, monkeypatch):
+    """q2 re-asserted q1's rule and was then undone itself: it no longer stands, so undoing q1
+    takes the rule back — never a rule the sklad took back twice that still drops the line."""
+    q1 = _teach_not_stock(pg, monkeypatch)
+    assert dl_memory.add_dl_alias(pg, SUPPLIER_EAN, SERVICE, G_BREAD, BREAD) is not None
+    q2 = _teach_not_stock(pg, monkeypatch, mid="q-src2", memory_conflict=True)
+    c = _board()
+    assert c.post(f"/api/board/questions/{q2}/undo").status_code == 200
+    # the reopened q2 expires unanswered (one open question per wording — q1 can reopen then)
+    pg.execute("UPDATE order_questions SET status = 'expired' WHERE id = %s", (q2,))
+    assert c.post(f"/api/board/questions/{q1}/undo").status_code == 200
+    assert _rule_rows(pg) == [], "no standing answer owns the rule any more"
+
+
+def test_undo_takes_back_only_the_row_its_own_answer_wrote(pg, monkeypatch):
+    """q1's rule row was removed in the Kôš, q2 learned the rule again on ANOTHER day (a new
+    row — the UNIQUE identity carries the day). Undoing q1 never touches q2's row."""
+    q1 = _teach_not_stock(pg, monkeypatch)
+    row1 = _rule_rows(pg)[0][0]
+    created = pg.execute("SELECT id FROM audit_log WHERE table_name='dl_item_memory' "
+                         "AND row_id=%s AND action='create'", (str(row1),)).fetchone()[0]
+    assert audit.restore(pg, created, by="admin") is True
+    pg.execute("UPDATE dl_item_memory SET delivered_on = current_date - 1 WHERE id=%s", (row1,))
+    q2 = _teach_not_stock(pg, monkeypatch, mid="q-src2")
+    row2 = _rule_rows(pg)[0][0]
+    assert row2 != row1, "another day = another row"
+    assert _board().post(f"/api/board/questions/{q1}/undo").status_code == 200
+    assert [x[0] for x in _rule_rows(pg)] == [row2], "q2's rule survived q1's undo"
+    assert teach.get(pg, q2)["status"] == "answered"
