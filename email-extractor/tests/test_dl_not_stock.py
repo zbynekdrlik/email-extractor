@@ -342,11 +342,11 @@ def test_a_document_of_only_ruled_lines_is_a_silent_not_warehouse_skip(pg, tmp_p
     assert "neskladové" in outcome
 
 
-def test_re_asserting_a_dormant_rule_is_audited_and_its_undo_only_reverts_the_re_assert(
+def test_re_asserting_a_dormant_rule_is_audited_and_the_kos_makes_it_dormant_again(
         pg, monkeypatch):
     """A card taught after the rule makes it dormant; a later question answered „vždy vynechať"
-    again RE-ASSERTS it (the newest decision) — audited as an `update`. Undoing THAT answer puts
-    the rule back to dormant; the rule the first question created stays."""
+    again RE-ASSERTS it (the newest decision) — never a second row, audited as an `update` whose
+    Kôš „Vrátiť" puts the old `created_at` back (dormant under the card again)."""
     q1 = _teach_not_stock(pg, monkeypatch)
     rid = _rule_rows(pg)[0][0]
     assert dl_memory.add_dl_alias(pg, SUPPLIER_EAN, SERVICE, G_BREAD, BREAD) is not None
@@ -355,14 +355,12 @@ def test_re_asserting_a_dormant_rule_is_audited_and_its_undo_only_reverts_the_re
     q2 = _teach_not_stock(pg, monkeypatch, mid="q-src2", memory_conflict=True)
     assert dl_memory.not_stock_keys(pg, SUPPLIER_EAN) == {key}, "re-asserted as newest"
     assert [x[0] for x in _rule_rows(pg)] == [rid], "never a second rule row"
-    assert pg.execute("SELECT action, question_id FROM audit_log WHERE table_name="
-                      "'dl_item_memory' AND row_id=%s ORDER BY id", (str(rid),)
-                      ).fetchall() == [("create", q1), ("update", q2)]
-    r = _board().post(f"/api/board/questions/{q2}/undo")
-    assert r.status_code == 200, r.get_data(as_text=True)
-    assert [x[0] for x in _rule_rows(pg)] == [rid], "q1's rule stays"
+    audit_rows = pg.execute("SELECT id, action, question_id FROM audit_log WHERE table_name="
+                            "'dl_item_memory' AND row_id=%s ORDER BY id", (str(rid),)).fetchall()
+    assert [(a, q) for _, a, q in audit_rows] == [("create", q1), ("update", q2)]
+    assert audit.restore(pg, audit_rows[1][0], by="admin") is True
+    assert [x[0] for x in _rule_rows(pg)] == [rid]
     assert dl_memory.not_stock_keys(pg, SUPPLIER_EAN) == set(), "dormant again under the card"
-    assert teach.get(pg, q1)["status"] == "answered"
 
 
 def test_undoing_a_plain_card_answer_never_removes_the_rule(pg, monkeypatch):
@@ -474,23 +472,53 @@ def test_weekly_invoices_of_a_ruled_supplier_ship_without_the_service_line(
     assert _open_dl_items(pg) == []
 
 
-# --- review round 2 (same branch) --------------------------------------------------------------
+# --- undo contract (review rounds 2-6): „Vrátiť odpoveď" always takes the rule back ----------------
 
-def test_undoing_an_older_answer_never_removes_a_rule_a_later_answer_owns(pg, monkeypatch):
-    """q1 learns the rule, the Kôš removes it, q2 learns it again (the same row revived). Undoing
-    q1 now must leave q2's rule alone — q1's write is no longer the newest on that row."""
+def test_undo_takes_the_rule_back_even_when_another_answer_or_the_seed_also_said_so(
+        pg, monkeypatch):
+    """Undo never keeps a rule — whoever else also decided it (another answer, the admin seed):
+    the SAFE direction (the line is held and asked again; the Kôš brings the rule back), never a
+    silently kept drop the sklad just took back. Deterministic: no history to interpret."""
     q1 = _teach_not_stock(pg, monkeypatch)
     rid = _rule_rows(pg)[0][0]
-    created = pg.execute("SELECT id FROM audit_log WHERE table_name='dl_item_memory' "
-                         "AND row_id=%s AND action='create'", (str(rid),)).fetchone()[0]
-    assert audit.restore(pg, created, by="admin") is True
-    assert _rule_rows(pg) == []
-    q2 = _teach_not_stock(pg, monkeypatch, mid="q-src2")
-    assert [x[0] for x in _rule_rows(pg)] == [rid], "the same row revived for q2"
-    r = _board().post(f"/api/board/questions/{q1}/undo")
+    q2 = _ask(pg, mid="q-src2", memory_conflict=True)
+    r, _ = _answer(pg, monkeypatch, q2, {"choice": NOT_STOCK})          # re-asserted by q2
     assert r.status_code == 200, r.get_data(as_text=True)
-    assert [x[0] for x in _rule_rows(pg)] == [rid], "q2's rule survived q1's undo"
-    assert teach.get(pg, q2)["status"] == "answered"
+    assert dl_memory.remember_not_stock(pg, SUPPLIER_EAN, SERVICE, actor="admin") == rid  # + seed
+    assert _board().post(f"/api/board/questions/{q1}/undo").status_code == 200
+    assert _rule_rows(pg) == [], "taken back"
+    deleted = pg.execute("SELECT id FROM audit_log WHERE table_name='dl_item_memory' AND "
+                         "row_id=%s AND action='delete' AND question_id=%s",
+                         (str(rid), q1)).fetchone()[0]
+    assert audit.restore(pg, deleted, by="admin") is True, "the Kôš brings it back"
+    assert [x[0] for x in _rule_rows(pg)] == [rid]
+
+
+def test_undo_takes_back_every_live_rule_row_of_the_wording(pg, monkeypatch):
+    """Rows of another day (the UNIQUE identity carries the day) are the same rule: q1's row
+    (learned yesterday) deleted in Naučené, q2 re-learns it today (a new row), the Kôš brings
+    q1's row back — two live rows. Undo takes them all back, never one left dropping the line."""
+    q1 = _teach_not_stock(pg, monkeypatch)
+    row1 = _rule_rows(pg)[0][0]
+    pg.execute("UPDATE dl_item_memory SET delivered_on = current_date - 1 WHERE id=%s", (row1,))
+    c = _board()
+    assert c.delete(f"/api/board/rules/dl_alias/{row1}").status_code == 200
+    _teach_not_stock(pg, monkeypatch, mid="q-src2")
+    deleted = pg.execute("SELECT id FROM audit_log WHERE table_name='dl_item_memory' "
+                         "AND row_id=%s AND action='delete'", (str(row1),)).fetchone()[0]
+    assert audit.restore(pg, deleted, by="admin") is True
+    assert len(_rule_rows(pg)) == 2
+    assert c.post(f"/api/board/questions/{q1}/undo").status_code == 200
+    assert _rule_rows(pg) == []
+
+
+def test_undo_is_supplier_scoped(pg, monkeypatch):
+    """Undoing this supplier's answer never touches another supplier's rule for the wording."""
+    q1 = _teach_not_stock(pg, monkeypatch)
+    _teach_not_stock(pg, monkeypatch, supplier_ean=OTHER_SUPPLIER, mid="q-other")
+    assert _board().post(f"/api/board/questions/{q1}/undo").status_code == 200
+    assert _rule_rows(pg) == []
+    assert len(_rule_rows(pg, supplier_ean=OTHER_SUPPLIER)) == 1
 
 
 def test_a_repeat_kos_restore_of_a_re_assert_is_a_clean_409(pg, monkeypatch):
@@ -513,133 +541,33 @@ def test_a_repeat_kos_restore_of_a_re_assert_is_a_clean_409(pg, monkeypatch):
                       (str(rid),)).fetchone()[0] == 1
 
 
-# --- review round 3 (same branch) --------------------------------------------------------------
-
-def test_an_undone_later_answer_never_keeps_the_rule_alive(pg, monkeypatch):
-    """q2 re-asserted q1's rule and was then undone itself: it no longer stands, so undoing q1
-    takes the rule back — never a rule the sklad took back twice that still drops the line."""
-    q1 = _teach_not_stock(pg, monkeypatch)
-    assert dl_memory.add_dl_alias(pg, SUPPLIER_EAN, SERVICE, G_BREAD, BREAD) is not None
-    q2 = _teach_not_stock(pg, monkeypatch, mid="q-src2", memory_conflict=True)
-    c = _board()
-    assert c.post(f"/api/board/questions/{q2}/undo").status_code == 200
-    # the reopened q2 expires unanswered (one open question per wording — q1 can reopen then)
-    pg.execute("UPDATE order_questions SET status = 'expired' WHERE id = %s", (q2,))
-    assert c.post(f"/api/board/questions/{q1}/undo").status_code == 200
-    assert _rule_rows(pg) == [], "no standing answer owns the rule any more"
-
-
-def test_undo_takes_back_only_the_row_its_own_answer_wrote(pg, monkeypatch):
-    """q1's rule row was removed in the Kôš, q2 learned the rule again on ANOTHER day (a new
-    row — the UNIQUE identity carries the day). Undoing q1 never touches q2's row."""
-    q1 = _teach_not_stock(pg, monkeypatch)
-    row1 = _rule_rows(pg)[0][0]
-    created = pg.execute("SELECT id FROM audit_log WHERE table_name='dl_item_memory' "
-                         "AND row_id=%s AND action='create'", (str(row1),)).fetchone()[0]
-    assert audit.restore(pg, created, by="admin") is True
-    pg.execute("UPDATE dl_item_memory SET delivered_on = current_date - 1 WHERE id=%s", (row1,))
-    q2 = _teach_not_stock(pg, monkeypatch, mid="q-src2")
-    row2 = _rule_rows(pg)[0][0]
-    assert row2 != row1, "another day = another row"
-    assert _board().post(f"/api/board/questions/{q1}/undo").status_code == 200
-    assert [x[0] for x in _rule_rows(pg)] == [row2], "q2's rule survived q1's undo"
-    assert teach.get(pg, q2)["status"] == "answered"
-
-
-# --- review round 4 (same branch) --------------------------------------------------------------
-
-def test_another_suppliers_later_answer_never_owns_this_suppliers_rule(pg, monkeypatch):
-    """Ownership is per rule ROW: a later „vždy vynechať" of ANOTHER supplier (its own row) never
-    keeps this supplier's rule alive once its own answer is undone."""
-    q1 = _teach_not_stock(pg, monkeypatch)
-    _teach_not_stock(pg, monkeypatch, supplier_ean=OTHER_SUPPLIER, mid="q-other")
-    assert _board().post(f"/api/board/questions/{q1}/undo").status_code == 200
-    assert _rule_rows(pg) == [], "this supplier's rule went with its own answer"
-    assert len(_rule_rows(pg, supplier_ean=OTHER_SUPPLIER)) == 1, "the other supplier's stays"
-
-
-def test_a_later_answer_changed_to_ship_without_no_longer_owns_the_rule(pg, monkeypatch):
-    """q2 re-asserted q1's rule, was undone and then answered „pošli bez" — it no longer says
-    „vždy vynechať", so undoing q1 takes the rule back."""
-    q1 = _teach_not_stock(pg, monkeypatch)
-    assert dl_memory.add_dl_alias(pg, SUPPLIER_EAN, SERVICE, G_BREAD, BREAD) is not None
-    q2 = _teach_not_stock(pg, monkeypatch, mid="q-src2", memory_conflict=True)
-    c = _board()
-    assert c.post(f"/api/board/questions/{q2}/undo").status_code == 200
-    r, _ = _answer(pg, monkeypatch, q2, {"choice": teach.DL_ITEM_SHIP_WITHOUT})
-    assert r.status_code == 200, r.get_data(as_text=True)
-    assert c.post(f"/api/board/questions/{q1}/undo").status_code == 200
-    assert _rule_rows(pg) == [], "only a question still answered „vždy vynechať“ owns the rule"
-
-
-def test_undoing_a_conflict_card_answer_never_revives_a_rule_nobody_stands_behind(
-        pg, monkeypatch):
-    """q1 learns the rule; a card is taught later; a memory-conflict question q3 answered with
-    the card supersedes (soft-deletes) the rule; q1 is undone. Undoing q3 brings back the human
-    card answers it superseded — never the rule, whose only answer was taken back."""
-    q1 = _teach_not_stock(pg, monkeypatch)
+def test_undoing_a_conflict_card_answer_never_revives_a_superseded_rule(pg, monkeypatch):
+    """A #465 memory-conflict question answered with a CARD supersedes (soft-deletes) the rule.
+    Undoing that answer brings back the human card answers it superseded — never the rule (a
+    rule is born only by a confirmed „vždy vynechať"; the Kôš can still restore it by hand)."""
+    _teach_not_stock(pg, monkeypatch)
+    rid = _rule_rows(pg)[0][0]
     assert dl_memory.add_dl_alias(pg, SUPPLIER_EAN, SERVICE, G_BREAD, BREAD) is not None
     q3 = _ask(pg, mid="q-src3", memory_conflict=True)
     r, _ = _answer(pg, monkeypatch, q3, {"choice": G_ROLL})
     assert r.status_code == 200, r.get_data(as_text=True)
     assert _rule_rows(pg) == [], "the conflict answer superseded the rule"
-    c = _board()
-    assert c.post(f"/api/board/questions/{q1}/undo").status_code == 200
-    pg.execute("UPDATE order_questions SET status = 'expired' WHERE id = %s", (q1,))
-    assert c.post(f"/api/board/questions/{q3}/undo").status_code == 200
-    assert _rule_rows(pg) == [], "no standing decision backs the rule — it stays gone"
+    assert _board().post(f"/api/board/questions/{q3}/undo").status_code == 200
+    assert _rule_rows(pg) == [], "the undo does not revive the rule"
+    superseded = pg.execute("SELECT id FROM audit_log WHERE table_name='dl_item_memory' AND "
+                            "row_id=%s AND action='delete' AND question_id=%s",
+                            (str(rid), q3)).fetchone()[0]
+    assert audit.restore(pg, superseded, by="admin") is True, "the Kôš still can, by hand"
+    assert [x[0] for x in _rule_rows(pg)] == [rid]
 
 
-def test_a_seeded_rule_survives_the_undo_of_an_older_answer(pg, monkeypatch):
-    """The admin seed (`remember_not_stock` with no question) owns the rule like a standing
-    answer: re-seeding over an answer's rule, then undoing that answer, keeps the rule."""
+def test_undo_with_another_open_question_for_the_wording_is_a_clean_409(pg, monkeypatch):
+    """One open question per (supplier, wording): undoing an answered one while another is open
+    is refused 409 with a plain message, rolled back — never a raw 500."""
     q1 = _teach_not_stock(pg, monkeypatch)
-    rid = _rule_rows(pg)[0][0]
-    assert dl_memory.remember_not_stock(pg, SUPPLIER_EAN, SERVICE, actor="admin") == rid
-    assert _board().post(f"/api/board/questions/{q1}/undo").status_code == 200
-    assert [x[0] for x in _rule_rows(pg)] == [rid], "the seed still stands"
-
-
-# --- review round 5 (same branch) --------------------------------------------------------------
-
-def test_undoing_both_answers_in_either_order_takes_the_rule_back(pg, monkeypatch):
-    """q1 learns the rule, a card makes it dormant, q2 re-asserts it. Undo q1 FIRST: q2 still
-    stands, the rule stays. Then undo q2: nothing stands behind the rule any more — it goes
-    (never left live to start dropping the line again once the card is deleted)."""
-    q1 = _teach_not_stock(pg, monkeypatch)
-    assert dl_memory.add_dl_alias(pg, SUPPLIER_EAN, SERVICE, G_BREAD, BREAD) is not None
-    q2 = _teach_not_stock(pg, monkeypatch, mid="q-src2", memory_conflict=True)
-    c = _board()
-    assert c.post(f"/api/board/questions/{q1}/undo").status_code == 200
-    assert len(_rule_rows(pg)) == 1, "q2 still stands behind the rule"
-    pg.execute("UPDATE order_questions SET status = 'expired' WHERE id = %s", (q1,))
-    assert c.post(f"/api/board/questions/{q2}/undo").status_code == 200
-    assert _rule_rows(pg) == [], "both answers taken back — the rule is gone"
-
-
-def test_a_naucene_delete_and_kos_restore_never_count_as_a_decision(pg, monkeypatch):
-    """A Kôš / Naučené `delete` / `restore` audit row of the rule (no question) is not the seed —
-    after a Naučené delete and its Kôš restore, undoing the answer still takes the rule back."""
-    q1 = _teach_not_stock(pg, monkeypatch)
-    rid = _rule_rows(pg)[0][0]
-    c = _board()
-    assert c.delete(f"/api/board/rules/dl_alias/{rid}").status_code == 200
-    deleted = pg.execute("SELECT id FROM audit_log WHERE table_name='dl_item_memory' "
-                         "AND row_id=%s AND action='delete'", (str(rid),)).fetchone()[0]
-    assert audit.restore(pg, deleted, by="admin") is True
-    assert len(_rule_rows(pg)) == 1
-    assert c.post(f"/api/board/questions/{q1}/undo").status_code == 200
-    assert _rule_rows(pg) == []
-
-
-def test_a_later_answer_that_no_longer_stands_as_answered_does_not_back_the_rule(
-        pg, monkeypatch):
-    """Backing needs the later question still ANSWERED „vždy vynechať" — one that went back to
-    expired (a Kôš revert of its reopen keeps the stored answer) does not keep the rule."""
-    q1 = _teach_not_stock(pg, monkeypatch)
-    assert dl_memory.add_dl_alias(pg, SUPPLIER_EAN, SERVICE, G_BREAD, BREAD) is not None
-    q2 = _teach_not_stock(pg, monkeypatch, mid="q-src2", memory_conflict=True)
-    pg.execute("UPDATE order_questions SET status = 'expired' WHERE id = %s", (q2,))
-    assert teach.get(pg, q2)["answer"]["choice"] == NOT_STOCK
-    assert _board().post(f"/api/board/questions/{q1}/undo").status_code == 200
-    assert _rule_rows(pg) == []
+    q2 = _ask(pg, mid="q-src2")                    # the rule is no card: a new open question
+    r = _board().post(f"/api/board/questions/{q1}/undo")
+    assert r.status_code == 409, r.get_data(as_text=True)
+    assert "otvorená otázka" in r.get_json()["error"]
+    assert teach.get(pg, q1)["status"] == "answered" and teach.get(pg, q2)["status"] == "open"
+    assert len(_rule_rows(pg)) == 1, "rolled back — nothing changed"
