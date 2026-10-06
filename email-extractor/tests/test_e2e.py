@@ -740,6 +740,15 @@ def test_board_dl_item_not_stock_answer_learns_a_supplier_rule_in_the_browser(
     row = page.locator(".r-row:has-text('PREPRAVNÉ e2e')")
     assert row.count() == 1 and label in row.inner_text()
     assert row.locator(".r-edit").count() == 0, "a rule row offers no editor (delete only)"
+    # … but it IS deletable right there (the answer's confirm dialog points the sklad here)
+    row.locator(".r-del").click()
+    row.locator(".r-del-yes").click()
+    page.wait_for_selector(".r-row:has-text('PREPRAVNÉ e2e')", state="detached")
+    rid = pg.execute("SELECT id FROM dl_item_memory WHERE gtin = 'not_stock'").fetchone()[0]
+    assert pg.execute("SELECT deleted_at IS NOT NULL FROM dl_item_memory WHERE id = %s",
+                      (rid,)).fetchone()[0] is True
+    assert pg.execute("SELECT count(*) FROM audit_log WHERE table_name = 'dl_item_memory' "
+                      "AND row_id = %s AND action = 'delete'", (str(rid),)).fetchone()[0] == 1
 
     assert console == [], f"browser console not clean: {console}"
 
