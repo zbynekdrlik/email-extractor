@@ -14,6 +14,7 @@ from . import (
     dl_match,
     dl_memory,
     dl_nonwarehouse,
+    dl_not_stock,
     dl_report,
     dl_snapshot,
     invoice_dedup,
@@ -79,16 +80,18 @@ def _document_has_catalog_match(client, message: dict, doc: dict,
 
 
 def _skip_not_warehouse(conn, shadow: bool, message: dict, doc_number: str,
-                        supplier_name: str) -> dict:
+                        supplier_name: str,
+                        outcome_text: str = "netýka sa skladu — automaticky (zapamätaný "
+                                            "dodávateľ), bez EDI") -> dict:
     """#314: terminal handling for a document from a REMEMBERED non-warehouse supplier with
     NO catalog match — no board question, no upload. The `not_warehouse` outcome flows into
     `_aggregate_status` → `_run_and_finish`'s rollup event (`stage/status='not_warehouse'`),
     the SAME event shape #307's manual `close_message_not_warehouse` produces, so it stays
     visible in the daily digest for Marek (req 2) — never a silent drop. `_run_and_finish`
-    marks the message processed as usual."""
+    marks the message processed as usual. #488: also a document whose EVERY line is ruled
+    „not a stock item" for its supplier (`outcome_text` says which)."""
     _event(conn, shadow, message["message_id"], stage="not_warehouse",
-          status="not_warehouse",
-          outcome="netýka sa skladu — automaticky (zapamätaný dodávateľ), bez EDI",
+          status="not_warehouse", outcome=outcome_text,
           detail={"doc_number": doc_number, "supplier_name": supplier_name},
           rollup=False, workflow=dl_report.WORKFLOW)
     return {"outcome": "not_warehouse", "doc_number": doc_number,
@@ -109,10 +112,13 @@ def _skip_answered_item_keys(conn, message_id: str) -> set[str]:
     jsonb shape with no `choice` key at all — neither equals the sentinel, so only a real
     "pošli bez nej" answer is returned here. #485: for an INVOICE mail also a question of
     ANOTHER mail its hold waited on (its ask deduped onto it — the hold event's
-    `question_ids`); the plain DL path keeps its own questions only."""
+    `question_ids`); the plain DL path keeps its own questions only. #488: a „vždy vynechať"
+    answer counts the same for its own mail (its supplier rule, `dl_not_stock`, covers every
+    later one) — so the answering mail ships without the line even after a Kôš removal of
+    the rule."""
     rows = conn.execute(
         """SELECT item_key FROM order_questions
-            WHERE kind = 'dl_item' AND status = 'answered' AND answer->>'choice' = %s
+            WHERE kind = 'dl_item' AND status = 'answered' AND answer->>'choice' = ANY(%s)
               AND (message_id = %s
                    OR id IN (SELECT w.qid::int FROM email_events e
                                JOIN messages m ON m.message_id = e.message_id
@@ -120,7 +126,7 @@ def _skip_answered_item_keys(conn, message_id: str) -> set[str]:
                                     jsonb_array_elements_text(
                                         COALESCE(e.detail->'question_ids', '[]')) AS w(qid)
                               WHERE e.message_id = %s AND e.stage = 'review'))""",
-        (teach.DL_ITEM_SHIP_WITHOUT, message_id, message_id)).fetchall()
+        (list(teach.DL_ITEM_SENTINELS), message_id, message_id)).fetchall()
     return {r[0] for r in rows}
 
 
@@ -429,7 +435,17 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     # item that failed to match the ACTIVE catalog as a known-but-manual retired product.
     retired_cards = dl_snapshot.retired_dl_cards(conn)
     retired_gtins = {str(c["gtin"]) for c in retired_cards}
+    # #488: the sklad's „Nie je skladová položka — vždy vynechať" rules for THIS supplier — a
+    # ruled line (a recurring service line: transport, deposit) is left off the EDI before any
+    # matching: no model call, no question, no hold. Read in shadow too: a learned decision,
+    # like human memory (the e2e-dl corpus has none, so it stays byte-identical).
+    not_stock_keys = dl_memory.not_stock_keys(conn, supplier_decision.ean_edi)
+    ruled = 0
     for item in doc.get("items") or []:
+        if dl_not_stock.leave_off(not_stock_keys, item, all_items, message["message_id"],
+                                  supplier_decision.ean_edi):
+            ruled += 1
+            continue
         # #465: `message_id` — this message's OWN answered question confirms its wording
         # (the reprocess right after the sklad answered it), never another message's.
         recalled = dl_memory.resolve(conn, supplier_decision.ean_edi, item.get("name", ""),
@@ -530,6 +546,14 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     if nw_remembered and not has_catalog_match and not has_match_failure:
         return _skip_not_warehouse(conn, shadow, message, doc_number,
                                    supplier_decision.name)
+    if ruled and not decisions:
+        # #488: EVERY line is one the sklad ruled „not a stock item" (e.g. a transport-only
+        # invoice) — nothing for the warehouse to receive: the same terminal, digest-visible
+        # skip, never a ❗ „0 z 0" review that nobody can answer
+        return _skip_not_warehouse(
+            conn, shadow, message, doc_number, supplier_decision.name,
+            outcome_text="netýka sa skladu — všetky riadky sú naučené ako neskladové "
+                         "(„vždy vynechať“), bez EDI")
 
     header = {"customerName": supplier_decision.name,
              "customerEanEdi": supplier_decision.ean_edi}

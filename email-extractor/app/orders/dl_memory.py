@@ -60,6 +60,11 @@ WEIGHT_OVERRIDE_MIN = 3
 # delivery is not a majority.
 NEWER_CONTRARY_MIN = 2
 
+# #488: the „Nie je skladová položka — vždy vynechať" rule (see the section at the bottom): the
+# sentinel stored in `gtin` — letters, never a card number — and the rule's display label
+NOT_STOCK = "not_stock"
+NOT_STOCK_LABEL = "Nie je skladová položka — vždy vynechať"
+
 
 @dataclass(frozen=True)
 class Recalled:
@@ -203,6 +208,9 @@ def resolve(conn, supplier_ean: str, item: str, catalog_gtins=None,
     match of one Dobrota roll wording onto a fruit card). `message_id` is the message being
     matched — its OWN answered question counts as confirmation (the reprocess right after the
     sklad answered it), never another message's plain answer (which is exactly the misclick).
+
+    #488: a „nie je skladová položka" rule row (`gtin = NOT_STOCK`) is never a card — every rung
+    skips it, even with no catalog filter (the engine reads the rule via `not_stock_keys`).
     """
     key = item_key(item)
     if not (supplier_ean and key):
@@ -211,9 +219,9 @@ def resolve(conn, supplier_ean: str, item: str, catalog_gtins=None,
         """SELECT gtin, max(card) AS card, max(delivered_on) AS last_day, max(created_at) AS at
              FROM dl_item_memory
             WHERE supplier_ean = %s AND item_key = %s AND source IN ('human', 'teachback')
-              AND deleted_at IS NULL
+              AND deleted_at IS NULL AND gtin <> %s
             GROUP BY gtin ORDER BY at DESC""",
-        (str(supplier_ean), key)).fetchall()
+        (str(supplier_ean), key, NOT_STOCK)).fetchall()
     valid_taught = [r for r in taught_rows
                     if catalog_gtins is None or str(r[0]) in catalog_gtins]
     if valid_taught:
@@ -234,10 +242,10 @@ def resolve(conn, supplier_ean: str, item: str, catalog_gtins=None,
         """SELECT gtin, delivered_on, max(cnt) AS c, max(card) AS card
              FROM dl_item_memory
             WHERE supplier_ean = %s AND item_key = %s AND source <> 'human'
-              AND deleted_at IS NULL
+              AND deleted_at IS NULL AND gtin <> %s
               AND (%s::date IS NULL OR delivered_on < %s::date)
             GROUP BY gtin, delivered_on""",
-        (str(supplier_ean), key, as_of or None, as_of or None)).fetchall()
+        (str(supplier_ean), key, NOT_STOCK, as_of or None, as_of or None)).fetchall()
     if catalog_gtins is not None:
         rows = [r for r in rows if str(r[0]) in catalog_gtins]
     if not rows:
@@ -357,14 +365,20 @@ def restore_superseded(conn, question_id: int, by: str = "auto:teach") -> list[i
     `delete` audit row of this question), never a bespoke UPDATE. Rows already restored by
     hand are skipped. Returns the restored `dl_item_memory` ids."""
     rows = conn.execute(
-        """SELECT DISTINCT ON (m.id) a.id, m.id FROM audit_log a
+        """SELECT DISTINCT ON (m.id) a.id, m.id, m.gtin FROM audit_log a
              JOIN dl_item_memory m ON m.id::text = a.row_id
             WHERE a.table_name = 'dl_item_memory' AND a.action = 'delete'
               AND a.question_id = %s AND m.deleted_at IS NOT NULL
             ORDER BY m.id, a.id DESC""", (question_id,)).fetchall()   # newest per row
     from ..board.services import audit  # lazy: a leaf module, no import cycle
     restored = []
-    for audit_id, mem_id in rows:
+    for audit_id, mem_id, gtin in rows:
+        if gtin == NOT_STOCK:
+            # #488: a superseded „vždy vynechať" rule is never revived by undoing the card
+            # answer — a rule is born only by a confirmed answer / the seed (the line is asked
+            # again, the safe direction); the Kôš can still restore it by hand
+            log.info("superseded not-stock rule %s not restored by the undo", mem_id)
+            continue
         try:
             audit.restore(conn, int(audit_id), by=by)
             restored.append(int(mem_id))
@@ -444,9 +458,108 @@ def update_dl_item_memory_row(conn, row_id: int, *, item_raw: str, gtin: str,
         (row_id, list(CURATED_SOURCES))).fetchone()
     if not before:
         return None
+    if str(gtin) == NOT_STOCK and before[2] != NOT_STOCK:
+        # #488: a typed number must never turn an alias into a silent-drop rule — the rule is
+        # born only by the board answer (with its confirmation) or `remember_not_stock`
+        raise ValueError("„Nie je skladová položka“ vzniká len odpoveďou na otázke na nástenke")
+    if before[2] == NOT_STOCK:
+        # #488: nor is a rule edited at all — retargeted to another wording it would silently
+        # drop a real stock line, turned into a typed number it would be a typed card, and its
+        # label is never shown (Naučené shows the constant); a wrong rule is deleted (Kôš) and
+        # the question answered / the alias added instead
+        raise ValueError("Pravidlo „Nie je skladová položka“ sa neupravuje — zmaž ho a "
+                         "odpovedz na otázku (alebo pridaj alias v Produkty sklad)")
     conn.execute(
         "UPDATE dl_item_memory SET item_key = %s, item_raw = %s, gtin = %s, card = %s "
         "WHERE id = %s",
         (item_key(item_raw), str(item_raw), str(gtin), card or "", row_id))
     return {"item_key": before[0], "item_raw": before[1], "gtin": before[2],
             "card": before[3] or ""}
+
+
+# --- #488: the learned LINE-level rule „Nie je skladová položka — vždy vynechať". A recurring
+# service line of ONE supplier (EKVIA „PREPRAVNÉ" = transport) is decided once: a row with the
+# sentinel `gtin = NOT_STOCK`, source 'human', keyed like the dl_item question. `resolve()` never
+# reads it as a card (every rung skips it); `not_stock_keys` is what the engine reads
+# (`dl_not_stock` owns the question halves and the engine helpers). Every write is audited on
+# `dl_item_memory`, so the Kôš lists and reverts it.
+
+def remember_not_stock(conn, supplier_ean: str, wording: str, *, actor: str, question_id=None,
+                       message_id=None) -> int | None:
+    """Learn the rule for (supplier, wording); returns its row id (None when a field is
+    missing). A live rule is never duplicated — it is RE-ASSERTED as the newest decision
+    (`created_at = now()`, so it wins over a card taught after it again), audited as an
+    `update` whose Kôš restore puts the old `created_at` back. Otherwise a new row — or the
+    same-day soft-deleted one revived (the UNIQUE identity is not partial) with a fresh
+    `created_at`, unlike `remember()` (the rule's precedence is its age) — audited `create`."""
+    key = item_key(wording)
+    if not (supplier_ean and key):
+        return None
+    live = conn.execute(
+        """UPDATE dl_item_memory m SET created_at = now()
+             FROM (SELECT id, created_at AS old_at FROM dl_item_memory
+                    WHERE supplier_ean = %s AND item_key = %s AND gtin = %s
+                      AND deleted_at IS NULL ORDER BY id LIMIT 1) o
+            WHERE m.id = o.id
+           RETURNING m.id, o.old_at, m.created_at""",
+        (str(supplier_ean), key, NOT_STOCK)).fetchone()
+    if live:
+        rid, old_at, new_at = int(live[0]), live[1], live[2]
+        _audit(conn, actor=actor, row_id=rid, action="update", question_id=question_id,
+               message_id=message_id,
+               before={"created_at": old_at.isoformat() if old_at else None},
+               after={"created_at": new_at.isoformat() if new_at else None},
+               note="#488 pravidlo „vždy vynechať“ znovu potvrdené")
+        log.info("not-stock rule for %r (%s) re-asserted as the newest decision (row %s)",
+                 wording, supplier_ean, rid)
+        return rid
+    rid = int(conn.execute(
+        """INSERT INTO dl_item_memory
+               (supplier_ean, item_key, item_raw, gtin, card, delivered_on, cnt, source)
+           VALUES (%s, %s, %s, %s, %s, current_date, 1, 'human')
+           ON CONFLICT (supplier_ean, item_key, gtin, delivered_on, cnt) DO UPDATE
+              SET deleted_at = NULL, created_at = now(), source = 'human',
+                  item_raw = EXCLUDED.item_raw, card = EXCLUDED.card
+           RETURNING id""",
+        (str(supplier_ean), key, str(wording), NOT_STOCK, NOT_STOCK_LABEL)).fetchone()[0])
+    _audit(conn, actor=actor, row_id=rid, action="create", question_id=question_id,
+           message_id=message_id,
+           after={"supplier_ean": str(supplier_ean), "item_raw": str(wording), "item_key": key,
+                  "gtin": NOT_STOCK, "card": NOT_STOCK_LABEL, "source": "human"},
+           note="#488 nie je skladová položka — vždy vynechať")
+    log.warning("not-stock rule learned: %r of supplier %s is never a stock line (row %s, "
+                "question %s, by %s)", wording, supplier_ean, rid, question_id, actor)
+    return rid
+
+
+def forget_not_stock(conn, supplier_ean: str, wording: str, *, actor: str, question_id=None,
+                     message_id=None) -> list[int]:
+    """Soft-delete every live rule row for (supplier, wording), each with a `delete` audit row
+    (the Kôš „Vrátiť" brings it back). Returns the removed ids."""
+    rows = conn.execute(
+        "UPDATE dl_item_memory SET deleted_at = now() WHERE supplier_ean = %s AND item_key = %s"
+        " AND gtin = %s AND deleted_at IS NULL RETURNING id",
+        (str(supplier_ean), item_key(wording), NOT_STOCK)).fetchall()
+    ids = [int(r[0]) for r in rows]
+    for rid in ids:
+        _audit(conn, actor=actor, row_id=rid, action="delete", question_id=question_id,
+               message_id=message_id, note="#488 pravidlo „vždy vynechať“ zrušené")
+    log.warning("not-stock rule for %r (%s) removed: rows %s", wording, supplier_ean, ids)
+    return ids
+
+
+def not_stock_keys(conn, supplier_ean: str) -> set[str]:
+    """The `item_key`s of this supplier's wordings whose NEWEST live taught decision
+    (`source IN human/teachback`, the taught-first rung of `resolve()`) is the rule — a card
+    taught later for the same wording sends the line back to the matcher."""
+    if not supplier_ean:
+        return set()
+    rows = conn.execute(
+        """SELECT item_key FROM (
+               SELECT DISTINCT ON (item_key) item_key, gtin FROM dl_item_memory
+                WHERE supplier_ean = %s AND source IN ('human', 'teachback')
+                  AND deleted_at IS NULL
+                ORDER BY item_key, created_at DESC NULLS LAST, id DESC) newest
+            WHERE gtin = %s""",
+        (str(supplier_ean), NOT_STOCK)).fetchall()
+    return {r[0] for r in rows}

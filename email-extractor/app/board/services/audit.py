@@ -15,6 +15,7 @@ that need that guarantee wrap the call (see `orders.teach`).
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime
 
 from psycopg import errors
 from psycopg.types.json import Json
@@ -304,7 +305,7 @@ def _restore_update(conn, table_name, row_id, before) -> None:
         (str(row_id),)).fetchone()
     if live is None:
         raise RestoreError(409, "pôvodný riadok neexistuje")
-    if all(live[i] == v for i, v in enumerate(restorable.values())):
+    if all(_same(live[i], v) for i, v in enumerate(restorable.values())):
         raise RestoreError(409, "riadok už má pôvodné hodnoty (už vrátené?)")
     sets, values = [], []
     for key, val in restorable.items():
@@ -322,6 +323,23 @@ def _restore_update(conn, table_name, row_id, before) -> None:
         raise RestoreError(409, "rovnaký záznam už existuje — vrátenie by vytvorilo "
                                 "duplicitu") from e
     _rebuild_snapshot(conn, table_name)
+
+
+def _same(live, recorded) -> bool:
+    """Is a live column value the recorded `before` value? A timestamp / date column is recorded
+    in the JSON `before` as its ISO string (#488: a re-asserted rule's `created_at`) — compare it
+    as a time, or a repeat restore is never seen as „already reverted" and writes again."""
+    if isinstance(live, datetime) and isinstance(recorded, str):
+        try:
+            return live == datetime.fromisoformat(recorded)
+        except ValueError:
+            return False
+    if isinstance(live, date) and isinstance(recorded, str):
+        try:
+            return live == date.fromisoformat(recorded)
+        except ValueError:
+            return False
+    return live == recorded
 
 
 def _restore_answer(conn, qid) -> None:

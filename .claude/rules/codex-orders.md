@@ -750,6 +750,11 @@ must never ship a SECOND delivery: the warehouse may already have typed it into 
   save (same fields) skips it. Read back `invoice_is_delivery_note` + `invoice_dl_since` from
   `dl_supplier_overrides`, then confirm no new `dl_invoice_runs` / `desadv_sent` rows.
 - **Service lines on invoices** (EKVIA „PREPRAVNÉ"): no card → the #365 hold + a `dl_item`
-  question per invoice; „pošli bez tejto položky" applies to that ONE mail only, so it recurs
-  weekly until a persistent not-a-warehouse-line answer exists.
+  question per invoice; „pošli bez tejto položky" applies to that ONE mail only. Since #488
+  (0.9.179) the answer „Nie je skladová položka — vždy vynechať" learns a supplier rule
+  (`dl_not_stock`) and every later invoice / DL of that supplier leaves the line off without a
+  question — the twin check / claim then compare the EDI without it (CODEX receipts carry no
+  transport either). A known service line is seeded once through
+  `dl_memory.remember_not_stock` (EKVIA „PREPRAVNÉ" after the 0.9.179 deploy — evidence on the
+  ticket). Details: `n8n-workflow-edits.md` (#488 section).
 

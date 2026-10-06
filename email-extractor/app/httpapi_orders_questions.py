@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 
 from flask import Flask, abort, jsonify, request, session
+from psycopg import errors as pg_errors
 from psycopg.types.json import Json
 
 from .httpapi_common import _EAN_STRIP_RE, Deps, _parse_emails_field
@@ -509,13 +510,16 @@ def register(app: Flask, deps: Deps) -> dict:
         # (legitimise server-side before validating) — scoped to the two DL kinds only;
         # mail/date/line have no search box and keep the strict offered-only check as-is.
         # #467: checked BEFORE a free/search pick is legitimised (a dead code never lingers as
-        # an offered button); „pošli bez nej" / a blank „Neviem" are no card — never checked.
-        if q.get("kind") == "dl_item" and choice and choice != teach.DL_ITEM_SHIP_WITHOUT:
+        # an offered button); „pošli bez nej" / #488 „vždy vynechať" / a blank „Neviem" are no
+        # card — never checked, never looked up in the catalog.
+        sentinel = q.get("kind") == "dl_item" and choice in teach.DL_ITEM_SENTINELS
+        if q.get("kind") == "dl_item" and choice and not sentinel:
             refused = _dl_card_refusal(deps, choice, q.get("wording", ""))
             if refused:
                 return refused
         offered = {str(c.get("value")) for c in (q.get("candidates") or [])}
-        if choice and choice not in offered and q.get("kind") in ("dl_supplier", "dl_item"):
+        if (choice and not sentinel and choice not in offered
+                and q.get("kind") in ("dl_supplier", "dl_item")):
             with deps.db() as clook:
                 if q.get("kind") == "dl_supplier":
                     hit = next((r for r in dl_snapshot.dl_suppliers_for_management(clook)
@@ -888,6 +892,14 @@ def register(app: Flask, deps: Deps) -> dict:
                 q = kind.undo(c, q0) if kind else teach.undo(c, qid)
         except teach.NotACandidate as e:
             return jsonify(error=str(e)), 404
+        except pg_errors.UniqueViolation:
+            # #488: one OPEN question per (partner, wording) — reopening this one while another
+            # is open collides; the transaction rolled back, nothing changed. A plain 409, never
+            # a raw 500: answer the open one instead.
+            log.warning("undo of question %s refused: another question for its wording is "
+                        "open", qid)
+            return jsonify(error="Na tento riadok už čaká otvorená otázka — odpovedz na ňu "
+                                 "(táto odpoveď sa nevrátila)."), 409
         return jsonify(ok=True, question=q)
 
     @app.post("/api/orders/question/<int:qid>/undo")

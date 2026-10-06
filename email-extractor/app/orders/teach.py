@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 from psycopg.types.json import Json
 
-from . import dl_item_conflict, dl_memory, dl_supplier_memory, memory, snapshot
+from . import dl_item_conflict, dl_memory, dl_not_stock, dl_supplier_memory, memory, snapshot
 
 log = logging.getLogger("orders.teach")
 
@@ -940,6 +940,11 @@ def _undo_line(conn, q: dict) -> dict:
 # the message's reprocess (`dl_document._skip_answered_item_keys`), so the line is shipped
 # WITHOUT it instead of re-holding the whole document forever.
 DL_ITEM_SHIP_WITHOUT = "ship_without"
+# #488: „Nie je skladová položka — vždy vynechať" — the same skip for THIS mail, plus a learned
+# supplier-scoped rule so every later document leaves the line off without asking
+# (`dl_not_stock`). Both are sentinels, never a card (never CODEX-checked, never legitimised).
+DL_ITEM_NOT_STOCK = dl_not_stock.NOT_STOCK
+DL_ITEM_SENTINELS = (DL_ITEM_SHIP_WITHOUT, DL_ITEM_NOT_STOCK)
 
 
 def dl_item_key(supplier_ean: str, wording: str) -> str:
@@ -1025,9 +1030,9 @@ def _present_dl_item(q: dict) -> dict:
 
 
 def _validate_dl_item(q: dict, choice: str, by: str) -> None:
-    # #365: the "nemá kartu — pošli bez tejto položky" sentinel is a valid answer even though
-    # it is not (and never can be) one of the offered catalog GTINs.
-    if choice and choice != DL_ITEM_SHIP_WITHOUT and choice not in _offered_values(q):
+    # #365/#488: the "pošli bez" / "vždy vynechať" sentinels are valid answers even though
+    # they are not (and never can be) one of the offered catalog GTINs.
+    if choice and choice not in DL_ITEM_SENTINELS and choice not in _offered_values(q):
         raise NotACandidate(f"{choice!r} nebolo ponúknuté pre otázku {q['id']}")
 
 
@@ -1045,6 +1050,8 @@ def _apply_dl_item(conn, cfg, q: dict, choice: str, by: str) -> dict:
     way `hold.py`'s own docstring already explains for its `pipeline` import."""
     if not choice:
         return {}
+    if choice == DL_ITEM_NOT_STOCK:
+        return dl_not_stock.apply_answer(conn, cfg, q, by)   # #488: the supplier rule
     if choice == DL_ITEM_SHIP_WITHOUT:
         # #365: "nemá kartu — pošli bez tejto položky". Teach NOTHING (there is genuinely no
         # card) — the skip is durably recorded on THIS answered question row
@@ -1084,13 +1091,17 @@ def _undo_dl_item(conn, q: dict) -> dict:
     Acceptable for a hotfix (rare: requires same-day, same-gtin collision + undo); a
     demote-instead-of-delete would be the structural fix if this proves problematic."""
     payload = q.get("payload") or {}
-    if dl_item_conflict.board_settled(payload):
+    if str((q.get("answer") or {}).get("choice") or "") == DL_ITEM_NOT_STOCK:
+        dl_not_stock.undo_answer(conn, q)       # #488: its rule goes (soft, audited)
+    elif dl_item_conflict.board_settled(payload):
         dl_item_conflict.undo_answer(conn, q)   # #465: remove only its own teach + restore
     else:
         conn.execute(
             "DELETE FROM dl_item_memory WHERE supplier_ean = %s AND item_key = %s "
-            "AND source = 'human' AND deleted_at IS NULL",   # #465: never a Kôš row
-            (payload.get("supplier_ean", ""), memory.item_key(q.get("wording", ""))))
+            "AND source = 'human' AND deleted_at IS NULL "   # #465: never a Kôš row
+            "AND gtin <> %s",   # #488: never another question's rule (own undo / Kôš / Naučené)
+            (payload.get("supplier_ean", ""), memory.item_key(q.get("wording", "")),
+             DL_ITEM_NOT_STOCK))
     conn.execute(
         """UPDATE order_questions
               SET status = 'open', answer = NULL, answered_by = NULL, answered_at = NULL,
@@ -1308,7 +1319,8 @@ KINDS: dict[str, QuestionKind] = {
         deadline_shippable=False),
     "dl_item": QuestionKind(
         name="dl_item", present=_present_dl_item, validate=_validate_dl_item,
-        apply=_apply_dl_item, undo=_undo_dl_item, learns="dl_item_memory(source='human')",
+        apply=_apply_dl_item, undo=_undo_dl_item,
+        learns="dl_item_memory(source='human'); „vždy vynechať“ = a not_stock rule (#488)",
         deadline_shippable=False),
     "dl_supplier": QuestionKind(
         name="dl_supplier", present=_present_dl_supplier, validate=_validate_dl_supplier,

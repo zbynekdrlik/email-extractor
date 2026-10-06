@@ -1077,3 +1077,74 @@ card for a sibling DL where the model scored 0.87 — pure lottery). Reusable ru
   written by the poisoned rescues are evidence and are NOT deletable there — the new verdict
   neutralizes them (contrary majority / lexical gap), and an already-imported DESADV is NEVER
   re-shipped (#239) — list it on the ticket for the warehouse's manual CODEX correction.
+
+## A recurring service line is a LINE-level supplier rule, not a per-mail „pošli bez" (#488)
+
+„Nemá kartu — pošli bez tejto položky" (`teach.DL_ITEM_SHIP_WITHOUT`) is a decision about ONE
+mail — `dl_document._skip_answered_item_keys(message_id)` reads it back for that mail (and, on
+the #485 invoice path, for the mails whose hold waited on the same question). A line that comes
+back on EVERY document of a supplier (EKVIA „PREPRAVNÉ" = transport on every weekly
+invoice-as-DL; a deposit, packaging) therefore held every document on a fresh `dl_item`
+question. The answer for that is „Nie je skladová položka — vždy vynechať" (`not_stock`). The
+rule's SQL lives in `dl_memory` (the ONE module that writes `dl_item_memory`:
+`remember_not_stock` / `forget_not_stock` / `not_stock_keys`); `app/orders/dl_not_stock.py` holds
+the question halves + the engine helper (`leave_off`), `teach` only dispatches (over budget):
+
+- **The rule = a `dl_item_memory` row with the sentinel `gtin = 'not_stock'`**, `source='human'`,
+  `card` = the label, keyed by the question's `(supplier_ean, item_key)` — supplier-scoped on
+  purpose (the same wording from another supplier is still asked). `remember_not_stock` writes it
+  with an audited `create` (Kôš „Vrátiť" soft-deletes it) and revives a same-day soft-deleted row
+  (non-partial UNIQUE identity) with a fresh `created_at`; a LIVE rule is never duplicated but
+  RE-ASSERTED (`created_at = now()`, audited `update` with the old `created_at` as `before`, so
+  the Kôš restore makes it dormant again).
+- **Undo of an answer ALWAYS takes the rule back** (`dl_not_stock.undo_answer` →
+  `forget_not_stock`: every live rule row of the wording, soft + audited `delete` tied to the
+  question, Kôš-restorable) — whoever else also decided it (another answer, the seed). Five
+  review rounds tried "keep it while another standing decision backs it" by reading the audit
+  history (newer writes, still-answered questions, seeds, same-day revivals, deletes in
+  between); every round found a new order of undos / Kôš actions that kept a rule nobody stood
+  behind — a SILENT DROP. The deterministic contract fails safe by construction (the line is
+  held and asked again) and needs no history. Same for #465 `restore_superseded`: undoing a
+  conflict CARD answer never revives a superseded rule (the Kôš can, by hand). Undo while
+  another question for the wording is open = 409 (one open question per wording), never a 500.
+  The Kôš „already reverted?" guard compares a timestamp column with its recorded ISO string as
+  a time (`audit._same`), so a repeat restore of a re-assert is a 409.
+- **The sentinel is never a card.** `dl_memory.resolve` skips `gtin = 'not_stock'` on every rung
+  — even with `catalog_gtins=None` (the retired-card recall, the ask pre-check) — so the #465
+  verdict, the #467 CODEX guard and `ask_dl_item` never see it. **Any NEW reader of
+  `dl_item_memory` that treats `gtin` as a card number must skip it too** (`codex_sync_memory`
+  is safe: it moves rows by real card numbers only; `catalog_aliases` lists per card number).
+  The generic answer path never CODEX-checks or catalog-looks-up a sentinel choice
+  (`teach.DL_ITEM_SENTINELS`).
+- **Newest live curated decision wins** (`dl_memory.not_stock_keys`: `DISTINCT ON (item_key) …
+  ORDER BY created_at DESC` over `source IN ('human','teachback')`) — a card taught LATER for the
+  same wording (Produkty alias, História „Doučiť", an answer) sends the line back to the matcher;
+  a #465 memory-conflict question answered with a card also soft-deletes the rule
+  (`supersede_taught`, audited, restorable). The plain `_undo_dl_item` DELETE never touches it.
+- **Engine:** `dl_document._process_document` reads `dl_memory.not_stock_keys` ONCE per document
+  and asks `dl_not_stock.leave_off` per line: a ruled line is taken out before
+  `dl_memory.resolve` / the model (no LLM call, not in `decisions`/`matched_items`, so the EDI is
+  complete — `ok`, not `partial`), logged and kept in the run items in its place
+  (`rule = 'not_stock'`, História shows why, in document order). A document whose EVERY line is ruled
+  (a transport-only invoice) is the terminal `_skip_not_warehouse` (`not_warehouse`, own outcome
+  text) — never a ❗ „0 z 0" review nobody can answer. Applied in shadow too (a learned decision,
+  like human memory) — the e2e-dl corpus has no rule rows, byte-identical.
+- **Naučené sklad:** the rule row shows label „Neskladový riadok (dodávateľ …)", target = the rule
+  label (searchable), origin = the question from its audit `create` (`LEFT JOIN LATERAL` on
+  `idx_audit_log_row`), `editable: false` — `tab-rules.js` offers no „Upraviť" but its own
+  „Zmazať" on the row head (the only delete in that tab otherwise lives inside the editor;
+  `editingOpen` also pauses the refresh while a delete confirmation is open). Typing `not_stock` into an alias's number, and ANY edit of a rule row,
+  are refused (400, `update_dl_item_memory_row`) — a rule is born only by the confirmed board
+  answer / the seed; a wrong one is deleted (Kôš restorable).
+- **The answering mail:** `_skip_answered_item_keys` reads BOTH sentinels, so the mail that got
+  the answer ships without the line even if the rule is later removed in the Kôš.
+- **Seeding a known service line without waiting for a question** = call
+  `dl_memory.remember_not_stock(conn, <supplier_ean>, <exact wording from order_runs>,
+  actor="admin")` inside the add-on container (the same function the answer uses, audited); read
+  back `dl_memory.not_stock_keys(conn, ean)` + the `audit_log` `create` row. Never a raw INSERT.
+  If a `dl_item` question for that wording is already OPEN, answer IT „vždy vynechať" instead — a
+  seed alone leaves that mail held (only the answer releases it). Undoing an answer for that
+  wording takes a seeded rule back too (the safe direction) — re-seed or restore it in the Kôš.
+- **Test gotcha:** a helper that creates a question's OWN mail for a later `dl_worker.tick` must
+  insert it `processed = true` (a question is raised while its mail is processed) — an
+  unprocessed `dodacie_listy` row is claimed by the next tick instead of the mail under test.
