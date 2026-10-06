@@ -116,12 +116,16 @@ def test_main_prints_the_pushed_line_with_the_target(monkeypatch, capsys):
              "delivery_date": datetime.date(2026, 9, 2), "line_count": 3}]
     posted = []
     monkeypatch.setattr(push, "query_duckdb", lambda db_path, days: rows)
+    monkeypatch.setattr(push, "query_as_of",
+                        lambda db_path: datetime.datetime(2026, 10, 6, 12, 41, 9))
     monkeypatch.setattr(push, "_requests_post",
                         lambda url, headers, body: posted.append(url)
                         or {"upserted": len(body["orders"])})
     url = "https://email-pz.newlevel.media/api/codex/orders"
     assert push.main(["--url", url, "--token", "tok-not-for-the-log"]) == 0
     out = capsys.readouterr().out.strip()
-    assert out == "pushed: fetched=1 orders=1 upserted=1 to=https://email-pz.newlevel.media"
+    # #485 reopen: the line names the ETL time of the orders it sent
+    assert out == ("pushed: fetched=1 orders=1 upserted=1 "
+                   "source_as_of=2026-10-06T12:41:09+00:00 to=https://email-pz.newlevel.media")
     assert "tok-not-for-the-log" not in out
     assert posted == [url]

@@ -169,6 +169,8 @@ def test_check_card_code_refuses_a_missing_code_with_similar_codex_cards(pg):
                                     catalog=catalog)
     payload = ei.value.payload
     assert "3698" in payload["error"] and "CODEX" in payload["error"]
+    # #485 reopen: the list now arrives when the ETL finished (~15:05 / ~18:50)
+    assert "15:05" in payload["error"] and "18:50" in payload["error"]
     assert payload["codex"]["code"] == "3698" and payload["codex"]["missing"] is True
     top = payload["codex"]["similar"][0]
     assert top == {"code": "9990000000017", "name": "Rožok so slaninou a syrom 70g",
@@ -239,6 +241,8 @@ def test_stale_sweep_raises_one_ops_alert_for_a_stale_list(pg):
     rows = _alerts(pg)
     assert len(rows) == 1 and rows[0][0] == 77
     assert "CODEX" in rows[0][2]
+    # #485 reopen: the per-push timers are gone — ops is sent to the trigger that exists
+    assert "codex-push-after-etl" in rows[0][2] and "push.timer" not in rows[0][2]
 
 
 def test_stale_sweep_is_quiet_for_a_fresh_list(pg):

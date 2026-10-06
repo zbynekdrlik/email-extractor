@@ -152,7 +152,9 @@ def test_stale_sweep_alerts_ops_once_per_episode_only_while_an_invoice_flag_is_o
     assert codex_receipts.stale_sweep(pg, _cfg()) is False, "deduped while undelivered"
     rows = _alerts(pg)
     assert len(rows) == 1 and rows[0][0] == 77
-    assert "NEspracúvajú" in rows[0][1] and "codex-receipts-push.timer" in rows[0][1]
+    assert "NEspracúvajú" in rows[0][1]
+    # #485 reopen: the per-push timers are gone — ops is sent to the trigger that exists
+    assert "codex-push-after-etl" in rows[0][1] and "push.timer" not in rows[0][1]
 
 
 def test_stale_sweep_is_quiet_for_fresh_receipts_and_gives_a_new_install_grace(pg):

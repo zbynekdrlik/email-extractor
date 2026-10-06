@@ -246,3 +246,152 @@ def test_the_receipts_pushed_line_names_the_etl_time_it_sent():
         res, "https://email-pz.newlevel.media/api/codex/receipts")
     assert line == ("pushed: fetched=1 receipts=1 stored=1 "
                     "source_as_of=2026-10-06T12:15:03+00:00 to=https://email-pz.newlevel.media")
+
+
+# --- review round 1: real child processes, exhaustion paths, serialisation, budget -------------
+
+def _child(tmp_path, name, body):
+    path = tmp_path / name
+    path.write_text(body)
+    return str(path)
+
+
+def test_real_child_pushes_report_ok_crash_and_timeout_and_the_round_is_not_recorded(
+        tmp_path, monkeypatch, capsys):
+    """The real `_run_script` (no runner injected): a crashing push and a hanging one (killed at
+    the per-push timeout) are reported by name; the other pushes still ran."""
+    monkeypatch.setattr(rounds, "PUSH_TIMEOUT_SECONDS", 1)
+    db = _write(tmp_path / "codex.duckdb", "gen-1")
+    marker = tmp_path / "ran.txt"
+    scripts = [
+        _child(tmp_path, "codex_orders_push.py",
+               f"open({str(marker)!r}, 'a').write('orders\\n')\n"),
+        _child(tmp_path, "codex_cards_push.py", "raise SystemExit(3)\n"),
+        _child(tmp_path, "codex_receipts_push.py", "import time\ntime.sleep(30)\n"),
+    ]
+    assert rounds.run_round(str(db), str(tmp_path / "state"), scripts=scripts, settle=0) == 1
+    out = capsys.readouterr().out
+    assert "orders=ok cards=exit 3 receipts=exit 124" in out
+    assert "killed" in out
+    assert marker.read_text() == "orders\n"
+    assert rounds.read_state(str(tmp_path / "state")) is None
+
+
+def test_a_missing_interpreter_fails_that_push_not_the_whole_round_as_a_missing_duckdb(
+        tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rounds.sys, "executable", str(tmp_path / "no-such-python"))
+    db = _write(tmp_path / "codex.duckdb", "gen-1")
+    script = _child(tmp_path, "codex_orders_push.py", "")
+    assert rounds.run_round(str(db), str(tmp_path / "state"), scripts=[script], settle=0) == 1
+    out = capsys.readouterr().out
+    assert "orders=exit 127" in out
+    assert "DuckDB file is missing" not in out
+
+
+def test_the_duckdb_vanishing_after_the_pushes_is_not_reported_as_nothing_pushed(
+        tmp_path, capsys):
+    db = _write(tmp_path / "codex.duckdb", "gen-1")
+
+    def vanish(name):
+        if name == "codex_receipts_push.py":
+            db.unlink()
+
+    assert _round(db, tmp_path / "state", Recorder(on_call=vanish)) == 1
+    out = capsys.readouterr().out
+    assert "nothing pushed" not in out and "vanished" in out
+    assert rounds.read_state(str(tmp_path / "state")) is None
+
+
+def test_a_file_that_never_settles_is_pushed_after_the_bounded_debounce(tmp_path):
+    db = _write(tmp_path / "codex.duckdb", "gen-0")
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        _replace_like_the_etl(db, f"gen-{len(sleeps)}")
+
+    runner = Recorder()
+    assert _round(db, tmp_path / "state", runner, settle=5, sleep=sleep) == 0
+    assert len(sleeps) == rounds.MAX_SETTLE_CHECKS
+    assert len(runner.calls) == 3
+    assert rounds.read_state(str(tmp_path / "state")) == rounds.generation(str(db))
+
+
+def test_a_file_that_changes_under_every_round_gives_up_unrecorded(tmp_path, capsys):
+    db = _write(tmp_path / "codex.duckdb", "gen-0")
+    count = []
+
+    def etl_again(name):
+        if name == "codex_orders_push.py":
+            count.append(1)
+            _replace_like_the_etl(db, f"gen-{len(count)}")
+
+    runner = Recorder(on_call=etl_again)
+    assert _round(db, tmp_path / "state", runner) == 1
+    assert len(runner.calls) == 3 * rounds.MAX_ROUNDS
+    assert rounds.read_state(str(tmp_path / "state")) is None
+    assert "kept changing" in capsys.readouterr().out
+
+
+def test_a_second_round_waits_for_the_running_one_instead_of_pushing_alongside(tmp_path):
+    """A manual run next to the service's round must not push the same data twice in
+    parallel — the round holds a lock in the state directory."""
+    import fcntl
+    import threading
+
+    db = _write(tmp_path / "codex.duckdb", "gen-1")
+    state = tmp_path / "state"
+    state.mkdir()
+    runner = Recorder()
+    with open(state / rounds.LOCK_FILE, "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        t = threading.Thread(target=_round, args=(db, state, runner), daemon=True)
+        t.start()
+        t.join(timeout=0.5)
+        assert t.is_alive() and runner.calls == [], "pushed while another round held the lock"
+    t.join(timeout=5)
+    assert not t.is_alive() and len(runner.calls) == 3
+
+
+def test_a_manual_run_without_systemd_uses_the_services_state_directory(tmp_path, monkeypatch):
+    db = _write(tmp_path / "codex.duckdb", "gen-1")
+    monkeypatch.delenv("STATE_DIRECTORY", raising=False)
+    monkeypatch.setenv("CODEX_DUCKDB_PATH", str(db))
+    monkeypatch.setenv("CODEX_PUSH_SETTLE_SECONDS", "0")
+    monkeypatch.setattr(rounds, "DEFAULT_STATE_DIR", str(tmp_path / "var-lib-state"))
+    monkeypatch.setattr(rounds, "_run_script", Recorder())
+    assert rounds.main([]) == 0
+    assert rounds.read_state(str(tmp_path / "var-lib-state")) == rounds.generation(str(db))
+
+
+def test_the_service_timeout_covers_the_rounds_worst_case():
+    """systemd must never SIGTERM a round the code still considers running."""
+    d = dict(_directives("codex-push-after-etl.service"))
+    worst = rounds.MAX_ROUNDS * (rounds.MAX_SETTLE_CHECKS * rounds.DEFAULT_SETTLE_SECONDS
+                                 + len(rounds.PUSH_SCRIPTS) * rounds.PUSH_TIMEOUT_SECONDS)
+    assert int(d["TimeoutStartSec"]) >= worst
+
+
+# --- the orders push names its ETL time too ------------------------------------------------------
+
+def test_the_orders_push_reads_the_etl_time_of_its_table(tmp_path):
+    import duckdb
+
+    from tools import codex_orders_push
+
+    path = tmp_path / "codex.duckdb"
+    con = duckdb.connect(str(path))
+    con.execute("CREATE SCHEMA meta")
+    con.execute("CREATE TABLE meta.etl_runs (table_name VARCHAR, status VARCHAR, "
+                "started_at TIMESTAMP, finished_at TIMESTAMP)")
+    con.execute("INSERT INTO meta.etl_runs VALUES "
+                "('sp002', 'ok', TIMESTAMP '2026-10-06 12:39:58', TIMESTAMP '2026-10-06 12:41:09'),"
+                "('sp002', 'error', TIMESTAMP '2026-10-06 16:39:58', TIMESTAMP '2026-10-06 16:41:09'),"
+                "('sm002', 'ok', TIMESTAMP '2026-10-06 17:00:00', TIMESTAMP '2026-10-06 17:01:00')")
+    con.close()
+    assert codex_orders_push.query_as_of(str(path)) == datetime.datetime(2026, 10, 6, 12, 41, 9)
+    res = codex_orders_push.run(
+        "https://addon/api/codex/orders", "tok", query=lambda: [],
+        as_of=lambda: datetime.datetime(2026, 10, 6, 12, 41, 9),
+        poster=lambda url, headers, body: {"upserted": 0})
+    assert res["source_as_of"] == "2026-10-06T12:41:09+00:00"
