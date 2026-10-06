@@ -44,8 +44,8 @@ paths:
 
 # CODEX order evidence + the auto-resolve sweep (#342)
 
-The warehouse enters every order into CODEX by hand; `tools/codex_orders_push.py` (dev-box
-systemd timer) reads those headers from the codex-bridge DuckDB read-only and POSTs them to
+The warehouse enters every order into CODEX by hand; `tools/codex_orders_push.py` (dev2, run
+after each codex-bridge ETL — #485) reads those headers from the DuckDB read-only and POSTs them to
 `POST /api/codex/orders`; the worker sweep (`codex_orders.resolve_mail_questions`) uses them
 to neutrally close open `mail`-kind board questions. Read this before touching any of it.
 
@@ -174,9 +174,17 @@ Never modify the codex-bridge units (a foreign project) — this repo only WATCH
 + `sudo cp email-extractor/tools/systemd/codex-*.{path,service,timer} /etc/systemd/system/ &&
 sudo systemctl daemon-reload`, then `sudo systemctl reenable codex-push-after-etl.path
 codex-push-after-etl.timer` + `sudo systemctl start codex-push-after-etl.path
-codex-push-after-etl.timer`. Run a round by hand with `sudo systemctl start
+codex-push-after-etl.timer`. **The first install (2026-10-06) also retired the per-push
+timers**: `sudo systemctl disable --now codex-orders-push.timer codex-cards-push.timer
+codex-receipts-push.timer` + `sudo rm /etc/systemd/system/codex-{orders,cards,receipts}-push.timer`
++ `daemon-reload`; `systemctl list-timers | grep codex-` must show only
+`codex-push-after-etl.timer` (plus codex-bridge's own) — a leftover per-push timer pushes
+unguarded beside the round. Right after an install push the CURRENT generation once by hand
+(nothing else triggers before the next ETL): `sudo systemctl start
 codex-push-after-etl.service` (a no-op `skip:` when that generation was already pushed — to
-re-push it, start the per-push services instead) and read `journalctl -u
+re-push it, `--force` on a manual `codex_push_after_etl.py` run with the push env, or start
+the per-push services; a manual run uses the same `/var/lib/codex-push-after-etl` state and
+waits on its `.round.lock` while the service's round runs) and read `journalctl -u
 codex-push-after-etl.service -n 20`; ONE push by hand = `sudo systemctl start
 codex-cards-push.service` + `journalctl -u codex-cards-push.service -n 5` (`pushed: fetched=…
 codes=… source_as_of=<ETL time> to=https://email-pz.newlevel.media` — the cards / receipts
@@ -288,7 +296,8 @@ forever). Reusable rules:
     stale ops alert keys on the stuck snapshot (`codex-cards:<as_of>`) — one episode, one
     first alert at once + morning reminders.
 - **A card created in CODEX this morning is refused until the next ETL+push** — by design the
-  refusal text says the list is as of X and refreshes ~14:45 / ~18:30; never add a bypass.
+  refusal text says the list is as of X and refreshes ~15:05 / ~18:50 (#485: when the ETL
+  replaced the DuckDB); never add a bypass.
 - **Name drift** (`codex_cards.name_key`: fold + `gr`→`g` + word ORDER ignored + 1-letter words
   dropped) — on 2026-09-29 63 of 480 cards differed by plain fold, most cosmetic; the key keeps
   real renames (e.g. „Bagetka s kečupom…" vs CODEX „Rožok so slaninou…"). Fix a drifted name via

@@ -95,4 +95,4 @@ curl -s -b cookies.txt -X POST <base>/api/board/questions/<qid>/answer \
 There is deliberately NO path that adds a card without a question (the owner's #477 order: a
 card is added when the warehouse needs it, one human-picked CODEX card at a time). A card that
 CODEX does not have cannot be added at all — the warehouse creates it in CODEX first; it shows in
-the picker after the next CODEX push (~14:45 / ~18:30).
+the picker after the next CODEX push (~15:05 / ~18:50 — right after the ETL, #485).
