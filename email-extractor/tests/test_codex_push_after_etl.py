@@ -260,14 +260,14 @@ def test_real_child_pushes_report_ok_crash_and_timeout_and_the_round_is_not_reco
         tmp_path, monkeypatch, capsys):
     """The real `_run_script` (no runner injected): a crashing push and a hanging one (killed at
     the per-push timeout) are reported by name; the other pushes still ran."""
-    monkeypatch.setattr(rounds, "PUSH_TIMEOUT_SECONDS", 1)
+    monkeypatch.setattr(rounds, "PUSH_TIMEOUT_SECONDS", 5)   # roomy for the fast ones
     db = _write(tmp_path / "codex.duckdb", "gen-1")
     marker = tmp_path / "ran.txt"
     scripts = [
         _child(tmp_path, "codex_orders_push.py",
                f"open({str(marker)!r}, 'a').write('orders\\n')\n"),
         _child(tmp_path, "codex_cards_push.py", "raise SystemExit(3)\n"),
-        _child(tmp_path, "codex_receipts_push.py", "import time\ntime.sleep(30)\n"),
+        _child(tmp_path, "codex_receipts_push.py", "import time\ntime.sleep(60)\n"),
     ]
     assert rounds.run_round(str(db), str(tmp_path / "state"), scripts=scripts, settle=0) == 1
     out = capsys.readouterr().out
@@ -333,7 +333,8 @@ def test_a_file_that_changes_under_every_round_gives_up_unrecorded(tmp_path, cap
     assert "kept changing" in capsys.readouterr().out
 
 
-def test_a_second_round_waits_for_the_running_one_instead_of_pushing_alongside(tmp_path):
+def test_a_second_round_waits_for_the_running_one_instead_of_pushing_alongside(
+        tmp_path, capsys):
     """A manual run next to the service's round must not push the same data twice in
     parallel — the round holds a lock in the state directory."""
     import fcntl
@@ -351,6 +352,7 @@ def test_a_second_round_waits_for_the_running_one_instead_of_pushing_alongside(t
         assert t.is_alive() and runner.calls == [], "pushed while another round held the lock"
     t.join(timeout=5)
     assert not t.is_alive() and len(runner.calls) == 3
+    assert "waiting: another round" in capsys.readouterr().out, "a silent wait looks hung"
 
 
 def test_a_manual_run_without_systemd_uses_the_services_state_directory(tmp_path, monkeypatch):
@@ -362,6 +364,60 @@ def test_a_manual_run_without_systemd_uses_the_services_state_directory(tmp_path
     monkeypatch.setattr(rounds, "_run_script", Recorder())
     assert rounds.main([]) == 0
     assert rounds.read_state(str(tmp_path / "var-lib-state")) == rounds.generation(str(db))
+
+
+def test_a_manual_run_and_the_service_share_one_state_directory():
+    d = dict(_directives("codex-push-after-etl.service"))
+    assert rounds.DEFAULT_STATE_DIR == "/var/lib/" + d["StateDirectory"]
+
+
+@pytest.mark.parametrize("tool", ["orders", "cards", "receipts"])
+def test_each_push_reads_the_etl_time_before_its_data(tool):
+    """If the ETL replaced the file between the two reads, `source_as_of` must never claim a
+    NEWER cycle than the rows sent (receipts: the invoice gate would trust data that is not
+    there) — so the ETL time is read first."""
+    from tools import codex_orders_push
+
+    mod = {"orders": codex_orders_push, "cards": codex_cards_push,
+           "receipts": codex_receipts_push}[tool]
+    calls = []
+    row = {"orders": {"order_number": 10, "customer_ean": "2000000000001"},
+           "cards": {"code": 9990000000017.0, "card_code": "27", "name": "A",
+                     "stredisko": 1, "sklad": 1},
+           "receipts": {"receipt_number": 261004409.0, "supplier_ico": 12345678.0,
+                        "supplier_eans": ["2000000000991"], "supplier_name": "Dodávateľ",
+                        "receipt_date": datetime.date(2026, 9, 9), "total": 1.0,
+                        "line_count": 1, "sdpoh": 10}}[tool]
+
+    def query():
+        calls.append("query")
+        return [row]
+
+    def as_of():
+        calls.append("as_of")
+        return datetime.datetime(2026, 10, 6, 12, 41, 9)
+
+    res = mod.run("https://addon/api/codex/x", "tok", query=query, as_of=as_of,
+                  poster=lambda url, headers, body: {})
+    assert calls == ["as_of", "query"]
+    assert res["source_as_of"] == "2026-10-06T12:41:09+00:00"
+
+
+def test_the_orders_journal_time_failing_never_stops_the_orders_push(capsys):
+    """The orders ETL time is only for the journal line — a broken meta.etl_runs read is
+    reported, the orders are still pushed."""
+    from tools import codex_orders_push
+
+    def broken_as_of():
+        raise RuntimeError("meta.etl_runs missing")
+
+    posted = []
+    res = codex_orders_push.run(
+        "https://addon/api/codex/orders", "tok",
+        query=lambda: [{"order_number": 10, "customer_ean": "2000000000001"}],
+        as_of=broken_as_of, poster=lambda url, headers, body: posted.append(1) or {})
+    assert posted == [1] and "source_as_of" not in res
+    assert "meta.etl_runs missing" in capsys.readouterr().err
 
 
 def test_the_service_timeout_covers_the_rounds_worst_case():

@@ -444,6 +444,8 @@ def test_too_many_code_changes_at_once_apply_nothing(pg):
     assert ROZOK in _orders(pg) and CHLIEB in _orders(pg)
     body = pg.execute("SELECT body_html FROM pending_alerts").fetchone()[0]
     assert "naraz" in body and "codex_sync_max_code_changes" in body
+    # #485 reopen: the cards push runs inside the guarded round — its journal is there
+    assert "codex-push-after-etl" in body
 
 
 def test_a_blocked_plan_alerts_once_not_on_every_push(pg):
