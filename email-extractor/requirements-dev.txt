@@ -6,6 +6,9 @@ reportlab>=4.0
 xlwt>=1.3
 playwright>=1.40
 pytest-playwright>=0.5
+# test_httpapi_proxy/test_httpapi_waitress talk to a real waitress server over HTTP with
+# `requests`; it used to arrive only transitively (CI broke 2026-10-14 when it stopped) — declare it.
+requests>=2.31
 mypy==2.3.0
 # #485: the CODEX receipts push SQL is tested against a synthetic DuckDB file (the tool
 # itself imports duckdb lazily — dev2 has it, the add-on image never needs it)
