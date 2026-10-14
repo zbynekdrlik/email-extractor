@@ -1148,3 +1148,17 @@ the question halves + the engine helper (`leave_off`), `teach` only dispatches (
 - **Test gotcha:** a helper that creates a question's OWN mail for a later `dl_worker.tick` must
   insert it `processed = true` (a question is raised while its mail is processed) — an
   unprocessed `dodacie_listy` row is claimed by the next tick instead of the mail under test.
+
+## Email Sorting classifier input is capped at 60 000 chars (incident 2026-10-14)
+
+`Email Sorting` (`BzZVRnyHKeAIK5op`) runs every minute, takes up to 50 rows `WHERE category IS
+NULL ORDER BY created_at` and sends unclassified mail to the „Basic LLM Chain" (gpt-5). The chain
+used to receive the WHOLE `combined_text`. A 1.5M-char xlsx price list (msg 15815, no subject/body)
+exceeded the model's context window → 400 every run; the chain has `retryOnFail` but no error
+output, so the run stopped before „Update Category" and the oldest-first query picked the same
+row again every minute — classification of ALL newer mail stopped (incl. 2 Karmen static orders)
+and the error workflow spammed Discord. Fix (n8n version „Cap classifier input at 60k chars"):
+`text = {{ ($json.combined_text || '').slice(0, 60000) }}` — the start of the mail is enough to
+classify; the full text stays in the DB for the order/DL engines (never cap at ingest).
+Residual: any OTHER persistent chain failure still blocks the queue the same way — if it recurs,
+add `onError: continueErrorOutput` and mark only context-length errors `human_processing`.
