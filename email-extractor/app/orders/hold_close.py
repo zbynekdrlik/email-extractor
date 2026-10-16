@@ -561,8 +561,7 @@ def retry_unknown_customer_questions(conn, cfg, upload=None, post=None) -> list[
             continue
         # #493: automation teaches nothing — an undo must not strip the address the card
         # already had (the old undo forgot it from the very card this sweep matched on)
-        conn.execute("UPDATE order_questions SET answer = %s WHERE id = %s",
-                     (Json({"email_added": False, "auto": True}), qid))
+        teach.set_answer(conn, qid, {"email_added": False, "auto": True})
         report.log_event(
             conn, q["message_id"], stage="review", status="ok",
             outcome=f"Automaticky doplnený zákazník {matched.name} ({matched.ean_edi})",

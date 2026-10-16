@@ -391,6 +391,12 @@ def ask_customer(conn, message_id: str, sender_email: str, candidates: list[dict
     return int(existing[0]) if existing else None
 
 
+def set_answer(conn, qid: int, answer: dict) -> None:
+    """Record what a `customer` answer taught (#493 `order_customers.learn` / the sweep's
+    auto answer) — what `undo` reads to take back exactly that."""
+    conn.execute("UPDATE order_questions SET answer = %s WHERE id = %s", (Json(answer), qid))
+
+
 def add_candidate(conn, qid: int, cand: dict) -> None:
     """Extend an OPEN question's stored candidate list with one more entry (#234) — used
     when the warehouse answers a customer question with a pick that was never in the

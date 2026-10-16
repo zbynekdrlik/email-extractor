@@ -25,8 +25,7 @@ import re
 from dataclasses import dataclass
 
 from . import dl_match
-
-STEM = 4   # = match.STEM_PREFIX, the corpus-validated Slovak stem length (#195)
+from .match import STEM_PREFIX as STEM  # the corpus-validated Slovak stem length (#195)
 
 _SECTION_RE = re.compile(r"^=====\s*(.+?)\s*=====[ \t]*$", re.MULTILINE)
 _EXT_RE = re.compile(r"\.(xlsx|xlsm|xls|ods|fods|csv|pdf|docx?|odt|txt|png|jpe?g|eml)$",
@@ -97,12 +96,14 @@ def attachment_sections(source: str) -> list[tuple[str, str]]:
     return out
 
 
-def locate_file(texts, source: str) -> str:
+def locate_file(texts, source: str = "", sections=None) -> str:
     """The attachment the given item texts (quotes, else names) were read from — the section
     containing the most of them, only when that section is a STRICT winner; "" otherwise
     (no sections, no hit, a tie). Best effort and never guessed: an order whose file stays
-    unknown keeps only its block header as the store key."""
-    sections = attachment_sections(source)
+    unknown keeps only its block header as the store key. Pass `sections` (computed ONCE per
+    mail with `attachment_sections`) when locating several orders of one mail."""
+    if sections is None:
+        sections = attachment_sections(source)
     if not sections:
         return ""
     needles = [n for n in (_squash(t) for t in texts or ()) if len(n) >= 3]
@@ -147,6 +148,12 @@ class StoreKey:
     def stems(self) -> set[str]:
         return stems(self.key)
 
+    @property
+    def identity(self) -> frozenset:
+        """Which shop this order says it is: its header words, or — under an empty header
+        („Predajňa:") — the words of its file (`key`). Empty = the order names no shop."""
+        return self.header_key or (self.key if self.source_file else frozenset())
+
 
 def for_orders(orders: list[dict]) -> list[StoreKey]:
     """The store key of every order of ONE mail, in order. Words shared by every distinct
@@ -170,8 +177,13 @@ def for_orders(orders: list[dict]) -> list[StoreKey]:
 
 
 def is_multi_store(keys: list[StoreKey]) -> bool:
-    """≥2 orders of the mail carry DIFFERENT non-empty shop headers."""
-    return len({k.header_key for k in keys if k.header_key}) >= 2
+    """The mail carries orders of ≥2 different shops: the model reported a shop header block
+    on some order (even an empty „Predajňa:"), and the orders name ≥2 different shops
+    (`identity` — the header, or the file under an empty header). File names alone, with no
+    header block anywhere, never make several shops: a one-shop customer may send one file
+    per day."""
+    return (any(k.header.strip() for k in keys)
+            and len({k.identity for k in keys if k.identity}) >= 2)
 
 
 def from_context(ctx: dict) -> StoreKey | None:
@@ -186,12 +198,30 @@ def from_context(ctx: dict) -> StoreKey | None:
                     header_key=frozenset(tokens(ctx.get("store") or "")))
 
 
-def match_rule(rules, key: StoreKey | None) -> str:
-    """The EAN the warehouse taught for this shop, or "". `rules` = [(key words, ean)] of
-    THIS sender. A rule applies when every one of its words is in the order's tokens; two
-    applicable rules that disagree decide nothing (the order is asked again — a conflict
-    is never resolved by recency)."""
+@dataclass(frozen=True)
+class RuleHit:
+    """What the sender's learned shop rules say about one order: the card (`ean`), the words
+    of the deciding rule(s), or `conflict` — rules that apply and disagree."""
+    ean: str = ""
+    words: frozenset = frozenset()
+    conflict: bool = False
+
+
+def match_rule(rules, key: StoreKey | None) -> RuleHit | None:
+    """The warehouse's learned answer for this shop, or None when no rule applies. `rules` =
+    [(key words, ean)] of THIS sender; a rule applies when every one of its words is in the
+    order's tokens. Among the applicable rules the most SPECIFIC decide (those no other
+    applicable rule strictly contains — the warehouse answered exactly „BISTRO Dolina", so
+    that beats its narrower {dolina}); when they disagree it is a `conflict` — asked again,
+    never resolved by recency."""
     if key is None or not key.tokens:
-        return ""
-    hits = {ean for words, ean in rules if words and set(words) <= key.tokens}
-    return next(iter(hits)) if len(hits) == 1 else ""
+        return None
+    cands = [(frozenset(w), ean) for w, ean in rules if w and set(w) <= key.tokens]
+    if not cands:
+        return None
+    top = [(w, ean) for w, ean in cands if not any(w < other for other, _e in cands)]
+    eans = {ean for _w, ean in top}
+    words = frozenset().union(*(w for w, _e in top))
+    if len(eans) != 1:
+        return RuleHit(words=words, conflict=True)
+    return RuleHit(ean=next(iter(eans)), words=words)

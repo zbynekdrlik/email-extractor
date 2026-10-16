@@ -6,14 +6,16 @@ the warehouse is asked ONE question for that shop (`teach.ask_customer(key=...)`
 answer is remembered here, so the same shop of the same sender goes to the same card from
 the next mail on — every shop is asked at most once.
 
-Written ONLY by a human board answer (`customer_answers.learn`); never by the model, the
+Written ONLY by a human board answer (`order_customers.learn`); never by the model, the
 automatic re-resolve sweep or any other automation. Every write is audited
 (`board.services.audit`) and soft-deleted (`deleted_at`), so the Kôš can bring a rule back or
 take it away, and undoing the answer takes its rule back.
 
 `customer.resolve` reads the rules of ONE sender per mail (`for_sender`) and matches them in
 pure code (`store_key.match_rule`): a rule applies when all its words are in the order's
-shop key; two applicable rules that disagree decide nothing (asked again).
+shop key; the most specific applicable rules decide; when they disagree, or the rest of the
+order's key names another card of the family, the order is asked again (`customer.
+_by_shop_rule`) — never resolved by recency.
 """
 from __future__ import annotations
 

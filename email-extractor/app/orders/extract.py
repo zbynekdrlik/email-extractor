@@ -268,6 +268,7 @@ def verify(extracted: dict, source: str) -> dict:
     but its items still appear in `unverified`, so nothing disappears quietly.
     """
     orders, unverified = [], []
+    sections = store_key.attachment_sections(source)   # #493: once per mail
     for order in extracted.get("orders", []) or []:
         kept = []
         for item in (order.get("items") or []) + (order.get("missedItems") or []):
@@ -289,7 +290,7 @@ def verify(extracted: dict, source: str) -> dict:
                            # header it is the order's shop identity (`store_key`)
                            "sourceFile": store_key.locate_file(
                                [i.get("sourceQuote") or i.get("name") or ""
-                                for i in order.get("items") or []], source),
+                                for i in order.get("items") or []], sections=sections),
                            "items": kept})
     if unverified:
         log.warning("%d item(s) could not be verified against the email: %s",

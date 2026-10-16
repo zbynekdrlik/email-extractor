@@ -253,6 +253,37 @@ def _by_store_name(family: list[dict], key: store_key.StoreKey | None) -> dict |
     return None
 
 
+def _by_shop_rule(hit: store_key.RuleHit, key: store_key.StoreKey, by_ean: dict,
+                  owners: list[dict], addr: str) -> tuple[bool, Matched | None]:
+    """The learned-rule rung (#493) -> (decides, result): (True, Matched); (True, None) = ASK
+    — a conflict, or the rule would capture a shop another card of the family names;
+    (False, None) = the rule's card is gone, fall through to the other rungs."""
+    if hit.conflict:
+        log.warning("shop %s of %s: learned rules disagree — asking", key.text, addr)
+        return True, None
+    taught = by_ean.get(hit.ean)
+    if taught is None:
+        log.info("shop rule %s -> %s of %s names no current card — ignored", key.text,
+                 hit.ean, addr)
+        return False, None
+    # review round 1: a NARROW rule ({dolina}) must not capture a different shop whose key
+    # carries a word naming ANOTHER card of the family („BISTRO Dolina")
+    leftover = store_key.stems(key.key - hit.words)
+    rivals = [c.get("ean_edi") for c in owners
+              if c.get("ean_edi") != hit.ean and leftover & _card_words(c)]
+    if rivals:
+        log.warning("shop %s of %s: rule %s -> %s, but the rest of the key names %s — asking",
+                    key.text, addr, sorted(hit.words), hit.ean, rivals)
+        return True, None
+    log.info("shop %s of %s -> %s (%s) by the warehouse's shop rule", key.text, addr,
+             taught.get("ean_edi"), taught.get("name"))
+    return True, Matched(
+        ean_edi=str(taught.get("ean_edi") or ""), name=taught.get("name", ""),
+        confidence=0.99, rule="store_rule",
+        note=(f"Predajňu {key.label} sklad už raz priradil ku karte "
+              f"„{taught.get('name', '')}“."))
+
+
 def owner_count(customers: list[dict], sender_email: str) -> int:
     """How many cards carry this sender's address (a family is ≥2)."""
     addr = (_addresses(sender_email) or [""])[0]
@@ -262,24 +293,28 @@ def owner_count(customers: list[dict], sender_email: str) -> int:
 def collapsed_shops(keys: list, matched: list) -> set[int]:
     """The poistka (#493): indexes of the orders that must be ASKED instead of shipped.
 
-    Orders whose DIFFERENT non-empty shop headers resolved to the SAME card are suspect —
-    and every one of them that got there through a rule that never looked at the shop
-    (`llm`, `exact_email`, `delivery_address`) is turned back into a question. A shop
-    resolved by a shop rule (`STORE_RULES`) keeps its card."""
+    In a mail of several shops (`store_key.is_multi_store`), a card that ≥2 DIFFERENT shops
+    (`StoreKey.identity` — the header, or the file under an empty „Predajňa:") resolved to
+    is a collapse: EVERY order on that card that got there through a rule that never looked
+    at the shop (`llm`, `exact_email`, `delivery_address`) is turned back into a question —
+    also one that names no shop at all (review round 1: the empty-header file shipped to the
+    one card). A shop resolved by a shop rule (`STORE_RULES`) keeps its card."""
+    if not store_key.is_multi_store(keys):
+        return set()
     by_card: dict[str, list[int]] = {}
-    for i, (key, m) in enumerate(zip(keys, matched, strict=True)):
-        if m is not None and key.header_key:
+    for i, m in enumerate(matched):
+        if m is not None:
             by_card.setdefault(m.ean_edi, []).append(i)
     out: set[int] = set()
     for ean, idxs in by_card.items():
-        if len({keys[i].header_key for i in idxs}) < 2:
+        shops = {keys[i].identity for i in idxs if keys[i].identity}
+        if len(shops) < 2:
             continue
         loose = {i for i in idxs if matched[i].rule not in STORE_RULES}
         if loose:
             log.warning("poistka: %d different shops resolved to ONE card %s (%s) — %d "
                         "order(s) via a non-shop rule are held and asked per shop",
-                        len({keys[i].header_key for i in idxs}), ean,
-                        [keys[i].header for i in idxs], len(loose))
+                        len(shops), ean, [keys[i].label for i in idxs], len(loose))
         out |= loose
     return out
 
@@ -316,15 +351,11 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
 
     # #493: a shop the warehouse already answered for THIS sender wins over everything — it
     # is a human decision about exactly this (sender, shop), written only by a board answer.
-    taught = by_ean.get(store_key.match_rule(rules, key)) if rules else None
-    if taught is not None and key is not None:
-        log.info("shop %s of %s -> %s (%s) by the warehouse's shop rule", key.text, addr,
-                 taught.get("ean_edi"), taught.get("name"))
-        return Matched(
-            ean_edi=str(taught.get("ean_edi") or ""), name=taught.get("name", ""),
-            confidence=0.99, rule="store_rule",
-            note=(f"Predajňu {key.label} sklad už raz priradil ku karte "
-                  f"„{taught.get('name', '')}“."))
+    hit = store_key.match_rule(rules, key) if rules else None
+    if hit is not None and key is not None:
+        applies, decided = _by_shop_rule(hit, key, by_ean, owners, addr)
+        if applies:
+            return decided
 
     # #435: within a multi-site FAMILY the delivery address decides ABOVE the llm pick — a
     # confident model pick of the central card must never silently win when the mail names

@@ -109,28 +109,43 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   `store_name`) — EXACTLY ONE card hit, stems shared by every family card dropped; (4) family:
   `_by_delivery_address` — but NOT in a multi-shop mail (the mail-level text cannot say which
   shop it describes); (5) the old llm / exact_email rungs for a non-family sender.
-- **The poistka** (`customer.collapsed_shops`): orders whose DIFFERENT non-empty HEADERS land
-  on ONE card — every one that got there by a non-shop rule (`llm`, `exact_email`,
+- **The poistka** (`customer.collapsed_shops`): in a multi-shop mail (`store_key.
+  is_multi_store`: the model reported a shop header block on SOME order — even an empty
+  „Predajňa:" — AND the orders name ≥2 different shops, `StoreKey.identity` = the header
+  words, or the FILE words under an empty header), a card ≥2 different shops landed on is a
+  collapse: EVERY order on it that got there by a non-shop rule (`llm`, `exact_email`,
   `delivery_address`; `STORE_RULES` = store_rule/store_address/store_name never) becomes
-  unresolved → held on the #431 placeholder + one question per shop. Keyed on the HEADER, not
-  the file name: a one-shop customer sending one file per day must never trip it.
+  unresolved — also one that names no shop at all (review round 1: the empty-header PR file
+  shipped to the one card) → held on the #431 placeholder + one question per shop. File
+  names with NO header block anywhere never make shops (a one-shop customer sends one file
+  per day).
+- **Merging (#81.1) happens in two steps**: `pipeline._merge_by_day` keys on (date, order
+  number, header, FILE) — two shops whose header blocks are both empty differ only by their
+  file and must never become one ORDER file (review round 1); after resolution
+  `order_customers.merge_by_card` merges the orders of one day that resolved to the SAME card
+  (two files of one shop = one ORDER file). Unresolved orders are never merged.
 - **Per-shop question** (`teach.ask_customer(key=)`): dedupe `item_key = <sender>|shop:<key>`,
   the shop in `wording` (the board card shows only `wording` + candidates — `reason` is not
   rendered), the key in `context` (`store`, `store_file`, `store_key`, `store_tokens`). Asked per
-  shop only when the mail is multi-shop or the sender owns ≥2 cards (`scoped`); otherwise the
-  #159 per-sender question, unchanged.
+  shop whenever the mail is multi-shop, the sender owns ≥2 cards, or it already has shop
+  rules (`scoped`); otherwise the #159 per-sender question, unchanged.
 - **The answer teaches** through ONE helper, `order_customers.learn` — called by the board
   route (`_api_orders_answer_customer`), the „Nový zákazník" route and `teach.KINDS['customer']
-  .apply` (the HTTP routes never went through `.apply`): the sender address on the card (#159)
-  + for a shop question a `customer_store_rules` row (audited `create`, soft-delete, Kôš:
-  `customer_store_rules` is in `audit._SOFT_DELETE_TABLES`). It records `answer =
-  {email_added, store_rule}` on the question; `teach.undo` forgets the address ONLY when that
-  answer added it (a CODEX/family address must survive an undo — a pre-#493 answer without the
-  flag keeps the old forget) and soft-deletes the question's rules. A different card for the
-  same (sender, key) replaces the old rule (audited delete + create); two live rules that both
-  apply and disagree decide nothing (asked again) — never "newest wins". Rules are matched as
-  `rule words ⊆ order tokens`, so a rule taught from a 5-file mail ({pr}) also hits a 1-file
-  mail ({pekarova…pr} — the brand is a stopword anyway).
+  .apply` (the HTTP routes never went through `.apply`): a per-sender question teaches the
+  sender address on the card (#159); a SHOP question teaches ONLY a `customer_store_rules` row
+  (audited `create`, soft-delete, Kôš: in `audit._SOFT_DELETE_TABLES`, label „Predajňa
+  zákazníka") — never the address (review round 1: the address on every answered shop's card
+  made the sender a family whose mails without a shop clue were asked every time). It records
+  `{email_added, store_rule}` (`teach.set_answer`); `teach.undo` → `order_customers.unlearn`
+  forgets the address ONLY when that answer added it (a pre-#493 answer without the flag keeps
+  the old forget) and soft-deletes the question's rules. A different card for the same
+  (sender, key) replaces the old rule (audited delete + create). Rules match as `rule words ⊆
+  order tokens` (a rule taught from a 5-file mail, {pr}, also hits a 1-file mail); the MOST
+  SPECIFIC applicable rules decide (`store_key.match_rule`: a rule strictly contained in
+  another applicable one yields — the answer for exactly „BISTRO Dolina" beats {dolina}, else
+  a re-ask loops); disagreeing top rules = `conflict` → asked, also for a sender on ONE card
+  (never a fall-through to `llm`/`exact_email`); a rule whose leftover key words name ANOTHER
+  family card is not applied (asked) — `customer._by_shop_rule`.
 - **`hold.retry_unknown_customer_questions`** (worker sweep, board save) settles a per-shop
   question only by a SHOP rung (`STORE_RULES`), never `exact_email` — the sender's one card is
   exactly the collapse; an auto answer records `email_added: false` (its undo used to strip the
@@ -163,6 +178,8 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   shift a hand-added card's identity.
 - **Measured impact before the deploy** (read-only, prod list × DuckDB, 131 senders of 60
   days): only the incident sender became a family (1 → 4 cards); four senders went 0 → 1 card
-  (now `exact_email`). Re-run that check (scratch script: effective list + `raw.firma`, owners
-  per sender before/after) before changing the union semantics.
+  (now `exact_email`). The #435 NAME-STEM families did not change for any `llm` run of those
+  60 days (CODEX adds only 9 EANs the list lacked; names are filled only when blank). Re-run
+  both checks (scratch script: effective list + `raw.firma`, owners per sender and
+  `_stem_family` of each `llm` pick, before/after) before changing the union semantics.
 

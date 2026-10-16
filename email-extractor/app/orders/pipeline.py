@@ -347,6 +347,8 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
     # learned shop rules, and the poistka against several shops collapsing onto one card
     oc = order_customers.resolve_orders(conn, customers, sender, extracted, cust_answer,
                                         orders)
+    # #81.1: one delivery day of ONE card is ONE order, whichever files it came from
+    orders, oc = order_customers.merge_by_card(orders, oc)
 
     def _ask_customer(i: int, order: dict) -> int | None:
         return order_customers.ask(conn, message=message, sender=sender, extracted=extracted,
@@ -688,21 +690,14 @@ def _merge_by_day(orders: list[dict]) -> list[dict]:
     for one day — two orders in ORION — and the warehouse got 40 or 10, never 50 (#81.1). A
     recipient group is a note on the order, not a separate order.
     """
-    merged: dict[tuple, dict] = {}
-    for order in orders:
-        # The SHOP belongs in the key (#101): a recipient group shares a delivery, but two
-        # shops are two customers with two EANs, and merging them writes one shop's name
-        # over both shops' pastry.
-        key = (str(order.get("deliveryDate") or ""), str(order.get("orderNumber") or ""),
-               str(order.get("store") or ""))
-        if key not in merged:
-            merged[key] = dict(order, items=list(order.get("items") or []))
-            continue
-        into = merged[key]
-        into["items"].extend(order.get("items") or [])
-        groups = [g for g in (into.get("recipientGroup"), order.get("recipientGroup")) if g]
-        into["recipientGroup"] = ", ".join(dict.fromkeys(groups))
-    return list(merged.values())
+    # The SHOP belongs in the key (#101): a recipient group shares a delivery, but two
+    # shops are two customers with two EANs, and merging them writes one shop's name over
+    # both shops' pastry. #493: so does the ATTACHMENT — two shops whose header blocks are
+    # empty („Predajňa:") differ only by their file; files of ONE card are merged later,
+    # once the customer of each is known (`order_customers.merge_by_card`).
+    return order_customers.merge_orders(
+        orders, lambda o: (str(o.get("deliveryDate") or ""), str(o.get("orderNumber") or ""),
+                           str(o.get("store") or ""), str(o.get("sourceFile") or "")))
 
 
 _LOAD_CODEX = object()

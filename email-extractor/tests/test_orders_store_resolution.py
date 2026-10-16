@@ -123,8 +123,9 @@ def test_a_learned_shop_rule_decides_above_everything():
 def test_two_rules_that_disagree_decide_nothing():
     key = store_key.for_orders([{"store": "BISTRO DOLINA"}])[0]
     rules = [(frozenset({"bistro"}), "2999000000204"), (frozenset({"dolina"}), "2999000000203")]
-    assert store_key.match_rule(rules, key) == ""
-    assert _resolve(key, rules=rules, multi=True) is None, "both name stems hit — asked"
+    assert store_key.match_rule(rules, key).conflict
+    assert _resolve(key, rules=rules, multi=True) is None, "a rule conflict is asked"
+    assert store_key.match_rule(rules, store_key.for_orders([{"store": "PR"}])[0]) is None
 
 
 def test_a_rule_naming_a_card_no_longer_in_the_list_is_ignored():
