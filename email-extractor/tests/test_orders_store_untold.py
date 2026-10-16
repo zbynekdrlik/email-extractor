@@ -200,3 +200,32 @@ def test_a_number_names_a_block_unless_an_order_or_sheet_word_owns_it():
         return store_key.names_a_block(store_key.for_orders([{"store": header}])[0])
     assert [block(h) for h in ("č. 2", "A", "Predajňa 3")] == [True] * 3
     assert [block(h) for h in ("Objednávka 1", "Objednávka č. 123", "Hárok 1")] == [False] * 3
+
+
+# --- review round 13 ------------------------------------------------------------------------
+
+TWO_BLANK = ("Subject: objednávka\n\nFrom: " + SENDER + "\n\nBody: Dobrý deň, posielam "
+             "objednávky.\n\nAttachments:\n"
+             "===== OBJ Pekárová žena PR.xlsx =====\n[Sheet: H]\nPredajňa:\nna 04.08.2026\n"
+             + HDR + "Chlieb kváskový 1kg\t1.10\t1.30\t5\nRožky\t0.10\t0.12\t\n\n"
+             "===== OBJ Pekárová žena ZA.xlsx =====\n[Sheet: H]\nPredajňa:\nna 04.08.2026\n"
+             + HDR + "Chlieb kváskový 1kg\t1.10\t1.30\t\nRožky\t0.10\t0.12\t120\n")
+
+
+def test_two_blank_untold_forms_are_two_shops(pg):
+    """Both forms headed by a blank „Predajňa:", both files untold (shared rows, rewritten
+    quotes): two shops — each asked, never merged into one order for the sender's card."""
+    orders = [_o("Predajňa:", _it("Chlieb kváskový 1kg", 5, "Chlieb kváskový 1kg | 5")),
+              _o("Predajňa:", _it("Rožky", 120, "Rožky | 120"))]
+    assert _run(pg, "m-2blank", TWO_BLANK, orders) == []
+    assert pg.execute("SELECT count(*) FROM order_questions WHERE kind = 'customer'"
+                      ).fetchone() == (2,)
+
+
+def test_noise_in_a_header_never_names_a_block():
+    def block(header):
+        return store_key.names_a_block(store_key.for_orders([{"store": header}])[0])
+    assert [block(h) for h in ("Objednávka v pondelok", "a.s.", "T42", "W42", "04/08/2026",
+                               "2026")] == [False] * 6
+    assert [block(h) for h in ("A", "Predajňa A", "č. 2")] == [True] * 3
+    assert store_key.tokens("BISTRO 04/08/2026", keep_numbers=True) == ["bistro"]
