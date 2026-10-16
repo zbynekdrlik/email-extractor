@@ -286,3 +286,29 @@ def test_a_date_only_header_never_makes_goods_files_shops():
     keys = store_key.for_orders([{"store": "16.10.", "sourceFile": "Objednávka pečivo.xlsx"},
                                  {"store": "", "sourceFile": "Objednávka chlieb.xlsx"}])
     assert not store_key.is_multi_store(keys)
+
+
+# --- review round 16 ------------------------------------------------------------------------
+
+def _street_family(*streets):
+    return [{"ean_edi": f"299900000080{i}", "name": f"Predajňa {i}", "emails": [SENDER],
+             "city": "Mestečko", "street": s, "zip": ""} for i, s in enumerate(streets, 1)]
+
+
+def _street_hit(fam, header):
+    key = store_key.for_orders([{"store": header}, {"store": "Iná predajňa"}])[0]
+    hit = customer.resolve(fam, SENDER, "", "", key=key, multi_store=True)
+    return (hit.ean_edi, hit.rule) if hit else None
+
+
+def test_a_shop_code_in_the_identity_never_reaches_the_street_comparison():
+    """Round 15 kept „T1" and a lone capital letter in the shop identity; the strict street
+    rung must keep comparing streets as before: „19/a" vs the card „19/A", the „1" of „T1"
+    is no house number, and an initial „M.R." on the card is no required word."""
+    assert _street_hit(_street_family("Bajkalská 19", "Bajkalská 19/A"),
+                       "BISTRO Bajkalská 19/a") is None
+    assert _street_hit(_street_family("Hlavná 1", "Hlavná 7"), "T1 Hlavná") is None
+    assert _street_hit(_street_family("Hlavná 1", "Hlavná 7"), "T1 Hlavná 7") == (
+        "2999000000802", "store_address")
+    assert _street_hit(_street_family("M.R. Štefánika 836/33", "Hlavná 7"),
+                       "BISTRO Štefánika 836/33") == ("2999000000801", "store_address")
