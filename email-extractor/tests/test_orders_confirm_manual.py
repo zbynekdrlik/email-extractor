@@ -77,11 +77,12 @@ def _ocfg(**kw):
 
 def _receipts(pg, *rows):
     """Push a CODEX receipts copy: each row = (receipt number, supplier EAN, DL numbers[,
-    receipt day — default the delivery day])."""
+    receipt day — default the delivery day[, last day of a receipt booked over several]])."""
     codex_receipts.replace_receipts(
         pg, [{"receipt_number": r[0], "supplier_ico": f"ico-{r[1]}", "supplier_eans": [r[1]],
               "supplier_name": "Dodávateľ", "dl_numbers": r[2], "total": 10.0,
-              "receipt_date": (r[3] if len(r) > 3 else DELIVERY).isoformat()}
+              "receipt_date": (r[3] if len(r) > 3 else DELIVERY).isoformat(),
+              "receipt_date_to": r[4].isoformat() if len(r) > 4 else None}
              for r in rows],
         source_as_of="2026-08-03T12:00:00+02:00", days=60)
 
@@ -172,6 +173,25 @@ def test_the_ops_alert_is_delivered_grouped_to_the_ops_channel_with_the_dashboar
     assert "https://dash.example" in html, "ops kinds link the admin dashboard (#473)"
 
 
+def test_every_file_of_a_large_batch_is_named_in_the_ops_post(pg):
+    """Each line of this alert is an instruction (delete THIS file) and the row is terminal,
+    so a „… a ešte N ďalších" cut would lose the deletion of the files behind it for good."""
+    docs = [f"01009001{i:02d}" for i in range(12)]
+    for doc in docs:
+        _desadv(pg, doc)
+    _receipts(pg, *[(f"2619001{i:02d}", SUP_A, [doc.lstrip("0")])
+                    for i, doc in enumerate(docs)])
+    _sweep(pg, PostRecorder(), in_dl=[_wire(d) for d in docs])
+    assert len(_manual_alerts(pg)) == 12
+
+    delivered = PostRecorder()
+    assert dl_alerts.flush_pending(pg, _ocfg(), post=delivered) == 12
+    html = "".join(h for h, _ch in delivered.calls)
+    for doc in docs:
+        assert _wire(doc) in html, f"{doc} must be named — its file must be deleted"
+    assert "ďalš" not in html, "never a capped remainder for this kind"
+
+
 def test_the_alert_escapes_what_it_quotes(pg):
     """The DL number comes from model extraction of supplier mail, the name from our cards."""
     doc = "0100900003<b>&"
@@ -259,9 +279,19 @@ def test_a_receipt_one_day_before_the_delivery_still_counts(pg):
 
 
 def test_a_receipt_booked_days_after_the_delivery_counts(pg):
-    """The incident shape: the DL was typed in by hand days after its delivery."""
+    """CODEX books a receipt the day it is typed — a DL typed in by hand days after its
+    delivery (the incident's were back-dated to the delivery day, also covered above)."""
     rid = _desadv(pg)
     _receipts(pg, (RECEIPT, SUP_A, [CODEX_DL], date(2026, 8, 13)))
+    _sweep(pg, PostRecorder(), in_dl=[_wire()])
+    assert _desadv_status(pg, rid) == "manual"
+
+
+def test_a_receipt_booked_over_several_days_counts_by_its_last_day(pg):
+    """`receipt_date_to`: a receipt opened before the delivery and closed after it is still
+    a receipt of this delivery (CODEX books one receipt over several days)."""
+    rid = _desadv(pg)
+    _receipts(pg, (RECEIPT, SUP_A, [CODEX_DL], date(2026, 7, 30), date(2026, 8, 4)))
     _sweep(pg, PostRecorder(), in_dl=[_wire()])
     assert _desadv_status(pg, rid) == "manual"
 
@@ -301,6 +331,39 @@ def test_a_failing_receipts_lookup_leaves_the_row_waiting(pg, monkeypatch, caplo
     assert len(posts.calls) == 1, "the carryover alert still goes out"
     assert _manual_alerts(pg) == []
     assert "receipts lookup down" in caplog.text
+
+
+def test_unreadable_delivery_dates_leave_every_row_waiting_and_the_sweep_alive(pg):
+    """A REAL failure (the column renamed away): the delivery-date read must never take the
+    sweep — and with it every carryover reminder — down."""
+    rid = _desadv(pg)
+    _receipts(pg, (RECEIPT, SUP_A, [CODEX_DL]))
+    posts = PostRecorder()
+    pg.execute("ALTER TABLE desadv_sent RENAME COLUMN delivery_date TO delivery_date_494")
+    try:
+        _sweep(pg, posts, in_dl=[_wire()])
+    finally:
+        pg.execute("ALTER TABLE desadv_sent RENAME COLUMN delivery_date_494 TO delivery_date")
+    assert _desadv_status(pg, rid) is None, "fail-open: the row keeps waiting"
+    assert len(posts.calls) == 1, "the carryover alert still goes out"
+    assert _manual_alerts(pg) == []
+
+
+def test_unloadable_supplier_names_still_mark_and_name_the_file(pg):
+    """A REAL failure of the names lookup (its table renamed away): the row is still marked
+    and its alert still names the DL, the receipt and the file — just without the supplier."""
+    _suppliers(pg)
+    rid = _desadv(pg)
+    _receipts(pg, (RECEIPT, SUP_A, [CODEX_DL]))
+    pg.execute("ALTER TABLE dl_supplier_overrides RENAME TO dl_supplier_overrides_494")
+    try:
+        _sweep(pg, PostRecorder(), in_dl=[_wire()])
+    finally:
+        pg.execute("ALTER TABLE dl_supplier_overrides_494 RENAME TO dl_supplier_overrides")
+    assert _desadv_status(pg, rid) == "manual"
+    body = _manual_alerts(pg)[0][3]
+    assert f"DL {DOC} &mdash;" in body and RECEIPT in body and _wire() in body, body
+    assert SUP_A_NAME not in body
 
 
 def test_status_and_alert_are_one_transaction_a_failed_alert_leaves_the_row_waiting(
