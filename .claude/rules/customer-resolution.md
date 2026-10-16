@@ -82,6 +82,24 @@ column). This is pure/read-only — no claim, no upload. The ssh user (`newlevel
 passwordless `sudo docker`, and `ha addons …` needs `SUPERVISOR_TOKEN` from
 `/run/s6/container_environment/HASSIO_TOKEN`.
 
+Script gotchas (#493 deploy, 2026-10-16): the config loader is `app.config.Config.load()`
+(there is no `load_config`); `order_runs` has NO `created_at` — date-filter on
+`messages.created_at` joined by `message_id`. A whole-mail shadow (extraction + customer
+model call + `order_customers.resolve_orders`, 2 model calls, zero writes) is the proof for a
+per-ORDER resolution change — `customer.resolve` alone cannot show the whole-mail fit / the
+poistka. Print counts / EAN suffixes, never names or addresses (the ticket is public).
+
+**A card data fix goes through the board's own route, from inside the container** (audited,
+Kôš-restorable — never raw SQL): `urllib` + a cookie jar against `http://127.0.0.1:8099`,
+`POST /login` with `dash_password` read from `/data/options.json` (never printed), `GET
+/api/board/customers?q=<ean>` → `families[].sites[]` rows carry `override_id` /
+`orig_ean_edi` / `orig_street`, then `POST /api/board/customers` with those + `name`, `city`,
+`street`, `zip` and `emails` as ONE comma string; read back with the same GET. Refuse to save
+a row without `override_id` (it would create a second card). The LIVE DOM check runs the
+repo venv's Playwright on dev2 with the password in an env var fed straight from `ssh … sudo
+docker exec … cat /data/options.json | python3 -c …` — the `[data-testid=version]` label,
+`#p-search` on `/nastenka/zakaznici`, `.p-meta` „EAN <ean>", console errors collected.
+
 ## #493 — a customer with SEVERAL SHOPS ordering in ONE mail (one attachment per shop)
 
 Incident 2026-10-16: five xlsx files (headers „BISTRO", „Predajňa: Tržnica", „ŽILINA",
