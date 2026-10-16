@@ -140,6 +140,8 @@ def score(expected: dict, actual: dict) -> Score:
     # #187: EMAIL-level, so it applies regardless of which shape below fires.
     _check_notes(expected, actual, problems)
 
+    if expected.get("shop_orders") is not None:
+        return _score_per_shop(expected, actual, problems)
     if expected.get("orders") is not None:
         return _score_per_order(expected, actual, problems)
 
@@ -213,6 +215,48 @@ def _score_per_order(expected: dict, actual: dict, problems: list[str]) -> Score
     return Score(passed=not problems, item_recall=recall, problems=problems)
 
 
+def _score_per_shop(expected: dict, actual: dict, problems: list[str]) -> Score:
+    """#493: a mail of SEVERAL SHOPS — every shipped order matched by (delivery date, the
+    card it went to). Two shops' orders of one day are two correct ORDER files, so the date
+    alone cannot score it; a shop shipped to ANOTHER shop's card (the 2026-10-16 incident)
+    is a missing order plus an extra one, the same card twice on one day is two ORDER files.
+    Optional per order: `item_count`; optional per case: `unshipped` — how many orders must
+    NOT be sent (held for a board question, or reviewed)."""
+    want: dict = {}
+    for o in expected["shop_orders"]:
+        want[(_day(o.get("delivery_date")), str(o.get("customer_ean") or ""))] = o
+    got: dict = {}
+    for o in actual.get("order_results") or []:
+        key = (_day(o.get("delivery_date")), str(o.get("customer_ean") or ""))
+        if key in got:
+            problems.append(f"objednávka na {key[0]} pre kartu {key[1]} vznikla dvakrát — "
+                            f"v ORIONe by to boli dva doklady")
+        got.setdefault(key, []).append(o)
+    hits = 0
+    for (day, ean), order in want.items():
+        if (day, ean) not in got:
+            problems.append(f"chýba objednávka na {day} pre kartu {ean}")
+            continue
+        hits += 1
+        if "item_count" in order:
+            n = sum(len(o.get("items") or []) for o in got[(day, ean)])
+            if n != int(order["item_count"]):
+                problems.append(f"iný počet položiek ({day}, karta {ean}): "
+                                f"čakáme {int(order['item_count'])}, dostali {n}")
+    for day, ean in got.keys() - want.keys():
+        problems.append(f"objednávka na {day} pre kartu {ean or '?'} navyše")
+    if "unshipped" in expected and int(expected["unshipped"]) != int(actual.get("unshipped")
+                                                                      or 0):
+        problems.append(f"iný počet nezaslaných objednávok: čakáme "
+                        f"{int(expected['unshipped'])}, dostali {int(actual.get('unshipped') or 0)}")
+    if expected.get("should_review") and actual.get("shipped"):
+        problems.append("malo ísť na kontrolu, ale odoslalo sa")
+    if expected.get("should_ship") and not actual.get("shipped"):
+        problems.append("malo sa odoslať, ale skončilo na kontrole")
+    recall = (hits / len(want)) if want else (1.0 if not got else 0.0)
+    return Score(passed=not problems, item_recall=recall, problems=problems)
+
+
 def summarize(results: list[Result]) -> dict:
     by_type: dict[str, dict] = {}
     for r in results:
@@ -256,13 +300,17 @@ def _actual_from_run(result: dict) -> dict:
     # an order it refuses to ship, and scoring those would fail every must-review case for
     # doing exactly the right thing.
     orders = [{"delivery_date": o.get("delivery_date", ""), "status": o.get("status", ""),
+               # #493: the card each shipped order went to (a multi-shop mail, `shop_orders`)
+               "customer_ean": o.get("customer_ean", ""),
                "items": [{"gtin": i["gtin"], "quantity": i["quantity"]}
                          for i in o.get("items") or [] if i.get("gtin")]}
               for o in result.get("order_results") or []
               if o.get("status") in ("ok", "partial")]
+    unshipped = sum(1 for o in result.get("order_results") or []
+                    if o.get("status") not in ("ok", "partial"))
     return {"customer_ean": result.get("customer_ean", ""),
             "delivery_date": result.get("delivery_date", ""),
-            "items": items, "order_results": orders,
+            "items": items, "order_results": orders, "unshipped": unshipped,
             "shipped": result.get("status") in ("ok", "partial"),
             # #187: EMAIL-level, same for every order derived from one email — carried
             # through so a case can assert something the extraction stage surfaced there

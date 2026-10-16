@@ -516,20 +516,22 @@ def retry_unknown_customer_questions(conn, cfg, upload=None, post=None) -> list[
     """A customer added on /znalosti (rather than answered straight on the question card,
     #234 §3) must also unstick any order still waiting for it. For every OPEN `customer`
     question, re-resolve the sender against the CURRENT customer list and act ONLY when
-    the match is a genuine exact-address hit with a real EAN — never the model rung (no
-    store header, no model call reaches this far, so `resolve()`'s `llm` rung never fires)
-    and never a fuzzy name/branch hit (`store=""` makes `_by_store` always return `None`):
-    a wrongly addressed order is worse than one still waiting (`customer.py`'s own module
-    docstring). Called from `/api/znalosti/clients` right after a save, and from the
+    the match is a genuine exact-address hit with a real EAN (a per-sender question) or the
+    warehouse's learned rule for exactly that shop (a per-shop question, #493 — the street
+    rung may run for a shop key but its decision is never taken, review round 26) — never
+    the model rung (no model call reaches this far): a wrongly addressed order is worse than
+    one still waiting (`customer.py`'s own module docstring). Called from `/api/znalosti/clients` right after a save, and from the
     order worker's own periodic tick (mirrors `release_due`'s own sweep)."""
     from . import customer as customer_mod
-    from . import report, teach
+    from . import report, store_key, store_rules, teach
     from . import snapshot as snapshot_mod
 
     rows = conn.execute(
         "SELECT id FROM order_questions WHERE kind = 'customer' AND status = 'open'"
     ).fetchall()
     released: list[dict] = []
+    # #493: loaded once per sweep (it layers ~1000 CODEX cards) — nothing below edits it
+    customers = snapshot_mod.customers_for_management(conn) if rows else []
     for (qid,) in rows:
         q = teach.get(conn, qid)
         if not q:
@@ -538,10 +540,22 @@ def retry_unknown_customer_questions(conn, cfg, upload=None, post=None) -> list[
         sender_email = str(ctx.get("sender_email") or "")
         if not sender_email:
             continue
-        customers = snapshot_mod.customers_for_management(conn)
-        matched = customer_mod.resolve(customers, sender_email, ctx.get("sender_name", ""),
-                                       ctx.get("company_name", ""))
-        if not (matched and matched.rule == "exact_email" and matched.ean_edi):
+        # #493: a question asked for ONE SHOP is settled automatically only by a learned shop
+        # rule — never by the sender address (the poistka asked it precisely because the
+        # sender's one card does not say which shop it is) and never by the street (review
+        # round 26: re-resolved ALONE, the street shipped two shops the mail-level check had
+        # refused to the one card)
+        key = store_key.from_context(ctx)
+        matched = customer_mod.resolve(
+            customers, sender_email, ctx.get("sender_name", ""), ctx.get("company_name", ""),
+            key=key, rules=store_rules.for_sender(conn, sender_email) if key else (),
+            multi_store=key is not None)
+        # a per-sender question asked in a shop context (`no_address` — a multi-shop mail
+        # or sender) is settled only by a shop rung too: it has no key, so only a human
+        # (review round 3: the sweep answered it with the sender's one card)
+        shop_q = key is not None or bool(ctx.get("no_address"))
+        wanted = {"store_rule"} if shop_q else {"exact_email"}
+        if not (matched and matched.rule in wanted and matched.ean_edi):
             continue
         teach.add_candidate(conn, qid, {
             "ean_edi": matched.ean_edi, "name": matched.name, "city": "", "street": "",
@@ -551,6 +565,9 @@ def retry_unknown_customer_questions(conn, cfg, upload=None, post=None) -> list[
                                   by="auto")
         except (teach.AlreadyAnswered, teach.NotACandidate):
             continue
+        # #493: automation teaches nothing — an undo must not strip the address the card
+        # already had (the old undo forgot it from the very card this sweep matched on)
+        teach.set_answer(conn, qid, {"email_added": False, "auto": True})
         report.log_event(
             conn, q["message_id"], stage="review", status="ok",
             outcome=f"Automaticky doplnený zákazník {matched.name} ({matched.ean_edi})",

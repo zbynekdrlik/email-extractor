@@ -18,6 +18,8 @@ const TABLE_LABELS = {
   global_item_memory: "Globálny alias",
   dl_item_memory: "Alias položky (DL)",
   dl_supplier_memory: "Pamäť dodávateľa",
+  // #493: the warehouse's answer for ONE shop of a multi-shop sender (sender + shop -> card)
+  customer_store_rules: "Predajňa zákazníka",
   order_questions: "Otázka",
 };
 const ACTION_LABELS = {

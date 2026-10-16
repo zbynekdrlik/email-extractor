@@ -20,8 +20,9 @@ PAGE = 25   # families per page
 
 # Business columns captured into the audit before/after (all real, restorable columns —
 # the pk `id` and timestamps are excluded; `_restore_update` re-validates each name).
+# #493: `removed_emails` (addresses kept off the card against CODEX) is restorable too.
 _COLS = ("orig_ean_edi", "orig_street", "ean_edi", "name", "emails",
-         "city", "street", "zip", "retired")
+         "city", "street", "zip", "retired", "removed_emails")
 
 
 def _order_counts(conn) -> dict[str, int]:
@@ -81,14 +82,17 @@ def save_customer(conn, cfg, actor: str, body: dict) -> dict:
     name, ean = name_and_ean(body, "zákazník")
     before = _before(conn, body.get("override_id"),
                      body.get("orig_ean_edi"), body.get("orig_street"))
+    # #493: the form shows the CODEX-layered card — store only what the board owns
+    own = snapshot.unlayer_edit(
+        conn, override_id=body.get("override_id"), orig_ean_edi=body.get("orig_ean_edi"),
+        orig_street=body.get("orig_street"), ean_edi=ean,
+        emails=_parse_emails_field(body.get("emails")),
+        city=str(body.get("city") or "").strip(), street=str(body.get("street") or "").strip(),
+        zip_=str(body.get("zip") or "").strip())
     try:
         rid = snapshot.upsert_customer(
             conn, override_id=body.get("override_id"), orig_ean_edi=body.get("orig_ean_edi"),
-            orig_street=body.get("orig_street"), ean_edi=ean, name=name,
-            emails=_parse_emails_field(body.get("emails")),
-            city=str(body.get("city") or "").strip(),
-            street=str(body.get("street") or "").strip(),
-            zip_=str(body.get("zip") or "").strip())
+            orig_street=body.get("orig_street"), ean_edi=ean, name=name, **own)
     except snapshot.DuplicateEan as e:
         raise PartnerError(409, f"EAN {ean} už má zákazník {e.existing.get('name', '')}.",
                            existing=e.existing) from e

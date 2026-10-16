@@ -408,6 +408,12 @@ def run_forever(conn, cfg, stop=None, sleep=None, pipeline=None, connect=None) -
                 # gate silently off.
                 from . import codex_cards
                 codex_cards.stale_sweep(conn, cfg)
+                # #493: the CODEX customer copy the order engine's customer list is layered on
+                # stopped arriving — orders keep the last copy (fail-open); ops hears it once
+                # per stale episode + workday-morning reminders
+                if orders_python:
+                    from . import codex_customers
+                    codex_customers.stale_sweep(conn, cfg)
             if dl_python:
                 # #239 classes 2/3: a message classified `dodacie_listy` that never got
                 # a first attempt at all — gated on the live DL python engine, same

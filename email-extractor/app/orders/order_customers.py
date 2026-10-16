@@ -1,0 +1,347 @@
+"""Who each ORDER of one mail is for — per shop, with the #493 poistka (#101/#159/#493).
+
+`pipeline._run` used to resolve every order with `customer.resolve(store=<header>) or
+<the mail-level customer>`: a mail whose orders were for several shops of one customer, with
+the sender's address on ONE card, sent every shop's order to that card (the 2026-10-16
+incident — 21 ORDER files of 5 shops under one EAN). This module is the ONE place the
+per-order decision is made now:
+
+1. every order gets its shop key (`store_key.for_orders`: block header + the attachment it
+   was read from); whether the mail carries several shops is decided once
+   (`store_key.is_multi_store` — a header block or the sender's learned shop rules);
+2. one delivery day + order number is ONE order (#81.1, `merge_orders`) — per SHOP in a
+   multi-shop mail (two shops are never merged, two files of one shop are), per (day, order
+   number, header, file) for a sender with learned shop rules, per (day, order number,
+   header) otherwise, exactly as before #493;
+3. every order is resolved with its key, the sender's learned shop rules and the multi-shop
+   flag (a card's name never decides a shop — it only ranks the question) — never falling
+   back to the mail-level customer; then orders of one day that resolved to the SAME card
+   (and header) are one order again (`merge_by_card`);
+4. the poistka (`customer.collapsed_shops`): in a multi-shop mail (and for a sender with
+   learned shop rules) only a SHOP rung may decide a shop — anything else is asked;
+5. an unresolved order is asked PER SHOP (`ask`, dedupe key sender + the shop's identity)
+   in a multi-shop mail or for a sender with learned shop rules — the answer teaches a shop
+   rule (`learn`), so each shop is asked once. Any other mail keeps the pre-#493 questions.
+
+`learn` is the ONE place a human customer answer is remembered — the board answer route,
+the new-customer route and `teach.KINDS['customer'].apply` all call it.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+
+from . import customer, snapshot, store_key, store_rules, teach
+
+log = logging.getLogger("orders.order_customers")
+
+
+def placeholder() -> customer.Matched:
+    """The #431 hold placeholder — `hold.place` never receives `matched=None`."""
+    return customer.Matched(ean_edi="", name="", confidence=0.0, rule="unmatched", note="")
+
+
+@dataclass
+class OrderCustomers:
+    keys: list = field(default_factory=list)       # store_key.StoreKey per order
+    matched: list = field(default_factory=list)    # customer.Matched | None per order
+    scoped: list = field(default_factory=list)     # ask THIS shop (not the sender)?
+    collapsed: set = field(default_factory=set)    # indexes the poistka turned back
+    # a multi-shop mail / sender: a per-SENDER question here must not teach the address
+    shop_context: bool = False
+
+
+# the per-SHOP question's dedupe separator: `<sender>|shop:<identity>` (`shop_question`)
+SHOP_KEY = "|shop:"
+
+
+def resolve_orders(conn, customers: list[dict], sender: str, extracted: dict, llm: dict,
+                   orders: list[dict]) -> tuple[list[dict], OrderCustomers]:
+    """Merge the orders of one delivery day and resolve the customer of each (see the module
+    docstring). Returns the (merged) orders + their customers. Reads the sender's shop rules
+    — a pure read, so it applies in shadow too, like a memory lookup."""
+    rules = store_rules.for_sender(conn, sender)
+    family = customer.family_of(customers, sender, llm) or []
+    # the FAMILY's shop history — learned rules or a shop question still open (rounds 27-29;
+    # also of a co-address on the sender's own card): such a sender ships a shop only by
+    # its rule, never by the street
+    history = bool(rules) or shop_history(conn, sender, family,
+                                          own_cards=customer.owners_of(customers, sender))
+    # the sender's own company / name words never name one of its shops (review round 4)
+    drop = (store_key.tokens(extracted.get("companyName", ""))
+            + store_key.tokens(extracted.get("senderName", "")))
+    multi = store_key.is_multi_store(store_key.for_orders(orders), history)
+    # review round 5: an order naming no shop is never merged in a mail of several shops —
+    # two shops ordering the same goods with nothing to tell them apart are two orders, each
+    # asked on its own (merged, one answer shipped both shops' goods to one card)
+    by_day = (merge_orders(orders, [(_day(o), s) if s else ("unnamed", i)
+                                    for i, o in enumerate(orders) for s in [_shop(o)]])
+              if multi else merge_by_day(orders, by_file=history))
+    keys = store_key.for_orders(by_day, drop=drop)
+    matched = [customer.resolve(customers, sender, extracted.get("senderName", ""),
+                                extracted.get("companyName", ""), llm=llm,
+                                store=k.header, key=k, rules=rules, multi_store=multi,
+                                shop_history=history,
+                                delivery_text=extracted.get("notes", ""))
+               for k in keys]
+    # the mail's attachments — not only the files an order was found in (review round 8:
+    # an untold sibling hid the second file); `extract` records the count
+    several_files = max(int(extracted.get("attachments") or 0),
+                        len({_file_id(o) for o in orders if _file_id(o)})) >= 2
+    collapsed = customer.collapsed_shops(keys, matched, multi, history, several_files,
+                                         family={str(c.get("ean_edi") or "") for c in family})
+    for i in collapsed:
+        matched[i] = None
+    shop_context = multi or history
+    scoped = [bool(k.identity) and shop_context for k in keys]
+    oc = OrderCustomers(keys=keys, matched=matched, scoped=scoped, collapsed=collapsed,
+                        shop_context=shop_context)
+    for i, (k, m) in enumerate(zip(keys, matched, strict=True)):
+        log.info("order %d/%d shop %r (file %r, shop %r) -> %s (%s)%s%s", i + 1, len(keys),
+                 k.header, k.source_file, k.text, m.ean_edi if m else None,
+                 m.rule if m else "asked", " [poistka]" if i in collapsed else "",
+                 " [multi-shop]" if multi else (" [shop history]" if history else ""))
+    return merge_by_card(by_day, oc)
+
+
+def shop_history(conn, sender_email: str, family, own_cards=()) -> bool:
+    """Has this sender's FAMILY shop history — a live learned shop rule of any of its
+    addresses (or pointing at one of its cards), or a per-SHOP question of any of its
+    addresses still open on the board (review rounds 27-28: the street shipped a shop of the
+    next mail — from the family's OTHER address — while that shop's question was open, then
+    the answer named another card)? The addresses of the sender's OWN card(s) count too
+    (`own_cards`, round 29: a co-address on the one central card shipped a taught shop to
+    it) — their addresses only, never their EANs (a one-card sender stays ordinary when
+    another chain's shop was answered with its card). Our own domain owns no rule and keys
+    its questions per mail, so it has no history; a per-ORDER question (`|shop-mail:`, an
+    unnamed order) is no shop history (round 28)."""
+    addresses = ([sender_email] + [e for c in family or [] for e in c.get("emails") or []]
+                 + [e for c in own_cards or () for e in c.get("emails") or []])
+    senders = {a for a in (str(v or "").strip().lower() for v in addresses) if a}
+    eans = {str(c.get("ean_edi") or "") for c in family or []} - {""}
+    if store_rules.any_live(conn, senders, eans):
+        return True
+    if not senders:
+        return False
+    # the dedupe key is `<sender>|shop:<identity>` (`shop_question`); split exactly at it —
+    # never LIKE (an `_` in an address is a LIKE wildcard)
+    return conn.execute(
+        "SELECT 1 FROM order_questions WHERE kind = 'customer' AND status = 'open' "
+        "AND position(%s in item_key) > 0 "
+        "AND left(item_key, position(%s in item_key) - 1) = ANY(%s) LIMIT 1",
+        (SHOP_KEY, SHOP_KEY, sorted(senders))).fetchone() is not None
+
+
+def _day(order: dict) -> tuple:
+    return (str(order.get("deliveryDate") or ""), str(order.get("orderNumber") or ""))
+
+
+def _shop(order: dict) -> frozenset:
+    """The order's shop identity (header + file words — independent of the other orders)."""
+    return store_key.for_orders([order])[0].identity
+
+
+def merge_by_day(orders: list[dict], by_file: bool = False) -> list[dict]:
+    """One delivery day + order number + shop header is ONE order (#81.1, #101) — the merge
+    of a mail that does NOT carry several shops, exactly as before #493 (the former
+    `pipeline._merge_by_day`). A mail of several shops merges per shop identity instead.
+
+    `by_file` (a sender with learned shop rules — its file names can name shops): orders of
+    DIFFERENT files are never merged, and an order whose file could not be told
+    (`fileUnknown`) is never merged at all (review round 7: merged, one answer shipped both
+    files' goods to one card). Otherwise a merged order names the ONE file all its orders were
+    located in, else none and `fileUnknown` (a file is its words, or its whole name when it
+    has none — „Objednávka.xlsx", review round 7)."""
+    if by_file:
+        return merge_orders(orders, [(_day(o), str(o.get("store") or ""),
+                                      ("unknown", i) if o.get("fileUnknown") else _file_id(o))
+                                     for i, o in enumerate(orders)])
+    keys = [(_day(o), str(o.get("store") or "")) for o in orders]
+    files: dict = {}
+    unknown: set = set()
+    for k, o in zip(keys, orders, strict=True):
+        if o.get("fileUnknown"):
+            unknown.add(k)
+        if _file_id(o):
+            files.setdefault(k, {}).setdefault(_file_id(o), str(o.get("sourceFile") or ""))
+    sizes: dict = {}
+    for k in keys:
+        sizes[k] = sizes.get(k, 0) + 1
+    merged = merge_orders(orders, keys)
+    for k, m in zip(dict.fromkeys(keys), merged, strict=True):
+        if sizes[k] < 2:
+            continue
+        located = files.get(k, {})
+        if len(located) == 1 and k not in unknown:
+            m["sourceFile"] = next(iter(located.values()))
+        else:
+            m["sourceFile"] = ""
+            if located or k in unknown:
+                m["fileUnknown"] = True
+    return merged
+
+
+def _file_id(order: dict):
+    """Which attachment an order was located in, compared by WORDS („… BISTRO.xlsx" and
+    „… BISTRO (1).xlsx" are one shop's file) or, for a name without any, by the name."""
+    name = str(order.get("sourceFile") or "").strip()
+    return store_key.file_tokens(name) or (("file", name) if name else frozenset())
+
+
+def merge_orders(orders: list[dict], keys: list) -> list[dict]:
+    """Merge the orders sharing a key (`keys[i]` is order i's) — items concatenated in order,
+    recipient groups joined (the #81.1 shape the former `pipeline._merge_by_day` had)."""
+    merged: dict = {}
+    for order, k in zip(orders, keys, strict=True):
+        if k not in merged:
+            merged[k] = dict(order, items=list(order.get("items") or []))
+            continue
+        into = merged[k]
+        into["items"].extend(order.get("items") or [])
+        groups = [g for g in (into.get("recipientGroup"), order.get("recipientGroup")) if g]
+        into["recipientGroup"] = ", ".join(dict.fromkeys(groups))
+    return list(merged.values())
+
+
+def merge_by_card(orders: list[dict], oc: OrderCustomers) -> tuple[list[dict], OrderCustomers]:
+    """#81.1 after #493: orders of one delivery day + order number + header that resolved to
+    the SAME card are ONE order (two files of one shop must not become two ORDER files for
+    one day). Two different headers are two shops (#101) and stay apart; unresolved orders
+    are never merged — each is asked for its own shop. The first order's shop key / match
+    carries the merged one."""
+    groups: dict = {}
+    for i, (o, m) in enumerate(zip(orders, oc.matched, strict=True)):
+        k = ((*_day(o), str(o.get("store") or ""), m.ean_edi)
+             if m is not None and m.ean_edi else ("unresolved", i))
+        groups.setdefault(k, []).append(i)
+    if all(len(idxs) == 1 for idxs in groups.values()):
+        return orders, oc
+    keep = [idxs[0] for idxs in groups.values()]
+    out_orders = []
+    for idxs in groups.values():
+        out_orders.append(merge_orders([orders[i] for i in idxs], [0] * len(idxs))[0])
+        if len(idxs) > 1:
+            log.info("orders %s of one day resolved to one card %s — merged into one",
+                     [i + 1 for i in idxs], oc.matched[idxs[0]].ean_edi)
+    return out_orders, OrderCustomers(
+        keys=[oc.keys[i] for i in keep], matched=[oc.matched[i] for i in keep],
+        scoped=[oc.scoped[i] for i in keep],
+        collapsed={keep.index(i) for i in oc.collapsed if i in keep},
+        shop_context=oc.shop_context)
+
+
+def ask(conn, *, message: dict, sender: str, extracted: dict, customers: list[dict],
+        free_text: str, order: dict, key, scoped: bool, on_new=None,
+        shop_context: bool = False, slot: int = 0) -> int | None:
+    """Raise (or reuse) the `customer` question for an unresolved order — per SHOP when
+    `scoped` (dedupe sender + shop key), else per sender exactly as before (#159). A
+    per-sender question in a `shop_context` (a multi-shop mail / sender) records
+    `no_address`: its answer must not put the address on a shop's card (`learn`), and it is
+    asked for THIS order only (`unnamed_question`, `slot` = the order's index in the mail)."""
+    shop = key if scoped else None
+    extra: dict = {}
+    if shop_context:
+        extra = {"no_address": True, "slot": slot, "order_summary": _summary(order)}
+    cands = customer.candidates_for_question(
+        customers, sender, extracted.get("senderName", ""), extracted.get("companyName", ""),
+        free_text=free_text, key=shop)
+    return teach.ask_customer(
+        conn, message_id=message.get("message_id", ""), sender_email=sender,
+        candidates=[{"ean_edi": c.get("ean_edi", ""), "name": c.get("name", ""),
+                     "city": c.get("city", ""), "street": c.get("street", ""),
+                     "address_match": bool(c.get("address_match"))} for c in cands],
+        delivery_date=order.get("deliveryDate", ""),
+        context={"sender_email": sender, "sender_name": extracted.get("senderName", ""),
+                 "company_name": extracted.get("companyName", ""),
+                 "delivery_address_guess": customer.guess_delivery_address(free_text),
+                 **extra},
+        on_new=on_new, key=shop)
+
+
+def _summary(order: dict, limit: int = 3) -> str:
+    """„10× rožok kváskový, 5× chlieb, …" — what the warehouse sees of an order that names no
+    shop, to find it in the mail."""
+    items = order.get("items") or []
+    parts = [f"{i.get('quantity', '')}× {i.get('name', '')}".strip() for i in items[:limit]]
+    return ", ".join(parts) + (", …" if len(items) > limit else "")
+
+
+def learn(conn, q: dict, ean_edi: str, by: str, email_added: bool | None = None) -> dict:
+    """Remember a HUMAN answer to a `customer` question: for a question asked for ONE SHOP the
+    shop rule only (#493 — the address is NOT added: every answered shop's card would make
+    the sender a family whose mails with no shop clue are then asked every time); for a
+    per-sender question the sender address on the chosen card (#159). Records on the
+    question what it taught (`answer`), so undo takes back exactly that and nothing else.
+    Rebuilds the snapshot when the card list changed. Returns the recorded `answer`.
+    `email_added` overrides the flag when the caller itself wrote the address (the
+    „Nový zákazník" card is CREATED with it by the same answer)."""
+    ctx = q.get("context") or {}
+    sender = str(ctx.get("sender_email") or "")
+    key = store_key.from_context(ctx)
+    rule_id, added = None, False
+    if key is not None or ctx.get("no_address"):
+        # review round 1: a SHOP answer teaches the shop rule only — adding the sender's
+        # address to every answered shop's card would make it a family whose mails with no
+        # shop clue are then asked every single time
+        if key is not None:
+            rule_id = store_rules.remember(conn, sender_email=sender, key=key,
+                                           ean_edi=ean_edi, question_id=q["id"], by=by)
+    elif not store_rules.is_own_address(sender):
+        # round 29: our own address (a staff forward) is never put on a customer's card —
+        # every later forward of that staff address would go to that card
+        added = snapshot.remember_customer_email(conn, ean_edi, sender)
+    if email_added is None:
+        email_added = added
+    answer = {"email_added": bool(email_added), "store_rule": rule_id}
+    teach.set_answer(conn, q["id"], answer)
+    if added:
+        snapshot.rebuild_from_overrides(conn)
+    log.info("customer question %s taught: card %s, address added=%s, shop rule=%s (by %s)",
+             q["id"], ean_edi, email_added, rule_id, by)
+    return answer
+
+
+def unlearn(conn, q: dict) -> None:
+    """Take back what `learn` taught for an answered `customer` question (`teach.undo`): the
+    sender address only when THIS answer added it (`answer.email_added`) — an address that
+    already sat on the card (a CODEX one, a family's) must survive the undo; an answer
+    recorded before #493 carries no flag and keeps the old forget — and the question's shop
+    rules (soft delete, audited)."""
+    if (q.get("answer") or {}).get("email_added", True):
+        snapshot.forget_customer_email(conn, q["answer_gtin"],
+                                       (q.get("context") or {}).get("sender_email", ""))
+        snapshot.rebuild_from_overrides(conn)
+    store_rules.forget_for_question(conn, q["id"])
+
+
+def shop_question(key: str, sender_email: str, shop, context: dict) -> tuple:
+    """The per-SHOP shape of a `customer` question (`teach.ask_customer(key=)`): dedupe key
+    sender + shop key, the shop in the title (the board card shows only `wording` + the
+    candidates), the key in `context` so the answer can teach the shop rule. Returns
+    (item_key, wording, reason, context)."""
+    return (f"{key}{SHOP_KEY}{shop.text}", f"{sender_email} · predajňa {shop.label}",
+            (f"Odosielateľ objednáva pre viac predajní — ku ktorej karte patrí predajňa "
+             f"{shop.label}? Odpoveď si zapamätám pre ďalšie objednávky tejto predajne."),
+            dict(context or {}, store=shop.header, store_file=shop.source_file,
+                 store_key=shop.text, store_tokens=sorted(shop.tokens),
+                 store_label=shop.label))
+
+
+def unnamed_question(key: str, message_id: str, context: dict) -> tuple:
+    """The shape of a per-sender `customer` question asked in a shop context (`no_address`) —
+    an order that names no shop in a mail of several shops, or a rule sender's order no rule
+    knows. Its answer teaches nothing (no shop to key a rule on, no address — `learn`), so
+    it is a decision about THIS order of THIS mail: the dedupe key carries the message and
+    the order's index (review round 5: one open `<sender>|shop-mail` question shipped every
+    unnamed order of every mail of the sender to one card), the wording says what the
+    warehouse is looking at. Returns (item_key, wording, reason, context)."""
+    ctx = context or {}
+    sender = str(ctx.get("sender_email") or key)
+    what = str(ctx.get("order_summary") or "")
+    # the board card shows only `wording` + the candidates — the order's goods go there
+    return (f"{key}|shop-mail:{message_id}:{int(ctx.get('slot') or 0)}",
+            f"{sender} · objednávka bez označenia predajne" + (f" ({what})" if what else ""),
+            ("Odosielateľ objednáva pre viac predajní a táto objednávka neuvádza, pre ktorú "
+             "predajňu je — ku ktorej karte patrí? Odpoveď platí len pre túto objednávku."),
+            ctx)
+

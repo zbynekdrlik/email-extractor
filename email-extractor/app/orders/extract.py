@@ -21,6 +21,8 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+from . import store_key
+
 log = logging.getLogger("orders.extract")
 
 PROMPT_PATH = Path(__file__).with_name("prompts") / "extract.md"
@@ -114,15 +116,47 @@ def _attachment_block(text: str) -> list[str] | None:
     return text[idx:].splitlines()
 
 
+def _kosik_header(line: str) -> bool:
+    return "Č.mat.dodavat." in line or ("EAN kus" in line and "Název" in line)
+
+
+def _pricelist_header(line: str) -> bool:
+    return "%DPH" in line and ("VO bez DPH" in line or "VO s DPH" in line)
+
+
+def table_attachments(text: str) -> int:
+    """How many attachments (`===== <file> =====` sections) carry a recognized table."""
+    lines = _attachment_block(clean_text(text)) or []
+    part, with_table = 0, set()
+    for line in lines:
+        if line.startswith("====="):
+            part += 1
+        elif _kosik_header(line) or _pricelist_header(line):
+            with_table.add(part)
+    return len(with_table)
+
+
+def _several_tables(source: str, extracted: dict) -> bool:
+    """Is this a mail of several shops the table path must not read as one? #493:
+    `parse_table` reads the FIRST table only (and straight through the next sheet) and keeps
+    only the model's first order — with two shops' tables, or a table next to another shop's
+    order, the second shop's order vanished or merged into the first (review rounds 9-11). So:
+    two attachments with a table, or a model naming two shops, go to the model."""
+    if table_attachments(source) > 1:
+        return True
+    stores = {str(o.get("store") or "").strip() for o in extracted.get("orders") or []}
+    return len(stores - {""}) > 1
+
+
 def parse_table(text: str) -> list[dict] | None:
     """Items from a recognized tabular attachment, or None when there is no such table."""
     lines = _attachment_block(clean_text(text))
     if not lines:
         return None
     for i, line in enumerate(lines):
-        if "Č.mat.dodavat." in line or ("EAN kus" in line and "Název" in line):
+        if _kosik_header(line):
             return _parse_kosik(lines, i)
-        if "%DPH" in line and ("VO bez DPH" in line or "VO s DPH" in line):
+        if _pricelist_header(line):
             return _parse_pricelist(lines, i)
     return None
 
@@ -259,6 +293,16 @@ def item_in_source(item: dict, source: str) -> bool:
     return len(squashed) >= 8 and squashed in _squash(source)
 
 
+def _located(source_file: str, sections) -> dict:
+    """#493: `sourceFile` + `fileUnknown` — the mail HAS attachments and this order's could
+    not be told (its lines tie between two files, or it came from the body): never guessed,
+    a sender with learned shop rules is asked for it (`customer.collapsed_shops`)."""
+    out: dict[str, Any] = {"sourceFile": source_file}
+    if sections and not source_file:
+        out["fileUnknown"] = True
+    return out
+
+
 def verify(extracted: dict, source: str) -> dict:
     """Keep only items provable from the source; report the rest.
 
@@ -266,6 +310,8 @@ def verify(extracted: dict, source: str) -> dict:
     but its items still appear in `unverified`, so nothing disappears quietly.
     """
     orders, unverified = [], []
+    sections = store_key.attachment_sections(source)   # #493: once per mail
+    body = store_key.body_text(source)
     for order in extracted.get("orders", []) or []:
         kept = []
         for item in (order.get("items") or []) + (order.get("missedItems") or []):
@@ -282,6 +328,13 @@ def verify(extracted: dict, source: str) -> dict:
                            "deliveryDate": order.get("deliveryDate", "") or "",
                            "recipientGroup": order.get("recipientGroup", "") or "",
                            "store": order.get("store", "") or "",
+                           # #493: the attachment this order was read from (located by
+                           # its block header, else its own quotes — never asked of the
+                           # model) — with the header it is the order's shop identity
+                           **_located(store_key.locate_file(
+                               [(i.get("sourceQuote") or "", i.get("name") or "")
+                                for i in order.get("items") or []], sections=sections,
+                               header=order.get("store", "") or "", body=body), sections),
                            "items": kept})
     if unverified:
         log.warning("%d item(s) could not be verified against the email: %s",
@@ -294,6 +347,9 @@ def verify(extracted: dict, source: str) -> dict:
         "notes": extracted.get("notes", "") or "",
         "orders": orders,
         "unverified": unverified,
+        # #493: how many attachments the mail has — „several files" for a sender with
+        # learned shop rules, also when an order's file could not be told (review round 8)
+        "attachments": len(sections),
     }
 
 
@@ -342,7 +398,12 @@ def run(client, email: dict) -> dict:
                 "prompt_hash": client.last_prompt_hash}
 
     table = parse_table(source)
+    if table and _several_tables(source, extracted):
+        log.info("several shops next to a table — read by the model, the code reads only the "
+                 "first table and order (#493)")
+        table = None
     if table:
+        sections = store_key.attachment_sections(source)   # #493
         head = (extracted.get("orders") or [{}])[0]
         log.info("tabular attachment recognized: %d item(s) parsed by code (model said %d)",
                  len(table), len(head.get("items") or []))
@@ -356,8 +417,12 @@ def run(client, email: dict) -> dict:
                         "deliveryDate": head.get("deliveryDate", "") or "",
                         "recipientGroup": head.get("recipientGroup", "") or "",
                         "store": head.get("store", "") or "",
+                        **_located(store_key.locate_file(
+                            [i.get("name") or "" for i in table], sections=sections,
+                            header=head.get("store", "") or ""), sections),
                         "items": table}],
             "unverified": [],
+            "attachments": len(sections),
             "source": "table",
         }
     else:

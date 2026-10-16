@@ -190,9 +190,19 @@ def register(app: Flask, deps: Deps) -> dict:
             return jsonify(error="chýba názov"), 400
 
         ctx = q.get("context") or {}
-        emails = _parse_emails_field(nc.get("emails"))
+        from .orders import store_rules
+        # round 30: our own domain is never a customer's address — also when submitted
+        emails = [e for e in _parse_emails_field(nc.get("emails"))
+                  if not store_rules.is_own_address(e)]
         ctx_email = str(ctx.get("sender_email") or "").strip().lower()
-        if ctx_email and ctx_email not in [e.lower() for e in emails]:
+        # #493: a card created for ONE SHOP of a multi-shop sender never gets the sender's
+        # address (the shop rule is the lesson — the address would make a family of it)
+        shop_question = bool(ctx.get("store_key")) or bool(ctx.get("no_address"))
+        # round 29: our own address (a staff forward) never goes on a customer's card
+        added_email = bool(ctx_email and not shop_question
+                           and not store_rules.is_own_address(ctx_email)
+                           and ctx_email not in [e.lower() for e in emails])
+        if added_email:
             emails.append(ctx_email)
         city = str(nc.get("city") or "").strip()
         street = str(nc.get("street") or "").strip()
@@ -249,9 +259,11 @@ def register(app: Flask, deps: Deps) -> dict:
                 error=f"EAN {ean} už má zákazník {e.existing.get('name', '')}.",
                 existing=e.existing), 409
 
-        sender_email = ctx.get("sender_email", "")
+        from .orders import order_customers
         with deps.db() as c2:
-            snapshot.remember_customer_email(c2, ean, sender_email)
+            # #493: an undo takes back the address only when THIS answer put it on the new
+            # card (`email_added`); a shop question teaches its rule instead
+            order_customers.learn(c2, q, ean, "sklad", email_added=added_email)
             hold.set_customer(c2, qid, ean, name)
             released = hold.release_for_question(c2, deps.cfg, qid)
         return jsonify(ok=True, question=answered, released=released,
@@ -323,10 +335,10 @@ def register(app: Flask, deps: Deps) -> dict:
             with deps.db() as c2:
                 released = hold.release_unknown_customer(c2, deps.cfg, qid)
             return jsonify(ok=True, question=answered, released=released)
-        sender_email = (q.get("context") or {}).get("sender_email", "")
+        from .orders import order_customers
         with deps.db() as c2:
-            snapshot.remember_customer_email(c2, ean_edi, sender_email)
-            snapshot.rebuild_from_overrides(c2)
+            # #159 the sender address + #493 the shop rule, recorded on the question for undo
+            order_customers.learn(c2, q, ean_edi, "sklad")
             hold.set_customer(c2, qid, ean_edi, name)
             released = hold.release_for_question(c2, deps.cfg, qid)
         return jsonify(ok=True, question=answered, released=released)

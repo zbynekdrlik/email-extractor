@@ -31,9 +31,11 @@ from . import (
     mail_kind,
     match,
     memory,
+    order_customers,
     promo,
     report,
     snapshot,
+    store_rules,
     teach,
 )
 from . import upload as upload_mod
@@ -113,9 +115,12 @@ def _customer_input(cands: list[dict], email: dict, extracted: dict) -> str:
     lines = []
     for i, c in enumerate(cands, 1):
         mark = " | PRESNÁ ZHODA E-MAILU ODOSIELATEĽA" if c.get("exact_email") else ""
+        # #493 round 31: our own address on a card is never shown — a staff forward's FROM
+        # would match it as text (a pre-#493 answer had put one on a card)
+        emails = [e for e in c.get("emails") or [] if not store_rules.is_own_address(e)]
         lines.append(f"{i}. {c.get('name', '')} | EAN: {c.get('ean_edi', '')} | "
                      f"Obec: {c.get('city', '')} | Ulica: {c.get('street', '')} | "
-                     f"E-mail: {', '.join(c.get('emails') or []) or '-'}{mark}")
+                     f"E-mail: {', '.join(emails) or '-'}{mark}")
     return (f"FROM: {extracted.get('senderName') or email.get('from_name', '')} "
             f"<{extracted.get('senderEmail') or email.get('from_addr', '')}>\n"
             f"FIRMA V PODPISE: {extracted.get('companyName', '')}\n"
@@ -335,10 +340,24 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                                 extracted.get("companyName", ""), llm=cust_answer,
                                 store=store, delivery_text=extracted.get("notes", ""))
 
+    # The MAIL-level customer — reported on the result and the Odoo summary only. Each ORDER
+    # is resolved on its own below (#493: never falling back to this one — a multi-shop mail
+    # whose shops collapsed onto it is exactly the 2026-10-16 misroute).
     email_matched = matched = _customer_for()
     is_change = bool(extracted.get("isChangeRequest"))
 
-    orders = _merge_by_day(orders)
+    # #81.1/#101/#493: one delivery day is ONE order per shop, and who each order is for —
+    # per shop (block header + attachment), the sender's learned shop rules, and the
+    # poistka: in a mail of several shops only a shop rung may decide a shop
+    orders, oc = order_customers.resolve_orders(conn, customers, sender, extracted,
+                                                cust_answer, orders)
+
+    def _ask_customer(i: int, order: dict) -> int | None:
+        return order_customers.ask(conn, message=message, sender=sender, extracted=extracted,
+                                   customers=customers, free_text=free_text, order=order,
+                                   key=oc.keys[i], scoped=oc.scoped[i],
+                                   on_new=new_questions.append,
+                                   shop_context=oc.shop_context, slot=i)
     # #164: do NOT move this check to after product matching — that would push mails the
     # date conflict used to short-circuit into NEW per-item LLM calls, missing the frozen
     # corpus cache and forcing a paid re-record (see the design comment on #164).
@@ -369,42 +388,32 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                             reason=conflict, delivery_date=first_date,
                             on_new=new_questions.append)
         qids = [dq] if dq else []
-        hold_matched = matched
         # #164 (e).1: the date conflict may ALSO hit an unresolved customer — a SECOND,
-        # independent open question on the SAME held order(s), each released on its own
+        # independent open question on the SAME held order, each released on its own
         # schedule (`release_for_question` ships only once EVERY id is answered).
-        # #431: the placeholder `hold_matched` is assigned WHENEVER the customer is
-        # unresolved, NOT only on the `not is_change` path — otherwise a change request
-        # from an ambiguous (2-card, #418) sender left `hold_matched = None` and crashed
-        # at `hold.place` (AttributeError on `matched.ean_edi`), losing the order silently
-        # (the 2026-09-14 gazdovskytrh incident). The customer QUESTION stays gated on
-        # `not is_change` (per #421 a change request is resolved by hand, no board
-        # question) — but the order is still HELD on its date question, never crashed.
-        if matched is None:
-            if not is_change:
-                cust_cands = customer.candidates_for_question(
-                    customers, sender, extracted.get("senderName", ""),
-                    extracted.get("companyName", ""), free_text=free_text)
-                cq = teach.ask_customer(
-                    conn, message_id=message.get("message_id", ""), sender_email=sender,
-                    candidates=[{"ean_edi": c.get("ean_edi", ""), "name": c.get("name", ""),
-                                "city": c.get("city", ""), "street": c.get("street", ""),
-                                "address_match": bool(c.get("address_match"))}
-                               for c in cust_cands],
-                    delivery_date=first_date,
-                    context={"sender_email": sender,
-                            "sender_name": extracted.get("senderName", ""),
-                            "company_name": extracted.get("companyName", ""),
-                            "delivery_address_guess": customer.guess_delivery_address(free_text)},
-                    on_new=new_questions.append)
-                if cq:
-                    qids.append(cq)
-            hold_matched = customer.Matched(ean_edi="", name="", confidence=0.0,
-                                            rule="unmatched", note="")
-        held_ids = [hold.place(conn, message_id=message.get("message_id", ""),
-                               matched=hold_matched, order=order, decisions=[],
-                               extracted=extracted, question_ids=qids)
-                   for order in orders]
+        # #431: an unresolved order is held on the placeholder WHENEVER the customer is
+        # unresolved, NOT only on the `not is_change` path (the 2026-09-14 gazdovskytrh
+        # incident crashed at `hold.place` on `matched=None`). The customer QUESTION stays
+        # gated on `not is_change` (#421: a change request is resolved by hand).
+        # #493: per ORDER, never the mail-level customer — answering the date must not ship
+        # every shop of a multi-shop mail to one card.
+        held_ids = []
+        date_qids = list(qids)
+        for i, order in enumerate(orders):
+            order_qids = list(date_qids)
+            hold_matched = oc.matched[i]
+            if hold_matched is None:
+                if not is_change:
+                    cq = _ask_customer(i, order)
+                    if cq and cq not in qids:
+                        qids.append(cq)
+                    if cq:
+                        order_qids.append(cq)
+                hold_matched = order_customers.placeholder()
+            held_ids.append(hold.place(conn, message_id=message.get("message_id", ""),
+                                       matched=hold_matched, order=order, decisions=[],
+                                       extracted=extracted, question_ids=order_qids))
+        hold_matched = email_matched or order_customers.placeholder()
         report.log_event(
             conn, message.get("message_id", ""), stage="held", status="held",
             outcome=f"Rozpor dátumu dodania — čaká na sklad ({conflict})",
@@ -450,11 +459,11 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
     # #479: the CODEX stock-card list guards every ORDER line — loaded ONCE per mail, LIVE only
     # (shadow / the e2e-orders corpus never consults it, byte-identical). None = fail-open.
     codex = None if shadow else card_guard.order_guard(conn)
-    for order in orders:
+    for i, order in enumerate(orders):
         # Two shops in one file are two customers; everything below — the memory lookup,
         # the alias that names the customer, the question, the EDI header — must be the
-        # one that shop belongs to, not the email's.
-        matched = _customer_for(str(order.get("store") or "")) or email_matched
+        # one that shop belongs to, not the email's (#101; #493: no mail-level fallback).
+        matched = oc.matched[i]
         decisions = []
         order_question_ids: list[int] = []
         for item in order.get("items") or []:
@@ -554,26 +563,12 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
         # gives unmatched items — past it, ship-or-review exactly as before).
         if (not shadow and matched is None and not is_change
                 and not hold.is_past_deadline(order.get("deliveryDate", ""), today)):
-            cust_cands = customer.candidates_for_question(
-                customers, sender, extracted.get("senderName", ""),
-                extracted.get("companyName", ""), free_text=free_text)
-            cq = teach.ask_customer(
-                conn, message_id=message.get("message_id", ""), sender_email=sender,
-                candidates=[{"ean_edi": c.get("ean_edi", ""), "name": c.get("name", ""),
-                            "city": c.get("city", ""), "street": c.get("street", ""),
-                            "address_match": bool(c.get("address_match"))}
-                           for c in cust_cands],
-                delivery_date=order.get("deliveryDate", ""),
-                context={"sender_email": sender,
-                        "sender_name": extracted.get("senderName", ""),
-                        "company_name": extracted.get("companyName", ""),
-                        "delivery_address_guess": customer.guess_delivery_address(free_text)},
-                on_new=new_questions.append)
+            # #493: per SHOP for a multi-shop mail / a sender with several cards
+            cq = _ask_customer(i, order)
             if cq:
                 held_id = hold.place(
                     conn, message_id=message.get("message_id", ""),
-                    matched=customer.Matched(ean_edi="", name="", confidence=0.0,
-                                             rule="unmatched", note=""),
+                    matched=order_customers.placeholder(),
                     order=order, decisions=decisions, extracted=extracted,
                     question_ids=[cq])
                 status, preview = "held", {}
@@ -611,22 +606,7 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
             # for a change request (row 5 stays purely technical).
             ship_question_ids = list(order_question_ids)
             if not shadow and matched is None and not is_change:
-                cust_cands = customer.candidates_for_question(
-                    customers, sender, extracted.get("senderName", ""),
-                    extracted.get("companyName", ""), free_text=free_text)
-                cq = teach.ask_customer(
-                    conn, message_id=message.get("message_id", ""), sender_email=sender,
-                    candidates=[{"ean_edi": c.get("ean_edi", ""), "name": c.get("name", ""),
-                                "city": c.get("city", ""), "street": c.get("street", ""),
-                                "address_match": bool(c.get("address_match"))}
-                               for c in cust_cands],
-                    delivery_date=order.get("deliveryDate", ""),
-                    context={"sender_email": sender,
-                            "sender_name": extracted.get("senderName", ""),
-                            "company_name": extracted.get("companyName", ""),
-                            "delivery_address_guess":
-                                customer.guess_delivery_address(free_text)},
-                    on_new=new_questions.append)
+                cq = _ask_customer(i, order)
                 if cq:
                     ship_question_ids.append(cq)
             # post_now=False: this order's own Odoo message is folded into the ONE summary
@@ -703,31 +683,6 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                   unverified_count=len(extracted.get("unverified") or []),
                   notes=extracted.get("notes", ""), message_id=message.get("message_id", ""))
     return out
-
-
-def _merge_by_day(orders: list[dict]) -> list[dict]:
-    """One delivery date is ONE order.
-
-    A mail saying "40 ks for patients and 10 ks for staff" comes back as one order per
-    recipient group with the SAME delivery date. Shipping those separately wrote two EDI files
-    for one day — two orders in ORION — and the warehouse got 40 or 10, never 50 (#81.1). A
-    recipient group is a note on the order, not a separate order.
-    """
-    merged: dict[tuple, dict] = {}
-    for order in orders:
-        # The SHOP belongs in the key (#101): a recipient group shares a delivery, but two
-        # shops are two customers with two EANs, and merging them writes one shop's name
-        # over both shops' pastry.
-        key = (str(order.get("deliveryDate") or ""), str(order.get("orderNumber") or ""),
-               str(order.get("store") or ""))
-        if key not in merged:
-            merged[key] = dict(order, items=list(order.get("items") or []))
-            continue
-        into = merged[key]
-        into["items"].extend(order.get("items") or [])
-        groups = [g for g in (into.get("recipientGroup"), order.get("recipientGroup")) if g]
-        into["recipientGroup"] = ", ".join(dict.fromkeys(groups))
-    return list(merged.values())
 
 
 _LOAD_CODEX = object()
@@ -1041,7 +996,7 @@ def diff(ours: dict, theirs: dict | None) -> list[str]:
     return out
 
 
-OUR_DOMAIN = "slovnormal.sk"
+OUR_DOMAIN = store_rules.OUR_DOMAIN
 
 
 def _sender_address(message: dict, extracted: dict, customers: list[dict]) -> str:
@@ -1057,7 +1012,7 @@ def _sender_address(message: dict, extracted: dict, customers: list[dict]) -> st
     """
     envelope = (message.get("from_addr") or "").strip()
     stated = (extracted.get("senderEmail") or "").strip()
-    if envelope and OUR_DOMAIN not in envelope.lower():
+    if envelope and not store_rules.is_own_address(envelope):
         return envelope
     known = {e.lower() for c in customers for e in (c.get("emails") or [])}
     if stated and stated.lower() in known:

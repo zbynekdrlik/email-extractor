@@ -6,6 +6,8 @@ the backend /version (the mandatory web rules).
 """
 import re
 
+from playwright.sync_api import expect
+
 from app import db
 
 
@@ -20,7 +22,8 @@ def _collect_console(page):
 def test_dashboard_user_workflow(live_server, pg, page):
     pg.execute("INSERT INTO messages (message_id, from_addr, subject, category, processed, "
                "proc_status, proc_outcome) VALUES "
-               "('e1','kupujuci@x.sk','Objednavka chleba','ai_orders', true, 'ok','EDI nahrate')")
+               "('e1','kupujuci@x.sk','Objednavka chleba','ai_orders', true, 'ok','EDI nahrate'),"
+               "('e2','iny@x.sk','Faktura za maslo','ai_orders', true, 'ok','EDI nahrate')")
     db.log_event(pg, "e1", "ai_orders", "uploaded_orion", "ok",
                  outcome="EDI nahrate", detail={"edi_file": "ORDER_1.txt"})
 
@@ -38,14 +41,19 @@ def test_dashboard_user_workflow(live_server, pg, page):
 
     # list shows the seeded mail; search narrows then restores
     page.wait_for_selector("text=Objednavka chleba")
-    page.fill("#q", "chleba")
-    page.wait_for_timeout(600)               # debounced search (350 ms)
-    assert page.locator("text=Objednavka chleba").count() == 1
+    # the search is debounced (350 ms) and then fetches: wait for the list itself, never a
+    # fixed sleep (a busy box missed the 600 ms window and read the unfiltered list)
+    mail = page.locator("text=Objednavka chleba")
+    with page.expect_response(lambda r: "/api/messages?" in r.url
+                              and "q=chleba" in r.url) as found:
+        page.fill("#q", "chleba")              # the matching search really runs
+    assert [i["subject"] for i in found.value.json()["items"]] == ["Objednavka chleba"]
+    expect(mail).to_have_count(1)
+    expect(page.locator("text=Faktura za maslo")).to_have_count(0)
     page.fill("#q", "neexistujuce_slovo_xyz")
-    page.wait_for_timeout(600)
-    assert page.locator("text=Objednavka chleba").count() == 0
+    expect(mail).to_have_count(0)
     page.fill("#q", "")
-    page.wait_for_timeout(600)
+    expect(mail).to_have_count(1)
 
     # open detail -> the pipeline event shows in the timeline
     page.click("text=Objednavka chleba")
@@ -728,9 +736,15 @@ def test_board_dl_item_not_stock_answer_learns_a_supplier_rule_in_the_browser(
     button.click()
     row = _wait_answered(pg, page, qid)
     assert row[0] == "answered" and row[1] == "not_stock", row
-    assert pg.execute(
-        "SELECT source, card FROM dl_item_memory WHERE supplier_ean = '2000000000009' "
-        "AND gtin = 'not_stock' AND deleted_at IS NULL").fetchall() == [("human", label)]
+    # the answer route commits the status, THEN applies the answer on its own connection
+    # (#116) — wait for the learned rule, never read it the instant the status flips
+    rule_sql = ("SELECT source, card FROM dl_item_memory WHERE supplier_ean = '2000000000009' "
+                "AND gtin = 'not_stock' AND deleted_at IS NULL")
+    for _ in range(80):
+        if pg.execute(rule_sql).fetchall():
+            break
+        page.wait_for_timeout(100)
+    assert pg.execute(rule_sql).fetchall() == [("human", label)]
 
     page.locator('.q-chip[data-status="answered"]').click()
     page.wait_for_selector(f"#q-card-{qid} .q-answer:has-text('{label}')")
