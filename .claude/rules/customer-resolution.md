@@ -174,7 +174,8 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
 - **Rung order inside `resolve`**: (1) a learned shop rule (`store_rule`) — exactly its shop,
   for ANY sender; (2) family: street in the header (`_by_store`, #101) — in a multi-shop mail
   or for a rule sender `strict`: the street's folded words INCLUDING the house number (digit
-  and letter runs apart — „35BB", round 9) must all be in the header (round 8: „BISTRO Hlavná
+  and letter runs apart — „35BB", round 9; a one-letter suffix glued to its number first,
+  „19/A" = „19/a" = „19A" ≠ „19/B", round 17) must all be in the header (round 8: „BISTRO Hlavná
   5" matched „Hlavná 12"; the #101 corpus case GT1 / GT2 still resolves), any other mail
   exactly as #101; (3) family: `_by_delivery_address` —
   NOT in a multi-shop mail; (4) the old llm / exact_email rungs.
