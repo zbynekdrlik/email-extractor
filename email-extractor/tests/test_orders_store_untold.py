@@ -247,3 +247,34 @@ def test_one_unnamed_shop_on_two_days_of_a_body_mail_stays_one_shop():
     keys = store_key.for_orders([{"store": "Predajňa A", "deliveryDate": "04.08.2026"},
                                  {"store": "Predajňa A", "deliveryDate": "05.08.2026"}])
     assert not store_key.is_multi_store(keys)
+
+
+# --- review round 15 ------------------------------------------------------------------------
+
+def test_shops_coded_t1_t2_or_a_b_next_to_a_shared_word_stay_apart(pg):
+    """„T1 Centrum" / „T2 Centrum" (and „A Centrum" / „B Centrum") were both {centrum} — the
+    code was dropped from the identity — one held order, one question, one answer for both."""
+    from test_orders_store_rules import _env, _run, _shop_questions
+    _env(pg)
+    for mid, (one, two) in (("m-t", ("T1 Centrum", "T2 Centrum")),
+                            ("m-ab", ("A Centrum", "B Centrum"))):
+        # file names that add no word („… A.xlsx" / „… B.xlsx"): only the header tells
+        result, rec = _run(pg, mid, stores=[(one, "A", "rožok 50g", 120, "G50"),
+                                            (two, "B", "vianočka 400g", 7, "VIA"),
+                                            ("Predajňa: Tržnica", "TR", "chlieb kváskový", 3,
+                                             "CHL")])
+        assert rec.uploads == [], mid
+        assert {one, two} <= set(_shop_questions(pg)), mid
+        assert pg.execute("SELECT count(*) FROM held_orders WHERE message_id = %s",
+                          (mid,)).fetchone() == (3,), mid
+
+
+def test_two_goods_files_under_one_week_code_stay_one_order(pg):
+    """#81.1: ONE shop's goods in two files, every sheet headed by the week „T42" — the code
+    every order of the mail shares is the week, not a shop: one order, as before #493."""
+    text = ("Subject: objednávka\n\nFrom: " + SENDER + "\n\nBody: Dobrý deň.\n\nAttachments:\n"
+            "===== Objednávka pečivo.xlsx =====\n[Sheet: H]\nT42\nRožky 120 ks\n\n"
+            "===== Objednávka chlieb.xlsx =====\n[Sheet: H]\nT42\nChlieb kváskový 1kg 5 ks\n")
+    orders = [_o("T42", _it("Rožky", 120, "Rožky 120 ks")),
+              _o("T42", _it("Chlieb kváskový 1kg", 5, "Chlieb kváskový 1kg 5 ks"))]
+    assert _run(pg, "m-t42", text, orders) == [("2999000000101", ["ROZ", "CHL"])]
