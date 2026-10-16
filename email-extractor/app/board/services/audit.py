@@ -36,6 +36,9 @@ _SOFT_DELETE_TABLES: dict[str, tuple[str, bool]] = {
     "global_item_memory": ("id", False),
     "dl_item_memory": ("id", False),
     "dl_supplier_memory": ("id", False),
+    # #493: the warehouse's shop rules (sender + shop key -> card); read at resolve time, no
+    # snapshot to rebuild
+    "customer_store_rules": ("id", False),
 }
 
 
