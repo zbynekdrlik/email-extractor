@@ -182,10 +182,15 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   `_by_street_strict`: a header with an undecidable house number (`_undecidable_numbers`: one
   letter written apart WITHOUT a dot — „19 A", „SNP 48 A", „19 b", round 20 — or a slash
   letter WITH a dot — „19/A.", „7 / B. Bystrica", round 21: house 7/B or house 7 + an
-  initial?) that ANY family card carries decides nothing (round 22: gluing one reading
-  before the count let another card win); a card with NO house number is no proof for a
-  header that has one; the fit must be UNIQUE (a header naming several branches decides
-  nothing — round 21: „Hlavná 5 a 7") → otherwise asked.
+  initial?; or a shop code's number „GT1" → 1, round 23) that ANY family card carries decides
+  nothing (round 22: gluing one reading before the count let another card win); a card with
+  NO house number never wins for a header that has one, yet BLOCKS when it fits unless a
+  fitting numbered card covers all its words (round 23: „BISTRO Námestie SNP 48" names both
+  „Námestie SNP" and „SNP 48"; „Hlavná" beside „Hlavná 19/A" is that card's street); the fit
+  must be UNIQUE (round 21: „Hlavná 5 a 7") → otherwise asked. Accepted over-asks (safe):
+  any number in the header counts as „has a number" (a shop code „Predajňa 2: Tržnica" with a
+  numberless „Tržnica" card is asked), and a shop number equal to another card's house
+  number blocks („Predajňa 3 A Hlavná 7" beside a „Námestie 3" card).
   Accepted over-ask (safe, settles by one answer → a rule): a Slovak one-letter word after a
   house number („Hlavná 5 v Žiline", „5 a 7") makes it undecidable too. Any other mail
   exactly as #101; (3) family: `_by_delivery_address` —
