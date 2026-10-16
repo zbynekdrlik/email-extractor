@@ -365,3 +365,19 @@ def test_an_unsure_house_number_vetoes_only_a_unique_winner():
     assert _street_hit(_street_family("Hlavná 19", "Hlavná 19/A"), "BISTRO Hlavná 19/A.") is None
     assert _street_hit(_street_family("Hlavná 5", "Hlavná 7"), "BISTRO Hlavná 5 a 7") is None
     assert _street_hit(_street_family("Hlavná 1", "Hlavná 12"), "Predajňa 1 A, Hlavná 12") is None
+
+
+def test_an_undecidable_house_number_or_a_numberless_card_is_never_proof():
+    """Round 22: gluing „7 / B." before the count silently picked one reading — another card
+    whose words fit then won („Hlavná 5, 7 / B. Bystrica" → the 5 card; a numberless „Hlavná"
+    card for „7 / B." or „19/A."). A header with an undecidable house number that a family
+    card carries is asked; a card with NO house number is no proof for a header that has one
+    („BISTRO Hlavná 12" is not the card „Hlavná")."""
+    assert _street_hit(_street_family("Hlavná 5", "Hlavná 7"),
+                       "BISTRO Hlavná 5, 7 / B. Bystrica") is None
+    assert _street_hit(_street_family("Hlavná 7", "Hlavná"), "BISTRO Hlavná 7 / B. Bystrica") is None
+    assert _street_hit(_street_family("Hlavná 19", "Hlavná"), "BISTRO Hlavná 19/A.") is None
+    assert _street_hit(_street_family("Hlavná 7", "Hlavná"), "BISTRO Hlavná 12") is None
+    fam = _street_family("Hlavná 19", "Hlavná 19/A", "Hlavná")
+    assert _street_hit(fam, "BISTRO Hlavná 19/B") is None
+    assert _street_hit(fam, "BISTRO Hlavná 19/A") == ("2999000000802", "store_address")
