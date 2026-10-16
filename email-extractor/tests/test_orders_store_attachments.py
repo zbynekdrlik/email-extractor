@@ -381,3 +381,14 @@ def test_an_undecidable_house_number_or_a_numberless_card_is_never_proof():
     fam = _street_family("Hlavná 19", "Hlavná 19/A", "Hlavná")
     assert _street_hit(fam, "BISTRO Hlavná 19/B") is None
     assert _street_hit(fam, "BISTRO Hlavná 19/A") == ("2999000000802", "store_address")
+
+
+def test_a_numberless_card_naming_the_header_still_blocks():
+    """Round 23: dropping a numberless card from the count made „BISTRO Námestie SNP 48" ship
+    to „SNP 48" although it names the „Námestie SNP" card's street too, and „GT1 Hlavná" ship
+    to „Hlavná 1" (the 1 is the shop code). A numberless card blocks unless a fitting
+    numbered card covers all its words; a code's number („GT1") is no house number."""
+    assert _street_hit(_street_family("Námestie SNP", "SNP 48"),
+                       "BISTRO Námestie SNP 48") is None
+    assert _street_hit(_street_family("OC Centrum", "Hlavná 2"), "OC Centrum, Hlavná 2") is None
+    assert _street_hit(_street_family("Hlavná", "Hlavná 1"), "GT1 Hlavná") is None
