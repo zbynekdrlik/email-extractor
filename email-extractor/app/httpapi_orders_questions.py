@@ -192,7 +192,12 @@ def register(app: Flask, deps: Deps) -> dict:
         ctx = q.get("context") or {}
         emails = _parse_emails_field(nc.get("emails"))
         ctx_email = str(ctx.get("sender_email") or "").strip().lower()
-        if ctx_email and ctx_email not in [e.lower() for e in emails]:
+        # #493: a card created for ONE SHOP of a multi-shop sender never gets the sender's
+        # address (the shop rule is the lesson — the address would make a family of it)
+        shop_question = bool(ctx.get("store_key")) or bool(ctx.get("no_address"))
+        added_email = bool(ctx_email and not shop_question
+                           and ctx_email not in [e.lower() for e in emails])
+        if added_email:
             emails.append(ctx_email)
         city = str(nc.get("city") or "").strip()
         street = str(nc.get("street") or "").strip()
@@ -251,9 +256,9 @@ def register(app: Flask, deps: Deps) -> dict:
 
         from .orders import order_customers
         with deps.db() as c2:
-            # #493: the card was created by THIS answer with the sender's address, so an undo
-            # takes the address back (`email_added=True`); a shop question also teaches its rule
-            order_customers.learn(c2, q, ean, "sklad", email_added=True)
+            # #493: an undo takes back the address only when THIS answer put it on the new
+            # card (`email_added`); a shop question teaches its rule instead
+            order_customers.learn(c2, q, ean, "sklad", email_added=added_email)
             hold.set_customer(c2, qid, ean, name)
             released = hold.release_for_question(c2, deps.cfg, qid)
         return jsonify(ok=True, question=answered, released=released,

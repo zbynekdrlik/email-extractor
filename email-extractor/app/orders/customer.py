@@ -17,13 +17,14 @@ so the authority order matters:
 3. otherwise nothing — a wrongly addressed order is worse than one sent for review.
 
 #493 — a customer with SEVERAL SHOPS ordering in one mail (one attachment per shop). Above
-everything: a shop rule the warehouse taught (sender + shop key → card, `store_rule`). Within
-a family the shop is decided by the street in its header (#101, `store_address`), then by the
-shop key against the card's name / trade name / city / street (`store_name`, a UNIQUE hit
-only); the mail-level delivery text (#418) is NOT used when the mail carries several shops —
-it cannot tell them apart. `collapsed_shops` is the poistka: several different shop headers
-landing on ONE card through a rule that never looked at the shop are turned back into
-per-shop questions (the 2026-10-16 incident: 21 files of 5 shops shipped to one card).
+everything: a shop rule the warehouse taught for EXACTLY this shop (sender + shop key → card,
+`store_rule`). Within a family the shop is decided by the street in its header (#101,
+`store_address`), then by the shop key against the card's name / trade name / city / street
+(`store_name`, a UNIQUE hit only); the mail-level delivery text (#418) is NOT used when the
+mail carries several shops — it cannot tell them apart. `collapsed_shops` is the poistka: in
+a mail of several shops only a shop rung may decide a shop — anything the model pick, the
+sender address or the delivery text decided is asked instead (the 2026-10-16 incident: 21
+files of 5 shops shipped to one card).
 """
 from __future__ import annotations
 
@@ -254,10 +255,11 @@ def _by_store_name(family: list[dict], key: store_key.StoreKey | None) -> dict |
 
 
 def _by_shop_rule(hit: store_key.RuleHit, key: store_key.StoreKey, by_ean: dict,
-                  owners: list[dict], addr: str) -> tuple[bool, Matched | None]:
+                  addr: str) -> tuple[bool, Matched | None]:
     """The learned-rule rung (#493) -> (decides, result): (True, Matched); (True, None) = ASK
-    — a conflict, or the rule would capture a shop another card of the family names;
-    (False, None) = the rule's card is gone, fall through to the other rungs."""
+    — two rules of the same shop disagree; (False, None) = the rule's card is gone, fall
+    through to the other rungs. A rule matches only its exact shop (`store_key.match_rule`),
+    so it can never capture another one."""
     if hit.conflict:
         log.warning("shop %s of %s: learned rules disagree — asking", key.text, addr)
         return True, None
@@ -266,15 +268,6 @@ def _by_shop_rule(hit: store_key.RuleHit, key: store_key.StoreKey, by_ean: dict,
         log.info("shop rule %s -> %s of %s names no current card — ignored", key.text,
                  hit.ean, addr)
         return False, None
-    # review round 1: a NARROW rule ({dolina}) must not capture a different shop whose key
-    # carries a word naming ANOTHER card of the family („BISTRO Dolina")
-    leftover = store_key.stems(key.key - hit.words)
-    rivals = [c.get("ean_edi") for c in owners
-              if c.get("ean_edi") != hit.ean and leftover & _card_words(c)]
-    if rivals:
-        log.warning("shop %s of %s: rule %s -> %s, but the rest of the key names %s — asking",
-                    key.text, addr, sorted(hit.words), hit.ean, rivals)
-        return True, None
     log.info("shop %s of %s -> %s (%s) by the warehouse's shop rule", key.text, addr,
              taught.get("ean_edi"), taught.get("name"))
     return True, Matched(
@@ -290,32 +283,24 @@ def owner_count(customers: list[dict], sender_email: str) -> int:
     return sum(1 for c in customers if addr and addr in _addresses(c.get("emails")))
 
 
-def collapsed_shops(keys: list, matched: list) -> set[int]:
+def collapsed_shops(keys: list, matched: list, multi: bool) -> set[int]:
     """The poistka (#493): indexes of the orders that must be ASKED instead of shipped.
 
-    In a mail of several shops (`store_key.is_multi_store`), a card that ≥2 DIFFERENT shops
-    (`StoreKey.identity` — the header, or the file under an empty „Predajňa:") resolved to
-    is a collapse: EVERY order on that card that got there through a rule that never looked
-    at the shop (`llm`, `exact_email`, `delivery_address`) is turned back into a question —
-    also one that names no shop at all (review round 1: the empty-header file shipped to the
-    one card). A shop resolved by a shop rule (`STORE_RULES`) keeps its card."""
-    if not store_key.is_multi_store(keys):
+    In a mail of several shops (`multi` — `store_key.is_multi_store`) a shop is shipped ONLY
+    when a SHOP rung decided it (`STORE_RULES`: a learned shop rule, the street, the shop
+    name). Every order that got its card from a rule that never looked at the shop (`llm`,
+    `exact_email`, `delivery_address`) is asked instead — also when it is the only order on
+    that card (review round 2: with the other shops taught, the one new shop went silently
+    to the sender's card) and when it names no shop at all. Converges: one question per
+    shop, then a learned rule."""
+    if not multi:
         return set()
-    by_card: dict[str, list[int]] = {}
-    for i, m in enumerate(matched):
-        if m is not None:
-            by_card.setdefault(m.ean_edi, []).append(i)
-    out: set[int] = set()
-    for ean, idxs in by_card.items():
-        shops = {keys[i].identity for i in idxs if keys[i].identity}
-        if len(shops) < 2:
-            continue
-        loose = {i for i in idxs if matched[i].rule not in STORE_RULES}
-        if loose:
-            log.warning("poistka: %d different shops resolved to ONE card %s (%s) — %d "
-                        "order(s) via a non-shop rule are held and asked per shop",
-                        len(shops), ean, [keys[i].label for i in idxs], len(loose))
-        out |= loose
+    out = {i for i, m in enumerate(matched)
+           if m is not None and m.rule not in STORE_RULES}
+    if out:
+        log.warning("poistka: %d order(s) of a mail with several shops were decided by a "
+                    "rule that ignores the shop (%s) — held and asked per shop", len(out),
+                    sorted({(keys[i].label, matched[i].rule) for i in out}))
     return out
 
 
@@ -353,7 +338,7 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
     # is a human decision about exactly this (sender, shop), written only by a board answer.
     hit = store_key.match_rule(rules, key) if rules else None
     if hit is not None and key is not None:
-        applies, decided = _by_shop_rule(hit, key, by_ean, owners, addr)
+        applies, decided = _by_shop_rule(hit, key, by_ean, addr)
         if applies:
             return decided
 

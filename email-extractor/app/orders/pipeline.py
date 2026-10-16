@@ -342,19 +342,18 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
     email_matched = matched = _customer_for()
     is_change = bool(extracted.get("isChangeRequest"))
 
-    orders = _merge_by_day(orders)
-    # #101/#493: who each order is for — per shop (block header + attachment), the sender's
-    # learned shop rules, and the poistka against several shops collapsing onto one card
-    oc = order_customers.resolve_orders(conn, customers, sender, extracted, cust_answer,
-                                        orders)
-    # #81.1: one delivery day of ONE card is ONE order, whichever files it came from
-    orders, oc = order_customers.merge_by_card(orders, oc)
+    # #81.1/#101/#493: one delivery day is ONE order per shop, and who each order is for —
+    # per shop (block header + attachment), the sender's learned shop rules, and the
+    # poistka: in a mail of several shops only a shop rung may decide a shop
+    orders, oc = order_customers.resolve_orders(conn, customers, sender, extracted,
+                                                cust_answer, orders)
 
     def _ask_customer(i: int, order: dict) -> int | None:
         return order_customers.ask(conn, message=message, sender=sender, extracted=extracted,
                                    customers=customers, free_text=free_text, order=order,
                                    key=oc.keys[i], scoped=oc.scoped[i],
-                                   on_new=new_questions.append)
+                                   on_new=new_questions.append,
+                                   shop_context=oc.shop_context)
     # #164: do NOT move this check to after product matching — that would push mails the
     # date conflict used to short-circuit into NEW per-item LLM calls, missing the frozen
     # corpus cache and forcing a paid re-record (see the design comment on #164).
@@ -692,12 +691,9 @@ def _merge_by_day(orders: list[dict]) -> list[dict]:
     """
     # The SHOP belongs in the key (#101): a recipient group shares a delivery, but two
     # shops are two customers with two EANs, and merging them writes one shop's name over
-    # both shops' pastry. #493: so does the ATTACHMENT — two shops whose header blocks are
-    # empty („Predajňa:") differ only by their file; files of ONE card are merged later,
-    # once the customer of each is known (`order_customers.merge_by_card`).
-    return order_customers.merge_orders(
-        orders, lambda o: (str(o.get("deliveryDate") or ""), str(o.get("orderNumber") or ""),
-                           str(o.get("store") or ""), str(o.get("sourceFile") or "")))
+    # both shops' pastry. #493: a mail of several shops merges per shop identity (header +
+    # file) inside `order_customers.resolve_orders`; this is the single-shop merge it uses.
+    return order_customers.merge_by_day(orders)
 
 
 _LOAD_CODEX = object()

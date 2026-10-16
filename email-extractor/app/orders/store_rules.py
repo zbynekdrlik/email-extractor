@@ -12,10 +12,9 @@ automatic re-resolve sweep or any other automation. Every write is audited
 take it away, and undoing the answer takes its rule back.
 
 `customer.resolve` reads the rules of ONE sender per mail (`for_sender`) and matches them in
-pure code (`store_key.match_rule`): a rule applies when all its words are in the order's
-shop key; the most specific applicable rules decide; when they disagree, or the rest of the
-order's key names another card of the family, the order is asked again (`customer.
-_by_shop_rule`) — never resolved by recency.
+pure code (`store_key.match_rule`): a rule applies only to EXACTLY its shop (its words equal
+the order's key or all of its words — never a subset); live rules of one shop that disagree
+are asked again (`customer._by_shop_rule`) — never resolved by recency.
 """
 from __future__ import annotations
 
@@ -68,12 +67,12 @@ def remember(conn, *, sender_email: str, key: StoreKey, ean_edi: str, question_i
     live = conn.execute(
         f"SELECT id, ean_edi FROM {TABLE} WHERE sender_email = %s AND store_key = %s "
         "AND deleted_at IS NULL ORDER BY id", (sender, key.text)).fetchall()
+    same = next((int(rid) for rid, old_ean in live if old_ean == ean), None)
+    # every OTHER live rule of this shop goes (also the second live rule a Kôš restore of a
+    # replaced one left behind — else the shop stays a conflict, asked forever)
     for rid, old_ean in live:
         if old_ean == ean:
-            log.info("shop rule %s/%r -> %s already known (rule %s)", sender, key.text, ean,
-                     rid)
-            return int(rid)
-    for rid, old_ean in live:
+            continue
         before = _row(conn, rid)
         conn.execute(f"UPDATE {TABLE} SET deleted_at = now() WHERE id = %s", (rid,))
         _audit(conn, actor=by or "sklad", row_id=rid, action="delete", before=before,
@@ -81,6 +80,9 @@ def remember(conn, *, sender_email: str, key: StoreKey, ean_edi: str, question_i
                question_id=question_id)
         log.warning("shop rule %s/%r: %s replaced by %s (question %s)", sender, key.text,
                     old_ean, ean, question_id)
+    if same is not None:
+        log.info("shop rule %s/%r -> %s already known (rule %s)", sender, key.text, ean, same)
+        return same
     rid = conn.execute(
         f"""INSERT INTO {TABLE} (sender_email, store_key, store_label, ean_edi, question_id,
                                  created_by)
