@@ -41,7 +41,8 @@ _SPACES_RE = re.compile(r"\s+")
 # round 6) and a year too: a year in a header re-asks once a year, dropping it could make two
 # shops one. A range needs its dot („16.-20.10."): „BISTRO 1 - 16.10." keeps its 1 (round 7).
 _HEADER_NOISE_RE = re.compile(
-    r"(?<!\d)\d{1,2}\s*\.\s*\d{1,2}(?:\s*\.\s*(?:\d{4}|\d{2})(?!\d))?\.?(?!\d)"
+    r"(?<!\d)\d{1,2}\s*/\s*\d{1,2}\s*/\s*(?:\d{4}|\d{2})(?!\d)"
+    r"|(?<!\d)\d{1,2}\s*\.\s*\d{1,2}(?:\s*\.\s*(?:\d{4}|\d{2})(?!\d))?\.?(?!\d)"
     r"|(?<!\d)\d{1,2}\s*\.\s*[-\u2013\u2014]\s*(?=\d{1,2}\s*\.\s*\d{1,2})"
     r"|\bobj(?!ekt)\w*\s*\.?\s*(?:c\s*\.?\s*|cislo\s*)?\d{4,}"
     r"|(?<!\d)\d{1,2}\s*\.?\s*(?:tyzden\w*|tyzd\w*|tyz|week|kw|kt)\b"
@@ -54,22 +55,25 @@ SHOP_WORDS = frozenset({
     "predajna", "predajne", "predajni", "predajnu", "prevadzka", "prevadzky", "prevadzku",
     "pobocka", "pobocky", "filialka",
 })
-STOPWORDS = SHOP_WORDS | frozenset({
-    # order / document words
+# order / document words
+DOCUMENT_WORDS = frozenset({
     "obj", "objed", "objednavka", "objednavky", "objednavku", "objednavok", "objednavkovy",
     "order", "zoznam", "tabulka", "harok", "sheet", "list",
-    # our own brand: the supplier, never a customer's shop
-    "pekarova", "pekarovej", "pekarovu", "zena", "zeny", "slovnormal",
-    # week / day words — change every week, never identify a shop
+})
+# our own brand: the supplier, never a customer's shop
+BRAND_WORDS = frozenset({"pekarova", "pekarovej", "pekarovu", "zena", "zeny", "slovnormal"})
+# week / day words — change every week, never identify a shop; month names in the NOMINATIVE
+# only („október" in a file name) — the genitive forms are street names („29. augusta")
+TIME_WORDS = frozenset({
     "tyzden", "tyzdna", "tyzdni", "tyzdne", "tyz", "tyzd", "week", "kw",
     "pondelok", "utorok", "streda", "stvrtok", "piatok", "sobota", "nedela",
-    # month names in the NOMINATIVE only („október" in a file name); the genitive forms stay
-    # — they are street names („29. augusta", „1. mája")
     "januar", "februar", "marec", "april", "maj", "jun", "jul", "august", "september",
     "oktober", "november", "december",
-    # legal forms / connectors
-    "sro", "spol", "as", "na", "pre", "do", "od", "a", "s", "r", "o", "v", "z", "k",
 })
+# legal forms / connectors
+FILLER_WORDS = frozenset({"sro", "spol", "as", "na", "pre", "do", "od",
+                          "a", "s", "r", "o", "v", "z", "k"})
+STOPWORDS = SHOP_WORDS | DOCUMENT_WORDS | BRAND_WORDS | TIME_WORDS | FILLER_WORDS
 
 
 def _squash(text: str) -> str:
@@ -273,35 +277,31 @@ def for_orders(orders: list[dict], drop=()) -> list[StoreKey]:
             for header, src, toks, unknown in raw]
 
 
-# words that make a header a document / time line, not a shop block („Objednávka 04.08.",
-# „Hárok 1", „Pondelok") — a number next to them is no shop code (`names_a_block`)
-_DOCUMENT_WORDS = frozenset({
-    "obj", "objed", "objednavka", "objednavky", "objednavku", "objednavok", "objednavkovy",
-    "order", "zoznam", "tabulka", "harok", "sheet", "list",
-})
-_TIME_WORDS = frozenset({
-    "tyzden", "tyzdna", "tyzdni", "tyzdne", "tyz", "tyzd", "week", "kw", "kt",
-    "pondelok", "utorok", "streda", "stvrtok", "piatok", "sobota", "nedela",
-    "januar", "februar", "marec", "april", "maj", "jun", "jul", "august", "september",
-    "oktober", "november", "december",
-})
-_NEUTRAL_WORDS = frozenset({"c", "cislo", "no", "nr", "na", "pre", "do", "od", "sro", "spol",
-                            "pekarova", "pekarovej", "pekarovu", "zena", "zeny", "slovnormal"})
+# a header's words that never name a shop block on their own („Objednávka 04.08.", „Hárok 1",
+# „v pondelok", „a.s.") — the SAME lists `tokens` drops, plus the number words „č." / „no."
+_NOT_A_BLOCK = DOCUMENT_WORDS | BRAND_WORDS | TIME_WORDS | FILLER_WORDS | {"c", "cislo", "no",
+                                                                          "nr", "kt"}
+_YEAR_RE = re.compile(r"^(19|20)\d{2}$")
 
 
 def names_a_block(key: StoreKey) -> bool:
     """The order sits under a header block of its own: its header carries a generic shop word
-    („Predajňa:"), a word that is not a document / time / filler word (a name, a code „A"),
-    or a number no document word owns („č. 2"). A header of only noise — a date, a calendar
-    week, „Objednávka 04.08.", „Objednávka č. 123", „Hárok 1", „Pondelok" — names no block
-    (review rounds 10-12)."""
-    words = [w for w in _NON_ALNUM_RE.split(_HEADER_NOISE_RE.sub(" ", dl_match.fold(
-        key.header))) if w]
+    („Predajňa:"), a word that is no document / time / filler word (a name), a lone CAPITAL
+    letter (a shop code „A"), or a number no document word owns („č. 2"). A header of only
+    noise — a date („04/08/2026" too), a calendar week („T42"), „Objednávka č. 123", „Hárok 1",
+    „v pondelok", „a.s.", a bare year — names no block (review rounds 10-13)."""
+    folded = _HEADER_NOISE_RE.sub(" ", dl_match.fold(key.header))
+    words = [w for w in _NON_ALNUM_RE.split(folded) if w]
     if SHOP_WORDS & set(words):
         return True
-    owned = bool(_DOCUMENT_WORDS & set(words))
+    capitals = {c.lower() for c in re.findall(r"(?<![^\W\d_])[A-Z](?![^\W\d_])", key.header)}
+    owned = bool(DOCUMENT_WORDS & set(words))
     for w in words:
-        if w in _DOCUMENT_WORDS or w in _TIME_WORDS or w in _NEUTRAL_WORDS:
+        if len(w) == 1 and w.isalpha():
+            if w in capitals:
+                return True
+            continue
+        if w in _NOT_A_BLOCK or _WEEK_CODE_RE.match(w) or _YEAR_RE.match(w):
             continue
         if w.isdigit():
             if not owned and len(w) <= MAX_HEADER_NUMBER:
@@ -323,8 +323,11 @@ def is_multi_store(keys: list[StoreKey], shop_evidence: bool = False) -> bool:
     # their own („Predajňa:", review round 8), from an attachment that could not be told
     # (round 11: the PR form's line was also in the body) or from a file whose name has no
     # shop words (round 12: „OBJ Pekárová žena.xlsx" next to the Tržnica form; „Predajňa A"
-    # / „Predajňa B" counted once) — else both shops went to the sender's card
-    shops += len({(_squash(k.header), k.source_file) for k in keys
+    # / „Predajňa B" counted once); an untold one always counts on its own (round 13: two
+    # blank „Predajňa:" forms whose files were untold counted once) — else both shops went to
+    # the sender's card
+    shops += len({(_squash(k.header), k.source_file or ("untold", i))
+                  for i, k in enumerate(keys)
                   if not k.identity and (names_a_block(k) or k.file_unknown or k.source_file)})
     return (shop_evidence or any(names_a_block(k) for k in keys)) and shops >= 2
 
