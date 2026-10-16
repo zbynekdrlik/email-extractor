@@ -227,12 +227,15 @@ def test_a_different_answer_for_the_same_shop_replaces_the_rule_audited(pg):
                                 by="sklad") is None
 
 
-def test_the_sweep_settles_a_shop_question_once_a_card_has_its_street(pg, monkeypatch):
-    """A card corrected in CODEX gets the street the shop's header names: the open question
-    is settled through the SHOP rung (#101 street) — the order ships, and automation teaches
-    no rule; „PR" (named by no street) stays a question. A card's NAME never settles it
-    (review round 7)."""
-    monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
+def test_the_sweep_never_settles_a_shop_question_by_the_street(pg, monkeypatch):
+    """A card corrected in CODEX gets the street the shop's header names: the open shop
+    question STAYS for the warehouse (review round 26 — re-resolved alone, the street shipped
+    shops the mail-level check had refused; only a learned rule settles a shop question
+    automatically). Nothing ships, automation teaches no rule. A card's NAME never settles it
+    either (review round 7)."""
+    uploads = []
+    monkeypatch.setattr("app.orders.upload.put",
+                        lambda cfg, name, content: uploads.append(name) or True)
     _env(pg)
     stores = [("Predajňa Lesná 4", "LE", "rožok kváskový 70g", 5, "G70"),
               ("PR", "PR", "chlieb kváskový", 3, "CHL")]
@@ -243,13 +246,12 @@ def test_the_sweep_settles_a_shop_question_once_a_card_has_its_street(pg, monkey
     codex_customers.replace_customers(
         pg, [dict(s, emails=[SENDER], zip="", codex_id=s["ean_edi"]) for s in fixed])
     snapshot.rebuild_from_overrides(pg)
-    released = hold.retry_unknown_customer_questions(pg, _cfg())
-    assert [r["status"] for r in released] == ["ok"]
-    assert pg.execute("SELECT status, customer_ean FROM held_orders WHERE message_id = 'm1' "
-                      "AND store = 'Predajňa Lesná 4'").fetchone() == ("released",
-                                                                      "2999000000203")
+    assert hold.retry_unknown_customer_questions(pg, _cfg()) == []
+    assert uploads == []
+    assert pg.execute("SELECT status FROM held_orders WHERE message_id = 'm1' "
+                      "AND store = 'Predajňa Lesná 4'").fetchone() == ("held",)
     assert store_rules.for_sender(pg, SENDER) == [], "automation never teaches a rule"
-    assert set(_shop_questions(pg)) == {"PR"}
+    assert set(_shop_questions(pg)) == {"Predajňa Lesná 4", "PR"}
 
 
 def test_a_shop_answer_teaches_the_rule_not_the_senders_address(pg, monkeypatch):

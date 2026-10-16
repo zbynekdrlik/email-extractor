@@ -191,12 +191,15 @@ def _m(ean, rule):
 
 def test_the_poistka_asks_every_shop_a_shop_rung_did_not_decide():
     """In a multi-shop mail only a SHOP rung may decide a shop — also a lone shop on its own
-    card (review round 2: one new shop next to taught ones went to the sender's card)."""
+    card (review round 2: one new shop next to taught ones went to the sender's card). A
+    street decision stands only when the whole mail fits the family (round 26) — here PR and
+    TR were decided by no shop rung, so BISTRO's street decision is asked too; a learned
+    rule stands."""
     keys = store_key.for_orders([{"store": "BISTRO"}, {"store": "PR"}, {"store": "TR"},
                                  {"store": "BISTRO"}])
     matched = [_m("A", "store_address"), _m("A", "llm"), _m("B", "exact_email"),
                _m("A", "store_rule")]
-    assert customer.collapsed_shops(keys, matched, multi=True) == {1, 2}
+    assert customer.collapsed_shops(keys, matched, multi=True) == {0, 1, 2}
 
 
 def test_the_poistka_never_acts_outside_a_multi_shop_mail():
