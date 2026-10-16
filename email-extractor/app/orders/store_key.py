@@ -34,13 +34,13 @@ _WEEK_CODE_RE = re.compile(r"^(kw|t|tyz|w|wk)\d+$")
 _SPACES_RE = re.compile(r"\s+")
 # what a HEADER's numbers must not keep (review round 5: „BISTRO 16.10." changed its identity
 # every mail, so its rule never matched again): a date („16.10.", „16. 10. 2026", „16.10"), a
-# week number („42. týždeň", „KW 42") — on the folded text; numbers of 4+ digits (an order
-# number, a year) are dropped in `tokens`. Short standalone numbers stay („Predajňa 2", a
-# house number).
+# calendar week („42. týždeň", „43 KT", „KW 42") — on the folded text; numbers of 4+ digits
+# (an order number, a year) are dropped in `tokens`. Short standalone numbers stay
+# („Predajňa 2", a house number).
 _HEADER_NOISE_RE = re.compile(
     r"(?<!\d)\d{1,2}\s*\.\s*\d{1,2}(?:\s*\.\s*(?:\d{4}|\d{2})(?!\d))?\.?(?!\d)"
-    r"|(?<!\d)\d{1,2}\s*\.?\s*(?:tyzden\w*|tyzd\w*|tyz|week|kw)\b"
-    r"|\b(?:kw|week|tyzden)\s*\.?\s*\d{1,2}(?!\d)")
+    r"|(?<!\d)\d{1,2}\s*\.?\s*(?:tyzden\w*|tyzd\w*|tyz|week|kw|kt)\b"
+    r"|\b(?:kw|kt|week|tyzden)\s*\.?\s*\d{1,2}(?!\d)")
 MAX_HEADER_NUMBER = 3   # digits of a number a header keeps
 
 STOPWORDS = frozenset({
