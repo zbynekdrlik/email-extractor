@@ -178,12 +178,14 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   slash or glued is ONE unit, „19/A" = „19/a" = „19A" ≠ „19/B" ≠ „19", rounds 17-18: the 19/B
   shop matched the „19/A" card, then a bare „19" card; a letter written APART is never glued
   — „7 B. Bystrica" (with its dot) is house 7, round 19) must all be in the header (round 8:
-  „BISTRO Hlavná 5" matched „Hlavná 12"; the #101 corpus case GT1 / GT2 still resolves). The
-  match must be UNIQUE first (a header naming several branches decides nothing — round 21:
-  a veto that pruned candidates first made „Hlavná 5 a 7" ship to the 7 card); then the one
-  winner is vetoed when its house number is undecidable (`_undecidable_numbers`: one letter
-  written apart WITHOUT a dot — „19 A", „SNP 48 A", „19 b", round 20 — or a slash letter WITH
-  a dot — „19/A.", „7 / B. Bystrica", round 21: house 7/B or house 7 + an initial?) → asked.
+  „BISTRO Hlavná 5" matched „Hlavná 12"; the #101 corpus case GT1 / GT2 still resolves) —
+  `_by_street_strict`: a header with an undecidable house number (`_undecidable_numbers`: one
+  letter written apart WITHOUT a dot — „19 A", „SNP 48 A", „19 b", round 20 — or a slash
+  letter WITH a dot — „19/A.", „7 / B. Bystrica", round 21: house 7/B or house 7 + an
+  initial?) that ANY family card carries decides nothing (round 22: gluing one reading
+  before the count let another card win); a card with NO house number is no proof for a
+  header that has one; the fit must be UNIQUE (a header naming several branches decides
+  nothing — round 21: „Hlavná 5 a 7") → otherwise asked.
   Accepted over-ask (safe, settles by one answer → a rule): a Slovak one-letter word after a
   house number („Hlavná 5 v Žiline", „5 a 7") makes it undecidable too. Any other mail
   exactly as #101; (3) family: `_by_delivery_address` —
