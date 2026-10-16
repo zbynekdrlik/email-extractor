@@ -8,18 +8,19 @@ per-order decision is made now:
 
 1. every order gets its shop key (`store_key.for_orders`: block header + the attachment it
    was read from); whether the mail carries several shops is decided once
-   (`store_key.is_multi_store` — a header block, or a sender known to have several shops);
+   (`store_key.is_multi_store` — a header block, the sender's learned shop rules, or a shop
+   rung that already names the shop of one of the files);
 2. one delivery day + order number is ONE order (#81.1, `merge_orders`) — per SHOP in a
    multi-shop mail (two shops are never merged, two files of one shop are), per (day, order
    number, header) otherwise, exactly as before #493;
 3. every order is resolved with its key, the sender's learned shop rules and the multi-shop
    flag — never falling back to the mail-level customer; then orders of one day that
    resolved to the SAME card (and header) are one order again (`merge_by_card`);
-4. the poistka (`customer.collapsed_shops`): in a multi-shop mail only a SHOP rung may
-   decide a shop — anything else is asked;
-5. an unresolved order is asked PER SHOP (`ask`, dedupe key sender + shop key) whenever the
-   mail is multi-shop or the sender is a known multi-shop sender — the answer teaches a shop
-   rule (`learn`), so each shop is asked once.
+4. the poistka (`customer.collapsed_shops`): in a multi-shop mail (and for a sender with
+   learned shop rules) only a SHOP rung may decide a shop — anything else is asked;
+5. an unresolved order is asked PER SHOP (`ask`, dedupe key sender + the shop's identity)
+   in a multi-shop mail or for a sender with learned shop rules — the answer teaches a shop
+   rule (`learn`), so each shop is asked once. Any other mail keeps the pre-#493 questions.
 
 `learn` is the ONE place a human customer answer is remembered — the board answer route,
 the new-customer route and `teach.KINDS['customer'].apply` all call it.
@@ -55,27 +56,40 @@ def resolve_orders(conn, customers: list[dict], sender: str, extracted: dict, ll
     docstring). Returns the (merged) orders + their customers. Reads the sender's shop rules
     — a pure read, so it applies in shadow too, like a memory lookup."""
     rules = store_rules.for_sender(conn, sender)
-    shop_sender = bool(rules) or customer.owner_count(customers, sender) >= 2
-    multi = store_key.is_multi_store(store_key.for_orders(orders), shop_sender)
+    has_rules = bool(rules)
+
+    def _resolve(k, multi: bool, use_names: bool):
+        return customer.resolve(customers, sender, extracted.get("senderName", ""),
+                                extracted.get("companyName", ""), llm=llm,
+                                store=k.header, key=k, rules=rules, multi_store=multi,
+                                use_names=use_names,
+                                delivery_text=extracted.get("notes", ""))
+
+    raw = store_key.for_orders(orders)
+    multi = store_key.is_multi_store(raw, has_rules)
+    if not multi and len({k.identity for k in raw if k.identity}) >= 2:
+        # no header block and no rules: the FILES are shops only when a shop rung already
+        # names the shop of one of them (the incident family sending one file per shop with
+        # no header) — never for a customer's files per day / per kind of goods (#81.1)
+        named = [m for m in (_resolve(k, True, True) for k in raw)
+                 if m is not None and m.rule in customer.STORE_RULES]
+        multi = bool(named)
     by_day = (merge_orders(orders, lambda o: (_day(o), _shop(o))) if multi
               else merge_by_day(orders))
     keys = store_key.for_orders(by_day)
-    matched = [customer.resolve(customers, sender, extracted.get("senderName", ""),
-                                extracted.get("companyName", ""), llm=llm,
-                                store=k.header, key=k, rules=rules, multi_store=multi,
-                                delivery_text=extracted.get("notes", ""))
-               for k in keys]
-    collapsed = customer.collapsed_shops(keys, matched, multi)
+    use_names = multi or has_rules
+    matched = [_resolve(k, multi, use_names) for k in keys]
+    collapsed = customer.collapsed_shops(keys, matched, multi, has_rules)
     for i in collapsed:
         matched[i] = None
-    scoped = [bool(k.key) and (multi or shop_sender) for k in keys]
+    scoped = [bool(k.identity) and use_names for k in keys]
     oc = OrderCustomers(keys=keys, matched=matched, scoped=scoped, collapsed=collapsed,
-                        shop_context=multi or shop_sender)
+                        shop_context=use_names)
     for i, (k, m) in enumerate(zip(keys, matched, strict=True)):
-        log.info("order %d/%d shop %r (file %r, key %r) -> %s (%s)%s%s", i + 1, len(keys),
+        log.info("order %d/%d shop %r (file %r, shop %r) -> %s (%s)%s%s", i + 1, len(keys),
                  k.header, k.source_file, k.text, m.ean_edi if m else None,
                  m.rule if m else "asked", " [poistka]" if i in collapsed else "",
-                 " [multi-shop]" if multi else "")
+                 " [multi-shop]" if multi else (" [shop rules]" if has_rules else ""))
     return merge_by_card(by_day, oc)
 
 
@@ -91,8 +105,18 @@ def _shop(order: dict) -> frozenset:
 def merge_by_day(orders: list[dict]) -> list[dict]:
     """One delivery day + order number + shop header is ONE order (#81.1, #101) — the merge
     of a mail that does NOT carry several shops, exactly as before #493 (`pipeline.
-    _merge_by_day`). A mail of several shops merges per shop identity instead."""
-    return merge_orders(orders, lambda o: (_day(o), str(o.get("store") or "")))
+    _merge_by_day`). A mail of several shops merges per shop identity instead. An order
+    merged from DIFFERENT files names no file (its shop key must not be the first file's)."""
+    def key(o):
+        return (_day(o), str(o.get("store") or ""))
+    files: dict = {}
+    for o in orders:
+        files.setdefault(key(o), set()).add(str(o.get("sourceFile") or ""))
+    merged = merge_orders(orders, key)
+    for m in merged:
+        if len(files[key(m)]) > 1:
+            m["sourceFile"] = ""
+    return merged
 
 
 def merge_orders(orders: list[dict], key) -> list[dict]:

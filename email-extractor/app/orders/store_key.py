@@ -125,21 +125,22 @@ def locate_file(texts, source: str = "", sections=None) -> str:
 
 @dataclass(frozen=True)
 class StoreKey:
-    """One order's shop identity. `tokens` = every normalized word of its header + file
-    name; `key` = the minimal distinguishing words (mail-common words removed) — what a
-    learned rule stores and what the name rung compares; `header_key` = the header's own
-    words, which is what decides whether two orders are DIFFERENT shops (the poistka): a file
-    name alone never does — a one-shop customer may send one file per day."""
+    """One order's shop identity. `tokens` = every normalized word of its header (numbers
+    kept) + its file name — independent of the rest of the mail: it is the shop's IDENTITY,
+    what a learned rule and the per-shop question are keyed on (`text`); `key` = `tokens`
+    minus the words every order of the mail shares — only what the name rung compares."""
     header: str = ""
     source_file: str = ""
     tokens: frozenset = frozenset()
     key: frozenset = frozenset()
-    header_key: frozenset = frozenset()
 
     @property
     def text(self) -> str:
-        """The stored form of `key` (sorted, space-joined)."""
-        return " ".join(sorted(self.key))
+        """The stored form of the shop identity (sorted `tokens`, space-joined) — rule key and
+        question dedupe. Never the mail-relative `key` (review round 3: „Tesco Žilina" +
+        „Kaufland Žilina" and „Tesco Martin" + „Kaufland Martin" both reduce to {tesco}/
+        {kaufland}, and a rule stored that way captured the other town's shops)."""
+        return " ".join(sorted(self.tokens))
 
     @property
     def label(self) -> str:
@@ -154,55 +155,46 @@ class StoreKey:
 
     @property
     def identity(self) -> frozenset:
-        """Which shop this order says it is: every word of its header (numbers included) and
-        of its file — independent of the other orders of the mail. Empty = it names no shop.
-        Two files of one shop for two days („… pondelok", „… streda") are one identity (day
-        words are stopwords); two „ŽILINA" files of different names are two."""
+        """Which shop this order says it is (= `tokens`). Empty = it names no shop. Two files
+        of one shop for two days („… pondelok", „… streda") are one identity (day words are
+        stopwords); two „ŽILINA" files of different names are two."""
         return self.tokens
 
 
 def for_orders(orders: list[dict]) -> list[StoreKey]:
     """The store key of every order of ONE mail, in order. Words shared by every distinct
-    token set of the mail are dropped from `key` — unless that would leave an order with no
-    key at all (its full tokens are kept then)."""
+    token set of the mail are dropped from `key` (the name rung's view) — unless that would
+    leave an order with no key at all (its full tokens are kept then)."""
     raw = []
     for o in orders:
         header = str(o.get("store") or "").strip()
         src = str(o.get("sourceFile") or "").strip()
-        head_t = tokens(header, keep_numbers=True)
-        raw.append((header, src, frozenset(head_t + tokens(file_stem(src))),
-                    frozenset(head_t)))
-    distinct = {t for _h, _s, t, _hk in raw if t}
+        raw.append((header, src, frozenset(tokens(header, keep_numbers=True)
+                                           + tokens(file_stem(src)))))
+    distinct = {t for _h, _s, t in raw if t}
     common = frozenset.intersection(*distinct) if len(distinct) >= 2 else frozenset()
-    out = []
-    for header, src, toks, head_key in raw:
-        key = (toks - common) or toks
-        out.append(StoreKey(header=header, source_file=src, tokens=toks, key=key,
-                            header_key=head_key))
-    return out
+    return [StoreKey(header=header, source_file=src, tokens=toks,
+                     key=(toks - common) or toks) for header, src, toks in raw]
 
 
-def is_multi_store(keys: list[StoreKey], shop_sender: bool = False) -> bool:
+def is_multi_store(keys: list[StoreKey], shop_evidence: bool = False) -> bool:
     """The mail carries orders of ≥2 different shops (`identity`) AND the shops are real:
-    the model reported a shop header block on some order (even an empty „Predajňa:"), or the
-    sender is a known multi-shop sender (`shop_sender`: its address is on several cards, or
-    the warehouse already taught it shop rules) — then its FILES are shops even with no
-    header. A one-card sender's file names alone never make shops: it may send one file per
-    day, which must stay one order (#81.1)."""
-    return ((shop_sender or any(k.header.strip() for k in keys))
+    the model reported a shop header block on some order (even an empty „Predajňa:"), or
+    `shop_evidence` (the sender has learned shop rules, or a shop rung named the shop of one
+    of the files — `order_customers.resolve_orders`). File names alone, with neither, never
+    make shops: a customer may send one file per day / per kind of goods, and that must stay
+    one order (#81.1)."""
+    return ((shop_evidence or any(k.header.strip() for k in keys))
             and len({k.identity for k in keys if k.identity}) >= 2)
 
 
 def from_context(ctx: dict) -> StoreKey | None:
     """Rebuild the key a store-scoped `customer` question was asked with (its `context`)."""
-    toks = frozenset(ctx.get("store_tokens") or ())
-    key = frozenset((ctx.get("store_key") or "").split())
-    if not key:
+    toks = frozenset(ctx.get("store_tokens") or (ctx.get("store_key") or "").split())
+    if not toks:
         return None
     return StoreKey(header=str(ctx.get("store") or ""),
-                    source_file=str(ctx.get("store_file") or ""),
-                    tokens=toks or key, key=key,
-                    header_key=frozenset(tokens(ctx.get("store") or "", keep_numbers=True)))
+                    source_file=str(ctx.get("store_file") or ""), tokens=toks, key=toks)
 
 
 @dataclass(frozen=True)
@@ -217,19 +209,17 @@ class RuleHit:
 def match_rule(rules, key: StoreKey | None) -> RuleHit | None:
     """The warehouse's learned answer for this shop, or None when no rule applies. `rules` =
     [(key words, ean)] of THIS sender. A rule applies only to EXACTLY the shop it was taught
-    for: its words equal the order's key (`key`, mail-common words removed) or all of its
-    words (`tokens`) — never a subset (review round 2: a narrow {dolina} captured „BISTRO
-    Dolina", the other shop; a re-ask is safe, a capture is the incident). Two live rules of
-    the same words that disagree (a Kôš restore) are a `conflict` — asked again, never
-    resolved by recency."""
+    for — its words equal the order's whole identity (`tokens`), which does not depend on
+    the other orders of the mail (review rounds 2-3: a subset or a mail-relative key captured
+    other shops). A re-ask when a shop's header/file gains a word is the safe direction. Two
+    live rules of the same words that disagree (a Kôš restore) are a `conflict` — asked
+    again, never resolved by recency."""
     if key is None or not key.tokens:
         return None
-    hits = {(frozenset(w), ean) for w, ean in rules
-            if w and frozenset(w) in (key.key, key.tokens)}
+    hits = {(frozenset(w), ean) for w, ean in rules if w and frozenset(w) == key.tokens}
     if not hits:
         return None
     eans = {ean for _w, ean in hits}
-    words = frozenset().union(*(w for w, _e in hits))
     if len(eans) != 1:
-        return RuleHit(words=words, conflict=True)
-    return RuleHit(ean=next(iter(eans)), words=words)
+        return RuleHit(words=key.tokens, conflict=True)
+    return RuleHit(ean=next(iter(eans)), words=key.tokens)

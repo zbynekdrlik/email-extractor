@@ -547,8 +547,12 @@ def retry_unknown_customer_questions(conn, cfg, upload=None, post=None) -> list[
         matched = customer_mod.resolve(
             customers, sender_email, ctx.get("sender_name", ""), ctx.get("company_name", ""),
             key=key, rules=store_rules.for_sender(conn, sender_email) if key else (),
-            multi_store=key is not None)
-        wanted = customer_mod.STORE_RULES if key is not None else {"exact_email"}
+            multi_store=key is not None, use_names=key is not None)
+        # a per-sender question asked in a shop context (`no_address` — a multi-shop mail
+        # or sender) is settled only by a shop rung too: it has no key, so only a human
+        # (review round 3: the sweep answered it with the sender's one card)
+        shop_q = key is not None or bool(ctx.get("no_address"))
+        wanted = customer_mod.STORE_RULES if shop_q else {"exact_email"}
         if not (matched and matched.rule in wanted and matched.ean_edi):
             continue
         teach.add_candidate(conn, qid, {

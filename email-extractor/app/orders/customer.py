@@ -283,24 +283,26 @@ def owner_count(customers: list[dict], sender_email: str) -> int:
     return sum(1 for c in customers if addr and addr in _addresses(c.get("emails")))
 
 
-def collapsed_shops(keys: list, matched: list, multi: bool) -> set[int]:
+def collapsed_shops(keys: list, matched: list, multi: bool, has_rules: bool = False
+                    ) -> set[int]:
     """The poistka (#493): indexes of the orders that must be ASKED instead of shipped.
 
-    In a mail of several shops (`multi` — `store_key.is_multi_store`) a shop is shipped ONLY
-    when a SHOP rung decided it (`STORE_RULES`: a learned shop rule, the street, the shop
-    name). Every order that got its card from a rule that never looked at the shop (`llm`,
-    `exact_email`, `delivery_address`) is asked instead — also when it is the only order on
-    that card (review round 2: with the other shops taught, the one new shop went silently
-    to the sender's card) and when it names no shop at all. Converges: one question per
-    shop, then a learned rule."""
-    if not multi:
-        return set()
+    A shop is shipped ONLY when a SHOP rung decided it (`STORE_RULES`: a learned shop rule,
+    the street, the shop name) whenever it is a shop question at all: in a mail of several
+    shops (`multi`) EVERY order decided by a rule that never looked at the shop (`llm`,
+    `exact_email`, `delivery_address`) is asked — also a lone new shop on its own card and
+    an order that names no shop; for a sender with learned shop rules (`has_rules`) the same
+    holds for any order that names a shop (owner decision 2: an unknown shop is asked once).
+    Converges: one question per shop, then its rule."""
     out = {i for i, m in enumerate(matched)
-           if m is not None and m.rule not in STORE_RULES}
+           if m is not None and m.rule not in STORE_RULES
+           and (multi or (has_rules and keys[i].identity))}
     if out:
-        log.warning("poistka: %d order(s) of a mail with several shops were decided by a "
-                    "rule that ignores the shop (%s) — held and asked per shop", len(out),
-                    sorted({(keys[i].label, matched[i].rule) for i in out}))
+        log.warning("poistka: %d order(s) were decided by a rule that ignores the shop (%s) "
+                    "although %s — held and asked per shop", len(out),
+                    sorted({(keys[i].label, matched[i].rule) for i in out}),
+                    "the mail carries several shops" if multi
+                    else "the sender has learned shop rules")
     return out
 
 
@@ -308,7 +310,7 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
             company_name: str, llm: dict | None = None,
             store: str = "", delivery_text: str = "",
             key: store_key.StoreKey | None = None, rules=(),
-            multi_store: bool = False) -> Matched | None:
+            multi_store: bool = False, use_names: bool = False) -> Matched | None:
     """Decide who ordered, or None when it cannot be decided safely.
 
     `store` is the block header of the order's own half of a multi-shop attachment; it is
@@ -321,7 +323,9 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
     #493: `key` is the order's shop key (header + attachment, `store_key.for_orders`),
     `rules` the warehouse's learned shop rules of THIS sender ([(words, ean)]), and
     `multi_store` says the mail carries several different shops — then the mail-level
-    delivery text is never used to pick one shop's card.
+    delivery text is never used to pick one shop's card. `use_names` enables the shop-name
+    rung — only for a multi-shop mail or a sender with learned shop rules; any other mail of
+    a 2-card sender keeps exactly the pre-#493 #418 rungs (review round 3).
     """
     llm = llm or {}
     store = store or (key.header if key is not None else "")
@@ -373,7 +377,7 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
                 confidence=0.99, rule="store_address",
                 note=(f"Odosielateľ má viac prevádzkových kariet; táto časť súboru je "
                       f"nadpísaná „{store}“, čo sedí na adresu „{branch.get('street', '')}“."))
-        named = _by_store_name(family, key)
+        named = _by_store_name(family, key) if use_names else None
         if named and key is not None:
             log.info("family of %d cards; the shop key %r picks %s (%s) by name/city",
                      len(family), key.text if key else "", named.get("ean_edi"),
