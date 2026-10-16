@@ -21,6 +21,8 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+from . import store_key
+
 log = logging.getLogger("orders.extract")
 
 PROMPT_PATH = Path(__file__).with_name("prompts") / "extract.md"
@@ -282,6 +284,12 @@ def verify(extracted: dict, source: str) -> dict:
                            "deliveryDate": order.get("deliveryDate", "") or "",
                            "recipientGroup": order.get("recipientGroup", "") or "",
                            "store": order.get("store", "") or "",
+                           # #493: the attachment this order was read from (located from
+                           # its own quotes, never asked of the model) — with the block
+                           # header it is the order's shop identity (`store_key`)
+                           "sourceFile": store_key.locate_file(
+                               [i.get("sourceQuote") or i.get("name") or ""
+                                for i in order.get("items") or []], source),
                            "items": kept})
     if unverified:
         log.warning("%d item(s) could not be verified against the email: %s",
@@ -356,6 +364,8 @@ def run(client, email: dict) -> dict:
                         "deliveryDate": head.get("deliveryDate", "") or "",
                         "recipientGroup": head.get("recipientGroup", "") or "",
                         "store": head.get("store", "") or "",
+                        "sourceFile": store_key.locate_file(
+                            [i.get("name") or "" for i in table], source),
                         "items": table}],
             "unverified": [],
             "source": "table",

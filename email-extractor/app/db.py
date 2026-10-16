@@ -409,6 +409,73 @@ CODEX_RECEIPTS = [
 ]
 
 
+# #493 (revision 20): customers of the ORDER engine come from CODEX too, and a customer with
+# several shops ordering in one mail is routed per shop.
+# - `codex_customers` = the CODEX customer cards (`raw.firma`, one row per EDI EAN — an EAN CODEX
+#   has on more than one firm is never stored, the push reports it), pushed by
+#   `tools/codex_customers_push.py` (dev2, after each codex-bridge ETL) to
+#   `POST /api/codex/customers`, which REPLACES the table atomically; `codex_customer_syncs` is
+#   the append-only push ledger (`ambiguous` = the EANs CODEX has on several firms, for the
+#   once-per-change ops alert).
+# - `order_snapshots.customer_base_id` = the snapshot whose customer rows are the pre-CODEX base
+#   this snapshot was layered on (NULL = its own rows are the base) — a rebuild layers CODEX on
+#   that base, so a CODEX change or removal is never baked into the cumulative chain for good.
+# - `customer_snapshot.trade_name` = the CODEX trade name (AOBCHODM) the shop-name rung compares.
+# - `customer_overrides.removed_emails` = addresses deliberately removed on the board — the CODEX
+#   layer never puts them back on that card.
+# - `customer_store_rules` = the warehouse's answer for ONE shop of a sender (sender + shop key
+#   -> card), written only by a human board answer, audited, soft-deleted (Kôš).
+CODEX_CUSTOMERS = [
+    """
+    CREATE TABLE IF NOT EXISTS codex_customers (
+        ean_edi     TEXT PRIMARY KEY,
+        name        TEXT NOT NULL DEFAULT '',
+        trade_name  TEXT NOT NULL DEFAULT '',
+        emails      TEXT[] NOT NULL DEFAULT '{}',
+        city        TEXT NOT NULL DEFAULT '',
+        street      TEXT NOT NULL DEFAULT '',
+        zip         TEXT NOT NULL DEFAULT '',
+        codex_id    TEXT NOT NULL DEFAULT ''
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS codex_customer_syncs (
+        id            BIGSERIAL PRIMARY KEY,
+        synced_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        source_as_of  TIMESTAMPTZ,
+        row_count     INTEGER NOT NULL,
+        ambiguous     JSONB NOT NULL DEFAULT '[]'::jsonb
+    )
+    """,
+    "ALTER TABLE order_snapshots ADD COLUMN IF NOT EXISTS customer_base_id BIGINT",
+    "ALTER TABLE customer_snapshot ADD COLUMN IF NOT EXISTS trade_name TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE customer_overrides ADD COLUMN IF NOT EXISTS removed_emails TEXT[] NOT NULL "
+    "DEFAULT '{}'",
+    """
+    CREATE TABLE IF NOT EXISTS customer_store_rules (
+        id           BIGSERIAL PRIMARY KEY,
+        sender_email TEXT NOT NULL,
+        store_key    TEXT NOT NULL,
+        store_label  TEXT NOT NULL DEFAULT '',
+        ean_edi      TEXT NOT NULL,
+        question_id  BIGINT,
+        created_by   TEXT NOT NULL DEFAULT '',
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+        deleted_at   TIMESTAMPTZ
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_customer_store_rules_sender "
+    "ON customer_store_rules (sender_email) WHERE deleted_at IS NULL",
+    # the 2026-10-16 incident (#188/#196 standing rule: the incident-fix PR records it)
+    """
+    INSERT INTO match_incidents (occurred_on, description, issue_ref) VALUES
+        ('2026-10-16', 'Zákazník s 5 predajňami: objednávky všetkých predajní z jedného mailu '
+                       'odišli na jednu kartu (21 súborov, 16 nesprávne) — oprava #493 '
+                       '(predajne z CODEXu, rozpoznanie predajne, poistka)', '#493')
+    ON CONFLICT (issue_ref) DO NOTHING
+    """,
+]
+
 # SCHEMA above is FROZEN as revision 1 (the baseline). NEVER edit those statements for a
 # schema change — append a NEW numbered migrate.Revision to this list instead
 # (immutable-migrations, #269). run_migrations() applies only the unapplied revisions, in
@@ -466,6 +533,7 @@ REVISIONS = [
     migrate.Revision(17, "add_codex_stock_cards", CODEX_STOCK_CARDS),
     migrate.Revision(18, "add_codex_card_history", CODEX_CARD_HISTORY),
     migrate.Revision(19, "add_codex_receipts", CODEX_RECEIPTS),
+    migrate.Revision(20, "add_codex_customers", CODEX_CUSTOMERS),
 ]
 
 

@@ -15,6 +15,15 @@ so the authority order matters:
    order fell over because the model, seeing only a public gmail address, refused to
    guess at 0.08 while the table knew the answer all along);
 3. otherwise nothing — a wrongly addressed order is worse than one sent for review.
+
+#493 — a customer with SEVERAL SHOPS ordering in one mail (one attachment per shop). Above
+everything: a shop rule the warehouse taught (sender + shop key → card, `store_rule`). Within
+a family the shop is decided by the street in its header (#101, `store_address`), then by the
+shop key against the card's name / trade name / city / street (`store_name`, a UNIQUE hit
+only); the mail-level delivery text (#418) is NOT used when the mail carries several shops —
+it cannot tell them apart. `collapsed_shops` is the poistka: several different shop headers
+landing on ONE card through a rule that never looked at the shop are turned back into
+per-shop questions (the 2026-10-16 incident: 21 files of 5 shops shipped to one card).
 """
 from __future__ import annotations
 
@@ -22,11 +31,13 @@ import logging
 import re
 from dataclasses import dataclass
 
-from . import dl_match
+from . import dl_match, store_key
 
 log = logging.getLogger("orders.customer")
 
 GATE_SURE = 0.85
+# #493: the rules that looked at the SHOP the order is for — the poistka never undoes these.
+STORE_RULES = frozenset({"store_rule", "store_address", "store_name"})
 CANDIDATES = 10
 # Free providers: a domain match on them would attach an order to a random customer.
 GENERIC_DOMAINS = {
@@ -210,9 +221,74 @@ def _by_store(owners: list[dict], store: str) -> dict | None:
     return hits[0] if len(hits) == 1 else None
 
 
+def _card_words(c: dict) -> set[str]:
+    """The shop-identifying stems of a card: its name, CODEX trade name, city and street."""
+    return store_key.stems(store_key.tokens(" ".join(
+        str(c.get(f) or "") for f in ("name", "trade_name", "city", "street"))))
+
+
+def _by_store_name(family: list[dict], key: store_key.StoreKey | None) -> dict | None:
+    """Which card of the family does this order's SHOP KEY name? (#493)
+
+    The incident's headers carry no street („BISTRO", „Predajňa: Tržnica", „ŽILINA") and one
+    carries nothing at all („Predajňa:" — the shop is only in the file name „… PR.xlsx"), so
+    #101's street match decides nothing. The key's 4-letter stems are compared with each
+    card's name + trade name + city + street; a stem every card of the family shares is no
+    signal and is dropped. Exactly ONE card hit → that card; none or several (two shops in
+    one city: „ŽILINA") → None, and the order is asked — never a guess."""
+    if key is None or len(family) < 2:
+        return None
+    want = key.stems()
+    words = [_card_words(c) for c in family]
+    common: set[str] = set(words[0]).intersection(*words[1:])
+    want -= common
+    if not want:
+        return None
+    hits = [c for c, w in zip(family, words, strict=True) if want & w]
+    if len(hits) == 1:
+        return hits[0]
+    if hits:
+        log.info("shop key %s hits %d cards of the family (%s) — not unique, asking",
+                 key.text, len(hits), [c.get("ean_edi") for c in hits])
+    return None
+
+
+def owner_count(customers: list[dict], sender_email: str) -> int:
+    """How many cards carry this sender's address (a family is ≥2)."""
+    addr = (_addresses(sender_email) or [""])[0]
+    return sum(1 for c in customers if addr and addr in _addresses(c.get("emails")))
+
+
+def collapsed_shops(keys: list, matched: list) -> set[int]:
+    """The poistka (#493): indexes of the orders that must be ASKED instead of shipped.
+
+    Orders whose DIFFERENT non-empty shop headers resolved to the SAME card are suspect —
+    and every one of them that got there through a rule that never looked at the shop
+    (`llm`, `exact_email`, `delivery_address`) is turned back into a question. A shop
+    resolved by a shop rule (`STORE_RULES`) keeps its card."""
+    by_card: dict[str, list[int]] = {}
+    for i, (key, m) in enumerate(zip(keys, matched, strict=True)):
+        if m is not None and key.header_key:
+            by_card.setdefault(m.ean_edi, []).append(i)
+    out: set[int] = set()
+    for ean, idxs in by_card.items():
+        if len({keys[i].header_key for i in idxs}) < 2:
+            continue
+        loose = {i for i in idxs if matched[i].rule not in STORE_RULES}
+        if loose:
+            log.warning("poistka: %d different shops resolved to ONE card %s (%s) — %d "
+                        "order(s) via a non-shop rule are held and asked per shop",
+                        len({keys[i].header_key for i in idxs}), ean,
+                        [keys[i].header for i in idxs], len(loose))
+        out |= loose
+    return out
+
+
 def resolve(customers: list[dict], sender_email: str, sender_name: str,
             company_name: str, llm: dict | None = None,
-            store: str = "", delivery_text: str = "") -> Matched | None:
+            store: str = "", delivery_text: str = "",
+            key: store_key.StoreKey | None = None, rules=(),
+            multi_store: bool = False) -> Matched | None:
     """Decide who ordered, or None when it cannot be decided safely.
 
     `store` is the block header of the order's own half of a multi-shop attachment; it is
@@ -221,8 +297,14 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
     `delivery_text` (#418) is the raw email text (subject + body) used to match a delivery
     city/street against customer cards when two+ cards share one sender address and the
     store header cannot decide.
+
+    #493: `key` is the order's shop key (header + attachment, `store_key.for_orders`),
+    `rules` the warehouse's learned shop rules of THIS sender ([(words, ean)]), and
+    `multi_store` says the mail carries several different shops — then the mail-level
+    delivery text is never used to pick one shop's card.
     """
     llm = llm or {}
+    store = store or (key.header if key is not None else "")
     conf = float(llm.get("confidence") or 0)
     if conf > 1:
         conf = conf / 100
@@ -231,6 +313,18 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
 
     addr = (_addresses(sender_email) or [""])[0]
     owners = [c for c in customers if addr and addr in _addresses(c.get("emails"))]
+
+    # #493: a shop the warehouse already answered for THIS sender wins over everything — it
+    # is a human decision about exactly this (sender, shop), written only by a board answer.
+    taught = by_ean.get(store_key.match_rule(rules, key)) if rules else None
+    if taught is not None and key is not None:
+        log.info("shop %s of %s -> %s (%s) by the warehouse's shop rule", key.text, addr,
+                 taught.get("ean_edi"), taught.get("name"))
+        return Matched(
+            ean_edi=str(taught.get("ean_edi") or ""), name=taught.get("name", ""),
+            confidence=0.99, rule="store_rule",
+            note=(f"Predajňu {key.label} sklad už raz priradil ku karte "
+                  f"„{taught.get('name', '')}“."))
 
     # #435: within a multi-site FAMILY the delivery address decides ABOVE the llm pick — a
     # confident model pick of the central card must never silently win when the mail names
@@ -263,7 +357,19 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
                 confidence=0.99, rule="store_address",
                 note=(f"Odosielateľ má viac prevádzkových kariet; táto časť súboru je "
                       f"nadpísaná „{store}“, čo sedí na adresu „{branch.get('street', '')}“."))
-        site = _by_delivery_address(family, delivery_text)
+        named = _by_store_name(family, key)
+        if named and key is not None:
+            log.info("family of %d cards; the shop key %r picks %s (%s) by name/city",
+                     len(family), key.text if key else "", named.get("ean_edi"),
+                     named.get("name"))
+            return Matched(
+                ean_edi=str(named.get("ean_edi") or ""), name=named.get("name", ""),
+                confidence=0.95, rule="store_name",
+                note=(f"Odosielateľ má viac prevádzkových kariet; predajňa {key.label} sedí "
+                      f"na názov/mesto karty „{named.get('name', '')}“."))
+        # #493: several shops in one mail — the mail-level delivery text cannot say which
+        # of them it describes, so it never picks a card for one of them
+        site = None if multi_store else _by_delivery_address(family, delivery_text)
         if site:
             parts = [site.get("city", ""), site.get("street", "")]
             addr_note = ", ".join(p for p in parts if p)
@@ -332,7 +438,8 @@ def guess_delivery_address(free_text: str) -> str:
 
 def candidates_for_question(customers: list[dict], sender_email: str, sender_name: str,
                             company_name: str, free_text: str = "",
-                            limit: int = 5) -> list[dict]:
+                            limit: int = 5,
+                            key: store_key.StoreKey | None = None) -> list[dict]:
     """Ranked customer candidates for the WAREHOUSE's "who is this?" question (#159).
 
     Adds a signal `candidates()` does not have: does this customer's OWN street or city
@@ -343,6 +450,9 @@ def candidates_for_question(customers: list[dict], sender_email: str, sender_nam
     matching key at all before this. Never an auto-match key — an unmatched sender still
     ALWAYS gets asked (#62's existing GATE_SURE design already applies to the customer
     boundary); this only orders the candidate LIST a human is shown.
+
+    #493: a question asked for ONE SHOP (`key`) ranks the cards whose name/city share a
+    stem with the shop key first, and always lists every card of the sender's family.
     """
     addr = (_addresses(sender_email) or [""])[0]
     domain = addr.split("@")[-1] if "@" in addr else ""
@@ -361,6 +471,10 @@ def candidates_for_question(customers: list[dict], sender_email: str, sender_nam
             if city and len(city) > 2 and city in text_norm:
                 score += 20.0
                 address_match = True
+        if key is not None and key.stems() & _card_words(c):
+            score += 40.0
         scored.append(dict(c, score=score, exact_email=exact, address_match=address_match))
     scored.sort(key=lambda c: -c["score"])
+    if key is not None:
+        limit = max(limit, sum(1 for c in scored if c["exact_email"]) + 2)
     return scored[:limit]

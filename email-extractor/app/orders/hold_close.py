@@ -523,7 +523,7 @@ def retry_unknown_customer_questions(conn, cfg, upload=None, post=None) -> list[
     docstring). Called from `/api/znalosti/clients` right after a save, and from the
     order worker's own periodic tick (mirrors `release_due`'s own sweep)."""
     from . import customer as customer_mod
-    from . import report, teach
+    from . import report, store_key, store_rules, teach
     from . import snapshot as snapshot_mod
 
     rows = conn.execute(
@@ -539,9 +539,16 @@ def retry_unknown_customer_questions(conn, cfg, upload=None, post=None) -> list[
         if not sender_email:
             continue
         customers = snapshot_mod.customers_for_management(conn)
-        matched = customer_mod.resolve(customers, sender_email, ctx.get("sender_name", ""),
-                                       ctx.get("company_name", ""))
-        if not (matched and matched.rule == "exact_email" and matched.ean_edi):
+        # #493: a question asked for ONE SHOP is settled only by a SHOP rung (a learned shop
+        # rule, the street, the shop name/city) — never by the sender address: the poistka
+        # asked it precisely because the sender's one card does not say which shop it is
+        key = store_key.from_context(ctx)
+        matched = customer_mod.resolve(
+            customers, sender_email, ctx.get("sender_name", ""), ctx.get("company_name", ""),
+            key=key, rules=store_rules.for_sender(conn, sender_email) if key else (),
+            multi_store=key is not None)
+        wanted = customer_mod.STORE_RULES if key is not None else {"exact_email"}
+        if not (matched and matched.rule in wanted and matched.ean_edi):
             continue
         teach.add_candidate(conn, qid, {
             "ean_edi": matched.ean_edi, "name": matched.name, "city": "", "street": "",
@@ -551,6 +558,10 @@ def retry_unknown_customer_questions(conn, cfg, upload=None, post=None) -> list[
                                   by="auto")
         except (teach.AlreadyAnswered, teach.NotACandidate):
             continue
+        # #493: automation teaches nothing — an undo must not strip the address the card
+        # already had (the old undo forgot it from the very card this sweep matched on)
+        conn.execute("UPDATE order_questions SET answer = %s WHERE id = %s",
+                     (Json({"email_added": False, "auto": True}), qid))
         report.log_event(
             conn, q["message_id"], stage="review", status="ok",
             outcome=f"Automaticky doplnený zákazník {matched.name} ({matched.ean_edi})",

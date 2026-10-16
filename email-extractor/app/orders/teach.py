@@ -264,10 +264,16 @@ def undo(conn, qid: int) -> dict:
         raise NotACandidate(f"question {qid} does not exist")
     if q.get("kind") == "customer":
         if q.get("answer_gtin"):
-            from . import snapshot
-            snapshot.forget_customer_email(
-                conn, q["answer_gtin"], (q.get("context") or {}).get("sender_email", ""))
-            snapshot.rebuild_from_overrides(conn)
+            from . import snapshot, store_rules
+            # #493: forget the address only when THIS answer added it (`answer.email_added`,
+            # written by `order_customers.learn`) — an address that already sat on the card
+            # (a CODEX one, a family's) must survive the undo. An answer recorded before
+            # #493 carries no flag and keeps the old behaviour.
+            if (q.get("answer") or {}).get("email_added", True):
+                snapshot.forget_customer_email(
+                    conn, q["answer_gtin"], (q.get("context") or {}).get("sender_email", ""))
+                snapshot.rebuild_from_overrides(conn)
+            store_rules.forget_for_question(conn, qid)
         # #369: a `not_order` customer answer (`answer_card='not_order'`) also created a
         # `mail_rules` ignore row — retract only the one THIS question created (mirrors
         # `_undo_mail`'s own `question_id`-scoped delete). A no-op for every other customer
@@ -338,7 +344,7 @@ def _row(r) -> dict:
 # same address, before the first is answered, reuses the SAME open question.
 
 def ask_customer(conn, message_id: str, sender_email: str, candidates: list[dict],
-                 delivery_date: str, context: dict, on_new=None) -> int | None:
+                 delivery_date: str, context: dict, on_new=None, key=None) -> int | None:
     """Raise ONE 'who is this customer?' question. Returns its id — the EXISTING id when
     one is already open for this sender address, and None when there is no message_id at
     all to key ANYTHING on (should not happen in practice).
@@ -354,12 +360,27 @@ def ask_customer(conn, message_id: str, sender_email: str, candidates: list[dict
     warehouse can still be asked "who is this?" and the order can still be HELD for an
     answer, instead of silently falling through to a reject with no path forward
     (`pipeline._run`'s old "no sender address" dead end, inventory row 4).
+
+    #493: `key` (a `store_key.StoreKey`) asks for ONE SHOP of a multi-shop sender instead of
+    the sender as a whole — dedupe on sender + shop key, the shop named in the title (the
+    board card shows only `wording` + the candidates) and recorded in `context`, so the
+    answer can teach the shop rule (`order_customers.learn`).
     """
+    shop = key
     key = str(sender_email or "").strip().lower()
     if not key:
         key = f"cust:{message_id}" if message_id else ""
     if not key:
         return None
+    wording, reason = sender_email, "Zákazník nebol nájdený v tabuľke zákazníkov"
+    if shop is not None and shop.text:
+        key = f"{key}|shop:{shop.text}"
+        wording = f"{sender_email} · predajňa {shop.label}"
+        reason = (f"Odosielateľ objednáva pre viac predajní — ku ktorej karte patrí predajňa "
+                  f"{shop.label}? Odpoveď si zapamätám pre ďalšie objednávky tejto predajne.")
+        context = dict(context or {}, store=shop.header, store_file=shop.source_file,
+                       store_key=shop.text, store_tokens=sorted(shop.tokens),
+                       store_label=shop.label)
     row = conn.execute(
         """INSERT INTO order_questions
                (message_id, customer_ean, customer_name, wording, item_key, kind,
@@ -367,11 +388,12 @@ def ask_customer(conn, message_id: str, sender_email: str, candidates: list[dict
            VALUES (%s, '', '', %s, %s, 'customer', %s, %s, %s, %s)
            ON CONFLICT (customer_ean, item_key) WHERE status = 'open' DO NOTHING
            RETURNING id""",
-        (message_id, sender_email, key, Json(candidates or []), delivery_date or "",
-         "Zákazník nebol nájdený v tabuľke zákazníkov", Json(context or {}))).fetchone()
+        (message_id, wording, key, Json(candidates or []), delivery_date or "",
+         reason, Json(context or {}))).fetchone()
     if row:
         qid = int(row[0])
-        log.info("asking the warehouse who %r is", sender_email)
+        log.info("asking the warehouse who %r is%s", sender_email,
+                 f" (shop {shop.label})" if shop is not None and shop.text else "")
         if on_new:
             try:
                 on_new(get(conn, qid))
@@ -716,9 +738,8 @@ def _apply_customer(conn, cfg, q: dict, choice: str, by: str) -> dict:
     if not choice:
         released = hold.release_unknown_customer(conn, cfg, q["id"])
     else:
-        sender_email = (q.get("context") or {}).get("sender_email", "")
-        snapshot.remember_customer_email(conn, choice, sender_email)
-        snapshot.rebuild_from_overrides(conn)
+        from . import order_customers
+        order_customers.learn(conn, q, choice, by)
         hold.set_customer(conn, q["id"], choice, "")
         released = hold.release_for_question(conn, cfg, q["id"])
     return {"question": answered, "released": released}

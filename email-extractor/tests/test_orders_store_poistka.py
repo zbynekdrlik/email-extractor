@@ -170,3 +170,22 @@ def test_a_date_conflict_does_not_send_all_shops_to_the_mail_level_card(pg):
     kinds = sorted(q["kind"] for q in teach.open_questions(pg))
     assert kinds.count("date") == 1 and kinds.count("customer") == 3
     assert all(len(h[1]) == 2 for h in held), "date question + the shop's own question"
+
+
+def test_the_worker_sweep_never_answers_a_shop_question_with_the_senders_one_card(pg):
+    """`hold.retry_unknown_customer_questions` auto-answers an open customer question when the
+    sender resolves by `exact_email` — for a per-shop question that is exactly the collapse
+    the poistka stopped (the sender's ONE card says nothing about the shop)."""
+    import os
+
+    from app.orders import hold
+    sid = _env(pg)
+    rec = Recorder()
+    pipeline.run(pg, _cfg(), MAIL, sid, client=ScriptedClient(_answers()),
+                 upload=rec.upload, post=rec.post)
+    assert len(_customer_questions(pg)) == 3
+    released = hold.retry_unknown_customer_questions(
+        pg, _cfg(pg_dsn=os.environ["PG_TEST_DSN"]), upload=rec.upload, post=rec.post)
+    assert released == []
+    assert rec.uploads == []
+    assert len(_customer_questions(pg)) == 3, "every shop question stays open for a human"
