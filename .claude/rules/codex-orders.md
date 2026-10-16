@@ -4,6 +4,9 @@ paths:
   - "email-extractor/app/orders/codex_cards.py"
   - "email-extractor/tools/codex_orders_push.py"
   - "email-extractor/tools/codex_cards_push.py"
+  - "email-extractor/tools/codex_customers_push.py"
+  - "email-extractor/app/orders/codex_customers.py"
+  - "email-extractor/tests/test_codex_customers_push.py"
   - "email-extractor/tools/codex_push_after_etl.py"
   - "email-extractor/tests/test_codex_push_after_etl.py"
   - "email-extractor/tools/systemd/**"
@@ -148,6 +151,7 @@ it again:
 | `codex_orders_push.py` (#342) | same dir | `codex-orders-push.service` (manual one-off only) |
 | `codex_cards_push.py` (#467) | same dir | `codex-cards-push.service` (manual one-off only) |
 | `codex_receipts_push.py` (#485) | same dir | `codex-receipts-push.service` (manual one-off only) |
+| `codex_customers_push.py` (#493) | same dir | `codex-customers-push.service` (manual one-off only) |
 
 **The pushes run when the codex-bridge ETL REPLACES the DuckDB file, never on their own clock
 (#485 reopen, 2026-10-06).** The ETL starts 14:15 / 18:00 and swaps the file in only when the
@@ -801,4 +805,29 @@ must never ship a SECOND delivery: the warehouse may already have typed it into 
   transport either). A known service line is seeded once through
   `dl_memory.remember_not_stock` (EKVIA „PREPRAVNÉ" after the 0.9.179 deploy — evidence on the
   ticket). Details: `n8n-workflow-edits.md` (#488 section).
+
+## CODEX customer cards → the order engine's customers (#493)
+
+`tools/codex_customers_push.py` (4th push of the guarded round, after receipts; the round's
+`TimeoutStartSec` covers 2 × (settle + 4 × 300 s) = 3000) reads `raw.firma` read-only:
+- **Generations**: several rows per (NICO, IICODOPL) — `DDATVYPU` is the extract date; the SQL
+  keeps the newest per firm × branch (`ROW_NUMBER … ORDER BY DDATVYPU DESC NULLS LAST,
+  AEDIEAN, ANAZORG`), THEN filters rows with an EDI EAN. `NICO` is a DOUBLE (cast to BIGINT),
+  `IICODOPL` a nullable BIGINT (NULL = the head office row).
+- **Fields**: `AEDIEAN` (= our `ean_edi`, 12-13 digits), `ANAZORG` name (fallback
+  `AOBCHODM`), `AOBCHODM` trade name (the shop-name rung compares it), `AULICA`, `AOBEC`,
+  `APSC`, `AEMAIL` — one cell can hold several addresses (`;`/`,`, 18 rows on 2026-10-16).
+- **An EAN on more than one firm/branch is NOT imported for anyone** (`ambiguous` in the body:
+  4 of 980 on 2026-10-16 — a shop vs an unrelated firm, or two branches of one firm); the
+  endpoint drops a duplicate EAN of the body the same way and raises ONE ops alert per CHANGE
+  of that set (`codex_customers_ambiguous`, key = hash of the EAN set).
+- `POST /api/codex/customers` (header X-Token only, 16 MB cap): full replace of
+  `codex_customers` (+ `codex_customer_syncs` ledger), 400 empty / 409 < 50 % of the last push
+  (`?force=1`), then `snapshot.rebuild_from_overrides` at once (the next order sees a shop
+  created in CODEX) — a failing rebuild/alert never fails the stored push. Fail-OPEN (the last
+  copy stays in use); `codex_customers.stale_sweep` (worker tick, orders engine) alerts once per
+  stale episode. Journal line: `pushed: fetched=… customers=… stored=… ambiguous=…
+  snapshot=<id> source_as_of=… to=https://…`.
+- How the copy is layered into the customer list (base ← board ← CODEX, the pre-CODEX base
+  pointer, `removed_emails`, the hand-added-EAN ghost rule) — `customer-resolution.md` #493.
 

@@ -1,7 +1,15 @@
 ---
 paths:
   - "email-extractor/app/orders/customer.py"
+  - "email-extractor/app/orders/store_key.py"
+  - "email-extractor/app/orders/store_rules.py"
+  - "email-extractor/app/orders/order_customers.py"
+  - "email-extractor/app/orders/customer_layers.py"
+  - "email-extractor/app/orders/codex_customers.py"
+  - "email-extractor/app/orders/snapshot.py"
   - "email-extractor/tests/test_orders_customer.py"
+  - "email-extractor/tests/test_orders_store_*.py"
+  - "email-extractor/tests/test_codex_customers*.py"
 ---
 
 # Customer resolution (`customer.resolve`) — multi-site families, name stems, corpus safety
@@ -73,3 +81,88 @@ exec -i app_e0ac7775_email_extractor python3 -` piping a script that loads
 column). This is pure/read-only — no claim, no upload. The ssh user (`newlevelmedia`) has
 passwordless `sudo docker`, and `ha addons …` needs `SUPERVISOR_TOKEN` from
 `/run/s6/container_environment/HASSIO_TOKEN`.
+
+## #493 — a customer with SEVERAL SHOPS ordering in ONE mail (one attachment per shop)
+
+Incident 2026-10-16: five xlsx files (headers „BISTRO", „Predajňa: Tržnica", „ŽILINA",
+„ŠKOLA, <ulica>", and an empty „Predajňa:" whose shop is only in the file name „… PR.xlsx"),
+the sender address on ONE card → `llm`/`exact_email` for every order → 21 ORDER files under
+one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order they act:
+
+- **Who each ORDER is for is decided in ONE place, `order_customers.resolve_orders`** — per
+  order, with its shop key, the sender's learned shop rules and the multi-shop flag, and
+  **never** `… or email_matched` any more (that fallback is how one card swallowed the mail).
+  The mail-level `email_matched` is reporting only. All four `ask_customer` call sites of the
+  pipeline go through `order_customers.ask` (the date-conflict branch included — it used to
+  hold every order on the mail-level card, so the date answer shipped all shops to it).
+- **The shop key** (`store_key`): block header + the attachment the order was read from
+  (`extract` records `sourceFile` — located deterministically from the item quotes in the
+  `===== <file> =====` sections of `combined_text`, never asked of the model, so no
+  `prompt_hash` change). Normalized: `dl_match.fold`, stopwords = order/document words, OUR
+  OWN brand („OBJ Pekárová žena …" is an order TO us), week/day words, NOMINATIVE month names
+  only (genitives are street names: „29. augusta"), legal forms, numbers. `key` drops words
+  every order of the mail shares (keeps its own words when that would empty it); `tokens` keep
+  everything; `header_key` = the header alone.
+- **Rung order inside `resolve`**: (1) a learned shop rule (`store_rule`) — for ANY sender,
+  above the family check; (2) family: street in the header (`_by_store`, #101); (3) family:
+  shop-key 4-letter stems vs card name + CODEX trade name + city + street (`_by_store_name`,
+  `store_name`) — EXACTLY ONE card hit, stems shared by every family card dropped; (4) family:
+  `_by_delivery_address` — but NOT in a multi-shop mail (the mail-level text cannot say which
+  shop it describes); (5) the old llm / exact_email rungs for a non-family sender.
+- **The poistka** (`customer.collapsed_shops`): orders whose DIFFERENT non-empty HEADERS land
+  on ONE card — every one that got there by a non-shop rule (`llm`, `exact_email`,
+  `delivery_address`; `STORE_RULES` = store_rule/store_address/store_name never) becomes
+  unresolved → held on the #431 placeholder + one question per shop. Keyed on the HEADER, not
+  the file name: a one-shop customer sending one file per day must never trip it.
+- **Per-shop question** (`teach.ask_customer(key=)`): dedupe `item_key = <sender>|shop:<key>`,
+  the shop in `wording` (the board card shows only `wording` + candidates — `reason` is not
+  rendered), the key in `context` (`store`, `store_file`, `store_key`, `store_tokens`). Asked per
+  shop only when the mail is multi-shop or the sender owns ≥2 cards (`scoped`); otherwise the
+  #159 per-sender question, unchanged.
+- **The answer teaches** through ONE helper, `order_customers.learn` — called by the board
+  route (`_api_orders_answer_customer`), the „Nový zákazník" route and `teach.KINDS['customer']
+  .apply` (the HTTP routes never went through `.apply`): the sender address on the card (#159)
+  + for a shop question a `customer_store_rules` row (audited `create`, soft-delete, Kôš:
+  `customer_store_rules` is in `audit._SOFT_DELETE_TABLES`). It records `answer =
+  {email_added, store_rule}` on the question; `teach.undo` forgets the address ONLY when that
+  answer added it (a CODEX/family address must survive an undo — a pre-#493 answer without the
+  flag keeps the old forget) and soft-deletes the question's rules. A different card for the
+  same (sender, key) replaces the old rule (audited delete + create); two live rules that both
+  apply and disagree decide nothing (asked again) — never "newest wins". Rules are matched as
+  `rule words ⊆ order tokens`, so a rule taught from a 5-file mail ({pr}) also hits a 1-file
+  mail ({pekarova…pr} — the brand is a stopword anyway).
+- **`hold.retry_unknown_customer_questions`** (worker sweep, board save) settles a per-shop
+  question only by a SHOP rung (`STORE_RULES`), never `exact_email` — the sender's one card is
+  exactly the collapse; an auto answer records `email_added: false` (its undo used to strip the
+  very address it matched on). It loads `customers_for_management` once per sweep (it layers
+  ~1000 CODEX cards).
+
+## #493 — the CODEX customer layer and the snapshot (read before touching `snapshot.py`)
+
+- **Layers**: the frozen pre-CODEX BASE ← board overrides (`_merge_customers`) ← CODEX
+  (`customer_layers.apply_codex`, pure): union of addresses, only BLANK name/city/street/zip/
+  trade_name filled, missing EANs added as CODEX-only cards (identity `orig = (ean, codex
+  street)`), a board-deleted EAN never re-added, `customer_overrides.removed_emails` never
+  re-added on that card. Fail-open: always the last pushed copy.
+- **Never layer on an already-layered snapshot**: `order_snapshots.customer_base_id` points at
+  the pre-CODEX base; `rebuild_from_overrides`/`customers_for_management` read the base
+  (`customer_base_id(conn, latest)`), so a card/address CODEX dropped leaves the list. The
+  frozen order snapshot still contains the layer (runs stay reproducible). Content hash: the
+  trade name joins the line only when set, so a list without CODEX hashes exactly as before
+  (the e2e-orders corpus stays byte-identical — verified offline, 32/37 + the 5 #120 defects).
+- **A hand-added override owns its EAN** (`_merge_customers`): every base row with that EAN is
+  excluded, not only its current street. Before, a street edit of a board-created card left the
+  copy baked in the cumulative base under the OLD street as a ghost duplicate card (checked on
+  prod 2026-10-16: no base row shares a hand-added card's EAN except its own baked copies).
+- **Never write CODEX-filled values back into an override**: `remember_/forget_customer_email`
+  edit the PRE-CODEX row (`_own_row`; a CODEX-only card gets a minimal override: name + the
+  board's own addresses, blank address fields), and the board save goes through
+  `snapshot.unlayer_edit` (a field still equal to CODEX's keeps the stored value; CODEX
+  addresses stay CODEX's; a CODEX address missing from the form = `removed_emails`). Writing
+  the shown values would make the board own CODEX data (a later CODEX fix never arrives) and
+  shift a hand-added card's identity.
+- **Measured impact before the deploy** (read-only, prod list × DuckDB, 131 senders of 60
+  days): only the incident sender became a family (1 → 4 cards); four senders went 0 → 1 card
+  (now `exact_email`). Re-run that check (scratch script: effective list + `raw.firma`, owners
+  per sender before/after) before changing the union semantics.
+
