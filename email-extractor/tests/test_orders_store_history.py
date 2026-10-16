@@ -258,3 +258,41 @@ def test_a_new_customer_never_stores_a_submitted_staff_address(pg):
                 if c["ean_edi"] == "2999000000778")
     emails = [e.lower() for e in card.get("emails") or []]
     assert STAFF not in emails and "obchod@zakaznik-test.sk" in emails and S1 in emails
+
+
+# --- review round 31 ------------------------------------------------------------------------
+
+def test_undo_of_an_old_staff_answer_takes_the_staff_address_back(pg):
+    """Round 31: the own-domain refusal was also pasted into `forget_customer_email` — undo of
+    a pre-#493 answer that had put a staff address on a card silently kept it there."""
+    snapshot.import_snapshot(pg, CATALOG_CSV, BASE_CSV)
+    card = next(c for c in snapshot.customers_for_management(pg)
+                if c["ean_edi"] == "2999000000999")
+    snapshot.upsert_customer(pg, override_id=None, orig_ean_edi=card["ean_edi"],
+                             orig_street=card["street"], ean_edi=card["ean_edi"],
+                             name=card["name"], emails=list(card["emails"]) + [STAFF],
+                             city=card["city"], street=card["street"], zip_="")
+    snapshot.rebuild_from_overrides(pg)
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('old', 'ai_orders')")
+    qid = teach.ask_customer(pg, "old", STAFF, [], "", {"sender_email": STAFF})
+    pg.execute("UPDATE order_questions SET status = 'answered', answer_gtin = %s, "
+               "answer_card = %s, answer = NULL, answered_at = now() WHERE id = %s",
+               ("2999000000999", card["name"], qid))
+    teach.undo(pg, qid)
+    after = next(c for c in snapshot.customers_for_management(pg)
+                 if c["ean_edi"] == "2999000000999")
+    assert STAFF not in [e.lower() for e in after.get("emails") or []]
+
+
+def test_the_model_never_sees_a_staff_address_on_a_card():
+    """Round 31: the exact-address flag was gone, but the card's `E-mail:` list still showed
+    the staff address next to `FROM: <staff>` — the model could still match the text."""
+    cands = [{"name": "Kaviareň", "ean_edi": "2999000000887", "city": "Mestečko",
+              "street": "Hlavná 1", "emails": [STAFF, "kaviaren@zakaznik-test.sk"]},
+             {"name": "Bez adresy", "ean_edi": "2999000000888", "city": "", "street": "",
+              "emails": [STAFF]}]
+    text = pipeline._customer_input(cands, {"from_addr": STAFF, "subject": "FW"},
+                                    {"senderEmail": STAFF})
+    lines = text.split("KANDIDÁTI:\n")[1].splitlines()
+    assert lines[0].endswith("E-mail: kaviaren@zakaznik-test.sk")
+    assert lines[1].endswith("E-mail: -")
