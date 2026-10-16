@@ -257,3 +257,10 @@ def test_the_101_family_ships_both_shops_by_the_street_through_the_pipeline(pg):
               ("GT2- 29 augusta 19 BB", "GT2", "vianočka 400g", 7, "VIA"))
     _r, rec = _run(pg, "m-gt", stores=stores)
     assert sorted(name.split("_")[1] for name, _c in rec.uploads) == ["000856", "000857"]
+
+
+def test_a_short_district_word_is_another_district_too():
+    """Round 28: „Bratislava - II" vs „Bratislava - III" — a district word of 1-2 letters was
+    skipped, the header naming district II shipped to the district III card."""
+    fam = _family(("Hlavná 5", "Bratislava - III"), ("Mierová 3", "Bratislava - II"))
+    assert _hit(fam, "Hlavná 5, Bratislava II") is None
