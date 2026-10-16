@@ -176,6 +176,11 @@ Never modify the codex-bridge units (a foreign project) — this repo only WATCH
 Live proof (6.10., 0.9.180): the ETL replaced the file at 18:46:07, the `.path` unit started
 the round the same second, all three pushed by 18:46:43; prod `codex_receipt_syncs` /
 `codex_card_syncs` `source_as_of` = 18:07 of THAT ETL (the old timers had left 5.10. 18:08).
+Since #493 (0.9.181) the round runs FOUR pushes (orders → cards → receipts → customers;
+`TimeoutStartSec=3000`). Install proof (16.10.): after the (re)install below, `sudo systemctl
+start codex-customers-push.service` → `pushed: fetched=984 customers=976 stored=976
+ambiguous=4 snapshot=45 source_as_of=<that ETL>`; prod `codex_customers` = 976 and ONE
+`codex_customers_ambiguous` pending alert (an EAN on several CODEX firms is never imported).
 
 (Re)install after a change: `cp email-extractor/tools/codex_*.py /home/newlevel/codex-orders-push/`
 + `sudo cp email-extractor/tools/systemd/codex-*.{path,service,timer} /etc/systemd/system/ &&
@@ -805,6 +810,12 @@ must never ship a SECOND delivery: the warehouse may already have typed it into 
   transport either). A known service line is seeded once through
   `dl_memory.remember_not_stock` (EKVIA „PREPRAVNÉ" after the 0.9.179 deploy — evidence on the
   ticket). Details: `n8n-workflow-edits.md` (#488 section).
+
+**Second reader of `codex_receipts` (#494):** `confirm_manual` marks a DESADV still waiting
+in ORION `in_DL` as `import_status = 'manual'` when a receipt of the same supplier carries
+its DL number (the warehouse typed it in by hand) — via the module-level
+`codex_receipts.for_supplier` WITHOUT the freshness gate (presence evidence), never
+`live()`. One ops alert per file asks to delete it. Details: `dl-alerts.md` (#494 section).
 
 ## CODEX customer cards → the order engine's customers (#493)
 

@@ -86,8 +86,8 @@ log = logging.getLogger("orders.dl_alerts")
 # (`• odosielateľ — predmet (prijaté D.M.)`), enqueued across many worker ticks and
 # grouped only at flush time. For each, `flush_pending` renders ONE readable message:
 # a per-kind HEADER (count + one explanation, `{n}` filled at flush) + up to
-# DISPLAY_ITEM_CAP short item lines + „… a ešte N ďalší/ďalšie/ďalších" (`report.more_line`,
-# agreeing with N, #476) + an action link (the admin dashboard
+# DISPLAY_ITEM_CAP short item lines (every line for a kind in `UNCAPPED_KINDS`, #494) +
+# „… a ešte N ďalší/ďalšie/ďalších" (`report.more_line`, agreeing with N, #476) + an action link (the admin dashboard
 # on the ops channel, the password-free board on a warehouse channel — #473) — instead
 # of the pre-#336 wall where flush just concatenated N full explanation sentences (live
 # evidence: a 3177-char human_processing_review post). Mirrors question_alerts._group_html's
@@ -120,7 +120,19 @@ GROUPED_ITEM_KINDS = {
     "scanner_not_dl":
         "&#128444;&#65039; Skeny z tlačiarne, ktoré sa nepodarilo zaradiť ako dodací list "
         "({n}) &mdash; ak to bol dodací list, naskenujte znova stranu s položkami.",
+    # #494 (`confirm_manual`): a DL the warehouse typed into CODEX by hand while our DESADV
+    # still waits in ORION `in_DL` — OPS only (never the warehouse thread), one item line per
+    # file (DL, supplier, CODEX receipt, exact file name). The action is on the ORION server.
+    "dl_manual_in_codex":
+        "&#128465;&#65039; Dodacie listy zadané v CODEXe ručne ({n}) &mdash; pri každom ešte "
+        "leží náš súbor v ORIONe v priečinku in_DL. Over v CODEXe uvedenú príjemku a súbor "
+        "zmaž, inak ho ranný import prevezme druhýkrát (duplicitná príjemka).",
 }
+
+# #494: a grouped kind whose every item line is its OWN instruction (delete THIS file) is never
+# capped — its rows are marked delivered with the post and its source row is terminal, so a
+# „… a ešte N ďalších" remainder would lose the instruction for those files for good.
+UNCAPPED_KINDS = frozenset({"dl_manual_in_codex"})
 
 # #473: a grouped kind that reaches a WAREHOUSE channel links the password-free board
 # History tab of its documents (`board.links` kind), never the password-gated admin
@@ -281,7 +293,8 @@ def _format_grouped(kind: str, bodies: list[str], cfg, *, channel_id: int,
                     message_ids: list[str] | None = None) -> str:
     """#336: one readable grouped alert for a per-item wall kind — a single per-kind
     HEADER (count + one explanation, `{n}` filled) + up to `DISPLAY_ITEM_CAP` short item
-    lines + „… a ešte N ďalší/ďalšie/ďalších" (`report.more_line`, #476) + an action link.
+    lines (every line for a kind in `UNCAPPED_KINDS` — each line its own action, #494) +
+    „… a ešte N ďalší/ďalšie/ďalších" (`report.more_line`, #476) + an action link.
     Replaces the pre-#336 wall where `flush_pending` just `"".join`-ed N full explanation
     sentences. Mirrors `question_alerts._group_html`'s header/cap/remainder/link convention.
     `cfg` may be
@@ -294,11 +307,12 @@ def _format_grouped(kind: str, bodies: list[str], cfg, *, channel_id: int,
     # CSS/JSON snippet, an emoji entity) must never raise and break the whole flush (this
     # runs OUTSIDE flush_pending's post() try/except) — `{n}` is the only placeholder.
     parts = [f"<p>{GROUPED_ITEM_KINDS[kind].replace('{n}', str(n))}</p>"]
-    parts.extend(bodies[:DISPLAY_ITEM_CAP])
-    if n > DISPLAY_ITEM_CAP:
+    cap = n if kind in UNCAPPED_KINDS else DISPLAY_ITEM_CAP     # #494: every line an action
+    parts.extend(bodies[:cap])
+    if n > cap:
         # #476: one kind per post and every header noun is masculine (e-maily, dodacie
         # listy, skeny) — the shared agreeing line („a ešte 1 ďalší", never „1 ďalších").
-        parts.append(report.more_line(n - DISPLAY_ITEM_CAP, "ďalší", "ďalšie", "ďalších"))
+        parts.append(report.more_line(n - cap, "ďalší", "ďalšie", "ďalších"))
     parts.append(_action_line(kind, cfg, channel_id, list(message_ids or [])))
     return "".join(parts)
 
