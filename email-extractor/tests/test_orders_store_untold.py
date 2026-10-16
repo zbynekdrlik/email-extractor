@@ -229,3 +229,21 @@ def test_noise_in_a_header_never_names_a_block():
                                "2026")] == [False] * 6
     assert [block(h) for h in ("A", "Predajňa A", "č. 2")] == [True] * 3
     assert store_key.tokens("BISTRO 04/08/2026", keep_numbers=True) == ["bistro"]
+
+
+# --- review round 14 ------------------------------------------------------------------------
+
+def test_shop_codes_like_t1_are_shops_not_weeks():
+    """„T1" / „T2" are shop codes as much as week codes — asked, never folded into one card;
+    only „KW 42" / „WK 42" / „tyž 42" are certainly weeks."""
+    keys = store_key.for_orders([{"store": "T1"}, {"store": "T2"}])
+    assert store_key.is_multi_store(keys)
+    assert not store_key.names_a_block(store_key.for_orders([{"store": "KW42"}])[0])
+
+
+def test_one_unnamed_shop_on_two_days_of_a_body_mail_stays_one_shop():
+    """No attachment, one „Predajňa A" block for two delivery days: one shop — an order with
+    no file is „untold" only when the mail HAS attachments it could not be told from."""
+    keys = store_key.for_orders([{"store": "Predajňa A", "deliveryDate": "04.08.2026"},
+                                 {"store": "Predajňa A", "deliveryDate": "05.08.2026"}])
+    assert not store_key.is_multi_store(keys)
