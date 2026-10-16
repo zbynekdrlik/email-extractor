@@ -95,38 +95,42 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   The mail-level `email_matched` is reporting only. All four `ask_customer` call sites of the
   pipeline go through `order_customers.ask` (the date-conflict branch included — it used to
   hold every order on the mail-level card, so the date answer shipped all shops to it).
+- **NO automatic decision by a card's NAME (review round 7 — the ROZHODNUTÉ on #493).**
+  Rounds 4-7 each found a new wrong card through the shop-name heuristic (a town every shop
+  shares, ONE shared word, numbers / short codes a card cannot be compared on: „BISTRO 1" +
+  „BISTRO 2" → both on the one BISTRO card, „Hlavná 2210" → the „Hlavná 1713" card, „BISTRO
+  BB" → BISTRO of another town). A card bearing the shop's name now ONLY ranks first in the
+  shop's question (`candidates_for_question`, +40 on a shared stem of `key`). A shop ships
+  automatically only by (1) the warehouse's rule for EXACTLY that shop (`store_rule`) or (2)
+  the street in its header (`_by_store`, #101, `store_address`). Every new shop is asked
+  ONCE, then its rule decides — the incident's first mail after the deploy = 5 questions (one
+  per shop), every later mail ships. Never re-add a name rung "with one more check": that is
+  the treadmill the four rounds proved.
 - **The shop key** (`store_key`): block header + the attachment the order was read from
-  (`extract` records `sourceFile` — located deterministically from the item quotes in the
-  `===== <file> =====` sections of `combined_text`, never asked of the model, so no
-  `prompt_hash` change). Normalized: `dl_match.fold`, stopwords = order/document words, OUR
-  OWN brand („OBJ Pekárová žena …" is an order TO us), week/day words, NOMINATIVE month names
-  only (genitives are street names: „29. augusta"), legal forms; numbers are dropped from a
-  FILE name but KEPT in a header („Predajňa 1" / „Predajňa 2" are two shops) — only short
-  standalone ones: a header's date („16.10.", „16. 10. 2026") or date range („16.-20.10."),
-  calendar week („42. týždeň", „43 KT", „KW 42") and 6+ digit numbers (an order number) are
-  dropped (`_HEADER_NOISE_RE`, round 5: „BISTRO 16.10." changed identity every mail); up to
-  5 digits STAY — a house number, also a year-like one (round 6: dropping 4-digit numbers made
-  „Hlavná 1713" and „Hlavná 2210" ONE shop; a year in a header re-asks once a year). `tokens` =
-  every word of header + file = the shop's IDENTITY (`text`): what a rule and the per-shop
-  question dedupe are keyed on — never a mail-relative value (round 3: „Tesco Žilina" +
-  „Kaufland Žilina" and „Tesco Martin" + „Kaufland Martin" both reduce to {tesco}/{kaufland}
-  once the common town is removed). `key` = `tokens` minus the words every order of the
-  mail shares AND the sender's own company / name words (`companyName`, `senderName`) — ONLY
-  the name rung's view, EMPTY when nothing distinguishing is left (round 4: a fallback to the
-  shared words, or a brand word „Kvetka …" in every file, picked the head-office card).
-  `own` = `tokens` minus only the company / name words. The per-shop question stores both
-  views (`store_name_key`, `store_own_key`) and whether the name rung ran (`store_names` =
-  a multi-shop mail), so the worker sweep matches with the SAME words AND rungs the pipeline
-  did (round 5: the sweep ran the name rung on a rule sender's one-shop question). The
-  attachment is located by the order's block HEADER first (`locate_file(header=)`: the ONE
-  section the header phrase is in), else word by word from the item quotes (`_words_text`:
-  any separator equal, whole words only — „chlieb 120" ≠ „chlieb 1200"); header and quotes
-  naming two files decide nothing. Round 5: the incident's files share most rows, the quotes
-  tied, and Tržnica's orders got {trznica} on some days and {tr, trznica} on others — every
-  variant its own question / rule; by the header all four carry one identity. An order of a
-  mail WITH attachments whose file cannot be told is marked `fileUnknown`
-  (`extract._located`): never guessed (round 6) — `merge_by_day` never lends it a sibling's
-  file, and for a sender with learned shop rules the poistka asks it.
+  (`extract` records `sourceFile`, never asked of the model, so no `prompt_hash` change).
+  Normalized: `dl_match.fold`, stopwords = order/document words, OUR OWN brand („OBJ Pekárová
+  žena …" is an order TO us), week/day words, NOMINATIVE month names only (genitives are
+  street names: „29. augusta"), legal forms. Numbers are dropped from a FILE name but KEPT in a
+  header („Predajňa 1" / „Predajňa 2" are two shops) up to 5 digits — a house number, also a
+  year-like one (round 6: dropping them made „Hlavná 1713" and „Hlavná 2210" ONE shop; a year
+  re-asks once a year, the safe direction); `_HEADER_NOISE_RE` strips a date („16.10.", „16.
+  10. 2026"), a date range WITH its dot („16.-20.10.", „16.—20.10." — „BISTRO 1 - 16.10."
+  keeps its 1, round 7), a calendar week („42. týždeň", „43 KT", „KW 42") and an order number
+  after „Obj." / 6+ digit numbers (round 5: „BISTRO 16.10." changed identity every mail).
+  `tokens` = every word of header + file = the shop's IDENTITY (`text`): what a rule and the
+  per-shop question dedupe are keyed on — never a mail-relative value (round 3). `key` =
+  `tokens` minus the words every order of the mail shares AND the sender's company / name
+  words — only the question ranking's view (round 4: a brand word must not rank the
+  head-office card first).
+- **Which attachment** (`store_key.locate_file`): the ONE section the order's block HEADER
+  phrase is in, else the section holding most of its items — an item counts by its quote OR
+  its name (round 7: a quote the model reformatted matched no section), compared word by word
+  (`_words_text`: any separator equal, whole words — „chlieb 120" ≠ „chlieb 1200"); header and
+  items naming two files, or a tie, decide nothing (round 5: the incident's files share most
+  rows — by the header every Tržnica order carries ONE identity). An order of a mail WITH
+  attachments whose file cannot be told is `fileUnknown` (`extract._located`) — never guessed.
+  A file is compared by its words, or by its whole name when it has none („Objednávka.xlsx",
+  round 7).
 - **Multi-shop mail** (`store_key.is_multi_store`): ≥2 different identities AND a header
   block on some order (even an empty „Predajňa:") or the sender's learned shop rules. Never
   file names alone, never the sender's card count (rounds 3-4: a 2-card sender's two files of
@@ -135,50 +139,35 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   NO header block and who has no rules yet gets the pre-#493 behaviour (one merged order, one
   question) — the incident's mails carry headers, and its first answered mail teaches rules.
 - **Rung order inside `resolve`**: (1) a learned shop rule (`store_rule`) — exactly its shop,
-  for ANY sender; (2) family: street in the header (`_by_store`, #101); (3) family, ONLY in a
-  multi-shop mail (`use_names`, and the sweep of a shop question): shop-key 4-letter stems vs
-  card name + CODEX trade name + city + street (`_by_store_name`, `store_name`) — EXACTLY ONE
-  card hit, stems shared by every family card dropped, and BOTH views (`key` and `own`) must
-  hit that SAME one card (round 5: „Kaufland Martin" next to „Tesco Martin" lost the shared
-  town from `key` = {kaufland} → Kaufland Žilina; with `own` two cards → asked) AND that card
-  must carry EVERY distinguishing stem of `own` (round 6: one hit word is no proof — with no
-  Martin card in the family „Kaufland Martin" still hit only Kaufland Žilina, a new „BISTRO
-  Trnava" the known BISTRO Dolina); (4) family: `_by_delivery_address` —
-  NOT in a multi-shop mail; (5) the old llm / exact_email rungs. Every other mail keeps
-  exactly the pre-#493 rungs (rounds 3-4: a file / brand word beat the delivery address); a
-  rule sender's one-shop mail is decided by its rule, else asked (the poistka).
+  for ANY sender; (2) family: street in the header (`_by_store`, #101); (3) family:
+  `_by_delivery_address` — NOT in a multi-shop mail; (4) the old llm / exact_email rungs.
 - **The poistka** (`customer.collapsed_shops`): a shop ships ONLY when a SHOP rung decided it
-  (`STORE_RULES` = store_rule/store_address/store_name) — in a multi-shop mail for EVERY order
-  (also a lone new shop on its own card, round 2, and an order naming no shop, round 1), and
-  for a sender with learned shop rules for every order that names a shop (round 3: its lone
-  unknown shop went to the sender's card) or whose file could not be told (`file_unknown`,
-  round 6: the other shop's goods rode on the located file's rule, or went to the sender's
-  one card by address). Converges: each shop asked once, then its rule.
+  (`STORE_RULES` = store_rule / store_address) — in a multi-shop mail for EVERY order (also a
+  lone new shop on its own card, round 2, and an order naming no shop, round 1); for a sender
+  with learned shop rules for every order that names a shop (round 3), whose file could not
+  be told (`file_unknown`, round 6), or — in a mail of several files — any order (round 7: a
+  „Objednávka.xlsx" order next to „… BISTRO.xlsx" is another of its shops). Converges: each
+  shop asked once, then its rule.
 - **Merging (#81.1), all inside `order_customers.resolve_orders`**: a multi-shop mail merges
   per (day, order number, shop identity) — two shops never merge, two files of one shop do,
-  an order naming NO shop is never merged at all (round 5: two shops ordering the same goods
-  with no header and a tie in `locate_file` became one order of both shops' goods);
-  any other mail merges exactly as before #493 (`merge_by_day`: day, order number, header —
-  files ignored; an order merged from files of DIFFERENT words names NO file, so the first
-  file's words never decide it — „… BISTRO.xlsx" + „… BISTRO (1).xlsx" keep their words; an
-  order with no attachment to tell is no "different file", the merged order keeps the ONE
-  located file, round 5 — but a member marked `fileUnknown` makes the merged order
-  `fileUnknown` with no file, round 6). After resolution `merge_by_card` merges orders of one day + header
-  that resolved to the SAME card. Accepted residual: two differently-named files of ONE shop
-  in a multi-shop mail that stay unresolved are asked twice and ship as two ORDER files.
+  an order naming NO shop is never merged at all (round 5); a sender with learned shop rules
+  merges per (day, order number, header, FILE) and never merges an untold-file order (round 7:
+  merged, one answer shipped both files' goods to one card); any other mail merges exactly as
+  before #493 (`merge_by_day`: day, order number, header — a merged order names its ONE file,
+  else none and `fileUnknown`). After resolution `merge_by_card` merges orders of one day +
+  header that resolved to the SAME card. Accepted residual: two differently-named files of ONE
+  shop in a multi-shop mail that stay unresolved are asked twice and ship as two ORDER files.
 - **Per-shop question** (`teach.ask_customer(key=)` → `order_customers.shop_question`):
   dedupe `item_key = <sender>|shop:<identity>`, the shop in `wording` (the board card shows
   only `wording` + candidates — `reason` is not rendered), the identity in `context`
-  (`store`, `store_file`, `store_key`, `store_tokens`, `store_name_key`). Per shop in a
-  multi-shop mail or for a sender with shop rules (`scoped`); a per-SENDER question asked
-  there carries `no_address` and is asked for ONE order of ONE mail
-  (`order_customers.unnamed_question`: key `<sender>|shop-mail:<message_id>:<order index>`,
-  wording „<sender> · objednávka bez označenia predajne (10× rožok, …)") — never folded into
-  the sender's plain question (round 4), never shared by two orders / mails (round 5: one open
-  question shipped every unnamed order of every mail to one card — its answer teaches
-  nothing, it is a per-order decision); its answer must not put the address on a shop's
-  card, and the worker sweep never settles it (round 3: it auto-answered it with the
-  sender's one card).
+  (`store`, `store_file`, `store_key`, `store_tokens`). Per shop in a multi-shop mail or for a
+  sender with shop rules (`scoped`); a per-SENDER question asked there carries `no_address`
+  and is asked for ONE order of ONE mail (`order_customers.unnamed_question`: key
+  `<sender>|shop-mail:<message_id>:<order index>`, wording „<sender> · objednávka bez
+  označenia predajne (10× rožok, …)") — never folded into the sender's plain question (round
+  4), never shared by two orders / mails (round 5); its answer teaches nothing (a per-order
+  decision), never puts the address on a shop's card, and the worker sweep never settles it
+  (round 3).
 - **The answer teaches** through ONE helper, `order_customers.learn` — called by the board
   route (`_api_orders_answer_customer`), the „Nový zákazník" route and `teach.KINDS['customer']
   .apply` (the HTTP routes never went through `.apply`): a plain per-sender question teaches the
@@ -197,7 +186,8 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   card. The price of exactness is a re-ask when a shop's header/file gains a word — never a
   wrong card.
 - **`hold.retry_unknown_customer_questions`** (worker sweep, board save) settles a per-shop
-  question only by a SHOP rung (`STORE_RULES`), never `exact_email` — the sender's one card is
+  question only by a SHOP rung (`STORE_RULES`: a rule, or a CODEX card that gained the street
+  the header names), never `exact_email` — the sender's one card is
   exactly the collapse; an auto answer records `email_added: false` (its undo used to strip the
   very address it matched on). It loads `customers_for_management` once per sweep (it layers
   ~1000 CODEX cards).

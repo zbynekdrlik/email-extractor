@@ -1922,7 +1922,9 @@ intentional there for cards it was tuned against.
   msg 16097, the #493 incident): its family's four cards were APPENDED to the corpus
   `customers.csv` as they look after the CODEX layer (the corpus has no `codex_customers`; the
   CSV importer has no trade-name column — the card NAMES carry the shop words), recorded
-  `--live` into a scratch cache (60 new files, ~$0.15), merged, full corpus `--require-all`
-  33/38 (the 5 #120 known defects), `--update-baseline`. Expected values were checked by hand
-  against the xlsx columns (PO..PIA = 19.-23.10.2026): ŠKOLA 1/4/1 lines → …883, Tržnica
-  1/1/1/9 → …884, BISTRO 9/9/10/9/10 → …886, ŽILINA + PR held (9).
+  `--live` into a scratch cache (60 + 31 new files, ~$0.15 each run), merged, full corpus
+  `--require-all` 33/38 (the 5 #120 known defects), `--update-baseline`. Its expectation
+  follows the review-round-7 design: with no learned shop rules NOTHING ships — `shop_orders:
+  []`, `unshipped: 21` (each of the 5 shops asked once; a card's name only ranks the
+  question). A re-record is needed whenever the customer of an order changes (the item calls
+  carry the customer), the extraction cache stays valid.
