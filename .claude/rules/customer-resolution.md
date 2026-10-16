@@ -101,17 +101,27 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   `prompt_hash` change). Normalized: `dl_match.fold`, stopwords = order/document words, OUR
   OWN brand („OBJ Pekárová žena …" is an order TO us), week/day words, NOMINATIVE month names
   only (genitives are street names: „29. augusta"), legal forms; numbers are dropped from a
-  FILE name but KEPT in a header („Predajňa 1" / „Predajňa 2" are two shops). `tokens` =
+  FILE name but KEPT in a header („Predajňa 1" / „Predajňa 2" are two shops) — only short
+  standalone ones: a header's date („16.10.", „16. 10. 2026"), calendar week („42. týždeň",
+  „43 KT", „KW 42") and 4+ digit numbers (order number, year) are dropped
+  (`_HEADER_NOISE_RE`, round 5: „BISTRO 16.10." changed identity every mail). `tokens` =
   every word of header + file = the shop's IDENTITY (`text`): what a rule and the per-shop
   question dedupe are keyed on — never a mail-relative value (round 3: „Tesco Žilina" +
   „Kaufland Žilina" and „Tesco Martin" + „Kaufland Martin" both reduce to {tesco}/{kaufland}
   once the common town is removed). `key` = `tokens` minus the words every order of the
   mail shares AND the sender's own company / name words (`companyName`, `senderName`) — ONLY
   the name rung's view, EMPTY when nothing distinguishing is left (round 4: a fallback to the
-  shared words, or a brand word „Kvetka …" in every file, picked the head-office card). The
-  per-shop question stores that exact view (`store_name_key`), so the worker sweep matches
-  with the SAME words the pipeline did. The attachment is located word by word (`_words_text`:
-  any separator equal, whole words only — „chlieb 120" ≠ „chlieb 1200").
+  shared words, or a brand word „Kvetka …" in every file, picked the head-office card).
+  `own` = `tokens` minus only the company / name words. The per-shop question stores both
+  views (`store_name_key`, `store_own_key`) and whether the name rung ran (`store_names` =
+  a multi-shop mail), so the worker sweep matches with the SAME words AND rungs the pipeline
+  did (round 5: the sweep ran the name rung on a rule sender's one-shop question). The
+  attachment is located by the order's block HEADER first (`locate_file(header=)`: the ONE
+  section the header phrase is in), else word by word from the item quotes (`_words_text`:
+  any separator equal, whole words only — „chlieb 120" ≠ „chlieb 1200"); header and quotes
+  naming two files decide nothing. Round 5: the incident's files share most rows, the quotes
+  tied, and Tržnica's orders got {trznica} on some days and {tr, trznica} on others — every
+  variant its own question / rule; by the header all four carry one identity.
 - **Multi-shop mail** (`store_key.is_multi_store`): ≥2 different identities AND a header
   block on some order (even an empty „Predajňa:") or the sender's learned shop rules. Never
   file names alone, never the sender's card count (rounds 3-4: a 2-card sender's two files of
@@ -123,7 +133,9 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   for ANY sender; (2) family: street in the header (`_by_store`, #101); (3) family, ONLY in a
   multi-shop mail (`use_names`, and the sweep of a shop question): shop-key 4-letter stems vs
   card name + CODEX trade name + city + street (`_by_store_name`, `store_name`) — EXACTLY ONE
-  card hit, stems shared by every family card dropped; (4) family: `_by_delivery_address` —
+  card hit, stems shared by every family card dropped, and BOTH views (`key` and `own`) must
+  hit that SAME one card (round 5: „Kaufland Martin" next to „Tesco Martin" lost the shared
+  town from `key` = {kaufland} → Kaufland Žilina; with `own` two cards → asked); (4) family: `_by_delivery_address` —
   NOT in a multi-shop mail; (5) the old llm / exact_email rungs. Every other mail keeps
   exactly the pre-#493 rungs (rounds 3-4: a file / brand word beat the delivery address); a
   rule sender's one-shop mail is decided by its rule, else asked (the poistka).
@@ -133,10 +145,14 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   for a sender with learned shop rules for every order that names a shop (round 3: its lone
   unknown shop went to the sender's card). Converges: each shop asked once, then its rule.
 - **Merging (#81.1), all inside `order_customers.resolve_orders`**: a multi-shop mail merges
-  per (day, order number, shop identity) — two shops never merge, two files of one shop do;
+  per (day, order number, shop identity) — two shops never merge, two files of one shop do,
+  an order naming NO shop is never merged at all (round 5: two shops ordering the same goods
+  with no header and a tie in `locate_file` became one order of both shops' goods);
   any other mail merges exactly as before #493 (`merge_by_day`: day, order number, header —
   files ignored; an order merged from files of DIFFERENT words names NO file, so the first
-  file's words never decide it — „… BISTRO.xlsx" + „… BISTRO (1).xlsx" keep their words). After resolution `merge_by_card` merges orders of one day + header
+  file's words never decide it — „… BISTRO.xlsx" + „… BISTRO (1).xlsx" keep their words; an
+  order whose file was not located is no "different file", the merged order keeps the ONE
+  located file, round 5). After resolution `merge_by_card` merges orders of one day + header
   that resolved to the SAME card. Accepted residual: two differently-named files of ONE shop
   in a multi-shop mail that stay unresolved are asked twice and ship as two ORDER files.
 - **Per-shop question** (`teach.ask_customer(key=)` → `order_customers.shop_question`):
@@ -144,8 +160,12 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   only `wording` + candidates — `reason` is not rendered), the identity in `context`
   (`store`, `store_file`, `store_key`, `store_tokens`, `store_name_key`). Per shop in a
   multi-shop mail or for a sender with shop rules (`scoped`); a per-SENDER question asked
-  there carries `no_address` and its own dedupe key (`<sender>|shop-mail`, never folded into
-  the sender's plain question — round 4): its answer must not put the address on a shop's
+  there carries `no_address` and is asked for ONE order of ONE mail
+  (`order_customers.unnamed_question`: key `<sender>|shop-mail:<message_id>:<order index>`,
+  wording „<sender> · objednávka bez označenia predajne (10× rožok, …)") — never folded into
+  the sender's plain question (round 4), never shared by two orders / mails (round 5: one open
+  question shipped every unnamed order of every mail to one card — its answer teaches
+  nothing, it is a per-order decision); its answer must not put the address on a shop's
   card, and the worker sweep never settles it (round 3: it auto-answered it with the
   sender's one card).
 - **The answer teaches** through ONE helper, `order_customers.learn` — called by the board

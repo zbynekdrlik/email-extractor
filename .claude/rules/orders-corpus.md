@@ -1911,3 +1911,18 @@ intentional there for cards it was tuned against.
   BEFORE `sweep` in `worker.tick`, so under default config a question is expired at touched=3
   before it can reach the escalate threshold (touched≥4) — the 🚨 escalation branch never
   renders with defaults.
+- **A mail of SEVERAL SHOPS is scored with `shop_orders` (#493), never the per-date
+  `orders` shape.** Two shops' orders of one day are two correct ORDER files, and the
+  incident class itself (every shop's order on ONE card) is invisible without the card:
+  `expected: {"shop_orders": [{"delivery_date", "customer_ean", "item_count"?}], "unshipped":
+  N?}` matches each SHIPPED order by (day, card) — a shop on another shop's card is a missing
+  + an extra order, the same card twice on one day is "vznikla dvakrát"; `unshipped` pins how
+  many orders are held / reviewed (the asked shops). `_actual_from_run` carries each shipped
+  order's `customer_ean` and the `unshipped` count. Case `multishop-2026-10-16-16097` (prod
+  msg 16097, the #493 incident): its family's four cards were APPENDED to the corpus
+  `customers.csv` as they look after the CODEX layer (the corpus has no `codex_customers`; the
+  CSV importer has no trade-name column — the card NAMES carry the shop words), recorded
+  `--live` into a scratch cache (60 new files, ~$0.15), merged, full corpus `--require-all`
+  33/38 (the 5 #120 known defects), `--update-baseline`. Expected values were checked by hand
+  against the xlsx columns (PO..PIA = 19.-23.10.2026): ŠKOLA 1/4/1 lines → …883, Tržnica
+  1/1/1/9 → …884, BISTRO 9/9/10/9/10 → …886, ŽILINA + PR held (9).
