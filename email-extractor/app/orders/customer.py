@@ -450,11 +450,16 @@ def family_of(customers: list[dict], sender_email: str, llm: dict | None = None
     a confident model pick (>1). A sender on exactly ONE card is no family (the unique
     address decides)."""
     llm = llm or {}
-    addr = (_addresses(sender_email) or [""])[0]
-    owners = [c for c in customers if addr and addr in _addresses(c.get("emails"))]
+    owners = owners_of(customers, sender_email)
     picked = {str(c.get("ean_edi")): c for c in customers
               if c.get("ean_edi")}.get(str(llm.get("ean_edi") or ""))
     return _family(customers, owners, picked, _confidence(llm))
+
+
+def owners_of(customers: list[dict], sender_email: str) -> list[dict]:
+    """The cards carrying the sender's exact address."""
+    addr = (_addresses(sender_email) or [""])[0]
+    return [c for c in customers if addr and addr in _addresses(c.get("emails"))]
 
 
 def _confidence(llm: dict) -> float:
@@ -503,7 +508,7 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
     picked = by_ean.get(str(llm.get("ean_edi") or ""))
 
     addr = (_addresses(sender_email) or [""])[0]
-    owners = [c for c in customers if addr and addr in _addresses(c.get("emails"))]
+    owners = owners_of(customers, sender_email)
 
     # #493: a shop the warehouse already answered for THIS sender wins over everything — it
     # is a human decision about exactly this (sender, shop), written only by a board answer.

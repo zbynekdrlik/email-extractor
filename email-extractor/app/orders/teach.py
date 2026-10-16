@@ -358,8 +358,8 @@ def ask_customer(conn, message_id: str, sender_email: str, candidates: list[dict
 
     shop = key
     key = str(sender_email or "").strip().lower()
-    if not key or (shop is not None and store_rules.is_own_address(key)):
-        # #493 round 28: a staff forward's shop question belongs to its mail — never shared
+    if not key or store_rules.is_own_address(key):
+        # #493 rounds 28-29: a staff forward's question belongs to its mail — never shared
         # by every customer that staff address forwards
         key = f"cust:{message_id}" if message_id else ""
     if not key:

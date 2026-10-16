@@ -1009,7 +1009,7 @@ def _sender_address(message: dict, extracted: dict, customers: list[dict]) -> st
     """
     envelope = (message.get("from_addr") or "").strip()
     stated = (extracted.get("senderEmail") or "").strip()
-    if envelope and OUR_DOMAIN not in envelope.lower():
+    if envelope and not store_rules.is_own_address(envelope):
         return envelope
     known = {e.lower() for c in customers for e in (c.get("emails") or [])}
     if stated and stated.lower() in known:

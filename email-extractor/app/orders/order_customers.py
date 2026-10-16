@@ -62,9 +62,11 @@ def resolve_orders(conn, customers: list[dict], sender: str, extracted: dict, ll
     — a pure read, so it applies in shadow too, like a memory lookup."""
     rules = store_rules.for_sender(conn, sender)
     family = customer.family_of(customers, sender, llm) or []
-    # the FAMILY's shop history — learned rules or a shop question still open (rounds 27-28):
-    # such a sender ships a shop only by its rule, never by the street
-    history = bool(rules) or shop_history(conn, sender, family)
+    # the FAMILY's shop history — learned rules or a shop question still open (rounds 27-29;
+    # also of a co-address on the sender's own card): such a sender ships a shop only by
+    # its rule, never by the street
+    history = bool(rules) or shop_history(conn, sender, family,
+                                          own_cards=customer.owners_of(customers, sender))
     # the sender's own company / name words never name one of its shops (review round 4)
     drop = (store_key.tokens(extracted.get("companyName", ""))
             + store_key.tokens(extracted.get("senderName", "")))
@@ -102,16 +104,20 @@ def resolve_orders(conn, customers: list[dict], sender: str, extracted: dict, ll
     return merge_by_card(by_day, oc)
 
 
-def shop_history(conn, sender_email: str, family) -> bool:
+def shop_history(conn, sender_email: str, family, own_cards=()) -> bool:
     """Has this sender's FAMILY shop history — a live learned shop rule of any of its
     addresses (or pointing at one of its cards), or a per-SHOP question of any of its
     addresses still open on the board (review rounds 27-28: the street shipped a shop of the
     next mail — from the family's OTHER address — while that shop's question was open, then
-    the answer named another card)? Our own domain owns no history (a staff forward), and a
-    per-ORDER question (`|shop-mail:`, an unnamed order) is no shop history (round 28)."""
-    addresses = [sender_email] + [e for c in family or [] for e in c.get("emails") or []]
-    senders = {a for a in (str(v or "").strip().lower() for v in addresses)
-               if a and not store_rules.is_own_address(a)}
+    the answer named another card)? The addresses of the sender's OWN card(s) count too
+    (`own_cards`, round 29: a co-address on the one central card shipped a taught shop to
+    it) — their addresses only, never their EANs (a one-card sender stays ordinary when
+    another chain's shop was answered with its card). Our own domain owns no rule and keys
+    its questions per mail, so it has no history; a per-ORDER question (`|shop-mail:`, an
+    unnamed order) is no shop history (round 28)."""
+    addresses = ([sender_email] + [e for c in family or [] for e in c.get("emails") or []]
+                 + [e for c in own_cards or () for e in c.get("emails") or []])
+    senders = {a for a in (str(v or "").strip().lower() for v in addresses) if a}
     eans = {str(c.get("ean_edi") or "") for c in family or []} - {""}
     if store_rules.any_live(conn, senders, eans):
         return True
@@ -280,7 +286,9 @@ def learn(conn, q: dict, ean_edi: str, by: str, email_added: bool | None = None)
         if key is not None:
             rule_id = store_rules.remember(conn, sender_email=sender, key=key,
                                            ean_edi=ean_edi, question_id=q["id"], by=by)
-    else:
+    elif not store_rules.is_own_address(sender):
+        # round 29: our own address (a staff forward) is never put on a customer's card —
+        # every later forward of that staff address would go to that card
         added = snapshot.remember_customer_email(conn, ean_edi, sender)
     if email_added is None:
         email_added = added

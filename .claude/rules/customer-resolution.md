@@ -178,7 +178,11 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   `|shop-mail:`, round 28) still OPEN on the board (round 27: the next mail shipped a shop by
   the street while its own question was open, then the answer named another card) — of ANY
   address of the sender's FAMILY or pointing at one of its cards (round 28: the family's
-  second address skipped the history); such a sender is a shop-history sender everywhere
+  second address skipped the history), or of a co-address on the sender's OWN card (round
+  29, `own_cards` — addresses only, never that card's EAN: S2 on the one central card shipped
+  S1's taught BISTRO to it, the incident misroute). Accepted: any rule naming a family card
+  (also another chain's) makes the family a shop-history sender — even the #101 GT pair is
+  then asked once per shop, then its rules ship; such a sender is a shop-history sender everywhere
   (`history` in `resolve_orders`, `collapsed_shops(shop_history=)`) and ships a shop only by
   ITS rule. In a multi-shop mail `strict`: the street's folded words INCLUDING the house number (digit
   and letter runs apart — „35BB", round 9; a house number WITH its one-letter suffix after a
@@ -257,12 +261,16 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   4), never shared by two orders / mails (round 5); its answer teaches nothing (a per-order
   decision), never puts the address on a shop's card, and the worker sweep never settles it
   (round 3).
-- **Our own domain is never a customer** (`store_rules.is_own_address`, `OUR_DOMAIN` moved
-  there from `pipeline`; round 28): a staff forward of an unknown customer keeps the staff
-  address as the sender — a shop rule keyed on it was shared by every customer that staff
-  forwards („Predajňa 1" of one customer shipped another's order). Such an address owns no
-  rule (`remember` → None, `for_sender` → []), no shop history, and its shop question is keyed
-  per MAIL (`cust:<message_id>|shop:…`, `teach.ask_customer`).
+- **Our own domain is never a customer** (`store_rules.is_own_address` — the EXACT domain or
+  a subdomain, never a substring; `OUR_DOMAIN` moved there, `pipeline._sender_address` uses
+  it; rounds 28-29): a staff forward of an unknown customer keeps the staff address as the
+  sender — a shop rule keyed on it was shared by every customer that staff forwards
+  („Predajňa 1" of one customer shipped another's order), and a plain answer put the staff
+  address on the customer's card (every later forward → that card). Such an address owns no
+  rule (`remember` → None, `for_sender` → []), no shop history, EVERY question of it is keyed
+  per MAIL (`cust:<message_id>…`, `teach.ask_customer`), and no answer puts it on a card
+  (`order_customers.learn`, the „Nový zákazník" route). Open (pre-existing, not #493): the
+  #369 „nie je objednávka" mail rule is keyed on the staff `from_addr` + subject shape.
 - **The answer teaches** through ONE helper, `order_customers.learn` — called by the board
   route (`_api_orders_answer_customer`), the „Nový zákazník" route and `teach.KINDS['customer']
   .apply` (the HTTP routes never went through `.apply`): a plain per-sender question teaches the

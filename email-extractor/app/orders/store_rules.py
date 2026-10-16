@@ -32,10 +32,15 @@ OUR_DOMAIN = "slovnormal.sk"
 
 
 def is_own_address(value) -> bool:
-    """An address of our own domain — never a customer's identity (review round 28: rules
-    and the shop question keyed on a staff forwarder were shared by every customer it
-    forwards; „Predajňa 1" of one customer shipped another's order)."""
-    return OUR_DOMAIN in str(value or "").lower()
+    """An address of our own domain (or a subdomain) — never a customer's identity (review
+    round 28: rules and the shop question keyed on a staff forwarder were shared by every
+    customer it forwards; „Predajňa 1" of one customer shipped another's order). The exact
+    domain, never a substring („x@notslovnormal.sk" is a customer, round 29)."""
+    addr = str(value or "").strip().lower()
+    if "@" not in addr:
+        return False
+    domain = addr.rsplit("@", 1)[1]
+    return domain == OUR_DOMAIN or domain.endswith("." + OUR_DOMAIN)
 
 
 def _sender(value) -> str:

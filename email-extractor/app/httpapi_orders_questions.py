@@ -195,7 +195,10 @@ def register(app: Flask, deps: Deps) -> dict:
         # #493: a card created for ONE SHOP of a multi-shop sender never gets the sender's
         # address (the shop rule is the lesson — the address would make a family of it)
         shop_question = bool(ctx.get("store_key")) or bool(ctx.get("no_address"))
+        from .orders import store_rules
+        # round 29: our own address (a staff forward) never goes on a customer's card
         added_email = bool(ctx_email and not shop_question
+                           and not store_rules.is_own_address(ctx_email)
                            and ctx_email not in [e.lower() for e in emails])
         if added_email:
             emails.append(ctx_email)
