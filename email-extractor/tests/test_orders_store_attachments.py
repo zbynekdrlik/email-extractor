@@ -312,3 +312,12 @@ def test_a_shop_code_in_the_identity_never_reaches_the_street_comparison():
         "2999000000802", "store_address")
     assert _street_hit(_street_family("M.R. Štefánika 836/33", "Hlavná 7"),
                        "BISTRO Štefánika 836/33") == ("2999000000801", "store_address")
+
+
+def test_a_house_numbers_letter_suffix_is_part_of_the_house_number():
+    """„19/B" is not „19/A" — the letter of a house number counts, in any case and form
+    („19/B", „19B", „19/b"); without a 19/B card the 19/B shop is asked (review round 17)."""
+    assert _street_hit(_street_family("Hlavná 19/A", "Hlavná 7"), "BISTRO Hlavná 19/B") is None
+    assert _street_hit(_street_family("Hlavná 19/A", "Hlavná 7"), "BISTRO Hlavná 19B") is None
+    assert _street_hit(_street_family("Hlavná 19/A", "Hlavná 19/B"), "BISTRO Hlavná 19/b") == (
+        "2999000000802", "store_address")
