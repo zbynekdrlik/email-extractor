@@ -142,12 +142,15 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   attachments whose file cannot be told is `fileUnknown` (`extract._located`) — never guessed.
   A file is compared by its words, or by its whole name when it has none („Objednávka.xlsx",
   round 7).
-- **Multi-shop mail** (`store_key.is_multi_store`): ≥2 different identities — an order naming
-  no shop counts as one more when it sits under a block of its own (`names_a_block`: a real
-  word or a generic shop word „Predajňa:"; never a noise-only header — a date, a calendar
-  week, „Objednávka 04.08.", rounds 8-11) or its attachment could not be told (`file_unknown`,
-  round 11: the PR form's line also in the body left one identity, both shops went to the
-  sender's card) — AND a header block (`names_a_block`) on some order
+- **Multi-shop mail** (`store_key.is_multi_store`): ≥2 different identities — orders naming
+  no shop count one per distinct (block, file) when under a block of their own
+  (`names_a_block`: a generic shop word „Predajňa:", a real word or code „A", or a number no
+  document word owns „č. 2"; never a noise-only header — a date, a calendar week, „Objednávka
+  04.08.", „Objednávka č. 123", „Hárok 1", rounds 8-12), from an attachment that could not be
+  told (`file_unknown`, round 11) or from a found file whose name has no shop words (round 12:
+  „OBJ Pekárová žena.xlsx" next to the Tržnica form; „Predajňa A" / „Predajňa B" counted
+  once — both shops went to the sender's card) — AND a header block (`names_a_block`) on
+  some order
   (even an empty „Predajňa:") or the sender's learned shop rules. Never
   file names alone, never the sender's card count (rounds 3-4: a 2-card sender's two files of
   one day, a template file name, „Objednávka Prešov" + „… Prešov pečivo" are no shops —
