@@ -83,24 +83,26 @@ def _squash(text: str) -> str:
     return _SPACES_RE.sub(" ", dl_match.fold(text)).strip()
 
 
-def tokens(text, keep_numbers: bool = False) -> list[str]:
+def tokens(text, keep_numbers: bool = False, codes: bool = False) -> list[str]:
     """Normalized words of a header / file name / card text, in order, de-duplicated:
     folded, split on every non-alphanumeric, without stopwords, week codes („kw42") and —
     unless `keep_numbers` (a shop HEADER: „Predajňa 1" / „Predajňa 2" are two shops) — pure
     numbers. Short words stay (the „PR" / „ZA" shop codes); the question ranking compares
     only words of `STEM`+ letters. A header keeps standalone numbers of up to
-    `MAX_HEADER_NUMBER` digits — never a date, a certain week number or an order number
-    (`_HEADER_NOISE_RE`) — and a shop's CODE: „T1" / „W2" (only „KW42" / „WK42" / „tyž42"
-    are certainly weeks) and a lone capital letter („A Centrum" / „B Centrum" are two shops,
-    review round 15: both were {centrum})."""
+    `MAX_HEADER_NUMBER` digits — never a date, a week number or an order number
+    (`_HEADER_NOISE_RE`). `codes` (a shop's IDENTITY, `for_orders`) also keeps a shop's
+    CODE: „T1" / „W2" (only „KW42" / „WK42" / „tyž42" are certainly weeks) and a lone
+    capital letter („A Centrum" / „B Centrum" are two shops, review round 15: both were
+    {centrum}) — never in a street comparison (round 16: „19/A" and the „1" of „T1")."""
     out: list[str] = []
     folded = dl_match.fold(text)
     capitals: set[str] = set()
     if keep_numbers:
         folded = _HEADER_NOISE_RE.sub(" ", folded)
+    if codes:
         capitals = {dl_match.fold(w) for w in re.findall(r"[^\W\d_]+", str(text or ""))
                     if len(w) == 1 and w.isupper()}
-    weeks = _CERTAIN_WEEK_RE if keep_numbers else _WEEK_CODE_RE
+    weeks = _CERTAIN_WEEK_RE if codes else _WEEK_CODE_RE
     for t in re.split(r"[^a-z0-9]+", folded):
         if t.isdigit() and keep_numbers and len(t) <= MAX_HEADER_NUMBER:
             if t not in out:
@@ -280,7 +282,7 @@ def for_orders(orders: list[dict], drop=()) -> list[StoreKey]:
     for o in orders:
         header = str(o.get("store") or "").strip()
         src = str(o.get("sourceFile") or "").strip()
-        raw.append((header, src, frozenset(tokens(header, keep_numbers=True))
+        raw.append((header, src, frozenset(tokens(header, keep_numbers=True, codes=True))
                     | file_tokens(src), bool(o.get("fileUnknown"))))
     distinct = {t for _h, _s, t, _u in raw if t}
     common = frozenset.intersection(*distinct) if len(distinct) >= 2 else frozenset()
