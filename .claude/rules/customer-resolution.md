@@ -122,12 +122,13 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   `tokens` minus the words every order of the mail shares AND the sender's company / name
   words — only the question ranking's view (round 4: a brand word must not rank the
   head-office card first).
-- **Several shops' tables** (`extract._several_tables`: two attachments with a recognized
-  table, or two SHEETS with one while the model names two shops — two shops' filled-in price
-  lists): read by the MODEL, never the table path (`parse_table` reads the first table only,
-  and straight through the next sheet — the second shop's order vanished or merged into the
-  first, rounds 9-10). One table, or a workbook split into goods sheets of ONE shop, keeps the
-  table path.
+- **Several shops next to a table** (`extract._several_tables`: two attachments with a
+  recognized table, or the model naming two shops): read by the MODEL, never the table path
+  (`parse_table` reads the first table only, straight through the next sheet, and keeps only
+  the model's FIRST order — the second shop's order vanished or merged, rounds 9-11). One
+  table of one shop keeps the table path (the corpus' Košík / price-list mails). Accepted
+  residual (pre-existing on main): a table mail plus another shop's body order the model
+  reports WITHOUT a store still loses that body order.
 - **Which attachment** (`store_key.locate_file`): the ONE section the order's block HEADER
   phrase is in, else the section holding most of its items — an item counts by its QUOTE, and
   by its name only when the quote is NOWHERE — every text is checked against the mail BODY
@@ -141,9 +142,12 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   attachments whose file cannot be told is `fileUnknown` (`extract._located`) — never guessed.
   A file is compared by its words, or by its whole name when it has none („Objednávka.xlsx",
   round 7).
-- **Multi-shop mail** (`store_key.is_multi_store`): ≥2 different identities (header blocks
-  naming nothing — „Predajňa:", `names_a_block`: a header with a WORD, never a date-only one —
-  count as one more, round 8) AND a header block (`names_a_block`, round 10) on some order
+- **Multi-shop mail** (`store_key.is_multi_store`): ≥2 different identities — an order naming
+  no shop counts as one more when it sits under a block of its own (`names_a_block`: a real
+  word or a generic shop word „Predajňa:"; never a noise-only header — a date, a calendar
+  week, „Objednávka 04.08.", rounds 8-11) or its attachment could not be told (`file_unknown`,
+  round 11: the PR form's line also in the body left one identity, both shops went to the
+  sender's card) — AND a header block (`names_a_block`) on some order
   (even an empty „Predajňa:") or the sender's learned shop rules. Never
   file names alone, never the sender's card count (rounds 3-4: a 2-card sender's two files of
   one day, a template file name, „Objednávka Prešov" + „… Prešov pečivo" are no shops —
