@@ -320,7 +320,7 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   (`customer_base_id(conn, latest)`), so a card/address CODEX dropped leaves the list. The
   frozen order snapshot still contains the layer (runs stay reproducible). Content hash: the
   trade name joins the line only when set, so a list without CODEX hashes exactly as before
-  (the e2e-orders corpus stays byte-identical — verified offline, 32/37 + the 5 #120 defects).
+  (the e2e-orders corpus stays byte-identical — verified offline: 32/37 then, 33/38 since the #493 case was added — the 5 failures are the known #120 defects).
 - **A hand-added override owns its EAN** (`_merge_customers`): every base row with that EAN is
   excluded, not only its current street. Before, a street edit of a board-created card left the
   copy baked in the cumulative base under the OLD street as a ghost duplicate card (checked on
