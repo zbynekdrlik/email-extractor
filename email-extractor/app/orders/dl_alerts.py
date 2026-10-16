@@ -129,6 +129,11 @@ GROUPED_ITEM_KINDS = {
         "zmaž, inak ho ranný import prevezme druhýkrát (duplicitná príjemka).",
 }
 
+# #494: a grouped kind whose every item line is its OWN instruction (delete THIS file) is never
+# capped — its rows are marked delivered with the post and its source row is terminal, so a
+# „… a ešte N ďalších" remainder would lose the instruction for those files for good.
+UNCAPPED_KINDS = frozenset({"dl_manual_in_codex"})
+
 # #473: a grouped kind that reaches a WAREHOUSE channel links the password-free board
 # History tab of its documents (`board.links` kind), never the password-gated admin
 # dashboard; a kind absent here gets no link on a warehouse channel (`_action_line`). The ops
@@ -301,11 +306,12 @@ def _format_grouped(kind: str, bodies: list[str], cfg, *, channel_id: int,
     # CSS/JSON snippet, an emoji entity) must never raise and break the whole flush (this
     # runs OUTSIDE flush_pending's post() try/except) — `{n}` is the only placeholder.
     parts = [f"<p>{GROUPED_ITEM_KINDS[kind].replace('{n}', str(n))}</p>"]
-    parts.extend(bodies[:DISPLAY_ITEM_CAP])
-    if n > DISPLAY_ITEM_CAP:
+    cap = n if kind in UNCAPPED_KINDS else DISPLAY_ITEM_CAP     # #494: every line an action
+    parts.extend(bodies[:cap])
+    if n > cap:
         # #476: one kind per post and every header noun is masculine (e-maily, dodacie
         # listy, skeny) — the shared agreeing line („a ešte 1 ďalší", never „1 ďalších").
-        parts.append(report.more_line(n - DISPLAY_ITEM_CAP, "ďalší", "ďalšie", "ďalších"))
+        parts.append(report.more_line(n - cap, "ďalší", "ďalšie", "ďalších"))
     parts.append(_action_line(kind, cfg, channel_id, list(message_ids or [])))
     return "".join(parts)
 

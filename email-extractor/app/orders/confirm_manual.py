@@ -25,10 +25,14 @@ any other (`_check_incidents_for_clear`). `confirm._activity_today_at` reads onl
 rows — a manual mark is no proof that an import pass ran (#255).
 
 Exactly ONE ops alert per file (`ALERT_KIND`, the ops channel — NEVER the warehouse thread):
-delete the file from `in_DL`, or the next morning import takes it a second time. It is written
-in the SAME transaction as the guarded status change (`WHERE import_status IS NULL`), so it can
-neither be lost nor repeated. The app never touches the file on ORION (the design rejected an
-automatic delete outside the upload, #239) — a human deletes it on the alert.
+check the receipt, delete the file from `in_DL`, or the next morning import takes it a second
+time. It is written in the SAME transaction as the guarded status change (`WHERE import_status
+IS NULL`), so a `manual` row never exists without its outbox row and never gets a second one;
+the grouped post names every file (`dl_alerts.UNCAPPED_KINDS` — no „… a ešte N" cut). With no
+ops channel configured the row is HELD and `dl_alerts.purge_held` drops it after
+`HELD_RETENTION_DAYS` — the ops channel must be set (it is on prod). The app never touches the
+file on ORION (the design rejected an automatic delete outside the upload, #239) — a human
+deletes it on the alert.
 
 No freshness gate: a receipt is evidence of PRESENCE, an older copy is still true. No copy / no
 match / a failing lookup = behaviour unchanged (the row keeps waiting, logged). Only the DESADV

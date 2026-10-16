@@ -313,9 +313,16 @@ from `confirm.sweep` via `_mark_manual`) fixes it with a FOURTH terminal status:
   file + one `dl_alerts.item_line` per file: DL, supplier, CODEX receipt, exact wire file name
   `Z-DESADV_…`; the ops channel gets the dashboard link per #473), outbox key
   `desadv-manual:<desadv_sent id>`, channel `report.ops_channel(cfg)`
-  (0 → held, delivered once an ops channel is set). The guarded `UPDATE … WHERE import_status IS
-  NULL RETURNING id` and `dl_alerts.enqueue` run in ONE `conn.transaction()` — `manual` without
-  its alert (a silently swallowed „delete the file") or a second alert are both impossible.
+  (0 → held, delivered once an ops channel is set — but `purge_held` drops a held row after
+  `HELD_RETENTION_DAYS`, so the ops channel must be configured; it is on prod, 592). The guarded
+  `UPDATE … WHERE import_status IS NULL RETURNING id` and `dl_alerts.enqueue` run in ONE
+  `conn.transaction()` — `manual` without its alert (a silently swallowed „delete the file") or a
+  second alert are both impossible.
+- **Never capped (review round 2):** `dl_alerts.UNCAPPED_KINDS` — `_format_grouped` lists EVERY
+  line of this kind, no „… a ešte N ďalších" after `DISPLAY_ITEM_CAP`. Each line is its own
+  delete instruction, the rows are marked delivered with the post and the ledger row is terminal,
+  so a capped remainder would lose those files' instruction for good. Any FUTURE grouped kind
+  whose lines are per-item actions (not just a list to look at) belongs in that set.
 - **The app never touches the file on ORION** (design: no automatic delete outside the upload,
   #239). A human deletes it on the ops alert; the row is already `manual`, so no alarm follows.
 - Pins: `tests/test_orders_confirm_manual.py` (manual + one alert, never repeated, grouped
@@ -327,10 +334,13 @@ from `confirm.sweep` via `_mark_manual`) fixes it with a FOURTH terminal status:
   due-row filter, the all-rows pass, the `IS NULL` guard, the transaction, the multi-number
   match, the ops channel, the lookup `try`, the date floor or its window each fails a named
   test. Fixtures use MADE-UP DL / receipt numbers — never the incident's (public repo).
-- **Known residual (not handled, deliberately):** `manual` is terminal and the one ops alert is
+- **Known residuals (not handled, deliberately):** `manual` is terminal and the one ops alert is
   the only safeguard — if nobody deletes the file and CODEX later imports it, the duplicate
-  receipt is not detected. Also a later deletion of the hand-typed receipt in CODEX never turns
-  the row back to waiting.
+  receipt is not detected. A later deletion of the hand-typed receipt in CODEX never turns the
+  row back to waiting. The date window has NO upper bound: any later receipt of the supplier in
+  the 60-day copy whose digits equal the DL number counts (prefixes are stripped, so an invoice
+  series sharing digits with the DL series behind another prefix could falsely match) — the ops
+  alert asks to check the named receipt in CODEX before deleting.
 - **Live read-only check after a deploy:** `SELECT id, doc_number, import_status,
   import_confirmed_at FROM desadv_sent WHERE import_status = 'manual'` + `SELECT channel_id,
   kind, message_id, delivered_at FROM pending_alerts WHERE kind = 'dl_manual_in_codex'` (one row
