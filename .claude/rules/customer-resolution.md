@@ -142,23 +142,23 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   attachments whose file cannot be told is `fileUnknown` (`extract._located`) — never guessed.
   A file is compared by its words, or by its whole name when it has none („Objednávka.xlsx",
   round 7).
-- **Multi-shop mail** (`store_key.is_multi_store`): ≥2 different identities — orders naming
-  no shop count one per distinct (block, file) when under a block of their own
-  (`names_a_block`: a generic shop word „Predajňa:", a real word, a lone CAPITAL letter „A",
-  or a number no document word owns „č. 2"; never a noise-only header — a date incl.
-  „04/08/2026", a calendar week „T42", „Objednávka č. 123", „Hárok 1", „v pondelok", „a.s.",
-  a bare year — the SAME word lists `tokens` drops, rounds 8-13), from an attachment that
-  could not be told (`file_unknown`, round 11 — each such order on its own, round 13: two
-  blank „Predajňa:" forms counted once) or from a found file whose name has no shop words
-  (round 12: „OBJ Pekárová žena.xlsx" next to the Tržnica form; „Predajňa A" / „Predajňa B"
-  counted once — both shops went to the sender's card) — AND a header block
-  (`names_a_block`) on some order. Measured (round 13, prod read-only): 435 of 443 order runs
-  since 2026-07-30 carry `store = ""` on every order — the header heuristics act on real
-  multi-shop mails only
-  (even an empty „Predajňa:") or the sender's learned shop rules. Never
-  file names alone, never the sender's card count (rounds 3-4: a 2-card sender's two files of
-  one day, a template file name, „Objednávka Prešov" + „… Prešov pečivo" are no shops —
-  #81.1/#418 exactly as on main). Accepted residual: a multi-shop customer whose files carry
+- **Multi-shop mail** (`store_key.is_multi_store`): ≥2 different shops AND a header block
+  (`names_a_block`) on some order or the sender's learned shop rules. Shops = the distinct
+  identities, plus orders naming no shop, one per distinct (block, file): under a block of
+  their own (`names_a_block`: a generic shop word „Predajňa:", a real word, a lone CAPITAL
+  letter „A", a code „T1", or a number no document word owns „č. 2"; never a noise-only
+  header — a date incl. „04/08/2026", a certain week code „KW 42" / „WK42", „Objednávka č.
+  123", „Hárok 1", „v pondelok", „a.s.", a bare year — the SAME word lists `tokens` drops,
+  rounds 8-14), from a found file whose name has no shop words (round 12: „OBJ Pekárová
+  žena.xlsx" next to the Tržnica form; „Predajňa A" / „Predajňa B" counted once — both shops
+  went to the sender's card), or `file_unknown` — the mail HAS attachments the order's could
+  not be told from — each such order on its own (rounds 11-13: two blank „Predajňa:" forms
+  counted once; a body mail with no attachment is never "untold", round 14). Never file names
+  alone, never the sender's card count (rounds 3-4: a 2-card sender's two files of one day, a
+  template file name, „Objednávka Prešov" + „… Prešov pečivo" are no shops — #81.1/#418
+  exactly as on main). Measured (round 13, prod read-only): 435 of 443 order runs since
+  2026-07-30 carry `store = ""` on every order — the header heuristics act on real multi-shop
+  mails only. Accepted residual: a multi-shop customer whose files carry
   NO header block and who has no rules yet gets the pre-#493 behaviour (one merged order, one
   question) — the incident's mails carry headers, and its first answered mail teaches rules.
 - **Rung order inside `resolve`**: (1) a learned shop rule (`store_rule`) — exactly its shop,
