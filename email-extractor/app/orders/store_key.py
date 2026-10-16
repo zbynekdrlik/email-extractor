@@ -282,13 +282,16 @@ def for_orders(orders: list[dict], drop=()) -> list[StoreKey]:
 _NOT_A_BLOCK = DOCUMENT_WORDS | BRAND_WORDS | TIME_WORDS | FILLER_WORDS | {"c", "cislo", "no",
                                                                           "nr", "kt"}
 _YEAR_RE = re.compile(r"^(19|20)\d{2}$")
+# a week code that is certainly a week („KW42", „WK42", „tyž42") — „T1" / „W2" may as well be
+# a shop's code, and a code is asked, never folded (review round 14)
+_CERTAIN_WEEK_RE = re.compile(r"^(kw|wk|tyz)\d+$")
 
 
 def names_a_block(key: StoreKey) -> bool:
     """The order sits under a header block of its own: its header carries a generic shop word
     („Predajňa:"), a word that is no document / time / filler word (a name), a lone CAPITAL
     letter (a shop code „A"), or a number no document word owns („č. 2"). A header of only
-    noise — a date („04/08/2026" too), a calendar week („T42"), „Objednávka č. 123", „Hárok 1",
+    noise — a date („04/08/2026" too), a calendar week („KW42"), „Objednávka č. 123", „Hárok 1",
     „v pondelok", „a.s.", a bare year — names no block (review rounds 10-13)."""
     folded = _HEADER_NOISE_RE.sub(" ", dl_match.fold(key.header))
     words = [w for w in _NON_ALNUM_RE.split(folded) if w]
@@ -301,7 +304,7 @@ def names_a_block(key: StoreKey) -> bool:
             if w in capitals:
                 return True
             continue
-        if w in _NOT_A_BLOCK or _WEEK_CODE_RE.match(w) or _YEAR_RE.match(w):
+        if w in _NOT_A_BLOCK or _CERTAIN_WEEK_RE.match(w) or _YEAR_RE.match(w):
             continue
         if w.isdigit():
             if not owned and len(w) <= MAX_HEADER_NUMBER:
@@ -326,7 +329,8 @@ def is_multi_store(keys: list[StoreKey], shop_evidence: bool = False) -> bool:
     # / „Predajňa B" counted once); an untold one always counts on its own (round 13: two
     # blank „Predajňa:" forms whose files were untold counted once) — else both shops went to
     # the sender's card
-    shops += len({(_squash(k.header), k.source_file or ("untold", i))
+    shops += len({(_squash(k.header),
+                   k.source_file or (("untold", i) if k.file_unknown else ""))
                   for i, k in enumerate(keys)
                   if not k.identity and (names_a_block(k) or k.file_unknown or k.source_file)})
     return (shop_evidence or any(names_a_block(k) for k in keys)) and shops >= 2
