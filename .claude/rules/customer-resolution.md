@@ -117,9 +117,11 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   10. 2026"), a date range WITH its dot („16.-20.10.", „16.—20.10." — „BISTRO 1 - 16.10."
   keeps its 1, round 7), a calendar week („42. týždeň", „43 KT", „KW 42") and an order number
   after „Obj." / 6+ digit numbers (round 5: „BISTRO 16.10." changed identity every mail).
-  A header's shop CODE stays in the identity: „T1" / „W2" (only „KW42" / „WK42" / „tyž42" are
-  certainly weeks) and a lone capital letter („A Centrum" / „B Centrum", round 15 — both were
-  {centrum}: one order, one answer for two shops).
+  A header's shop CODE stays in the identity (`tokens(codes=True)`, only in `for_orders`):
+  „T1" / „W2" (only „KW42" / „WK42" / „tyž42" are certainly weeks) and a lone capital letter
+  („A Centrum" / „B Centrum", round 15 — both were {centrum}: one order, one answer for two
+  shops). NEVER in the street comparison (round 16: „19/A" on a card then required its A, the
+  „1" of „T1" became a house number — `_street_tokens` keeps the plain `tokens`).
   `tokens` = every word of header + file = the shop's IDENTITY (`text`): what a rule and the
   per-shop question dedupe are keyed on — never a mail-relative value (round 3). `key` =
   `tokens` minus the words every order of the mail shares AND the sender's company / name
@@ -162,9 +164,13 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   template file name, „Objednávka Prešov" + „… Prešov pečivo" are no shops — #81.1/#418
   exactly as on main). Measured (round 13, prod read-only): 435 of 443 order runs since
   2026-07-30 carry `store = ""` on every order — the header heuristics act on real multi-shop
-  mails only. Accepted residual: a multi-shop customer whose files carry
-  NO header block and who has no rules yet gets the pre-#493 behaviour (one merged order, one
-  question) — the incident's mails carry headers, and its first answered mail teaches rules.
+  mails only. Accepted residual: a multi-shop customer whose files carry NO header block (or
+  only a bare code every sheet shares, „T1", round 16) and who has no rules yet gets the
+  pre-#493 behaviour — one merged order: a question for a family sender, a ship to the card
+  of a sender whose address is on one card (as on main); the incident's mails carry headers,
+  and its first answered mail teaches rules. Also accepted (asked, never a wrong card): the
+  identity is case-sensitive for one-letter words („ŠKOLA A JEDÁLEŇ" vs „Škola a jedáleň")
+  and a „T42 Centrum" header changes identity weekly — re-asked.
 - **Rung order inside `resolve`**: (1) a learned shop rule (`store_rule`) — exactly its shop,
   for ANY sender; (2) family: street in the header (`_by_store`, #101) — in a multi-shop mail
   or for a rule sender `strict`: the street's folded words INCLUDING the house number (digit
