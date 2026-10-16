@@ -131,3 +131,71 @@ def test_the_shop_questions_of_two_mails_from_one_sender_stay_one_question(pg, m
     _run_from(pg, "m1", S1, STORES)
     _run_from(pg, "m2", S1, STORES)
     assert sorted(_shop_questions(pg)) == ["A Hlavná", "B Hlavná", "Mierová 3"]
+
+
+# --- review round 29 ------------------------------------------------------------------------
+
+ONE_CARD = [
+    {"ean_edi": "2999000000501", "name": "Reťazec centrála", "trade_name": "",
+     "city": "Mestečko", "street": "Hlavná 9", "emails": [S1, S2]},
+    {"ean_edi": "2999000000502", "name": "Reťazec BISTRO", "trade_name": "",
+     "city": "Mestečko", "street": "Krátka 1", "emails": []},
+]
+
+
+def test_a_co_address_of_the_senders_one_card_shares_its_shop_history(pg, monkeypatch):
+    """Round 29: S1 and S2 sit on ONE card (no family). S1's shops were answered (rules);
+    S2's BISTRO-only mail shipped to the central card — the incident misroute against a
+    human rule for exactly that shop. A co-address on the sender's own card shares the
+    history: the shop is asked."""
+    monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
+    snapshot.import_snapshot(pg, CATALOG_CSV, BASE_CSV)
+    codex_customers.replace_customers(
+        pg, [dict(s, zip="", codex_id=s["ean_edi"]) for s in ONE_CARD])
+    snapshot.rebuild_from_overrides(pg)
+    key = store_key.for_orders([{"store": "BISTRO", "sourceFile": "OBJ Pekárová žena BI.xlsx"}])[0]
+    store_rules.remember(pg, sender_email=S1, key=key, ean_edi="2999000000502",
+                         question_id=1, by="sklad")
+    stores = (("BISTRO", "BI", "rožok 50g", 120, "G50"),)
+    assert _run_from(pg, "m-s2", S2, stores).uploads == []
+    assert order_customers.shop_history(pg, S2, None, own_cards=ONE_CARD)
+    assert not order_customers.shop_history(pg, S2, None)
+
+
+def test_a_rule_pointing_at_a_family_card_is_the_familys_shop_history(pg):
+    """Round 29 (a test the `ean_edi` clause lacked): another sender's rule naming one of the
+    family's cards makes the family a shop-history sender."""
+    family = [dict(c, emails=[S1]) for c in FAMILY]
+    assert not order_customers.shop_history(pg, S1, family)
+    key = store_key.for_orders([{"store": "Hlavná"}])[0]
+    store_rules.remember(pg, sender_email="iny@zakaznik-test.sk", key=key,
+                         ean_edi="2999000000301", question_id=1, by="sklad")
+    assert order_customers.shop_history(pg, S1, family)
+
+
+def test_a_staff_forward_question_belongs_to_its_mail_and_teaches_no_address(pg):
+    """Round 29: two forwards of unknown customers by one staff address shared ONE plain
+    question, and its answer put the staff address on the customer's card — every later
+    forward then went to that card. Any question of our own address is keyed per mail and
+    its answer teaches no address."""
+    snapshot.import_snapshot(pg, CATALOG_CSV, BASE_CSV)
+    for mid in ("g1", "g2"):
+        pg.execute("INSERT INTO messages (message_id, category) VALUES (%s, 'ai_orders')",
+                   (mid,))
+    q1 = teach.ask_customer(pg, "g1", STAFF, [], "", {"sender_email": STAFF})
+    q2 = teach.ask_customer(pg, "g2", STAFF, [], "", {"sender_email": STAFF})
+    assert q1 and q2 and q1 != q2
+    answer = order_customers.learn(pg, teach.get(pg, q1), "2999000000999", "sklad")
+    assert answer["email_added"] is False
+    card = next(c for c in snapshot.customers_for_management(pg)
+                if c["ean_edi"] == "2999000000999")
+    assert STAFF not in [e.lower() for e in card.get("emails") or []]
+
+
+def test_our_own_domain_is_the_exact_domain():
+    assert store_rules.is_own_address(f"jana@{store_rules.OUR_DOMAIN}")
+    assert store_rules.is_own_address(f"Jana@Mail.{store_rules.OUR_DOMAIN.upper()}")
+    assert not store_rules.is_own_address(f"x@not{store_rules.OUR_DOMAIN}")
+    assert not store_rules.is_own_address(f"{store_rules.OUR_DOMAIN}@gmail.com")
+    assert not store_rules.is_own_address(f"a@{store_rules.OUR_DOMAIN}.example.com")
+    assert not store_rules.is_own_address("")
