@@ -104,8 +104,8 @@ def _shop(order: dict) -> frozenset:
 
 def merge_by_day(orders: list[dict], by_file: bool = False) -> list[dict]:
     """One delivery day + order number + shop header is ONE order (#81.1, #101) — the merge
-    of a mail that does NOT carry several shops, exactly as before #493 (`pipeline.
-    _merge_by_day`). A mail of several shops merges per shop identity instead.
+    of a mail that does NOT carry several shops, exactly as before #493 (the former
+    `pipeline._merge_by_day`). A mail of several shops merges per shop identity instead.
 
     `by_file` (a sender with learned shop rules — its file names can name shops): orders of
     DIFFERENT files are never merged, and an order whose file could not be told
@@ -151,7 +151,7 @@ def _file_id(order: dict):
 
 def merge_orders(orders: list[dict], keys: list) -> list[dict]:
     """Merge the orders sharing a key (`keys[i]` is order i's) — items concatenated in order,
-    recipient groups joined (the #81.1 shape `pipeline._merge_by_day` always had)."""
+    recipient groups joined (the #81.1 shape the former `pipeline._merge_by_day` had)."""
     merged: dict = {}
     for order, k in zip(orders, keys, strict=True):
         if k not in merged:

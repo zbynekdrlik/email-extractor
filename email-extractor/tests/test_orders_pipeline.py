@@ -16,7 +16,7 @@ import json
 import pytest
 
 from app.config import Config
-from app.orders import pipeline, snapshot, teach
+from app.orders import order_customers, pipeline, snapshot, teach
 
 CATALOG_CSV = (
     "GTIN,Sklad,Názov,doplnok\n"
@@ -798,7 +798,7 @@ def test_two_shops_on_one_delivery_date_stay_two_orders(pg, env):
         {"deliveryDate": "31.07.2026", "orderNumber": "", "store": "GT2- 29 augusta 19 BB",
          "items": [{"name": "Rožok štandart 50g", "quantity": 5, "unit": "ks"}]},
     ]
-    merged = pipeline._merge_by_day(orders)
+    merged = order_customers.merge_by_day(orders)
     assert len(merged) == 2, "two shops are two orders"
     assert {o["store"] for o in merged} == {"GT1- Družby 35 BB", "GT2- 29 augusta 19 BB"}
     assert [len(o["items"]) for o in merged] == [1, 1]
@@ -814,7 +814,7 @@ def test_two_recipient_groups_of_the_same_shop_still_merge(pg, env):
          "recipientGroup": "zamestnanci",
          "items": [{"name": "Rožok štandart 50g", "quantity": 5, "unit": "ks"}]},
     ]
-    merged = pipeline._merge_by_day(orders)
+    merged = order_customers.merge_by_day(orders)
     assert len(merged) == 1 and len(merged[0]["items"]) == 2
 
 

@@ -681,21 +681,6 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
     return out
 
 
-def _merge_by_day(orders: list[dict]) -> list[dict]:
-    """One delivery date is ONE order.
-
-    A mail saying "40 ks for patients and 10 ks for staff" comes back as one order per
-    recipient group with the SAME delivery date. Shipping those separately wrote two EDI files
-    for one day — two orders in ORION — and the warehouse got 40 or 10, never 50 (#81.1). A
-    recipient group is a note on the order, not a separate order.
-    """
-    # The SHOP belongs in the key (#101): a recipient group shares a delivery, but two
-    # shops are two customers with two EANs, and merging them writes one shop's name over
-    # both shops' pastry. #493: a mail of several shops merges per shop identity (header +
-    # file) inside `order_customers.resolve_orders`; this is the single-shop merge it uses.
-    return order_customers.merge_by_day(orders)
-
-
 _LOAD_CODEX = object()
 
 
