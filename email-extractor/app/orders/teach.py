@@ -264,16 +264,8 @@ def undo(conn, qid: int) -> dict:
         raise NotACandidate(f"question {qid} does not exist")
     if q.get("kind") == "customer":
         if q.get("answer_gtin"):
-            from . import snapshot, store_rules
-            # #493: forget the address only when THIS answer added it (`answer.email_added`,
-            # written by `order_customers.learn`) — an address that already sat on the card
-            # (a CODEX one, a family's) must survive the undo. An answer recorded before
-            # #493 carries no flag and keeps the old behaviour.
-            if (q.get("answer") or {}).get("email_added", True):
-                snapshot.forget_customer_email(
-                    conn, q["answer_gtin"], (q.get("context") or {}).get("sender_email", ""))
-                snapshot.rebuild_from_overrides(conn)
-            store_rules.forget_for_question(conn, qid)
+            from . import order_customers
+            order_customers.unlearn(conn, q)   # #493: exactly what `learn` taught
         # #369: a `not_order` customer answer (`answer_card='not_order'`) also created a
         # `mail_rules` ignore row — retract only the one THIS question created (mirrors
         # `_undo_mail`'s own `question_id`-scoped delete). A no-op for every other customer
@@ -360,11 +352,7 @@ def ask_customer(conn, message_id: str, sender_email: str, candidates: list[dict
     warehouse can still be asked "who is this?" and the order can still be HELD for an
     answer, instead of silently falling through to a reject with no path forward
     (`pipeline._run`'s old "no sender address" dead end, inventory row 4).
-
-    #493: `key` (a `store_key.StoreKey`) asks for ONE SHOP of a multi-shop sender instead of
-    the sender as a whole — dedupe on sender + shop key, the shop named in the title (the
-    board card shows only `wording` + the candidates) and recorded in `context`, so the
-    answer can teach the shop rule (`order_customers.learn`).
+    #493: `key` (a `store_key.StoreKey`) asks for ONE SHOP — `order_customers.shop_question`.
     """
     shop = key
     key = str(sender_email or "").strip().lower()
@@ -374,13 +362,9 @@ def ask_customer(conn, message_id: str, sender_email: str, candidates: list[dict
         return None
     wording, reason = sender_email, "Zákazník nebol nájdený v tabuľke zákazníkov"
     if shop is not None and shop.text:
-        key = f"{key}|shop:{shop.text}"
-        wording = f"{sender_email} · predajňa {shop.label}"
-        reason = (f"Odosielateľ objednáva pre viac predajní — ku ktorej karte patrí predajňa "
-                  f"{shop.label}? Odpoveď si zapamätám pre ďalšie objednávky tejto predajne.")
-        context = dict(context or {}, store=shop.header, store_file=shop.source_file,
-                       store_key=shop.text, store_tokens=sorted(shop.tokens),
-                       store_label=shop.label)
+        from . import order_customers
+        key, wording, reason, context = order_customers.shop_question(
+            key, sender_email, shop, context)
     row = conn.execute(
         """INSERT INTO order_questions
                (message_id, customer_ean, customer_name, wording, item_key, kind,

@@ -113,3 +113,30 @@ def learn(conn, q: dict, ean_edi: str, by: str, email_added: bool | None = None)
     log.info("customer question %s taught: card %s, address added=%s, shop rule=%s (by %s)",
              q["id"], ean_edi, email_added, rule_id, by)
     return answer
+
+
+def unlearn(conn, q: dict) -> None:
+    """Take back what `learn` taught for an answered `customer` question (`teach.undo`): the
+    sender address only when THIS answer added it (`answer.email_added`) — an address that
+    already sat on the card (a CODEX one, a family's) must survive the undo; an answer
+    recorded before #493 carries no flag and keeps the old forget — and the question's shop
+    rules (soft delete, audited)."""
+    if (q.get("answer") or {}).get("email_added", True):
+        snapshot.forget_customer_email(conn, q["answer_gtin"],
+                                       (q.get("context") or {}).get("sender_email", ""))
+        snapshot.rebuild_from_overrides(conn)
+    store_rules.forget_for_question(conn, q["id"])
+
+
+def shop_question(key: str, sender_email: str, shop, context: dict) -> tuple:
+    """The per-SHOP shape of a `customer` question (`teach.ask_customer(key=)`): dedupe key
+    sender + shop key, the shop in the title (the board card shows only `wording` + the
+    candidates), the key in `context` so the answer can teach the shop rule. Returns
+    (item_key, wording, reason, context)."""
+    return (f"{key}|shop:{shop.text}", f"{sender_email} · predajňa {shop.label}",
+            (f"Odosielateľ objednáva pre viac predajní — ku ktorej karte patrí predajňa "
+             f"{shop.label}? Odpoveď si zapamätám pre ďalšie objednávky tejto predajne."),
+            dict(context or {}, store=shop.header, store_file=shop.source_file,
+                 store_key=shop.text, store_tokens=sorted(shop.tokens),
+                 store_label=shop.label))
+
