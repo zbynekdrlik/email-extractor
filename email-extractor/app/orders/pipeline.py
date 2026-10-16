@@ -35,6 +35,7 @@ from . import (
     promo,
     report,
     snapshot,
+    store_rules,
     teach,
 )
 from . import upload as upload_mod
@@ -992,7 +993,7 @@ def diff(ours: dict, theirs: dict | None) -> list[str]:
     return out
 
 
-OUR_DOMAIN = "slovnormal.sk"
+OUR_DOMAIN = store_rules.OUR_DOMAIN
 
 
 def _sender_address(message: dict, extracted: dict, customers: list[dict]) -> str:

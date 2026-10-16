@@ -51,43 +51,46 @@ class OrderCustomers:
     shop_context: bool = False
 
 
+# the per-SHOP question's dedupe separator: `<sender>|shop:<identity>` (`shop_question`)
+SHOP_KEY = "|shop:"
+
+
 def resolve_orders(conn, customers: list[dict], sender: str, extracted: dict, llm: dict,
                    orders: list[dict]) -> tuple[list[dict], OrderCustomers]:
     """Merge the orders of one delivery day and resolve the customer of each (see the module
     docstring). Returns the (merged) orders + their customers. Reads the sender's shop rules
     — a pure read, so it applies in shadow too, like a memory lookup."""
     rules = store_rules.for_sender(conn, sender)
-    # shop HISTORY: learned rules, or a shop question still open on the board (review round
-    # 27: the street shipped a shop of the next mail while its own question was open — then
-    # the answer named another card). Such a sender ships a shop only by its rule.
-    has_rules = bool(rules) or open_shop_question(conn, sender)
+    family = customer.family_of(customers, sender, llm) or []
+    # the FAMILY's shop history — learned rules or a shop question still open (rounds 27-28):
+    # such a sender ships a shop only by its rule, never by the street
+    history = bool(rules) or shop_history(conn, sender, family)
     # the sender's own company / name words never name one of its shops (review round 4)
     drop = (store_key.tokens(extracted.get("companyName", ""))
             + store_key.tokens(extracted.get("senderName", "")))
-    multi = store_key.is_multi_store(store_key.for_orders(orders), has_rules)
+    multi = store_key.is_multi_store(store_key.for_orders(orders), history)
     # review round 5: an order naming no shop is never merged in a mail of several shops —
     # two shops ordering the same goods with nothing to tell them apart are two orders, each
     # asked on its own (merged, one answer shipped both shops' goods to one card)
     by_day = (merge_orders(orders, [(_day(o), s) if s else ("unnamed", i)
                                     for i, o in enumerate(orders) for s in [_shop(o)]])
-              if multi else merge_by_day(orders, by_file=has_rules))
+              if multi else merge_by_day(orders, by_file=history))
     keys = store_key.for_orders(by_day, drop=drop)
     matched = [customer.resolve(customers, sender, extracted.get("senderName", ""),
                                 extracted.get("companyName", ""), llm=llm,
                                 store=k.header, key=k, rules=rules, multi_store=multi,
-                                shop_history=has_rules,
+                                shop_history=history,
                                 delivery_text=extracted.get("notes", ""))
                for k in keys]
     # the mail's attachments — not only the files an order was found in (review round 8:
     # an untold sibling hid the second file); `extract` records the count
     several_files = max(int(extracted.get("attachments") or 0),
                         len({_file_id(o) for o in orders if _file_id(o)})) >= 2
-    family = customer.family_of(customers, sender, llm) or []
-    collapsed = customer.collapsed_shops(keys, matched, multi, has_rules, several_files,
+    collapsed = customer.collapsed_shops(keys, matched, multi, history, several_files,
                                          family={str(c.get("ean_edi") or "") for c in family})
     for i in collapsed:
         matched[i] = None
-    shop_context = multi or has_rules
+    shop_context = multi or history
     scoped = [bool(k.identity) and shop_context for k in keys]
     oc = OrderCustomers(keys=keys, matched=matched, scoped=scoped, collapsed=collapsed,
                         shop_context=shop_context)
@@ -95,21 +98,32 @@ def resolve_orders(conn, customers: list[dict], sender: str, extracted: dict, ll
         log.info("order %d/%d shop %r (file %r, shop %r) -> %s (%s)%s%s", i + 1, len(keys),
                  k.header, k.source_file, k.text, m.ean_edi if m else None,
                  m.rule if m else "asked", " [poistka]" if i in collapsed else "",
-                 " [multi-shop]" if multi else (" [shop rules]" if has_rules else ""))
+                 " [multi-shop]" if multi else (" [shop history]" if history else ""))
     return merge_by_card(by_day, oc)
 
 
-def open_shop_question(conn, sender_email: str) -> bool:
-    """Is a per-shop (or per-order shop-context) `customer` question of this sender still
-    open? Its dedupe key starts with `<sender>|shop` (`shop_question` / `unnamed_question`);
-    `left()`, never LIKE — an `_` in the address is a LIKE wildcard."""
-    sender = str(sender_email or "").strip().lower()
-    if not sender:
+def shop_history(conn, sender_email: str, family) -> bool:
+    """Has this sender's FAMILY shop history — a live learned shop rule of any of its
+    addresses (or pointing at one of its cards), or a per-SHOP question of any of its
+    addresses still open on the board (review rounds 27-28: the street shipped a shop of the
+    next mail — from the family's OTHER address — while that shop's question was open, then
+    the answer named another card)? Our own domain owns no history (a staff forward), and a
+    per-ORDER question (`|shop-mail:`, an unnamed order) is no shop history (round 28)."""
+    addresses = [sender_email] + [e for c in family or [] for e in c.get("emails") or []]
+    senders = {a for a in (str(v or "").strip().lower() for v in addresses)
+               if a and not store_rules.is_own_address(a)}
+    eans = {str(c.get("ean_edi") or "") for c in family or []} - {""}
+    if store_rules.any_live(conn, senders, eans):
+        return True
+    if not senders:
         return False
-    prefix = f"{sender}|shop"
+    # the dedupe key is `<sender>|shop:<identity>` (`shop_question`); split exactly at it —
+    # never LIKE (an `_` in an address is a LIKE wildcard)
     return conn.execute(
         "SELECT 1 FROM order_questions WHERE kind = 'customer' AND status = 'open' "
-        "AND left(item_key, %s) = %s LIMIT 1", (len(prefix), prefix)).fetchone() is not None
+        "AND position(%s in item_key) > 0 "
+        "AND left(item_key, position(%s in item_key) - 1) = ANY(%s) LIMIT 1",
+        (SHOP_KEY, SHOP_KEY, sorted(senders))).fetchone() is not None
 
 
 def _day(order: dict) -> tuple:
@@ -297,7 +311,7 @@ def shop_question(key: str, sender_email: str, shop, context: dict) -> tuple:
     sender + shop key, the shop in the title (the board card shows only `wording` + the
     candidates), the key in `context` so the answer can teach the shop rule. Returns
     (item_key, wording, reason, context)."""
-    return (f"{key}|shop:{shop.text}", f"{sender_email} · predajňa {shop.label}",
+    return (f"{key}{SHOP_KEY}{shop.text}", f"{sender_email} · predajňa {shop.label}",
             (f"Odosielateľ objednáva pre viac predajní — ku ktorej karte patrí predajňa "
              f"{shop.label}? Odpoveď si zapamätám pre ďalšie objednávky tejto predajne."),
             dict(context or {}, store=shop.header, store_file=shop.source_file,

@@ -300,8 +300,8 @@ def _names_another_town(owners: list[dict], card: dict, words: set[str]) -> bool
     """Do the header / file words name the town of ANOTHER family card (not this card's own)?
     A town is its main part („Košice" of „Košice - Sever"); any of its words of 3+ letters or
     the initials of a two-word town („bb") counts (round 26: the whole city was required and
-    the file name was not read); within the card's own town, another card's DISTRICT word
-    counts (round 27). Over-asks when two family towns share a word — the safe direction."""
+    the file name was not read); within the card's own town, any word of another card's
+    DISTRICT counts („Juh", round 27; „II", round 28). Over-asks when two family towns share a word — the safe direction."""
     own = _main_town(card)
     own_all = set(store_key.tokens(card.get("city", "")))
     for c in owners:
@@ -311,7 +311,7 @@ def _names_another_town(owners: list[dict], card: dict, words: set[str]) -> bool
         if town == own:
             # the same town: another district of it („Košice - Juh" vs „- Sever", round 27)
             district = [w for w in store_key.tokens(c.get("city", "")) if w not in own_all]
-            if any(len(w) >= 3 and w in words for w in district):
+            if any(w in words for w in district):
                 return True
             continue
         initials = "".join(w[0] for w in town) if len(town) > 1 else ""
@@ -382,7 +382,7 @@ def _by_shop_rule(hit: store_key.RuleHit, key: store_key.StoreKey, by_ean: dict,
               f"„{taught.get('name', '')}“."))
 
 
-def collapsed_shops(keys: list, matched: list, multi: bool, has_rules: bool = False,
+def collapsed_shops(keys: list, matched: list, multi: bool, shop_history: bool = False,
                     several_files: bool = False, family=frozenset()) -> set[int]:
     """The poistka (#493): indexes of the orders that must be ASKED instead of shipped.
 
@@ -390,7 +390,8 @@ def collapsed_shops(keys: list, matched: list, multi: bool, has_rules: bool = Fa
     the street in its header) whenever it is a shop question at all: in a mail of several
     shops (`multi`) EVERY order decided by a rule that never looked at the shop (`llm`,
     `exact_email`, `delivery_address`) is asked — also a lone new shop on its own card and
-    an order that names no shop; for a sender with learned shop rules (`has_rules`) the same
+    an order that names no shop; for a sender with SHOP HISTORY (`shop_history`: learned rules
+    or an open shop question of its family, `order_customers.shop_history`) the same
     holds for any order that names a shop (owner decision 2: an unknown shop is asked once)
     or whose attachment could not be told (`file_unknown`, review round 6: its shop is
     unknown, the sender's address must not decide it) — or, in a mail of `several_files`,
@@ -400,15 +401,15 @@ def collapsed_shops(keys: list, matched: list, multi: bool, has_rules: bool = Fa
     one question per shop, then its rule."""
     out = {i for i, m in enumerate(matched)
            if m is not None and m.rule not in STORE_RULES
-           and (multi or (has_rules and (keys[i].identity or keys[i].file_unknown
-                                         or several_files
-                                         or store_key.names_a_block(keys[i]))))}
+           and (multi or (shop_history and (keys[i].identity or keys[i].file_unknown
+                                            or several_files
+                                            or store_key.names_a_block(keys[i]))))}
     if out:
         log.warning("poistka: %d order(s) were decided by a rule that ignores the shop (%s) "
                     "although %s — held and asked per shop", len(out),
                     sorted({(keys[i].label, matched[i].rule) for i in out}),
                     "the mail carries several shops" if multi
-                    else "the sender has learned shop rules")
+                    else "the sender has shop history")
     if multi:
         out |= _street_unproven(keys, matched, family)
     return out
@@ -418,9 +419,11 @@ def _street_unproven(keys: list, matched: list, family) -> set[int]:
     """In a mail of several shops the street decides only when the WHOLE mail fits the family
     (review round 26 — the cause of rounds 17-26, each of which found one more way a single
     order's street pointed at a card that was not its shop): every shop of the mail (each
-    identity naming a block) is decided by the street, no two shops land on one card and
-    every family card is taken — the #101 GT1 / GT2 shape. Otherwise every street decision
-    of the mail is asked (one question per shop, then its rule)."""
+    identity — also one named only by its file, round 27) is decided by the street, no two
+    shops land on one card and every family card is taken — the #101 GT1 / GT2 shape.
+    Otherwise every street decision of the mail is asked (one question per shop, then its
+    rule). Accepted: a header-less order inside the #101 shared file (its shop unknown) asks
+    the whole mail too (round 28 — the cached #101 extractions name a shop on every order)."""
     street = {i for i, m in enumerate(matched) if m is not None and m.rule == "store_address"}
     if not street:
         return set()

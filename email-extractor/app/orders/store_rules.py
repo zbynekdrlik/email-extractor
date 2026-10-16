@@ -26,10 +26,35 @@ log = logging.getLogger("orders.store_rules")
 
 TABLE = "customer_store_rules"
 _COLS = ("sender_email", "store_key", "store_label", "ean_edi", "question_id", "created_by")
+# our own mail domain: the sender of a staff forward whose original sender is unknown
+# (`pipeline._sender_address`) — shared by every customer the staff forwards
+OUR_DOMAIN = "slovnormal.sk"
+
+
+def is_own_address(value) -> bool:
+    """An address of our own domain — never a customer's identity (review round 28: rules
+    and the shop question keyed on a staff forwarder were shared by every customer it
+    forwards; „Predajňa 1" of one customer shipped another's order)."""
+    return OUR_DOMAIN in str(value or "").lower()
 
 
 def _sender(value) -> str:
-    return str(value or "").strip().lower()
+    """The rule owner: the normalized address — never one of our own (no rules for it)."""
+    sender = str(value or "").strip().lower()
+    return "" if is_own_address(sender) else sender
+
+
+def any_live(conn, senders, eans) -> bool:
+    """Is any live rule owned by one of these addresses or pointing at one of these cards?
+    (`order_customers.shop_history` — the family's history, review round 28)."""
+    senders = sorted({s for s in (_sender(v) for v in senders or ()) if s})
+    eans = sorted({str(e) for e in eans or () if e})
+    if not senders and not eans:
+        return False
+    return conn.execute(
+        f"SELECT 1 FROM {TABLE} WHERE deleted_at IS NULL "
+        "AND (sender_email = ANY(%s) OR ean_edi = ANY(%s)) LIMIT 1",
+        (senders, eans)).fetchone() is not None
 
 
 def for_sender(conn, sender_email: str) -> list[tuple[frozenset, str]]:

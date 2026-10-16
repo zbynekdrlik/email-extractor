@@ -354,9 +354,13 @@ def ask_customer(conn, message_id: str, sender_email: str, candidates: list[dict
     (`pipeline._run`'s old "no sender address" dead end, inventory row 4).
     #493: `key` (a `store_key.StoreKey`) asks for ONE SHOP — `order_customers.shop_question`.
     """
+    from . import store_rules
+
     shop = key
     key = str(sender_email or "").strip().lower()
-    if not key:
+    if not key or (shop is not None and store_rules.is_own_address(key)):
+        # #493 round 28: a staff forward's shop question belongs to its mail — never shared
+        # by every customer that staff address forwards
         key = f"cust:{message_id}" if message_id else ""
     if not key:
         return None

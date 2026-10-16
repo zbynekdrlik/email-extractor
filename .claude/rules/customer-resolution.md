@@ -173,11 +173,14 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   and a „T42 Centrum" header changes identity weekly — re-asked.
 - **Rung order inside `resolve`**: (1) a learned shop rule (`store_rule`) — exactly its shop,
   for ANY sender; (2) family: street in the header (`_by_store`, #101) — NEVER for a sender
-  with SHOP HISTORY: learned shop rules (round 26: a rule's card was another shop's street
-  match) or a shop question still OPEN on the board (round 27, `order_customers.
-  open_shop_question` — the next mail shipped a shop by the street while its own question
-  was open, then the answer named another card); such a sender is a rule sender everywhere
-  (`has_rules`) and ships a shop only by ITS rule. In a multi-shop mail `strict`: the street's folded words INCLUDING the house number (digit
+  with SHOP HISTORY (`order_customers.shop_history`): learned shop rules (round 26: a rule's
+  card was another shop's street match) or a per-SHOP question (`|shop:` — never the per-order
+  `|shop-mail:`, round 28) still OPEN on the board (round 27: the next mail shipped a shop by
+  the street while its own question was open, then the answer named another card) — of ANY
+  address of the sender's FAMILY or pointing at one of its cards (round 28: the family's
+  second address skipped the history); such a sender is a shop-history sender everywhere
+  (`history` in `resolve_orders`, `collapsed_shops(shop_history=)`) and ships a shop only by
+  ITS rule. In a multi-shop mail `strict`: the street's folded words INCLUDING the house number (digit
   and letter runs apart — „35BB", round 9; a house number WITH its one-letter suffix after a
   slash or glued is ONE unit, „19/A" = „19/a" = „19A" ≠ „19/B" ≠ „19", rounds 17-18: the 19/B
   shop matched the „19/A" card, then a bare „19" card; a letter written APART is never glued
@@ -197,7 +200,8 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   code's number „GT1") that ANY family card carries; a header or FILE naming the TOWN of
   another family card (`_names_another_town`: the town's main part „Košice" of „Košice -
   Sever", any of its words of 3+ letters, the initials „bb" of a two-word town; round 26;
-  within the card's own town another card's DISTRICT word, „Košice - Juh", round 27).
+  within the card's own town any word of another card's DISTRICT, „Košice - Juh", round 27,
+  „Bratislava - II", round 28).
   The rung only PROPOSES a card — the whole-mail fit below decides whether it stands. Branches on one
   street are always asked ONCE, then the answer's rule decides. The #101 shape (two branches
   on two streets, GT1 / GT2) still ships. NEVER re-add a same-street number comparison „with
@@ -253,6 +257,12 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   4), never shared by two orders / mails (round 5); its answer teaches nothing (a per-order
   decision), never puts the address on a shop's card, and the worker sweep never settles it
   (round 3).
+- **Our own domain is never a customer** (`store_rules.is_own_address`, `OUR_DOMAIN` moved
+  there from `pipeline`; round 28): a staff forward of an unknown customer keeps the staff
+  address as the sender — a shop rule keyed on it was shared by every customer that staff
+  forwards („Predajňa 1" of one customer shipped another's order). Such an address owns no
+  rule (`remember` → None, `for_sender` → []), no shop history, and its shop question is keyed
+  per MAIL (`cust:<message_id>|shop:…`, `teach.ask_customer`).
 - **The answer teaches** through ONE helper, `order_customers.learn` — called by the board
   route (`_api_orders_answer_customer`), the „Nový zákazník" route and `teach.KINDS['customer']
   .apply` (the HTTP routes never went through `.apply`): a plain per-sender question teaches the
