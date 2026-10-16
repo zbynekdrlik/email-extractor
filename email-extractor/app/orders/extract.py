@@ -261,6 +261,16 @@ def item_in_source(item: dict, source: str) -> bool:
     return len(squashed) >= 8 and squashed in _squash(source)
 
 
+def _located(source_file: str, sections) -> dict:
+    """#493: `sourceFile` + `fileUnknown` — the mail HAS attachments and this order's could
+    not be told (its lines tie between two files, or it came from the body): never guessed,
+    a sender with learned shop rules is asked for it (`customer.collapsed_shops`)."""
+    out: dict[str, Any] = {"sourceFile": source_file}
+    if sections and not source_file:
+        out["fileUnknown"] = True
+    return out
+
+
 def verify(extracted: dict, source: str) -> dict:
     """Keep only items provable from the source; report the rest.
 
@@ -288,10 +298,10 @@ def verify(extracted: dict, source: str) -> dict:
                            # #493: the attachment this order was read from (located by
                            # its block header, else its own quotes — never asked of the
                            # model) — with the header it is the order's shop identity
-                           "sourceFile": store_key.locate_file(
+                           **_located(store_key.locate_file(
                                [i.get("sourceQuote") or i.get("name") or ""
                                 for i in order.get("items") or []], sections=sections,
-                               header=order.get("store", "") or ""),
+                               header=order.get("store", "") or ""), sections),
                            "items": kept})
     if unverified:
         log.warning("%d item(s) could not be verified against the email: %s",
@@ -366,9 +376,10 @@ def run(client, email: dict) -> dict:
                         "deliveryDate": head.get("deliveryDate", "") or "",
                         "recipientGroup": head.get("recipientGroup", "") or "",
                         "store": head.get("store", "") or "",
-                        "sourceFile": store_key.locate_file(
+                        **_located(store_key.locate_file(
                             [i.get("name") or "" for i in table], source,
                             header=head.get("store", "") or ""),
+                            store_key.attachment_sections(source)),
                         "items": table}],
             "unverified": [],
             "source": "table",

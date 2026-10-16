@@ -33,15 +33,17 @@ _EXT_RE = re.compile(r"\.(xlsx|xlsm|xls|ods|fods|csv|pdf|docx?|odt|txt|png|jpe?g
 _WEEK_CODE_RE = re.compile(r"^(kw|t|tyz|w|wk)\d+$")
 _SPACES_RE = re.compile(r"\s+")
 # what a HEADER's numbers must not keep (review round 5: „BISTRO 16.10." changed its identity
-# every mail, so its rule never matched again): a date („16.10.", „16. 10. 2026", „16.10"), a
-# calendar week („42. týždeň", „43 KT", „KW 42") — on the folded text; numbers of 4+ digits
-# (an order number, a year) are dropped in `tokens`. Short standalone numbers stay
-# („Predajňa 2", a house number).
+# every mail, so its rule never matched again): a date („16.10.", „16. 10. 2026", „16.10") or
+# date range („16.-20.10.", round 6), a calendar week („42. týždeň", „43 KT", „KW 42") — on the
+# folded text; numbers of 6+ digits (an order number) are dropped in `tokens`. Everything
+# shorter stays — a house number („Hlavná 1713" / „Hlavná 2210" are two shops, round 6) and a
+# year too: a year in a header re-asks once a year, dropping it could make two shops one.
 _HEADER_NOISE_RE = re.compile(
     r"(?<!\d)\d{1,2}\s*\.\s*\d{1,2}(?:\s*\.\s*(?:\d{4}|\d{2})(?!\d))?\.?(?!\d)"
+    r"|(?<!\d)\d{1,2}\s*\.?\s*[-\u2013]\s*(?=\d{1,2}\s*\.\s*\d{1,2})"
     r"|(?<!\d)\d{1,2}\s*\.?\s*(?:tyzden\w*|tyzd\w*|tyz|week|kw|kt)\b"
     r"|\b(?:kw|kt|week|tyzden)\s*\.?\s*\d{1,2}(?!\d)")
-MAX_HEADER_NUMBER = 3   # digits of a number a header keeps
+MAX_HEADER_NUMBER = 5   # digits of a number a header keeps (an order number is longer)
 
 STOPWORDS = frozenset({
     # order / document words
@@ -187,6 +189,8 @@ class StoreKey:
     tokens: frozenset = frozenset()
     key: frozenset = frozenset()
     own: frozenset = frozenset()
+    # the mail has attachments and this order's could not be told (`extract._located`)
+    file_unknown: bool = False
 
     @property
     def text(self) -> str:
@@ -234,13 +238,13 @@ def for_orders(orders: list[dict], drop=()) -> list[StoreKey]:
         header = str(o.get("store") or "").strip()
         src = str(o.get("sourceFile") or "").strip()
         raw.append((header, src, frozenset(tokens(header, keep_numbers=True))
-                    | file_tokens(src)))
-    distinct = {t for _h, _s, t in raw if t}
+                    | file_tokens(src), bool(o.get("fileUnknown"))))
+    distinct = {t for _h, _s, t, _u in raw if t}
     common = frozenset.intersection(*distinct) if len(distinct) >= 2 else frozenset()
     brand = frozenset(drop)
     return [StoreKey(header=header, source_file=src, tokens=toks, key=toks - common - brand,
-                     own=toks - brand)
-            for header, src, toks in raw]
+                     own=toks - brand, file_unknown=unknown)
+            for header, src, toks, unknown in raw]
 
 
 def is_multi_store(keys: list[StoreKey], shop_evidence: bool = False) -> bool:

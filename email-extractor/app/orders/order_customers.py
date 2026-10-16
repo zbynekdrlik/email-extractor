@@ -106,13 +106,17 @@ def merge_by_day(orders: list[dict]) -> list[dict]:
     """One delivery day + order number + shop header is ONE order (#81.1, #101) — the merge
     of a mail that does NOT carry several shops, exactly as before #493 (`pipeline.
     _merge_by_day`). A mail of several shops merges per shop identity instead. A merged order
-    names the ONE file its orders were located in — none when they came from files of
-    DIFFERENT words (its shop key must not be the first file's); an order whose file was not
-    located is no "different file" (review round 5: it cleared the located sibling's file,
-    the merged order lost its shop identity and skipped the sender's shop rule)."""
+    names the ONE file its orders were located in; when they came from files of DIFFERENT
+    words, or one of them could not be told (`fileUnknown`, review round 6: borrowing the
+    sibling's file was a guess — another shop's goods rode on its rule), it names no file
+    and is `fileUnknown` itself. An order with no attachment to tell (`sourceFile` "" and no
+    flag: a mail without attachments) never blocks the located file (review round 5)."""
     keys = [(_day(o), str(o.get("store") or "")) for o in orders]
     files: dict = {}
+    unknown: set = set()
     for k, o in zip(keys, orders, strict=True):
+        if o.get("fileUnknown"):
+            unknown.add(k)
         name = str(o.get("sourceFile") or "")
         words = store_key.file_tokens(name)
         if words:
@@ -123,9 +127,15 @@ def merge_by_day(orders: list[dict]) -> list[dict]:
         sizes[k] = sizes.get(k, 0) + 1
     merged = merge_orders(orders, keys)
     for k, m in zip(dict.fromkeys(keys), merged, strict=True):
-        if sizes[k] > 1:
-            located = files.get(k, {})
-            m["sourceFile"] = next(iter(located.values())) if len(located) == 1 else ""
+        if sizes[k] < 2:
+            continue
+        located = files.get(k, {})
+        if len(located) == 1 and k not in unknown:
+            m["sourceFile"] = next(iter(located.values()))
+        else:
+            m["sourceFile"] = ""
+            if located or k in unknown:
+                m["fileUnknown"] = True
     return merged
 
 

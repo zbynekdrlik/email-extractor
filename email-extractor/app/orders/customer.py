@@ -239,35 +239,38 @@ def _by_store_name(family: list[dict], key: store_key.StoreKey | None) -> dict |
     one city: „ŽILINA") → None, and the order is asked — never a guess.
 
     Both views of the shop must name that SAME one card (review round 5): `key` (without the
-    words every shop of the mail shares) and `own` (all its words). „Kaufland Martin" next to
-    „Tesco Martin" is {kaufland} without the shared town — Kaufland Žilina — but {kaufland,
-    martin} hits two cards: asked, never shipped to another town's shop."""
+    words every shop of the mail shares) and `own` (all its words) — and that card must carry
+    EVERY distinguishing word of `own` (review round 6: one hit word is no proof — „Kaufland
+    Martin" hit only Kaufland Žilina when no family card says Martin, a new „BISTRO Trnava"
+    hit the known BISTRO Dolina). Anything less is asked, never shipped to a namesake."""
     if key is None or len(family) < 2:
         return None
     words = [_card_words(c) for c in family]
     common: set[str] = set(words[0]).intersection(*words[1:])
-    narrow = _one_card_hit(family, words, key.stems() - common, key.text)
-    whole = _one_card_hit(family, words, key.own_stems() - common, key.text)
-    if narrow is not None and narrow is whole:
-        return narrow
+    own = key.own_stems() - common
+    narrow = _one_card_hit(words, key.stems() - common, key.text, family)
+    whole = _one_card_hit(words, own, key.text, family)
+    if narrow is not None and whole is not None and narrow == whole and own <= words[whole]:
+        return family[whole]
     if narrow is not None or whole is not None:
-        log.info("shop key %s: its mail-relative and its own words name different cards "
-                 "(%s / %s) — asking", key.text, narrow and narrow.get("ean_edi"),
-                 whole and whole.get("ean_edi"))
+        log.info("shop key %s: no card carries all its words in both views (%s / %s, own "
+                 "words %s) — asking", key.text, narrow is not None and
+                 family[narrow].get("ean_edi"), whole is not None and
+                 family[whole].get("ean_edi"), sorted(own))
     return None
 
 
-def _one_card_hit(family: list[dict], words: list, want: set[str], label: str
-                  ) -> dict | None:
-    """The ONE family card any of the `want` stems hits, or None (no stem, no hit, several)."""
+def _one_card_hit(words: list, want: set[str], label: str, family: list[dict]) -> int | None:
+    """The index of the ONE family card any of the `want` stems hits, or None (no stem, no
+    hit, several)."""
     if not want:
         return None
-    hits = [c for c, w in zip(family, words, strict=True) if want & w]
+    hits = [i for i, w in enumerate(words) if want & w]
     if len(hits) == 1:
         return hits[0]
     if hits:
         log.info("shop key %s hits %d cards of the family (%s) — not unique", label,
-                 len(hits), [c.get("ean_edi") for c in hits])
+                 len(hits), [family[i].get("ean_edi") for i in hits])
     return None
 
 
@@ -303,11 +306,13 @@ def collapsed_shops(keys: list, matched: list, multi: bool, has_rules: bool = Fa
     shops (`multi`) EVERY order decided by a rule that never looked at the shop (`llm`,
     `exact_email`, `delivery_address`) is asked — also a lone new shop on its own card and
     an order that names no shop; for a sender with learned shop rules (`has_rules`) the same
-    holds for any order that names a shop (owner decision 2: an unknown shop is asked once).
-    Converges: one question per shop, then its rule."""
+    holds for any order that names a shop (owner decision 2: an unknown shop is asked once)
+    or whose attachment could not be told (`file_unknown`, review round 6: its shop is
+    unknown, the sender's address must not decide it). Converges: one question per shop,
+    then its rule."""
     out = {i for i, m in enumerate(matched)
            if m is not None and m.rule not in STORE_RULES
-           and (multi or (has_rules and keys[i].identity))}
+           and (multi or (has_rules and (keys[i].identity or keys[i].file_unknown)))}
     if out:
         log.warning("poistka: %d order(s) were decided by a rule that ignores the shop (%s) "
                     "although %s — held and asked per shop", len(out),
