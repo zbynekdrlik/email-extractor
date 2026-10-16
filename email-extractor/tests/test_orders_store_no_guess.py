@@ -25,7 +25,7 @@ from test_orders_store_rules import (
     _shop_questions,
 )
 
-from app.orders import extract, pipeline, snapshot, store_key, store_rules, teach
+from app.orders import extract, order_customers, pipeline, snapshot, store_key, store_rules, teach
 
 ZILINA_FAMILY_CSV = (
     "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,E-mail\n"
@@ -83,32 +83,36 @@ def test_a_new_shop_in_another_town_is_not_its_namesakes_card(pg):
     result, rec = _run(pg, "m-new", stores=[("BISTRO Trnava", "BT", "rožok 50g", 120, "G50"),
                                             ("Predajňa: Tržnica", "TR", "vianočka 400g", 7,
                                              "VIA")])
-    shipped = {r["store"]: r["customer_ean"] for r in result["order_results"]
-               if r["status"] == "ok"}
-    assert "BISTRO Trnava" not in shipped
-    assert shipped == {"Predajňa: Tržnica": "2999000000202"}
-    assert "BISTRO Trnava" in _shop_questions(pg)
+    assert rec.uploads == [], "a card's name never ships a shop (review round 7)"
+    assert set(_shop_questions(pg)) == {"BISTRO Trnava", "Predajňa: Tržnica"}
 
 
 def test_an_untold_file_never_borrows_its_siblings_rule(pg):
     """A family sender with a rule for the BISTRO file: the other shop's order ties between
-    the two files and merges with BISTRO's — it must not ride on BISTRO's rule."""
+    the two files — it is not merged into BISTRO's (review round 7) and never rides on its
+    rule: BISTRO's own goods ship by the rule, the other order is asked."""
     _brand_env(pg)
     _bistro_rule(pg, "2999000000402")
     result, rec = _overlap_run(pg, "m-ov")
-    assert rec.uploads == []
-    assert [q for q in teach.open_questions(pg) if q["kind"] == "customer"]
+    shipped = [(r["customer_ean"], [i["gtin"] for i in r["items"]])
+               for r in result["order_results"] if r["status"] == "ok"]
+    assert shipped == [("2999000000402", ["G50"])]
+    assert len(rec.uploads) == 1
+    assert len([q for q in teach.open_questions(pg) if q["kind"] == "customer"]) == 1
 
 
 def test_a_rule_sender_on_one_card_is_asked_for_an_untold_file(pg):
     """The same mail from a sender on ONE card (its other shops are learned rules): the
     order whose file is unknown is asked — never shipped to the sender's card by its address,
-    nor by the other file's rule."""
+    nor by the other file's rule; the BISTRO order ships by its rule alone."""
     snapshot.import_snapshot(pg, CATALOG_CSV, TOWNS_CSV)
     _bistro_rule(pg, "2999000000111")
     result, rec = _overlap_run(pg, "m-ov1", company="Reťazec")
-    assert rec.uploads == []
-    assert [q for q in teach.open_questions(pg) if q["kind"] == "customer"]
+    shipped = [(r["customer_ean"], [i["gtin"] for i in r["items"]])
+               for r in result["order_results"] if r["status"] == "ok"]
+    assert shipped == [("2999000000111", ["G50"])]
+    assert len(rec.uploads) == 1
+    assert len([q for q in teach.open_questions(pg) if q["kind"] == "customer"]) == 1
 
 
 def test_the_extraction_marks_an_order_whose_file_it_could_not_tell():
@@ -143,3 +147,83 @@ def test_a_header_s_date_range_is_not_the_shop():
     assert store_key.tokens("BISTRO 16.-20.10.", keep_numbers=True) == ["bistro"]
     assert store_key.tokens("BISTRO 16. - 20. 10. 2026", keep_numbers=True) == ["bistro"]
     assert store_key.tokens("Týždeň od 19.10-23.10. ŽILINA", keep_numbers=True) == ["zilina"]
+
+
+# --- review round 7 -------------------------------------------------------------------------
+
+def test_shops_numbered_or_coded_like_a_card_are_asked(pg):
+    """„BISTRO 1" + „BISTRO 2" both resembled the one BISTRO card (two shops on one card — the
+    incident class), a new „BISTRO BB" the BISTRO of another town: every one is asked."""
+    _env(pg)
+    result, rec = _run(pg, "m-num", stores=[("BISTRO 1", "B1", "rožok 50g", 120, "G50"),
+                                            ("BISTRO 2", "B2", "vianočka 400g", 7, "VIA"),
+                                            ("BISTRO BB", "BB", "rožok kváskový 70g", 5,
+                                             "G70"),
+                                            ("Predajňa: Tržnica", "TR", "chlieb kváskový", 3,
+                                             "CHL")])
+    assert rec.uploads == []
+    assert set(_shop_questions(pg)) == {"BISTRO 1", "BISTRO 2", "BISTRO BB",
+                                        "Predajňa: Tržnica"}
+
+
+def test_a_date_range_never_eats_a_shop_number_and_an_order_number_goes():
+    assert store_key.tokens("BISTRO 1 - 16.10.", keep_numbers=True) == ["bistro", "1"]
+    assert store_key.tokens("BISTRO 2 – 16.10.", keep_numbers=True) == ["bistro", "2"]
+    assert store_key.tokens("BISTRO 16.—20.10.", keep_numbers=True) == ["bistro"]
+    assert store_key.tokens("Obj. č. 4512 BISTRO", keep_numbers=True) == ["bistro"]
+    assert store_key.tokens("Objednávka 45120 BISTRO", keep_numbers=True) == ["bistro"]
+    assert store_key.tokens("Predajňa č. 2", keep_numbers=True) == ["2"]
+
+
+def test_a_file_with_no_shop_words_is_still_another_file():
+    day = {"store": "", "deliveryDate": "04.08.2026", "orderNumber": ""}
+    bistro = dict(day, sourceFile="Kvetka BISTRO.xlsx", items=[{"name": "rožok", "quantity": 3}])
+    plain = dict(day, sourceFile="Objednávka.xlsx", items=[{"name": "chlieb", "quantity": 2}])
+    merged = order_customers.merge_by_day([bistro, plain])
+    assert len(merged) == 1 and merged[0]["sourceFile"] == ""
+    assert merged[0]["fileUnknown"] is True
+    assert len(order_customers.merge_by_day([bistro, plain], by_file=True)) == 2
+    again = order_customers.merge_by_day([plain, dict(plain, items=[{"name": "x",
+                                                                     "quantity": 1}])])
+    assert again[0]["sourceFile"] == "Objednávka.xlsx" and not again[0].get("fileUnknown")
+
+
+def test_a_rule_senders_order_from_a_file_naming_no_shop_is_asked(pg):
+    """A sender on one card with a learned BISTRO rule sends „Kvetka BISTRO.xlsx" and
+    „Objednávka.xlsx" (no header): BISTRO's goods ship by its rule; the other file's order —
+    another of its shops, which one the mail does not say — is asked, never shipped to the
+    sender's own card by its address."""
+    snapshot.import_snapshot(pg, CATALOG_CSV, TOWNS_CSV)
+    _bistro_rule(pg, "2999000000111")
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('m-wl', 'ai_orders')")
+    text = ("Subject: objednávka\n\nAttachments:\n"
+            "===== Kvetka BISTRO.xlsx =====\n[Sheet: H]\nna 04.08.2026\n120x rožok 50g\n"
+            "===== Objednávka.xlsx =====\n[Sheet: H]\nna 04.08.2026\n7x vianočka 400g\n")
+    orders = [{"orderNumber": "", "deliveryDate": "04.08.2026", "recipientGroup": "",
+               "store": "", "items": [{"name": n, "quantity": q, "unit": "ks",
+                                       "sourceQuote": f"{q}x {n}"}]}
+              for n, q in (("rožok 50g", 120), ("vianočka 400g", 7))]
+    answers = [{"senderName": "Nákup", "senderEmail": SENDER, "companyName": "Reťazec",
+                "isChangeRequest": False, "notes": "", "orders": orders},
+               {"ean_edi": "", "confidence": 0.2}]
+    answers += [{"gtin": g, "confidence": 0.95, "matchedCatalogName": "", "reason": ""}
+                for g in ("G50", "VIA")]
+    rec = Recorder()
+    mail = {"message_id": "m-wl", "subject": "objednávka", "from_addr": SENDER,
+            "from_name": "Nákup", "combined_text": text, "today": "2026-07-30"}
+    result = pipeline.run(pg, _cfg(), mail, snapshot.latest_snapshot_id(pg),
+                          client=ScriptedClient(answers), upload=rec.upload, post=rec.post)
+    shipped = [(r["customer_ean"], [i["gtin"] for i in r["items"]])
+               for r in result["order_results"] if r["status"] == "ok"]
+    assert shipped == [("2999000000111", ["G50"])]
+    assert len([q for q in teach.open_questions(pg) if q["kind"] == "customer"]) == 1
+
+
+def test_an_items_name_locates_its_file_when_its_quote_was_reformatted():
+    src = ("Attachments:\n===== OBJ A.xlsx =====\n[Sheet: H]\nRožok štandart 50g\t0.05\t120\n"
+           "===== OBJ B.xlsx =====\n[Sheet: H]\nVianočka 400g\t0.23\t7\n")
+    out = extract.verify({"orders": [{"deliveryDate": "04.08.2026", "store": "", "items": [
+        {"name": "Rožok štandart 50g", "quantity": 120, "unit": "ks",
+         "sourceQuote": "120x Rožok štandart 50g"}]}]}, src)
+    assert [(o["sourceFile"], bool(o.get("fileUnknown"))) for o in out["orders"]] == [
+        ("OBJ A.xlsx", False)]

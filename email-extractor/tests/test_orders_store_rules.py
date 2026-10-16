@@ -125,22 +125,25 @@ def _client():
     return c
 
 
-def test_each_shop_goes_to_its_card_and_the_undecidable_ones_are_asked_once(pg):
+def test_every_shop_is_asked_once_with_its_named_card_first(pg):
+    """Review round 7: a card whose NAME resembles a shop never ships it (four review rounds
+    found a wrong card each time) — every shop of the mail is asked once, the card that bears
+    its name first in the question; the answer then teaches the shop's rule."""
     _env(pg)
     result, rec = _run(pg, "m1")
-    shipped = {r["store"]: r["customer_ean"] for r in result["order_results"]
-               if r["status"] == "ok"}
-    assert shipped == {"BISTRO": "2999000000204", "Predajňa: Tržnica": "2999000000202"}
-    assert len(rec.uploads) == 2
+    assert [r for r in result["order_results"] if r["status"] == "ok"] == []
+    assert rec.uploads == []
     qs = _shop_questions(pg)
-    assert set(qs) == {"DOLINA", "PR"}
+    assert set(qs) == {"BISTRO", "Predajňa: Tržnica", "DOLINA", "PR"}
     dolina = qs["DOLINA"]
     assert "predajňa „DOLINA“" in dolina["wording"]
     offered = [c["ean_edi"] for c in dolina["candidates"]]
     assert set(offered[:2]) == {"2999000000203", "2999000000204"}, "the two Dolina shops first"
+    assert qs["BISTRO"]["candidates"][0]["ean_edi"] == "2999000000204"
+    assert qs["Predajňa: Tržnica"]["candidates"][0]["ean_edi"] == "2999000000202"
     held = pg.execute("SELECT store, customer_ean FROM held_orders WHERE message_id = 'm1' "
                       "ORDER BY store").fetchall()
-    assert held == [("DOLINA", ""), ("PR", "")]
+    assert held == [("BISTRO", ""), ("DOLINA", ""), ("PR", ""), ("Predajňa: Tržnica", "")]
 
 
 def test_the_answer_ships_the_held_shop_and_the_next_mail_needs_no_question(pg, monkeypatch):
@@ -224,22 +227,27 @@ def test_a_different_answer_for_the_same_shop_replaces_the_rule_audited(pg):
                                 by="sklad") is None
 
 
-def test_the_sweep_settles_a_shop_question_once_a_card_names_the_shop(pg, monkeypatch):
-    """A card corrected in CODEX (the second Dolina card moved to another town) settles the
-    open DOLINA question through the SHOP rung — the order ships, and automation teaches no
-    rule; „PR" (named by no card) stays a question."""
+def test_the_sweep_settles_a_shop_question_once_a_card_has_its_street(pg, monkeypatch):
+    """A card corrected in CODEX gets the street the shop's header names: the open question
+    is settled through the SHOP rung (#101 street) — the order ships, and automation teaches
+    no rule; „PR" (named by no street) stays a question. A card's NAME never settles it
+    (review round 7)."""
     monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
     _env(pg)
-    _run(pg, "m1")
-    fixed = [dict(s, name="BISTRO Hôrka Krátka 1", city="Hôrka")
-             if s["ean_edi"] == "2999000000204" else s for s in SHOPS]
+    stores = [("Predajňa Lesná 4", "LE", "rožok kváskový 70g", 5, "G70"),
+              ("PR", "PR", "chlieb kváskový", 3, "CHL")]
+    _run(pg, "m1", stores=stores)
+    assert set(_shop_questions(pg)) == {"Predajňa Lesná 4", "PR"}
+    fixed = [dict(s, street="Lesná 4") if s["ean_edi"] == "2999000000203" else s
+             for s in SHOPS]
     codex_customers.replace_customers(
         pg, [dict(s, emails=[SENDER], zip="", codex_id=s["ean_edi"]) for s in fixed])
     snapshot.rebuild_from_overrides(pg)
     released = hold.retry_unknown_customer_questions(pg, _cfg())
     assert [r["status"] for r in released] == ["ok"]
     assert pg.execute("SELECT status, customer_ean FROM held_orders WHERE message_id = 'm1' "
-                      "AND store = 'DOLINA'").fetchone() == ("released", "2999000000203")
+                      "AND store = 'Predajňa Lesná 4'").fetchone() == ("released",
+                                                                      "2999000000203")
     assert store_rules.for_sender(pg, SENDER) == [], "automation never teaches a rule"
     assert set(_shop_questions(pg)) == {"PR"}
 
@@ -515,12 +523,10 @@ def test_the_sweep_never_settles_a_shop_by_the_senders_own_brand_word(pg, monkey
     monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
     _brand_env(pg)
     result, rec = _brand_run(pg, "m-brand", BRAND_STORES)
-    shipped = {r["store"]: r["customer_ean"] for r in result["order_results"]
-               if r["status"] == "ok"}
-    assert shipped == {"BISTRO": "2999000000402", "Predajňa: Tržnica": "2999000000403"}
+    assert rec.uploads == [], "a card's name never ships a shop (review round 7)"
     assert hold.retry_unknown_customer_questions(pg, _cfg()) == []
     assert pg.execute("SELECT status FROM held_orders WHERE message_id = 'm-brand'"
-                      ).fetchall() == [("held",)]
+                      ).fetchall() == [("held",)] * 3
 
 
 def test_a_rule_senders_one_shop_mail_is_never_decided_by_its_brand_word(pg):

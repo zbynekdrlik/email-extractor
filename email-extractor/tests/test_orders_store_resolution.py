@@ -11,7 +11,7 @@ SENDER = "nakup@retazec-test.sk"
 FAMILY = [
     {"ean_edi": "2999000000201", "name": "Školská jedáleň, Lipová 7 Mestečko",
      "trade_name": "Súkromná škola", "emails": [SENDER], "city": "Mestečko",
-     "street": "Lipová 7", "zip": ""},
+     "street": "Lipovská 7", "zip": ""},
     {"ean_edi": "2999000000202", "name": "Tržnica Mestečko - Riadok 1",
      "trade_name": "Tržnica Mestečko", "emails": [SENDER], "city": "Mestečko",
      "street": "Riadok 1", "zip": ""},
@@ -37,7 +37,7 @@ ORDERS = [
 def _resolve(key, rules=(), multi=True, delivery_text=""):
     return customer.resolve(FAMILY, SENDER, "", "", llm={"ean_edi": "2999000000204",
                                                            "confidence": 0.97},
-                            key=key, rules=rules, multi_store=multi, use_names=multi,
+                            key=key, rules=rules, multi_store=multi,
                             delivery_text=delivery_text)
 
 
@@ -102,18 +102,12 @@ def test_a_question_context_rebuilds_the_same_key():
 
 # --- the resolve rungs ----------------------------------------------------------------------
 
-def test_the_incident_shops_resolve_by_name_or_are_asked():
-    """BISTRO / Tržnica / ŠKOLA name ONE card each; ŽILINA-like „DOLINA" names two cards
-    (two shops in one town) and „PR" names none — both are asked, never guessed, and the
-    model's confident pick of the BISTRO card never decides a shop."""
+def test_no_incident_shop_is_decided_by_a_card_name():
+    """Review round 7: BISTRO / Tržnica / ŠKOLA each resemble ONE card, „DOLINA" two, „PR"
+    none — none of them is decided by the resemblance (it only ranks the question), and the
+    model's confident pick of the BISTRO card never decides a shop either."""
     keys = store_key.for_orders(ORDERS)
-    got = {k.header: _resolve(k) for k in keys}
-    assert (got["BISTRO"].ean_edi, got["BISTRO"].rule) == ("2999000000204", "store_name")
-    assert (got["Predajňa: Tržnica"].ean_edi,
-            got["Predajňa: Tržnica"].rule) == ("2999000000202", "store_name")
-    assert got["ŠKOLA, Lipová 7, MS"].ean_edi == "2999000000201"
-    assert got["DOLINA"] is None
-    assert got["PR"] is None
+    assert {k.header: _resolve(k) for k in keys} == {k.header: None for k in keys}
 
 
 def test_a_learned_shop_rule_decides_above_everything():
@@ -176,11 +170,10 @@ def test_outside_a_multi_shop_mail_the_name_rung_never_beats_the_delivery_addres
     assert (hit.ean_edi, hit.rule) == ("2999000000203", "delivery_address")
 
 
-def test_a_stem_every_family_card_shares_is_no_signal():
-    fam = [dict(c, name=f"Reťazec {c['name']}", trade_name="")
-           for c in FAMILY if c["ean_edi"] != "2999000000999"]
-    key = store_key.for_orders([{"store": "Reťazec"}])[0]
-    assert customer._by_store_name(fam, key) is None
+def test_a_card_name_never_decides_a_shop_even_alone_in_the_family():
+    """One family card bears the shop's whole name — still asked, never shipped by it."""
+    key = store_key.for_orders([{"store": "BISTRO DOLINA"}])[0]
+    assert _resolve(key, multi=True) is None
 
 
 def test_a_sender_on_no_family_keeps_the_old_rungs():
@@ -201,7 +194,7 @@ def test_the_poistka_asks_every_shop_a_shop_rung_did_not_decide():
     card (review round 2: one new shop next to taught ones went to the sender's card)."""
     keys = store_key.for_orders([{"store": "BISTRO"}, {"store": "PR"}, {"store": "TR"},
                                  {"store": "BISTRO"}])
-    matched = [_m("A", "store_name"), _m("A", "llm"), _m("B", "exact_email"),
+    matched = [_m("A", "store_address"), _m("A", "llm"), _m("B", "exact_email"),
                _m("A", "store_rule")]
     assert customer.collapsed_shops(keys, matched, multi=True) == {1, 2}
 

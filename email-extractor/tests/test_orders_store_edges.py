@@ -121,9 +121,10 @@ def test_a_merge_keeps_the_one_file_that_was_located():
     assert order_customers.merge_by_day([located, other])[0]["sourceFile"] == ""
 
 
-def test_a_rule_senders_merged_order_follows_the_rule_of_its_located_file(pg):
-    """The merged order keeps its shop identity, so the learned rule decides it — never the
-    sender's address or the model pick."""
+def test_a_rule_senders_located_order_follows_its_rule_and_is_merged_with_no_other(pg):
+    """A sender with learned shop rules: an order of another (here: no) file is never merged
+    into the located one (review round 7) — the located order keeps its shop identity and
+    its rule decides it, never the sender's address or the model pick."""
     _brand_env(pg)
     known = store_key.for_orders([{"store": "", "sourceFile": "Kvetka BISTRO.xlsx"}])[0]
     store_rules.remember(pg, sender_email=SENDER, key=known, ean_edi="2999000000402",
@@ -136,8 +137,9 @@ def test_a_rule_senders_merged_order_follows_the_rule_of_its_located_file(pg):
     merged, oc = order_customers.resolve_orders(
         pg, customers, SENDER, {"senderName": "Nákup", "companyName": "Kvetka s.r.o."},
         {"ean_edi": "2999000000401", "confidence": 0.97}, orders)
-    assert len(merged) == 1
-    assert (oc.matched[0].ean_edi, oc.matched[0].rule) == ("2999000000402", "store_rule")
+    assert [o["sourceFile"] for o in merged] == ["", "Kvetka BISTRO.xlsx"]
+    assert oc.matched[0] is None
+    assert (oc.matched[1].ean_edi, oc.matched[1].rule) == ("2999000000402", "store_rule")
 
 
 def test_the_sweep_uses_only_the_rungs_the_pipeline_used(pg):
