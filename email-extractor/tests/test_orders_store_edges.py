@@ -189,3 +189,10 @@ def test_the_ambiguity_alert_never_depends_on_the_snapshot_rebuild(pg, monkeypat
 def test_brand_family_fixture_is_unchanged():
     """Guard: the round-4 fixture this file reuses still has its head-office card first."""
     assert BRAND_SHOPS[0]["ean_edi"] == "2999000000401"
+
+
+def test_a_header_s_calendar_week_kt_is_not_the_shop():
+    """The incident's own headers carry „43 KT" / „43týždeň" next to the shop."""
+    assert store_key.tokens("BISTRO 43 KT", keep_numbers=True) == ["bistro"]
+    assert store_key.tokens("Predajňa: Tržnica 43týždeň", keep_numbers=True) == ["trznica"]
+    assert store_key.tokens("ŽILINA KT 43", keep_numbers=True) == ["zilina"]
