@@ -305,8 +305,10 @@ def test_a_shop_code_in_the_identity_never_reaches_the_street_comparison():
     """Round 15 kept „T1" and a lone capital letter in the shop identity; the strict street
     rung must keep comparing streets as before: „19/a" vs the card „19/A", the „1" of „T1"
     is no house number, and an initial „M.R." on the card is no required word."""
+    # „19/a" is the „19/A" card — never the bare „19" card (a suffixed house number is one
+    # unit, round 18; round 16 pinned only the then-unavoidable question)
     assert _street_hit(_street_family("Bajkalská 19", "Bajkalská 19/A"),
-                       "BISTRO Bajkalská 19/a") is None
+                       "BISTRO Bajkalská 19/a") == ("2999000000802", "store_address")
     assert _street_hit(_street_family("Hlavná 1", "Hlavná 7"), "T1 Hlavná") is None
     assert _street_hit(_street_family("Hlavná 1", "Hlavná 7"), "T1 Hlavná 7") == (
         "2999000000802", "store_address")
