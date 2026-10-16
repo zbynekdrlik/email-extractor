@@ -242,3 +242,25 @@ def test_the_sweep_settles_a_shop_question_once_a_card_names_the_shop(pg, monkey
                       "AND store = 'DOLINA'").fetchone() == ("released", "2999000000203")
     assert store_rules.for_sender(pg, SENDER) == [], "automation never teaches a rule"
     assert set(_shop_questions(pg)) == {"PR"}
+
+
+def test_a_shop_answer_teaches_the_rule_not_the_senders_address(pg, monkeypatch):
+    """Review round 1 (#493 F7): adding the sender's address to every answered shop's card
+    would make it a family — its mails with no shop clue would then be asked every time.
+    The rule is the lasting lesson; the card's addresses stay as they were."""
+    monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
+    snapshot.import_snapshot(pg, CATALOG_CSV, BASE_CSV)
+    codex_customers.replace_customers(
+        pg, [dict(s, emails=[SENDER] if s["ean_edi"] == "2999000000204" else [], zip="",
+                  codex_id=s["ean_edi"]) for s in SHOPS])
+    snapshot.rebuild_from_overrides(pg)
+    _run(pg, "m1")
+    q = _shop_questions(pg)["Predajňa: Tržnica"]
+    r = _client().post(f"/api/board/questions/{q['id']}/answer",
+                       json={"ean_edi": "2999000000202", "name": "Tržnica"})
+    assert r.status_code == 200, r.get_json()
+    cards = {c["ean_edi"]: c for c in snapshot.customers_for_management(pg)}
+    assert SENDER not in cards["2999000000202"]["emails"]
+    assert teach.get(pg, q["id"])["answer"]["email_added"] is False
+    assert store_rules.for_sender(pg, SENDER) == [(frozenset({"tr", "trznica"}),
+                                                   "2999000000202")]

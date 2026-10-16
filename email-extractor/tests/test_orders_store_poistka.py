@@ -189,3 +189,66 @@ def test_the_worker_sweep_never_answers_a_shop_question_with_the_senders_one_car
     assert released == []
     assert rec.uploads == []
     assert len(_customer_questions(pg)) == 3, "every shop question stays open for a human"
+
+
+# --- review round 1 (#493): the empty-header shop and file-only shops -----------------------
+
+def _attachments(blocks):
+    parts = ["Subject: objednávka\n\nAttachments:\n"]
+    for code, header, item, qty in blocks:
+        parts.append(f"===== OBJ Pekárová žena {code}.xlsx =====\n[Sheet: H]\n{header}\n"
+                     f"na 04.08.2026\n{qty}x {item}\n")
+    return "".join(parts)
+
+
+def test_the_empty_header_shop_of_a_multi_shop_mail_is_asked_too(pg):
+    """The incident's „Predajňa:" file (the shop only in „… PR.xlsx") on the same one card as
+    the named shops: the collapse covers it too — never shipped to the one card."""
+    sid = _env(pg)
+    rec = Recorder()
+    stores = (("BISTRO", "rožok 50g", 120, "G50"),
+              ("Predajňa: Tržnica", "vianočka 400g", 7, "VIA"),
+              ("Predajňa:", "rožok kváskový 70g", 5, "G70"))
+    text = _attachments([("BISTRO", "BISTRO", "rožok 50g", 120),
+                         ("TR", "Predajňa: Tržnica", "vianočka 400g", 7),
+                         ("PR", "Predajňa:", "rožok kváskový 70g", 5)])
+    pipeline.run(pg, _cfg(), dict(MAIL, combined_text=text), sid,
+                 client=ScriptedClient(_answers(stores=stores)), upload=rec.upload,
+                 post=rec.post)
+    assert rec.uploads == []
+    qs = _customer_questions(pg)
+    assert len(qs) == 3
+    assert any("OBJ Pekárová žena PR.xlsx" in q["wording"] for q in qs)
+
+
+def test_two_file_only_shops_of_one_day_are_never_merged_onto_one_card(pg):
+    """Two shops whose header blocks are empty („Predajňa:") on the same day: they must not be
+    merged into ONE order (one ORDER file with both shops' lines) — each file is its own shop,
+    asked per shop."""
+    sid = _env(pg)
+    rec = Recorder()
+    stores = (("Predajňa:", "vianočka 400g", 7, "VIA"),
+              ("Predajňa:", "rožok kváskový 70g", 5, "G70"))
+    text = _attachments([("TR", "Predajňa:", "vianočka 400g", 7),
+                         ("PR", "Predajňa:", "rožok kváskový 70g", 5)])
+    pipeline.run(pg, _cfg(), dict(MAIL, combined_text=text), sid,
+                 client=ScriptedClient(_answers(stores=stores)), upload=rec.upload,
+                 post=rec.post)
+    assert rec.uploads == []
+    assert len(_customer_questions(pg)) == 2
+
+
+def test_one_shop_sending_two_files_for_one_day_still_ships_one_order(pg):
+    """#81.1 stays: no shop header anywhere (a one-shop customer, two files the same day) →
+    the orders resolve to the same card and are merged into ONE ORDER file."""
+    sid = _env(pg)
+    rec = Recorder()
+    stores = (("", "vianočka 400g", 7, "VIA"), ("", "rožok kváskový 70g", 5, "G70"))
+    text = _attachments([("Jana", "", "vianočka 400g", 7),
+                         ("Peter", "", "rožok kváskový 70g", 5)])
+    result = pipeline.run(pg, _cfg(), dict(MAIL, combined_text=text), sid,
+                          client=ScriptedClient(_answers(stores=stores)), upload=rec.upload,
+                          post=rec.post)
+    assert result["status"] == "ok"
+    assert len(rec.uploads) == 1, "one delivery day of one card = one ORDER file"
+    assert _customer_questions(pg) == []

@@ -187,3 +187,37 @@ def test_a_shop_question_lists_the_whole_family_and_its_name_hits_first():
     eans = [c["ean_edi"] for c in cands]
     assert set(eans[:2]) == {"2999000000203", "2999000000204"}, "the two Dolina shops first"
     assert {"2999000000201", "2999000000202"} <= set(eans), "every family card is offered"
+
+
+# --- review round 1 (#493): rule conflicts and narrow rules ---------------------------------
+
+def test_a_rule_conflict_is_asked_even_for_a_sender_on_one_card():
+    """Two applicable rules that disagree must ASK — never fall through to the sender's one
+    card (exact_email / llm)."""
+    one = [dict(FAMILY[4], emails=[SENDER])] + [dict(c, emails=[]) for c in FAMILY[:4]]
+    key = store_key.for_orders([{"store": "Tržnica Dolina"}])[0]
+    rules = [(frozenset({"trznica"}), "2999000000202"), (frozenset({"dolina"}), "2999000000203")]
+    assert customer.resolve(one, SENDER, "", "", llm={"ean_edi": "2999000000999",
+                                                       "confidence": 0.97},
+                            key=key, rules=rules) is None
+
+
+def test_the_most_specific_rule_wins_over_the_rules_it_contains():
+    """The warehouse answered exactly „BISTRO Dolina" -> that rule decides even though the
+    narrower {dolina} rule also applies (else a re-ask would loop forever)."""
+    key = store_key.for_orders([{"store": "BISTRO Dolina"}])[0]
+    rules = [(frozenset({"dolina"}), "2999000000203"),
+             (frozenset({"bistro", "dolina"}), "2999000000204")]
+    hit = _resolve(key, rules=rules)
+    assert (hit.ean_edi, hit.rule) == ("2999000000204", "store_rule")
+
+
+def test_a_narrow_rule_never_captures_a_shop_another_card_names():
+    """{dolina} -> Makovická was taught for the „DOLINA" header; „BISTRO Dolina" carries a word
+    naming ANOTHER family card (BISTRO) — the rule must not capture it."""
+    key = store_key.for_orders([{"store": "BISTRO Dolina"}])[0]
+    assert _resolve(key, rules=[(frozenset({"dolina"}), "2999000000203")]) is None
+    # an extra word naming no card does not stop the rule
+    other = store_key.for_orders([{"store": "DOLINA týždeň 42 nová"}])[0]
+    hit = _resolve(other, rules=[(frozenset({"dolina"}), "2999000000203")])
+    assert (hit.ean_edi, hit.rule) == ("2999000000203", "store_rule")
