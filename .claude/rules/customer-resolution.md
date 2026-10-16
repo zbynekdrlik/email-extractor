@@ -122,15 +122,19 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   `tokens` minus the words every order of the mail shares AND the sender's company / name
   words — only the question ranking's view (round 4: a brand word must not rank the
   head-office card first).
-- **Two recognized tables** (`extract.table_attachments` ≥ 2 — two shops' filled-in price
-  lists): read by the MODEL, never the table path (`parse_table` reads the first table only —
-  the second shop's order vanished, round 9). One table keeps the table path.
+- **Several shops' tables** (`extract._several_tables`: two attachments with a recognized
+  table, or two SHEETS with one while the model names two shops — two shops' filled-in price
+  lists): read by the MODEL, never the table path (`parse_table` reads the first table only,
+  and straight through the next sheet — the second shop's order vanished or merged into the
+  first, rounds 9-10). One table, or a workbook split into goods sheets of ONE shop, keeps the
+  table path.
 - **Which attachment** (`store_key.locate_file`): the ONE section the order's block HEADER
   phrase is in, else the section holding most of its items — an item counts by its QUOTE, and
-  by its name only when the quote is NOWHERE — a text found in the mail BODY counts for no
-  attachment (round 7: a reformatted quote matched no section; round 8: the incident's order
-  forms share their product rows, a name is in every file and must never tie a located quote;
-  round 9: a body order's name in a form put it into that form's shop), compared word by word
+  by its name only when the quote is NOWHERE — every text is checked against the mail BODY
+  FIRST and one found there counts for no attachment, even when a form lists the same product
+  (round 7: a reformatted quote matched no section; round 8: the incident's order forms share
+  their product rows, a name is in every file and must never tie a located quote; rounds 9-10:
+  a body order's quote / name in a form put it into that form's shop), compared word by word
   (`_words_text`: any separator equal, whole words — „chlieb 120" ≠ „chlieb 1200"); header and
   items naming two files, or a tie, decide nothing (round 5: the incident's files share most
   rows — by the header every Tržnica order carries ONE identity). An order of a mail WITH
@@ -139,7 +143,7 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   round 7).
 - **Multi-shop mail** (`store_key.is_multi_store`): ≥2 different identities (header blocks
   naming nothing — „Predajňa:", `names_a_block`: a header with a WORD, never a date-only one —
-  count as one more, round 8) AND a header block on some order
+  count as one more, round 8) AND a header block (`names_a_block`, round 10) on some order
   (even an empty „Predajňa:") or the sender's learned shop rules. Never
   file names alone, never the sender's card count (rounds 3-4: a 2-card sender's two files of
   one day, a template file name, „Objednávka Prešov" + „… Prešov pečivo" are no shops —
