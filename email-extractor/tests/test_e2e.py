@@ -22,7 +22,8 @@ def _collect_console(page):
 def test_dashboard_user_workflow(live_server, pg, page):
     pg.execute("INSERT INTO messages (message_id, from_addr, subject, category, processed, "
                "proc_status, proc_outcome) VALUES "
-               "('e1','kupujuci@x.sk','Objednavka chleba','ai_orders', true, 'ok','EDI nahrate')")
+               "('e1','kupujuci@x.sk','Objednavka chleba','ai_orders', true, 'ok','EDI nahrate'),"
+               "('e2','iny@x.sk','Faktura za maslo','ai_orders', true, 'ok','EDI nahrate')")
     db.log_event(pg, "e1", "ai_orders", "uploaded_orion", "ok",
                  outcome="EDI nahrate", detail={"edi_file": "ORDER_1.txt"})
 
@@ -43,9 +44,12 @@ def test_dashboard_user_workflow(live_server, pg, page):
     # the search is debounced (350 ms) and then fetches: wait for the list itself, never a
     # fixed sleep (a busy box missed the 600 ms window and read the unfiltered list)
     mail = page.locator("text=Objednavka chleba")
-    with page.expect_response(lambda r: "/api/messages?" in r.url and "q=chleba" in r.url):
+    with page.expect_response(lambda r: "/api/messages?" in r.url
+                              and "q=chleba" in r.url) as found:
         page.fill("#q", "chleba")              # the matching search really runs
+    assert [i["subject"] for i in found.value.json()["items"]] == ["Objednavka chleba"]
     expect(mail).to_have_count(1)
+    expect(page.locator("text=Faktura za maslo")).to_have_count(0)
     page.fill("#q", "neexistujuce_slovo_xyz")
     expect(mail).to_have_count(0)
     page.fill("#q", "")
