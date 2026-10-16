@@ -196,3 +196,35 @@ def test_a_header_s_calendar_week_kt_is_not_the_shop():
     assert store_key.tokens("BISTRO 43 KT", keep_numbers=True) == ["bistro"]
     assert store_key.tokens("Predajňa: Tržnica 43týždeň", keep_numbers=True) == ["trznica"]
     assert store_key.tokens("ŽILINA KT 43", keep_numbers=True) == ["zilina"]
+
+
+TIED = ("Body: ahoj\n\nAttachments:\n"
+        "===== OBJ A.xlsx =====\n[Sheet: H]\nPredajňa: Tržnica\nRožok biely 0.6 20\n"
+        "===== OBJ B.xlsx =====\n[Sheet: H]\nBISTRO\nRožok biely 0.6 20\n"
+        "===== OBJ C.xlsx =====\n[Sheet: H]\nBISTRO\nVianočka 400 g 3\n")
+
+
+def test_an_orders_file_is_located_by_its_header_when_its_lines_are_everywhere():
+    """The incident's files share most rows („Rožok biely 0.6 …"), so an order's quotes often
+    tie and its file stayed unknown — its identity then differed between days of one shop
+    ({trznica} vs {tr, trznica}) and every variant was its own question / rule. The block
+    header, when it is in exactly ONE attachment, names the file."""
+    assert store_key.locate_file(["Rožok biely 0.6 20"], TIED) == "", "a tie on the lines"
+    assert store_key.locate_file(["Rožok biely 0.6 20"], TIED,
+                                 header="Predajňa: Tržnica") == "OBJ A.xlsx"
+    assert store_key.locate_file(["Rožok biely 0.6 20"], TIED, header="PR") == "", \
+        "a header in no attachment decides nothing"
+    assert store_key.locate_file(["Vianočka 400 g 3"], TIED, header="BISTRO") == "OBJ C.xlsx", \
+        "a header in two attachments leaves it to the lines"
+    assert store_key.locate_file(["Vianočka 400 g 3"], TIED,
+                                 header="Predajňa: Tržnica") == "", \
+        "the header and the lines name different files — never guessed"
+
+
+def test_the_extraction_records_the_file_its_header_names():
+    from app.orders import extract
+    out = extract.verify({"orders": [
+        {"deliveryDate": "04.08.2026", "store": "Predajňa: Tržnica",
+         "items": [{"name": "Rožok biely", "quantity": 20, "unit": "ks",
+                    "sourceQuote": "Rožok biely 0.6 20"}]}]}, TIED)
+    assert [o["sourceFile"] for o in out["orders"]] == ["OBJ A.xlsx"]
