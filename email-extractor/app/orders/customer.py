@@ -236,21 +236,38 @@ def _by_store_name(family: list[dict], key: store_key.StoreKey | None) -> dict |
     #101's street match decides nothing. The key's 4-letter stems are compared with each
     card's name + trade name + city + street; a stem every card of the family shares is no
     signal and is dropped. Exactly ONE card hit → that card; none or several (two shops in
-    one city: „ŽILINA") → None, and the order is asked — never a guess."""
+    one city: „ŽILINA") → None, and the order is asked — never a guess.
+
+    Both views of the shop must name that SAME one card (review round 5): `key` (without the
+    words every shop of the mail shares) and `own` (all its words). „Kaufland Martin" next to
+    „Tesco Martin" is {kaufland} without the shared town — Kaufland Žilina — but {kaufland,
+    martin} hits two cards: asked, never shipped to another town's shop."""
     if key is None or len(family) < 2:
         return None
-    want = key.stems()
     words = [_card_words(c) for c in family]
     common: set[str] = set(words[0]).intersection(*words[1:])
-    want -= common
+    narrow = _one_card_hit(family, words, key.stems() - common, key.text)
+    whole = _one_card_hit(family, words, key.own_stems() - common, key.text)
+    if narrow is not None and narrow is whole:
+        return narrow
+    if narrow is not None or whole is not None:
+        log.info("shop key %s: its mail-relative and its own words name different cards "
+                 "(%s / %s) — asking", key.text, narrow and narrow.get("ean_edi"),
+                 whole and whole.get("ean_edi"))
+    return None
+
+
+def _one_card_hit(family: list[dict], words: list, want: set[str], label: str
+                  ) -> dict | None:
+    """The ONE family card any of the `want` stems hits, or None (no stem, no hit, several)."""
     if not want:
         return None
     hits = [c for c, w in zip(family, words, strict=True) if want & w]
     if len(hits) == 1:
         return hits[0]
     if hits:
-        log.info("shop key %s hits %d cards of the family (%s) — not unique, asking",
-                 key.text, len(hits), [c.get("ean_edi") for c in hits])
+        log.info("shop key %s hits %d cards of the family (%s) — not unique", label,
+                 len(hits), [c.get("ean_edi") for c in hits])
     return None
 
 
@@ -275,12 +292,6 @@ def _by_shop_rule(hit: store_key.RuleHit, key: store_key.StoreKey, by_ean: dict,
         confidence=0.99, rule="store_rule",
         note=(f"Predajňu {key.label} sklad už raz priradil ku karte "
               f"„{taught.get('name', '')}“."))
-
-
-def owner_count(customers: list[dict], sender_email: str) -> int:
-    """How many cards carry this sender's address (a family is ≥2)."""
-    addr = (_addresses(sender_email) or [""])[0]
-    return sum(1 for c in customers if addr and addr in _addresses(c.get("emails")))
 
 
 def collapsed_shops(keys: list, matched: list, multi: bool, has_rules: bool = False

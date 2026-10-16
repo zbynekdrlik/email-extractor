@@ -48,6 +48,8 @@ class OrderCustomers:
     collapsed: set = field(default_factory=set)    # indexes the poistka turned back
     # a multi-shop mail / sender: a per-SENDER question here must not teach the address
     shop_context: bool = False
+    # the mail carries several shops — the shop-name rung ran (the sweep may run it too)
+    multi: bool = False
 
 
 def resolve_orders(conn, customers: list[dict], sender: str, extracted: dict, llm: dict,
@@ -61,8 +63,12 @@ def resolve_orders(conn, customers: list[dict], sender: str, extracted: dict, ll
     drop = (store_key.tokens(extracted.get("companyName", ""))
             + store_key.tokens(extracted.get("senderName", "")))
     multi = store_key.is_multi_store(store_key.for_orders(orders), has_rules)
-    by_day = (merge_orders(orders, lambda o: (_day(o), _shop(o))) if multi
-              else merge_by_day(orders))
+    # review round 5: an order naming no shop is never merged in a mail of several shops —
+    # two shops ordering the same goods with nothing to tell them apart are two orders, each
+    # asked on its own (merged, one answer shipped both shops' goods to one card)
+    by_day = (merge_orders(orders, [(_day(o), s) if s else ("unnamed", i)
+                                    for i, o in enumerate(orders) for s in [_shop(o)]])
+              if multi else merge_by_day(orders))
     keys = store_key.for_orders(by_day, drop=drop)
     # the shop-name rung only in a mail of several shops: anywhere else (one shop, a
     # sender's ordinary mail) a shop is decided by a learned rule or the street, exactly as
@@ -78,7 +84,7 @@ def resolve_orders(conn, customers: list[dict], sender: str, extracted: dict, ll
     shop_context = multi or has_rules
     scoped = [bool(k.identity) and shop_context for k in keys]
     oc = OrderCustomers(keys=keys, matched=matched, scoped=scoped, collapsed=collapsed,
-                        shop_context=shop_context)
+                        shop_context=shop_context, multi=multi)
     for i, (k, m) in enumerate(zip(keys, matched, strict=True)):
         log.info("order %d/%d shop %r (file %r, shop %r) -> %s (%s)%s%s", i + 1, len(keys),
                  k.header, k.source_file, k.text, m.ean_edi if m else None,
@@ -99,27 +105,35 @@ def _shop(order: dict) -> frozenset:
 def merge_by_day(orders: list[dict]) -> list[dict]:
     """One delivery day + order number + shop header is ONE order (#81.1, #101) — the merge
     of a mail that does NOT carry several shops, exactly as before #493 (`pipeline.
-    _merge_by_day`). A mail of several shops merges per shop identity instead. An order
-    merged from DIFFERENT files names no file (its shop key must not be the first file's)."""
-    def key(o):
-        return (_day(o), str(o.get("store") or ""))
+    _merge_by_day`). A mail of several shops merges per shop identity instead. A merged order
+    names the ONE file its orders were located in — none when they came from files of
+    DIFFERENT words (its shop key must not be the first file's); an order whose file was not
+    located is no "different file" (review round 5: it cleared the located sibling's file,
+    the merged order lost its shop identity and skipped the sender's shop rule)."""
+    keys = [(_day(o), str(o.get("store") or "")) for o in orders]
     files: dict = {}
-    for o in orders:
-        # compared by WORDS — „… BISTRO.xlsx" and „… BISTRO (1).xlsx" are one shop's file
-        files.setdefault(key(o), set()).add(store_key.file_tokens(o.get("sourceFile") or ""))
-    merged = merge_orders(orders, key)
-    for m in merged:
-        if len(files[key(m)]) > 1:
-            m["sourceFile"] = ""
+    for k, o in zip(keys, orders, strict=True):
+        name = str(o.get("sourceFile") or "")
+        words = store_key.file_tokens(name)
+        if words:
+            # compared by WORDS — „… BISTRO.xlsx" and „… BISTRO (1).xlsx" are one shop's file
+            files.setdefault(k, {}).setdefault(words, name)
+    sizes: dict = {}
+    for k in keys:
+        sizes[k] = sizes.get(k, 0) + 1
+    merged = merge_orders(orders, keys)
+    for k, m in zip(dict.fromkeys(keys), merged, strict=True):
+        if sizes[k] > 1:
+            located = files.get(k, {})
+            m["sourceFile"] = next(iter(located.values())) if len(located) == 1 else ""
     return merged
 
 
-def merge_orders(orders: list[dict], key) -> list[dict]:
-    """Merge the orders sharing `key(order)` — items concatenated in order, recipient groups
-    joined (the #81.1 shape `pipeline._merge_by_day` always had)."""
+def merge_orders(orders: list[dict], keys: list) -> list[dict]:
+    """Merge the orders sharing a key (`keys[i]` is order i's) — items concatenated in order,
+    recipient groups joined (the #81.1 shape `pipeline._merge_by_day` always had)."""
     merged: dict = {}
-    for order in orders:
-        k = key(order)
+    for order, k in zip(orders, keys, strict=True):
         if k not in merged:
             merged[k] = dict(order, items=list(order.get("items") or []))
             continue
@@ -146,7 +160,7 @@ def merge_by_card(orders: list[dict], oc: OrderCustomers) -> tuple[list[dict], O
     keep = [idxs[0] for idxs in groups.values()]
     out_orders = []
     for idxs in groups.values():
-        out_orders.append(merge_orders([orders[i] for i in idxs], lambda o: 0)[0])
+        out_orders.append(merge_orders([orders[i] for i in idxs], [0] * len(idxs))[0])
         if len(idxs) > 1:
             log.info("orders %s of one day resolved to one card %s — merged into one",
                      [i + 1 for i in idxs], oc.matched[idxs[0]].ean_edi)
@@ -154,17 +168,24 @@ def merge_by_card(orders: list[dict], oc: OrderCustomers) -> tuple[list[dict], O
         keys=[oc.keys[i] for i in keep], matched=[oc.matched[i] for i in keep],
         scoped=[oc.scoped[i] for i in keep],
         collapsed={keep.index(i) for i in oc.collapsed if i in keep},
-        shop_context=oc.shop_context)
+        shop_context=oc.shop_context, multi=oc.multi)
 
 
 def ask(conn, *, message: dict, sender: str, extracted: dict, customers: list[dict],
         free_text: str, order: dict, key, scoped: bool, on_new=None,
-        shop_context: bool = False) -> int | None:
+        shop_context: bool = False, multi: bool = False, slot: int = 0) -> int | None:
     """Raise (or reuse) the `customer` question for an unresolved order — per SHOP when
     `scoped` (dedupe sender + shop key), else per sender exactly as before (#159). A
     per-sender question in a `shop_context` (a multi-shop mail / sender) records
-    `no_address`: its answer must not put the address on a shop's card (`learn`)."""
+    `no_address`: its answer must not put the address on a shop's card (`learn`), and it is
+    asked for THIS order only (`unnamed_question`, `slot` = the order's index in the mail).
+    `multi` records that the shop-name rung ran, so the worker sweep may run it too."""
     shop = key if scoped else None
+    extra: dict = {}
+    if shop_context:
+        extra = {"no_address": True, "slot": slot, "order_summary": _summary(order)}
+    if multi:
+        extra["store_names"] = True
     cands = customer.candidates_for_question(
         customers, sender, extracted.get("senderName", ""), extracted.get("companyName", ""),
         free_text=free_text, key=shop)
@@ -177,8 +198,16 @@ def ask(conn, *, message: dict, sender: str, extracted: dict, customers: list[di
         context={"sender_email": sender, "sender_name": extracted.get("senderName", ""),
                  "company_name": extracted.get("companyName", ""),
                  "delivery_address_guess": customer.guess_delivery_address(free_text),
-                 **({"no_address": True} if shop_context else {})},
+                 **extra},
         on_new=on_new, key=shop)
+
+
+def _summary(order: dict, limit: int = 3) -> str:
+    """„10× rožok kváskový, 5× chlieb, …" — what the warehouse sees of an order that names no
+    shop, to find it in the mail."""
+    items = order.get("items") or []
+    parts = [f"{i.get('quantity', '')}× {i.get('name', '')}".strip() for i in items[:limit]]
+    return ", ".join(parts) + (", …" if len(items) > limit else "")
 
 
 def learn(conn, q: dict, ean_edi: str, by: str, email_added: bool | None = None) -> dict:
@@ -237,5 +266,25 @@ def shop_question(key: str, sender_email: str, shop, context: dict) -> tuple:
              f"{shop.label}? Odpoveď si zapamätám pre ďalšie objednávky tejto predajne."),
             dict(context or {}, store=shop.header, store_file=shop.source_file,
                  store_key=shop.text, store_tokens=sorted(shop.tokens),
-                 store_name_key=sorted(shop.key), store_label=shop.label))
+                 store_name_key=sorted(shop.key), store_own_key=sorted(shop.own),
+                 store_label=shop.label))
+
+
+def unnamed_question(key: str, message_id: str, context: dict) -> tuple:
+    """The shape of a per-sender `customer` question asked in a shop context (`no_address`) —
+    an order that names no shop in a mail of several shops, or a rule sender's order no rule
+    knows. Its answer teaches nothing (no shop to key a rule on, no address — `learn`), so
+    it is a decision about THIS order of THIS mail: the dedupe key carries the message and
+    the order's index (review round 5: one open `<sender>|shop-mail` question shipped every
+    unnamed order of every mail of the sender to one card), the wording says what the
+    warehouse is looking at. Returns (item_key, wording, reason, context)."""
+    ctx = context or {}
+    sender = str(ctx.get("sender_email") or key)
+    what = str(ctx.get("order_summary") or "")
+    # the board card shows only `wording` + the candidates — the order's goods go there
+    return (f"{key}|shop-mail:{message_id}:{int(ctx.get('slot') or 0)}",
+            f"{sender} · objednávka bez označenia predajne" + (f" ({what})" if what else ""),
+            ("Odosielateľ objednáva pre viac predajní a táto objednávka neuvádza, pre ktorú "
+             "predajňu je — ku ktorej karte patrí? Odpoveď platí len pre túto objednávku."),
+            ctx)
 

@@ -17,8 +17,8 @@ from test_orders_store_rules import (
     SENDER,
     TWO_CARD_CSV,
     _brand_env,
-    _client,
     _cfg,
+    _client,
     _env,
     _run,
     _shop_questions,
@@ -171,9 +171,8 @@ def test_a_header_s_dates_and_order_numbers_are_not_the_shop():
 def test_the_ambiguity_alert_never_depends_on_the_snapshot_rebuild(pg, monkeypatch):
     """A failing rebuild must not swallow the ops alert: the next push sees an unchanged set
     and would never alert again."""
-    from test_codex_customers import SHOP_A, _base
+    from test_codex_customers import SHOP_A, _base, _push
     from test_codex_customers import _client as codex_client
-    from test_codex_customers import _push
 
     _base(pg)
 

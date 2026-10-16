@@ -32,6 +32,16 @@ _EXT_RE = re.compile(r"\.(xlsx|xlsm|xls|ods|fods|csv|pdf|docx?|odt|txt|png|jpe?g
                      re.IGNORECASE)
 _WEEK_CODE_RE = re.compile(r"^(kw|t|tyz|w|wk)\d+$")
 _SPACES_RE = re.compile(r"\s+")
+# what a HEADER's numbers must not keep (review round 5: „BISTRO 16.10." changed its identity
+# every mail, so its rule never matched again): a date („16.10.", „16. 10. 2026", „16.10"), a
+# week number („42. týždeň", „KW 42") — on the folded text; numbers of 4+ digits (an order
+# number, a year) are dropped in `tokens`. Short standalone numbers stay („Predajňa 2", a
+# house number).
+_HEADER_NOISE_RE = re.compile(
+    r"(?<!\d)\d{1,2}\s*\.\s*\d{1,2}(?:\s*\.\s*(?:\d{4}|\d{2})(?!\d))?\.?(?!\d)"
+    r"|(?<!\d)\d{1,2}\s*\.?\s*(?:tyzden\w*|tyzd\w*|tyz|week|kw)\b"
+    r"|\b(?:kw|week|tyzden)\s*\.?\s*\d{1,2}(?!\d)")
+MAX_HEADER_NUMBER = 3   # digits of a number a header keeps
 
 STOPWORDS = frozenset({
     # order / document words
@@ -63,11 +73,16 @@ def tokens(text, keep_numbers: bool = False) -> list[str]:
     folded, split on every non-alphanumeric, without stopwords, week codes („kw42") and —
     unless `keep_numbers` (a shop HEADER: „Predajňa 1" / „Predajňa 2" are two shops) — pure
     numbers. Short words stay (the „PR" / „ZA" shop codes); the name rung itself only
-    compares words of `STEM`+ letters."""
+    compares words of `STEM`+ letters. A header keeps only short standalone numbers — never
+    a date, a week number or a long (order / year) number (`_HEADER_NOISE_RE`)."""
     out: list[str] = []
-    for t in re.split(r"[^a-z0-9]+", dl_match.fold(text)):
-        if t.isdigit() and keep_numbers and t not in out:
-            out.append(t)
+    folded = dl_match.fold(text)
+    if keep_numbers:
+        folded = _HEADER_NOISE_RE.sub(" ", folded)
+    for t in re.split(r"[^a-z0-9]+", folded):
+        if t.isdigit() and keep_numbers and len(t) <= MAX_HEADER_NUMBER:
+            if t not in out:
+                out.append(t)
             continue
         if len(t) < 2 or t.isdigit() or t in STOPWORDS or _WEEK_CODE_RE.match(t):
             continue
@@ -147,12 +162,16 @@ class StoreKey:
     kept) + its file name — independent of the rest of the mail: it is the shop's IDENTITY,
     what a learned rule and the per-shop question are keyed on (`text`); `key` = `tokens`
     minus the words every order of the mail shares and the sender's own company / name words
-    — only what the name rung compares (review round 4: a brand word picked the company's
-    head-office card)."""
+    — what the name rung compares (review round 4: a brand word picked the company's
+    head-office card); `own` = `tokens` minus only the sender's company / name words — the
+    name rung must name the SAME card with it too (review round 5: the town every shop of
+    the mail shares, dropped from `key`, left „Kaufland Martin" = {kaufland} -> Kaufland
+    Žilina)."""
     header: str = ""
     source_file: str = ""
     tokens: frozenset = frozenset()
     key: frozenset = frozenset()
+    own: frozenset = frozenset()
 
     @property
     def text(self) -> str:
@@ -172,6 +191,9 @@ class StoreKey:
 
     def stems(self) -> set[str]:
         return stems(self.key)
+
+    def own_stems(self) -> set[str]:
+        return stems(self.own)
 
     @property
     def identity(self) -> frozenset:
@@ -200,8 +222,9 @@ def for_orders(orders: list[dict], drop=()) -> list[StoreKey]:
                     | file_tokens(src)))
     distinct = {t for _h, _s, t in raw if t}
     common = frozenset.intersection(*distinct) if len(distinct) >= 2 else frozenset()
-    gone = common | frozenset(drop)
-    return [StoreKey(header=header, source_file=src, tokens=toks, key=toks - gone)
+    brand = frozenset(drop)
+    return [StoreKey(header=header, source_file=src, tokens=toks, key=toks - common - brand,
+                     own=toks - brand)
             for header, src, toks in raw]
 
 
@@ -217,14 +240,16 @@ def is_multi_store(keys: list[StoreKey], shop_evidence: bool = False) -> bool:
 
 def from_context(ctx: dict) -> StoreKey | None:
     """Rebuild the key a store-scoped `customer` question was asked with (its `context`) —
-    with the SAME name-rung words the pipeline used (`store_name_key`, review round 4: the
-    sweep rebuilt the full words and a brand word picked the head-office card)."""
+    with the SAME name-rung words the pipeline used (`store_name_key` + `store_own_key`,
+    review rounds 4-5: the sweep rebuilt the full words and a brand word picked the
+    head-office card). A context without them decides nothing by name."""
     toks = frozenset(ctx.get("store_tokens") or (ctx.get("store_key") or "").split())
     if not toks:
         return None
     return StoreKey(header=str(ctx.get("store") or ""),
                     source_file=str(ctx.get("store_file") or ""), tokens=toks,
-                    key=frozenset(ctx.get("store_name_key") or ()))
+                    key=frozenset(ctx.get("store_name_key") or ()),
+                    own=frozenset(ctx.get("store_own_key") or ()))
 
 
 @dataclass(frozen=True)

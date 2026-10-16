@@ -146,14 +146,6 @@ def layer(conn) -> dict[str, dict]:
     return {r[0]: dict(zip(_COLS, r, strict=True), emails=list(r[3] or [])) for r in rows}
 
 
-def emails_for(conn, ean_edi: str) -> list[str]:
-    """The addresses CODEX has for this EAN (the board needs them to know what a save
-    deliberately removed)."""
-    row = conn.execute("SELECT emails FROM codex_customers WHERE ean_edi = %s",
-                       (str(ean_edi or ""),)).fetchone()
-    return list(row[0] or []) if row else []
-
-
 # --- the ops alerts -------------------------------------------------------------------------
 
 def ambiguity_alert(conn, cfg, res: dict) -> bool:

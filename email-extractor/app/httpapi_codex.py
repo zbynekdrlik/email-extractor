@@ -144,12 +144,18 @@ def register(app: Flask, deps: Deps) -> None:
                     c, payload["customers"],
                     ambiguous=ambiguous if isinstance(ambiguous, list) else [],
                     source_as_of=payload.get("source_as_of"), force=force)
+                # each on its own: a failing rebuild must not swallow the alert — the next
+                # push sees an unchanged ambiguous set and would never alert again
                 try:
-                    sid = snapshot.rebuild_from_overrides(c)
                     codex_customers.ambiguity_alert(c, deps.cfg, res)
                 except Exception:
-                    log.exception("codex customers push: stored, but the snapshot rebuild / "
-                                  "ambiguity alert failed")
+                    log.exception("codex customers push: stored, but the ambiguity alert "
+                                  "failed")
+                try:
+                    sid = snapshot.rebuild_from_overrides(c)
+                except Exception:
+                    log.exception("codex customers push: stored, but the snapshot rebuild "
+                                  "failed")
         except codex_customers.ReplaceRefused as e:
             log.warning("codex customers push refused (%s): %s", e.status, e)
             return jsonify(error=str(e)), e.status
