@@ -156,10 +156,10 @@ def test_a_co_address_of_the_senders_one_card_shares_its_shop_history(pg, monkey
     key = store_key.for_orders([{"store": "BISTRO", "sourceFile": "OBJ Pekárová žena BI.xlsx"}])[0]
     store_rules.remember(pg, sender_email=S1, key=key, ean_edi="2999000000502",
                          question_id=1, by="sklad")
-    stores = (("BISTRO", "BI", "rožok 50g", 120, "G50"),)
-    assert _run_from(pg, "m-s2", S2, stores).uploads == []
     assert order_customers.shop_history(pg, S2, None, own_cards=ONE_CARD)
     assert not order_customers.shop_history(pg, S2, None)
+    stores = (("BISTRO", "BI", "rožok 50g", 120, "G50"),)
+    assert _run_from(pg, "m-s2", S2, stores).uploads == []
 
 
 def test_a_rule_pointing_at_a_family_card_is_the_familys_shop_history(pg):
