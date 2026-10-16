@@ -34,7 +34,7 @@ from test_orders_confirm import (
 )
 from test_orders_confirm_carryover import SUP_A, SUP_A_NAME, SUP_B, _suppliers
 
-from app.orders import codex_receipts, confirm, dl_alerts
+from app.orders import codex_receipts, confirm, confirm_manual, dl_alerts
 
 OPS = 592
 KIND = "dl_manual_in_codex"
@@ -240,6 +240,45 @@ def test_a_failing_receipts_lookup_leaves_the_row_waiting(pg, monkeypatch, caplo
     assert len(posts.calls) == 1, "the carryover alert still goes out"
     assert _manual_alerts(pg) == []
     assert "receipts lookup down" in caplog.text
+
+
+def test_status_and_alert_are_one_transaction_a_failed_alert_leaves_the_row_waiting(
+        pg, monkeypatch):
+    """`manual` without its ops alert would silently swallow the „delete the file" message —
+    the status change and the outbox row land together or not at all."""
+    rid = _insert_desadv_at(pg, SUP_A, _fname(), uploaded_at=MON_EVENING, doc_number=DOC)
+    _receipts(pg, (RECEIPT, SUP_A, [CODEX_DL]))
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("outbox down")
+
+    monkeypatch.setattr(dl_alerts, "enqueue", boom)
+    posts = PostRecorder()
+    confirm.sweep(pg, _ocfg(), listdir=lambda: _dirs(in_dl=[_wire()]), post=posts,
+                  now=TUE_MORNING)
+    assert _row(pg, rid) == (None, None), "rolled back — still waiting, retried next sweep"
+    assert len(posts.calls) == 1, "the carryover alert still goes out"
+
+    monkeypatch.undo()
+    _make_due(pg)
+    confirm.sweep(pg, _ocfg(), listdir=lambda: _dirs(in_dl=[_wire()]), post=posts,
+                  now=TUE_MORNING.replace(hour=12))
+    assert _desadv_status(pg, rid) == "manual"
+    assert len(_manual_alerts(pg)) == 1
+
+
+def test_mark_never_touches_a_row_resolved_meanwhile(pg):
+    """The status change is guarded (`import_status IS NULL`): a row another sweep resolved
+    between the listing and the mark keeps its status and gets no alert."""
+    rid = _insert_desadv_at(pg, SUP_A, _fname(), uploaded_at=MON_EVENING, doc_number=DOC)
+    _receipts(pg, (RECEIPT, SUP_A, [CODEX_DL]))
+    row = {"id": rid, "supplier_ean": SUP_A, "doc_number": DOC, "filename": _fname(),
+           "uploaded_at": MON_EVENING}
+    pg.execute("UPDATE desadv_sent SET import_status = 'imported' WHERE id = %s", (rid,))
+    marked = confirm_manual.mark(pg, _ocfg(), [row], wire_prefix="Z-", now=TUE_MORNING)
+    assert marked == set()
+    assert _desadv_status(pg, rid) == "imported"
+    assert _manual_alerts(pg) == []
 
 
 # --- after manual: the file vanishing is no alarm; the incident closes ----------------------

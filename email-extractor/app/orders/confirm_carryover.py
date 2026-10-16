@@ -52,7 +52,7 @@ class _Dead:
     as_of: str = ""
 
 
-def _names(conn, source: str) -> dict[str, str]:
+def display_names(conn, source: str) -> dict[str, str]:
     """EAN → display name: the DL supplier list for a DESADV row, the customer list for an
     ORDER row (both the effective snapshot + overrides view the board shows). Branches sharing
     one EAN keep the first name."""
@@ -122,7 +122,7 @@ def items(conn, rows: list[dict], source: str, *, wire_prefix: str, read_files: 
     """One HTML-escaped `<li>` per waiting row, in the given order except that a file CODEX
     will never take goes first (the one the warehouse must act on by hand)."""
     try:
-        names = _names(conn, source)
+        names = display_names(conn, source)
     except Exception:
         log.exception("carryover alert: %s names could not be loaded — listing numbers only "
                       "(fail-open)", source)

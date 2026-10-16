@@ -72,15 +72,7 @@ class Receipts:
     synced_at: datetime
 
     def for_supplier(self, conn, supplier_ean: str) -> list[Receipt]:
-        rows = conn.execute(
-            "SELECT receipt_number, supplier_eans, receipt_date, receipt_date_to, dl_numbers, "
-            "invoice_number, invoice_vs, total, invoice_total FROM codex_receipts "
-            "WHERE supplier_eans @> ARRAY[%s]::text[] ORDER BY receipt_date, receipt_number",
-            (str(supplier_ean or ""),)).fetchall()
-        return [Receipt(r[0], tuple(r[1] or ()), r[2], r[3] or r[2], tuple(r[4] or ()),
-                        r[5] or "", r[6] or "",
-                        float(r[7]) if r[7] is not None else None,
-                        float(r[8]) if r[8] is not None else None) for r in rows]
+        return for_supplier(conn, supplier_ean)
 
     def covers(self, conn, supplier_ean: str) -> bool:
         """Does any receipt carry this supplier's EAN? If not, the gate cannot see its CODEX
@@ -88,6 +80,22 @@ class Receipts:
         return conn.execute(
             "SELECT 1 FROM codex_receipts WHERE supplier_eans @> ARRAY[%s]::text[] LIMIT 1",
             (str(supplier_ean or ""),)).fetchone() is not None
+
+
+def for_supplier(conn, supplier_ean: str) -> list[Receipt]:
+    """Every receipt of the copy carrying this supplier EAN, oldest first — WITHOUT the
+    freshness gate. The invoice gate goes through `live()` (`Receipts.for_supplier`, fail-
+    closed); a reader that only needs evidence of PRESENCE (#494: is this DL already in
+    CODEX?) may use an older copy, since a receipt that was there is still true."""
+    rows = conn.execute(
+        "SELECT receipt_number, supplier_eans, receipt_date, receipt_date_to, dl_numbers, "
+        "invoice_number, invoice_vs, total, invoice_total FROM codex_receipts "
+        "WHERE supplier_eans @> ARRAY[%s]::text[] ORDER BY receipt_date, receipt_number",
+        (str(supplier_ean or ""),)).fetchall()
+    return [Receipt(r[0], tuple(r[1] or ()), r[2], r[3] or r[2], tuple(r[4] or ()),
+                    r[5] or "", r[6] or "",
+                    float(r[7]) if r[7] is not None else None,
+                    float(r[8]) if r[8] is not None else None) for r in rows]
 
 
 def _day(value) -> date | None:

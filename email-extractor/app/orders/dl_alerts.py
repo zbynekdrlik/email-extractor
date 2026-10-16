@@ -120,6 +120,13 @@ GROUPED_ITEM_KINDS = {
     "scanner_not_dl":
         "&#128444;&#65039; Skeny z tlačiarne, ktoré sa nepodarilo zaradiť ako dodací list "
         "({n}) &mdash; ak to bol dodací list, naskenujte znova stranu s položkami.",
+    # #494 (`confirm_manual`): a DL the warehouse typed into CODEX by hand while our DESADV
+    # still waits in ORION `in_DL` — OPS only (never the warehouse thread), one item line per
+    # file (DL, supplier, CODEX receipt, exact file name). The action is on the ORION server.
+    "dl_manual_in_codex":
+        "&#128465;&#65039; Dodacie listy zadané v CODEXe ručne ({n}) &mdash; náš súbor "
+        "ešte leží v ORIONe v priečinku <code>in_DL</code>. Zmaž ho, inak ho ranný import "
+        "prevezme druhýkrát (duplicitná príjemka).",
 }
 
 # #473: a grouped kind that reaches a WAREHOUSE channel links the password-free board

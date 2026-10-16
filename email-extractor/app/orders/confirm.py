@@ -95,6 +95,15 @@ card (#467 list, read-only file read, fail-open). A carryover alert names EVERY 
 channel still waiting, not only the throttled rows due this sweep. Once nothing waits there
 is no carryover group at all, so no reminder — the incident closes through
 `_check_incidents_for_clear` with its one all-clear.
+
+**#494 — a DL the warehouse typed into CODEX by hand is `manual`, not waiting.** A DESADV whose
+file still sits in `in_DL` while CODEX already holds a receipt of the same supplier with the
+same DL number (`codex_receipts`, #485) gets the terminal `import_status = 'manual'`
+(`confirm_manual`) BEFORE any alert of the sweep is built — over every unresolved DESADV row of
+the listing, not only the throttled due rows, because a carryover alert names them all. It
+leaves the reminder, its carryover incident clears like an imported one, and the file's later
+deletion is never the `unknown` alarm; ONE ops alert per file asks to delete it. Its
+`import_confirmed_at` is no import pass: `_activity_today_at` (#255) reads `imported` rows only.
 """
 from __future__ import annotations
 
@@ -104,7 +113,7 @@ from datetime import UTC, datetime, timedelta
 from html import escape
 from zoneinfo import ZoneInfo
 
-from . import confirm_carryover, report
+from . import confirm_carryover, confirm_manual, report
 from . import upload as upload_mod
 
 log = logging.getLogger("orders.confirm")
@@ -319,13 +328,16 @@ def _activity_today_at(conn, now_utc: datetime) -> datetime | None:
     # this file already uses (`due_rows`, `sweep`), never a hardcoded literal — an f-string
     # is the only way to parameterize a table name at all (psycopg %s is value-only), same
     # pattern `due_rows`'s own `f"...FROM {ledger.table}..."` already establishes.
+    # #494: only `imported` rows — a `manual` row (typed into CODEX by hand) carries an
+    # `import_confirmed_at` too, but nobody clicked „prijať"; counting it would flag every
+    # file uploaded earlier today as a same-day rejection.
     row = conn.execute(
         f"""SELECT max(t) FROM (
                SELECT import_confirmed_at AS t FROM {EDI_LEDGER.table}
-                WHERE import_confirmed_at >= %s
+                WHERE import_confirmed_at >= %s AND import_status = 'imported'
                UNION ALL
                SELECT import_confirmed_at AS t FROM {DESADV_LEDGER.table}
-                WHERE import_confirmed_at >= %s
+                WHERE import_confirmed_at >= %s AND import_status = 'imported'
            ) activity""",
         (today_start_utc, today_start_utc)).fetchone()
     return row[0] if row else None
@@ -645,6 +657,20 @@ def _handle_group(conn, cfg, post, channel_id: int, kind: str, rows: list[dict],
     return True
 
 
+# --- a DL typed into CODEX by hand (#494) ------------------------------------
+
+def _mark_manual(conn, cfg, dirs: dict, now: datetime) -> set[int]:
+    """Every unresolved DESADV row still queued in THIS listing (no throttle — a carryover
+    alert names every waiting file, #476) whose DL CODEX already has → `manual` + its one
+    ops alert (`confirm_manual`). Returns the ids marked."""
+    queued = [r for r in _unresolved_rows(conn, DESADV_LEDGER)
+              if _decide(r, dirs, DESADV_LEDGER) is None]
+    if not queued:
+        return set()
+    return confirm_manual.mark(conn, cfg, queued, wire_prefix=DESADV_LEDGER.wire_prefix,
+                               now=now)
+
+
 # --- the sweep -------------------------------------------------------------
 
 def sweep(conn, cfg, listdir=None, post=None, now=None, read_files=None) -> int:
@@ -694,6 +720,12 @@ def sweep(conn, cfg, listdir=None, post=None, now=None, read_files=None) -> int:
                 ([r["id"] for r in desadv_rows],))
         return 0
 
+    # #494: BEFORE anything else reads the ledger — a DL already typed into CODEX leaves the
+    # pending state first, so no alert of this sweep (opening, widened, reminder) names it
+    # and the activity read below does not see its mark.
+    manual = _mark_manual(conn, cfg, dirs, now)
+    desadv_rows = [r for r in desadv_rows if r["id"] not in manual]
+
     morning_active = morning_check_active(cfg, now)
     # #255: only pay for the extra read when the evening check could even fire this pass —
     # the common case (most of the day) skips it entirely.
@@ -707,7 +739,7 @@ def sweep(conn, cfg, listdir=None, post=None, now=None, read_files=None) -> int:
         return ((morning_active and _is_carryover(row, now))
                 or (evening_active and _is_same_day_stuck(row, now, activity_at)))
 
-    changed = 0
+    changed = len(manual)
     groups: dict[tuple[int, str, str], list[dict]] = {}
     for ledger, rows in ((EDI_LEDGER, edi_rows), (DESADV_LEDGER, desadv_rows)):
         c1, c2 = ledger.identity_cols
