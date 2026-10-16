@@ -115,9 +115,12 @@ def _customer_input(cands: list[dict], email: dict, extracted: dict) -> str:
     lines = []
     for i, c in enumerate(cands, 1):
         mark = " | PRESNÁ ZHODA E-MAILU ODOSIELATEĽA" if c.get("exact_email") else ""
+        # #493 round 31: our own address on a card is never shown — a staff forward's FROM
+        # would match it as text (a pre-#493 answer had put one on a card)
+        emails = [e for e in c.get("emails") or [] if not store_rules.is_own_address(e)]
         lines.append(f"{i}. {c.get('name', '')} | EAN: {c.get('ean_edi', '')} | "
                      f"Obec: {c.get('city', '')} | Ulica: {c.get('street', '')} | "
-                     f"E-mail: {', '.join(c.get('emails') or []) or '-'}{mark}")
+                     f"E-mail: {', '.join(emails) or '-'}{mark}")
     return (f"FROM: {extracted.get('senderName') or email.get('from_name', '')} "
             f"<{extracted.get('senderEmail') or email.get('from_addr', '')}>\n"
             f"FIRMA V PODPISE: {extracted.get('companyName', '')}\n"

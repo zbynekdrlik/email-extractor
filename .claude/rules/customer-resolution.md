@@ -268,14 +268,19 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   („Predajňa 1" of one customer shipped another's order), and a plain answer put the staff
   address on the customer's card (every later forward → that card). Such an address owns no
   rule (`remember` → None, `for_sender` → []), no shop history, EVERY question of it is keyed
-  per MAIL (`cust:<message_id>…`, `teach.ask_customer`), nothing writes it on a card
-  (`snapshot.remember_customer_email` refuses it, the „Nový zákazník" route strips it), and —
+  per MAIL (`cust:<message_id>…`, `teach.ask_customer`), no ANSWER path writes it on a card
+  (`snapshot.remember_customer_email` refuses it, the „Nový zákazník" route strips it — the
+  board card editor / CODEX union still can, harmless below; `forget_customer_email` always
+  removes it, so undo of a pre-#493 answer cleans the card, round 31), and —
   round 30, the READ side — it never matches a card (`customer._sender_addr` → "": no
   `owners_of`, no `exact_email`, no exact-address flag for the model, no CODEX-order owner in
-  `codex_orders._owner_ean`; prod had ONE card carrying a staff address from a pre-#493
-  answer and two forwards of an unknown customer shipped to it). `is_own_address` parses a
-  display name („Jana <jana@…>"). Measured before (prod, read-only, 60 days): no own-domain
-  sender ever resolved by `exact_email`, so nothing legitimate is lost. Pre-existing, outside
+  `codex_orders._owner_ean`, never printed in the model's candidate list — round 31; prod had
+  ONE card carrying a staff address from a pre-#493 answer and two forwards of an unknown
+  customer shipped to it). `is_own_address` parses a display name („Jana <jana@…>").
+  Measured before (prod, read-only, 2026-10-16): exactly ONE card of the whole effective
+  list carries an own-domain address (that one) — no internal unit's card does, so no sender
+  loses a legitimate match by ANY rung (count the CARDS, not `exact_email` runs: the `llm`
+  rung runs first and records a one-card sender as `llm`, round 31). Pre-existing, outside
   #493, reported as a follow-up candidate (review round 30): the #369 „nie je objednávka" mail
   rule is keyed on the staff `from_addr` + subject shape (4 live rules on prod).
 - **The answer teaches** through ONE helper, `order_customers.learn` — called by the board

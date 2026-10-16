@@ -947,11 +947,8 @@ def forget_customer_email(conn, ean_edi: str, email: str) -> bool:
     No-op (returns False) when the address is not currently listed for that customer, or
     `ean_edi` does not match any current customer.
     """
-    from . import store_rules  # leaf module; lazy like the other cross-module helpers
-
     email = (email or "").strip().lower()
-    if not email or not ean_edi or store_rules.is_own_address(email):
-        # #493 round 30: our own address (a staff forward) never goes on a customer card
+    if not email or not ean_edi:
         return False
     effective = next((r for r in customers_for_management(conn)
                       if str(r.get("ean_edi") or "") == str(ean_edi)), None)
