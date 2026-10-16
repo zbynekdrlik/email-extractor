@@ -549,3 +549,19 @@ EXACTLY once, `str.replace`s it with the mutant, writes the copy to scratch, and
 mutant with an env var (`MUTANT=k0`), run only the relevant tests with `-x`, and expect a
 FAILED line per mutant. Keep the plugin in the scratchpad, never in the repo, and add the
 pin test only when a mutant survives — the mutant's name + what it breaks goes in the commit.
+
+## A dispatched review subagent can wedge for an HOUR on a permission prompt — brief it on safe command shapes (#494)
+
+A fresh-context review dispatch (CYCLE step 6) stalled 60 minutes on ONE Bash call — `set -e; …;
+cd <repo>; for c in <shas>; do rm -rf <scratch>/$c; …; git archive $c … | tar -x …; done` — its
+transcript showed the `tool_use` with no `tool_result`: the call was waiting on a permission prompt
+(a recursive delete in a loop + a `cd` into the repo) that nobody answered. `TaskStop` on it was
+refused ("owned by <agent>; agent <me> cannot stop it") and its reasoning blocks were empty, so
+nothing was salvageable — a NEW dispatch had to redo the review. Put a "command hygiene" block in
+every review brief: never `rm`/`rm -rf`, never `cd <repo>` inside a loop/compound (use `git -C` +
+absolute paths, the Read/Grep tools), scratch copies only via `mkdir -p <new dir>` + one plain
+`git -C <repo> archive <sha> email-extractor | tar -x -C <new dir>`, and "if a command is refused or
+prompts, skip it — don't retry". With that block the next two review rounds finished in 6-7 min.
+Detect a wedge early: parse the last non-attachment record of the dispatch's `.output` JSONL — an
+`assistant ['tool_use']` whose timestamp stays unchanged for > ~10 min means a stuck call, not a
+slow review.
