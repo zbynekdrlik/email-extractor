@@ -206,7 +206,8 @@ def _by_delivery_address(owners: list[dict], delivery_text: str) -> dict | None:
     return None
 
 
-def _by_store(owners: list[dict], store: str, strict: bool = False) -> dict | None:
+def _by_store(owners: list[dict], store: str, strict: bool = False,
+              file_words=()) -> dict | None:
     """Which of the branches sharing one address does this block header name? (#101)
 
     Matched on the STREET, never the name: the live table calls both Gazdovský trh rows
@@ -221,7 +222,7 @@ def _by_store(owners: list[dict], store: str, strict: bool = False) -> dict | No
     other mail keeps the #101 comparison exactly.
     """
     if strict:
-        return _by_street_strict(owners, store)
+        return _by_street_strict(owners, store, file_words)
     want = _words(store)
     if not want:
         return None
@@ -246,7 +247,7 @@ _CODE_NUMBER_RE = re.compile(r"^[a-z]+(\d+)$")
 _HOUSE_RE = re.compile(r"^(\d+)[a-z]?$")
 
 
-def _by_street_strict(owners: list[dict], store: str) -> dict | None:
+def _by_street_strict(owners: list[dict], store: str, file_words=()) -> dict | None:
     """The `strict` street rung (#493 shop contexts) — decides only when exactly ONE family
     card is on a street the header names, and the header is that card's street address.
 
@@ -262,8 +263,12 @@ def _by_street_strict(owners: list[dict], store: str) -> dict | None:
     - a card with NO house number never wins for a header that has one;
     - a header with an undecidable house number („19 A", „19/A.", „7 / B. Bystrica", or a
       shop code's number „GT1") that ANY family card carries decides nothing;
-    - a header naming the town of ANOTHER family card decides nothing („Košice, Hlavná 5").
-    The #101 shape (two branches on two streets, „GT1- Družby 35 BB") still ships."""
+    - a header or file naming the town of ANOTHER family card decides nothing („Košice,
+      Hlavná 5", „BB", „OBJ Martin.xlsx" — `_names_another_town`, round 26).
+    It only PROPOSES a card: in a mail of several shops the proposal stands only when the
+    whole mail fits the family (`_street_unproven`), and a sender with learned shop rules
+    never reaches it (round 26). The #101 shape (two branches on two streets, „GT1- Družby
+    35 BB") still ships."""
     want_seq = _street_seq(store)
     unsure = _undecidable_numbers(store)
     streets = [(c, _street_seq(c.get("street", ""))) for c in owners]
@@ -281,7 +286,7 @@ def _by_street_strict(owners: list[dict], store: str) -> dict | None:
         return None
     if numbers != header_numbers or not _is_run(seq, want_seq):
         return None
-    return None if _names_another_town(owners, card, set(want_seq)) else card
+    return None if _names_another_town(owners, card, set(want_seq) | set(file_words)) else card
 
 
 def _is_run(part: list[str], whole: list[str]) -> bool:
@@ -291,14 +296,27 @@ def _is_run(part: list[str], whole: list[str]) -> bool:
     return n > 0 and any(whole[i:i + n] == part for i in range(len(whole) - n + 1))
 
 
-def _names_another_town(owners: list[dict], card: dict, want: set[str]) -> bool:
-    """Does the header name the town of another family card — not this card's own?"""
-    own = frozenset(store_key.tokens(card.get("city", "")))
+def _names_another_town(owners: list[dict], card: dict, words: set[str]) -> bool:
+    """Do the header / file words name the town of ANOTHER family card (not this card's own)?
+    A town is its main part („Košice" of „Košice - Sever"); any of its words of 3+ letters or
+    the initials of a two-word town („bb") counts (round 26: the whole city was required and
+    the file name was not read). Over-asks when two family towns share a word — the safe
+    direction."""
+    own = _main_town(card)
     for c in owners:
-        town = frozenset(store_key.tokens(c.get("city", "")))
-        if town and town != own and town <= want:
+        town = _main_town(c)
+        if not town or town == own:
+            continue
+        initials = "".join(w[0] for w in town) if len(town) > 1 else ""
+        if any(len(w) >= 3 and w in words for w in town) or (initials and initials in words):
             return True
     return False
+
+
+def _main_town(card: dict) -> tuple[str, ...]:
+    """„Košice - Sever" -> (kosice,); „Banská Bystrica" -> (banska, bystrica)."""
+    main = re.split(r"\s*[-–,/]\s*", str(card.get("city") or "").strip())[0]
+    return tuple(store_key.tokens(main))
 
 
 def _undecidable_numbers(header: str) -> set[str]:
@@ -358,7 +376,7 @@ def _by_shop_rule(hit: store_key.RuleHit, key: store_key.StoreKey, by_ean: dict,
 
 
 def collapsed_shops(keys: list, matched: list, multi: bool, has_rules: bool = False,
-                    several_files: bool = False) -> set[int]:
+                    several_files: bool = False, family=frozenset()) -> set[int]:
     """The poistka (#493): indexes of the orders that must be ASKED instead of shipped.
 
     A shop is shipped ONLY when a SHOP rung decided it (`STORE_RULES`: a learned shop rule,
@@ -370,7 +388,9 @@ def collapsed_shops(keys: list, matched: list, multi: bool, has_rules: bool = Fa
     or whose attachment could not be told (`file_unknown`, review round 6: its shop is
     unknown, the sender's address must not decide it) — or, in a mail of `several_files`,
     any order (review round 7: „Objednávka.xlsx" next to „… BISTRO.xlsx" names no shop, yet it
-    is another one of them). Converges: one question per shop, then its rule."""
+    is another one of them). In a mail of several shops the street decisions stand only when
+    the whole mail fits the `family` (the card EANs, `_street_unproven`, round 26). Converges:
+    one question per shop, then its rule."""
     out = {i for i, m in enumerate(matched)
            if m is not None and m.rule not in STORE_RULES
            and (multi or (has_rules and (keys[i].identity or keys[i].file_unknown
@@ -382,28 +402,57 @@ def collapsed_shops(keys: list, matched: list, multi: bool, has_rules: bool = Fa
                     sorted({(keys[i].label, matched[i].rule) for i in out}),
                     "the mail carries several shops" if multi
                     else "the sender has learned shop rules")
-    if multi or has_rules:
-        out |= _street_collisions(keys, matched)
+    if multi:
+        out |= _street_unproven(keys, matched, family)
     return out
 
 
-def _street_collisions(keys: list, matched: list) -> set[int]:
-    """Two DIFFERENT shops (block headers) of one mail decided by the street onto ONE card
-    contradict each other — all of them are asked (review round 25: „A Hlavná" + „B Hlavná"
-    both went to the „Hlavná" card as two ORDER files). One shop on two days or in two files
-    has one header (dates are noise) — no collision; a learned rule is never second-guessed."""
-    by_card: dict[str, dict[frozenset, list[int]]] = {}
-    for i, m in enumerate(matched):
-        if m is not None and m.rule == "store_address":
-            head = frozenset(store_key.tokens(keys[i].header, keep_numbers=True, codes=True))
-            by_card.setdefault(m.ean_edi, {}).setdefault(head, []).append(i)
-    out = {i for heads in by_card.values() if len(heads) > 1
-           for idx in heads.values() for i in idx}
-    if out:
-        log.warning("poistka: %d order(s) of different shops matched ONE card by the street "
-                    "(%s) — asked per shop", len(out),
-                    sorted({(keys[i].label, matched[i].ean_edi) for i in out}))
-    return out
+def _street_unproven(keys: list, matched: list, family) -> set[int]:
+    """In a mail of several shops the street decides only when the WHOLE mail fits the family
+    (review round 26 — the cause of rounds 17-26, each of which found one more way a single
+    order's street pointed at a card that was not its shop): every shop of the mail (each
+    identity naming a block) is decided by the street, no two shops land on one card and
+    every family card is taken — the #101 GT1 / GT2 shape. Otherwise every street decision
+    of the mail is asked (one question per shop, then its rule)."""
+    street = {i for i, m in enumerate(matched) if m is not None and m.rule == "store_address"}
+    if not street:
+        return set()
+    cards: dict[frozenset, set[str]] = {}
+    for i, k in enumerate(keys):
+        if store_key.names_a_block(k):
+            cards.setdefault(k.tokens, set()).add(matched[i].ean_edi if i in street else "")
+    picked = [next(iter(c)) for c in cards.values() if len(c) == 1]
+    fits = (len(picked) == len(cards) and "" not in picked
+            and len(set(picked)) == len(picked) and set(picked) == set(family))
+    if fits:
+        return set()
+    log.warning("poistka: the street decisions of this mail do not fit the family (%s; "
+                "family %s) — every shop asked", sorted({(keys[i].label, matched[i].ean_edi)
+                                                         for i in street}), sorted(family))
+    return street
+
+
+def family_of(customers: list[dict], sender_email: str, llm: dict | None = None
+              ) -> list[dict] | None:
+    """The sender's multi-site FAMILY (#435), or None: the cards sharing the sender's exact
+    address (>1), or — a sender on NO card — the cards sharing the distinctive name stem of
+    a confident model pick (>1). A sender on exactly ONE card is no family (the unique
+    address decides)."""
+    llm = llm or {}
+    conf = float(llm.get("confidence") or 0)
+    if conf > 1:
+        conf = conf / 100
+    addr = (_addresses(sender_email) or [""])[0]
+    owners = [c for c in customers if addr and addr in _addresses(c.get("emails"))]
+    if len(owners) > 1:
+        return owners
+    picked = {str(c.get("ean_edi")): c for c in customers
+              if c.get("ean_edi")}.get(str(llm.get("ean_edi") or ""))
+    if not owners and picked and conf >= GATE_SURE:
+        stem_family = _stem_family(customers, picked)
+        if len(stem_family) > 1:
+            return stem_family
+    return None
 
 
 def resolve(customers: list[dict], sender_email: str, sender_name: str,
@@ -458,16 +507,13 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
     # A sender that resolves to exactly ONE card (`owners == 1`) is deliberately excluded
     # from the stem path — the unique address already disambiguates, and the confident-llm
     # / exact_email hierarchy below keeps deciding it unchanged.
-    family = None
-    if len(owners) > 1:
-        family = owners
-    elif not owners and picked and conf >= GATE_SURE:
-        stem_family = _stem_family(customers, picked)
-        if len(stem_family) > 1:
-            family = stem_family
-
+    family = family_of(customers, sender_email, llm)
     if family:
-        branch = _by_store(family, store, strict=multi_store or bool(rules))
+        # #493 round 26: a sender with learned shop rules ships a shop only by ITS rule —
+        # the street never decides for it (a rule's card is another shop's street match)
+        branch = None if rules else _by_store(
+            family, store, strict=multi_store,
+            file_words=key.tokens if key is not None else ())
         if branch:
             # The EAN, not just the name: the live table calls both Gazdovský trh rows
             # "GT1", so a name-only log line reads as if the wrong branch was picked.

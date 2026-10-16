@@ -78,7 +78,9 @@ def resolve_orders(conn, customers: list[dict], sender: str, extracted: dict, ll
     # an untold sibling hid the second file); `extract` records the count
     several_files = max(int(extracted.get("attachments") or 0),
                         len({_file_id(o) for o in orders if _file_id(o)})) >= 2
-    collapsed = customer.collapsed_shops(keys, matched, multi, has_rules, several_files)
+    family = customer.family_of(customers, sender, llm) or []
+    collapsed = customer.collapsed_shops(keys, matched, multi, has_rules, several_files,
+                                         family={str(c.get("ean_edi") or "") for c in family})
     for i in collapsed:
         matched[i] = None
     shop_context = multi or has_rules

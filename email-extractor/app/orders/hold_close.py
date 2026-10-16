@@ -540,9 +540,11 @@ def retry_unknown_customer_questions(conn, cfg, upload=None, post=None) -> list[
         sender_email = str(ctx.get("sender_email") or "")
         if not sender_email:
             continue
-        # #493: a question asked for ONE SHOP is settled only by a SHOP rung (a learned shop
-        # rule, the street in its header) — never by the sender address: the poistka
-        # asked it precisely because the sender's one card does not say which shop it is
+        # #493: a question asked for ONE SHOP is settled automatically only by a learned shop
+        # rule — never by the sender address (the poistka asked it precisely because the
+        # sender's one card does not say which shop it is) and never by the street (review
+        # round 26: re-resolved ALONE, the street shipped two shops the mail-level check had
+        # refused to the one card)
         key = store_key.from_context(ctx)
         matched = customer_mod.resolve(
             customers, sender_email, ctx.get("sender_name", ""), ctx.get("company_name", ""),
@@ -552,7 +554,7 @@ def retry_unknown_customer_questions(conn, cfg, upload=None, post=None) -> list[
         # or sender) is settled only by a shop rung too: it has no key, so only a human
         # (review round 3: the sweep answered it with the sender's one card)
         shop_q = key is not None or bool(ctx.get("no_address"))
-        wanted = customer_mod.STORE_RULES if shop_q else {"exact_email"}
+        wanted = {"store_rule"} if shop_q else {"exact_email"}
         if not (matched and matched.rule in wanted and matched.ean_edi):
             continue
         teach.add_candidate(conn, qid, {
