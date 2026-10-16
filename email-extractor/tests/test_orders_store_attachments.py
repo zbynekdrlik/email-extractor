@@ -142,3 +142,96 @@ def test_a_week_word_before_a_date_and_an_objekt_keep_their_meaning():
     assert store_key.tokens("Týždeň 19.10-23.10. ŽILINA", keep_numbers=True) == ["zilina"]
     assert store_key.tokens("KW 42 BISTRO", keep_numbers=True) == ["bistro"]
     assert store_key.tokens("Objekt 1713", keep_numbers=True) == ["objekt", "1713"]
+
+
+# --- review round 9 -------------------------------------------------------------------------
+
+BODY = ("Subject: objednávka\n\nBody: Dobrý deň, posielam objednávku PR. A pre BISTRO ešte "
+        "10x rožok štandart 50g.\n\nAttachments:\n"
+        "===== OBJ Pekárová žena PR.xlsx =====\n[Sheet: H]\nPredajňa:\nna 04.08.2026\n"
+        "Rožok štandart 50g | 120\nVianočka 400g | 7\n")
+BODY_ORDERS = [
+    _order("Predajňa:", _item("Rožok štandart 50g", 120, "Rožok štandart 50g | 120"),
+           _item("Vianočka 400g", 7, "Vianočka 400g | 7")),
+    _order("", _item("Rožok štandart 50g", 10, "10x rožok štandart 50g"))]
+
+
+def test_a_body_order_is_never_placed_in_an_attachment_by_its_name():
+    """The body line „10x rožok štandart 50g" is in the BODY: the item's name is also in the
+    PR form, but a quote found in the body is no attachment's (round 7's name fallback put
+    the body order into the PR file)."""
+    out = extract.verify({"orders": BODY_ORDERS}, BODY)
+    assert [(o["sourceFile"], bool(o.get("fileUnknown"))) for o in out["orders"]] == [
+        ("OBJ Pekárová žena PR.xlsx", False), ("", True)]
+
+
+def test_a_body_order_of_another_shop_never_takes_the_attachments_rule(pg):
+    snapshot.import_snapshot(pg, CATALOG_CSV, TOWNS_CSV)
+    known = store_key.for_orders([{"store": "Predajňa:",
+                                   "sourceFile": "OBJ Pekárová žena PR.xlsx"}])[0]
+    store_rules.remember(pg, sender_email=SENDER, key=known, ean_edi="2999000000113",
+                         question_id=1, by="sklad")
+    result, rec = _run_mail(pg, "m-body", BODY, BODY_ORDERS)
+    assert _shipped(result) == [("2999000000113", ["G50", "VIA"])]
+    assert len(rec.uploads) == 1
+
+
+def test_a_rule_senders_lone_blank_block_is_asked(pg):
+    """A sender with learned shop rules sends ONE form whose only block is „Predajňa:" and
+    whose file name names nothing — which of its shops? Asked, never its address card."""
+    snapshot.import_snapshot(pg, CATALOG_CSV, TOWNS_CSV)
+    _bistro_rule(pg, "2999000000111")
+    text = ("Subject: objednávka\n\nAttachments:\n"
+            "===== Objednávka.xlsx =====\n[Sheet: H]\nPredajňa:\nna 04.08.2026\n"
+            "7x vianočka 400g\n")
+    result, rec = _run_mail(pg, "m-blank", text, [_order("Predajňa:", _item("vianočka 400g", 7))])
+    assert _shipped(result) == [] and rec.uploads == []
+
+
+def test_two_filled_in_price_lists_are_read_by_the_model():
+    """`parse_table` reads only the first table: two shops' price lists lost the second
+    shop's order. Such a mail is read by the model; one table still goes the table path."""
+    hdr = "Názov\t%DPH\tVO bez DPH\tVO s DPH\n"
+    text = ("Subject: objednávka\n\nAttachments:\n"
+            "===== Cennik A.xlsx =====\n[Sheet: H]\nPredajňa: Alfa\n" + hdr
+            + "Rožok štandart 50g\t20\t0.10\t0.12\t120\n\n"
+            "===== Cennik B.xlsx =====\n[Sheet: H]\nPredajňa: Beta\n" + hdr
+            + "Rožok štandart 50g\t20\t0.10\t0.12\t40\nVianočka 400g\t20\t1\t1.2\t7\n")
+    assert extract.table_attachments(text) == 2
+    orders = [_order("Predajňa: Alfa", _item("Rožok štandart 50g", 120,
+                                             "Rožok štandart 50g\t20\t0.10\t0.12\t120")),
+              _order("Predajňa: Beta", _item("Rožok štandart 50g", 40,
+                                             "Rožok štandart 50g\t20\t0.10\t0.12\t40"),
+                     _item("Vianočka 400g", 7, "Vianočka 400g\t20\t1\t1.2\t7"))]
+
+    class Model:
+        last_prompt_hash = "x"
+
+        def json_call(self, *a, **k):
+            return {"senderName": "N", "senderEmail": SENDER, "companyName": "",
+                    "isChangeRequest": False, "notes": "", "orders": orders}
+    out = extract.run(Model(), {"combined_text": text, "today": "2026-07-30",
+                                "subject": "objednávka"})
+    assert out["source"] == "model"
+    assert [(o["store"], o["sourceFile"]) for o in out["orders"]] == [
+        ("Predajňa: Alfa", "Cennik A.xlsx"), ("Predajňa: Beta", "Cennik B.xlsx")]
+    one = text[:text.index("===== Cennik B.xlsx")]
+    assert extract.table_attachments(one) == 1
+
+
+def test_header_noise_keeps_a_year_and_knows_its_order_words():
+    assert store_key.tokens("KW 43.2026 BISTRO", keep_numbers=True) == ["2026", "bistro"]
+    assert store_key.tokens("Objed. 12345 BISTRO", keep_numbers=True) == ["bistro"]
+    assert store_key.tokens("Objekt 1713", keep_numbers=True) == ["objekt", "1713"]
+
+
+def test_a_date_alone_is_no_shop_block_and_a_glued_house_number_still_matches():
+    keys = store_key.for_orders([{"store": "16.10."}, {"store": "Tržnica 17.10."}])
+    assert not store_key.is_multi_store(keys), "a date-only header names no block"
+    fam = [{"ean_edi": "2999000000701", "name": "GT jedna", "emails": [SENDER], "city": "BB",
+            "street": "Družby 35", "zip": ""},
+           {"ean_edi": "2999000000702", "name": "GT dva", "emails": [SENDER], "city": "BB",
+            "street": "29. augusta 19", "zip": ""}]
+    key = store_key.for_orders([{"store": "GT1 Družby 35BB"}, {"store": "GT2"}])[0]
+    hit = customer.resolve(fam, SENDER, "", "", key=key, multi_store=True)
+    assert (hit.ean_edi, hit.rule) == ("2999000000701", "store_address")
