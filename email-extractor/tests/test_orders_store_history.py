@@ -199,3 +199,19 @@ def test_our_own_domain_is_the_exact_domain():
     assert not store_rules.is_own_address(f"{store_rules.OUR_DOMAIN}@gmail.com")
     assert not store_rules.is_own_address(f"a@{store_rules.OUR_DOMAIN}.example.com")
     assert not store_rules.is_own_address("")
+
+
+def test_a_new_customer_for_a_staff_forward_never_gets_the_staff_address(pg):
+    """Round 29: „Nový zákazník" on a staff forward's question created the card WITH the
+    staff address — every later forward of that address then went to the new card."""
+    from test_orders_store_rules import _client
+
+    snapshot.import_snapshot(pg, CATALOG_CSV, BASE_CSV)
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('g3', 'ai_orders')")
+    qid = teach.ask_customer(pg, "g3", STAFF, [], "", {"sender_email": STAFF})
+    r = _client().post(f"/api/board/questions/{qid}/answer", json={"new_customer": {
+        "ean_edi": "2999000000777", "name": "Nový odberateľ", "city": "Mestečko"}})
+    assert r.status_code == 200, r.get_json()
+    card = next(c for c in snapshot.customers_for_management(pg)
+                if c["ean_edi"] == "2999000000777")
+    assert STAFF not in [e.lower() for e in card.get("emails") or []]
