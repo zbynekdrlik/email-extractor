@@ -32,6 +32,9 @@ _SECTION_RE = re.compile(r"^=====\s*(.+?)\s*=====[ \t]*$", re.MULTILINE)
 _EXT_RE = re.compile(r"\.(xlsx|xlsm|xls|ods|fods|csv|pdf|docx?|odt|txt|png|jpe?g|eml)$",
                      re.IGNORECASE)
 _WEEK_CODE_RE = re.compile(r"^(kw|t|tyz|w|wk)\d+$")
+# a week code that is certainly a week („KW42", „WK42", „tyž42") — „T1" / „W2" may as well be
+# a shop's code, and a code is asked, never folded (review rounds 14-15)
+_CERTAIN_WEEK_RE = re.compile(r"^(kw|wk|tyz)\d+$")
 _SPACES_RE = re.compile(r"\s+")
 # what a HEADER's numbers must not keep (review round 5: „BISTRO 16.10." changed its identity
 # every mail, so its rule never matched again): a date („16.10.", „16. 10. 2026", „16.10") or
@@ -86,18 +89,28 @@ def tokens(text, keep_numbers: bool = False) -> list[str]:
     unless `keep_numbers` (a shop HEADER: „Predajňa 1" / „Predajňa 2" are two shops) — pure
     numbers. Short words stay (the „PR" / „ZA" shop codes); the question ranking compares
     only words of `STEM`+ letters. A header keeps standalone numbers of up to
-    `MAX_HEADER_NUMBER` digits — never a date, a week number or an order number
-    (`_HEADER_NOISE_RE`)."""
+    `MAX_HEADER_NUMBER` digits — never a date, a certain week number or an order number
+    (`_HEADER_NOISE_RE`) — and a shop's CODE: „T1" / „W2" (only „KW42" / „WK42" / „tyž42"
+    are certainly weeks) and a lone capital letter („A Centrum" / „B Centrum" are two shops,
+    review round 15: both were {centrum})."""
     out: list[str] = []
     folded = dl_match.fold(text)
+    capitals: set[str] = set()
     if keep_numbers:
         folded = _HEADER_NOISE_RE.sub(" ", folded)
+        capitals = {dl_match.fold(w) for w in re.findall(r"[^\W\d_]+", str(text or ""))
+                    if len(w) == 1 and w.isupper()}
+    weeks = _CERTAIN_WEEK_RE if keep_numbers else _WEEK_CODE_RE
     for t in re.split(r"[^a-z0-9]+", folded):
         if t.isdigit() and keep_numbers and len(t) <= MAX_HEADER_NUMBER:
             if t not in out:
                 out.append(t)
             continue
-        if len(t) < 2 or t.isdigit() or t in STOPWORDS or _WEEK_CODE_RE.match(t):
+        if t in capitals:
+            if t not in out:
+                out.append(t)
+            continue
+        if len(t) < 2 or t.isdigit() or t in STOPWORDS or weeks.match(t):
             continue
         if t not in out:
             out.append(t)
@@ -282,12 +295,10 @@ def for_orders(orders: list[dict], drop=()) -> list[StoreKey]:
 _NOT_A_BLOCK = DOCUMENT_WORDS | BRAND_WORDS | TIME_WORDS | FILLER_WORDS | {"c", "cislo", "no",
                                                                           "nr", "kt"}
 _YEAR_RE = re.compile(r"^(19|20)\d{2}$")
-# a week code that is certainly a week („KW42", „WK42", „tyž42") — „T1" / „W2" may as well be
-# a shop's code, and a code is asked, never folded (review round 14)
-_CERTAIN_WEEK_RE = re.compile(r"^(kw|wk|tyz)\d+$")
 
 
-def names_a_block(key: StoreKey) -> bool:
+
+def names_a_block(key: StoreKey, weeks=frozenset()) -> bool:
     """The order sits under a header block of its own: its header carries a generic shop word
     („Predajňa:"), a word that is no document / time / filler word (a name), a lone CAPITAL
     letter (a shop code „A"), or a number no document word owns („č. 2"). A header of only
@@ -304,7 +315,7 @@ def names_a_block(key: StoreKey) -> bool:
             if w in capitals:
                 return True
             continue
-        if w in _NOT_A_BLOCK or _CERTAIN_WEEK_RE.match(w) or _YEAR_RE.match(w):
+        if w in _NOT_A_BLOCK or w in weeks or _CERTAIN_WEEK_RE.match(w) or _YEAR_RE.match(w):
             continue
         if w.isdigit():
             if not owned and len(w) <= MAX_HEADER_NUMBER:
@@ -314,6 +325,13 @@ def names_a_block(key: StoreKey) -> bool:
     return False
 
 
+def _shared_codes(keys: list[StoreKey]) -> frozenset:
+    """The ambiguous week-or-shop codes („T42") that EVERY order's header carries alike."""
+    codes = [frozenset(w for w in _NON_ALNUM_RE.split(dl_match.fold(k.header))
+                       if _WEEK_CODE_RE.match(w)) for k in keys]
+    return codes[0] if codes and codes[0] and all(c == codes[0] for c in codes) else frozenset()
+
+
 def is_multi_store(keys: list[StoreKey], shop_evidence: bool = False) -> bool:
     """The mail carries orders of ≥2 different shops (`identity`; header blocks naming nothing
     count as one more) AND the shops are real:
@@ -321,6 +339,9 @@ def is_multi_store(keys: list[StoreKey], shop_evidence: bool = False) -> bool:
     `shop_evidence` (the sender has learned shop rules). File names alone never make shops:
     a customer may send one file per day / per kind of goods, and that must stay one order
     (#81.1) — exactly as before #493."""
+    # a code like „T42" on EVERY order of the mail is its week, never a shop block (review
+    # round 15: two goods files of one shop under „T42" were asked)
+    weeks = _shared_codes(keys)
     shops = len({k.identity for k in keys if k.identity})
     # orders that name no shop count too, one per distinct (block, file) — under a block of
     # their own („Predajňa:", review round 8), from an attachment that could not be told
@@ -332,8 +353,9 @@ def is_multi_store(keys: list[StoreKey], shop_evidence: bool = False) -> bool:
     shops += len({(_squash(k.header),
                    k.source_file or (("untold", i) if k.file_unknown else ""))
                   for i, k in enumerate(keys)
-                  if not k.identity and (names_a_block(k) or k.file_unknown or k.source_file)})
-    return (shop_evidence or any(names_a_block(k) for k in keys)) and shops >= 2
+                  if not k.identity and (names_a_block(k, weeks) or k.file_unknown
+                                         or k.source_file)})
+    return (shop_evidence or any(names_a_block(k, weeks) for k in keys)) and shops >= 2
 
 
 def from_context(ctx: dict) -> StoreKey | None:
