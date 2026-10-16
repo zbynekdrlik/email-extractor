@@ -305,13 +305,11 @@ def test_a_shop_code_in_the_identity_never_reaches_the_street_comparison():
     """Round 15 kept „T1" and a lone capital letter in the shop identity; the strict street
     rung must keep comparing streets as before: „19/a" vs the card „19/A", the „1" of „T1"
     is no house number, and an initial „M.R." on the card is no required word."""
-    # „19/a" is the „19/A" card — never the bare „19" card (a suffixed house number is one
-    # unit, round 18; round 16 pinned only the then-unavoidable question)
+    # two branches on ONE street are never told apart by their numbers (round 24): asked
     assert _street_hit(_street_family("Bajkalská 19", "Bajkalská 19/A"),
-                       "BISTRO Bajkalská 19/a") == ("2999000000802", "store_address")
+                       "BISTRO Bajkalská 19/a") is None
     assert _street_hit(_street_family("Hlavná 1", "Hlavná 7"), "T1 Hlavná") is None
-    assert _street_hit(_street_family("Hlavná 1", "Hlavná 7"), "T1 Hlavná 7") == (
-        "2999000000802", "store_address")
+    assert _street_hit(_street_family("Hlavná 1", "Hlavná 7"), "T1 Hlavná 7") is None
     assert _street_hit(_street_family("M.R. Štefánika 836/33", "Hlavná 7"),
                        "BISTRO Štefánika 836/33") == ("2999000000801", "store_address")
 
@@ -321,8 +319,7 @@ def test_a_house_numbers_letter_suffix_is_part_of_the_house_number():
     („19/B", „19B", „19/b"); without a 19/B card the 19/B shop is asked (review round 17)."""
     assert _street_hit(_street_family("Hlavná 19/A", "Hlavná 7"), "BISTRO Hlavná 19/B") is None
     assert _street_hit(_street_family("Hlavná 19/A", "Hlavná 7"), "BISTRO Hlavná 19B") is None
-    assert _street_hit(_street_family("Hlavná 19/A", "Hlavná 19/B"), "BISTRO Hlavná 19/b") == (
-        "2999000000802", "store_address")
+    assert _street_hit(_street_family("Hlavná 19/A", "Hlavná 19/B"), "BISTRO Hlavná 19/b") is None
 
 
 def test_a_house_number_with_its_letter_is_one_unit():
@@ -331,8 +328,8 @@ def test_a_house_number_with_its_letter_is_one_unit():
     matches neither „19" nor „19/A" (asked); „19" and „19/A" each find their own card."""
     fam = _street_family("Hlavná 19", "Hlavná 19/A")
     assert _street_hit(fam, "BISTRO Hlavná 19/B") is None
-    assert _street_hit(fam, "BISTRO Hlavná 19") == ("2999000000801", "store_address")
-    assert _street_hit(fam, "BISTRO Hlavná 19/A") == ("2999000000802", "store_address")
+    assert _street_hit(fam, "BISTRO Hlavná 19") is None, "two branches on one street"
+    assert _street_hit(fam, "BISTRO Hlavná 19/A") is None, "two branches on one street"
     # a letter written apart („19 A") is not glued — it may as well be a city initial
     # („7 B. Bystrica", round 19): asked, never a guessed card
     assert _street_hit(_street_family("Hlavná 19/A", "Hlavná 7"), "BISTRO Hlavná 19 A") is None
@@ -341,9 +338,11 @@ def test_a_house_number_with_its_letter_is_one_unit():
 def test_a_city_initial_after_the_house_number_is_no_suffix():
     """„Hlavná 7 B. Bystrica" is house 7 in Banská Bystrica — never the „Hlavná 7/B" card
     (review round 19: a capital written apart was glued to the number)."""
-    fam = _street_family("Hlavná 7", "Hlavná 7/B")
+    fam = _street_family("Hlavná 7", "Nová 3")
     assert _street_hit(fam, "Hlavná 7 B. Bystrica") == ("2999000000801", "store_address")
     assert _street_hit(fam, "BISTRO Hlavná 7 B.Bystrica") == ("2999000000801", "store_address")
+    # beside a 7/B card on the same street: asked (round 24 — one street, two branches)
+    assert _street_hit(_street_family("Hlavná 7", "Hlavná 7/B"), "Hlavná 7 B. Bystrica") is None
 
 
 def test_a_letter_written_apart_after_a_house_number_is_asked():
@@ -380,7 +379,7 @@ def test_an_undecidable_house_number_or_a_numberless_card_is_never_proof():
     assert _street_hit(_street_family("Hlavná 7", "Hlavná"), "BISTRO Hlavná 12") is None
     fam = _street_family("Hlavná 19", "Hlavná 19/A", "Hlavná")
     assert _street_hit(fam, "BISTRO Hlavná 19/B") is None
-    assert _street_hit(fam, "BISTRO Hlavná 19/A") == ("2999000000802", "store_address")
+    assert _street_hit(fam, "BISTRO Hlavná 19/A") is None, "three branches on one street"
 
 
 def test_a_numberless_card_naming_the_header_still_blocks():
@@ -392,3 +391,17 @@ def test_a_numberless_card_naming_the_header_still_blocks():
                        "BISTRO Námestie SNP 48") is None
     assert _street_hit(_street_family("OC Centrum", "Hlavná 2"), "OC Centrum, Hlavná 2") is None
     assert _street_hit(_street_family("Hlavná", "Hlavná 1"), "GT1 Hlavná") is None
+
+
+def test_the_strict_street_rung_needs_exactly_one_named_street():
+    """Review round 24 (the cause of rounds 17-23 — each found a new way to tell branches on
+    ONE street apart by their numbers, and each fix opened another): in a shop context the
+    street decides only when the header names EXACTLY ONE family street (its words, numbers
+    aside) and that card's house number is the header's. Branches on one street, or a header
+    naming two streets, are asked once — then a rule decides."""
+    fam = _street_family("Družby 35", "29. augusta 19")       # the #101 shape: two streets
+    assert _street_hit(fam, "GT1- Družby 35 BB") == ("2999000000801", "store_address")
+    assert _street_hit(fam, "GT2- 29 augusta 19 BB") == ("2999000000802", "store_address")
+    assert _street_hit(fam, "BISTRO Družby 36") is None, "its house number is not the header's"
+    assert _street_hit(_street_family("Hlavná 19", "Hlavná 7"), "BISTRO Hlavná 7") is None
+    assert _street_hit(_street_family("Hlavná 7", "Nová 3"), "Hlavná 7, Nová 3") is None
