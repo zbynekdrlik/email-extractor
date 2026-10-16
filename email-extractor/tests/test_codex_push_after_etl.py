@@ -61,10 +61,11 @@ def test_the_first_trigger_pushes_orders_cards_receipts_in_order_and_records_the
     runner = Recorder()
     assert _round(db, tmp_path / "state", runner) == 0
     assert runner.calls == ["codex_orders_push.py", "codex_cards_push.py",
-                            "codex_receipts_push.py"]
+                            "codex_receipts_push.py", "codex_customers_push.py"]
     assert rounds.read_state(str(tmp_path / "state")) == rounds.generation(str(db))
     out = capsys.readouterr().out
-    assert "round: generation=" in out and "orders=ok cards=ok receipts=ok" in out
+    assert "round: generation=" in out
+    assert "orders=ok cards=ok receipts=ok customers=ok" in out
     assert "file_mtime=" in out
 
 
@@ -90,7 +91,7 @@ def test_the_etl_replacing_the_file_is_a_new_generation_and_pushes_again(tmp_pat
     assert rounds.generation(str(db)) != first
     runner = Recorder()
     assert _round(db, tmp_path / "state", runner) == 0
-    assert len(runner.calls) == 3
+    assert len(runner.calls) == len(rounds.PUSH_SCRIPTS)
     assert rounds.read_state(str(tmp_path / "state")) == rounds.generation(str(db))
 
 
@@ -100,13 +101,13 @@ def test_a_failed_push_still_runs_the_others_and_leaves_the_generation_for_the_n
     runner = Recorder(codes={"codex_cards_push.py": 1})
     assert _round(db, tmp_path / "state", runner) == 1
     assert runner.calls == ["codex_orders_push.py", "codex_cards_push.py",
-                            "codex_receipts_push.py"]
+                            "codex_receipts_push.py", "codex_customers_push.py"]
     assert rounds.read_state(str(tmp_path / "state")) is None
     assert "cards=exit 1" in capsys.readouterr().out
     # the safety-net timer (or the next path event) retries the whole round
     retry = Recorder()
     assert _round(db, tmp_path / "state", retry) == 0
-    assert len(retry.calls) == 3
+    assert len(retry.calls) == len(rounds.PUSH_SCRIPTS)
 
 
 def test_a_generation_that_advanced_during_the_round_is_pushed_again(tmp_path):
@@ -120,7 +121,7 @@ def test_a_generation_that_advanced_during_the_round_is_pushed_again(tmp_path):
 
     runner = Recorder(on_call=etl_finishes_mid_round)
     assert _round(db, tmp_path / "state", runner) == 0
-    assert len(runner.calls) == 6   # the mixed round, then one clean round on gen-2
+    assert len(runner.calls) == 2 * len(rounds.PUSH_SCRIPTS)   # the mixed round + one on gen-2
     assert rounds.read_state(str(tmp_path / "state")) == rounds.generation(str(db))
 
 
@@ -136,7 +137,7 @@ def test_the_debounce_waits_until_the_file_stopped_changing(tmp_path):
     runner = Recorder()
     assert _round(db, tmp_path / "state", runner, settle=30, sleep=sleep) == 0
     assert sleeps == [30, 30]
-    assert len(runner.calls) == 3
+    assert len(runner.calls) == len(rounds.PUSH_SCRIPTS)
     assert rounds.read_state(str(tmp_path / "state")) == rounds.generation(str(db))
 
 
@@ -152,14 +153,14 @@ def test_force_pushes_an_already_pushed_generation(tmp_path):
     assert _round(db, tmp_path / "state", Recorder()) == 0
     runner = Recorder()
     assert _round(db, tmp_path / "state", runner, force=True) == 0
-    assert len(runner.calls) == 3
+    assert len(runner.calls) == len(rounds.PUSH_SCRIPTS)
 
 
 def test_the_scripts_run_are_the_push_tools_next_to_the_round_runner():
     here = pathlib.Path(rounds.__file__).resolve().parent
     assert [pathlib.Path(p) for p in rounds.default_scripts()] == [
         here / "codex_orders_push.py", here / "codex_cards_push.py",
-        here / "codex_receipts_push.py"]
+        here / "codex_receipts_push.py", here / "codex_customers_push.py"]
     assert all(pathlib.Path(p).is_file() for p in rounds.default_scripts())
 
 
@@ -171,7 +172,7 @@ def test_main_reads_the_db_and_state_dir_from_the_service_environment(tmp_path, 
     runner = Recorder()
     monkeypatch.setattr(rounds, "_run_script", runner)
     assert rounds.main([]) == 0
-    assert len(runner.calls) == 3
+    assert len(runner.calls) == len(rounds.PUSH_SCRIPTS)
     assert rounds.read_state(str(tmp_path / "state")) == rounds.generation(str(db))
 
 
@@ -313,7 +314,7 @@ def test_a_file_that_never_settles_is_pushed_after_the_bounded_debounce(tmp_path
     runner = Recorder()
     assert _round(db, tmp_path / "state", runner, settle=5, sleep=sleep) == 0
     assert len(sleeps) == rounds.MAX_SETTLE_CHECKS
-    assert len(runner.calls) == 3
+    assert len(runner.calls) == len(rounds.PUSH_SCRIPTS)
     assert rounds.read_state(str(tmp_path / "state")) == rounds.generation(str(db))
 
 
@@ -328,7 +329,7 @@ def test_a_file_that_changes_under_every_round_gives_up_unrecorded(tmp_path, cap
 
     runner = Recorder(on_call=etl_again)
     assert _round(db, tmp_path / "state", runner) == 1
-    assert len(runner.calls) == 3 * rounds.MAX_ROUNDS
+    assert len(runner.calls) == len(rounds.PUSH_SCRIPTS) * rounds.MAX_ROUNDS
     assert rounds.read_state(str(tmp_path / "state")) is None
     assert "kept changing" in capsys.readouterr().out
 
@@ -351,7 +352,7 @@ def test_a_second_round_waits_for_the_running_one_instead_of_pushing_alongside(
         t.join(timeout=0.5)
         assert t.is_alive() and runner.calls == [], "pushed while another round held the lock"
     t.join(timeout=5)
-    assert not t.is_alive() and len(runner.calls) == 3
+    assert not t.is_alive() and len(runner.calls) == len(rounds.PUSH_SCRIPTS)
     assert "waiting: another round" in capsys.readouterr().out, "a silent wait looks hung"
 
 
@@ -371,15 +372,15 @@ def test_a_manual_run_and_the_service_share_one_state_directory():
     assert rounds.DEFAULT_STATE_DIR == "/var/lib/" + d["StateDirectory"]
 
 
-@pytest.mark.parametrize("tool", ["orders", "cards", "receipts"])
+@pytest.mark.parametrize("tool", ["orders", "cards", "receipts", "customers"])
 def test_each_push_reads_the_etl_time_before_its_data(tool):
     """If the ETL replaced the file between the two reads, `source_as_of` must never claim a
     NEWER cycle than the rows sent (receipts: the invoice gate would trust data that is not
     there) — so the ETL time is read first."""
-    from tools import codex_orders_push
+    from tools import codex_customers_push, codex_orders_push
 
     mod = {"orders": codex_orders_push, "cards": codex_cards_push,
-           "receipts": codex_receipts_push}[tool]
+           "receipts": codex_receipts_push, "customers": codex_customers_push}[tool]
     calls = []
     row = {"orders": {"order_number": 10, "customer_ean": "2000000000001"},
            "cards": {"code": 9990000000017.0, "card_code": "27", "name": "A",
@@ -387,7 +388,9 @@ def test_each_push_reads_the_etl_time_before_its_data(tool):
            "receipts": {"receipt_number": 261004409.0, "supplier_ico": 12345678.0,
                         "supplier_eans": ["2000000000991"], "supplier_name": "Dodávateľ",
                         "receipt_date": datetime.date(2026, 9, 9), "total": 1.0,
-                        "line_count": 1, "sdpoh": 10}}[tool]
+                        "line_count": 1, "sdpoh": 10},
+           "customers": {"nico": "1", "branch": None, "ean": "2999000000101",
+                         "name": "Predajňa A", "emails": "a@example.sk"}}[tool]
 
     def query():
         calls.append("query")

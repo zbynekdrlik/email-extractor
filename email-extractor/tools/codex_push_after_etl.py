@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Run the three CODEX pushes once per codex-bridge ETL generation (#485, reopened 2026-10-06).
+"""Run the CODEX pushes once per codex-bridge ETL generation (#485, reopened 2026-10-06; the
+customer cards joined the round in #493).
 
 Why: the pushes used to run on their own clocks (orders 14:40 / 18:25, cards 14:42 / 18:27,
 receipts 14:50 / 18:35) while the codex-bridge ETL starts at 14:15 / 18:00 and replaces its
@@ -27,7 +28,7 @@ A generation that changed DURING the round (a second ETL replace) is pushed agai
 The pushes run as child processes of this one (same interpreter, same EnvironmentFile), so their
 own `pushed: …` lines land in this unit's journal, between the `trigger:` and `round:` lines.
 A round holds a lock in the state directory, so a manual run waits for the service's round
-(and vice versa) instead of pushing the same data alongside it. The three
+(and vice versa) instead of pushing the same data alongside it. The per-push
 `codex-*-push.service` units stay for a manual one-off push (no guard there); `--force`
 re-pushes a generation that was already pushed.
 
@@ -54,7 +55,8 @@ DEFAULT_SETTLE_SECONDS = 30
 DEFAULT_STATE_DIR = "/var/lib/codex-push-after-etl"   # = the service's StateDirectory=
 STATE_FILE = "last-generation"
 LOCK_FILE = ".round.lock"
-PUSH_SCRIPTS = ("codex_orders_push.py", "codex_cards_push.py", "codex_receipts_push.py")
+PUSH_SCRIPTS = ("codex_orders_push.py", "codex_cards_push.py", "codex_receipts_push.py",
+                "codex_customers_push.py")
 PUSH_TIMEOUT_SECONDS = 300   # what each push unit's TimeoutStartSec allowed
 MAX_ROUNDS = 2               # one re-push when the ETL replaced the file during a round
 MAX_SETTLE_CHECKS = 6
@@ -197,7 +199,8 @@ def _locked_round(db_path, state_dir, scripts, runner, settle, sleep, force) -> 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
-        description="Push CODEX orders, cards and receipts once per codex-bridge ETL (#485)")
+        description="Push CODEX orders, cards, receipts and customers once per codex-bridge "
+                    "ETL (#485, #493)")
     ap.add_argument("--db", default=os.environ.get("CODEX_DUCKDB_PATH", DEFAULT_DB_PATH))
     ap.add_argument("--state-dir",
                     default=os.environ.get("STATE_DIRECTORY") or DEFAULT_STATE_DIR)

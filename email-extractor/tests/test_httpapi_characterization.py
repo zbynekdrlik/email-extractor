@@ -125,6 +125,8 @@ EXPECTED_ROUTES = sorted([
     (("POST",), "/api/codex/cards"),
     # #485: the CODEX supplier-receipts push (same machine X-Token auth, full replace).
     (("POST",), "/api/codex/receipts"),
+    # #493: the CODEX customer-cards push (same machine X-Token auth, full replace).
+    (("POST",), "/api/codex/customers"),
     (("GET",), "/api/fix-queue"),
     (("POST",), "/api/fix/<int:fid>/resolve"),
     (("GET",), "/api/imap-failures"),

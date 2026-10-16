@@ -530,6 +530,8 @@ def retry_unknown_customer_questions(conn, cfg, upload=None, post=None) -> list[
         "SELECT id FROM order_questions WHERE kind = 'customer' AND status = 'open'"
     ).fetchall()
     released: list[dict] = []
+    # #493: loaded once per sweep (it layers ~1000 CODEX cards) — nothing below edits it
+    customers = snapshot_mod.customers_for_management(conn) if rows else []
     for (qid,) in rows:
         q = teach.get(conn, qid)
         if not q:
@@ -538,7 +540,6 @@ def retry_unknown_customer_questions(conn, cfg, upload=None, post=None) -> list[
         sender_email = str(ctx.get("sender_email") or "")
         if not sender_email:
             continue
-        customers = snapshot_mod.customers_for_management(conn)
         # #493: a question asked for ONE SHOP is settled only by a SHOP rung (a learned shop
         # rule, the street, the shop name/city) — never by the sender address: the poistka
         # asked it precisely because the sender's one card does not say which shop it is

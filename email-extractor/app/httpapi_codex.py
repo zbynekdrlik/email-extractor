@@ -1,5 +1,6 @@
 """`POST /api/codex/orders` (#342) + `POST /api/codex/cards` (#467) + `POST /api/codex/receipts`
-(#485) — the machine endpoints the codex-bridge push tools write to.
+(#485) + `POST /api/codex/customers` (#493) — the machine endpoints the codex-bridge push tools
+write to.
 
 `tools/codex_orders_push.py` (on the dev/ERP box, next to the codex-bridge DuckDB) reads
 order headers read-only and POSTs a compact JSON batch here after each codex-bridge ETL. Auth
@@ -12,11 +13,21 @@ push is a harmless no-op.
 from __future__ import annotations
 
 import hmac
+import logging
 
 from flask import Flask, jsonify, request
 
 from .httpapi_common import Deps
-from .orders import codex_cards, codex_orders, codex_receipts, codex_sync
+from .orders import (
+    codex_cards,
+    codex_customers,
+    codex_orders,
+    codex_receipts,
+    codex_sync,
+    snapshot,
+)
+
+log = logging.getLogger("email_extractor.httpapi_codex")
 
 # #467: the cards push is one ~1 MB body (~6k rows); anything past this is not a CODEX list.
 MAX_CARDS_BODY = 16 * 1024 * 1024
@@ -105,3 +116,44 @@ def register(app: Flask, deps: Deps) -> None:
         except codex_receipts.ReplaceRefused as e:
             return jsonify(error=str(e)), e.status
         return jsonify(stored=res["stored"], received=len(payload["receipts"])), 200
+
+    @app.post("/api/codex/customers")
+    def codex_customers_replace():
+        # #493: the CODEX customer cards (`tools/codex_customers_push.py`) — the order engine's
+        # customers are layered on them. Same header-only machine token and body cap as the
+        # cards push; the body REPLACES the copy atomically (a card removed from CODEX leaves
+        # the order engine too), an empty or drastically smaller push is refused, `?force=1`
+        # overrides the shrink guard. The accepted copy is frozen into a new order snapshot at
+        # once (the next order already sees a shop created in CODEX), and a CHANGED set of EANs
+        # CODEX has on several firms raises ONE ops alert. A failing rebuild/alert never fails
+        # the push — the copy is stored; the next push / board edit re-freezes.
+        if not _token_ok(allow_query=False):
+            log.warning("codex customers push refused: bad or missing token")
+            return jsonify(error="forbidden"), 403
+        if (request.content_length or 0) > MAX_CARDS_BODY:
+            return jsonify(error="body too large"), 413
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or not isinstance(payload.get("customers"), list):
+            return jsonify(error="body must be {\"customers\": [...]}"), 400
+        ambiguous = payload.get("ambiguous")
+        force = request.args.get("force") in ("1", "true", "yes")
+        sid = None
+        try:
+            with deps.db() as c:
+                res = codex_customers.replace_customers(
+                    c, payload["customers"],
+                    ambiguous=ambiguous if isinstance(ambiguous, list) else [],
+                    source_as_of=payload.get("source_as_of"), force=force)
+                try:
+                    sid = snapshot.rebuild_from_overrides(c)
+                    codex_customers.ambiguity_alert(c, deps.cfg, res)
+                except Exception:
+                    log.exception("codex customers push: stored, but the snapshot rebuild / "
+                                  "ambiguity alert failed")
+        except codex_customers.ReplaceRefused as e:
+            log.warning("codex customers push refused (%s): %s", e.status, e)
+            return jsonify(error=str(e)), e.status
+        log.info("codex customers push accepted: stored=%d ambiguous=%d snapshot=%s",
+                 res["stored"], len(res["ambiguous"]), sid)
+        return jsonify(stored=res["stored"], received=len(payload["customers"]),
+                       ambiguous=len(res["ambiguous"]), snapshot_id=sid), 200

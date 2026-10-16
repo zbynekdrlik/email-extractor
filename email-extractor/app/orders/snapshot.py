@@ -26,6 +26,8 @@ import re
 
 import psycopg
 
+from . import codex_customers, customer_layers
+
 log = logging.getLogger("orders.snapshot")
 
 _EMAIL_RE = re.compile(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}")
@@ -160,9 +162,12 @@ def _content_hash(catalog: list[dict], customers: list[dict]) -> str:
     hash for `_freeze`'s dedup to reuse it, or every retire would mint a needless new
     snapshot row even though nothing about the effective content actually changed."""
     cat_lines = sorted(f'C|{r["gtin"]}|{r["name"]}|{r["alias"]}' for r in catalog)
+    # #493: the CODEX trade name joins the line only when set, so every pre-#493 content
+    # keeps its exact hash (an unchanged list still dedupes onto its old snapshot)
     cust_lines = sorted(
         f'S|{r["ean_edi"]}|{r["name"]}|{",".join(r["emails"])}|'
-        f'{r["city"]}|{r["street"]}|{r["zip"]}' for r in customers)
+        f'{r["city"]}|{r["street"]}|{r["zip"]}'
+        + (f'|t:{r["trade_name"]}' if r.get("trade_name") else "") for r in customers)
     h = hashlib.sha256()
     for line in cat_lines + cust_lines:
         h.update(line.encode())
@@ -170,23 +175,35 @@ def _content_hash(catalog: list[dict], customers: list[dict]) -> str:
     return h.hexdigest()
 
 
-def _freeze(conn, catalog: list[dict], customers: list[dict]) -> int:
+def _freeze(conn, catalog: list[dict], customers: list[dict],
+            customer_base_id: int | None = None) -> int:
     """Content-address and persist one (catalog, customers) pair. Identical content
     reuses the existing snapshot, so re-freezing (an override edit's immediate
     `rebuild_from_overrides`, or a corpus re-import) never churns ids while nothing
-    actually changed."""
+    actually changed.
+
+    #493: `customer_base_id` = the pre-CODEX snapshot these customers were layered on
+    (`customer_layers`) — recorded so the NEXT rebuild layers on that base again instead of
+    on this already-layered list. A reused snapshot that is its own base keeps NULL."""
     digest = _content_hash(catalog, customers)
     row = conn.execute(
         "SELECT id FROM order_snapshots WHERE content_sha256 = %s ORDER BY id DESC LIMIT 1",
         (digest,)).fetchone()
     if row:
-        conn.execute("UPDATE order_snapshots SET checked_at = now() WHERE id = %s", (row[0],))
+        conn.execute(
+            """UPDATE order_snapshots SET checked_at = now(),
+                      customer_base_id = CASE WHEN customer_base_id IS NULL AND id <> %s
+                                              THEN %s ELSE customer_base_id END
+                WHERE id = %s""",
+            (customer_base_id if customer_base_id is not None else row[0], customer_base_id,
+             row[0]))
         return int(row[0])
 
     sid = conn.execute(
-        """INSERT INTO order_snapshots (content_sha256, catalog_rows, customer_rows)
-           VALUES (%s, %s, %s) RETURNING id""",
-        (digest, len(catalog), len(customers))).fetchone()[0]
+        """INSERT INTO order_snapshots (content_sha256, catalog_rows, customer_rows,
+                                        customer_base_id)
+           VALUES (%s, %s, %s, %s) RETURNING id""",
+        (digest, len(catalog), len(customers), customer_base_id)).fetchone()[0]
     with conn.cursor() as cur:
         cur.executemany(
             """INSERT INTO catalog_snapshot (snapshot_id, gtin, name, alias)
@@ -195,10 +212,10 @@ def _freeze(conn, catalog: list[dict], customers: list[dict]) -> int:
             [(sid, r["gtin"], r["name"], r["alias"]) for r in catalog])
         cur.executemany(
             """INSERT INTO customer_snapshot
-                   (snapshot_id, ean_edi, name, emails, city, street, zip)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-            [(sid, r["ean_edi"], r["name"], r["emails"], r["city"], r["street"], r["zip"])
-             for r in customers])
+                   (snapshot_id, ean_edi, name, emails, city, street, zip, trade_name)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            [(sid, r["ean_edi"], r["name"], r["emails"], r["city"], r["street"], r["zip"],
+              r.get("trade_name") or "") for r in customers])
     log.info("snapshot %s frozen: %d cards, %d customers", sid, len(catalog), len(customers))
     return int(sid)
 
@@ -218,8 +235,15 @@ def import_snapshot(conn, catalog_csv: str, customer_csv: str) -> int:
             f"import looks empty (catalog={len(catalog)}, customers={len(customers)}) "
             "— keeping the previous snapshot")
     catalog = _apply_catalog_overrides(conn, catalog)
-    customers = _apply_customer_overrides(conn, customers)
-    return _freeze(conn, catalog, customers)
+    overrides = _load_customer_overrides(conn)
+    base = _plain(_merge_customers(customers, overrides))
+    codex = codex_customers.layer(conn)
+    if not codex:
+        return _freeze(conn, catalog, base)
+    # #493: the pre-CODEX list is frozen first and becomes the customer base of the layered one
+    base_id = _freeze(conn, catalog, base)
+    return _freeze(conn, catalog, _plain(customer_layers.apply_codex(
+        _merge_customers(customers, overrides), codex, overrides)), customer_base_id=base_id)
 
 
 def rebuild_from_overrides(conn) -> int | None:
@@ -233,8 +257,19 @@ def rebuild_from_overrides(conn) -> int | None:
     if sid is None:
         return None
     catalog = _apply_catalog_overrides(conn, load_catalog(conn, sid))
-    customers = _apply_customer_overrides(conn, load_customers(conn, sid))
-    return _freeze(conn, catalog, customers)
+    # #493: the customers are layered on the PRE-CODEX base of the current snapshot (never on
+    # its already-layered rows), so a card / address CODEX dropped since leaves the list too
+    base_id = customer_base_id(conn, sid)
+    customers = _apply_customer_overrides(conn, load_customers(conn, base_id))
+    return _freeze(conn, catalog, customers, customer_base_id=base_id)
+
+
+def customer_base_id(conn, snapshot_id: int) -> int:
+    """The snapshot whose customer rows are the pre-CODEX base of `snapshot_id` (#493) —
+    itself for every snapshot frozen before #493 or without CODEX data."""
+    row = conn.execute("SELECT customer_base_id FROM order_snapshots WHERE id = %s",
+                       (snapshot_id,)).fetchone()
+    return int(row[0]) if row and row[0] else int(snapshot_id)
 
 
 def latest_snapshot_id(conn) -> int | None:
@@ -275,11 +310,12 @@ def catalog_gtin_set(conn) -> set[str]:
 
 def load_customers(conn, snapshot_id: int) -> list[dict]:
     rows = conn.execute(
-        """SELECT ean_edi, name, emails, city, street, zip
+        """SELECT ean_edi, name, emails, city, street, zip, trade_name
            FROM customer_snapshot WHERE snapshot_id = %s ORDER BY id""",
         (snapshot_id,)).fetchall()
     return [{"ean_edi": r[0], "name": r[1], "emails": list(r[2] or []),
-             "city": r[3] or "", "street": r[4] or "", "zip": r[5] or ""} for r in rows]
+             "city": r[3] or "", "street": r[4] or "", "zip": r[5] or "",
+             "trade_name": r[6] or ""} for r in rows]
 
 
 def import_files(conn, catalog_path: str, customers_path: str) -> int:
@@ -474,11 +510,12 @@ def retire_catalog_card(conn, gtin: str) -> bool:
 def _load_customer_overrides(conn) -> list[dict]:
     rows = conn.execute(
         """SELECT id, orig_ean_edi, orig_street, ean_edi, name, emails, city, street, zip,
-                  (retired OR deleted_at IS NOT NULL)
+                  (retired OR deleted_at IS NOT NULL), removed_emails
            FROM customer_overrides ORDER BY id""").fetchall()
     return [{"id": r[0], "orig_ean_edi": r[1], "orig_street": r[2], "ean_edi": r[3] or "",
              "name": r[4], "emails": list(r[5] or []), "city": r[6] or "",
-             "street": r[7] or "", "zip": r[8] or "", "retired": r[9]} for r in rows]
+             "street": r[7] or "", "zip": r[8] or "", "retired": r[9],
+             "removed_emails": list(r[10] or [])} for r in rows]
 
 
 def _merge_customers(base: list[dict], overrides: list[dict]) -> list[dict]:
@@ -495,16 +532,26 @@ def _merge_customers(base: list[dict], overrides: list[dict]) -> list[dict]:
     previously-rebuilt snapshot — is not counted twice once its own override row is
     appended below; this is what keeps re-merging idempotent for a brand-new customer
     too, which has no orig identity to exclude by).
+
+    #493: a HAND-ADDED override (no orig identity — a board/answer-created card) owns its
+    EAN outright: every base row with that EAN is a baked copy of it (verified on prod
+    2026-10-16: no other base row shares a hand-added card's EAN), so they are ALL excluded,
+    not only the one with its current street. Otherwise editing such a card's street (now
+    common — the CODEX layer fills a blank street) left the copy baked under the OLD street
+    behind as a ghost duplicate card with the old addresses.
     """
     excluded = set()
+    owned_eans = set()
     for o in overrides:
         if o["orig_ean_edi"] is not None:
             excluded.add((o["orig_ean_edi"], o["orig_street"]))
+        elif o["ean_edi"]:
+            owned_eans.add(o["ean_edi"])
         excluded.add((o["ean_edi"], o["street"]))
     out = []
     for row in base:
         key = (row.get("ean_edi") or "", row.get("street") or "")
-        if key in excluded:
+        if key in excluded or key[0] in owned_eans:
             continue
         out.append({**row, "override_id": None, "orig_ean_edi": key[0], "orig_street": key[1]})
     for o in overrides:
@@ -517,18 +564,31 @@ def _merge_customers(base: list[dict], overrides: list[dict]) -> list[dict]:
     return out
 
 
-def _apply_customer_overrides(conn, customers: list[dict]) -> list[dict]:
-    merged = _merge_customers(customers, _load_customer_overrides(conn))
+def _plain(rows: list[dict]) -> list[dict]:
+    """The frozen shape of a customer row (what `customer_snapshot` stores)."""
     return [{"ean_edi": r["ean_edi"], "name": r["name"], "emails": r["emails"],
-             "city": r["city"], "street": r["street"], "zip": r["zip"]} for r in merged]
+             "city": r["city"], "street": r["street"], "zip": r["zip"],
+             "trade_name": r.get("trade_name") or ""} for r in rows]
+
+
+def _layered_customers(conn, base: list[dict]) -> list[dict]:
+    """#493: base ← the board's edits ← CODEX (`customer_layers.apply_codex`)."""
+    overrides = _load_customer_overrides(conn)
+    return customer_layers.apply_codex(_merge_customers(base, overrides),
+                                       codex_customers.layer(conn), overrides)
+
+
+def _apply_customer_overrides(conn, customers: list[dict]) -> list[dict]:
+    return _plain(_layered_customers(conn, customers))
 
 
 def customers_for_management(conn) -> list[dict]:
-    """The current effective customer list (sheet + overrides merged), each row carrying
-    the override identity fields the /znalosti clients UI needs to edit/retire it."""
+    """The current effective customer list (base + overrides + CODEX), each row carrying
+    the override identity fields the /znalosti clients UI needs to edit/retire it — the SAME
+    list the next rebuild freezes (layered on the current snapshot's pre-CODEX base)."""
     sid = latest_snapshot_id(conn)
-    base = load_customers(conn, sid) if sid else []
-    return _merge_customers(base, _load_customer_overrides(conn))
+    base = load_customers(conn, customer_base_id(conn, sid)) if sid else []
+    return _layered_customers(conn, base)
 
 
 def _active_customer_conflict(conn, ean_edi: str) -> dict | None:
@@ -549,7 +609,30 @@ def _active_customer_conflict(conn, ean_edi: str) -> dict | None:
 
 def upsert_customer(conn, *, override_id: int | None, orig_ean_edi: str | None,
                      orig_street: str | None, ean_edi: str, name: str,
-                     emails: list[str], city: str, street: str, zip_: str) -> int:
+                     emails: list[str], city: str, street: str, zip_: str,
+                     removed_emails: list[str] | None = None) -> int:
+    """`_upsert_customer_row` + the #493 removed-address memory: `removed_emails` = addresses
+    this edit deliberately took OFF the card (an address CODEX has for it must then stay off —
+    `customer_layers.apply_codex`). The stored set keeps every earlier removal the edit did
+    not put back; an address present in `emails` is never "removed"."""
+    rid = _upsert_customer_row(conn, override_id=override_id, orig_ean_edi=orig_ean_edi,
+                               orig_street=orig_street, ean_edi=ean_edi, name=name,
+                               emails=emails, city=city, street=street, zip_=zip_)
+    prev = conn.execute("SELECT removed_emails FROM customer_overrides WHERE id = %s",
+                        (rid,)).fetchone()
+    keep = {str(e).strip().lower() for e in emails or []}
+    removed = sorted(({str(e).lower() for e in (prev[0] if prev else None) or []}
+                      | {str(e).strip().lower() for e in removed_emails or []}) - keep - {""})
+    if removed != sorted({str(e).lower() for e in (prev[0] if prev else None) or []}):
+        conn.execute("UPDATE customer_overrides SET removed_emails = %s WHERE id = %s",
+                     (removed, rid))
+        log.info("customer override %s: addresses kept off the card = %s", rid, removed)
+    return rid
+
+
+def _upsert_customer_row(conn, *, override_id: int | None, orig_ean_edi: str | None,
+                         orig_street: str | None, ean_edi: str, name: str,
+                         emails: list[str], city: str, street: str, zip_: str) -> int:
     """Add a brand-new customer (override_id=None, orig_ean_edi=None), or edit one —
     either an already-overridden row (pass its override_id) or a still-sheet-only row
     (pass its CURRENT orig_ean_edi/orig_street, from `customers_for_management`; the
@@ -781,21 +864,74 @@ def remember_customer_email(conn, ean_edi: str, email: str) -> bool:
     email = (email or "").strip().lower()
     if not email or not ean_edi:
         return False
-    rows = [r for r in customers_for_management(conn)
-           if str(r.get("ean_edi") or "") == str(ean_edi)]
-    if not rows:
+    effective = next((r for r in customers_for_management(conn)
+                      if str(r.get("ean_edi") or "") == str(ean_edi)), None)
+    if effective is None:
         return False
-    row = rows[0]
-    emails = list(row.get("emails") or [])
-    if email in [e.lower() for e in emails]:
+    if email in [e.lower() for e in effective.get("emails") or []]:
         return False
-    emails.append(email)
+    row = _own_row(conn, effective)
+    emails = list(row.get("emails") or []) + [email]
     upsert_customer(conn, override_id=row.get("override_id"),
                     orig_ean_edi=row.get("orig_ean_edi"), orig_street=row.get("orig_street"),
                     ean_edi=row.get("ean_edi") or "", name=row.get("name") or "",
                     emails=emails, city=row.get("city") or "", street=row.get("street") or "",
                     zip_=row.get("zip") or "")
     return True
+
+
+def unlayer_edit(conn, *, override_id, orig_ean_edi, orig_street, ean_edi: str,
+                 emails: list[str], city: str, street: str, zip_: str) -> dict:
+    """#493: a board edit of a card arrives with the EFFECTIVE values the form showed —
+    including what the CODEX layer filled in or added. Store only what the board owns:
+    a city/street/zip still equal to CODEX's value keeps the card's own stored value
+    (blank stays blank — CODEX keeps filling it, and a hand-added card's identity never
+    shifts on an unchanged save); a CODEX address stays CODEX's; a CODEX address the form
+    no longer lists is a deliberate removal (`removed_emails`). Returns the values for
+    `upsert_customer` (`emails`, `city`, `street`, `zip_`, `removed_emails`)."""
+    card = codex_customers.layer(conn).get(str(ean_edi or ""))
+    if card is None:
+        return {"emails": emails, "city": city, "street": street, "zip_": zip_,
+                "removed_emails": []}
+    own: dict = {}
+    sid = latest_snapshot_id(conn)
+    base = load_customers(conn, customer_base_id(conn, sid)) if sid else []
+    for r in _merge_customers(base, _load_customer_overrides(conn)):
+        if (override_id is not None and r.get("override_id") == override_id) or (
+                override_id is None and orig_ean_edi is not None
+                and r.get("orig_ean_edi") == orig_ean_edi
+                and (r.get("orig_street") or "") == (orig_street or "")):
+            own = r
+            break
+    own_emails = {str(e).lower() for e in own.get("emails") or []}
+    sent = [str(e).strip().lower() for e in emails or [] if str(e).strip()]
+    codex_emails = set(card["emails"])
+    out: dict = {"emails": [e for e in sent if e not in codex_emails or e in own_emails],
+                 "removed_emails": sorted(codex_emails - set(sent))}
+    for key, value, field in (("city", city, "city"), ("street", street, "street"),
+                              ("zip_", zip_, "zip")):
+        same = (value or "").strip() == (card.get(field) or "").strip()
+        out[key] = (own.get(field) or "") if same else value
+    return out
+
+
+def _own_row(conn, effective: dict) -> dict:
+    """#493: the row an address change edits, in its PRE-CODEX form — the stored override /
+    base values, never the CODEX-filled ones (writing those would make the board own them:
+    a later CODEX correction would stop arriving, and a hand-added card's identity would
+    change). A card that exists only through CODEX gets a minimal override: its name, no
+    address fields (CODEX keeps filling them) and only the board's own addresses."""
+    sid = latest_snapshot_id(conn)
+    base = load_customers(conn, customer_base_id(conn, sid)) if sid else []
+    ean = str(effective.get("ean_edi") or "")
+    merged = [r for r in _merge_customers(base, _load_customer_overrides(conn))
+              if str(r.get("ean_edi") or "") == ean]
+    if merged:
+        return merged[0]
+    return {"ean_edi": ean, "name": effective.get("name") or "", "emails": [], "city": "",
+            "street": "", "zip": "", "override_id": None,
+            "orig_ean_edi": effective.get("orig_ean_edi"),
+            "orig_street": effective.get("orig_street")}
 
 
 def forget_customer_email(conn, ean_edi: str, email: str) -> bool:
@@ -811,18 +947,16 @@ def forget_customer_email(conn, ean_edi: str, email: str) -> bool:
     email = (email or "").strip().lower()
     if not email or not ean_edi:
         return False
-    rows = [r for r in customers_for_management(conn)
-           if str(r.get("ean_edi") or "") == str(ean_edi)]
-    if not rows:
+    effective = next((r for r in customers_for_management(conn)
+                      if str(r.get("ean_edi") or "") == str(ean_edi)), None)
+    if effective is None or email not in [e.lower() for e in effective.get("emails") or []]:
         return False
-    row = rows[0]
-    current = list(row.get("emails") or [])
-    emails = [e for e in current if e.lower() != email]
-    if len(emails) == len(current):
-        return False
+    row = _own_row(conn, effective)
+    emails = [e for e in row.get("emails") or [] if e.lower() != email]
+    # #493: kept off for good — an address CODEX also has would otherwise come right back
     upsert_customer(conn, override_id=row.get("override_id"),
                     orig_ean_edi=row.get("orig_ean_edi"), orig_street=row.get("orig_street"),
                     ean_edi=row.get("ean_edi") or "", name=row.get("name") or "",
                     emails=emails, city=row.get("city") or "", street=row.get("street") or "",
-                    zip_=row.get("zip") or "")
+                    zip_=row.get("zip") or "", removed_emails=[email])
     return True
