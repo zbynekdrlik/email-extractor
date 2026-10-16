@@ -268,18 +268,19 @@ def test_a_shop_answer_teaches_the_rule_not_the_senders_address(pg, monkeypatch)
 
 # --- review round 2 (#493) --------------------------------------------------------------------
 
-def test_a_family_senders_files_are_shops_even_without_any_header(pg):
-    """The model may report no header at all (one shop per file): for a sender whose address
-    is on several cards the FILES are the shops — never one merged order on one card."""
+def test_files_without_any_header_or_rule_stay_the_pre_493_single_question(pg):
+    """Round 4: with no header block and no learned rules, file names alone never make
+    shops (a customer's files per day / per kind of goods are one order, #81.1) — even for a
+    sender on several cards. Exactly as before #493: one merged order, one question,
+    nothing shipped (never a guess from the first file's name)."""
     _env(pg)
-    stores = (("", "BISTRO", "rožok 50g", 120, "G50"), ("", "Tržnica", "vianočka 400g", 7, "VIA"),
-              ("", "DOLINA", "rožok kváskový 70g", 5, "G70"))
-    plain = [(h, code, item, qty, g) for h, code, item, qty, g in stores]
+    plain = [("", "BISTRO", "rožok 50g", 120, "G50"), ("", "Tržnica", "vianočka 400g", 7, "VIA"),
+             ("", "DOLINA", "rožok kváskový 70g", 5, "G70")]
     result, rec = _run(pg, "m-nohead", stores=plain)
-    shipped = {r["customer_ean"] for r in result["order_results"] if r["status"] == "ok"}
-    assert shipped == {"2999000000204", "2999000000202"}
-    assert len(rec.uploads) == 2
-    assert len(_shop_questions(pg)) == 1, "the two-Dolina-cards shop is asked"
+    assert rec.uploads == []
+    assert len(result["order_results"]) == 1
+    qs = [q for q in teach.open_questions(pg) if q["kind"] == "customer"]
+    assert len(qs) == 1 and not qs[0]["context"].get("store_key")
 
 
 def test_answering_a_conflict_retires_the_other_rule_and_settles_the_shop(pg, monkeypatch):
@@ -455,3 +456,126 @@ def test_a_two_card_sender_s_two_files_of_one_day_stay_one_order(pg):
     assert len(result["order_results"]) == 1
     assert len(rec.uploads) == 1
     assert result["order_results"][0]["customer_ean"] == "2999000000302"
+
+
+# --- review round 4 (#493) --------------------------------------------------------------------
+
+BRAND_SHOPS = [
+    {"ean_edi": "2999000000401", "name": "Kvetka s.r.o.", "trade_name": "Kvetka",
+     "city": "Mestečko", "street": "Centrálna 1"},
+    {"ean_edi": "2999000000402", "name": "BISTRO Mestečko", "trade_name": "",
+     "city": "Mestečko", "street": "Krátka 1"},
+    {"ean_edi": "2999000000403", "name": "Tržnica Mestečko", "trade_name": "",
+     "city": "Mestečko", "street": "Riadok 1"},
+    {"ean_edi": "2999000000404", "name": "Predajňa Lipová", "trade_name": "",
+     "city": "Mestečko", "street": "Lipová 6"},
+]
+
+
+def _brand_env(pg):
+    snapshot.import_snapshot(pg, CATALOG_CSV, BASE_CSV)
+    codex_customers.replace_customers(
+        pg, [dict(s, emails=[SENDER], zip="", codex_id=s["ean_edi"]) for s in BRAND_SHOPS])
+    snapshot.rebuild_from_overrides(pg)
+
+
+def _brand_run(pg, mid, stores, company="Kvetka s.r.o."):
+    pg.execute("INSERT INTO messages (message_id, category) VALUES (%s, 'ai_orders')", (mid,))
+    parts = ["Subject: objednávka\n\nAttachments:\n"]
+    for header, fname, item, qty, _g in stores:
+        parts.append(f"===== {fname}.xlsx =====\n[Sheet: H]\n{header}\nna 04.08.2026\n"
+                     f"{qty}x {item}\n")
+    orders = [{"orderNumber": "", "deliveryDate": "04.08.2026", "recipientGroup": "",
+               "store": header, "items": [{"name": item, "quantity": qty, "unit": "ks",
+                                           "sourceQuote": f"{qty}x {item}"}]}
+              for header, _f, item, qty, _g in stores]
+    answers = [{"senderName": "Nákup", "senderEmail": SENDER, "companyName": company,
+                "isChangeRequest": False, "notes": "", "orders": orders},
+               {"ean_edi": "2999000000401", "confidence": 0.97}]
+    answers += [{"gtin": g, "confidence": 0.95, "matchedCatalogName": "", "reason": ""}
+                for *_r, g in stores]
+    rec = Recorder()
+    mail = {"message_id": mid, "subject": "objednávka", "from_addr": SENDER,
+            "from_name": "Nákup", "combined_text": "".join(parts), "today": "2026-07-30"}
+    result = pipeline.run(pg, _cfg(), mail, snapshot.latest_snapshot_id(pg),
+                          client=ScriptedClient(answers), upload=rec.upload, post=rec.post)
+    return result, rec
+
+
+BRAND_STORES = [("BISTRO", "Kvetka BISTRO", "rožok 50g", 120, "G50"),
+                ("Predajňa: Tržnica", "Kvetka TR", "vianočka 400g", 7, "VIA"),
+                ("Predajňa:", "Kvetka PR", "rožok kváskový 70g", 5, "G70")]
+
+
+def test_the_sweep_never_settles_a_shop_by_the_senders_own_brand_word(pg, monkeypatch):
+    """The file names carry the customer's own brand („Kvetka …") that only its head-office
+    card bears: the pipeline asks „PR"; the worker sweep must use the SAME shop words and
+    never answer it with the head-office card."""
+    from app.orders import hold
+    monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
+    _brand_env(pg)
+    result, rec = _brand_run(pg, "m-brand", BRAND_STORES)
+    shipped = {r["store"]: r["customer_ean"] for r in result["order_results"]
+               if r["status"] == "ok"}
+    assert shipped == {"BISTRO": "2999000000402", "Predajňa: Tržnica": "2999000000403"}
+    assert hold.retry_unknown_customer_questions(pg, _cfg()) == []
+    assert pg.execute("SELECT status FROM held_orders WHERE message_id = 'm-brand'"
+                      ).fetchall() == [("held",)]
+
+
+def test_a_rule_senders_one_shop_mail_is_never_decided_by_its_brand_word(pg):
+    """A sender with learned rules sends ONE order „Kvetka PR" no rule knows: asked (the
+    poistka), never shipped to the head-office card by the brand word."""
+    from app.orders import store_key
+    _brand_env(pg)
+    known = store_key.for_orders([{"store": "BISTRO", "sourceFile": "Kvetka BISTRO.xlsx"}])[0]
+    store_rules.remember(pg, sender_email=SENDER, key=known, ean_edi="2999000000402",
+                         question_id=1, by="sklad")
+    result, rec = _brand_run(pg, "m-one", [BRAND_STORES[2]])
+    assert rec.uploads == []
+    assert set(_shop_questions(pg)) == {"Predajňa:"}
+
+
+def test_two_files_of_one_taught_shop_still_follow_its_rule(pg):
+    """„… BISTRO.xlsx" + „… BISTRO (1).xlsx" (one shop, one day) are merged and keep the
+    shop's words — the rule decides, never the model pick of the head-office card."""
+    from app.orders import store_key
+    _brand_env(pg)
+    known = store_key.for_orders([{"store": "", "sourceFile": "Kvetka BISTRO.xlsx"}])[0]
+    store_rules.remember(pg, sender_email=SENDER, key=known, ean_edi="2999000000402",
+                         question_id=1, by="sklad")
+    result, rec = _brand_run(pg, "m-dup", [("", "Kvetka BISTRO", "rožok 50g", 120, "G50"),
+                                           ("", "Kvetka BISTRO (1)", "vianočka 400g", 7, "VIA")])
+    assert [r["customer_ean"] for r in result["order_results"]] == ["2999000000402"]
+    assert len(rec.uploads) == 1
+
+
+def test_a_shop_mails_per_sender_question_never_merges_into_a_plain_one(pg):
+    """An older plain question of the sender is open; a mail of several shops brings an
+    order that names no shop — its own `no_address` question, never folded into the plain
+    one (whose answer teaches the address and which the sweep may settle by the address)."""
+    _towns(pg)
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('m-plain', 'ai_orders')")
+    teach.ask_customer(pg, message_id="m-plain", sender_email=SENDER,
+                       candidates=[{"ean_edi": "2999000000101", "name": "Centrála"}],
+                       delivery_date="04.08.2026", context={"sender_email": SENDER})
+    _run(pg, "m-mix", stores=_town_stores("Žilina") + [("Predajňa:", "3", "rožok 50g", 120,
+                                                         "G50")])
+    plain = [q for q in teach.open_questions(pg) if q["kind"] == "customer"
+             and not q["context"].get("store_key")]
+    assert len(plain) == 2
+    assert sorted(bool(q["context"].get("no_address")) for q in plain) == [False, True]
+
+
+def test_a_two_card_senders_similar_file_names_stay_one_order(pg):
+    """#81.1 as on main: „Objednávka Prešov" + „Objednávka Prešov pečivo" (no header, no
+    rules) are ONE order — never split into a shop question, even when one of the sender's
+    cards IS in Prešov (round 4: the shared word looked like a shop name)."""
+    snapshot.import_snapshot(pg, CATALOG_CSV, TWO_CARD_CSV.replace(
+        "Rodina pobočka B,2999000000302,Dolina", "Rodina pobočka B,2999000000302,Prešov"))
+    result, rec = _two_card_mail_run(
+        pg, "m-pre", [("Objednávka Prešov", "vianočka 400g", 7),
+                      ("Objednávka Prešov pečivo", "rožok kváskový 70g", 5)],
+        "Doručiť: Dlhá 5, Prešov")
+    assert len(result["order_results"]) == 1 and len(rec.uploads) == 1
+    assert _shop_questions(pg) == {}

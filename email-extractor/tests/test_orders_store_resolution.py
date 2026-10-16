@@ -70,10 +70,15 @@ def test_a_one_shop_mail_keeps_its_whole_key_and_is_not_multi_store():
     assert not store_key.is_multi_store(keys), "a file name alone never makes two shops"
 
 
-def test_a_key_that_would_become_empty_keeps_its_own_words():
+def test_shared_words_never_count_as_a_shop_name():
+    """Round 4: when every word of an order is shared by the whole mail, its name-rung key is
+    EMPTY (a fallback to the shared words made them look like a shop name); its identity
+    (rules, questions) keeps them."""
     keys = store_key.for_orders([{"store": "Mesto"}, {"store": "Mesto Bistro"}])
-    assert keys[0].key == frozenset({"mesto"})
+    assert keys[0].key == frozenset() and keys[0].tokens == frozenset({"mesto"})
     assert keys[1].key == frozenset({"bistro"})
+    brand = store_key.for_orders([{"store": "Kvetka PR"}], drop=["kvetka"])[0]
+    assert brand.key == frozenset({"pr"}) and brand.tokens == frozenset({"kvetka", "pr"})
 
 
 def test_the_attachment_of_an_order_is_located_from_its_quotes():
@@ -266,3 +271,12 @@ def test_a_narrow_rule_never_captures_another_shop():
     assert _resolve(store_key.for_orders([{"store": "DOLINA nová"}])[0], rules=rule) is None
     hit = _resolve(store_key.for_orders([{"store": "DOLINA"}])[0], rules=rule)
     assert (hit.ean_edi, hit.rule) == ("2999000000203", "store_rule")
+
+
+def test_locate_file_matches_whole_numbers_and_table_rows():
+    """Round 4: „chlieb 120" is not inside „chlieb 1200"; a quoted table row („Chlieb
+    kváskový | 3") is found by its alphanumerics, like `extract.quote_in_source`."""
+    source = ("Attachments:\n===== A.xlsx =====\n[Sheet: H]\nchlieb 1200 g\n"
+              "===== B.xlsx =====\n[Sheet: H]\nchlieb 120\tChlieb kváskový\t3\n")
+    assert store_key.locate_file(["chlieb 120"], source) == "B.xlsx"
+    assert store_key.locate_file(["Chlieb kváskový | 3"], source) == "B.xlsx"
