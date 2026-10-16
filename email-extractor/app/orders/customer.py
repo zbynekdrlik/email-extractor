@@ -222,18 +222,7 @@ def _by_store(owners: list[dict], store: str, strict: bool = False) -> dict | No
     mail keeps the #101 comparison exactly.
     """
     if strict:
-        want_tokens = _street_tokens(store)
-        hits = [c for c in owners
-                if (street_tokens := _street_tokens(c.get("street", "")))
-                and street_tokens <= want_tokens]
-        if len(hits) != 1:
-            return None   # none, or a header naming several branches — decides nothing
-        # the ONE winner is no proof when its house number is undecidable (round 21: a veto
-        # that pruned candidates first made „Hlavná 5 a 7" ship to the 7 card)
-        unsure = _undecidable_numbers(store)
-        if any(_house_number(t) in unsure for t in _street_tokens(hits[0].get("street", ""))):
-            return None
-        return hits[0]
+        return _by_street_strict(owners, store)
     want = _words(store)
     if not want:
         return None
@@ -253,6 +242,27 @@ _HOUSE_SUFFIX_RE = re.compile(r"(\d)\s*/\s*([^\W\d_])(?![^\W\d_])")
 _UNDECIDABLE_RE = re.compile(r"(\d+)\s+[^\W\d_](?![^\W\d_]|\s*\.)"
                              r"|(\d+)\s*/\s*[^\W\d_]\s*\.")
 _HOUSE_RE = re.compile(r"^(\d+)[a-z]?$")
+
+
+def _by_street_strict(owners: list[dict], store: str) -> dict | None:
+    """The `strict` street rung (#493 shop contexts): the ONE card whose street's words —
+    house number included — are all in the header. Never a guess (review rounds 8-22):
+    - a header with an undecidable house number („19 A", „19/A.", „7 / B. Bystrica") that ANY
+      family card carries decides nothing — gluing one reading before the count let another
+      card win („Hlavná 5, 7 / B. Bystrica" → the 5 card, round 22);
+    - a card with NO house number is no proof for a header that has one („BISTRO Hlavná 12"
+      is not the card „Hlavná");
+    - several fitting cards decide nothing (round 21: „Hlavná 5 a 7")."""
+    unsure = _undecidable_numbers(store)
+    streets = [(c, _street_tokens(c.get("street", ""))) for c in owners]
+    if unsure and any(_house_number(t) in unsure for _c, toks in streets for t in toks):
+        return None
+    want_tokens = _street_tokens(store)
+    header_has_number = any(_house_number(t) for t in want_tokens)
+    hits = [c for c, toks in streets
+            if toks and toks <= want_tokens
+            and (any(_house_number(t) for t in toks) or not header_has_number)]
+    return hits[0] if len(hits) == 1 else None
 
 
 def _undecidable_numbers(header: str) -> set[str]:
