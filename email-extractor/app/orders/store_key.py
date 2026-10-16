@@ -133,16 +133,31 @@ def _in_section(needle: str, words: str) -> bool:
     return len(want.strip()) >= 3 and want in words
 
 
-def locate_file(texts, source: str = "", sections=None) -> str:
-    """The attachment the given item texts (quotes, else names) were read from — the section
-    containing the most of them, only when that section is a STRICT winner; "" otherwise
-    (no sections, no hit, a tie). Best effort and never guessed: an order whose file stays
-    unknown keeps only its block header as the store key. Pass `sections` (computed ONCE per
-    mail with `attachment_sections`) when locating several orders of one mail."""
+def locate_file(texts, source: str = "", sections=None, header: str = "") -> str:
+    """The attachment an order was read from: the ONE section its block `header` is in, else
+    the section containing the most of its item texts (quotes, else names) — only a STRICT
+    winner; "" otherwise (no sections, no hit, a tie, or the header and the lines naming two
+    different files). Best effort and never guessed: an order whose file stays unknown keeps
+    only its block header as the store key. The header comes first (review round 5): the
+    incident's files share most rows, so the lines tied and one shop's orders got different
+    identities day by day. Pass `sections` (computed ONCE per mail with
+    `attachment_sections`) when locating several orders of one mail."""
     if sections is None:
         sections = attachment_sections(source)
     if not sections:
         return ""
+    by_lines = _by_lines(texts, sections)
+    by_header = ""
+    if str(header or "").strip():
+        hits = [name for name, words in sections if _in_section(header, words)]
+        by_header = hits[0] if len(hits) == 1 else ""
+    if by_header and by_lines and by_header != by_lines:
+        return ""
+    return by_header or by_lines
+
+
+def _by_lines(texts, sections) -> str:
+    """The section containing the most of the item texts — a strict winner, else ""."""
     needles = [t for t in texts or () if len(_squash(t)) >= 3]
     if not needles:
         return ""

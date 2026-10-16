@@ -285,12 +285,13 @@ def verify(extracted: dict, source: str) -> dict:
                            "deliveryDate": order.get("deliveryDate", "") or "",
                            "recipientGroup": order.get("recipientGroup", "") or "",
                            "store": order.get("store", "") or "",
-                           # #493: the attachment this order was read from (located from
-                           # its own quotes, never asked of the model) — with the block
-                           # header it is the order's shop identity (`store_key`)
+                           # #493: the attachment this order was read from (located by
+                           # its block header, else its own quotes — never asked of the
+                           # model) — with the header it is the order's shop identity
                            "sourceFile": store_key.locate_file(
                                [i.get("sourceQuote") or i.get("name") or ""
-                                for i in order.get("items") or []], sections=sections),
+                                for i in order.get("items") or []], sections=sections,
+                               header=order.get("store", "") or ""),
                            "items": kept})
     if unverified:
         log.warning("%d item(s) could not be verified against the email: %s",
@@ -366,7 +367,8 @@ def run(client, email: dict) -> dict:
                         "recipientGroup": head.get("recipientGroup", "") or "",
                         "store": head.get("store", "") or "",
                         "sourceFile": store_key.locate_file(
-                            [i.get("name") or "" for i in table], source),
+                            [i.get("name") or "" for i in table], source,
+                            header=head.get("store", "") or ""),
                         "items": table}],
             "unverified": [],
             "source": "table",
