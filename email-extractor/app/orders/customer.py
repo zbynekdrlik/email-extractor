@@ -33,7 +33,7 @@ import logging
 import re
 from dataclasses import dataclass
 
-from . import dl_match, store_key
+from . import dl_match, store_key, store_rules
 
 log = logging.getLogger("orders.customer")
 
@@ -154,7 +154,7 @@ def _score(cust: dict, sender_addr: str, sender_domain: str, sender_name: str,
 def candidates(customers: list[dict], sender_email: str, sender_name: str,
                company_name: str, limit: int = CANDIDATES) -> list[dict]:
     """The shortlist shown to the model, best first, exact address matches marked."""
-    addr = (_addresses(sender_email) or [""])[0]
+    addr = _sender_addr(sender_email)
     domain = addr.split("@")[-1] if "@" in addr else ""
     company = str(company_name or "").lower().strip()
     scored = []
@@ -457,9 +457,18 @@ def family_of(customers: list[dict], sender_email: str, llm: dict | None = None
 
 
 def owners_of(customers: list[dict], sender_email: str) -> list[dict]:
-    """The cards carrying the sender's exact address."""
-    addr = (_addresses(sender_email) or [""])[0]
+    """The cards carrying the sender's exact address (never one of our own, `_sender_addr`)."""
+    addr = _sender_addr(sender_email)
     return [c for c in customers if addr and addr in _addresses(c.get("emails"))]
+
+
+def _sender_addr(sender_email) -> str:
+    """The sender's address for matching cards — "" for an address of our own domain (#493
+    review round 30: a staff forward kept the staff address as the sender, and a pre-#493
+    answer had put it on a customer's card; every forward of that staff address then went
+    there — by `exact_email`, or by the model trusting the exact-address flag)."""
+    addr = (_addresses(sender_email) or [""])[0]
+    return "" if store_rules.is_own_address(addr) else addr
 
 
 def _confidence(llm: dict) -> float:
@@ -507,7 +516,7 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
     by_ean = {str(c.get("ean_edi")): c for c in customers if c.get("ean_edi")}
     picked = by_ean.get(str(llm.get("ean_edi") or ""))
 
-    addr = (_addresses(sender_email) or [""])[0]
+    addr = _sender_addr(sender_email)
     owners = owners_of(customers, sender_email)
 
     # #493: a shop the warehouse already answered for THIS sender wins over everything — it
@@ -635,7 +644,7 @@ def candidates_for_question(customers: list[dict], sender_email: str, sender_nam
     #493: a question asked for ONE SHOP (`key`) ranks the cards whose name/city share a
     stem with the shop key first, and always lists every card of the sender's family.
     """
-    addr = (_addresses(sender_email) or [""])[0]
+    addr = _sender_addr(sender_email)
     domain = addr.split("@")[-1] if "@" in addr else ""
     company = str(company_name or "").lower().strip()
     text_norm = _norm_text(free_text)

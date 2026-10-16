@@ -268,9 +268,16 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   („Predajňa 1" of one customer shipped another's order), and a plain answer put the staff
   address on the customer's card (every later forward → that card). Such an address owns no
   rule (`remember` → None, `for_sender` → []), no shop history, EVERY question of it is keyed
-  per MAIL (`cust:<message_id>…`, `teach.ask_customer`), and no answer puts it on a card
-  (`order_customers.learn`, the „Nový zákazník" route). Open (pre-existing, not #493): the
-  #369 „nie je objednávka" mail rule is keyed on the staff `from_addr` + subject shape.
+  per MAIL (`cust:<message_id>…`, `teach.ask_customer`), nothing writes it on a card
+  (`snapshot.remember_customer_email` refuses it, the „Nový zákazník" route strips it), and —
+  round 30, the READ side — it never matches a card (`customer._sender_addr` → "": no
+  `owners_of`, no `exact_email`, no exact-address flag for the model, no CODEX-order owner in
+  `codex_orders._owner_ean`; prod had ONE card carrying a staff address from a pre-#493
+  answer and two forwards of an unknown customer shipped to it). `is_own_address` parses a
+  display name („Jana <jana@…>"). Measured before (prod, read-only, 60 days): no own-domain
+  sender ever resolved by `exact_email`, so nothing legitimate is lost. Pre-existing, outside
+  #493, reported as a follow-up candidate (review round 30): the #369 „nie je objednávka" mail
+  rule is keyed on the staff `from_addr` + subject shape (4 live rules on prod).
 - **The answer teaches** through ONE helper, `order_customers.learn` — called by the board
   route (`_api_orders_answer_customer`), the „Nový zákazník" route and `teach.KINDS['customer']
   .apply` (the HTTP routes never went through `.apply`): a plain per-sender question teaches the

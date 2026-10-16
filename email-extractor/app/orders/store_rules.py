@@ -19,6 +19,7 @@ one shop that disagree are asked again (`customer._by_shop_rule`) — never by r
 from __future__ import annotations
 
 import logging
+import re
 
 from .store_key import StoreKey
 
@@ -29,6 +30,7 @@ _COLS = ("sender_email", "store_key", "store_label", "ean_edi", "question_id", "
 # our own mail domain: the sender of a staff forward whose original sender is unknown
 # (`pipeline._sender_address`) — shared by every customer the staff forwards
 OUR_DOMAIN = "slovnormal.sk"
+_ADDRESS_RE = re.compile(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+")
 
 
 def is_own_address(value) -> bool:
@@ -36,10 +38,10 @@ def is_own_address(value) -> bool:
     round 28: rules and the shop question keyed on a staff forwarder were shared by every
     customer it forwards; „Predajňa 1" of one customer shipped another's order). The exact
     domain, never a substring („x@notslovnormal.sk" is a customer, round 29)."""
-    addr = str(value or "").strip().lower()
-    if "@" not in addr:
+    found = _ADDRESS_RE.search(str(value or "").lower())     # „Jana <jana@…>" too (round 30)
+    if not found:
         return False
-    domain = addr.rsplit("@", 1)[1]
+    domain = found.group(0).rsplit("@", 1)[1]
     return domain == OUR_DOMAIN or domain.endswith("." + OUR_DOMAIN)
 
 

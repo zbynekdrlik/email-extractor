@@ -94,10 +94,7 @@ def _owner_ean(customers: list[dict], sender_email: str) -> str | None:
     A shared/unknown address, or a sole owner with a blank EAN, never resolves — the question
     stays open (never a wrong close). Reuses `customer._addresses` so the email-field parsing
     (a list OR a comma string) is identical to the rest of the system."""
-    addr = (customer._addresses(sender_email) or [""])[0]
-    if not addr:
-        return None
-    owners = [c for c in customers if addr in customer._addresses(c.get("emails"))]
+    owners = customer.owners_of(customers, sender_email)   # never our own address (#493)
     if len(owners) != 1:
         return None
     ean = str(owners[0].get("ean_edi") or "").strip()
