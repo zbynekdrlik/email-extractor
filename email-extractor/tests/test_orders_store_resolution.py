@@ -54,7 +54,8 @@ def test_tokens_drop_order_words_our_brand_days_and_numbers():
 
 def test_the_key_drops_what_every_shop_of_the_mail_shares():
     keys = store_key.for_orders(ORDERS)
-    assert [k.text for k in keys] == ["pr", "hrdinov ms skola", "dolina za", "bistro",
+    # a HEADER keeps its numbers („Predajňa 1" / „Predajňa 2" are two shops), a file not
+    assert [k.text for k in keys] == ["pr", "7 hrdinov ms skola", "dolina za", "bistro",
                                       "tr trznica"]
     # the full tokens keep everything (a learned rule is matched against them)
     assert keys[0].tokens == frozenset({"pr"})
@@ -120,12 +121,25 @@ def test_a_learned_shop_rule_decides_above_everything():
     assert _resolve(one, rules=rules).ean_edi == "2999000000203"
 
 
-def test_two_rules_that_disagree_decide_nothing():
+def test_two_live_rules_of_one_shop_that_disagree_decide_nothing():
+    """Two live rules of the SAME words (a Kôš restore of a replaced rule) — asked."""
     key = store_key.for_orders([{"store": "BISTRO DOLINA"}])[0]
-    rules = [(frozenset({"bistro"}), "2999000000204"), (frozenset({"dolina"}), "2999000000203")]
+    rules = [(frozenset({"bistro", "dolina"}), "2999000000204"),
+             (frozenset({"bistro", "dolina"}), "2999000000203")]
     assert store_key.match_rule(rules, key).conflict
     assert _resolve(key, rules=rules, multi=True) is None, "a rule conflict is asked"
     assert store_key.match_rule(rules, store_key.for_orders([{"store": "PR"}])[0]) is None
+
+
+def test_a_rule_applies_only_to_exactly_its_shop():
+    """Review round 2: a rule never applies to a SUPERSET of its words — {bistro} taught for
+    „BISTRO" must not capture „BISTRO DOLINA", nor {dolina} the „BISTRO Dolina" shop. A
+    re-ask is safe; a capture is the incident."""
+    rules = [(frozenset({"bistro"}), "2999000000204"), (frozenset({"dolina"}), "2999000000203")]
+    both = store_key.for_orders([{"store": "BISTRO DOLINA"}])[0]
+    assert store_key.match_rule(rules, both) is None
+    alone = store_key.for_orders([{"store": "BISTRO"}])[0]
+    assert store_key.match_rule(rules, alone).ean == "2999000000204"
 
 
 def test_a_rule_naming_a_card_no_longer_in_the_list_is_ignored():
@@ -168,18 +182,37 @@ def _m(ean, rule):
     return customer.Matched(ean_edi=ean, name="", confidence=0.9, rule=rule, note="")
 
 
-def test_the_poistka_turns_back_only_the_non_shop_resolutions_of_a_collapsed_card():
+def test_the_poistka_asks_every_shop_a_shop_rung_did_not_decide():
+    """In a multi-shop mail only a SHOP rung may decide a shop — also a lone shop on its own
+    card (review round 2: one new shop next to taught ones went to the sender's card)."""
     keys = store_key.for_orders([{"store": "BISTRO"}, {"store": "PR"}, {"store": "TR"},
                                  {"store": "BISTRO"}])
     matched = [_m("A", "store_name"), _m("A", "llm"), _m("B", "exact_email"),
-               _m("A", "store_name")]
-    assert customer.collapsed_shops(keys, matched) == {1}
+               _m("A", "store_rule")]
+    assert customer.collapsed_shops(keys, matched, multi=True) == {1, 2}
 
 
-def test_the_poistka_ignores_one_shop_on_several_dates_and_empty_headers():
+def test_the_poistka_never_acts_outside_a_multi_shop_mail():
     keys = store_key.for_orders([{"store": "BISTRO"}, {"store": "BISTRO"}, {"store": ""}])
     matched = [_m("A", "llm"), _m("A", "llm"), _m("A", "llm")]
-    assert customer.collapsed_shops(keys, matched) == set()
+    assert not store_key.is_multi_store(keys)
+    assert customer.collapsed_shops(keys, matched, multi=False) == set()
+
+
+def test_what_makes_a_mail_multi_shop():
+    numbered = store_key.for_orders([{"store": "Predajňa 1"}, {"store": "Predajňa 2"}])
+    assert store_key.is_multi_store(numbered), "numbered headers are two shops"
+    same_header = store_key.for_orders([{"store": "ŽILINA", "sourceFile": "ZA1.xlsx"},
+                                        {"store": "ŽILINA", "sourceFile": "ZA2.xlsx"}])
+    assert store_key.is_multi_store(same_header), "one header, two different files"
+    files_only = store_key.for_orders([{"store": "", "sourceFile": "Jana.xlsx"},
+                                       {"store": "", "sourceFile": "Peter.xlsx"}])
+    assert not store_key.is_multi_store(files_only), "a one-card sender's files are no shops"
+    assert store_key.is_multi_store(files_only, shop_sender=True), \
+        "a known multi-shop sender's files ARE shops"
+    days = store_key.for_orders([{"store": "BISTRO", "sourceFile": "BISTRO pondelok.xlsx"},
+                                 {"store": "BISTRO", "sourceFile": "BISTRO streda.xlsx"}])
+    assert not store_key.is_multi_store(days), "one shop, a file per day"
 
 
 def test_a_shop_question_lists_the_whole_family_and_its_name_hits_first():
@@ -193,19 +226,20 @@ def test_a_shop_question_lists_the_whole_family_and_its_name_hits_first():
 # --- review round 1 (#493): rule conflicts and narrow rules ---------------------------------
 
 def test_a_rule_conflict_is_asked_even_for_a_sender_on_one_card():
-    """Two applicable rules that disagree must ASK — never fall through to the sender's one
-    card (exact_email / llm)."""
+    """Disagreeing rules of a shop must ASK — never fall through to the sender's one card
+    (exact_email / llm)."""
     one = [dict(FAMILY[4], emails=[SENDER])] + [dict(c, emails=[]) for c in FAMILY[:4]]
     key = store_key.for_orders([{"store": "Tržnica Dolina"}])[0]
-    rules = [(frozenset({"trznica"}), "2999000000202"), (frozenset({"dolina"}), "2999000000203")]
+    rules = [(frozenset({"trznica", "dolina"}), "2999000000202"),
+             (frozenset({"trznica", "dolina"}), "2999000000203")]
     assert customer.resolve(one, SENDER, "", "", llm={"ean_edi": "2999000000999",
                                                        "confidence": 0.97},
                             key=key, rules=rules) is None
 
 
-def test_the_most_specific_rule_wins_over_the_rules_it_contains():
-    """The warehouse answered exactly „BISTRO Dolina" -> that rule decides even though the
-    narrower {dolina} rule also applies (else a re-ask would loop forever)."""
+def test_the_rule_for_exactly_the_shop_wins_next_to_narrower_ones():
+    """The warehouse answered exactly „BISTRO Dolina" -> that rule decides; the narrower
+    {dolina} rule does not even apply (exact matching — a re-ask can never loop)."""
     key = store_key.for_orders([{"store": "BISTRO Dolina"}])[0]
     rules = [(frozenset({"dolina"}), "2999000000203"),
              (frozenset({"bistro", "dolina"}), "2999000000204")]
@@ -213,12 +247,13 @@ def test_the_most_specific_rule_wins_over_the_rules_it_contains():
     assert (hit.ean_edi, hit.rule) == ("2999000000204", "store_rule")
 
 
-def test_a_narrow_rule_never_captures_a_shop_another_card_names():
-    """{dolina} -> Makovická was taught for the „DOLINA" header; „BISTRO Dolina" carries a word
-    naming ANOTHER family card (BISTRO) — the rule must not capture it."""
-    key = store_key.for_orders([{"store": "BISTRO Dolina"}])[0]
-    assert _resolve(key, rules=[(frozenset({"dolina"}), "2999000000203")]) is None
-    # an extra word naming no card does not stop the rule
-    other = store_key.for_orders([{"store": "DOLINA týždeň 42 nová"}])[0]
-    hit = _resolve(other, rules=[(frozenset({"dolina"}), "2999000000203")])
+def test_a_narrow_rule_never_captures_another_shop():
+    """{dolina} -> Makovická was taught for the „DOLINA" header; „BISTRO Dolina" is another
+    shop — the rule does not apply (it is asked: the name stems hit two cards). A header
+    with an extra word is a re-ask too: the cost of exactness is one more question, never a
+    wrong card."""
+    rule = [(frozenset({"dolina"}), "2999000000203")]
+    assert _resolve(store_key.for_orders([{"store": "BISTRO Dolina"}])[0], rules=rule) is None
+    assert _resolve(store_key.for_orders([{"store": "DOLINA nová"}])[0], rules=rule) is None
+    hit = _resolve(store_key.for_orders([{"store": "DOLINA"}])[0], rules=rule)
     assert (hit.ean_edi, hit.rule) == ("2999000000203", "store_rule")

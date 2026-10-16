@@ -252,3 +252,79 @@ def test_one_shop_sending_two_files_for_one_day_still_ships_one_order(pg):
     assert result["status"] == "ok"
     assert len(rec.uploads) == 1, "one delivery day of one card = one ORDER file"
     assert _customer_questions(pg) == []
+
+
+# --- review round 2 (#493) --------------------------------------------------------------------
+
+def test_one_new_shop_next_to_taught_ones_is_asked_not_shipped_to_the_one_card(pg):
+    """Tržnica is taught (rule -> …102); ŽILINA is new and lands alone on the sender's one
+    card through the model pick — in a mail of several shops that is never enough."""
+    from app.orders import store_key, store_rules
+    sid = _env(pg)
+    tr = store_key.for_orders([{"store": "Predajňa: Tržnica",
+                                "sourceFile": "OBJ Pekárová žena TR.xlsx"},
+                               {"store": "ŽILINA", "sourceFile": "OBJ Pekárová žena ZA.xlsx"}])[0]
+    store_rules.remember(pg, sender_email=SENDER, key=tr, ean_edi="2999000000102",
+                         question_id=1, by="sklad")
+    rec = Recorder()
+    stores = (("Predajňa: Tržnica", "vianočka 400g", 7, "VIA"),
+              ("ŽILINA", "rožok kváskový 70g", 5, "G70"))
+    text = _attachments([("TR", "Predajňa: Tržnica", "vianočka 400g", 7),
+                         ("ZA", "ŽILINA", "rožok kváskový 70g", 5)])
+    result = pipeline.run(pg, _cfg(), dict(MAIL, combined_text=text), sid,
+                          client=ScriptedClient(_answers(stores=stores)), upload=rec.upload,
+                          post=rec.post)
+    shipped = {r["store"]: r["customer_ean"] for r in result["order_results"]
+               if r["status"] == "ok"}
+    assert shipped == {"Predajňa: Tržnica": "2999000000102"}
+    assert len(rec.uploads) == 1
+    assert [q["context"]["store"] for q in _customer_questions(pg)] == ["ŽILINA"]
+
+
+def test_an_unknown_senders_two_files_of_one_day_stay_one_held_order(pg):
+    """#81.1 for the unresolved path: no shop header, the sender on no card and the model
+    unsure — ONE held order, ONE question, so the answer ships ONE ORDER file."""
+    sid = _env(pg)
+    rec = Recorder()
+    stores = (("", "vianočka 400g", 7, "VIA"), ("", "rožok kváskový 70g", 5, "G70"))
+    text = _attachments([("Jana", "", "vianočka 400g", 7),
+                         ("Peter", "", "rožok kváskový 70g", 5)])
+    answers = _answers(stores=stores)
+    answers[1] = {"ean_edi": "", "confidence": 0.1}
+    pipeline.run(pg, _cfg(), dict(MAIL, from_addr="neznamy@obchod-test.sk",
+                                  combined_text=text), sid,
+                 client=ScriptedClient(answers), upload=rec.upload, post=rec.post)
+    assert rec.uploads == []
+    assert pg.execute("SELECT count(*) FROM held_orders").fetchone()[0] == 1
+    assert len(_customer_questions(pg)) == 1
+
+
+def test_numbered_shops_in_one_file_are_two_shops(pg):
+    """„Predajňa 1" / „Predajňa 2" side by side: two shops — never merged into one order,
+    never shipped to the sender's one card by the model pick."""
+    sid = _env(pg)
+    rec = Recorder()
+    stores = (("Predajňa 1", "vianočka 400g", 7, "VIA"),
+              ("Predajňa 2", "rožok kváskový 70g", 5, "G70"))
+    text = ("Subject: objednávka\n\nAttachments:\n===== OBJ Firma.xlsx =====\n[Sheet: H]\n"
+            "Predajňa 1 / Predajňa 2\nna 04.08.2026\n7x vianočka 400g\n5x rožok kváskový 70g\n")
+    pipeline.run(pg, _cfg(), dict(MAIL, combined_text=text), sid,
+                 client=ScriptedClient(_answers(stores=stores)), upload=rec.upload,
+                 post=rec.post)
+    assert rec.uploads == []
+    assert pg.execute("SELECT count(*) FROM held_orders").fetchone()[0] == 2
+    assert len(_customer_questions(pg)) == 2
+
+
+def test_two_files_with_one_header_text_are_two_shops(pg):
+    """Two „ŽILINA" files (two shops in one town): different files, never merged."""
+    sid = _env(pg)
+    rec = Recorder()
+    stores = (("ŽILINA", "vianočka 400g", 7, "VIA"), ("ŽILINA", "rožok kváskový 70g", 5, "G70"))
+    text = _attachments([("ZA Makovicka", "ŽILINA", "vianočka 400g", 7),
+                         ("ZA Bistro", "ŽILINA", "rožok kváskový 70g", 5)])
+    pipeline.run(pg, _cfg(), dict(MAIL, combined_text=text), sid,
+                 client=ScriptedClient(_answers(stores=stores)), upload=rec.upload,
+                 post=rec.post)
+    assert rec.uploads == []
+    assert pg.execute("SELECT count(*) FROM held_orders").fetchone()[0] == 2

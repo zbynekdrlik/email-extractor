@@ -264,3 +264,54 @@ def test_a_shop_answer_teaches_the_rule_not_the_senders_address(pg, monkeypatch)
     assert teach.get(pg, q["id"])["answer"]["email_added"] is False
     assert store_rules.for_sender(pg, SENDER) == [(frozenset({"tr", "trznica"}),
                                                    "2999000000202")]
+
+
+# --- review round 2 (#493) --------------------------------------------------------------------
+
+def test_a_family_senders_files_are_shops_even_without_any_header(pg):
+    """The model may report no header at all (one shop per file): for a sender whose address
+    is on several cards the FILES are the shops — never one merged order on one card."""
+    _env(pg)
+    stores = (("", "BISTRO", "rožok 50g", 120, "G50"), ("", "Tržnica", "vianočka 400g", 7, "VIA"),
+              ("", "DOLINA", "rožok kváskový 70g", 5, "G70"))
+    plain = [(h, code, item, qty, g) for h, code, item, qty, g in stores]
+    result, rec = _run(pg, "m-nohead", stores=plain)
+    shipped = {r["customer_ean"] for r in result["order_results"] if r["status"] == "ok"}
+    assert shipped == {"2999000000204", "2999000000202"}
+    assert len(rec.uploads) == 2
+    assert len(_shop_questions(pg)) == 1, "the two-Dolina-cards shop is asked"
+
+
+def test_answering_a_conflict_retires_the_other_rule_and_settles_the_shop(pg, monkeypatch):
+    """A Kôš restore can leave two live rules for one shop: asked, and the answer retires the
+    other one — the next mail of that shop ships with no question."""
+    from app.orders import store_key
+    monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
+    _env(pg)
+    key = store_key.for_orders([{"store": "DOLINA",
+                                 "sourceFile": "OBJ Pekárová žena DO.xlsx"}])[0]
+    store_rules.remember(pg, sender_email=SENDER, key=key, ean_edi="2999000000203",
+                         question_id=1, by="sklad")
+    pg.execute("INSERT INTO customer_store_rules (sender_email, store_key, ean_edi) "
+               "VALUES (%s, %s, '2999000000204')", (SENDER, key.text))
+    dolina = [("DOLINA", "DO", "rožok kváskový 70g", 5, "G70")]
+    _run(pg, "m-c1", stores=dolina)
+    q = _shop_questions(pg)["DOLINA"]
+    _client().post(f"/api/board/questions/{q['id']}/answer",
+                   json={"ean_edi": "2999000000203", "name": "Dolina Makovická"})
+    assert store_rules.for_sender(pg, SENDER) == [(frozenset({"dolina"}), "2999000000203")]
+    result, rec = _run(pg, "m-c2", stores=[("DOLINA", "DO", "rožok kváskový 70g", 6, "G70")])
+    assert result["status"] == "ok" and len(rec.uploads) == 1
+
+
+def test_a_new_customer_created_for_a_shop_never_gets_the_senders_address(pg, monkeypatch):
+    monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
+    _env(pg)
+    _run(pg, "m-new")
+    q = _shop_questions(pg)["PR"]
+    r = _client().post(f"/api/board/questions/{q['id']}/answer", json={"new_customer": {
+        "ean_edi": "2999000000209", "name": "Predajňa PR Lipová", "city": "Mestečko"}})
+    assert r.status_code == 200, r.get_json()
+    cards = {c["ean_edi"]: c for c in snapshot.customers_for_management(pg)}
+    assert SENDER not in cards["2999000000209"]["emails"]
+    assert store_rules.for_sender(pg, SENDER) == [(frozenset({"pr"}), "2999000000209")]
