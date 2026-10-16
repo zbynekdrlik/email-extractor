@@ -247,35 +247,58 @@ _HOUSE_RE = re.compile(r"^(\d+)[a-z]?$")
 
 
 def _by_street_strict(owners: list[dict], store: str) -> dict | None:
-    """The `strict` street rung (#493 shop contexts) — decides only when the header names
-    EXACTLY ONE family street and that card's house number is the header's (review round 24).
+    """The `strict` street rung (#493 shop contexts) — decides only when exactly ONE family
+    card is on a street the header names, and the header is that card's street address.
 
-    Rounds 17-23 each found a new way to tell branches on ONE street apart by their house
-    numbers wrongly („19/a" vs „19", „7 B. Bystrica", „19/A.", „GT1", a numberless card…);
-    every fix opened the next. Branches on one street are therefore never told apart here:
-    - a family street is NAMED when all its words (house numbers aside) are in the header;
-      zero or several named streets (one street of two branches, „Námestie SNP" + „SNP 48",
-      a header naming two streets) decide nothing — asked once, then a learned rule decides;
-    - the named card's house numbers (a suffixed one is ONE unit, „19/A" = „19a") must all
-      be in the header, a card with NO house number never wins for a header that has one;
+    Rounds 17-24 each found a new way to read a house number or a street wrongly („19/a" vs
+    „19", „7 B. Bystrica", „19/A.", „GT1", a numberless card, „Predajňa 2, Hlavná 14", „ul.
+    Hlavná 14"); branches on one street are therefore never told apart here:
+    - a card BLOCKS when its street shares any word (numbers aside) with the header; zero or
+      several such cards (one street of two branches, „Nám. SNP 5" + „SNP 5", a header naming
+      two streets) decide nothing — asked once, then a learned rule decides (round 25);
+    - the one card's street (words and house numbers, a suffixed one is ONE unit „19/A" =
+      „19a") must be ONE run of the header, and the header's other house numbers none — a
+      shop number, a floor or a code written apart is no house number (round 25);
+    - a card with NO house number never wins for a header that has one;
     - a header with an undecidable house number („19 A", „19/A.", „7 / B. Bystrica", or a
-      shop code's number „GT1") that ANY family card carries decides nothing.
+      shop code's number „GT1") that ANY family card carries decides nothing;
+    - a header naming the town of ANOTHER family card decides nothing („Košice, Hlavná 5").
     The #101 shape (two branches on two streets, „GT1- Družby 35 BB") still ships."""
-    want = _street_tokens(store)
+    want_seq = _street_seq(store)
     unsure = _undecidable_numbers(store)
-    streets = [(c, _street_tokens(c.get("street", ""))) for c in owners]
-    if unsure and any(_house_number(t) in unsure for _c, toks in streets for t in toks):
+    streets = [(c, _street_seq(c.get("street", ""))) for c in owners]
+    if unsure and any(_house_number(t) in unsure for _c, seq in streets for t in seq):
         return None
-    want_words = {t for t in want if not _house_number(t)}
-    named = [(c, toks) for c, toks in streets
-             if (words := {t for t in toks if not _house_number(t)}) and words <= want_words]
-    if len(named) != 1:
+    words = {t for t in want_seq if not _house_number(t)}
+    sharing = [(c, seq) for c, seq in streets
+               if any(not _house_number(t) and t in words for t in seq)]
+    if len(sharing) != 1:
         return None
-    card, toks = named[0]
-    numbers = {t for t in toks if _house_number(t)}
-    if not numbers:
-        return None if any(_house_number(t) for t in want) else card
-    return card if numbers <= want else None
+    card, seq = sharing[0]
+    numbers = {t for t in seq if _house_number(t)}
+    header_numbers = {t for t in want_seq if _house_number(t) and _house_number(t) not in unsure}
+    if not numbers and any(_house_number(t) for t in want_seq):
+        return None
+    if numbers != header_numbers or not _is_run(seq, want_seq):
+        return None
+    return None if _names_another_town(owners, card, set(want_seq)) else card
+
+
+def _is_run(part: list[str], whole: list[str]) -> bool:
+    """Is `part` one unbroken run of `whole`? („Hlavná 2" in „BISTRO Hlavná 2", not in
+    „Predajňa 2, Hlavná 14")."""
+    n = len(part)
+    return n > 0 and any(whole[i:i + n] == part for i in range(len(whole) - n + 1))
+
+
+def _names_another_town(owners: list[dict], card: dict, want: set[str]) -> bool:
+    """Does the header name the town of another family card — not this card's own?"""
+    own = frozenset(store_key.tokens(card.get("city", "")))
+    for c in owners:
+        town = frozenset(store_key.tokens(c.get("city", "")))
+        if town and town != own and town <= want:
+            return True
+    return False
 
 
 def _undecidable_numbers(header: str) -> set[str]:
@@ -294,14 +317,15 @@ def _house_number(token: str) -> str:
     return m.group(1) if m else ""
 
 
-def _street_tokens(text: str) -> set[str]:
-    """A street / header as folded words for the `strict` street comparison: a house number
-    with its one-letter suffix is ONE unit („19/A" = „19/a" = „19A" → 19a; review rounds
-    17-18: „19/B" matched the card „19/A", then the bare card „19" — it matches neither now),
-    other digit and letter runs apart („35BB" → 35, bb; „GT1" → gt, 1 — round 9)."""
+def _street_seq(text: str) -> list[str]:
+    """A street / header as folded words, in order, for the `strict` street comparison: a
+    house number with its one-letter suffix is ONE unit („19/A" = „19/a" = „19A" → 19a;
+    review rounds 17-18: „19/B" matched the card „19/A", then the bare card „19" — it matches
+    neither now), other digit and letter runs apart („35BB" → 35, bb; „GT1" → gt, 1 — round
+    9)."""
     glued = _HOUSE_SUFFIX_RE.sub(r"\1\2", str(text or ""))
-    return {run for t in store_key.tokens(glued, keep_numbers=True)
-            for run in re.findall(r"\d+[a-z](?![a-z])|\d+|[a-z]+", t)}
+    return [run for t in store_key.tokens(glued, keep_numbers=True)
+            for run in re.findall(r"\d+[a-z](?![a-z])|\d+|[a-z]+", t)]
 
 
 def _card_words(c: dict) -> set[str]:
@@ -358,6 +382,27 @@ def collapsed_shops(keys: list, matched: list, multi: bool, has_rules: bool = Fa
                     sorted({(keys[i].label, matched[i].rule) for i in out}),
                     "the mail carries several shops" if multi
                     else "the sender has learned shop rules")
+    if multi or has_rules:
+        out |= _street_collisions(keys, matched)
+    return out
+
+
+def _street_collisions(keys: list, matched: list) -> set[int]:
+    """Two DIFFERENT shops (block headers) of one mail decided by the street onto ONE card
+    contradict each other — all of them are asked (review round 25: „A Hlavná" + „B Hlavná"
+    both went to the „Hlavná" card as two ORDER files). One shop on two days or in two files
+    has one header (dates are noise) — no collision; a learned rule is never second-guessed."""
+    by_card: dict[str, dict[frozenset, list[int]]] = {}
+    for i, m in enumerate(matched):
+        if m is not None and m.rule == "store_address":
+            head = frozenset(store_key.tokens(keys[i].header, keep_numbers=True, codes=True))
+            by_card.setdefault(m.ean_edi, {}).setdefault(head, []).append(i)
+    out = {i for heads in by_card.values() if len(heads) > 1
+           for idx in heads.values() for i in idx}
+    if out:
+        log.warning("poistka: %d order(s) of different shops matched ONE card by the street "
+                    "(%s) — asked per shop", len(out),
+                    sorted({(keys[i].label, matched[i].ean_edi) for i in out}))
     return out
 
 

@@ -179,22 +179,28 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   shop matched the „19/A" card, then a bare „19" card; a letter written APART is never glued
   — „7 B. Bystrica" (with its dot) is house 7, round 19) must all be in the header (round 8:
   „BISTRO Hlavná 5" matched „Hlavná 12"; the #101 corpus case GT1 / GT2 still resolves) —
-  `_by_street_strict` (round 24 — the CAUSE of rounds 17-23, each of which found a new way
-  to tell two branches on ONE street apart by their numbers wrongly: „19/a" vs „19", „7 B.
-  Bystrica", „19/A.", „GT1", a numberless card): decides ONLY when the header names EXACTLY
-  ONE family street — a street is named when all its words (house numbers aside) are in the
-  header — and that card's house numbers (a suffixed one is one unit) are all in the header.
-  Branches on one street, a header naming two family streets („Námestie SNP 48" next to
-  „Námestie SNP" + „SNP 48", „Hlavná 7, Nová 3") or no street → asked ONCE, then the
-  answer's rule decides; a numberless card never wins for a header carrying any number; a
-  header with an undecidable house number (`_undecidable_numbers`: one letter written apart
-  without a dot „19 A", a slash letter with a dot „19/A.", a shop code's number „GT1") that
-  ANY family card carries decides nothing. The #101 shape (two branches on two streets) still
-  ships. NEVER re-add a same-street number comparison „with one more check" — that is the
-  treadmill rounds 17-23 proved. Accepted over-asks (safe): any number in the header counts
-  as „has a number" (a shop code „Predajňa 2: Tržnica" with a numberless „Tržnica" card is
-  asked); a Slovak one-letter word after a house number („Hlavná 5 v Žiline") makes it
-  undecidable. Any other mail
+  `_by_street_strict` (rounds 24-25 — the CAUSE of rounds 17-23, each of which found a new
+  way to tell two branches on ONE street apart by their numbers wrongly: „19/a" vs „19", „7 B.
+  Bystrica", „19/A.", „GT1", a numberless card): a card BLOCKS when its street shares ANY word
+  (numbers aside) with the header — so „ul. Hlavná 14" / „Nám. SNP 5" block „Hlavná 2" /
+  „Námestie SNP 5" (round 25); the rung decides only when EXACTLY ONE card shares a word, its
+  street (words + house numbers, a suffixed number one unit) is ONE RUN of the header, and the
+  header's house numbers (minus the undecidable ones) are EXACTLY the card's — a shop number,
+  a floor or a code written apart is no house number („Predajňa 2, Hlavná 14" ≠ „Hlavná 2",
+  „BISTRO 1 Hlavná" ≠ „Hlavná 1", round 25). Also None: a numberless card for a header
+  carrying any number; a header with an undecidable house number (`_undecidable_numbers`:
+  one letter written apart without a dot „19 A", a slash letter with a dot „19/A.", a shop
+  code's number „GT1") that ANY family card carries; a header naming the TOWN of another
+  family card („Košice, Hlavná 5" vs the Žilina card, `_names_another_town`). Branches on one
+  street are always asked ONCE, then the answer's rule decides. The #101 shape (two branches
+  on two streets, GT1 / GT2) still ships. NEVER re-add a same-street number comparison „with
+  one more check" — that is the treadmill rounds 17-23 proved. Accepted residuals: a shop on
+  a street whose name EXTENDS a family card's street with the same house number („Nová Hlavná
+  5" vs the „Hlavná 5" card) or in a town no family card has, when no other card shares a
+  word, ships to that card — the collision guard below catches it when another shop of the
+  mail lands there too. Accepted over-asks (safe): a zip / floor / second number in the
+  header, a street-type word („ulica", „námestie") shared by two cards, a Slovak one-letter
+  word after a house number („Hlavná 5 v Žiline"). Any other mail
   exactly as #101; (3) family: `_by_delivery_address` —
   NOT in a multi-shop mail; (4) the old llm / exact_email rungs.
 - **The poistka** (`customer.collapsed_shops`): a shop ships ONLY when a SHOP rung decided it
@@ -205,6 +211,11 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   lone „Predajňa:" form went to the address card), or — in a mail of several ATTACHMENTS
   (`extract` records the count, round 8) — any order (round 7: a „Objednávka.xlsx" order next
   to „… BISTRO.xlsx" is another of its shops). Converges: each shop asked once, then its rule.
+  **Street collision** (`_street_collisions`, round 25, multi-shop mail / rule sender): two
+  DIFFERENT block headers decided by the street (`store_address`) onto ONE card contradict
+  each other — all of them asked („A Hlavná" + „B Hlavná" both on the numberless „Hlavná"
+  card). One shop on two days / in two files has one header (dates are noise) — no
+  collision; a learned rule (`store_rule`) is never second-guessed.
   Accepted
   residuals (safe direction — asked, never a wrong card): a shop with NO identity at all (an
   empty header and a file name with no words) is asked per order every mail (no rule can be
