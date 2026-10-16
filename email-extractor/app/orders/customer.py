@@ -221,10 +221,9 @@ def _by_store(owners: list[dict], store: str, strict: bool = False) -> dict | No
     keeps the #101 comparison exactly.
     """
     if strict:
-        want_tokens = set(store_key.tokens(store, keep_numbers=True))
+        want_tokens = _street_tokens(store)
         hits = [c for c in owners
-                if (street_tokens := set(store_key.tokens(c.get("street", ""),
-                                                          keep_numbers=True)))
+                if (street_tokens := _street_tokens(c.get("street", "")))
                 and street_tokens <= want_tokens]
         return hits[0] if len(hits) == 1 else None
     want = _words(store)
@@ -236,6 +235,14 @@ def _by_store(owners: list[dict], store: str, strict: bool = False) -> dict | No
         if street and all(w in want for w in street):
             hits.append(c)
     return hits[0] if len(hits) == 1 else None
+
+
+def _street_tokens(text: str) -> set[str]:
+    """A street / header as folded words with digit and letter runs apart („35BB" → 35, bb;
+    „GT1" → gt, 1) — the `strict` street comparison (review round 9: a house number glued to
+    letters must still match)."""
+    return {run for t in store_key.tokens(text, keep_numbers=True)
+            for run in re.findall(r"\d+|[a-z]+", t)}
 
 
 def _card_words(c: dict) -> set[str]:
@@ -284,7 +291,8 @@ def collapsed_shops(keys: list, matched: list, multi: bool, has_rules: bool = Fa
     out = {i for i, m in enumerate(matched)
            if m is not None and m.rule not in STORE_RULES
            and (multi or (has_rules and (keys[i].identity or keys[i].file_unknown
-                                         or several_files)))}
+                                         or several_files
+                                         or store_key.names_a_block(keys[i]))))}
     if out:
         log.warning("poistka: %d order(s) were decided by a rule that ignores the shop (%s) "
                     "although %s — held and asked per shop", len(out),

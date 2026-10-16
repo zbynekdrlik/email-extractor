@@ -116,15 +116,37 @@ def _attachment_block(text: str) -> list[str] | None:
     return text[idx:].splitlines()
 
 
+def _kosik_header(line: str) -> bool:
+    return "Č.mat.dodavat." in line or ("EAN kus" in line and "Název" in line)
+
+
+def _pricelist_header(line: str) -> bool:
+    return "%DPH" in line and ("VO bez DPH" in line or "VO s DPH" in line)
+
+
+def table_attachments(text: str) -> int:
+    """How many attachments (`===== <file> =====` sections) carry a recognized table. #493:
+    `parse_table` reads the FIRST one only — with two (two shops' filled-in price lists) the
+    second shop's order would vanish, so such a mail is read by the model (review round 9)."""
+    lines = _attachment_block(clean_text(text)) or []
+    section, with_table = 0, set()
+    for line in lines:
+        if line.startswith("====="):
+            section += 1
+        elif _kosik_header(line) or _pricelist_header(line):
+            with_table.add(section)
+    return len(with_table)
+
+
 def parse_table(text: str) -> list[dict] | None:
     """Items from a recognized tabular attachment, or None when there is no such table."""
     lines = _attachment_block(clean_text(text))
     if not lines:
         return None
     for i, line in enumerate(lines):
-        if "Č.mat.dodavat." in line or ("EAN kus" in line and "Název" in line):
+        if _kosik_header(line):
             return _parse_kosik(lines, i)
-        if "%DPH" in line and ("VO bez DPH" in line or "VO s DPH" in line):
+        if _pricelist_header(line):
             return _parse_pricelist(lines, i)
     return None
 
@@ -279,6 +301,7 @@ def verify(extracted: dict, source: str) -> dict:
     """
     orders, unverified = [], []
     sections = store_key.attachment_sections(source)   # #493: once per mail
+    body = store_key.body_text(source)
     for order in extracted.get("orders", []) or []:
         kept = []
         for item in (order.get("items") or []) + (order.get("missedItems") or []):
@@ -301,7 +324,7 @@ def verify(extracted: dict, source: str) -> dict:
                            **_located(store_key.locate_file(
                                [(i.get("sourceQuote") or "", i.get("name") or "")
                                 for i in order.get("items") or []], sections=sections,
-                               header=order.get("store", "") or ""), sections),
+                               header=order.get("store", "") or "", body=body), sections),
                            "items": kept})
     if unverified:
         log.warning("%d item(s) could not be verified against the email: %s",
@@ -364,7 +387,11 @@ def run(client, email: dict) -> dict:
                 "companyName": extracted.get("companyName", "") or "",
                 "prompt_hash": client.last_prompt_hash}
 
-    table = parse_table(source)
+    tables = table_attachments(source)
+    table = parse_table(source) if tables <= 1 else None
+    if tables > 1:
+        log.info("%d attachments carry a table — read by the model, the code reads only the "
+                 "first (#493)", tables)
     if table:
         sections = store_key.attachment_sections(source)   # #493
         head = (extracted.get("orders") or [{}])[0]

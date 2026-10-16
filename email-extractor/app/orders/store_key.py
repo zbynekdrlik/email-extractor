@@ -43,9 +43,9 @@ _SPACES_RE = re.compile(r"\s+")
 _HEADER_NOISE_RE = re.compile(
     r"(?<!\d)\d{1,2}\s*\.\s*\d{1,2}(?:\s*\.\s*(?:\d{4}|\d{2})(?!\d))?\.?(?!\d)"
     r"|(?<!\d)\d{1,2}\s*\.\s*[-\u2013\u2014]\s*(?=\d{1,2}\s*\.\s*\d{1,2})"
-    r"|\bobj(?:ednavk\w*)?\s*\.?\s*(?:c\s*\.?\s*|cislo\s*)?\d{4,}"
+    r"|\bobj(?!ekt)\w*\s*\.?\s*(?:c\s*\.?\s*|cislo\s*)?\d{4,}"
     r"|(?<!\d)\d{1,2}\s*\.?\s*(?:tyzden\w*|tyzd\w*|tyz|week|kw|kt)\b"
-    r"|\b(?:kw|kt|week|tyzden)\s*\.?\s*\d{1,2}(?!\d)(?!\s*\.\s*\d)")
+    r"|\b(?:kw|kt|week|tyzden)\s*\.?\s*\d{1,2}(?!\d)(?!\s*\.\s*\d{1,2}(?!\d))")
 MAX_HEADER_NUMBER = 5   # digits of a number a header keeps (an order number is longer)
 
 STOPWORDS = frozenset({
@@ -139,20 +139,24 @@ def _in_section(needle: str, words: str) -> bool:
     return len(want.strip()) >= 3 and want in words
 
 
-def locate_file(texts, source: str = "", sections=None, header: str = "") -> str:
+def locate_file(texts, source: str = "", sections=None, header: str = "",
+                body: str | None = None) -> str:
     """The attachment an order was read from: the ONE section its block `header` is in, else
-    the section containing the most of its items (a quote or a name each) — only a STRICT
+    the section holding the most of its items (a quote or a name each) — only a STRICT
     winner; "" otherwise (no sections, no hit, a tie, or the header and the lines naming two
     different files). Best effort and never guessed: an order whose file stays unknown keeps
     only its block header as the store key. The header comes first (review round 5): the
     incident's files share most rows, so the lines tied and one shop's orders got different
     identities day by day. Pass `sections` (computed ONCE per mail with
-    `attachment_sections`) when locating several orders of one mail."""
+    `attachment_sections`) and the mail's `body` (`body_text`) when locating several orders
+    of one mail."""
     if sections is None:
         sections = attachment_sections(source)
+    if body is None:
+        body = body_text(source)
     if not sections:
         return ""
-    by_lines = _by_lines(texts, sections)
+    by_lines = _by_lines(texts, sections, body)
     by_header = ""
     if str(header or "").strip():
         hits = [name for name, words in sections if _in_section(header, words)]
@@ -162,12 +166,20 @@ def locate_file(texts, source: str = "", sections=None, header: str = "") -> str
     return by_header or by_lines
 
 
-def _by_lines(texts, sections) -> str:
+def body_text(source: str) -> str:
+    """The words text of the mail itself — everything before its first attachment section."""
+    text = str(source or "")
+    first = _SECTION_RE.search(text)
+    return _words_text(text[:first.start()] if first else text)
+
+
+def _by_lines(texts, sections, body: str = "") -> str:
     """The section holding the most of the items — a strict winner, else "". An item is a
-    text or a tuple of alternatives, the first one found in ANY section deciding: its quote,
-    and its name only when the quote is in none (review round 7: a quote the model reformatted
-    matched no section; round 8: the incident's order forms share their product rows, so a
-    name is in every file — counted beside a located quote it tied the files)."""
+    text or a tuple of alternatives, the first one found ANYWHERE deciding: its quote, and its
+    name only when the quote is nowhere (review round 7: a quote the model reformatted matched
+    nothing; round 8: the incident's order forms share their product rows — a name is in
+    every file and must never tie a located quote). A text found in the mail `body` is no
+    attachment's (round 9: a body order's name in a form put it into that form's shop)."""
     counts = [0] * len(sections)
     found = False
     for x in texts or ():
@@ -180,6 +192,8 @@ def _by_lines(texts, sections) -> str:
                     counts[i] += 1
                 found = True
                 break
+            if body and _in_section(t, body):
+                break   # read from the mail itself — counts for no file
     if not found:
         return ""
     best = max(counts)
@@ -255,6 +269,12 @@ def for_orders(orders: list[dict], drop=()) -> list[StoreKey]:
             for header, src, toks, unknown in raw]
 
 
+def names_a_block(key: StoreKey) -> bool:
+    """The order sits under a header block of its own — a header with a WORD in it, even one
+    naming nothing („Predajňa:"); a header that is only a date („16.10.") names no block."""
+    return bool(re.search(r"[a-z]", dl_match.fold(key.header)))
+
+
 def is_multi_store(keys: list[StoreKey], shop_evidence: bool = False) -> bool:
     """The mail carries orders of ≥2 different shops (`identity`; header blocks naming nothing
     count as one more) AND the shops are real:
@@ -265,7 +285,7 @@ def is_multi_store(keys: list[StoreKey], shop_evidence: bool = False) -> bool:
     shops = len({k.identity for k in keys if k.identity})
     # a header block naming nothing („Predajňa:") next to a named shop is a shop of its
     # own (review round 8: its order shipped to the sender's card by address)
-    shops += any(k.header.strip() and not k.identity for k in keys)
+    shops += any(names_a_block(k) and not k.identity for k in keys)
     return (shop_evidence or any(k.header.strip() for k in keys)) and shops >= 2
 
 
