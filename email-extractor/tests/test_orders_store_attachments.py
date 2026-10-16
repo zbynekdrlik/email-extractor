@@ -349,13 +349,13 @@ def test_a_city_initial_after_the_house_number_is_no_suffix():
 def test_a_letter_written_apart_after_a_house_number_is_asked():
     """„19 A" may be house 19/A or house 19 + an initial: a card whose street has that bare
     number (or the number with any letter) is no proof — asked (review round 20: „19 A" and
-    „SNP 48 A" shipped to the bare-number card). An initial with its dot („7 / B. Bystrica")
-    is no suffix."""
+    „SNP 48 A" shipped to the bare-number card)."""
     assert _street_hit(_street_family("Hlavná 19", "Hlavná 19/A"), "BISTRO Hlavná 19 A") is None
     assert _street_hit(_street_family("Hlavná 19", "Hlavná 19/A"), "BISTRO Hlavná 19 b") is None
     assert _street_hit(_street_family("SNP 48", "SNP 48/A"), "BISTRO SNP 48 A") is None
+    # „7 / B. Bystrica": house 7/B or house 7 + an initial — undecidable, asked (round 21)
     assert _street_hit(_street_family("Hlavná 7", "Hlavná 7/B"),
-                       "BISTRO Hlavná 7 / B. Bystrica") == ("2999000000801", "store_address")
+                       "BISTRO Hlavná 7 / B. Bystrica") is None
 
 
 def test_an_unsure_house_number_vetoes_only_a_unique_winner():
