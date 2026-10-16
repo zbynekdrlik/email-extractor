@@ -177,8 +177,10 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   and letter runs apart — „35BB", round 9; a house number WITH its one-letter suffix after a
   slash or glued is ONE unit, „19/A" = „19/a" = „19A" ≠ „19/B" ≠ „19", rounds 17-18: the 19/B
   shop matched the „19/A" card, then a bare „19" card; a letter written APART is never glued —
-  „7 B. Bystrica" is house 7, round 19 — so „19 A" is asked, and a lowercase „19 b" still
-  matches a bare „19" card: accepted residual) must all be in the header (round 8: „BISTRO Hlavná
+  „7 B. Bystrica" is house 7, round 19 — and makes that house number undecidable: no card with
+  it, bare or suffixed, is proof, „19 A" / „SNP 48 A" / „19 b" are asked, round 20; an initial
+  with its dot is never a suffix, also after a slash „7 / B. Bystrica") must all be in the
+  header (round 8: „BISTRO Hlavná
   5" matched „Hlavná 12"; the #101 corpus case GT1 / GT2 still resolves), any other mail
   exactly as #101; (3) family: `_by_delivery_address` —
   NOT in a multi-shop mail; (4) the old llm / exact_email rungs.
