@@ -314,6 +314,9 @@ def verify(extracted: dict, source: str) -> dict:
         "notes": extracted.get("notes", "") or "",
         "orders": orders,
         "unverified": unverified,
+        # #493: how many attachments the mail has — „several files" for a sender with
+        # learned shop rules, also when an order's file could not be told (review round 8)
+        "attachments": len(sections),
     }
 
 
@@ -363,6 +366,7 @@ def run(client, email: dict) -> dict:
 
     table = parse_table(source)
     if table:
+        sections = store_key.attachment_sections(source)   # #493
         head = (extracted.get("orders") or [{}])[0]
         log.info("tabular attachment recognized: %d item(s) parsed by code (model said %d)",
                  len(table), len(head.get("items") or []))
@@ -377,11 +381,11 @@ def run(client, email: dict) -> dict:
                         "recipientGroup": head.get("recipientGroup", "") or "",
                         "store": head.get("store", "") or "",
                         **_located(store_key.locate_file(
-                            [i.get("name") or "" for i in table], source,
-                            header=head.get("store", "") or ""),
-                            store_key.attachment_sections(source)),
+                            [i.get("name") or "" for i in table], sections=sections,
+                            header=head.get("store", "") or ""), sections),
                         "items": table}],
             "unverified": [],
+            "attachments": len(sections),
             "source": "table",
         }
     else:

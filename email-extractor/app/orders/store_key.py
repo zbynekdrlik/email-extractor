@@ -43,9 +43,9 @@ _SPACES_RE = re.compile(r"\s+")
 _HEADER_NOISE_RE = re.compile(
     r"(?<!\d)\d{1,2}\s*\.\s*\d{1,2}(?:\s*\.\s*(?:\d{4}|\d{2})(?!\d))?\.?(?!\d)"
     r"|(?<!\d)\d{1,2}\s*\.\s*[-\u2013\u2014]\s*(?=\d{1,2}\s*\.\s*\d{1,2})"
-    r"|\bobj\w*\s*\.?\s*(?:c\s*\.?\s*|cislo\s*)?\d{4,}"
+    r"|\bobj(?:ednavk\w*)?\s*\.?\s*(?:c\s*\.?\s*|cislo\s*)?\d{4,}"
     r"|(?<!\d)\d{1,2}\s*\.?\s*(?:tyzden\w*|tyzd\w*|tyz|week|kw|kt)\b"
-    r"|\b(?:kw|kt|week|tyzden)\s*\.?\s*\d{1,2}(?!\d)")
+    r"|\b(?:kw|kt|week|tyzden)\s*\.?\s*\d{1,2}(?!\d)(?!\s*\.\s*\d)")
 MAX_HEADER_NUMBER = 5   # digits of a number a header keeps (an order number is longer)
 
 STOPWORDS = frozenset({
@@ -163,21 +163,28 @@ def locate_file(texts, source: str = "", sections=None, header: str = "") -> str
 
 
 def _by_lines(texts, sections) -> str:
-    """The section containing the most of the items — a strict winner, else "". An item is a
-    text or a tuple of alternatives (its quote AND its name, review round 7: a quote the
-    model reformatted is in no section although the item's name is in a cell); it counts in
-    a section when any of them is there."""
-    items = [[t for t in ((x,) if isinstance(x, str) else x) if len(_squash(t)) >= 3]
-             for x in texts or ()]
-    items = [alts for alts in items if alts]
-    if not items:
+    """The section holding the most of the items — a strict winner, else "". An item is a
+    text or a tuple of alternatives, the first one found in ANY section deciding: its quote,
+    and its name only when the quote is in none (review round 7: a quote the model reformatted
+    matched no section; round 8: the incident's order forms share their product rows, so a
+    name is in every file — counted beside a located quote it tied the files)."""
+    counts = [0] * len(sections)
+    found = False
+    for x in texts or ():
+        for t in (x,) if isinstance(x, str) else x:
+            if len(_squash(t)) < 3:
+                continue
+            hits = [i for i, (_name, words) in enumerate(sections) if _in_section(t, words)]
+            if hits:
+                for i in hits:
+                    counts[i] += 1
+                found = True
+                break
+    if not found:
         return ""
-    scored = sorted(((sum(1 for alts in items if any(_in_section(t, words) for t in alts)),
-                      name) for name, words in sections), key=lambda s: -s[0])
-    best = scored[0]
-    if best[0] == 0 or (len(scored) > 1 and scored[1][0] == best[0]):
-        return ""
-    return best[1]
+    best = max(counts)
+    winners = [i for i, n in enumerate(counts) if n == best]
+    return sections[winners[0]][0] if len(winners) == 1 else ""
 
 
 # --- the key ----------------------------------------------------------------------------
@@ -249,13 +256,17 @@ def for_orders(orders: list[dict], drop=()) -> list[StoreKey]:
 
 
 def is_multi_store(keys: list[StoreKey], shop_evidence: bool = False) -> bool:
-    """The mail carries orders of ≥2 different shops (`identity`) AND the shops are real:
+    """The mail carries orders of ≥2 different shops (`identity`; header blocks naming nothing
+    count as one more) AND the shops are real:
     the model reported a shop header block on some order (even an empty „Predajňa:"), or
     `shop_evidence` (the sender has learned shop rules). File names alone never make shops:
     a customer may send one file per day / per kind of goods, and that must stay one order
     (#81.1) — exactly as before #493."""
-    return ((shop_evidence or any(k.header.strip() for k in keys))
-            and len({k.identity for k in keys if k.identity}) >= 2)
+    shops = len({k.identity for k in keys if k.identity})
+    # a header block naming nothing („Predajňa:") next to a named shop is a shop of its
+    # own (review round 8: its order shipped to the sender's card by address)
+    shops += any(k.header.strip() and not k.identity for k in keys)
+    return (shop_evidence or any(k.header.strip() for k in keys)) and shops >= 2
 
 
 def from_context(ctx: dict) -> StoreKey | None:

@@ -74,7 +74,10 @@ def resolve_orders(conn, customers: list[dict], sender: str, extracted: dict, ll
                                 store=k.header, key=k, rules=rules, multi_store=multi,
                                 delivery_text=extracted.get("notes", ""))
                for k in keys]
-    several_files = len({_file_id(o) for o in orders if _file_id(o)}) >= 2
+    # the mail's attachments — not only the files an order was found in (review round 8:
+    # an untold sibling hid the second file); `extract` records the count
+    several_files = max(int(extracted.get("attachments") or 0),
+                        len({_file_id(o) for o in orders if _file_id(o)})) >= 2
     collapsed = customer.collapsed_shops(keys, matched, multi, has_rules, several_files)
     for i in collapsed:
         matched[i] = None

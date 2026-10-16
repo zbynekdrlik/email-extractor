@@ -206,14 +206,27 @@ def _by_delivery_address(owners: list[dict], delivery_text: str) -> dict | None:
     return None
 
 
-def _by_store(owners: list[dict], store: str) -> dict | None:
+def _by_store(owners: list[dict], store: str, strict: bool = False) -> dict | None:
     """Which of the branches sharing one address does this block header name? (#101)
 
     Matched on the STREET, never the name: the live table calls both Gazdovský trh rows
     "GT1", so the name proves nothing, while the header over each half of the file
     ("GT2- 29 augusta 19 BB") carries the street verbatim. Only a UNIQUE hit counts —
     a header naming both branches, or neither, decides nothing.
+
+    `strict` (#493 — a mail of several shops / a sender with learned shop rules, where this
+    is the only automatic shop rung besides a rule): the street's folded words INCLUDING its
+    house number must all be in the header (review round 8: „BISTRO Hlavná 5" matched the
+    card on „Hlavná 12" — the old comparison drops words of ≤ 2 characters). Any other mail
+    keeps the #101 comparison exactly.
     """
+    if strict:
+        want_tokens = set(store_key.tokens(store, keep_numbers=True))
+        hits = [c for c in owners
+                if (street_tokens := set(store_key.tokens(c.get("street", ""),
+                                                          keep_numbers=True)))
+                and street_tokens <= want_tokens]
+        return hits[0] if len(hits) == 1 else None
     want = _words(store)
     if not want:
         return None
@@ -342,7 +355,7 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
             family = stem_family
 
     if family:
-        branch = _by_store(family, store)
+        branch = _by_store(family, store, strict=multi_store or bool(rules))
         if branch:
             # The EAN, not just the name: the live table calls both Gazdovský trh rows
             # "GT1", so a name-only log line reads as if the wrong branch was picked.
