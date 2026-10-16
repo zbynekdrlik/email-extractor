@@ -235,3 +235,54 @@ def test_a_date_alone_is_no_shop_block_and_a_glued_house_number_still_matches():
     key = store_key.for_orders([{"store": "GT1 Družby 35BB"}, {"store": "GT2"}])[0]
     hit = customer.resolve(fam, SENDER, "", "", key=key, multi_store=True)
     assert (hit.ean_edi, hit.rule) == ("2999000000701", "store_address")
+
+
+# --- review round 10 ------------------------------------------------------------------------
+
+def test_a_body_order_with_a_reformatted_or_bare_quote_stays_out_of_the_forms(pg):
+    """The model reformats the body quote („10 x rožok štandart 50 g") or quotes the bare
+    name: the item's text is in the BODY first — never placed into the PR form by its name."""
+    snapshot.import_snapshot(pg, CATALOG_CSV, TOWNS_CSV)
+    known = store_key.for_orders([{"store": "Predajňa:",
+                                   "sourceFile": "OBJ Pekárová žena PR.xlsx"}])[0]
+    store_rules.remember(pg, sender_email=SENDER, key=known, ean_edi="2999000000113",
+                         question_id=1, by="sklad")
+    for mid, quote in (("m-ref", "10 x rožok štandart 50 g"), ("m-bare", "Rožok štandart 50g")):
+        out = extract.verify({"orders": [BODY_ORDERS[0], _order(
+            "", _item("Rožok štandart 50g", 10, quote))]}, BODY)
+        assert [o["sourceFile"] for o in out["orders"]] == ["OBJ Pekárová žena PR.xlsx", ""]
+        result, rec = _run_mail(pg, mid, BODY, [BODY_ORDERS[0], _order(
+            "", _item("Rožok štandart 50g", 10, quote))])
+        assert _shipped(result) == [("2999000000113", ["G50", "VIA"])], mid
+
+
+def test_one_workbook_of_several_shops_price_lists_is_read_by_the_model():
+    """One xlsx, a filled price list per shop on its own sheet, and the model names two shops:
+    the code would read straight through both sheets into ONE order — the model reads it."""
+    hdr = "Názov\t%DPH\tVO bez DPH\tVO s DPH\n"
+    text = ("Subject: objednávka\n\nAttachments:\n===== Cennik.xlsx =====\n"
+            "[Sheet: Alfa]\nPredajňa: Alfa\n" + hdr + "Rožok štandart 50g\t20\t0.10\t0.12\t120\n"
+            "[Sheet: Beta]\nPredajňa: Beta\n" + hdr + "Rožok štandart 50g\t20\t0.10\t0.12\t40\n"
+            "Vianočka 400g\t20\t1\t1.2\t7\n")
+    orders = [_order("Predajňa: Alfa", _item("Rožok štandart 50g", 120,
+                                             "Rožok štandart 50g\t20\t0.10\t0.12\t120")),
+              _order("Predajňa: Beta", _item("Rožok štandart 50g", 40,
+                                             "Rožok štandart 50g\t20\t0.10\t0.12\t40"),
+                     _item("Vianočka 400g", 7, "Vianočka 400g\t20\t1\t1.2\t7"))]
+
+    class Model:
+        last_prompt_hash = "x"
+
+        def json_call(self, *a, **k):
+            return {"senderName": "N", "senderEmail": SENDER, "companyName": "",
+                    "isChangeRequest": False, "notes": "", "orders": orders}
+    out = extract.run(Model(), {"combined_text": text, "today": "2026-07-30",
+                                "subject": "objednávka"})
+    assert out["source"] == "model"
+    assert [o["store"] for o in out["orders"]] == ["Predajňa: Alfa", "Predajňa: Beta"]
+
+
+def test_a_date_only_header_never_makes_goods_files_shops():
+    keys = store_key.for_orders([{"store": "16.10.", "sourceFile": "Objednávka pečivo.xlsx"},
+                                 {"store": "", "sourceFile": "Objednávka chlieb.xlsx"}])
+    assert not store_key.is_multi_store(keys)
