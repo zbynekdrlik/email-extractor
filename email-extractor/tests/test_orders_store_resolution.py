@@ -9,9 +9,9 @@ from app.orders import customer, store_key
 
 SENDER = "nakup@retazec-test.sk"
 FAMILY = [
-    {"ean_edi": "2999000000201", "name": "Školská jedáleň, Hrdinov 7 Mestečko",
+    {"ean_edi": "2999000000201", "name": "Školská jedáleň, Lipová 7 Mestečko",
      "trade_name": "Súkromná škola", "emails": [SENDER], "city": "Mestečko",
-     "street": "Hrdinová 7", "zip": ""},
+     "street": "Lipová 7", "zip": ""},
     {"ean_edi": "2999000000202", "name": "Tržnica Mestečko - Riadok 1",
      "trade_name": "Tržnica Mestečko", "emails": [SENDER], "city": "Mestečko",
      "street": "Riadok 1", "zip": ""},
@@ -27,7 +27,7 @@ FILES = {"PR": "OBJ Pekárová žena PR.xlsx", "SKOLA": "OBJ Pekárová žena š
          "TR": "OBJ Pekárová žena TR.xlsx"}
 ORDERS = [
     {"store": "PR", "sourceFile": FILES["PR"]},
-    {"store": "ŠKOLA, Hrdinov 7, MS", "sourceFile": FILES["SKOLA"]},
+    {"store": "ŠKOLA, Lipová 7, MS", "sourceFile": FILES["SKOLA"]},
     {"store": "DOLINA", "sourceFile": FILES["ZA"]},
     {"store": "BISTRO", "sourceFile": FILES["BISTRO"]},
     {"store": "Predajňa: Tržnica", "sourceFile": FILES["TR"]},
@@ -46,7 +46,7 @@ def _resolve(key, rules=(), multi=True, delivery_text=""):
 def test_tokens_drop_order_words_our_brand_days_and_numbers():
     assert store_key.tokens("OBJ Pekárová žena BISTRO 42. týždeň pondelok") == ["bistro"]
     assert store_key.tokens("Predajňa: Tržnica") == ["trznica"]
-    assert store_key.tokens("ŠKOLA, Hrdinov SNP 7, MT") == ["skola", "hrdinov", "snp", "mt"]
+    assert store_key.tokens("ŠKOLA, Lipová SNP 7, MT") == ["skola", "lipova", "snp", "mt"]
     # a street genitive month stays (it IS the street), a nominative month name does not
     assert "augusta" in store_key.tokens("GT2- 29 augusta 19 BB")
     assert store_key.tokens("objednávka október kw42") == []
@@ -55,11 +55,11 @@ def test_tokens_drop_order_words_our_brand_days_and_numbers():
 def test_the_key_drops_what_every_shop_of_the_mail_shares():
     keys = store_key.for_orders(ORDERS)
     # a HEADER keeps its numbers („Predajňa 1" / „Predajňa 2" are two shops), a file not
-    assert [k.text for k in keys] == ["pr", "7 hrdinov ms skola", "dolina za", "bistro",
+    assert [k.text for k in keys] == ["pr", "7 lipova ms skola", "dolina za", "bistro",
                                       "tr trznica"]
     # the full tokens keep everything (a learned rule is matched against them)
     assert keys[0].tokens == frozenset({"pr"})
-    assert keys[1].label == "„ŠKOLA, Hrdinov 7, MS“ (príloha OBJ Pekárová žena škola.xlsx)"
+    assert keys[1].label == "„ŠKOLA, Lipová 7, MS“ (príloha OBJ Pekárová žena škola.xlsx)"
     assert store_key.is_multi_store(keys)
 
 
@@ -111,7 +111,7 @@ def test_the_incident_shops_resolve_by_name_or_are_asked():
     assert (got["BISTRO"].ean_edi, got["BISTRO"].rule) == ("2999000000204", "store_name")
     assert (got["Predajňa: Tržnica"].ean_edi,
             got["Predajňa: Tržnica"].rule) == ("2999000000202", "store_name")
-    assert got["ŠKOLA, Hrdinov 7, MS"].ean_edi == "2999000000201"
+    assert got["ŠKOLA, Lipová 7, MS"].ean_edi == "2999000000201"
     assert got["DOLINA"] is None
     assert got["PR"] is None
 

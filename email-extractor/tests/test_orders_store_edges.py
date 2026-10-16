@@ -164,8 +164,8 @@ def test_a_header_s_dates_and_order_numbers_are_not_the_shop():
     assert store_key.tokens("Obj. č. 2026104512 BISTRO", keep_numbers=True) == ["bistro"]
     # short standalone numbers stay: „Predajňa 1" / „Predajňa 2", a house number
     assert store_key.tokens("Predajňa 2", keep_numbers=True) == ["2"]
-    assert store_key.tokens("ŠKOLA, Hrdinov 7, MS", keep_numbers=True) == [
-        "skola", "hrdinov", "7", "ms"]
+    assert store_key.tokens("ŠKOLA, Lipová 7, MS", keep_numbers=True) == [
+        "skola", "lipova", "7", "ms"]
 
 
 def test_the_ambiguity_alert_never_depends_on_the_snapshot_rebuild(pg, monkeypatch):
