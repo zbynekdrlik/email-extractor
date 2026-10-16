@@ -321,3 +321,16 @@ def test_a_house_numbers_letter_suffix_is_part_of_the_house_number():
     assert _street_hit(_street_family("Hlavná 19/A", "Hlavná 7"), "BISTRO Hlavná 19B") is None
     assert _street_hit(_street_family("Hlavná 19/A", "Hlavná 19/B"), "BISTRO Hlavná 19/b") == (
         "2999000000802", "store_address")
+
+
+def test_a_house_number_with_its_letter_is_one_unit():
+    """Review round 18: a bare „Hlavná 19" card matched any suffix the header carried — the
+    19/B shop shipped to it next to a 19/A card. A suffixed house number is ONE unit: „19/B"
+    matches neither „19" nor „19/A" (asked); „19" and „19/A" each find their own card."""
+    fam = _street_family("Hlavná 19", "Hlavná 19/A")
+    assert _street_hit(fam, "BISTRO Hlavná 19/B") is None
+    assert _street_hit(fam, "BISTRO Hlavná 19") == ("2999000000801", "store_address")
+    assert _street_hit(fam, "BISTRO Hlavná 19/A") == ("2999000000802", "store_address")
+    # a capital suffix written apart („19 A") is the same house number
+    assert _street_hit(_street_family("Hlavná 19/A", "Hlavná 7"), "BISTRO Hlavná 19 A") == (
+        "2999000000801", "store_address")
