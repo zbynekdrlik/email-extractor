@@ -19,9 +19,10 @@ so the authority order matters:
 #493 — a customer with SEVERAL SHOPS ordering in one mail (one attachment per shop). Above
 everything: a shop rule the warehouse taught for EXACTLY this shop (sender + shop key → card,
 `store_rule`). Within a family the shop is decided by the street in its header (#101,
-`store_address`), then by the shop key against the card's name / trade name / city / street
-(`store_name`, a UNIQUE hit only); the mail-level delivery text (#418) is NOT used when the
-mail carries several shops — it cannot tell them apart. `collapsed_shops` is the poistka: in
+`store_address`) — never by a card whose name resembles the shop (review round 7: such a card
+only ranks first in the question, `candidates_for_question`); the mail-level delivery text
+(#418) is NOT used when the mail carries several shops — it cannot tell them apart. Each shop
+is asked once, then its rule decides. `collapsed_shops` is the poistka: in
 a mail of several shops only a shop rung may decide a shop — anything the model pick, the
 sender address or the delivery text decided is asked instead (the 2026-10-16 incident: 21
 files of 5 shops shipped to one card).
@@ -38,7 +39,9 @@ log = logging.getLogger("orders.customer")
 
 GATE_SURE = 0.85
 # #493: the rules that looked at the SHOP the order is for — the poistka never undoes these.
-STORE_RULES = frozenset({"store_rule", "store_address", "store_name"})
+# The shop's NAME is not one of them (review round 7): a card whose name merely resembles the
+# shop only ranks first in the question (`candidates_for_question`) — never ships.
+STORE_RULES = frozenset({"store_rule", "store_address"})
 CANDIDATES = 10
 # Free providers: a domain match on them would attach an order to a random customer.
 GENERIC_DOMAINS = {
@@ -228,52 +231,6 @@ def _card_words(c: dict) -> set[str]:
         str(c.get(f) or "") for f in ("name", "trade_name", "city", "street"))))
 
 
-def _by_store_name(family: list[dict], key: store_key.StoreKey | None) -> dict | None:
-    """Which card of the family does this order's SHOP KEY name? (#493)
-
-    The incident's headers carry no street („BISTRO", „Predajňa: Tržnica", „ŽILINA") and one
-    carries nothing at all („Predajňa:" — the shop is only in the file name „… PR.xlsx"), so
-    #101's street match decides nothing. The key's 4-letter stems are compared with each
-    card's name + trade name + city + street; a stem every card of the family shares is no
-    signal and is dropped. Exactly ONE card hit → that card; none or several (two shops in
-    one city: „ŽILINA") → None, and the order is asked — never a guess.
-
-    Both views of the shop must name that SAME one card (review round 5): `key` (without the
-    words every shop of the mail shares) and `own` (all its words) — and that card must carry
-    EVERY distinguishing word of `own` (review round 6: one hit word is no proof — „Kaufland
-    Martin" hit only Kaufland Žilina when no family card says Martin, a new „BISTRO Trnava"
-    hit the known BISTRO Dolina). Anything less is asked, never shipped to a namesake."""
-    if key is None or len(family) < 2:
-        return None
-    words = [_card_words(c) for c in family]
-    common: set[str] = set(words[0]).intersection(*words[1:])
-    own = key.own_stems() - common
-    narrow = _one_card_hit(words, key.stems() - common, key.text, family)
-    whole = _one_card_hit(words, own, key.text, family)
-    if narrow is not None and whole is not None and narrow == whole and own <= words[whole]:
-        return family[whole]
-    if narrow is not None or whole is not None:
-        log.info("shop key %s: no card carries all its words in both views (%s / %s, own "
-                 "words %s) — asking", key.text, narrow is not None and
-                 family[narrow].get("ean_edi"), whole is not None and
-                 family[whole].get("ean_edi"), sorted(own))
-    return None
-
-
-def _one_card_hit(words: list, want: set[str], label: str, family: list[dict]) -> int | None:
-    """The index of the ONE family card any of the `want` stems hits, or None (no stem, no
-    hit, several)."""
-    if not want:
-        return None
-    hits = [i for i, w in enumerate(words) if want & w]
-    if len(hits) == 1:
-        return hits[0]
-    if hits:
-        log.info("shop key %s hits %d cards of the family (%s) — not unique", label,
-                 len(hits), [family[i].get("ean_edi") for i in hits])
-    return None
-
-
 def _by_shop_rule(hit: store_key.RuleHit, key: store_key.StoreKey, by_ean: dict,
                   addr: str) -> tuple[bool, Matched | None]:
     """The learned-rule rung (#493) -> (decides, result): (True, Matched); (True, None) = ASK
@@ -297,22 +254,24 @@ def _by_shop_rule(hit: store_key.RuleHit, key: store_key.StoreKey, by_ean: dict,
               f"„{taught.get('name', '')}“."))
 
 
-def collapsed_shops(keys: list, matched: list, multi: bool, has_rules: bool = False
-                    ) -> set[int]:
+def collapsed_shops(keys: list, matched: list, multi: bool, has_rules: bool = False,
+                    several_files: bool = False) -> set[int]:
     """The poistka (#493): indexes of the orders that must be ASKED instead of shipped.
 
     A shop is shipped ONLY when a SHOP rung decided it (`STORE_RULES`: a learned shop rule,
-    the street, the shop name) whenever it is a shop question at all: in a mail of several
+    the street in its header) whenever it is a shop question at all: in a mail of several
     shops (`multi`) EVERY order decided by a rule that never looked at the shop (`llm`,
     `exact_email`, `delivery_address`) is asked — also a lone new shop on its own card and
     an order that names no shop; for a sender with learned shop rules (`has_rules`) the same
     holds for any order that names a shop (owner decision 2: an unknown shop is asked once)
     or whose attachment could not be told (`file_unknown`, review round 6: its shop is
-    unknown, the sender's address must not decide it). Converges: one question per shop,
-    then its rule."""
+    unknown, the sender's address must not decide it) — or, in a mail of `several_files`,
+    any order (review round 7: „Objednávka.xlsx" next to „… BISTRO.xlsx" names no shop, yet it
+    is another one of them). Converges: one question per shop, then its rule."""
     out = {i for i, m in enumerate(matched)
            if m is not None and m.rule not in STORE_RULES
-           and (multi or (has_rules and (keys[i].identity or keys[i].file_unknown)))}
+           and (multi or (has_rules and (keys[i].identity or keys[i].file_unknown
+                                         or several_files)))}
     if out:
         log.warning("poistka: %d order(s) were decided by a rule that ignores the shop (%s) "
                     "although %s — held and asked per shop", len(out),
@@ -326,7 +285,7 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
             company_name: str, llm: dict | None = None,
             store: str = "", delivery_text: str = "",
             key: store_key.StoreKey | None = None, rules=(),
-            multi_store: bool = False, use_names: bool = False) -> Matched | None:
+            multi_store: bool = False) -> Matched | None:
     """Decide who ordered, or None when it cannot be decided safely.
 
     `store` is the block header of the order's own half of a multi-shop attachment; it is
@@ -339,9 +298,11 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
     #493: `key` is the order's shop key (header + attachment, `store_key.for_orders`),
     `rules` the warehouse's learned shop rules of THIS sender ([(words, ean)]), and
     `multi_store` says the mail carries several different shops — then the mail-level
-    delivery text is never used to pick one shop's card. `use_names` enables the shop-name
-    rung — only in a multi-shop mail (and the worker sweep of a shop question); any other
-    mail keeps exactly the pre-#493 rungs (review rounds 3-4).
+    delivery text is never used to pick one shop's card. A shop is decided only by the
+    warehouse's rule for exactly that shop or the street in its header — never by a card
+    whose NAME resembles it (review rounds 4-7 found a wrong card each time: a shared town,
+    one shared word, a number or a code the card cannot be compared on); that card only
+    ranks first in the question.
     """
     llm = llm or {}
     store = store or (key.header if key is not None else "")
@@ -393,16 +354,6 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
                 confidence=0.99, rule="store_address",
                 note=(f"Odosielateľ má viac prevádzkových kariet; táto časť súboru je "
                       f"nadpísaná „{store}“, čo sedí na adresu „{branch.get('street', '')}“."))
-        named = _by_store_name(family, key) if use_names else None
-        if named and key is not None:
-            log.info("family of %d cards; the shop key %r picks %s (%s) by name/city",
-                     len(family), key.text if key else "", named.get("ean_edi"),
-                     named.get("name"))
-            return Matched(
-                ean_edi=str(named.get("ean_edi") or ""), name=named.get("name", ""),
-                confidence=0.95, rule="store_name",
-                note=(f"Odosielateľ má viac prevádzkových kariet; predajňa {key.label} sedí "
-                      f"na názov/mesto karty „{named.get('name', '')}“."))
         # #493: several shops in one mail — the mail-level delivery text cannot say which
         # of them it describes, so it never picks a card for one of them
         site = None if multi_store else _by_delivery_address(family, delivery_text)

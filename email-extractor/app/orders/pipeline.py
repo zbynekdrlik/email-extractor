@@ -353,7 +353,7 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                                    customers=customers, free_text=free_text, order=order,
                                    key=oc.keys[i], scoped=oc.scoped[i],
                                    on_new=new_questions.append,
-                                   shop_context=oc.shop_context, multi=oc.multi, slot=i)
+                                   shop_context=oc.shop_context, slot=i)
     # #164: do NOT move this check to after product matching — that would push mails the
     # date conflict used to short-circuit into NEW per-item LLM calls, missing the frozen
     # corpus cache and forcing a paid re-record (see the design comment on #164).

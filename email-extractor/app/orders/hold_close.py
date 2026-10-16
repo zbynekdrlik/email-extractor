@@ -541,17 +541,13 @@ def retry_unknown_customer_questions(conn, cfg, upload=None, post=None) -> list[
         if not sender_email:
             continue
         # #493: a question asked for ONE SHOP is settled only by a SHOP rung (a learned shop
-        # rule, the street, the shop name/city) — never by the sender address: the poistka
+        # rule, the street in its header) — never by the sender address: the poistka
         # asked it precisely because the sender's one card does not say which shop it is
         key = store_key.from_context(ctx)
-        # only the rungs the pipeline used for it: the shop-name rung only for a question of
-        # a mail of several shops (`store_names`, review round 5 — a rule sender's one-shop
-        # question was settled by a file word the pipeline had deliberately not used)
         matched = customer_mod.resolve(
             customers, sender_email, ctx.get("sender_name", ""), ctx.get("company_name", ""),
             key=key, rules=store_rules.for_sender(conn, sender_email) if key else (),
-            multi_store=key is not None,
-            use_names=key is not None and bool(ctx.get("store_names")))
+            multi_store=key is not None)
         # a per-sender question asked in a shop context (`no_address` — a multi-shop mail
         # or sender) is settled only by a shop rung too: it has no key, so only a human
         # (review round 3: the sweep answered it with the sender's one card)

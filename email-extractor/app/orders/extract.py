@@ -299,7 +299,7 @@ def verify(extracted: dict, source: str) -> dict:
                            # its block header, else its own quotes — never asked of the
                            # model) — with the header it is the order's shop identity
                            **_located(store_key.locate_file(
-                               [i.get("sourceQuote") or i.get("name") or ""
+                               [(i.get("sourceQuote") or "", i.get("name") or "")
                                 for i in order.get("items") or []], sections=sections,
                                header=order.get("store", "") or ""), sections),
                            "items": kept})

@@ -4,9 +4,10 @@ A customer with several shops sends ONE mail with one attachment per shop (the 2
 incident: five xlsx files, headers „BISTRO", „Predajňa: Tržnica", „ŽILINA", „ŠKOLA, …" and an
 empty „Predajňa:" whose only identifier is the file name „… PR.xlsx"). The extraction gives
 each order its block header (`store`, #101) and — since #493 — the attachment it was read
-from (`sourceFile`, located here from the item quotes). This module turns those two into a
-normalized, deterministic key the customer resolver can match against card names / cities
-(`customer._by_store_name`) and the warehouse's learned shop rules (`match_rule`).
+from (`sourceFile`, located here by the header, else the item quotes). This module turns those
+two into a normalized, deterministic identity the warehouse's learned shop rules are matched
+against (`match_rule`) and the per-shop question is keyed on; card names only RANK that
+question's candidates.
 
 Pure: no DB, no model. Folding goes through `dl_match.fold` — the ONE diacritic folder of the
 package (never re-derived, the #265 Slovak-stem lesson) — and stems use the corpus-validated
@@ -35,12 +36,14 @@ _SPACES_RE = re.compile(r"\s+")
 # what a HEADER's numbers must not keep (review round 5: „BISTRO 16.10." changed its identity
 # every mail, so its rule never matched again): a date („16.10.", „16. 10. 2026", „16.10") or
 # date range („16.-20.10.", round 6), a calendar week („42. týždeň", „43 KT", „KW 42") — on the
-# folded text; numbers of 6+ digits (an order number) are dropped in `tokens`. Everything
-# shorter stays — a house number („Hlavná 1713" / „Hlavná 2210" are two shops, round 6) and a
-# year too: a year in a header re-asks once a year, dropping it could make two shops one.
+# folded text; an order number after „Obj." and numbers of 6+ digits are dropped (`tokens`).
+# Everything shorter stays — a house number („Hlavná 1713" / „Hlavná 2210" are two shops,
+# round 6) and a year too: a year in a header re-asks once a year, dropping it could make two
+# shops one. A range needs its dot („16.-20.10."): „BISTRO 1 - 16.10." keeps its 1 (round 7).
 _HEADER_NOISE_RE = re.compile(
     r"(?<!\d)\d{1,2}\s*\.\s*\d{1,2}(?:\s*\.\s*(?:\d{4}|\d{2})(?!\d))?\.?(?!\d)"
-    r"|(?<!\d)\d{1,2}\s*\.?\s*[-\u2013]\s*(?=\d{1,2}\s*\.\s*\d{1,2})"
+    r"|(?<!\d)\d{1,2}\s*\.\s*[-\u2013\u2014]\s*(?=\d{1,2}\s*\.\s*\d{1,2})"
+    r"|\bobj\w*\s*\.?\s*(?:c\s*\.?\s*|cislo\s*)?\d{4,}"
     r"|(?<!\d)\d{1,2}\s*\.?\s*(?:tyzden\w*|tyzd\w*|tyz|week|kw|kt)\b"
     r"|\b(?:kw|kt|week|tyzden)\s*\.?\s*\d{1,2}(?!\d)")
 MAX_HEADER_NUMBER = 5   # digits of a number a header keeps (an order number is longer)
@@ -74,9 +77,10 @@ def tokens(text, keep_numbers: bool = False) -> list[str]:
     """Normalized words of a header / file name / card text, in order, de-duplicated:
     folded, split on every non-alphanumeric, without stopwords, week codes („kw42") and —
     unless `keep_numbers` (a shop HEADER: „Predajňa 1" / „Predajňa 2" are two shops) — pure
-    numbers. Short words stay (the „PR" / „ZA" shop codes); the name rung itself only
-    compares words of `STEM`+ letters. A header keeps only short standalone numbers — never
-    a date, a week number or a long (order / year) number (`_HEADER_NOISE_RE`)."""
+    numbers. Short words stay (the „PR" / „ZA" shop codes); the question ranking compares
+    only words of `STEM`+ letters. A header keeps standalone numbers of up to
+    `MAX_HEADER_NUMBER` digits — never a date, a week number or an order number
+    (`_HEADER_NOISE_RE`)."""
     out: list[str] = []
     folded = dl_match.fold(text)
     if keep_numbers:
@@ -137,7 +141,7 @@ def _in_section(needle: str, words: str) -> bool:
 
 def locate_file(texts, source: str = "", sections=None, header: str = "") -> str:
     """The attachment an order was read from: the ONE section its block `header` is in, else
-    the section containing the most of its item texts (quotes, else names) — only a STRICT
+    the section containing the most of its items (a quote or a name each) — only a STRICT
     winner; "" otherwise (no sections, no hit, a tie, or the header and the lines naming two
     different files). Best effort and never guessed: an order whose file stays unknown keeps
     only its block header as the store key. The header comes first (review round 5): the
@@ -159,12 +163,17 @@ def locate_file(texts, source: str = "", sections=None, header: str = "") -> str
 
 
 def _by_lines(texts, sections) -> str:
-    """The section containing the most of the item texts — a strict winner, else ""."""
-    needles = [t for t in texts or () if len(_squash(t)) >= 3]
-    if not needles:
+    """The section containing the most of the items — a strict winner, else "". An item is a
+    text or a tuple of alternatives (its quote AND its name, review round 7: a quote the
+    model reformatted is in no section although the item's name is in a cell); it counts in
+    a section when any of them is there."""
+    items = [[t for t in ((x,) if isinstance(x, str) else x) if len(_squash(t)) >= 3]
+             for x in texts or ()]
+    items = [alts for alts in items if alts]
+    if not items:
         return ""
-    scored = sorted(((sum(1 for n in needles if _in_section(n, words)), name)
-                     for name, words in sections), key=lambda s: -s[0])
+    scored = sorted(((sum(1 for alts in items if any(_in_section(t, words) for t in alts)),
+                      name) for name, words in sections), key=lambda s: -s[0])
     best = scored[0]
     if best[0] == 0 or (len(scored) > 1 and scored[1][0] == best[0]):
         return ""
@@ -179,16 +188,12 @@ class StoreKey:
     kept) + its file name — independent of the rest of the mail: it is the shop's IDENTITY,
     what a learned rule and the per-shop question are keyed on (`text`); `key` = `tokens`
     minus the words every order of the mail shares and the sender's own company / name words
-    — what the name rung compares (review round 4: a brand word picked the company's
-    head-office card); `own` = `tokens` minus only the sender's company / name words — the
-    name rung must name the SAME card with it too (review round 5: the town every shop of
-    the mail shares, dropped from `key`, left „Kaufland Martin" = {kaufland} -> Kaufland
-    Žilina)."""
+    — only what RANKS the cards of the per-shop question (`customer.candidates_for_question`);
+    a card's name never decides a shop (review round 7)."""
     header: str = ""
     source_file: str = ""
     tokens: frozenset = frozenset()
     key: frozenset = frozenset()
-    own: frozenset = frozenset()
     # the mail has attachments and this order's could not be told (`extract._located`)
     file_unknown: bool = False
 
@@ -211,9 +216,6 @@ class StoreKey:
     def stems(self) -> set[str]:
         return stems(self.key)
 
-    def own_stems(self) -> set[str]:
-        return stems(self.own)
-
     @property
     def identity(self) -> frozenset:
         """Which shop this order says it is (= `tokens`). Empty = it names no shop. Two files
@@ -228,11 +230,10 @@ def file_tokens(name: str) -> frozenset:
 
 
 def for_orders(orders: list[dict], drop=()) -> list[StoreKey]:
-    """The store key of every order of ONE mail, in order. `key` (the name rung's view) drops
-    the words every distinct token set of the mail shares and `drop` (the sender's own
-    company / name words) — empty when nothing distinguishing is left (the name rung then
-    decides nothing; a fallback to the shared words made them look like shop names — review
-    round 4)."""
+    """The store key of every order of ONE mail, in order. `key` (the question ranking's
+    view) drops the words every distinct token set of the mail shares and `drop` (the
+    sender's own company / name words) — empty when nothing distinguishing is left (a brand
+    word „Kvetka …" in every file must not rank the head-office card first, round 4)."""
     raw = []
     for o in orders:
         header = str(o.get("store") or "").strip()
@@ -243,7 +244,7 @@ def for_orders(orders: list[dict], drop=()) -> list[StoreKey]:
     common = frozenset.intersection(*distinct) if len(distinct) >= 2 else frozenset()
     brand = frozenset(drop)
     return [StoreKey(header=header, source_file=src, tokens=toks, key=toks - common - brand,
-                     own=toks - brand, file_unknown=unknown)
+                     file_unknown=unknown)
             for header, src, toks, unknown in raw]
 
 
@@ -258,17 +259,14 @@ def is_multi_store(keys: list[StoreKey], shop_evidence: bool = False) -> bool:
 
 
 def from_context(ctx: dict) -> StoreKey | None:
-    """Rebuild the key a store-scoped `customer` question was asked with (its `context`) —
-    with the SAME name-rung words the pipeline used (`store_name_key` + `store_own_key`,
-    review rounds 4-5: the sweep rebuilt the full words and a brand word picked the
-    head-office card). A context without them decides nothing by name."""
+    """Rebuild the identity a store-scoped `customer` question was asked with (its
+    `context`) — what its answer teaches a rule for and what the worker sweep matches the
+    sender's rules against."""
     toks = frozenset(ctx.get("store_tokens") or (ctx.get("store_key") or "").split())
     if not toks:
         return None
     return StoreKey(header=str(ctx.get("store") or ""),
-                    source_file=str(ctx.get("store_file") or ""), tokens=toks,
-                    key=frozenset(ctx.get("store_name_key") or ()),
-                    own=frozenset(ctx.get("store_own_key") or ()))
+                    source_file=str(ctx.get("store_file") or ""), tokens=toks)
 
 
 @dataclass(frozen=True)
