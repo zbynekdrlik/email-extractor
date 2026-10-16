@@ -241,35 +241,46 @@ _HOUSE_SUFFIX_RE = re.compile(r"(\d)\s*/\s*([^\W\d_])(?![^\W\d_])")
 # letter with a dot („19/A.", „7 / B. Bystrica" — house 7/B or house 7 + an initial?)
 _UNDECIDABLE_RE = re.compile(r"(\d+)\s+[^\W\d_](?![^\W\d_]|\s*\.)"
                              r"|(\d+)\s*/\s*[^\W\d_]\s*\.")
+# a shop code's number („GT1" → 1) — never a house number on its own (round 23); taken from
+# the street tokens, where a week code („T1", „KW42") is already gone
+_CODE_NUMBER_RE = re.compile(r"^[a-z]+(\d+)$")
 _HOUSE_RE = re.compile(r"^(\d+)[a-z]?$")
 
 
 def _by_street_strict(owners: list[dict], store: str) -> dict | None:
     """The `strict` street rung (#493 shop contexts): the ONE card whose street's words —
-    house number included — are all in the header. Never a guess (review rounds 8-22):
-    - a header with an undecidable house number („19 A", „19/A.", „7 / B. Bystrica") that ANY
-      family card carries decides nothing — gluing one reading before the count let another
-      card win („Hlavná 5, 7 / B. Bystrica" → the 5 card, round 22);
-    - a card with NO house number is no proof for a header that has one („BISTRO Hlavná 12"
-      is not the card „Hlavná");
-    - several fitting cards decide nothing (round 21: „Hlavná 5 a 7")."""
+    house number included — are all in the header. Never a guess (review rounds 8-23):
+    - a header with an undecidable house number („19 A", „19/A.", „7 / B. Bystrica", or a shop
+      code's number „GT1") that ANY family card carries decides nothing — gluing one reading
+      before the count let another card win („Hlavná 5, 7 / B. Bystrica" → the 5 card);
+    - a card with NO house number never wins for a header that has one („BISTRO Hlavná 12" is
+      not the card „Hlavná"), yet it BLOCKS when the header names its street, unless a fitting
+      numbered card covers all its words („BISTRO Námestie SNP 48" names both „Námestie SNP"
+      and „SNP 48" — asked; „Hlavná" beside a fitting „Hlavná 19/A" is that card's street);
+    - several fitting cards decide nothing („Hlavná 5 a 7")."""
     unsure = _undecidable_numbers(store)
     streets = [(c, _street_tokens(c.get("street", ""))) for c in owners]
     if unsure and any(_house_number(t) in unsure for _c, toks in streets for t in toks):
         return None
     want_tokens = _street_tokens(store)
-    header_has_number = any(_house_number(t) for t in want_tokens)
-    hits = [c for c, toks in streets
-            if toks and toks <= want_tokens
-            and (any(_house_number(t) for t in toks) or not header_has_number)]
-    return hits[0] if len(hits) == 1 else None
+    fits = [(c, toks) for c, toks in streets if toks and toks <= want_tokens]
+    if not any(_house_number(t) for t in want_tokens):
+        return fits[0][0] if len(fits) == 1 else None
+    numbered = [(c, toks) for c, toks in fits if any(_house_number(t) for t in toks)]
+    blockers = [c for c, toks in fits
+                if not any(_house_number(t) for t in toks)
+                and not any(toks <= n_toks for _n, n_toks in numbered)]
+    return numbered[0][0] if len(numbered) == 1 and not blockers else None
 
 
 def _undecidable_numbers(header: str) -> set[str]:
-    """The header's house numbers no card is proof of — a card with that house number (bare
-    or suffixed) as the ONE winner is asked instead (round 20: „19 A" / „SNP 48 A" shipped to
-    the bare-number card; round 21: „19/A." too)."""
-    return {a or b for a, b in _UNDECIDABLE_RE.findall(str(header or ""))}
+    """The header's numbers no card is proof of — any family card carrying one (bare or
+    suffixed) makes the strict rung decide nothing (round 20: „19 A" / „SNP 48 A" shipped to
+    the bare-number card; round 21: „19/A."; round 23: a code's number „GT1")."""
+    text = str(header or "")
+    codes = {m.group(1) for t in store_key.tokens(text, keep_numbers=True)
+             if (m := _CODE_NUMBER_RE.match(t))}
+    return {a or b for a, b in _UNDECIDABLE_RE.findall(text)} | codes
 
 
 def _house_number(token: str) -> str:
