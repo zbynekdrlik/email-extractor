@@ -215,3 +215,46 @@ def test_a_new_customer_for_a_staff_forward_never_gets_the_staff_address(pg):
     card = next(c for c in snapshot.customers_for_management(pg)
                 if c["ean_edi"] == "2999000000777")
     assert STAFF not in [e.lower() for e in card.get("emails") or []]
+
+
+# --- review round 30 ------------------------------------------------------------------------
+
+def test_a_staff_address_already_on_a_card_decides_nothing():
+    """Round 30: a pre-#493 answer had put a staff address on a customer card (prod: one card
+    carried it, two forwards of an unknown customer shipped to it). An address of our own
+    domain is never the sender's identity: no exact-address card, no exact flag for the
+    model, no CODEX-order owner."""
+    from app.orders import codex_orders, customer
+
+    cards = [{"ean_edi": "2999000000887", "name": "Kaviareň", "city": "Mestečko",
+              "street": "Hlavná 1", "emails": [STAFF, "kaviaren@zakaznik-test.sk"]}]
+    assert customer.owners_of(cards, STAFF) == []
+    assert customer.resolve(cards, STAFF, "Jana", "") is None
+    assert [c["exact_email"] for c in customer.candidates(cards, STAFF, "Jana", "")] == [False]
+    assert codex_orders._owner_ean(cards, STAFF) is None
+    # the customer's own address still decides, exactly as before
+    assert customer.resolve(cards, "kaviaren@zakaznik-test.sk", "", "").rule == "exact_email"
+
+
+def test_answers_never_write_a_staff_address_and_display_names_are_parsed(pg):
+    snapshot.import_snapshot(pg, CATALOG_CSV, BASE_CSV)
+    assert snapshot.remember_customer_email(pg, "2999000000999", STAFF) is False
+    assert store_rules.is_own_address(f"Jana <{STAFF}>")
+    assert not store_rules.is_own_address("Jana <jana@zakaznik-test.sk>")
+
+
+def test_a_new_customer_never_stores_a_submitted_staff_address(pg):
+    """Round 30: the „Nový zákazník" route stored any own-domain address the request listed."""
+    from test_orders_store_rules import _client
+
+    snapshot.import_snapshot(pg, CATALOG_CSV, BASE_CSV)
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('g4', 'ai_orders')")
+    qid = teach.ask_customer(pg, "g4", S1, [], "", {"sender_email": S1})
+    r = _client().post(f"/api/board/questions/{qid}/answer", json={"new_customer": {
+        "ean_edi": "2999000000778", "name": "Nový odberateľ", "city": "Mestečko",
+        "emails": f"{STAFF}, obchod@zakaznik-test.sk"}})
+    assert r.status_code == 200, r.get_json()
+    card = next(c for c in snapshot.customers_for_management(pg)
+                if c["ean_edi"] == "2999000000778")
+    emails = [e.lower() for e in card.get("emails") or []]
+    assert STAFF not in emails and "obchod@zakaznik-test.sk" in emails and S1 in emails
