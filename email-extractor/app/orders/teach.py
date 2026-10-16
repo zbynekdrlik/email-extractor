@@ -365,6 +365,8 @@ def ask_customer(conn, message_id: str, sender_email: str, candidates: list[dict
         from . import order_customers
         key, wording, reason, context = order_customers.shop_question(
             key, sender_email, shop, context)
+    elif (context or {}).get("no_address"):
+        key = f"{key}|shop-mail"   # #493: never merged into the sender's plain question
     row = conn.execute(
         """INSERT INTO order_questions
                (message_id, customer_ean, customer_name, wording, item_key, kind,

@@ -13,8 +13,8 @@ take it away, and undoing the answer takes its rule back.
 
 `customer.resolve` reads the rules of ONE sender per mail (`for_sender`) and matches them in
 pure code (`store_key.match_rule`): a rule applies only to EXACTLY its shop (its words equal
-the order's key or all of its words — never a subset); live rules of one shop that disagree
-are asked again (`customer._by_shop_rule`) — never resolved by recency.
+the order's whole shop identity — never a subset, never a mail-relative part); live rules of
+one shop that disagree are asked again (`customer._by_shop_rule`) — never by recency.
 """
 from __future__ import annotations
 

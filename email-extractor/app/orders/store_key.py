@@ -88,16 +88,34 @@ def file_stem(name: str) -> str:
 
 # --- which attachment an order was read from -------------------------------------------
 
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _words_text(text: str) -> str:
+    """Folded text with every non-alphanumeric run turned into ONE space („Chlieb | 3" and
+    „Chlieb\t3" both become „chlieb 3")."""
+    return " " + " ".join(_NON_ALNUM_RE.split(dl_match.fold(text))).strip() + " "
+
+
 def attachment_sections(source: str) -> list[tuple[str, str]]:
     """The `===== <file name> =====` sections `process._combined_text` appends after
-    „Attachments:" — [(file name, that section's folded text)], in order."""
+    „Attachments:" — [(file name, its words text — `_words_text`)], in order."""
     text = str(source or "")
     marks = list(_SECTION_RE.finditer(text))
     out = []
     for i, m in enumerate(marks):
         end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
-        out.append((m.group(1).strip(), _squash(text[m.end():end])))
+        body = text[m.end():end]
+        out.append((m.group(1).strip(), _words_text(body)))
     return out
+
+
+def _in_section(needle: str, words: str) -> bool:
+    """Is one item text in this section? Compared word by word (every separator — space,
+    tab, „|", „," — counts the same, like a quoted table row in `extract.quote_in_source`)
+    and only as WHOLE words: „chlieb 120" is never found inside „chlieb 1200"."""
+    want = _words_text(needle)
+    return len(want.strip()) >= 3 and want in words
 
 
 def locate_file(texts, source: str = "", sections=None) -> str:
@@ -110,11 +128,11 @@ def locate_file(texts, source: str = "", sections=None) -> str:
         sections = attachment_sections(source)
     if not sections:
         return ""
-    needles = [n for n in (_squash(t) for t in texts or ()) if len(n) >= 3]
+    needles = [t for t in texts or () if len(_squash(t)) >= 3]
     if not needles:
         return ""
-    scored = sorted(((sum(1 for n in needles if n in body), name) for name, body in sections),
-                    key=lambda s: -s[0])
+    scored = sorted(((sum(1 for n in needles if _in_section(n, words)), name)
+                     for name, words in sections), key=lambda s: -s[0])
     best = scored[0]
     if best[0] == 0 or (len(scored) > 1 and scored[1][0] == best[0]):
         return ""
@@ -128,7 +146,9 @@ class StoreKey:
     """One order's shop identity. `tokens` = every normalized word of its header (numbers
     kept) + its file name — independent of the rest of the mail: it is the shop's IDENTITY,
     what a learned rule and the per-shop question are keyed on (`text`); `key` = `tokens`
-    minus the words every order of the mail shares — only what the name rung compares."""
+    minus the words every order of the mail shares and the sender's own company / name words
+    — only what the name rung compares (review round 4: a brand word picked the company's
+    head-office card)."""
     header: str = ""
     source_file: str = ""
     tokens: frozenset = frozenset()
@@ -161,40 +181,50 @@ class StoreKey:
         return self.tokens
 
 
-def for_orders(orders: list[dict]) -> list[StoreKey]:
-    """The store key of every order of ONE mail, in order. Words shared by every distinct
-    token set of the mail are dropped from `key` (the name rung's view) — unless that would
-    leave an order with no key at all (its full tokens are kept then)."""
+def file_tokens(name: str) -> frozenset:
+    """The words a file name contributes to a shop identity."""
+    return frozenset(tokens(file_stem(name)))
+
+
+def for_orders(orders: list[dict], drop=()) -> list[StoreKey]:
+    """The store key of every order of ONE mail, in order. `key` (the name rung's view) drops
+    the words every distinct token set of the mail shares and `drop` (the sender's own
+    company / name words) — empty when nothing distinguishing is left (the name rung then
+    decides nothing; a fallback to the shared words made them look like shop names — review
+    round 4)."""
     raw = []
     for o in orders:
         header = str(o.get("store") or "").strip()
         src = str(o.get("sourceFile") or "").strip()
-        raw.append((header, src, frozenset(tokens(header, keep_numbers=True)
-                                           + tokens(file_stem(src)))))
+        raw.append((header, src, frozenset(tokens(header, keep_numbers=True))
+                    | file_tokens(src)))
     distinct = {t for _h, _s, t in raw if t}
     common = frozenset.intersection(*distinct) if len(distinct) >= 2 else frozenset()
-    return [StoreKey(header=header, source_file=src, tokens=toks,
-                     key=(toks - common) or toks) for header, src, toks in raw]
+    gone = common | frozenset(drop)
+    return [StoreKey(header=header, source_file=src, tokens=toks, key=toks - gone)
+            for header, src, toks in raw]
 
 
 def is_multi_store(keys: list[StoreKey], shop_evidence: bool = False) -> bool:
     """The mail carries orders of ≥2 different shops (`identity`) AND the shops are real:
     the model reported a shop header block on some order (even an empty „Predajňa:"), or
-    `shop_evidence` (the sender has learned shop rules, or a shop rung named the shop of one
-    of the files — `order_customers.resolve_orders`). File names alone, with neither, never
-    make shops: a customer may send one file per day / per kind of goods, and that must stay
-    one order (#81.1)."""
+    `shop_evidence` (the sender has learned shop rules). File names alone never make shops:
+    a customer may send one file per day / per kind of goods, and that must stay one order
+    (#81.1) — exactly as before #493."""
     return ((shop_evidence or any(k.header.strip() for k in keys))
             and len({k.identity for k in keys if k.identity}) >= 2)
 
 
 def from_context(ctx: dict) -> StoreKey | None:
-    """Rebuild the key a store-scoped `customer` question was asked with (its `context`)."""
+    """Rebuild the key a store-scoped `customer` question was asked with (its `context`) —
+    with the SAME name-rung words the pipeline used (`store_name_key`, review round 4: the
+    sweep rebuilt the full words and a brand word picked the head-office card)."""
     toks = frozenset(ctx.get("store_tokens") or (ctx.get("store_key") or "").split())
     if not toks:
         return None
     return StoreKey(header=str(ctx.get("store") or ""),
-                    source_file=str(ctx.get("store_file") or ""), tokens=toks, key=toks)
+                    source_file=str(ctx.get("store_file") or ""), tokens=toks,
+                    key=frozenset(ctx.get("store_name_key") or ()))
 
 
 @dataclass(frozen=True)

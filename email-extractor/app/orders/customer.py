@@ -324,8 +324,8 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
     `rules` the warehouse's learned shop rules of THIS sender ([(words, ean)]), and
     `multi_store` says the mail carries several different shops — then the mail-level
     delivery text is never used to pick one shop's card. `use_names` enables the shop-name
-    rung — only for a multi-shop mail or a sender with learned shop rules; any other mail of
-    a 2-card sender keeps exactly the pre-#493 #418 rungs (review round 3).
+    rung — only in a multi-shop mail (and the worker sweep of a shop question); any other
+    mail keeps exactly the pre-#493 rungs (review rounds 3-4).
     """
     llm = llm or {}
     store = store or (key.header if key is not None else "")
