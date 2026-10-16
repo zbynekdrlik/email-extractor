@@ -122,11 +122,15 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   `tokens` minus the words every order of the mail shares AND the sender's company / name
   words — only the question ranking's view (round 4: a brand word must not rank the
   head-office card first).
+- **Two recognized tables** (`extract.table_attachments` ≥ 2 — two shops' filled-in price
+  lists): read by the MODEL, never the table path (`parse_table` reads the first table only —
+  the second shop's order vanished, round 9). One table keeps the table path.
 - **Which attachment** (`store_key.locate_file`): the ONE section the order's block HEADER
   phrase is in, else the section holding most of its items — an item counts by its QUOTE, and
-  by its name only when the quote is in no section (round 7: a reformatted quote matched no
-  section; round 8: the incident's order forms share their product rows, a name is in every
-  file and must never tie a located quote), compared word by word
+  by its name only when the quote is NOWHERE — a text found in the mail BODY counts for no
+  attachment (round 7: a reformatted quote matched no section; round 8: the incident's order
+  forms share their product rows, a name is in every file and must never tie a located quote;
+  round 9: a body order's name in a form put it into that form's shop), compared word by word
   (`_words_text`: any separator equal, whole words — „chlieb 120" ≠ „chlieb 1200"); header and
   items naming two files, or a tie, decide nothing (round 5: the incident's files share most
   rows — by the header every Tržnica order carries ONE identity). An order of a mail WITH
@@ -134,7 +138,8 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   A file is compared by its words, or by its whole name when it has none („Objednávka.xlsx",
   round 7).
 - **Multi-shop mail** (`store_key.is_multi_store`): ≥2 different identities (header blocks
-  naming nothing — „Predajňa:" — count as one more, round 8) AND a header block on some order
+  naming nothing — „Predajňa:", `names_a_block`: a header with a WORD, never a date-only one —
+  count as one more, round 8) AND a header block on some order
   (even an empty „Predajňa:") or the sender's learned shop rules. Never
   file names alone, never the sender's card count (rounds 3-4: a 2-card sender's two files of
   one day, a template file name, „Objednávka Prešov" + „… Prešov pečivo" are no shops —
@@ -143,17 +148,20 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   question) — the incident's mails carry headers, and its first answered mail teaches rules.
 - **Rung order inside `resolve`**: (1) a learned shop rule (`store_rule`) — exactly its shop,
   for ANY sender; (2) family: street in the header (`_by_store`, #101) — in a multi-shop mail
-  or for a rule sender `strict`: the street's folded words INCLUDING the house number must all
-  be in the header (round 8: „BISTRO Hlavná 5" matched „Hlavná 12"; the #101 corpus case GT1 /
-  GT2 still resolves), any other mail exactly as #101; (3) family: `_by_delivery_address` —
+  or for a rule sender `strict`: the street's folded words INCLUDING the house number (digit
+  and letter runs apart — „35BB", round 9) must all be in the header (round 8: „BISTRO Hlavná
+  5" matched „Hlavná 12"; the #101 corpus case GT1 / GT2 still resolves), any other mail
+  exactly as #101; (3) family: `_by_delivery_address` —
   NOT in a multi-shop mail; (4) the old llm / exact_email rungs.
 - **The poistka** (`customer.collapsed_shops`): a shop ships ONLY when a SHOP rung decided it
   (`STORE_RULES` = store_rule / store_address) — in a multi-shop mail for EVERY order (also a
   lone new shop on its own card, round 2, and an order naming no shop, round 1); for a sender
   with learned shop rules for every order that names a shop (round 3), whose file could not
-  be told (`file_unknown`, round 6), or — in a mail of several ATTACHMENTS (`extract` records
-  the count, round 8) — any order (round 7: a „Objednávka.xlsx" order next to „… BISTRO.xlsx"
-  is another of its shops). Converges: each shop asked once, then its rule. Accepted
+  be told (`file_unknown`, round 6), that sits under a header block of its own (round 9: a
+  lone „Predajňa:" form went to the address card), or — in a mail of several ATTACHMENTS
+  (`extract` records the count, round 8) — any order (round 7: a „Objednávka.xlsx" order next
+  to „… BISTRO.xlsx" is another of its shops). Converges: each shop asked once, then its rule.
+  Accepted
   residuals (safe direction — asked, never a wrong card): a shop with NO identity at all (an
   empty header and a file name with no words) is asked per order every mail (no rule can be
   keyed on nothing); a date range without the dot after its first day („16-20.10.") leaves
