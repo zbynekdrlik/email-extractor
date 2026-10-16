@@ -217,14 +217,17 @@ def _by_store(owners: list[dict], store: str, strict: bool = False) -> dict | No
     `strict` (#493 — a mail of several shops / a sender with learned shop rules, where this
     is the only automatic shop rung besides a rule): the street's folded words INCLUDING its
     house number must all be in the header (review round 8: „BISTRO Hlavná 5" matched the
-    card on „Hlavná 12" — the old comparison drops words of ≤ 2 characters). Any other mail
-    keeps the #101 comparison exactly.
+    card on „Hlavná 12" — the old comparison drops words of ≤ 2 characters); a house number
+    with a letter written apart („19 A") proves no card with that number (round 20). Any other
+    mail keeps the #101 comparison exactly.
     """
     if strict:
         want_tokens = _street_tokens(store)
+        unsure = _numbers_with_a_letter_apart(store)
         hits = [c for c in owners
                 if (street_tokens := _street_tokens(c.get("street", "")))
-                and street_tokens <= want_tokens]
+                and street_tokens <= want_tokens
+                and not any(_house_number(t) in unsure for t in street_tokens)]
         return hits[0] if len(hits) == 1 else None
     want = _words(store)
     if not want:
@@ -237,9 +240,26 @@ def _by_store(owners: list[dict], store: str, strict: bool = False) -> dict | No
     return hits[0] if len(hits) == 1 else None
 
 
-# a house number's one-letter suffix after a slash — „19/A", „19 / a"; a letter written apart
-# („19 A") is never glued: it may be a city initial („7 B. Bystrica", review round 19)
-_HOUSE_SUFFIX_RE = re.compile(r"(\d)\s*/\s*([^\W\d_])(?![^\W\d_])")
+# a house number's one-letter suffix after a slash — „19/A", „19 / a"; never an initial with
+# its dot („7 / B. Bystrica") and never a letter written apart (`_numbers_with_a_letter_apart`)
+_HOUSE_SUFFIX_RE = re.compile(r"(\d)\s*/\s*([^\W\d_])(?![^\W\d_]|\s*\.)")
+# a house number followed by ONE letter written apart, no dot after it: „19 A", „48 a" — house
+# 19/A or house 19 + an initial? undecidable (review rounds 19-20)
+_LETTER_APART_RE = re.compile(r"(\d+)\s+[^\W\d_](?![^\W\d_]|\s*\.)")
+_HOUSE_RE = re.compile(r"^(\d+)[a-z]?$")
+
+
+def _numbers_with_a_letter_apart(header: str) -> set[str]:
+    """The house numbers of the header that a letter written apart makes undecidable — no
+    card with that house number (bare or suffixed) is proof of the shop: asked (round 20:
+    „19 A" and „SNP 48 A" shipped to the bare-number card; a lowercase „19 b" too)."""
+    return set(_LETTER_APART_RE.findall(str(header or "")))
+
+
+def _house_number(token: str) -> str:
+    """„19a" / „19" -> „19"; any other token -> "" (never in an `unsure` set)."""
+    m = _HOUSE_RE.match(token)
+    return m.group(1) if m else ""
 
 
 def _street_tokens(text: str) -> set[str]:
