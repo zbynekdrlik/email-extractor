@@ -173,8 +173,11 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   and a „T42 Centrum" header changes identity weekly — re-asked.
 - **Rung order inside `resolve`**: (1) a learned shop rule (`store_rule`) — exactly its shop,
   for ANY sender; (2) family: street in the header (`_by_store`, #101) — NEVER for a sender
-  with learned shop rules (round 26: a rule's card was another shop's street match; such a
-  sender ships a shop only by ITS rule), in a multi-shop mail `strict`: the street's folded words INCLUDING the house number (digit
+  with SHOP HISTORY: learned shop rules (round 26: a rule's card was another shop's street
+  match) or a shop question still OPEN on the board (round 27, `order_customers.
+  open_shop_question` — the next mail shipped a shop by the street while its own question
+  was open, then the answer named another card); such a sender is a rule sender everywhere
+  (`has_rules`) and ships a shop only by ITS rule. In a multi-shop mail `strict`: the street's folded words INCLUDING the house number (digit
   and letter runs apart — „35BB", round 9; a house number WITH its one-letter suffix after a
   slash or glued is ONE unit, „19/A" = „19/a" = „19A" ≠ „19/B" ≠ „19", rounds 17-18: the 19/B
   shop matched the „19/A" card, then a bare „19" card; a letter written APART is never glued
@@ -193,7 +196,8 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   one letter written apart without a dot „19 A", a slash letter with a dot „19/A.", a shop
   code's number „GT1") that ANY family card carries; a header or FILE naming the TOWN of
   another family card (`_names_another_town`: the town's main part „Košice" of „Košice -
-  Sever", any of its words of 3+ letters, the initials „bb" of a two-word town; round 26).
+  Sever", any of its words of 3+ letters, the initials „bb" of a two-word town; round 26;
+  within the card's own town another card's DISTRICT word, „Košice - Juh", round 27).
   The rung only PROPOSES a card — the whole-mail fit below decides whether it stands. Branches on one
   street are always asked ONCE, then the answer's rule decides. The #101 shape (two branches
   on two streets, GT1 / GT2) still ships. NEVER re-add a same-street number comparison „with
@@ -217,7 +221,7 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   **Whole-mail fit** (`_street_unproven`, round 26 — the cause of rounds 17-26, each of
   which found one more way a single order's street pointed at a card that was not its
   shop): in a multi-shop mail the street decisions stand ONLY when every shop of the mail
-  (each identity naming a block) is decided by the street, no two shops land on one card and
+  (each identity — also a shop named only by its FILE, round 27) is decided by the street, no two shops land on one card and
   every family card (`customer.family_of`) is taken — the #101 GT1 / GT2 shape. Otherwise
   every street decision of the mail is asked („A Hlavná" + „B Hlavná" on one card, one header
   in two files = two shops, the incident's 5 shops on 4 cards). Rejected: switching the street

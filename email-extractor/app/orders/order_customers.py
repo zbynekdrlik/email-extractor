@@ -57,7 +57,10 @@ def resolve_orders(conn, customers: list[dict], sender: str, extracted: dict, ll
     docstring). Returns the (merged) orders + their customers. Reads the sender's shop rules
     — a pure read, so it applies in shadow too, like a memory lookup."""
     rules = store_rules.for_sender(conn, sender)
-    has_rules = bool(rules)
+    # shop HISTORY: learned rules, or a shop question still open on the board (review round
+    # 27: the street shipped a shop of the next mail while its own question was open — then
+    # the answer named another card). Such a sender ships a shop only by its rule.
+    has_rules = bool(rules) or open_shop_question(conn, sender)
     # the sender's own company / name words never name one of its shops (review round 4)
     drop = (store_key.tokens(extracted.get("companyName", ""))
             + store_key.tokens(extracted.get("senderName", "")))
@@ -72,6 +75,7 @@ def resolve_orders(conn, customers: list[dict], sender: str, extracted: dict, ll
     matched = [customer.resolve(customers, sender, extracted.get("senderName", ""),
                                 extracted.get("companyName", ""), llm=llm,
                                 store=k.header, key=k, rules=rules, multi_store=multi,
+                                shop_history=has_rules,
                                 delivery_text=extracted.get("notes", ""))
                for k in keys]
     # the mail's attachments — not only the files an order was found in (review round 8:
@@ -93,6 +97,19 @@ def resolve_orders(conn, customers: list[dict], sender: str, extracted: dict, ll
                  m.rule if m else "asked", " [poistka]" if i in collapsed else "",
                  " [multi-shop]" if multi else (" [shop rules]" if has_rules else ""))
     return merge_by_card(by_day, oc)
+
+
+def open_shop_question(conn, sender_email: str) -> bool:
+    """Is a per-shop (or per-order shop-context) `customer` question of this sender still
+    open? Its dedupe key starts with `<sender>|shop` (`shop_question` / `unnamed_question`);
+    `left()`, never LIKE — an `_` in the address is a LIKE wildcard."""
+    sender = str(sender_email or "").strip().lower()
+    if not sender:
+        return False
+    prefix = f"{sender}|shop"
+    return conn.execute(
+        "SELECT 1 FROM order_questions WHERE kind = 'customer' AND status = 'open' "
+        "AND left(item_key, %s) = %s LIMIT 1", (len(prefix), prefix)).fetchone() is not None
 
 
 def _day(order: dict) -> tuple:

@@ -300,12 +300,19 @@ def _names_another_town(owners: list[dict], card: dict, words: set[str]) -> bool
     """Do the header / file words name the town of ANOTHER family card (not this card's own)?
     A town is its main part („Košice" of „Košice - Sever"); any of its words of 3+ letters or
     the initials of a two-word town („bb") counts (round 26: the whole city was required and
-    the file name was not read). Over-asks when two family towns share a word — the safe
-    direction."""
+    the file name was not read); within the card's own town, another card's DISTRICT word
+    counts (round 27). Over-asks when two family towns share a word — the safe direction."""
     own = _main_town(card)
+    own_all = set(store_key.tokens(card.get("city", "")))
     for c in owners:
         town = _main_town(c)
-        if not town or town == own:
+        if not town:
+            continue
+        if town == own:
+            # the same town: another district of it („Košice - Juh" vs „- Sever", round 27)
+            district = [w for w in store_key.tokens(c.get("city", "")) if w not in own_all]
+            if any(len(w) >= 3 and w in words for w in district):
+                return True
             continue
         initials = "".join(w[0] for w in town) if len(town) > 1 else ""
         if any(len(w) >= 3 and w in words for w in town) or (initials and initials in words):
@@ -419,7 +426,8 @@ def _street_unproven(keys: list, matched: list, family) -> set[int]:
         return set()
     cards: dict[frozenset, set[str]] = {}
     for i, k in enumerate(keys):
-        if store_key.names_a_block(k):
+        # every shop of the mail — also one named only by its file (round 27)
+        if k.identity or store_key.names_a_block(k):
             cards.setdefault(k.tokens, set()).add(matched[i].ean_edi if i in street else "")
     picked = [next(iter(c)) for c in cards.values() if len(c) == 1]
     fits = (len(picked) == len(cards) and "" not in picked
@@ -439,15 +447,22 @@ def family_of(customers: list[dict], sender_email: str, llm: dict | None = None
     a confident model pick (>1). A sender on exactly ONE card is no family (the unique
     address decides)."""
     llm = llm or {}
-    conf = float(llm.get("confidence") or 0)
-    if conf > 1:
-        conf = conf / 100
     addr = (_addresses(sender_email) or [""])[0]
     owners = [c for c in customers if addr and addr in _addresses(c.get("emails"))]
-    if len(owners) > 1:
-        return owners
     picked = {str(c.get("ean_edi")): c for c in customers
               if c.get("ean_edi")}.get(str(llm.get("ean_edi") or ""))
+    return _family(customers, owners, picked, _confidence(llm))
+
+
+def _confidence(llm: dict) -> float:
+    conf = float(llm.get("confidence") or 0)
+    return conf / 100 if conf > 1 else conf
+
+
+def _family(customers: list[dict], owners: list[dict], picked: dict | None,
+            conf: float) -> list[dict] | None:
+    if len(owners) > 1:
+        return owners
     if not owners and picked and conf >= GATE_SURE:
         stem_family = _stem_family(customers, picked)
         if len(stem_family) > 1:
@@ -459,7 +474,7 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
             company_name: str, llm: dict | None = None,
             store: str = "", delivery_text: str = "",
             key: store_key.StoreKey | None = None, rules=(),
-            multi_store: bool = False) -> Matched | None:
+            multi_store: bool = False, shop_history: bool = False) -> Matched | None:
     """Decide who ordered, or None when it cannot be decided safely.
 
     `store` is the block header of the order's own half of a multi-shop attachment; it is
@@ -480,9 +495,7 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
     """
     llm = llm or {}
     store = store or (key.header if key is not None else "")
-    conf = float(llm.get("confidence") or 0)
-    if conf > 1:
-        conf = conf / 100
+    conf = _confidence(llm)
     by_ean = {str(c.get("ean_edi")): c for c in customers if c.get("ean_edi")}
     picked = by_ean.get(str(llm.get("ean_edi") or ""))
 
@@ -507,11 +520,13 @@ def resolve(customers: list[dict], sender_email: str, sender_name: str,
     # A sender that resolves to exactly ONE card (`owners == 1`) is deliberately excluded
     # from the stem path — the unique address already disambiguates, and the confident-llm
     # / exact_email hierarchy below keeps deciding it unchanged.
-    family = family_of(customers, sender_email, llm)
+    family = _family(customers, owners, picked, conf)
     if family:
         # #493 round 26: a sender with learned shop rules ships a shop only by ITS rule —
-        # the street never decides for it (a rule's card is another shop's street match)
-        branch = None if rules else _by_store(
+        # the street never decides for it (a rule's card is another shop's street match);
+        # an open shop question is shop history too (round 27: the street shipped a shop
+        # whose own question was still on the board)
+        branch = None if (rules or shop_history) else _by_store(
             family, store, strict=multi_store,
             file_words=key.tokens if key is not None else ())
         if branch:

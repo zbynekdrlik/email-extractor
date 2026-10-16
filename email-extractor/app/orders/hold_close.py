@@ -516,11 +516,11 @@ def retry_unknown_customer_questions(conn, cfg, upload=None, post=None) -> list[
     """A customer added on /znalosti (rather than answered straight on the question card,
     #234 §3) must also unstick any order still waiting for it. For every OPEN `customer`
     question, re-resolve the sender against the CURRENT customer list and act ONLY when
-    the match is a genuine exact-address hit with a real EAN — never the model rung (no
-    store header, no model call reaches this far, so `resolve()`'s `llm` rung never fires)
-    and never a fuzzy name/branch hit (`store=""` makes `_by_store` always return `None`):
-    a wrongly addressed order is worse than one still waiting (`customer.py`'s own module
-    docstring). Called from `/api/znalosti/clients` right after a save, and from the
+    the match is a genuine exact-address hit with a real EAN (a per-sender question) or the
+    warehouse's learned rule for exactly that shop (a per-shop question, #493 — the street
+    rung may run for a shop key but its decision is never taken, review round 26) — never
+    the model rung (no model call reaches this far): a wrongly addressed order is worse than
+    one still waiting (`customer.py`'s own module docstring). Called from `/api/znalosti/clients` right after a save, and from the
     order worker's own periodic tick (mirrors `release_due`'s own sweep)."""
     from . import customer as customer_mod
     from . import report, store_key, store_rules, teach
