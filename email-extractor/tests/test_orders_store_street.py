@@ -186,3 +186,74 @@ def test_the_worker_sweep_never_answers_a_shop_question_by_the_street(pg, monkey
     assert hold.retry_unknown_customer_questions(pg, _cfg()) == []
     assert uploads == []
     assert {"A Hlavná", "B Hlavná", "Mierová 3"} <= set(_shop_questions(pg))
+
+
+# --- review round 27 ------------------------------------------------------------------------
+
+def test_a_shop_named_only_by_its_file_counts_in_the_whole_mail_fit():
+    """Round 27: the fit counted only shops whose HEADER names a block — a form with an empty
+    header in „OBJ … Hlavná A.xlsx" is a shop of the mail too (asked), so „B Hlavná" on the
+    one „Hlavná" card is no proof: every shop asked."""
+    keys = store_key.for_orders([
+        {"store": "B Hlavná", "sourceFile": "BH.xlsx"},
+        {"store": "", "sourceFile": "OBJ Pekárová žena Hlavná A.xlsx"},
+        {"store": "Mierová 3", "sourceFile": "MI.xlsx"}])
+    matched = [_matched("2999000000801"), None, _matched("2999000000802")]
+    assert customer.collapsed_shops(keys, matched, multi=True, family=GT) == {0, 2}
+
+
+def test_another_district_of_the_same_town_decides_nothing():
+    """Round 27: „Košice - Juh" in the header next to a „Košice - Juh" family card is not the
+    „Košice - Sever" card on the same street; the card's own district is fine."""
+    fam = _family(("Hlavná 5", "Košice - Sever"), ("Mierová 3", "Košice - Juh"))
+    assert _hit(fam, "Hlavná 5, Košice - Juh") is None
+    assert _hit(fam, "Hlavná 5, Košice - Sever") == ("2999000000801", "store_address")
+    fam = _family(("Školská 5", "Bratislava - Rača"), ("Mierová 3", "Bratislava - Vajnory"))
+    assert _hit(fam, "Školská 5, Bratislava Vajnory") is None
+
+
+def _street_env(pg, family):
+    from test_orders_store_rules import BASE_CSV, CATALOG_CSV
+
+    from app.orders import codex_customers, snapshot
+
+    snapshot.import_snapshot(pg, CATALOG_CSV, BASE_CSV)
+    codex_customers.replace_customers(
+        pg, [dict(s, emails=[SENDER], zip="", codex_id=s["ean_edi"]) for s in family])
+    snapshot.rebuild_from_overrides(pg)
+
+
+def test_an_open_shop_question_stops_the_street_until_the_warehouse_answers(pg, monkeypatch):
+    """Round 27: mail 1 asked „A Hlavná" / „B Hlavná" (both on the one „Hlavná" card); mail 2
+    with „B Hlavná" + „Mierová 3" fitted the family and shipped B to that card while B's own
+    question was still open — the warehouse then answered another card: one shop, two cards.
+    A sender with an open shop question is a sender with shop history, like one with rules."""
+    from test_orders_store_rules import _run, _shop_questions
+
+    monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
+    _street_env(pg, STREET_FAMILY)
+    _r, rec1 = _run(pg, "m1", stores=STREET_STORES)
+    assert rec1.uploads == []
+    _r, rec2 = _run(pg, "m2", stores=STREET_STORES[1:])
+    assert rec2.uploads == [], "B's own question is still open"
+    assert {"A Hlavná", "B Hlavná", "Mierová 3"} <= set(_shop_questions(pg))
+
+
+GT_FAMILY = [
+    {"ean_edi": "2999000000856", "name": "Gazdovský trh GT1", "trade_name": "",
+     "city": "Banská Bystrica", "street": "Družby 35"},
+    {"ean_edi": "2999000000857", "name": "Gazdovský trh GT2", "trade_name": "",
+     "city": "Banská Bystrica", "street": "29. augusta 19"},
+]
+
+
+def test_the_101_family_ships_both_shops_by_the_street_through_the_pipeline(pg):
+    """The positive half of the whole-mail fit through the real wiring (`family_of` ->
+    `collapsed_shops`): every shop of the mail on its own family card — both ship."""
+    from test_orders_store_rules import _run
+
+    _street_env(pg, GT_FAMILY)
+    stores = (("GT1- Družby 35 BB", "GT1", "rožok 50g", 120, "G50"),
+              ("GT2- 29 augusta 19 BB", "GT2", "vianočka 400g", 7, "VIA"))
+    _r, rec = _run(pg, "m-gt", stores=stores)
+    assert sorted(name.split("_")[1] for name, _c in rec.uploads) == ["000856", "000857"]
