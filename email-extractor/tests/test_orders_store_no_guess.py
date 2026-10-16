@@ -6,9 +6,9 @@
 * an order whose attachment could not be told (its lines are in two files) never borrows a
   sibling's file — for a sender with learned shop rules it is asked, never shipped by a rule
   of the other file nor by the sender's address;
-* a header's 4-5 digit house number stays part of the shop (two shops „Hlavná 1713" /
-  „Hlavná 2210" stay two); only years and 6+ digit numbers go — and a date range
-  („16.-20.10.") goes whole.
+* a header's 4-5 digit number stays part of the shop (two shops „Hlavná 1713" / „Hlavná
+  2210" stay two — a year-like house number too); only 6+ digit numbers go — and a date
+  range („16.-20.10.") goes whole.
 
 Synthetic data only (the repo is public).
 """
@@ -131,8 +131,9 @@ def test_the_extraction_marks_an_order_whose_file_it_could_not_tell():
 def test_two_shops_differing_by_a_house_number_stay_two():
     assert store_key.tokens("Hlavná 1713", keep_numbers=True) == ["hlavna", "1713"]
     assert store_key.tokens("Hlavná 22105", keep_numbers=True) == ["hlavna", "22105"]
-    assert store_key.tokens("BISTRO 2026", keep_numbers=True) == ["bistro"], "a year"
-    assert store_key.tokens("BISTRO 1999", keep_numbers=True) == ["bistro"], "a year"
+    # a year stays: dropping it would make „Hlavná 2010" and „Hlavná 2011" ONE shop; a
+    # header with a year only re-asks once a year (the safe direction)
+    assert store_key.tokens("Hlavná 2010", keep_numbers=True) == ["hlavna", "2010"]
     assert store_key.tokens("Obj 450031", keep_numbers=True) == [], "an order number"
     keys = store_key.for_orders([{"store": "Hlavná 1713"}, {"store": "Hlavná 2210"}])
     assert keys[0].identity != keys[1].identity
