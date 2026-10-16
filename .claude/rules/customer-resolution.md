@@ -117,6 +117,9 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   10. 2026"), a date range WITH its dot („16.-20.10.", „16.—20.10." — „BISTRO 1 - 16.10."
   keeps its 1, round 7), a calendar week („42. týždeň", „43 KT", „KW 42") and an order number
   after „Obj." / 6+ digit numbers (round 5: „BISTRO 16.10." changed identity every mail).
+  A header's shop CODE stays in the identity: „T1" / „W2" (only „KW42" / „WK42" / „tyž42" are
+  certainly weeks) and a lone capital letter („A Centrum" / „B Centrum", round 15 — both were
+  {centrum}: one order, one answer for two shops).
   `tokens` = every word of header + file = the shop's IDENTITY (`text`): what a rule and the
   per-shop question dedupe are keyed on — never a mail-relative value (round 3). `key` =
   `tokens` minus the words every order of the mail shares AND the sender's company / name
@@ -147,9 +150,10 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   identities, plus orders naming no shop, one per distinct (block, file): under a block of
   their own (`names_a_block`: a generic shop word „Predajňa:", a real word, a lone CAPITAL
   letter „A", a code „T1", or a number no document word owns „č. 2"; never a noise-only
-  header — a date incl. „04/08/2026", a certain week code „KW 42" / „WK42", „Objednávka č.
-  123", „Hárok 1", „v pondelok", „a.s.", a bare year — the SAME word lists `tokens` drops,
-  rounds 8-14), from a found file whose name has no shop words (round 12: „OBJ Pekárová
+  header — a date incl. „04/08/2026", a certain week code „KW 42" / „WK42", an ambiguous code
+  „T42" that EVERY order of the mail carries alike (its week, `_shared_codes`, round 15),
+  „Objednávka č. 123", „Hárok 1", „v pondelok", „a.s.", a bare year — built from the same
+  word lists `tokens` uses, rounds 8-15), from a found file whose name has no shop words (round 12: „OBJ Pekárová
   žena.xlsx" next to the Tržnica form; „Predajňa A" / „Predajňa B" counted once — both shops
   went to the sender's card), or `file_unknown` — the mail HAS attachments the order's could
   not be told from — each such order on its own (rounds 11-13: two blank „Predajňa:" forms
@@ -179,10 +183,10 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   Accepted
   residuals (safe direction — asked, never a wrong card): a shop with NO identity at all (an
   empty header and a file name with no words) is asked per order every mail (no rule can be
-  keyed on nothing) — also one-letter codes („Predajňa A" / „Predajňa B": the identity drops
-  one-letter words, so no rule is learned for them); a date range without the dot after its
-  first day („16-20.10.") leaves that day in the identity, so such a shop is re-asked each
-  week.
+  keyed on nothing); a date range without the dot after its first day („16-20.10.") leaves
+  that day in the identity, so such a shop is re-asked each week; two blank „Predajňa:"
+  blocks of a BODY-only mail on one day are one order (as on main — the mail carries no
+  shop information at all).
 - **Merging (#81.1), all inside `order_customers.resolve_orders`**: a multi-shop mail merges
   per (day, order number, shop identity) — two shops never merge, two files of one shop do,
   an order naming NO shop is never merged at all (round 5); a sender with learned shop rules
