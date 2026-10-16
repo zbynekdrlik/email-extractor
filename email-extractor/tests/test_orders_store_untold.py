@@ -225,7 +225,7 @@ def test_two_blank_untold_forms_are_two_shops(pg):
 def test_noise_in_a_header_never_names_a_block():
     def block(header):
         return store_key.names_a_block(store_key.for_orders([{"store": header}])[0])
-    assert [block(h) for h in ("Objednávka v pondelok", "a.s.", "T42", "W42", "04/08/2026",
+    assert [block(h) for h in ("Objednávka v pondelok", "a.s.", "KW42", "WK42", "04/08/2026",
                                "2026")] == [False] * 6
     assert [block(h) for h in ("A", "Predajňa A", "č. 2")] == [True] * 3
     assert store_key.tokens("BISTRO 04/08/2026", keep_numbers=True) == ["bistro"]
