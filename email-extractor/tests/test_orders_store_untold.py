@@ -154,3 +154,49 @@ def test_a_table_mail_whose_model_names_two_shops_is_read_by_the_model():
                                 "subject": "objednávka"})
     assert out["source"] == "model"
     assert [o["store"] for o in out["orders"]] == ["Predajňa: Alfa", "BISTRO"]
+
+
+# --- review round 12 ------------------------------------------------------------------------
+
+def _mail(*files):
+    s = ("Subject: objednávka\n\nFrom: " + SENDER + "\n\nBody: Dobrý deň, posielam "
+         "objednávky.\n\nAttachments:\n")
+    return s + "\n".join(f"===== {n} =====\n[Sheet: H]\n{t}" for n, t in files)
+
+
+def test_a_wordless_file_next_to_one_named_shop_is_never_shipped_by_address(pg):
+    text = _mail(("OBJ Pekárová žena TR.xlsx", "Predajňa: Tržnica\nna 04.08.2026\n" + HDR
+                  + "Chlieb kváskový 1kg\t1.10\t1.30\t5\n"),
+                 ("OBJ Pekárová žena.xlsx", "na 04.08.2026\n" + HDR + "Rožky\t0.10\t0.12\t120\n"))
+    orders = [_o("Predajňa: Tržnica", _it("Chlieb kváskový 1kg", 5,
+                                          "Chlieb kváskový 1kg\t1.10\t1.30\t5")),
+              _o("", _it("Rožky", 120, "Rožky\t0.10\t0.12\t120"))]
+    assert _run(pg, "m-wordless", text, orders) == []
+
+
+def test_two_shops_named_by_a_single_letter_are_two(pg):
+    text = _mail(("OBJ Pekárová žena A.xlsx", "Predajňa A\nna 04.08.2026\n" + HDR
+                  + "Chlieb kváskový 1kg\t1.10\t1.30\t5\n"),
+                 ("OBJ Pekárová žena B.xlsx", "Predajňa B\nna 04.08.2026\n" + HDR
+                  + "Rožky\t0.10\t0.12\t120\n"))
+    orders = [_o("Predajňa A", _it("Chlieb kváskový 1kg", 5,
+                                   "Chlieb kváskový 1kg\t1.10\t1.30\t5")),
+              _o("Predajňa B", _it("Rožky", 120, "Rožky\t0.10\t0.12\t120"))]
+    assert _run(pg, "m-letters", text, orders) == []
+
+
+def test_two_shops_headed_by_a_number_code_are_two(pg):
+    text = _mail(("OBJ Pekárová žena 2.xlsx", "č. 2\nna 04.08.2026\n" + HDR
+                  + "Chlieb kváskový 1kg\t1.10\t1.30\t5\n"),
+                 ("OBJ Pekárová žena 3.xlsx", "č. 3\nna 04.08.2026\n" + HDR
+                  + "Rožky\t0.10\t0.12\t120\n"))
+    orders = [_o("č. 2", _it("Chlieb kváskový 1kg", 5, "Chlieb kváskový 1kg\t1.10\t1.30\t5")),
+              _o("č. 3", _it("Rožky", 120, "Rožky\t0.10\t0.12\t120"))]
+    assert _run(pg, "m-codes", text, orders) == []
+
+
+def test_a_number_names_a_block_unless_an_order_or_sheet_word_owns_it():
+    def block(header):
+        return store_key.names_a_block(store_key.for_orders([{"store": header}])[0])
+    assert [block(h) for h in ("č. 2", "A", "Predajňa 3")] == [True] * 3
+    assert [block(h) for h in ("Objednávka 1", "Objednávka č. 123", "Hárok 1")] == [False] * 3
