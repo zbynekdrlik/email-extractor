@@ -330,10 +330,14 @@ from `confirm.sweep` via `_mark_manual`) fixes it with a FOURTH terminal status:
   undated row unchanged, one-day window + days-later receipt count, digits normalisation incl.
   prefixes, archCodex wins, fail-open lookup, transaction rollback, guarded update, vanished
   manual file = no alarm, imported + manual incident closes, not-yet-due manual file never in a
-  reminder, manual mark ≠ activity). Mutation-checked: removing the activity filter, the
-  due-row filter, the all-rows pass, the `IS NULL` guard, the transaction, the multi-number
-  match, the ops channel, the lookup `try`, the date floor or its window each fails a named
-  test. Fixtures use MADE-UP DL / receipt numbers — never the incident's (public repo).
+  reminder, manual mark ≠ activity, a multi-day receipt counts by `receipt_date_to`, an
+  unreadable `delivery_date` column / an unloadable supplier table (REAL failures: renamed away
+  inside the test, restored in `finally`) never take the sweep down, 12 files = every file named
+  in the post). Mutation-checked: removing the activity filter, the due-row filter, the
+  all-rows pass, the `IS NULL` guard, the transaction, the multi-number match, the ops channel,
+  the receipts-lookup / delivery-dates / supplier-names `try`, the date floor, its window,
+  `receipt_date_to` or `UNCAPPED_KINDS` each fails a named test. Fixtures use MADE-UP DL /
+  receipt numbers — never the incident's (public repo).
 - **Known residuals (not handled, deliberately):** `manual` is terminal and the one ops alert is
   the only safeguard — if nobody deletes the file and CODEX later imports it, the duplicate
   receipt is not detected. A later deletion of the hand-typed receipt in CODEX never turns the

@@ -86,8 +86,8 @@ log = logging.getLogger("orders.dl_alerts")
 # (`• odosielateľ — predmet (prijaté D.M.)`), enqueued across many worker ticks and
 # grouped only at flush time. For each, `flush_pending` renders ONE readable message:
 # a per-kind HEADER (count + one explanation, `{n}` filled at flush) + up to
-# DISPLAY_ITEM_CAP short item lines + „… a ešte N ďalší/ďalšie/ďalších" (`report.more_line`,
-# agreeing with N, #476) + an action link (the admin dashboard
+# DISPLAY_ITEM_CAP short item lines (every line for a kind in `UNCAPPED_KINDS`, #494) +
+# „… a ešte N ďalší/ďalšie/ďalších" (`report.more_line`, agreeing with N, #476) + an action link (the admin dashboard
 # on the ops channel, the password-free board on a warehouse channel — #473) — instead
 # of the pre-#336 wall where flush just concatenated N full explanation sentences (live
 # evidence: a 3177-char human_processing_review post). Mirrors question_alerts._group_html's
@@ -293,7 +293,8 @@ def _format_grouped(kind: str, bodies: list[str], cfg, *, channel_id: int,
                     message_ids: list[str] | None = None) -> str:
     """#336: one readable grouped alert for a per-item wall kind — a single per-kind
     HEADER (count + one explanation, `{n}` filled) + up to `DISPLAY_ITEM_CAP` short item
-    lines + „… a ešte N ďalší/ďalšie/ďalších" (`report.more_line`, #476) + an action link.
+    lines (every line for a kind in `UNCAPPED_KINDS` — each line its own action, #494) +
+    „… a ešte N ďalší/ďalšie/ďalších" (`report.more_line`, #476) + an action link.
     Replaces the pre-#336 wall where `flush_pending` just `"".join`-ed N full explanation
     sentences. Mirrors `question_alerts._group_html`'s header/cap/remainder/link convention.
     `cfg` may be
