@@ -6,6 +6,8 @@ the backend /version (the mandatory web rules).
 """
 import re
 
+from playwright.sync_api import expect
+
 from app import db
 
 
@@ -38,14 +40,15 @@ def test_dashboard_user_workflow(live_server, pg, page):
 
     # list shows the seeded mail; search narrows then restores
     page.wait_for_selector("text=Objednavka chleba")
+    # the search is debounced (350 ms) and then fetches: wait for the list itself, never a
+    # fixed sleep (a busy box missed the 600 ms window and read the unfiltered list)
+    mail = page.locator("text=Objednavka chleba")
     page.fill("#q", "chleba")
-    page.wait_for_timeout(600)               # debounced search (350 ms)
-    assert page.locator("text=Objednavka chleba").count() == 1
+    expect(mail).to_have_count(1)
     page.fill("#q", "neexistujuce_slovo_xyz")
-    page.wait_for_timeout(600)
-    assert page.locator("text=Objednavka chleba").count() == 0
+    expect(mail).to_have_count(0)
     page.fill("#q", "")
-    page.wait_for_timeout(600)
+    expect(mail).to_have_count(1)
 
     # open detail -> the pipeline event shows in the timeline
     page.click("text=Objednavka chleba")
