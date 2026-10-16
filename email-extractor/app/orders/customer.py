@@ -215,11 +215,10 @@ def _by_store(owners: list[dict], store: str, strict: bool = False) -> dict | No
     a header naming both branches, or neither, decides nothing.
 
     `strict` (#493 — a mail of several shops / a sender with learned shop rules, where this
-    is the only automatic shop rung besides a rule): the street's folded words INCLUDING its
-    house number must all be in the header (review round 8: „BISTRO Hlavná 5" matched the
-    card on „Hlavná 12" — the old comparison drops words of ≤ 2 characters); a house number
-    with a letter written apart („19 A") proves no card with that number (round 20). Any other
-    mail keeps the #101 comparison exactly.
+    is the only automatic shop rung besides a rule): `_by_street_strict` — exactly ONE named
+    family street whose house number is the header's (review rounds 8-24: the old comparison
+    drops words of ≤ 2 characters, „BISTRO Hlavná 5" matched the card on „Hlavná 12"). Any
+    other mail keeps the #101 comparison exactly.
     """
     if strict:
         return _by_street_strict(owners, store)
@@ -248,29 +247,35 @@ _HOUSE_RE = re.compile(r"^(\d+)[a-z]?$")
 
 
 def _by_street_strict(owners: list[dict], store: str) -> dict | None:
-    """The `strict` street rung (#493 shop contexts): the ONE card whose street's words —
-    house number included — are all in the header. Never a guess (review rounds 8-23):
-    - a header with an undecidable house number („19 A", „19/A.", „7 / B. Bystrica", or a shop
-      code's number „GT1") that ANY family card carries decides nothing — gluing one reading
-      before the count let another card win („Hlavná 5, 7 / B. Bystrica" → the 5 card);
-    - a card with NO house number never wins for a header that has one („BISTRO Hlavná 12" is
-      not the card „Hlavná"), yet it BLOCKS when the header names its street, unless a fitting
-      numbered card covers all its words („BISTRO Námestie SNP 48" names both „Námestie SNP"
-      and „SNP 48" — asked; „Hlavná" beside a fitting „Hlavná 19/A" is that card's street);
-    - several fitting cards decide nothing („Hlavná 5 a 7")."""
+    """The `strict` street rung (#493 shop contexts) — decides only when the header names
+    EXACTLY ONE family street and that card's house number is the header's (review round 24).
+
+    Rounds 17-23 each found a new way to tell branches on ONE street apart by their house
+    numbers wrongly („19/a" vs „19", „7 B. Bystrica", „19/A.", „GT1", a numberless card…);
+    every fix opened the next. Branches on one street are therefore never told apart here:
+    - a family street is NAMED when all its words (house numbers aside) are in the header;
+      zero or several named streets (one street of two branches, „Námestie SNP" + „SNP 48",
+      a header naming two streets) decide nothing — asked once, then a learned rule decides;
+    - the named card's house numbers (a suffixed one is ONE unit, „19/A" = „19a") must all
+      be in the header, a card with NO house number never wins for a header that has one;
+    - a header with an undecidable house number („19 A", „19/A.", „7 / B. Bystrica", or a
+      shop code's number „GT1") that ANY family card carries decides nothing.
+    The #101 shape (two branches on two streets, „GT1- Družby 35 BB") still ships."""
+    want = _street_tokens(store)
     unsure = _undecidable_numbers(store)
     streets = [(c, _street_tokens(c.get("street", ""))) for c in owners]
     if unsure and any(_house_number(t) in unsure for _c, toks in streets for t in toks):
         return None
-    want_tokens = _street_tokens(store)
-    fits = [(c, toks) for c, toks in streets if toks and toks <= want_tokens]
-    if not any(_house_number(t) for t in want_tokens):
-        return fits[0][0] if len(fits) == 1 else None
-    numbered = [(c, toks) for c, toks in fits if any(_house_number(t) for t in toks)]
-    blockers = [c for c, toks in fits
-                if not any(_house_number(t) for t in toks)
-                and not any(toks <= n_toks for _n, n_toks in numbered)]
-    return numbered[0][0] if len(numbered) == 1 and not blockers else None
+    want_words = {t for t in want if not _house_number(t)}
+    named = [(c, toks) for c, toks in streets
+             if (words := {t for t in toks if not _house_number(t)}) and words <= want_words]
+    if len(named) != 1:
+        return None
+    card, toks = named[0]
+    numbers = {t for t in toks if _house_number(t)}
+    if not numbers:
+        return None if any(_house_number(t) for t in want) else card
+    return card if numbers <= want else None
 
 
 def _undecidable_numbers(header: str) -> set[str]:

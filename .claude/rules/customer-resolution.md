@@ -179,20 +179,22 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   shop matched the „19/A" card, then a bare „19" card; a letter written APART is never glued
   — „7 B. Bystrica" (with its dot) is house 7, round 19) must all be in the header (round 8:
   „BISTRO Hlavná 5" matched „Hlavná 12"; the #101 corpus case GT1 / GT2 still resolves) —
-  `_by_street_strict`: a header with an undecidable house number (`_undecidable_numbers`: one
-  letter written apart WITHOUT a dot — „19 A", „SNP 48 A", „19 b", round 20 — or a slash
-  letter WITH a dot — „19/A.", „7 / B. Bystrica", round 21: house 7/B or house 7 + an
-  initial?; or a shop code's number „GT1" → 1, round 23) that ANY family card carries decides
-  nothing (round 22: gluing one reading before the count let another card win); a card with
-  NO house number never wins for a header that has one, yet BLOCKS when it fits unless a
-  fitting numbered card covers all its words (round 23: „BISTRO Námestie SNP 48" names both
-  „Námestie SNP" and „SNP 48"; „Hlavná" beside „Hlavná 19/A" is that card's street); the fit
-  must be UNIQUE (round 21: „Hlavná 5 a 7") → otherwise asked. Accepted over-asks (safe):
-  any number in the header counts as „has a number" (a shop code „Predajňa 2: Tržnica" with a
-  numberless „Tržnica" card is asked), and a shop number equal to another card's house
-  number blocks („Predajňa 3 A Hlavná 7" beside a „Námestie 3" card).
-  Accepted over-ask (safe, settles by one answer → a rule): a Slovak one-letter word after a
-  house number („Hlavná 5 v Žiline", „5 a 7") makes it undecidable too. Any other mail
+  `_by_street_strict` (round 24 — the CAUSE of rounds 17-23, each of which found a new way
+  to tell two branches on ONE street apart by their numbers wrongly: „19/a" vs „19", „7 B.
+  Bystrica", „19/A.", „GT1", a numberless card): decides ONLY when the header names EXACTLY
+  ONE family street — a street is named when all its words (house numbers aside) are in the
+  header — and that card's house numbers (a suffixed one is one unit) are all in the header.
+  Branches on one street, a header naming two family streets („Námestie SNP 48" next to
+  „Námestie SNP" + „SNP 48", „Hlavná 7, Nová 3") or no street → asked ONCE, then the
+  answer's rule decides; a numberless card never wins for a header carrying any number; a
+  header with an undecidable house number (`_undecidable_numbers`: one letter written apart
+  without a dot „19 A", a slash letter with a dot „19/A.", a shop code's number „GT1") that
+  ANY family card carries decides nothing. The #101 shape (two branches on two streets) still
+  ships. NEVER re-add a same-street number comparison „with one more check" — that is the
+  treadmill rounds 17-23 proved. Accepted over-asks (safe): any number in the header counts
+  as „has a number" (a shop code „Predajňa 2: Tržnica" with a numberless „Tržnica" card is
+  asked); a Slovak one-letter word after a house number („Hlavná 5 v Žiline") makes it
+  undecidable. Any other mail
   exactly as #101; (3) family: `_by_delivery_address` —
   NOT in a multi-shop mail; (4) the old llm / exact_email rungs.
 - **The poistka** (`customer.collapsed_shops`): a shop ships ONLY when a SHOP rung decided it
