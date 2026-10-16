@@ -144,13 +144,17 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   round 7).
 - **Multi-shop mail** (`store_key.is_multi_store`): ≥2 different identities — orders naming
   no shop count one per distinct (block, file) when under a block of their own
-  (`names_a_block`: a generic shop word „Predajňa:", a real word or code „A", or a number no
-  document word owns „č. 2"; never a noise-only header — a date, a calendar week, „Objednávka
-  04.08.", „Objednávka č. 123", „Hárok 1", rounds 8-12), from an attachment that could not be
-  told (`file_unknown`, round 11) or from a found file whose name has no shop words (round 12:
-  „OBJ Pekárová žena.xlsx" next to the Tržnica form; „Predajňa A" / „Predajňa B" counted
-  once — both shops went to the sender's card) — AND a header block (`names_a_block`) on
-  some order
+  (`names_a_block`: a generic shop word „Predajňa:", a real word, a lone CAPITAL letter „A",
+  or a number no document word owns „č. 2"; never a noise-only header — a date incl.
+  „04/08/2026", a calendar week „T42", „Objednávka č. 123", „Hárok 1", „v pondelok", „a.s.",
+  a bare year — the SAME word lists `tokens` drops, rounds 8-13), from an attachment that
+  could not be told (`file_unknown`, round 11 — each such order on its own, round 13: two
+  blank „Predajňa:" forms counted once) or from a found file whose name has no shop words
+  (round 12: „OBJ Pekárová žena.xlsx" next to the Tržnica form; „Predajňa A" / „Predajňa B"
+  counted once — both shops went to the sender's card) — AND a header block
+  (`names_a_block`) on some order. Measured (round 13, prod read-only): 435 of 443 order runs
+  since 2026-07-30 carry `store = ""` on every order — the header heuristics act on real
+  multi-shop mails only
   (even an empty „Predajňa:") or the sender's learned shop rules. Never
   file names alone, never the sender's card count (rounds 3-4: a 2-card sender's two files of
   one day, a template file name, „Objednávka Prešov" + „… Prešov pečivo" are no shops —
@@ -175,8 +179,10 @@ one EAN (16 wrong). Three shops existed only in CODEX. The pieces, in the order 
   Accepted
   residuals (safe direction — asked, never a wrong card): a shop with NO identity at all (an
   empty header and a file name with no words) is asked per order every mail (no rule can be
-  keyed on nothing); a date range without the dot after its first day („16-20.10.") leaves
-  that day in the identity, so such a shop is re-asked each week.
+  keyed on nothing) — also one-letter codes („Predajňa A" / „Predajňa B": the identity drops
+  one-letter words, so no rule is learned for them); a date range without the dot after its
+  first day („16-20.10.") leaves that day in the identity, so such a shop is re-asked each
+  week.
 - **Merging (#81.1), all inside `order_customers.resolve_orders`**: a multi-shop mail merges
   per (day, order number, shop identity) — two shops never merge, two files of one shop do,
   an order naming NO shop is never merged at all (round 5); a sender with learned shop rules
