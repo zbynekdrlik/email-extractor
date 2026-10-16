@@ -315,3 +315,143 @@ def test_a_new_customer_created_for_a_shop_never_gets_the_senders_address(pg, mo
     cards = {c["ean_edi"]: c for c in snapshot.customers_for_management(pg)}
     assert SENDER not in cards["2999000000209"]["emails"]
     assert store_rules.for_sender(pg, SENDER) == [(frozenset({"pr"}), "2999000000209")]
+
+
+# --- review round 3 (#493) --------------------------------------------------------------------
+
+TOWNS_CSV = (
+    "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,E-mail\n"
+    f"Tesco Žilina,2999000000111,Žilina,Hlavná 1,,,\n"
+    f"Kaufland Žilina,2999000000112,Žilina,Hlavná 2,,,\n"
+    f"Tesco Martin,2999000000113,Martin,Hlavná 3,,,\n"
+    f"Kaufland Martin,2999000000114,Martin,Hlavná 4,,,\n"
+    f"Centrála reťazca,2999000000101,Mestečko,Hlavná 9,,,{SENDER}\n"
+)
+
+
+def _towns(pg):
+    snapshot.import_snapshot(pg, CATALOG_CSV, TOWNS_CSV)
+
+
+def _town_stores(town, qty=7):
+    """The file names carry no town — only the headers do (the mail-relative words of both
+    towns' mails are then the same: {tesco} / {kaufland})."""
+    return [(f"Tesco {town}", "TE", "vianočka 400g", qty, "VIA"),
+            (f"Kaufland {town}", "KA", "rožok kváskový 70g", qty - 2, "G70")]
+
+
+def test_a_rule_never_captures_the_same_chain_in_another_town(pg, monkeypatch):
+    """„Tesco Žilina" + „Kaufland Žilina" and „Tesco Martin" + „Kaufland Martin" reduce to
+    the same mail-relative words ({tesco}/{kaufland}); a rule is keyed on the shop's WHOLE
+    identity, so Martin is asked, never shipped to the Žilina cards — also while the Žilina
+    questions are still open (each shop its own question)."""
+    monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
+    _towns(pg)
+    _run(pg, "m-za", stores=_town_stores("Žilina"))
+    _run(pg, "m-mt", stores=_town_stores("Martin"))
+    qs = _shop_questions(pg)
+    assert set(qs) == {"Tesco Žilina", "Kaufland Žilina", "Tesco Martin", "Kaufland Martin"}
+    c = _client()
+    c.post(f"/api/board/questions/{qs['Tesco Žilina']['id']}/answer",
+           json={"ean_edi": "2999000000111", "name": "Tesco Žilina"})
+    assert pg.execute("SELECT message_id, status FROM held_orders WHERE store = "
+                      "'Tesco Martin'").fetchone() == ("m-mt", "held")
+    c.post(f"/api/board/questions/{qs['Kaufland Žilina']['id']}/answer",
+           json={"ean_edi": "2999000000112", "name": "Kaufland Žilina"})
+    result, rec = _run(pg, "m-mt2", stores=_town_stores("Martin", qty=8))
+    assert rec.uploads == [], "the Martin shops are never shipped to the Žilina cards"
+    again, rec2 = _run(pg, "m-za2", stores=_town_stores("Žilina", qty=9))
+    assert {r["customer_ean"] for r in again["order_results"]} == {"2999000000111",
+                                                                 "2999000000112"}
+    assert len(rec2.uploads) == 2
+
+
+def test_a_rule_sender_s_unknown_shop_is_asked_even_alone(pg, monkeypatch):
+    """A sender with learned shop rules sends ONE order of a shop no rule knows — asked once
+    (owner decision 2), never shipped to the sender's one card by the model pick."""
+    from app.orders import store_key
+    _towns(pg)
+    za = store_key.for_orders([{"store": "Tesco Žilina",
+                                "sourceFile": "OBJ Pekárová žena TE.xlsx"}])[0]
+    store_rules.remember(pg, sender_email=SENDER, key=za, ean_edi="2999000000111",
+                         question_id=1, by="sklad")
+    result, rec = _run(pg, "m-lone", stores=[_town_stores("Martin")[0]])
+    assert rec.uploads == []
+    assert set(_shop_questions(pg)) == {"Tesco Martin"}
+
+
+def test_the_sweep_never_answers_a_per_sender_question_of_a_shop_mail(pg):
+    """An order naming no shop (an empty header, a file name with no word) in a mail of
+    several shops is asked per sender with `no_address`; the worker sweep must not settle
+    it with the sender's one card."""
+    from app.orders import hold
+    _towns(pg)
+    stores = _town_stores("Žilina") + [("Predajňa:", "3", "rožok 50g", 120, "G50")]
+    _run(pg, "m-sweep", stores=stores)
+    plain = [q for q in teach.open_questions(pg) if q["kind"] == "customer"
+             and not q["context"].get("store_key")]
+    assert len(plain) == 1 and plain[0]["context"].get("no_address") is True
+    assert hold.retry_unknown_customer_questions(pg, _cfg()) == []
+    assert teach.get(pg, plain[0]["id"])["status"] == "open"
+
+
+TWO_CARD_CSV = (
+    "Názov organizácie,EAN kód EDI,Obec,Ulica,Meno pre fakturáciu,Číslo mobilu,E-mail\n"
+    f"Rodina pobočka A,2999000000301,Hôrka,Krátka 9,,,{SENDER}\n"
+    f"Rodina pobočka B,2999000000302,Dolina,Dlhá 5,,,{SENDER}\n"
+)
+
+
+def _two_card_mail_run(pg, mid, files, notes):
+    pg.execute("INSERT INTO messages (message_id, category) VALUES (%s, 'ai_orders')", (mid,))
+    parts = ["Subject: objednávka\n\nAttachments:\n"]
+    for name, item, qty in files:
+        parts.append(f"===== {name}.xlsx =====\n[Sheet: H]\nna 04.08.2026\n{qty}x {item}\n")
+    orders = [{"orderNumber": "", "deliveryDate": "04.08.2026", "recipientGroup": "",
+               "store": "", "items": [{"name": item, "quantity": qty, "unit": "ks",
+                                       "sourceQuote": f"{qty}x {item}"}]}
+              for _n, item, qty in files]
+    answers = [{"senderName": "N", "senderEmail": SENDER, "companyName": "Rodina",
+                "isChangeRequest": False, "notes": notes, "orders": orders},
+               {"ean_edi": "", "confidence": 0.2}]
+    answers += [{"gtin": g, "confidence": 0.95, "matchedCatalogName": "", "reason": ""}
+                for g in ("VIA", "G70")[:len(files)]]
+    rec = Recorder()
+    mail = {"message_id": mid, "subject": "objednávka", "from_addr": SENDER, "from_name": "N",
+            "combined_text": "".join(parts), "today": "2026-07-30"}
+    result = pipeline.run(pg, _cfg(), mail, snapshot.latest_snapshot_id(pg),
+                          client=ScriptedClient(answers), upload=rec.upload, post=rec.post)
+    return result, rec
+
+
+def test_a_two_card_sender_keeps_the_delivery_address_and_learns_no_file_rule(pg, monkeypatch):
+    """#418 unchanged: a 2-card sender's ordinary mail with a constant template file name.
+    One without a delivery address is asked per SENDER (as before #493) and its answer
+    teaches NO file-name rule — the next mails are decided by their delivery address."""
+    monkeypatch.setattr("app.orders.upload.put", lambda cfg, name, content: True)
+    snapshot.import_snapshot(pg, CATALOG_CSV, TWO_CARD_CSV)
+    _two_card_mail_run(pg, "m-418q", [("rodina tovar", "vianočka 400g", 6)], "")
+    qs = [q for q in teach.open_questions(pg) if q["kind"] == "customer"]
+    assert len(qs) == 1 and not qs[0]["context"].get("store_key")
+    _client().post(f"/api/board/questions/{qs[0]['id']}/answer",
+                   json={"ean_edi": "2999000000301", "name": "Rodina pobočka A"})
+    assert store_rules.for_sender(pg, SENDER) == []
+    r1, rec1 = _two_card_mail_run(pg, "m-418a", [("rodina tovar", "vianočka 400g", 7)],
+                                  "Doručiť: Dlhá 5, Dolina")
+    r2, rec2 = _two_card_mail_run(pg, "m-418b", [("rodina tovar", "vianočka 400g", 8)],
+                                  "Doručiť: Krátka 9, Hôrka")
+    assert [r["customer_ean"] for r in r1["order_results"]] == ["2999000000302"]
+    assert [r["customer_ean"] for r in r2["order_results"]] == ["2999000000301"]
+    assert len(rec1.uploads) == len(rec2.uploads) == 1
+
+
+def test_a_two_card_sender_s_two_files_of_one_day_stay_one_order(pg):
+    """#81.1 unchanged: two files of one day (no shop header, no shop named) are ONE order."""
+    snapshot.import_snapshot(pg, CATALOG_CSV, TWO_CARD_CSV)
+    result, rec = _two_card_mail_run(
+        pg, "m-811", [("objednavka pecivo", "vianočka 400g", 7),
+                      ("objednavka kolace", "rožok kváskový 70g", 5)],
+        "Doručiť: Dlhá 5, Dolina")
+    assert len(result["order_results"]) == 1
+    assert len(rec.uploads) == 1
+    assert result["order_results"][0]["customer_ean"] == "2999000000302"

@@ -37,7 +37,7 @@ ORDERS = [
 def _resolve(key, rules=(), multi=True, delivery_text=""):
     return customer.resolve(FAMILY, SENDER, "", "", llm={"ean_edi": "2999000000204",
                                                            "confidence": 0.97},
-                            key=key, rules=rules, multi_store=multi,
+                            key=key, rules=rules, multi_store=multi, use_names=multi,
                             delivery_text=delivery_text)
 
 
@@ -91,7 +91,7 @@ def test_a_question_context_rebuilds_the_same_key():
     ctx = {"store": key.header, "store_file": key.source_file, "store_key": key.text,
            "store_tokens": sorted(key.tokens)}
     back = store_key.from_context(ctx)
-    assert (back.key, back.tokens, back.header_key) == (key.key, key.tokens, key.header_key)
+    assert (back.tokens, back.text, back.label) == (key.tokens, key.text, key.label)
     assert store_key.from_context({"sender_email": SENDER}) is None
 
 
@@ -162,6 +162,15 @@ def test_the_mail_level_delivery_text_never_picks_a_shop_in_a_multi_shop_mail():
     assert _resolve(key, multi=False, delivery_text=notes).rule == "delivery_address"
 
 
+def test_outside_a_multi_shop_mail_the_name_rung_never_beats_the_delivery_address():
+    """Review round 3: a 2-card sender's ordinary mail keeps exactly the pre-#493 rungs — a
+    file word naming one card („… kosice") must not win over the delivery address."""
+    key = store_key.for_orders([{"store": "", "sourceFile": "objednavka BISTRO.xlsx"}])[0]
+    notes = "Dodať na adresu Makovická, Dolina"
+    hit = _resolve(key, multi=False, delivery_text=notes)
+    assert (hit.ean_edi, hit.rule) == ("2999000000203", "delivery_address")
+
+
 def test_a_stem_every_family_card_shares_is_no_signal():
     fam = [dict(c, name=f"Reťazec {c['name']}", trade_name="")
            for c in FAMILY if c["ean_edi"] != "2999000000999"]
@@ -207,9 +216,9 @@ def test_what_makes_a_mail_multi_shop():
     assert store_key.is_multi_store(same_header), "one header, two different files"
     files_only = store_key.for_orders([{"store": "", "sourceFile": "Jana.xlsx"},
                                        {"store": "", "sourceFile": "Peter.xlsx"}])
-    assert not store_key.is_multi_store(files_only), "a one-card sender's files are no shops"
-    assert store_key.is_multi_store(files_only, shop_sender=True), \
-        "a known multi-shop sender's files ARE shops"
+    assert not store_key.is_multi_store(files_only), "file names alone are no shops"
+    assert store_key.is_multi_store(files_only, shop_evidence=True), \
+        "with shop evidence (rules / a shop rung) the files ARE shops"
     days = store_key.for_orders([{"store": "BISTRO", "sourceFile": "BISTRO pondelok.xlsx"},
                                  {"store": "BISTRO", "sourceFile": "BISTRO streda.xlsx"}])
     assert not store_key.is_multi_store(days), "one shop, a file per day"
