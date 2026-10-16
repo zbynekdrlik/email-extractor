@@ -273,14 +273,42 @@ def for_orders(orders: list[dict], drop=()) -> list[StoreKey]:
             for header, src, toks, unknown in raw]
 
 
+# words that make a header a document / time line, not a shop block („Objednávka 04.08.",
+# „Hárok 1", „Pondelok") — a number next to them is no shop code (`names_a_block`)
+_DOCUMENT_WORDS = frozenset({
+    "obj", "objed", "objednavka", "objednavky", "objednavku", "objednavok", "objednavkovy",
+    "order", "zoznam", "tabulka", "harok", "sheet", "list",
+})
+_TIME_WORDS = frozenset({
+    "tyzden", "tyzdna", "tyzdni", "tyzdne", "tyz", "tyzd", "week", "kw", "kt",
+    "pondelok", "utorok", "streda", "stvrtok", "piatok", "sobota", "nedela",
+    "januar", "februar", "marec", "april", "maj", "jun", "jul", "august", "september",
+    "oktober", "november", "december",
+})
+_NEUTRAL_WORDS = frozenset({"c", "cislo", "no", "nr", "na", "pre", "do", "od", "sro", "spol",
+                            "pekarova", "pekarovej", "pekarovu", "zena", "zeny", "slovnormal"})
+
+
 def names_a_block(key: StoreKey) -> bool:
-    """The order sits under a header block of its own — a header with a real word, or a
-    generic shop word naming nothing („Predajňa:"); a header of only noise — a date, a
-    calendar week, an order / day word („Objednávka 04.08.", „43 KT", „Pondelok") — names no
-    block (review rounds 10-11: two goods files of ONE shop became two shops)."""
-    if any(not t.isdigit() for t in tokens(key.header, keep_numbers=True)):
+    """The order sits under a header block of its own: its header carries a generic shop word
+    („Predajňa:"), a word that is not a document / time / filler word (a name, a code „A"),
+    or a number no document word owns („č. 2"). A header of only noise — a date, a calendar
+    week, „Objednávka 04.08.", „Objednávka č. 123", „Hárok 1", „Pondelok" — names no block
+    (review rounds 10-12)."""
+    words = [w for w in _NON_ALNUM_RE.split(_HEADER_NOISE_RE.sub(" ", dl_match.fold(
+        key.header))) if w]
+    if SHOP_WORDS & set(words):
         return True
-    return bool(SHOP_WORDS & set(re.split(r"[^a-z0-9]+", dl_match.fold(key.header))))
+    owned = bool(_DOCUMENT_WORDS & set(words))
+    for w in words:
+        if w in _DOCUMENT_WORDS or w in _TIME_WORDS or w in _NEUTRAL_WORDS:
+            continue
+        if w.isdigit():
+            if not owned and len(w) <= MAX_HEADER_NUMBER:
+                return True
+            continue
+        return True
+    return False
 
 
 def is_multi_store(keys: list[StoreKey], shop_evidence: bool = False) -> bool:
@@ -291,10 +319,13 @@ def is_multi_store(keys: list[StoreKey], shop_evidence: bool = False) -> bool:
     a customer may send one file per day / per kind of goods, and that must stay one order
     (#81.1) — exactly as before #493."""
     shops = len({k.identity for k in keys if k.identity})
-    # an order that names no shop is one more next to named ones when it sits under a block
-    # of its own („Predajňa:", review round 8) or its attachment could not be told (round 11:
-    # the PR form's line was also in the body — both shops went to the sender's card)
-    shops += any(not k.identity and (names_a_block(k) or k.file_unknown) for k in keys)
+    # orders that name no shop count too, one per distinct (block, file) — under a block of
+    # their own („Predajňa:", review round 8), from an attachment that could not be told
+    # (round 11: the PR form's line was also in the body) or from a file whose name has no
+    # shop words (round 12: „OBJ Pekárová žena.xlsx" next to the Tržnica form; „Predajňa A"
+    # / „Predajňa B" counted once) — else both shops went to the sender's card
+    shops += len({(_squash(k.header), k.source_file) for k in keys
+                  if not k.identity and (names_a_block(k) or k.file_unknown or k.source_file)})
     return (shop_evidence or any(names_a_block(k) for k in keys)) and shops >= 2
 
 
