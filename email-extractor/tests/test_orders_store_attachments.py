@@ -336,3 +336,11 @@ def test_a_house_number_with_its_letter_is_one_unit():
     # a capital suffix written apart („19 A") is the same house number
     assert _street_hit(_street_family("Hlavná 19/A", "Hlavná 7"), "BISTRO Hlavná 19 A") == (
         "2999000000801", "store_address")
+
+
+def test_a_city_initial_after_the_house_number_is_no_suffix():
+    """„Hlavná 7 B. Bystrica" is house 7 in Banská Bystrica — never the „Hlavná 7/B" card
+    (review round 19: a capital written apart was glued to the number)."""
+    fam = _street_family("Hlavná 7", "Hlavná 7/B")
+    assert _street_hit(fam, "Hlavná 7 B. Bystrica") == ("2999000000801", "store_address")
+    assert _street_hit(fam, "BISTRO Hlavná 7 B.Bystrica") == ("2999000000801", "store_address")
