@@ -43,7 +43,8 @@ def test_dashboard_user_workflow(live_server, pg, page):
     # the search is debounced (350 ms) and then fetches: wait for the list itself, never a
     # fixed sleep (a busy box missed the 600 ms window and read the unfiltered list)
     mail = page.locator("text=Objednavka chleba")
-    page.fill("#q", "chleba")
+    with page.expect_response(lambda r: "/api/messages?" in r.url and "q=chleba" in r.url):
+        page.fill("#q", "chleba")              # the matching search really runs
     expect(mail).to_have_count(1)
     page.fill("#q", "neexistujuce_slovo_xyz")
     expect(mail).to_have_count(0)
@@ -731,9 +732,15 @@ def test_board_dl_item_not_stock_answer_learns_a_supplier_rule_in_the_browser(
     button.click()
     row = _wait_answered(pg, page, qid)
     assert row[0] == "answered" and row[1] == "not_stock", row
-    assert pg.execute(
-        "SELECT source, card FROM dl_item_memory WHERE supplier_ean = '2000000000009' "
-        "AND gtin = 'not_stock' AND deleted_at IS NULL").fetchall() == [("human", label)]
+    # the answer route commits the status, THEN applies the answer on its own connection
+    # (#116) — wait for the learned rule, never read it the instant the status flips
+    rule_sql = ("SELECT source, card FROM dl_item_memory WHERE supplier_ean = '2000000000009' "
+                "AND gtin = 'not_stock' AND deleted_at IS NULL")
+    for _ in range(80):
+        if pg.execute(rule_sql).fetchall():
+            break
+        page.wait_for_timeout(100)
+    assert pg.execute(rule_sql).fetchall() == [("human", label)]
 
     page.locator('.q-chip[data-status="answered"]').click()
     page.wait_for_selector(f"#q-card-{qid} .q-answer:has-text('{label}')")
