@@ -356,3 +356,12 @@ def test_a_letter_written_apart_after_a_house_number_is_asked():
     assert _street_hit(_street_family("SNP 48", "SNP 48/A"), "BISTRO SNP 48 A") is None
     assert _street_hit(_street_family("Hlavná 7", "Hlavná 7/B"),
                        "BISTRO Hlavná 7 / B. Bystrica") == ("2999000000801", "store_address")
+
+
+def test_an_unsure_house_number_vetoes_only_a_unique_winner():
+    """Round 21: „19/A." (a suffix then a dot) shipped to the bare 19 card; and the unsure
+    veto ran BEFORE the uniqueness count, so „Hlavná 5 a 7" (both cards named) shipped to
+    the 7 card. A header naming two houses decides nothing; an unsure number is asked."""
+    assert _street_hit(_street_family("Hlavná 19", "Hlavná 19/A"), "BISTRO Hlavná 19/A.") is None
+    assert _street_hit(_street_family("Hlavná 5", "Hlavná 7"), "BISTRO Hlavná 5 a 7") is None
+    assert _street_hit(_street_family("Hlavná 1", "Hlavná 12"), "Predajňa 1 A, Hlavná 12") is None
