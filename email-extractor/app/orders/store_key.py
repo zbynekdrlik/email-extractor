@@ -179,21 +179,22 @@ def _by_lines(texts, sections, body: str = "") -> str:
     name only when the quote is nowhere (review round 7: a quote the model reformatted matched
     nothing; round 8: the incident's order forms share their product rows — a name is in
     every file and must never tie a located quote). A text found in the mail `body` is no
-    attachment's (round 9: a body order's name in a form put it into that form's shop)."""
+    attachment's — checked FIRST, a form may list the same product (rounds 9-10: a body
+    order's quote or name in a form put it into that form's shop)."""
     counts = [0] * len(sections)
     found = False
     for x in texts or ():
         for t in (x,) if isinstance(x, str) else x:
             if len(_squash(t)) < 3:
                 continue
+            if body and _in_section(t, body):
+                break   # in the mail itself — counts for no file, even if a form has it too
             hits = [i for i, (_name, words) in enumerate(sections) if _in_section(t, words)]
             if hits:
                 for i in hits:
                     counts[i] += 1
                 found = True
                 break
-            if body and _in_section(t, body):
-                break   # read from the mail itself — counts for no file
     if not found:
         return ""
     best = max(counts)
@@ -286,7 +287,7 @@ def is_multi_store(keys: list[StoreKey], shop_evidence: bool = False) -> bool:
     # a header block naming nothing („Predajňa:") next to a named shop is a shop of its
     # own (review round 8: its order shipped to the sender's card by address)
     shops += any(names_a_block(k) and not k.identity for k in keys)
-    return (shop_evidence or any(k.header.strip() for k in keys)) and shops >= 2
+    return (shop_evidence or any(names_a_block(k) for k in keys)) and shops >= 2
 
 
 def from_context(ctx: dict) -> StoreKey | None:

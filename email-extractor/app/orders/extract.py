@@ -124,18 +124,29 @@ def _pricelist_header(line: str) -> bool:
     return "%DPH" in line and ("VO bez DPH" in line or "VO s DPH" in line)
 
 
-def table_attachments(text: str) -> int:
-    """How many attachments (`===== <file> =====` sections) carry a recognized table. #493:
-    `parse_table` reads the FIRST one only — with two (two shops' filled-in price lists) the
-    second shop's order would vanish, so such a mail is read by the model (review round 9)."""
+def table_attachments(text: str, by_sheet: bool = False) -> int:
+    """How many attachments (`===== <file> =====` sections) — or, `by_sheet`, how many sheets
+    (`[Sheet: …]`) — carry a recognized table. #493: `parse_table` reads the FIRST table only
+    (and straight through the next sheet of one workbook) — with two shops' filled-in price
+    lists the second shop's order vanished or merged into the first (review rounds 9-10)."""
     lines = _attachment_block(clean_text(text)) or []
-    section, with_table = 0, set()
+    part, with_table = 0, set()
     for line in lines:
-        if line.startswith("====="):
-            section += 1
+        if line.startswith("=====") or (by_sheet and line.startswith("[Sheet:")):
+            part += 1
         elif _kosik_header(line) or _pricelist_header(line):
-            with_table.add(section)
+            with_table.add(part)
     return len(with_table)
+
+
+def _several_tables(source: str, extracted: dict) -> bool:
+    """Is this a mail of several shops' tables the code must not read as one? Two attachments
+    with a table, or two sheets with a table while the model names two shops (a workbook split
+    into goods sheets of ONE shop keeps the table path)."""
+    if table_attachments(source) > 1:
+        return True
+    stores = {str(o.get("store") or "").strip() for o in extracted.get("orders") or []}
+    return table_attachments(source, by_sheet=True) > 1 and len(stores - {""}) > 1
 
 
 def parse_table(text: str) -> list[dict] | None:
@@ -387,11 +398,11 @@ def run(client, email: dict) -> dict:
                 "companyName": extracted.get("companyName", "") or "",
                 "prompt_hash": client.last_prompt_hash}
 
-    tables = table_attachments(source)
-    table = parse_table(source) if tables <= 1 else None
-    if tables > 1:
-        log.info("%d attachments carry a table — read by the model, the code reads only the "
-                 "first (#493)", tables)
+    several = _several_tables(source, extracted)
+    table = None if several else parse_table(source)
+    if several:
+        log.info("several shops' tables — read by the model, the code reads only the first "
+                 "(#493)")
     if table:
         sections = store_key.attachment_sections(source)   # #493
         head = (extracted.get("orders") or [{}])[0]
