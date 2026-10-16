@@ -12,9 +12,13 @@ the INVOICE number), the linked invoice number(s), the receipt total (Σ NSUMAP)
 invoice's total without VAT. The shared snapshot mechanics (refusal type, data age, staleness,
 the stale ops alert) live in `codex_snapshot`, one copy with the stock-card list (#467).
 
-The ONE consumer is the invoice-as-DL dedup gate (`invoice_dedup`, wired in `dl_invoice`): an
-invoice whose delivery CODEX already has is never shipped as a DESADV. Our own imported DESADVs
-show up here too (CODEX stores our DL number in NCDLIST on import).
+Two consumers. The invoice-as-DL dedup gate (`invoice_dedup`, wired in `dl_invoice`): an
+invoice whose delivery CODEX already has is never shipped as a DESADV — through `live()`, fail
+closed. And the import confirmation (`confirm_manual`, #494): a DESADV still waiting in ORION
+`in_DL` whose DL the warehouse typed in by hand becomes `manual` — through the module-level
+`for_supplier`, WITHOUT the freshness gate (a receipt is evidence of presence; an older copy is
+still true). Our own imported DESADVs show up here too (CODEX stores our DL number in NCDLIST on
+import).
 
 **Fail CLOSED, unlike the stock-card list (#467 is fail-open).** A missing invoice-as-DL is
 handled by hand exactly as before the feature; a DUPLICATE delivery note in ORION is the harm

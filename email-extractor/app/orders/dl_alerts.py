@@ -124,9 +124,9 @@ GROUPED_ITEM_KINDS = {
     # still waits in ORION `in_DL` — OPS only (never the warehouse thread), one item line per
     # file (DL, supplier, CODEX receipt, exact file name). The action is on the ORION server.
     "dl_manual_in_codex":
-        "&#128465;&#65039; Dodacie listy zadané v CODEXe ručne ({n}) &mdash; náš súbor "
-        "ešte leží v ORIONe v priečinku <code>in_DL</code>. Zmaž ho, inak ho ranný import "
-        "prevezme druhýkrát (duplicitná príjemka).",
+        "&#128465;&#65039; Dodacie listy zadané v CODEXe ručne ({n}) &mdash; pri každom ešte "
+        "leží náš súbor v ORIONe v priečinku in_DL. Over v CODEXe uvedenú príjemku a súbor "
+        "zmaž, inak ho ranný import prevezme druhýkrát (duplicitná príjemka).",
 }
 
 # #473: a grouped kind that reaches a WAREHOUSE channel links the password-free board

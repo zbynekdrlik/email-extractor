@@ -721,8 +721,9 @@ def sweep(conn, cfg, listdir=None, post=None, now=None, read_files=None) -> int:
         return 0
 
     # #494: BEFORE anything else reads the ledger — a DL already typed into CODEX leaves the
-    # pending state first, so no alert of this sweep (opening, widened, reminder) names it
-    # and the activity read below does not see its mark.
+    # pending state first, so no alert of this sweep (opening, widened, reminder) names it.
+    # (Its `import_confirmed_at` is written now, before the activity read below — that read
+    # counts `imported` rows only, so the mark is never taken for an import pass.)
     manual = _mark_manual(conn, cfg, dirs, now)
     desadv_rows = [r for r in desadv_rows if r["id"] not in manual]
 

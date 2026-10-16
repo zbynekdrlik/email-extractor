@@ -811,6 +811,12 @@ must never ship a SECOND delivery: the warehouse may already have typed it into 
   `dl_memory.remember_not_stock` (EKVIA „PREPRAVNÉ" after the 0.9.179 deploy — evidence on the
   ticket). Details: `n8n-workflow-edits.md` (#488 section).
 
+**Second reader of `codex_receipts` (#494):** `confirm_manual` marks a DESADV still waiting
+in ORION `in_DL` as `import_status = 'manual'` when a receipt of the same supplier carries
+its DL number (the warehouse typed it in by hand) — via the module-level
+`codex_receipts.for_supplier` WITHOUT the freshness gate (presence evidence), never
+`live()`. One ops alert per file asks to delete it. Details: `dl-alerts.md` (#494 section).
+
 ## CODEX customer cards → the order engine's customers (#493)
 
 `tools/codex_customers_push.py` (4th push of the guarded round, after receipts; the round's

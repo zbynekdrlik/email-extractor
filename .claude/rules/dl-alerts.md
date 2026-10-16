@@ -4,6 +4,7 @@ paths:
   - "email-extractor/tests/test_dl_alerts.py"
   - "email-extractor/app/orders/confirm.py"
   - "email-extractor/app/orders/confirm_carryover.py"
+  - "email-extractor/app/orders/confirm_manual.py"
   - "email-extractor/tests/test_orders_confirm*.py"
 ---
 
@@ -269,3 +270,68 @@ day while 3 of the 4 had been imported two days earlier — the reminder printed
   `confirm._carryover_html(conn, confirm._pending_members(conn, <incident id>,
   upload.list_dirs(cfg), confirm.DESADV_LEDGER), confirm.DESADV_LEDGER, reminder=True,
   read_files=lambda n: upload.read_files(cfg, cfg.orion_dl_dir, n), now=datetime.now(UTC))`.
+
+## A DL the warehouse typed into CODEX BY HAND = terminal `import_status = 'manual'` (#494)
+
+Live 13.10.: CODEX refused 4 DESADVs of one supplier, the warehouse typed the 4 DLs in by hand,
+our files stayed in `in_DL` — and the carryover reminder kept telling the warehouse „treba ich
+prijať v CODEXe" every morning (following it = a duplicate receipt). `confirm_manual` (called
+from `confirm.sweep` via `_mark_manual`) fixes it with a FOURTH terminal status:
+
+- **The signal = `codex_receipts` (#485):** a receipt of the SAME supplier
+  (`codex_receipts.for_supplier` → `supplier_eans @> ARRAY[ean]`) whose `dl_numbers` contain
+  the row's `doc_number` compared via `invoice_dedup.digits`/`numbers_of` (digits only, leading
+  zeros and prefixes dropped, < 5 digits never matches — CODEX stores numbers as DOUBLE, a
+  printed `0100…` arrives without its zero). NO freshness gate (`codex_receipts.live()` is NOT
+  used): a receipt is evidence of PRESENCE, an older copy is still true; no copy / no match / a
+  failing lookup = the row keeps waiting (logged). archCodex is decided FIRST — CODEX's own
+  import of our file is ALSO a receipt with our DL number, it must stay `imported`.
+- **Date floor (review round 1):** the receipt's `receipt_date_to` must be ≥ the row's
+  `desadv_sent.delivery_date` (the #485 delivery fact) − `invoice_dedup.DATE_WINDOW_DAYS`. A
+  receipt cannot predate the delivery it books; an older one with the same digits is a reused
+  counter or an INVOICE number typed into CODEX's DL field („often the invoice number", #485) —
+  marking on it would drop a genuinely waiting delivery from the reminder and tell ops to delete
+  its file. A row WITHOUT `delivery_date` (only rows before #485, none waiting at deploy) is
+  never marked. The warehouse back-dates a hand-typed receipt to the delivery day (live: typed
+  13.10., booked 2.10. = the delivery day) — so the floor is the DELIVERY day, never
+  `uploaded_at` (that upload was 5 days after the delivery).
+- **Runs BEFORE any alert of the sweep is built, over EVERY unresolved DESADV row still queued in
+  the listing** (`_unresolved_rows`, no throttle) — a carryover alert/reminder names every waiting
+  file (#476), so marking only the throttled due rows would let a reminder in the 5-minute gap
+  still list a manual file. The marked ids are then dropped from that sweep's `desadv_rows`
+  (else a stale due-row dict would still be grouped as carryover in the same pass).
+- **Terminal = everything else falls out for free:** not in `due_rows`/`_unresolved_rows`/
+  `_pending_members` (all `import_status IS NULL`), never `_decide`d again (so deleting the file
+  is never the `unknown` alarm), and `_check_incidents_for_clear` closes its carryover incident
+  with the ordinary all-clear. `import_status` is TEXT without CHECK → no migration.
+- **`import_confirmed_at` of a manual row is NOT an import pass:** `_activity_today_at` (#255)
+  reads `import_status = 'imported'` rows only — counting a manual mark would flag every file
+  uploaded earlier that day as a same-day rejection. Any FUTURE terminal status that writes
+  `import_confirmed_at` must keep that filter.
+- **ONE ops alert per file, never repeated, never the warehouse thread:** grouped ops kind
+  `dl_manual_in_codex` (`GROUPED_ITEM_KINDS` header: check the receipt in CODEX, then delete the
+  file + one `dl_alerts.item_line` per file: DL, supplier, CODEX receipt, exact wire file name
+  `Z-DESADV_…`; the ops channel gets the dashboard link per #473), outbox key
+  `desadv-manual:<desadv_sent id>`, channel `report.ops_channel(cfg)`
+  (0 → held, delivered once an ops channel is set). The guarded `UPDATE … WHERE import_status IS
+  NULL RETURNING id` and `dl_alerts.enqueue` run in ONE `conn.transaction()` — `manual` without
+  its alert (a silently swallowed „delete the file") or a second alert are both impossible.
+- **The app never touches the file on ORION** (design: no automatic delete outside the upload,
+  #239). A human deletes it on the ops alert; the row is already `manual`, so no alarm follows.
+- Pins: `tests/test_orders_confirm_manual.py` (manual + one alert, never repeated, grouped
+  delivery to ops, escaping, no receipt / other supplier / short number / older receipt /
+  undated row unchanged, one-day window + days-later receipt count, digits normalisation incl.
+  prefixes, archCodex wins, fail-open lookup, transaction rollback, guarded update, vanished
+  manual file = no alarm, imported + manual incident closes, not-yet-due manual file never in a
+  reminder, manual mark ≠ activity). Mutation-checked: removing the activity filter, the
+  due-row filter, the all-rows pass, the `IS NULL` guard, the transaction, the multi-number
+  match, the ops channel, the lookup `try`, the date floor or its window each fails a named
+  test. Fixtures use MADE-UP DL / receipt numbers — never the incident's (public repo).
+- **Known residual (not handled, deliberately):** `manual` is terminal and the one ops alert is
+  the only safeguard — if nobody deletes the file and CODEX later imports it, the duplicate
+  receipt is not detected. Also a later deletion of the hand-typed receipt in CODEX never turns
+  the row back to waiting.
+- **Live read-only check after a deploy:** `SELECT id, doc_number, import_status,
+  import_confirmed_at FROM desadv_sent WHERE import_status = 'manual'` + `SELECT channel_id,
+  kind, message_id, delivered_at FROM pending_alerts WHERE kind = 'dl_manual_in_codex'` (one row
+  per file, channel = ops 592, never 243).

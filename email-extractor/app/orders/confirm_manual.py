@@ -11,8 +11,13 @@ všetkých priečinkov").
 
 The signal is the CODEX receipts read-model (`codex_receipts`, #485): a receipt of the SAME
 supplier (`supplier_eans @> [supplier_ean]`) carrying the SAME DL number (`invoice_dedup.digits`
-— digits only, leading zeros dropped, at least 5 digits; CODEX stores `0100304144` as
-`100304144`) means the delivery is already in CODEX. Such a still-queued row gets
+— digits only, leading zeros dropped, at least 5 digits; CODEX stores numbers as DOUBLE, so a
+printed `0100…` arrives without its zero) and booked no earlier than the row's delivery day
+(`desadv_sent.delivery_date`, written by `record_facts` since #485) minus
+`invoice_dedup.DATE_WINDOW_DAYS` means the delivery is already in CODEX. A receipt cannot
+predate the delivery it books: an older one with the same digits is a reused counter or an
+invoice number the warehouse typed into CODEX's DL field — never this delivery. A row without
+the delivery fact is never marked (it keeps waiting). Such a still-queued row gets
 `import_status = 'manual'` (+ `import_confirmed_at`): terminal, so it leaves every carryover
 alert (`_unresolved_rows` / `_pending_members`), a later disappearance of its file is never the
 `unknown` alarm (a terminal row is never decided again), and its carryover incident closes like
@@ -32,8 +37,7 @@ ledger: a receipt is a SUPPLIER delivery, an ORDER file to a customer never has 
 from __future__ import annotations
 
 import logging
-from datetime import datetime
-from html import escape
+from datetime import date, datetime, timedelta
 
 from . import codex_receipts, confirm_carryover, dl_alerts, invoice_dedup, report
 
@@ -44,29 +48,47 @@ ALERT_KIND = "dl_manual_in_codex"
 ALERT_KEY = "desadv-manual"            # + ":<desadv_sent id>" — one alert per file
 
 
-def receipt_for(conn, row: dict) -> codex_receipts.Receipt | None:
-    """The CODEX receipt of this DESADV row's supplier whose DL number is the row's DL number,
-    or None. A number with fewer than `invoice_dedup.MIN_NUMBER_DIGITS` digits never matches
-    (a short counter must not meet another document)."""
+def receipt_for(conn, row: dict, delivery: date | None) -> codex_receipts.Receipt | None:
+    """The CODEX receipt of this DESADV row's supplier whose DL number is the row's DL number
+    and that was booked no earlier than `delivery` - `DATE_WINDOW_DAYS`, or None. A number with
+    fewer than `invoice_dedup.MIN_NUMBER_DIGITS` digits never matches (a short counter must not
+    meet another document); no `delivery` = nothing to tie a receipt to = None."""
     number = invoice_dedup.digits(row.get("doc_number"))
-    if not number:
+    if not number or delivery is None:
         return None
+    earliest = delivery - timedelta(days=invoice_dedup.DATE_WINDOW_DAYS)
     for receipt in codex_receipts.for_supplier(conn, str(row.get("supplier_ean") or "")):
-        if number in invoice_dedup.numbers_of(receipt.dl_numbers):
-            return receipt
+        if number not in invoice_dedup.numbers_of(receipt.dl_numbers):
+            continue
+        if receipt.receipt_date_to < earliest:
+            log.debug("manual-in-CODEX check: receipt %s carries DL %s but is dated %s, "
+                      "before delivery %s — another document, not this one",
+                      receipt.receipt_number, row.get("doc_number"), receipt.receipt_date_to,
+                      delivery)
+            continue
+        return receipt
     return None
 
 
 def _line(row: dict, receipt: codex_receipts.Receipt, names: dict[str, str],
           wire_prefix: str) -> str:
-    """One grouped-alert item line (`dl_alerts.GROUPED_ITEM_KINDS` carries the header):
-    „• DL 0100304144 (Dodávateľ) — príjemka 261005071, súbor Z-DESADV_…"."""
-    who = confirm_carryover.label(row, "desadv", names)
-    return (f"<p>&#8226; {escape(who)} &mdash; príjemka {escape(receipt.receipt_number)}, "
-            f"súbor <code>{escape(wire_prefix + row['filename'])}</code></p>")
+    """One grouped-alert item line (`dl_alerts.item_line`; the header with the instruction is
+    `dl_alerts.GROUPED_ITEM_KINDS[ALERT_KIND]`): „• DL <číslo> (<dodávateľ>) — príjemka
+    <číslo>, súbor Z-DESADV_…"."""
+    return dl_alerts.item_line(
+        confirm_carryover.label(row, "desadv", names),
+        f"príjemka {receipt.receipt_number}, súbor {wire_prefix}{row['filename']}")
 
 
-def _names(conn) -> dict[str, str]:
+def _delivery_dates(conn, rows: list[dict]) -> dict[int, date | None]:
+    """`desadv_sent.delivery_date` per row id — the delivery FACT `record_facts` writes right
+    after the claim (#485); the sweep's own row dicts do not carry it."""
+    return {r[0]: r[1] for r in conn.execute(
+        "SELECT id, delivery_date FROM desadv_sent WHERE id = ANY(%s)",
+        ([r["id"] for r in rows],)).fetchall()}
+
+
+def _supplier_names(conn) -> dict[str, str]:
     try:
         return confirm_carryover.display_names(conn, "desadv")
     except Exception:
@@ -80,10 +102,23 @@ def mark(conn, cfg, rows: list[dict], *, wire_prefix: str, now: datetime) -> set
     enqueue its one ops alert; returns the ids marked. Each row on its own: a failing lookup
     or write is logged and leaves that row waiting (unchanged behaviour), never the sweep."""
     marked: set[int] = set()
+    if not rows:
+        return marked
     names: dict[str, str] | None = None
+    try:
+        deliveries = _delivery_dates(conn, rows)
+    except Exception:
+        log.exception("manual-in-CODEX check: delivery dates of %d waiting DESADV row(s) could "
+                      "not be read — they keep waiting (fail-open)", len(rows))
+        return marked
     for row in rows:
+        delivery = deliveries.get(row["id"])
+        if delivery is None:
+            log.debug("manual-in-CODEX check: desadv_sent #%s has no delivery date — never "
+                      "marked, it keeps waiting", row.get("id"))
+            continue
         try:
-            receipt = receipt_for(conn, row)
+            receipt = receipt_for(conn, row, delivery)
         except Exception:
             log.exception("manual-in-CODEX check: receipts lookup failed for desadv_sent #%s "
                           "(%s) — it keeps waiting (fail-open)", row.get("id"),
@@ -94,7 +129,7 @@ def mark(conn, cfg, rows: list[dict], *, wire_prefix: str, now: datetime) -> set
                       row.get("doc_number"), row.get("id"))
             continue
         if names is None:
-            names = _names(conn)
+            names = _supplier_names(conn)
         body = _line(row, receipt, names, wire_prefix)
         channel = report.ops_channel(cfg)
         try:
