@@ -333,9 +333,9 @@ def test_a_house_number_with_its_letter_is_one_unit():
     assert _street_hit(fam, "BISTRO Hlavná 19/B") is None
     assert _street_hit(fam, "BISTRO Hlavná 19") == ("2999000000801", "store_address")
     assert _street_hit(fam, "BISTRO Hlavná 19/A") == ("2999000000802", "store_address")
-    # a capital suffix written apart („19 A") is the same house number
-    assert _street_hit(_street_family("Hlavná 19/A", "Hlavná 7"), "BISTRO Hlavná 19 A") == (
-        "2999000000801", "store_address")
+    # a letter written apart („19 A") is not glued — it may as well be a city initial
+    # („7 B. Bystrica", round 19): asked, never a guessed card
+    assert _street_hit(_street_family("Hlavná 19/A", "Hlavná 7"), "BISTRO Hlavná 19 A") is None
 
 
 def test_a_city_initial_after_the_house_number_is_no_suffix():
