@@ -237,11 +237,16 @@ def _by_store(owners: list[dict], store: str, strict: bool = False) -> dict | No
     return hits[0] if len(hits) == 1 else None
 
 
+_HOUSE_SUFFIX_RE = re.compile(r"(\d)\s*/\s*([^\W\d_])(?![^\W\d_])")
+
+
 def _street_tokens(text: str) -> set[str]:
     """A street / header as folded words with digit and letter runs apart („35BB" → 35, bb;
     „GT1" → gt, 1) — the `strict` street comparison (review round 9: a house number glued to
-    letters must still match)."""
-    return {run for t in store_key.tokens(text, keep_numbers=True)
+    letters must still match). A one-letter house-number suffix is glued to its number first,
+    so „19/A", „19/a" and „19A" all compare as 19 + a — „19/B" is never „19/A" (round 17)."""
+    glued = _HOUSE_SUFFIX_RE.sub(r"\1\2", str(text or ""))
+    return {run for t in store_key.tokens(glued, keep_numbers=True)
             for run in re.findall(r"\d+|[a-z]+", t)}
 
 
