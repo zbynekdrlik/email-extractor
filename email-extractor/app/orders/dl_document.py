@@ -1,6 +1,7 @@
 """DL worker — the per-document pipeline (EDI build + safe ORION upload)."""
 from __future__ import annotations
 
+import functools
 import logging
 from datetime import UTC, datetime
 
@@ -22,7 +23,14 @@ from . import (
     teach,
 )
 from . import upload as upload_mod
-from .dl_events import _dl_history_link, _event, _post
+from .dl_events import (
+    REVIEW_KEY_SUPPLIER_UNMATCHED,
+    _dl_history_link,
+    _doc_part,
+    _event,
+    _post,
+    _post_review,
+)
 from .dl_matching import _match_item, _match_supplier
 from .dl_retry import _check_landed, _check_retry, _is_transient
 
@@ -265,7 +273,8 @@ def _twin_outcome(conn, cfg, message: dict, doc: dict, supplier_decision, built,
     invoice's twin → its own skip; a DL's twin → the W7 duplicate log, naming the invoice."""
     if twin.conflict:
         return dl_invoice.review_conflict(conn, cfg, message, doc, twin, post=post, link=link,
-                                          history_link=hlink)
+                                          history_link=hlink,
+                                          supplier_ean=supplier_decision.ean_edi)
     if invoice_mode:
         return dl_invoice.skip_twin(conn, message, doc, twin)
     dl_report.log_duplicate(conn, message["message_id"], built.doc_number,
@@ -305,6 +314,12 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     hlink = history_link
     if hlink is None:
         hlink = "" if shadow else _dl_history_link(conn, cfg, message["message_id"])
+    # #495: every ❗ below goes through the once-per-DL-and-reason choke point, keyed on the
+    # EXTRACTED number (never the #262 one made up from the mail) — a numberless document
+    # keys on its attachment (`part`), never the whole mail
+    review = functools.partial(_post_review, conn, cfg, shadow, message,
+                               delivery_date=delivery_date, link=link, cmr=cmr,
+                               part=_doc_part(doc), key_doc_number=doc_number, post=post)
 
     # #485: an invoice-derived document passes the duplicate gate FIRST — a credit note, an
     # older version of a re-sent invoice, or goods CODEX / our own ledger already has never
@@ -321,9 +336,8 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
 
     if doc.get("status") == "needsReview":
         reason = doc.get("reviewReason") or "Dokument potrebuje kontrolu"
-        _post(cfg, shadow, lambda: dl_report.build_review(
-            reason, doc.get("supplierName", ""), doc_number, delivery_date, from_addr,
-            subject, link=link, cmr=cmr, history_link=hlink), post=post)
+        review(reason, supplier_name=doc.get("supplierName", ""), doc_number=doc_number,
+               history_link=hlink)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, detail={"doc_number": doc_number}, rollup=False,
               workflow=dl_report.WORKFLOW)
@@ -343,9 +357,8 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
                            f"(DL {doc_number}, dodávateľ {supplier_name})."
                            if supplier_name
                            else f"{date_reason} (DL {doc_number}).")
-            _post(cfg, shadow, lambda: dl_report.build_review(
-                full_reason, supplier_name, doc_number, delivery_date, from_addr,
-                subject, link=link, cmr=cmr, history_link=hlink), post=post)
+            review(full_reason, supplier_name=supplier_name, doc_number=doc_number,
+                   history_link=hlink, reason_key=date_reason)   # #495: not the name suffix
             _event(conn, shadow, message["message_id"], stage="review",
                   status="review", outcome=full_reason,
                   detail={"doc_number": doc_number}, rollup=False,
@@ -364,9 +377,7 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         log.warning("DL supplier match failed for message %s doc %s: %s",
                     message["message_id"], doc_number, e)
         reason = "Nepodarilo sa priradiť dodávateľa — over dodací list ručne."
-        _post(cfg, shadow, lambda: dl_report.build_review(
-            reason, "", doc_number, delivery_date, from_addr, subject, link=link, cmr=cmr,
-            history_link=hlink), post=post)
+        review(reason, doc_number=doc_number, history_link=hlink)
         _event(conn, shadow, message["message_id"], stage="review", status="error",
               outcome=reason, detail={"doc_number": doc_number, "error": str(e)},
               rollup=False, workflow=dl_report.WORKFLOW)
@@ -401,9 +412,9 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         # #473: the dl_supplier question (fresh or deduped onto an open one) waits on Otázky
         # sklad → `link`; an ask REFUSED (`None` — this address is already taught, e.g. to a
         # supplier no longer in the list) leaves nothing there → this mail's History detail.
-        _post(cfg, shadow, lambda: dl_report.build_review(
-            supplier_decision.note, "", doc_number, delivery_date, from_addr, subject,
-            link=link, cmr=cmr, history_link="" if supplier_qid else hlink), post=post)
+        review(supplier_decision.note, doc_number=doc_number,   # #495: model text → task key
+               history_link="" if supplier_qid else hlink,
+               reason_key=REVIEW_KEY_SUPPLIER_UNMATCHED)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=supplier_decision.note, detail={"doc_number": doc_number},
               rollup=False, workflow=dl_report.WORKFLOW)
@@ -661,10 +672,9 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
         # #473: a line that got a board question (dl_item / CODEX code / mass) → Otázky
         # sklad; nothing asked (retired cards, ask-refused lines) → this mail's history.
         asked = bool(held_items or codex_held_items or mass_hold_items)
-        _post(cfg, shadow, lambda: dl_report.build_review(
-            reason, supplier_decision.name, built.doc_number, delivery_date,
-            from_addr, subject, link=link, cmr=cmr,
-            history_link="" if asked else hlink), post=post)
+        review(reason, supplier_ean=supplier_decision.ean_edi,
+               supplier_name=supplier_decision.name, doc_number=built.doc_number,
+               history_link="" if asked else hlink)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, detail={"doc_number": built.doc_number,
                                       "question_ids": held_qids},
@@ -709,9 +719,8 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     if (held_items or codex_held_items or mass_hold_items) and not desadv.already_sent(
             conn, supplier_decision.ean_edi, built.doc_number):
         reason, all_held_names = _held_reason(held_items, codex_held_items, mass_hold_items)
-        _post(cfg, shadow, lambda: dl_report.build_review(
-            reason, supplier_decision.name, built.doc_number, delivery_date, from_addr,
-            subject, link=link, cmr=cmr), post=post)
+        review(reason, supplier_ean=supplier_decision.ean_edi,
+               supplier_name=supplier_decision.name, doc_number=built.doc_number)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, detail={"doc_number": built.doc_number, "held": True,
               "held_items": all_held_names, "question_ids": held_qids},

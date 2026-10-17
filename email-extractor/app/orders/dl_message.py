@@ -9,7 +9,7 @@ from .. import store
 from . import dl_extract, dl_invoice, dl_report, dl_snapshot, invoice_dedup, report, worker
 from .dl_correction import _correction_review_reason, _looks_like_correction, _mail_body_only
 from .dl_document import _process_document
-from .dl_events import _dl_history_link, _event, _flag_attachment, _post
+from .dl_events import _dl_history_link, _event, _flag_attachment, _post_review
 from .dl_retry import _check_retry, _RetryLater
 
 log = logging.getLogger("orders.dl_worker")
@@ -297,10 +297,8 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
                 "SELECT 1 FROM email_events WHERE message_id = %s "
                 "AND status = 'age_guard' LIMIT 1", (mid,)).fetchone()
             if not already:
-                _post(cfg, shadow, lambda: dl_report.build_review(
-                    reason, from_addr=message.get("from_addr", ""),
-                    subject=message.get("subject", ""), link=link,
-                    history_link=hlink), post=post)
+                _post_review(conn, cfg, shadow, message, reason, link=link,
+                             history_link=hlink, post=post)
             # #399: status='age_guard' (was 'review') — _release_stuck_siblings' SQL
             # carries NOT EXISTS (status='age_guard') so an age-guarded message is never
             # auto-released. NOTE: _run_and_finish logs a SECOND rollup with status=
@@ -414,9 +412,8 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
         else:
             # R15: no attachment (or nothing PDF/image-shaped) is NOT an error.
             reason = "Email bez prílohy a bez textu — pravdepodobne bežná správa"
-        _post(cfg, shadow, lambda: dl_report.build_review(
-            reason, from_addr=message.get("from_addr", ""),
-            subject=message.get("subject", ""), link=link, history_link=hlink), post=post)
+        _post_review(conn, cfg, shadow, message, reason, link=link, history_link=hlink,
+                     post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, rollup=not invoice_mode, workflow=dl_report.WORKFLOW)
         return {"kind": "dl", "dl_snapshot_id": snapshot_id, "status": "review",
@@ -441,9 +438,8 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
     if (used_body_text and not shadow
             and _looks_like_correction(message.get("subject", ""), body_text)):
         reason = _correction_review_reason(body_text)
-        _post(cfg, shadow, lambda: dl_report.build_review(
-            reason, from_addr=message.get("from_addr", ""),
-            subject=message.get("subject", ""), link=link, history_link=hlink), post=post)
+        _post_review(conn, cfg, shadow, message, reason, link=link, history_link=hlink,
+                     post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, rollup=not invoice_mode, workflow=dl_report.WORKFLOW)
         # #297 review finding: merge with `documents_out` (never overwrite it) — it
@@ -478,10 +474,8 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
             if credit == dl_invoice.MAIL_CREDIT_REASON:
                 # only the mail's words said „dobropis" — a human sees it (a real invoice in
                 # a „Re: dobropis" thread must never vanish silently)
-                _post(cfg, shadow, lambda: dl_report.build_review(
-                    credit, from_addr=message.get("from_addr", ""),
-                    subject=message.get("subject", ""), link=link, history_link=hlink),
-                    post=post)
+                _post_review(conn, cfg, shadow, message, credit, link=link,
+                             history_link=hlink, post=post)
             dl_invoice.skip_message(conn, message, invoice_dedup.OUTCOME_CREDIT_NOTE, credit)
             this_doc = {"outcome": invoice_dedup.OUTCOME_CREDIT_NOTE, "reason": credit}
             return {"kind": "dl", "dl_snapshot_id": snapshot_id,
@@ -531,9 +525,8 @@ def _process_message(conn, cfg, client, message: dict, snapshot_id: int | None,
         reason = ("Nepodarilo sa rozpoznať žiadny dodací list v texte e-mailu"
                   if used_body_text else
                   "Nepodarilo sa rozpoznať žiadny dodací list v prílohách")
-        _post(cfg, shadow, lambda: dl_report.build_review(
-            reason, from_addr=message.get("from_addr", ""),
-            subject=message.get("subject", ""), link=link, history_link=hlink), post=post)
+        _post_review(conn, cfg, shadow, message, reason, link=link, history_link=hlink,
+                     post=post)
         _event(conn, shadow, message["message_id"], stage="review", status="review",
               outcome=reason, rollup=not invoice_mode, workflow=dl_report.WORKFLOW)
         documents_out.append({"outcome": "review", "reason": reason})

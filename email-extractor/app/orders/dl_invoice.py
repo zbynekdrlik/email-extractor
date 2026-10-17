@@ -21,7 +21,7 @@ from psycopg.pq import TransactionStatus
 
 from . import codex_receipts, desadv, desadv_edi, dl_report, invoice_dedup
 from .dl_correction import _mail_body_only
-from .dl_events import _event, _post
+from .dl_events import _doc_part, _event, _post_review
 
 log = logging.getLogger("orders.dl_worker")
 
@@ -124,10 +124,11 @@ def gate(conn, cfg, message: dict, doc: dict, supplier_ean: str, *,
     if receipts is None:
         # fail-CLOSED: the tick claims no invoice while the receipts are stale, so this is a
         # race with a stopped push — a human decides, never a blind upload
-        _post(cfg, False, lambda: dl_report.build_review(
-            STALE_REASON, doc.get("supplierName", ""), doc.get("docNumber") or "",
-            doc.get("deliveryDate", ""), message.get("from_addr", ""),
-            message.get("subject", ""), link=link, history_link=history_link), post=post)
+        _post_review(conn, cfg, False, message, STALE_REASON, supplier_ean=supplier_ean,
+                     supplier_name=doc.get("supplierName", ""),
+                     doc_number=doc.get("docNumber") or "",
+                     delivery_date=doc.get("deliveryDate", ""), link=link,
+                     history_link=history_link, part=_doc_part(doc), post=post)
         _event(conn, False, message["message_id"], stage="review", status="review",
                outcome=STALE_REASON, detail={"doc_number": doc.get("docNumber") or "",
                                              "held": True, "invoice_mode": True},
@@ -142,7 +143,8 @@ def gate(conn, cfg, message: dict, doc: dict, supplier_ean: str, *,
         # document RESOLVED to — its CODEX receipts are invisible to the gate: a human decides
         return review_conflict(conn, cfg, message, doc,
                                invoice_dedup.unverifiable(UNCOVERED_REASON), post=post,
-                               link=link, history_link=history_link)
+                               link=link, history_link=history_link,
+                               supplier_ean=supplier_ean)
     dup = invoice_dedup.find_duplicate(conn, receipts, supplier_ean, doc,
                                        message["message_id"],
                                        doc_number=claim_number(message, doc),
@@ -151,12 +153,13 @@ def gate(conn, cfg, message: dict, doc: dict, supplier_ean: str, *,
         return None
     if dup.conflict:
         return review_conflict(conn, cfg, message, doc, dup, post=post, link=link,
-                               history_link=history_link)
+                               history_link=history_link, supplier_ean=supplier_ean)
     return _skip(conn, message, doc, "duplicate", dup.reason() + ".", dup.as_dict())
 
 
 def review_conflict(conn, cfg, message: dict, doc: dict, dup: invoice_dedup.Duplicate, *,
-                    post=None, link: str = "", history_link: str = "") -> dict:
+                    post=None, link: str = "", history_link: str = "",
+                    supplier_ean: str = "") -> dict:
     """Not provably the same document as one of our shipments (`Duplicate.conflict`: the same
     number from a later mail with another sum / other items — a CORRECTED version; the same
     day with another invoice number — a reissue or a second delivery). Never shipped (a second
@@ -167,10 +170,10 @@ def review_conflict(conn, cfg, message: dict, doc: dict, dup: invoice_dedup.Dupl
     log.warning("invoice/DL %s doc %s: maybe already received / shipped, not provable (%s) — "
                 "not shipped, review posted", message["message_id"], doc_number,
                 dup.as_dict())
-    _post(cfg, False, lambda: dl_report.build_review(
-        reason, doc.get("supplierName", ""), doc_number, doc.get("deliveryDate", ""),
-        message.get("from_addr", ""), message.get("subject", ""), link=link,
-        history_link=history_link), post=post)
+    _post_review(conn, cfg, False, message, reason, supplier_ean=supplier_ean,
+                 supplier_name=doc.get("supplierName", ""), doc_number=doc_number,
+                 delivery_date=doc.get("deliveryDate", ""), link=link,
+                 history_link=history_link, part=_doc_part(doc), post=post)
     _event(conn, False, message["message_id"], stage=STAGE, status="review", outcome=reason,
            detail={"doc_number": doc_number, "invoice_number": doc.get("invoiceNumber") or "",
                    "dedup": dup.as_dict()},

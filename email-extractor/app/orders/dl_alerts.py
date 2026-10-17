@@ -117,6 +117,8 @@ GROUPED_ITEM_KINDS = {
     # lives here in the header. The warehouse rescans the items page if it was really a DL.
     # #473: NO link — the scan is not a DL (never in História dodacích listov), the action is
     # physical, and the admin dashboard it used to link is password-gated for the warehouse.
+    # #495: only a scan that MAY be a DL gets here (a clear non-DL is posted nowhere), and it
+    # is posted ONCE — never re-reminded (`ONE_SHOT_KINDS`).
     "scanner_not_dl":
         "&#128444;&#65039; Skeny z tlačiarne, ktoré sa nepodarilo zaradiť ako dodací list "
         "({n}) &mdash; ak to bol dodací list, naskenujte znova stranu s položkami.",
@@ -133,6 +135,15 @@ GROUPED_ITEM_KINDS = {
 # capped — its rows are marked delivered with the post and its source row is terminal, so a
 # „… a ešte N ďalších" remainder would lose the instruction for those files for good.
 UNCAPPED_KINDS = frozenset({"dl_manual_in_codex"})
+
+# #495: a sweep kind whose alert goes out ONCE per message and is NEVER re-reminded —
+# `reminder_suppressed` suppresses it as soon as ANY row for the message exists. The scanner
+# scan notice was re-posted to the warehouse thread every working-day morning while the scan
+# stayed unclassified; the warehouse acts on it once (rescan) or not at all, so a reminder is
+# only noise. Accepted trade-off (review round 2): the old morning reminder also re-ran the
+# vision check, so a scan whose first verdict failed (a brief LLM error) could still be
+# rescued a day later; now the one notice asks the warehouse to rescan instead.
+ONE_SHOT_KINDS = frozenset({"scanner_not_dl"})
 
 # #473: a grouped kind that reaches a WAREHOUSE channel links the password-free board
 # History tab of its documents (`board.links` kind), never the password-gated admin
@@ -335,9 +346,16 @@ def reminder_suppressed(conn, cfg, kind: str, message_id: str, now=None) -> bool
     (the #310 channel-0 hold) then finally delivered has a stale `created_at`, so the
     once-per-day gate must measure from the real delivery. While a row is still undelivered
     there is nothing to remind about — it suppresses regardless of age (#327), and the held
-    row itself still delivers once it can."""
+    row itself still delivers once it can.
+
+    #495: a kind in `ONE_SHOT_KINDS` (`scanner_not_dl`) is never re-reminded at all — any
+    row for the message, delivered or not, suppresses."""
     if not message_id:
         return False
+    if kind in ONE_SHOT_KINDS:
+        return conn.execute(
+            "SELECT 1 FROM pending_alerts WHERE kind = %s AND message_id = %s LIMIT 1",
+            (kind, message_id)).fetchone() is not None
     now = now or datetime.now(UTC)
     if conn.execute(
             "SELECT 1 FROM pending_alerts WHERE kind = %s AND message_id = %s "

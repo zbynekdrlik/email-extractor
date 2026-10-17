@@ -166,3 +166,38 @@ printer, OCR "succeeded" with 3609 chars of a foreign transport form, `needs_vis
   enqueue under — else a scanner message's own alert is invisible to the dedup and re-enqueues
   every tick. The two #390 SQL guards match `kind IN (both)` (a message's from_addr is fixed, so
   it only ever carries one kind — the `IN` is exact, never a cross-kind leak).
+
+## A scanner scan reaches the warehouse thread only when it MAY be a DL — once (#495)
+
+The #436 carve-out sent EVERY unclassified scanner scan to the warehouse thread (243) and
+`reminder_suppressed` re-posted it every working-day morning: 73 posts about 40 scans in 30
+days, nearly all personal/HR papers (a health card, an employment contract …) — noise, and
+sensitive. Now (`_notify` + `_scanner_maybe_dl`):
+
+- **Hidden only by a KNOWN non-DL verdict:** `category` (stripped, lower-cased) in
+  `SCANNER_NOT_DL_CATEGORIES` (= `no_processing`) AND a finite confidence ≥
+  `RESCUE_CONFIDENCE` (0.6). Everything else is „maybe a DL" and is posted: no verdict
+  (unreadable, vision failed, or OCR already looked like a DL), a DL-like category, a processor
+  category the rescue did not trust, ANY out-of-vocabulary category („DODACIE_LISTY", a typo —
+  review round 1: an allowlist of maybe-DL categories let those hide a real DL), a missing /
+  text / NaN confidence. Lean to „post" — a wrong post costs one line, a wrong hide loses a DL.
+- **Posted ONCE:** `scanner_not_dl` is in `dl_alerts.ONE_SHOT_KINDS` — `reminder_suppressed`
+  suppresses it as soon as ANY row for the message exists, and the candidate SQL excludes any
+  `scanner_not_dl` row (delivered or not) BEFORE the LIMIT (the #390 lesson; a test pins the
+  SQL alone with `reminder_suppressed` monkeypatched off).
+- **Every Layer-2 decision is logged** (`_log_notify`): `email_events` workflow
+  `human_processing`, stage `notify`, status `enqueued` (route `warehouse` / `ops`, kind,
+  channel) or `skipped` (route `none`), `detail.verdict` = category / confidence / doc_type /
+  reason (sanitised: a NaN confidence is stored as null — jsonb rejects NaN). A `skipped` row is
+  ALSO the durable „decided" marker: the candidate SQL excludes it, so a hidden scan never costs
+  a second vision call. The model's free text about a personal paper stays in that admin-only
+  detail, never in the app log.
+- `_apply_rescue` reads the confidence through the same `_verdict_confidence` (review round 1:
+  a raw `float()` raised on „vysoká" — no alert, a vision call on every tick — and a NaN passed
+  `< 0.6` as False and RESCUED a processor verdict).
+- The hidden scan stays in `human_processing` (`processed=false`) on the dashboard for a
+  deliberate operator reclassify; the ops (non-scanner) routing is unchanged.
+- **Live check (read-only):** `SELECT status, detail->>'route', detail->'verdict'->>'category',
+  detail->'verdict'->>'confidence' FROM email_events WHERE workflow='human_processing' AND
+  stage='notify' ORDER BY id DESC LIMIT 20` — every scanner scan since the deploy has exactly
+  one row; `pending_alerts` `scanner_not_dl` has at most ONE row per message.

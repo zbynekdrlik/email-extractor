@@ -26,6 +26,7 @@ from test_orders_confirm import (
     MON_EVENING,
     TUE_MORNING,
     TZ,
+    WED_MORNING,
     PostRecorder,
     _cfg,
     _desadv_status,
@@ -151,8 +152,8 @@ def test_reminder_counts_and_lists_only_the_file_still_waiting(pg):
 
     _make_due(pg)
     confirm.sweep(pg, _cfg(), listdir=lambda: _dirs(in_dl=all_wire[3:], arch=all_wire[:3]),
-                  post=posts, now=TUE_MORNING.replace(hour=16))
-    assert len(posts.calls) == 2, "exactly one reminder once the 4h threshold passed"
+                  post=posts, now=WED_MORNING)
+    assert len(posts.calls) == 2, "exactly one reminder, the next working-day morning (#495)"
     html = posts.calls[1][0]
     assert "Stále 1 dodací list neprevzatý v ORIONe" in html, html
     assert "4 dodac" not in html and "dodacie listy" not in html
@@ -182,7 +183,7 @@ def test_reminder_skips_a_member_already_in_archcodex_before_its_own_recheck(pg)
     _make_due(pg)
     pg.execute("UPDATE desadv_sent SET import_checked_at = now() WHERE id = %s", (a,))
     confirm.sweep(pg, _cfg(), listdir=lambda: _dirs(in_dl=[w2], arch=[w1]), post=posts,
-                  now=TUE_MORNING.replace(hour=16))
+                  now=WED_MORNING)
     assert len(posts.calls) == 2
     html = posts.calls[1][0]
     assert "Stále 1 dodací list" in html, html
@@ -283,7 +284,7 @@ def test_reminder_says_codex_will_not_take_the_dl_with_an_unknown_code(pg):
 
     _make_due(pg)
     confirm.sweep(pg, _cfg(), listdir=lambda: _dirs(in_dl=all_wire[3:], arch=all_wire[:3]),
-                  post=posts, now=TUE_MORNING.replace(hour=16), read_files=reader)
+                  post=posts, now=WED_MORNING, read_files=reader)
     html = posts.calls[-1][0]
     assert "Stále 1 dodací list" in html, html
     assert (f"DL 126000004 ({SUP_A_NAME}): CODEX ho neprevezme — kód {DEAD} v CODEXe "
@@ -613,7 +614,7 @@ def test_reminder_od_is_the_oldest_upload_among_the_waiting_files(pg):
                   now=TUE_MORNING)
     _make_due(pg)
     confirm.sweep(pg, _cfg(), listdir=lambda: _dirs(in_dl=wires), post=posts,
-                  now=TUE_MORNING.replace(hour=16))
+                  now=WED_MORNING)
     assert len(posts.calls) == 2
     assert "Stále 2 dodacie listy neprevzaté v ORIONe (od 3.8. 09:15)" in posts.calls[1][0]
 
