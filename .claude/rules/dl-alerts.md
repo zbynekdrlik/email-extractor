@@ -6,6 +6,8 @@ paths:
   - "email-extractor/app/orders/confirm_carryover.py"
   - "email-extractor/app/orders/confirm_manual.py"
   - "email-extractor/tests/test_orders_confirm*.py"
+  - "email-extractor/app/orders/dl_events.py"
+  - "email-extractor/tests/test_dl_review_once.py"
 ---
 
 # `pending_alerts` durable alert outbox — retention + routing gotchas
@@ -349,3 +351,69 @@ from `confirm.sweep` via `_mark_manual`) fixes it with a FOURTH terminal status:
   import_confirmed_at FROM desadv_sent WHERE import_status = 'manual'` + `SELECT channel_id,
   kind, message_id, delivered_at FROM pending_alerts WHERE kind = 'dl_manual_in_codex'` (one row
   per file, channel = ops 592, never 243).
+
+## The warehouse DL thread hears each thing ONCE (#495)
+
+30 days of channel 243: 243 automated posts, ~75 % noise. Three paths had no memory of what
+already went out; the ✅ per-DL success message and the ⏰ question reminders stay as they were
+(owner decision, never touch them for #495-style noise work).
+
+**❗ „Dodací list potrebuje kontrolu" — ONE choke point, `dl_events._post_review`.** Every
+`dl_report.build_review` call goes through it (all 14 call sites: `dl_document` 6 via a
+`functools.partial` named `review`, `dl_message` 5, `dl_invoice` 2, `_flag_attachment` 1);
+`tests/test_dl_review_once.py::test_every_review_post_goes_through_the_choke_point` greps
+`app/` and FAILS on a new direct `build_review(` call — a new review path calls
+`_post_review`, never `_post` + `build_review`.
+- **Key** (`_review_doc_key`): `dl:<supplier EAN, else the sender>:<DL number digits>`
+  (`invoice_dedup.digits`, < 5 digits = no number); NEVER a scanner/relay sender (#407 — before
+  the supplier match a scan keys per mail); no number / no identity → `mail:<message_id>`
+  narrowed by `part` (`_doc_part`: `att<idx>` — one review per unreadable attachment, a
+  numberless document keys on its source attachment — review round 1). The number is the one
+  the document REALLY carries (`key_doc_number`, bound once in `_process_document`'s `review`
+  partial): the #262 number made up from the MAIL for a numberless document
+  (`generate_stable_doc_number`, what `built.doc_number` shows) is the same for every document
+  of the mail — keying on it merged them (review round 2). Residual: the key is the sender before the
+  supplier match and the EAN after — a DL reviewed at both stages for different reasons is two
+  keys, which is two posts anyway.
+- **Reason** (`_review_reason_hash`): the reason text through `dl_match.fold` (the package's ONE
+  diacritic fold), EVERY digit run masked, every non-letter dropped (no separators — „Rožok 50g"
+  = „Rožok 50 g", review round 2), sha256 — a reprint read with other sums / dates / counts is
+  the same reason; a hold whose open lines change (other item names) is a new one. A path whose
+  text is the model's own words passes a stable `reason_key`: the unmatched supplier
+  (`REVIEW_KEY_SUPPLIER_UNMATCHED` — `matchReason` differs per run), the date gate (the gate
+  sentence without the model-read supplier-name suffix).
+- **Claim before post** through `claim.claim_or_identify` (#271) on a savepoint: `dl_review_posts`
+  UNIQUE (doc_key, reason_hash) — migration revision 21; a row older than
+  `REVIEW_MEMORY_DAYS` (30) is re-claimed in place (a reused DL number a month later is a new
+  DL). A post Odoo never got (an exception or `None` — a test `post` fake that returns `None`
+  therefore never dedupes) DELETES the claim, the next processing posts again. A failing claim
+  posts anyway (R97 — a repeat beats a lost review). Shadow posts and writes nothing.
+- **Logged** on the message timeline: `email_events` stage `review_post`, status `posted` /
+  `suppressed` (+ `first_message_id` / `first_posted_at`) / `post_failed`, rollup=False — the
+  document's own `stage='review'` event is unchanged, so `_release_stuck_siblings` and the
+  dashboard see exactly what they saw before.
+- Mutation-checked pins: the supplier / date-gate reason keys, the scanner fallback, the
+  30-day re-claim, the per-attachment part.
+
+**⚠️ „Stále N dodacích listov neprevzatých" — once per working-day morning (`confirm`).**
+`_reminder_due(cfg, ledger, kind, last_alert_at, now, reminder_hours)`: a CARRYOVER incident of
+a `MORNING_ONLY_SOURCES` source (DESADV, channel 243) is reminded only when
+`morning_check_active(cfg, now)` and its last alert was on an EARLIER local day (Sat/Sun
+skipped) — live it repeated at 10, 14, 18, 22 h for two weeks. The #255 evening same-day check
+never opens a DESADV alert (`_stuck(row, ledger)`); the next morning's carryover check names
+the file. A failed/unknown DESADV incident keeps the 4-hour reminder (review round 1: it never
+self-heals and folds a NEW failed file in silently — the reminder is how that one surfaces).
+EDI orders (152) keep both. An incident opened before the deploy simply follows the new rule
+from its `last_alert_at`. The five #476/#494 tests that waited 5 h for a DESADV reminder now
+wait for `WED_MORNING`; `test_orders_confirm_desadv_cadence.py` pins the cadence, the weekend,
+the evening rule and EDI's 4 h.
+
+**🖼️ scanner scans** — `ONE_SHOT_KINDS` (`scanner_not_dl`): `reminder_suppressed` returns True
+as soon as ANY row exists for the message; who is posted at all: `human-processing-sweep.md`
+(#495 section). Accepted trade-off: the old morning reminder also re-ran vision, so a scan whose
+first verdict failed could be rescued a day later; now the one notice asks for a rescan.
+
+**Live read-only check after a deploy:** `SELECT max(revision) FROM schema_version` (21) +
+`SELECT count(*) FROM dl_review_posts`; `SELECT status, count(*) FROM email_events WHERE
+stage='review_post' GROUP BY 1`; the DESADV incident's `last_alert_at` never twice on one
+local day.
