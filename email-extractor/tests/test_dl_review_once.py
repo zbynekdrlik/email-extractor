@@ -81,7 +81,7 @@ def test_two_mails_of_the_same_dl_with_the_same_reason_post_one_review(pg, tmp_p
     assert len(post.reviews()) == 1, post.reviews()
     # the second mail still records its own review outcome on its timeline …
     assert pg.execute("SELECT count(*) FROM email_events WHERE message_id = 'dl-b' "
-                      "AND stage = 'review'").fetchone()[0] == 1
+                      "AND stage = 'review' AND NOT rollup").fetchone()[0] == 1
     # … and WHY nothing went to Odoo
     assert _post_events(pg, "dl-a") == ["posted"]
     assert _post_events(pg, "dl-b") == ["suppressed"]
