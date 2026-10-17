@@ -321,7 +321,8 @@ def test_two_numberless_documents_of_one_mail_are_two_reviews(pg, tmp_path):
     dl_worker.tick(pg, cfg, client=client, upload=_no_upload, post=post)
     reviews = post.reviews()
     assert len(reviews) == 2, reviews
-    assert "Neznámy chlebík" in "".join(reviews) and "Neznáma bageta" in "".join(reviews)
+    keys = {r[0] for r in pg.execute("SELECT doc_key FROM dl_review_posts").fetchall()}
+    assert keys == {"mail:dl-n:att0", "mail:dl-n:att1"}, keys
 
 
 def test_the_reason_identity_ignores_spacing_inside_a_model_read_name():
