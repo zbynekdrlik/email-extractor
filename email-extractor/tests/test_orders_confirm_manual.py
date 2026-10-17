@@ -35,6 +35,7 @@ from test_orders_confirm import (
     _cfg,
     _desadv_status,
     _insert,
+    _insert_at,
 )
 from test_orders_confirm_carryover import SUP_A, SUP_A_NAME, SUP_B, _suppliers
 
@@ -473,16 +474,22 @@ def test_a_reminder_never_lists_a_manual_file_whose_own_recheck_is_not_due(pg):
 def test_a_manual_mark_is_no_evidence_of_an_import_pass_for_the_same_day_check(pg):
     """`_activity_today_at` reads `import_confirmed_at` as „an import ran today" — a manual
     mark writes it too, but nobody clicked „prijať"; another file uploaded earlier today and
-    still queued must stay silent in the evening."""
+    still queued must stay silent in the evening. #495: the evening check no longer opens a
+    DESADV alert at all, so the queued file this pins is an ORDER (`_activity_today_at`
+    unions both ledgers — a DESADV manual mark must not make an ORDER look rejected)."""
     _desadv(pg, DOC, uploaded_at=MON_EVENING.replace(hour=9))
     waiting = _desadv(pg, DOC2, uploaded_at=MON_EVENING.replace(hour=10))
+    order = _insert_at(pg, "8580000000019", "ORDER_m1.txt",
+                       uploaded_at=MON_EVENING.replace(hour=10))
     _receipts(pg, (RECEIPT, SUP_A, [CODEX_DL]))
     posts = PostRecorder()
     evening = MON_EVENING.replace(hour=18, minute=30)
-    _sweep(pg, posts, now=evening, in_dl=[_wire(DOC), _wire(DOC2)])
+    _sweep(pg, posts, now=evening, in_dl=[_wire(DOC), _wire(DOC2)], in_=["ORDER_m1.txt"])
     assert _desadv_status(pg, waiting) is None
+    assert pg.execute("SELECT import_status FROM edi_sent WHERE id = %s",
+                      (order,)).fetchone()[0] is None
     assert confirm._activity_today_at(pg, evening) is None
-    assert posts.calls == [], "no import ran today — the queued file is simply waiting"
+    assert posts.calls == [], "no import ran today — the queued files are simply waiting"
 
 
 def test_activity_today_counts_only_rows_really_imported(pg):

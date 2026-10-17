@@ -138,8 +138,9 @@ UNCAPPED_KINDS = frozenset({"dl_manual_in_codex"})
 
 # #495: a sweep kind whose alert goes out ONCE per message and is NEVER re-reminded —
 # `reminder_suppressed` suppresses it as soon as ANY row for the message exists. The scanner
-# scan notice reached the warehouse thread up to 9x per scan (one reminder per working-day
-# morning); the warehouse acts on it once (rescan) or not at all, so a reminder is only noise.
+# scan notice was re-posted to the warehouse thread every working-day morning while the scan
+# stayed unclassified; the warehouse acts on it once (rescan) or not at all, so a reminder is
+# only noise.
 ONE_SHOT_KINDS = frozenset({"scanner_not_dl"})
 
 # #473: a grouped kind that reaches a WAREHOUSE channel links the password-free board

@@ -517,7 +517,8 @@ def test_non_scanner_cmr_verdict_is_not_rescued(pg):
 # --- #495: a scanner scan reaches the warehouse thread ONLY when it MAY be a DL, once ---
 #
 # 30 days of channel 243 (16.9.-16.10.): 73 "Skeny z tlačiarne" posts about only 40 scans,
-# nearly all personal/HR papers (a health card, an employment contract, …) reminded up to 9x.
+# nearly all personal/HR papers (a health card, an employment contract, …), re-reminded
+# every working-day morning.
 # A scan the vision verdict CLEARLY places elsewhere is posted NOWHERE (it stays on the
 # dashboard in human_processing); a scan that may be a DL (no verdict, a DL-like category,
 # low confidence) is posted ONCE and never re-reminded. The verdict + the routing decision
@@ -681,3 +682,20 @@ def test_an_out_of_vocabulary_category_is_a_maybe_dl():
     assert maybe({"category": "dodaci_list", "confidence": 0.9}) is True
     assert maybe({"category": "vyplatna_paska", "confidence": 0.95}) is True
     assert maybe({"category": " No_Processing ", "confidence": 0.9}) is False
+
+
+def test_the_sweep_sql_alone_keeps_an_alerted_scanner_scan_out(pg, monkeypatch):
+    """The one-shot exclusion is in the candidate SQL (#390: before the LIMIT), not only in
+    the Python `reminder_suppressed` — pinned with the Python layer switched off."""
+    from app.orders import dl_alerts
+    monkeypatch.setattr(dl_alerts, "reminder_suppressed", lambda *a, **k: False)
+    _hp_msg(pg, "sql1", needs_vision=False, has_attachments=True)
+    _hp_attachment(pg, "sql1", _PAPER_OCR)
+    dl_alerts.enqueue(pg, 243, "scanner_not_dl", "<p>l</p>", message_id="sql1")
+    pg.execute("UPDATE pending_alerts SET delivered_at = now() - interval '3 days'")
+    calls = []
+    human_processing.sweep(pg, _cfg(**_SCANNER_CFG),
+                           classify=lambda c, a: calls.append(1) or None)
+    assert calls == [], "never classified again"
+    assert pg.execute("SELECT count(*) FROM pending_alerts WHERE message_id='sql1'"
+                      ).fetchone()[0] == 1

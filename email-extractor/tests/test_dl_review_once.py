@@ -222,3 +222,79 @@ def test_two_unreadable_attachments_of_one_mail_are_two_reviews(pg, tmp_path):
     _reprocess(pg, "dl-x")
     dl_worker.tick(pg, cfg, client=FakeClient({}), upload=_no_upload, post=post)
     assert len(post.reviews()) == 2
+
+
+# --- review round 1: every explicit key decision is pinned (each fails if it is removed) ----
+
+def _doc_from(supplier_name, supplier_email, delivery_date=None, total=5.0):
+    doc = _doc(doc_number=DL_NO, total=total, delivery_date=delivery_date)
+    d = doc["documents"][0]
+    d.update(supplierName=supplier_name, supplierEmail=supplier_email)
+    return doc
+
+
+def test_an_unmatched_supplier_is_one_review_whatever_the_model_writes(pg, tmp_path):
+    """The note is the model's own `matchReason` — different on every run; the task (identify
+    the supplier on the board) is the same, so a reprint is not posted again."""
+    _snapshot(pg)
+    post = Poster()
+    for mid, why in (("dl-a", "Taký dodávateľ v zozname nie je."),
+                     ("dl-b", "Názov ani e-mail nesedí so žiadnou kartou.")):
+        _msg(pg, mid=mid, from_addr="fakturacia@neznamy.example")
+        _attach(pg, tmp_path, mid)
+        cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+        client = FakeClient({
+            "dl_documents": [_doc_from("Neznámy dodávateľ s.r.o.",
+                                       "fakturacia@neznamy.example")],
+            "dl_supplier": [{"matched": False, "matchConfidence": 0.1, "matchReason": why}]})
+        dl_worker.tick(pg, cfg, client=client, upload=_no_upload, post=post)
+    assert len(post.reviews()) == 1, post.reviews()
+
+
+def test_the_date_gate_is_one_review_even_when_the_supplier_name_is_read_differently(
+        pg, tmp_path):
+    _snapshot(pg)
+    post = Poster()
+    for mid, name in (("dl-a", "Pekáreň Lunys"), ("dl-b", "Pekáreň LUNYS s.r.o.")):
+        _msg(pg, mid=mid)
+        _attach(pg, tmp_path, mid)
+        cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+        dl_worker.tick(pg, cfg, client=FakeClient({"dl_documents": [
+            _doc_from(name, "dodavatel@lunys.sk", delivery_date=_dl_days_ago(60))]}),
+            upload=_no_upload, post=post)
+    assert len(post.reviews()) == 1, post.reviews()
+
+
+def test_a_scanner_sender_is_no_supplier_identity_for_the_key(pg, tmp_path):
+    """#407: the warehouse printer forwards every supplier's paper — before the supplier is
+    known, two scans with the same DL number are two mails, never „the same DL"."""
+    _snapshot(pg)
+    post = Poster()
+    for mid in ("sc-a", "sc-b"):
+        _msg(pg, mid=mid, from_addr="tlaciaren@x.sk")
+        _attach(pg, tmp_path, mid)
+        cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path),
+                   delivery_notes_scanner_senders="tlaciaren@x.sk")
+        dl_worker.tick(pg, cfg, client=FakeClient({"dl_documents": [
+            _doc(doc_number=DL_NO, total=999.0)]}), upload=_no_upload, post=post)
+    assert len(post.reviews()) == 2
+
+
+def test_a_review_older_than_the_memory_window_is_posted_again(pg, tmp_path):
+    """A supplier reusing a DL number a month later is a new DL — the stale row is
+    re-claimed in place (inside the window the same pair stays suppressed)."""
+    from app.orders import dl_events
+    _snapshot(pg)
+    post = Poster()
+    _tick(pg, tmp_path, "dl-a", _doc(doc_number=DL_NO, total=999.0), post)
+    days = dl_events.REVIEW_MEMORY_DAYS
+    pg.execute("UPDATE dl_review_posts SET created_at = now() - make_interval(days => %s)",
+               (days - 1,))
+    _tick(pg, tmp_path, "dl-b", _doc(doc_number=DL_NO, total=999.0), post)
+    assert len(post.reviews()) == 1, "inside the window: suppressed"
+    pg.execute("UPDATE dl_review_posts SET created_at = now() - make_interval(days => %s)",
+               (days + 1,))
+    _tick(pg, tmp_path, "dl-c", _doc(doc_number=DL_NO, total=999.0), post)
+    assert len(post.reviews()) == 2, "past the window: a new DL, posted"
+    assert pg.execute("SELECT count(*), max(message_id) FROM dl_review_posts").fetchone() \
+        == (1, "dl-c")
