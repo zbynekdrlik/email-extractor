@@ -512,3 +512,138 @@ def test_non_scanner_cmr_verdict_is_not_rescued(pg):
         "SELECT channel_id, kind FROM pending_alerts WHERE message_id='cmr2'").fetchone()
     assert kind == "human_processing_review"
     assert channel == 888                # ops, never the warehouse 243
+
+
+# --- #495: a scanner scan reaches the warehouse thread ONLY when it MAY be a DL, once ---
+#
+# 30 days of channel 243 (16.9.-16.10.): 73 "Skeny z tlačiarne" posts about only 40 scans,
+# nearly all personal/HR papers (a health card, an employment contract, …) reminded up to 9x.
+# A scan the vision verdict CLEARLY places elsewhere is posted NOWHERE (it stays on the
+# dashboard in human_processing); a scan that may be a DL (no verdict, a DL-like category,
+# low confidence) is posted ONCE and never re-reminded. The verdict + the routing decision
+# land in email_events. Synthetic fixtures only — never a real employee document.
+
+_SCANNER_CFG = dict(ops_channel_id=592, delivery_notes_channel_id=243,
+                    delivery_notes_scanner_senders="tlaciaren@x.sk")
+# A synthetic internal form: no EAN, no quantity lines, no SK DL/order keyword.
+_PAPER_OCR = "Interny formular\nMeno: Vzor Vzorovy\nDatum: 1.1.2026\nPodpis\n" * 20
+_TUE_MORNING = datetime(2026, 10, 13, 10, 30, tzinfo=UTC)   # a Tuesday, past 10:00 local
+
+
+def _notify_events(pg, mid):
+    return pg.execute(
+        "SELECT stage, status, detail FROM email_events WHERE message_id = %s "
+        "AND workflow = 'human_processing' AND stage = 'notify' ORDER BY id",
+        (mid,)).fetchall()
+
+
+def test_a_clear_non_dl_scanner_scan_is_posted_nowhere_and_its_verdict_is_logged(pg):
+    _hp_msg(pg, "hr1", needs_vision=False, has_attachments=True)
+    _hp_attachment(pg, "hr1", _PAPER_OCR)
+    calls = []
+
+    def classify(cfg, atts):
+        calls.append(1)
+        return {"category": "no_processing", "confidence": 0.9,
+                "reason": "osobný doklad", "doc_type": "pracovná zmluva"}
+
+    cfg = _cfg(**_SCANNER_CFG)
+    human_processing.sweep(pg, cfg, classify=classify)
+    human_processing.sweep(pg, cfg, classify=classify)   # a later tick
+    assert pg.execute("SELECT count(*) FROM pending_alerts WHERE message_id='hr1'"
+                      ).fetchone()[0] == 0, "a clear non-DL scan is posted nowhere"
+    cat, processed = pg.execute(
+        "SELECT category, processed FROM messages WHERE message_id='hr1'").fetchone()
+    assert (cat, processed) == ("human_processing", False)   # stays on the dashboard
+    events = _notify_events(pg, "hr1")
+    assert len(events) == 1, "the routing decision is logged once"
+    _, status, detail = events[0]
+    assert status == "skipped"
+    assert detail["route"] == "none"
+    assert detail["verdict"]["category"] == "no_processing"
+    assert detail["verdict"]["confidence"] == 0.9
+    assert len(calls) == 1, "a decided scan never costs a second vision call"
+
+
+def test_an_unclear_scanner_scan_is_posted_once_and_never_reminded(pg):
+    _hp_msg(pg, "unc1", needs_vision=False, has_attachments=True)
+    _hp_attachment(pg, "unc1", _PAPER_OCR)
+    calls = []
+
+    def classify(cfg, atts):
+        calls.append(1)
+        return {"category": "human_processing", "confidence": 0.3, "doc_type": "neznámy"}
+
+    cfg = _cfg(**_SCANNER_CFG)
+    human_processing.sweep(pg, cfg, classify=classify)
+    rows = pg.execute("SELECT channel_id, kind FROM pending_alerts WHERE message_id='unc1'"
+                      ).fetchall()
+    assert rows == [(243, "scanner_not_dl")]
+    # delivered on an earlier working day; the next working-day morning must not remind
+    pg.execute("UPDATE pending_alerts SET delivered_at = %s WHERE message_id = 'unc1'",
+               (_TUE_MORNING - timedelta(days=1),))
+    human_processing.sweep(pg, cfg, classify=classify, now=_TUE_MORNING)
+    assert pg.execute("SELECT count(*) FROM pending_alerts WHERE message_id='unc1'"
+                      ).fetchone()[0] == 1, "a scanner alert is sent once, never reminded"
+    assert len(calls) == 1
+    events = _notify_events(pg, "unc1")
+    assert len(events) == 1
+    _, status, detail = events[0]
+    assert status == "enqueued"
+    assert detail["route"] == "warehouse" and detail["channel"] == 243
+    assert detail["verdict"]["category"] == "human_processing"
+
+
+def test_a_scanner_scan_with_no_verdict_is_posted_as_a_maybe_dl(pg):
+    """Unreadable (vision returned nothing) = it MAY be a DL → the warehouse hears once."""
+    _hp_msg(pg, "nov1", needs_vision=False, has_attachments=True)
+    _hp_attachment(pg, "nov1", _PAPER_OCR)
+    human_processing.sweep(pg, _cfg(**_SCANNER_CFG), classify=lambda c, a: None)
+    assert pg.execute("SELECT channel_id, kind FROM pending_alerts WHERE message_id='nov1'"
+                      ).fetchall() == [(243, "scanner_not_dl")]
+    _, status, detail = _notify_events(pg, "nov1")[0]
+    assert status == "enqueued" and detail["verdict"] is None
+
+
+def test_scanner_maybe_dl_verdict_table():
+    maybe = human_processing._scanner_maybe_dl
+    assert maybe(None) is True                                         # unreadable
+    for cat in ("dodacie_listy", "invoices", "cmr", "human_processing"):
+        assert maybe({"category": cat, "confidence": 0.95}) is True    # DL-like
+    assert maybe({"category": "no_processing", "confidence": 0.59}) is True   # unsure
+    assert maybe({"category": "reklamacie", "confidence": 0.4}) is True       # unsure
+    assert maybe({"category": "no_processing", "confidence": 0.6}) is False   # clear
+    assert maybe({"category": "no_processing", "confidence": 0.9}) is False
+    assert maybe({"category": "no_processing"}) is True        # no confidence = unsure
+    assert maybe({"category": "no_processing", "confidence": "vysoká"}) is True
+
+
+def test_a_non_scanner_notify_logs_its_ops_routing(pg):
+    _hp_msg(pg, "ops1", from_addr="uctaren@firma.sk", needs_vision=False,
+            has_attachments=True)
+    _hp_attachment(pg, "ops1", _PAPER_OCR)
+    human_processing.sweep(
+        pg, _cfg(**_SCANNER_CFG),
+        classify=lambda c, a: {"category": "no_processing", "confidence": 0.9})
+    assert pg.execute("SELECT channel_id, kind FROM pending_alerts WHERE message_id='ops1'"
+                      ).fetchall() == [(592, "human_processing_review")]   # unchanged
+    _, status, detail = _notify_events(pg, "ops1")[0]
+    assert status == "enqueued" and detail["route"] == "ops" and detail["channel"] == 592
+
+
+def test_reminder_suppressed_never_re_reminds_a_one_shot_scanner_alert(pg):
+    from zoneinfo import ZoneInfo
+
+    from app.orders import dl_alerts
+    tz = ZoneInfo("Europe/Bratislava")
+    cfg = _cfg()
+    mon = datetime(2026, 8, 17, 9, 0, tzinfo=tz)
+    tue = datetime(2026, 8, 18, 11, 0, tzinfo=tz)
+    for kind, mid in (("scanner_not_dl", "s1"), ("human_processing_review", "o1")):
+        dl_alerts.enqueue(pg, 243, kind, "<p>l</p>", message_id=mid)
+        pg.execute("UPDATE pending_alerts SET delivered_at = %s WHERE message_id = %s",
+                   (mon, mid))
+    assert dl_alerts.reminder_suppressed(pg, cfg, "scanner_not_dl", "s1", now=tue) is True
+    # the ops net keeps its once-per-morning reminder (#336)
+    assert dl_alerts.reminder_suppressed(
+        pg, cfg, "human_processing_review", "o1", now=tue) is False
