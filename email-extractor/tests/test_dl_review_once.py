@@ -332,3 +332,27 @@ def test_the_reason_identity_ignores_spacing_inside_a_model_read_name():
     h = dl_events._review_reason_hash
     assert h("Dodací list má 1 položku: Rožok 50g.") == h("Dodaci list ma 2 polozku: rozok 50 g")
     assert h("Dodací list má 1 položku: Rožok 50g.") != h("Dodací list má 1 položku: Bageta 50g.")
+
+
+# --- review round 3 ---------------------------------------------------------------------
+
+def test_two_numbered_dls_in_one_scanner_attachment_are_two_reviews(pg, tmp_path):
+    """Review round 3: before the supplier match a scanner mail keys per mail/attachment
+    (#407) — the DL NUMBER must stay in that key, or a stack of DLs scanned into one PDF that
+    all hit the same reason (unknown supplier, the date gate …) posts ONE ❗ for the stack."""
+    _snapshot(pg)
+    post = Poster()
+    _msg(pg, mid="sc-1", from_addr="tlaciaren@x.sk")
+    _attach(pg, tmp_path, "sc-1")
+    docs = {"documents": [
+        dict(_doc_from("Neznámy dodávateľ s.r.o.", "", total=5.0)["documents"][0],
+             docNumber=number) for number in (DL_NO, "0100777002")]}
+    unmatched = {"matched": False, "matchConfidence": 0.1, "matchReason": "nepoznám"}
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path),
+               delivery_notes_scanner_senders="tlaciaren@x.sk")
+    dl_worker.tick(pg, cfg, client=FakeClient({"dl_documents": [docs],
+                                               "dl_supplier": [unmatched] * 2}),
+                   upload=_no_upload, post=post)
+    assert len(post.reviews()) == 2, post.reviews()
+    keys = {r[0] for r in pg.execute("SELECT doc_key FROM dl_review_posts").fetchall()}
+    assert keys == {"mail:sc-1:att0:100555001", "mail:sc-1:att0:100777002"}, keys
