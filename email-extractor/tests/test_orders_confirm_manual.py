@@ -30,6 +30,7 @@ import pytest
 from test_orders_confirm import (
     MON_EVENING,
     TUE_MORNING,
+    WED_MORNING,
     PostRecorder,
     _cfg,
     _desadv_status,
@@ -459,9 +460,9 @@ def test_a_reminder_never_lists_a_manual_file_whose_own_recheck_is_not_due(pg):
     _receipts(pg, (RECEIPT, SUP_A, [CODEX_DL]))
     _make_due(pg)
     pg.execute("UPDATE desadv_sent SET import_checked_at = now() WHERE id = %s", (a,))
-    _sweep(pg, posts, now=TUE_MORNING.replace(hour=16), in_dl=both)
+    _sweep(pg, posts, now=WED_MORNING, in_dl=both)
     assert _desadv_status(pg, a) == "manual"
-    assert len(posts.calls) == 2, "the 4h reminder about the one file really waiting"
+    assert len(posts.calls) == 2, "the next working-day morning reminder (#495) about the one file really waiting"
     html = posts.calls[1][0]
     assert "Stále 1 dodací list" in html, html
     assert DOC2 in html and DOC not in html

@@ -26,6 +26,7 @@ TZ = ZoneInfo("Europe/Bratislava")
 MON_MORNING = datetime(2026, 8, 3, 11, 0, tzinfo=TZ)
 MON_EVENING = datetime(2026, 8, 3, 18, 0, tzinfo=TZ)
 TUE_MORNING = datetime(2026, 8, 4, 11, 0, tzinfo=TZ)
+WED_MORNING = datetime(2026, 8, 5, 11, 0, tzinfo=TZ)   # #495: DESADV reminder day
 FRI_EVENING = datetime(2026, 8, 7, 18, 0, tzinfo=TZ)
 SAT_MORNING = datetime(2026, 8, 8, 11, 0, tzinfo=TZ)
 SUN_MORNING = datetime(2026, 8, 9, 11, 0, tzinfo=TZ)
