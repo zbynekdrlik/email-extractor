@@ -218,8 +218,11 @@ def _scanner_doc_type(verdict: dict | None) -> str:
 
 def _verdict_confidence(verdict: dict) -> float | None:
     """The verdict's confidence as a finite float, or None when missing/unparseable/NaN."""
+    raw = verdict.get("confidence")
+    if raw is None:
+        return None
     try:
-        conf = float(verdict.get("confidence"))
+        conf = float(raw)
     except (TypeError, ValueError):
         return None
     return conf if math.isfinite(conf) else None
