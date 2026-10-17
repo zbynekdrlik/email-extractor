@@ -87,12 +87,15 @@ def _review_doc_key(cfg, message: dict, supplier_ean: str, doc_number: str,
     its digits without leading zeros (`invoice_dedup.digits`: a reprint read as „0100…" and
     one read as „100…" are the same DL; < 5 digits is no number). The supplier is the matched
     EAN, else the sender — never a scanner/relay address (#407: it forwards every supplier's
-    paper, so it identifies nobody). No number or no supplier identity → the mail itself,
-    narrowed to its `part` (an attachment) when the caller knows it, so such a review goes
-    out once per mail / attachment (review round 1: two unreadable attachments of one mail
-    must stay two reviews). Residual: before the supplier match the key is the sender, after
-    it the EAN — one DL reviewed for two different reasons at those two stages is two keys,
-    which is two posts anyway."""
+    paper, so it identifies nobody). No supplier identity or no number → the mail itself,
+    narrowed to its `part` (an attachment) when the caller knows it and still carrying the
+    DL number when there is one, so such a review goes out once per mail / attachment / DL
+    (review round 1: two unreadable attachments of one mail stay two reviews; round 3: two
+    DLs scanned into one PDF stay two reviews before the supplier is known). Residuals: before
+    the supplier match the key is the sender, after it the EAN — one DL reviewed for two
+    different reasons at those two stages is two keys, which is two posts anyway; two
+    NUMBERLESS documents in the SAME attachment with the same reason share a key (rare — each
+    still raises its own board questions)."""
     number = invoice_dedup.digits(doc_number)
     who = str(supplier_ean or "").strip()
     if not who:
@@ -104,7 +107,8 @@ def _review_doc_key(cfg, message: dict, supplier_ean: str, doc_number: str,
             who = sender
     if number and who:
         return f"dl:{who}:{number}"
-    return f"mail:{message['message_id']}" + (f":{part}" if part else "")
+    return (f"mail:{message['message_id']}" + (f":{part}" if part else "")
+            + (f":{number}" if number else ""))
 
 
 def _review_reason_hash(reason: str) -> str:
@@ -113,7 +117,9 @@ def _review_reason_hash(reason: str) -> str:
     number masked (a reprint read with other sums, dates or counts is still „the sum does
     not add up"), every non-letter dropped — no separators, so a model-read „Rožok 50g" and
     „Rožok 50 g" are one reason (review round 2) — and hashed to keep the key short. Item
-    names stay: a hold whose open lines change is a different reason and is posted again."""
+    WORDS stay: a hold whose open lines change to other items is a different reason and is
+    posted again; a weight-only variant („Rožok 50g" → „Rožok 80g") counts as the same reason
+    (that line still gets its own board question and ⏰ reminders)."""
     norm = _NON_WORD_RE.sub("", _DIGITS_RE.sub("#", fold(reason)))
     return hashlib.sha256(norm.encode()).hexdigest()
 

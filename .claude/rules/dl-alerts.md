@@ -368,7 +368,11 @@ already went out; the ✅ per-DL success message and the ⏰ question reminders 
   (`invoice_dedup.digits`, < 5 digits = no number); NEVER a scanner/relay sender (#407 — before
   the supplier match a scan keys per mail); no number / no identity → `mail:<message_id>`
   narrowed by `part` (`_doc_part`: `att<idx>` — one review per unreadable attachment, a
-  numberless document keys on its source attachment — review round 1). The number is the one
+  numberless document keys on its source attachment — review round 1) and STILL carrying the
+  DL number when there is one (`mail:<id>:att0:<digits>` — round 3: two DLs scanned into one
+  PDF hitting the same pre-match reason posted one ❗). Residual: two NUMBERLESS documents in
+  the SAME attachment with the same reason share a key (rare; each still raises its own board
+  questions). The number is the one
   the document REALLY carries (`key_doc_number`, bound once in `_process_document`'s `review`
   partial): the #262 number made up from the MAIL for a numberless document
   (`generate_stable_doc_number`, what `built.doc_number` shows) is the same for every document
@@ -378,7 +382,8 @@ already went out; the ✅ per-DL success message and the ⏰ question reminders 
 - **Reason** (`_review_reason_hash`): the reason text through `dl_match.fold` (the package's ONE
   diacritic fold), EVERY digit run masked, every non-letter dropped (no separators — „Rožok 50g"
   = „Rožok 50 g", review round 2), sha256 — a reprint read with other sums / dates / counts is
-  the same reason; a hold whose open lines change (other item names) is a new one. A path whose
+  the same reason; a hold whose open lines change to OTHER items is a new one, a weight-only
+  variant („Rožok 50g" → „Rožok 80g") is not (its line still has its own board question). A path whose
   text is the model's own words passes a stable `reason_key`: the unmatched supplier
   (`REVIEW_KEY_SUPPLIER_UNMATCHED` — `matchReason` differs per run), the date gate (the gate
   sentence without the model-read supplier-name suffix).
