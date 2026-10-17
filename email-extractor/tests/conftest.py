@@ -46,7 +46,7 @@ def pg(_schema):
         "dl_nonwarehouse_supplier, codex_orders, audit_log, "
         "codex_stock_cards, codex_card_syncs, codex_card_history, codex_card_bindings, "
         "codex_sync_runs, codex_receipts, codex_receipt_syncs, "
-        "codex_customers, codex_customer_syncs, customer_store_rules "
+        "codex_customers, codex_customer_syncs, customer_store_rules, dl_review_posts "
         "RESTART IDENTITY CASCADE")
     return _schema
 

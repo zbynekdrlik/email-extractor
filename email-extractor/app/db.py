@@ -476,6 +476,26 @@ CODEX_CUSTOMERS = [
     """,
 ]
 
+# #495: the ❗ „Dodací list potrebuje kontrolu" reviews already posted to Odoo — one row per
+# delivery note (`doc_key`: supplier + DL number, or the mail when there is none) and reason
+# (`reason_hash`), written by `dl_events._post_review` BEFORE the post and released if Odoo
+# never gets it. The UNIQUE key is the „once per DL and reason" guarantee; a row older than
+# `dl_events.REVIEW_MEMORY_DAYS` is re-claimed in place. Small by nature (one row per
+# distinct DL review, ~60 a month), so no retention sweep.
+DL_REVIEW_POSTS = [
+    """
+    CREATE TABLE IF NOT EXISTS dl_review_posts (
+        id          BIGSERIAL PRIMARY KEY,
+        doc_key     TEXT NOT NULL,
+        reason_hash TEXT NOT NULL,
+        message_id  TEXT NOT NULL,
+        reason      TEXT NOT NULL DEFAULT '',
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (doc_key, reason_hash)
+    )
+    """,
+]
+
 # SCHEMA above is FROZEN as revision 1 (the baseline). NEVER edit those statements for a
 # schema change — append a NEW numbered migrate.Revision to this list instead
 # (immutable-migrations, #269). run_migrations() applies only the unapplied revisions, in
@@ -534,6 +554,7 @@ REVISIONS = [
     migrate.Revision(18, "add_codex_card_history", CODEX_CARD_HISTORY),
     migrate.Revision(19, "add_codex_receipts", CODEX_RECEIPTS),
     migrate.Revision(20, "add_codex_customers", CODEX_CUSTOMERS),
+    migrate.Revision(21, "add_dl_review_posts", DL_REVIEW_POSTS),
 ]
 
 

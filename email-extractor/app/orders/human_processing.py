@@ -28,6 +28,14 @@ This sweep closes that pit in two layers (see the #308 design comment):
   unset, NEVER on 243/152). Deduped per message, runs unconditionally. Only messages
   received on/after `BACKLOG_CUTOFF` are ever touched — the pre-existing historical
   backlog must never auto-enter a pipeline/channel.
+- **#495 — a scanner scan reaches the warehouse thread only when it MAY be a DL, once.**
+  The warehouse printer also scans personal/HR papers (a health card, an employment
+  contract …): 73 posts about 40 scans in 30 days, each reminded up to 9x. A scan the vision
+  verdict CLEARLY places elsewhere (`_scanner_maybe_dl` False) is posted NOWHERE — it stays in
+  `human_processing`, visible on the dashboard; a maybe-DL scan is posted ONCE
+  (`scanner_not_dl` is a one-shot kind, `dl_alerts.ONE_SHOT_KINDS`). Every routing decision
+  + the verdict is logged to `email_events` (`stage='notify'`); a `skipped` one is also what
+  keeps the decided scan out of the next sweep (no second vision call).
 
 Injection seams (`classify=`) mirror `dl_worker.tick`/`worker.tick` so the whole sweep is
 testable offline with a scripted fake — no network, no poppler in the unit path.
@@ -36,6 +44,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from datetime import UTC, datetime, timedelta
 from datetime import time as _dtime
@@ -102,6 +111,18 @@ ALERT_KIND = "human_processing_review"
 # scanner-specific header/instruction instead of the ops "Nezaradené e-maily" one, and the
 # per-message recognised document type survives. See `dl_alerts.GROUPED_ITEM_KINDS`.
 SCANNER_ALERT_KIND = "scanner_not_dl"
+
+# #495: the vision categories that mean "this scan MAY be a delivery note" — a DL itself, an
+# invoice (#485: some suppliers' invoice IS the DL), a CMR (#437), or "cannot decide". Any
+# OTHER category counts as a clear non-DL only when its confidence clears the same bar a
+# rescue trusts (`RESCUE_CONFIDENCE`); a missing/unparseable confidence is "unsure".
+SCANNER_MAYBE_DL_CATEGORIES = frozenset(
+    {"dodacie_listy", "invoices", "cmr", "human_processing"})
+
+# #495: the `email_events` stage of every Layer-2 routing decision (status `enqueued` /
+# `skipped`). A `skipped` row is ALSO the durable "decided" marker the candidate query
+# excludes — without it a scan posted nowhere would be re-classified on every tick.
+NOTIFY_STAGE = "notify"
 
 _CLASSIFY_PROMPT = (
     "Si klasifikátor prichádzajúcej firemnej pošty. Na obrázku je príloha e-mailu, "
@@ -193,6 +214,54 @@ def _scanner_doc_type(verdict: dict | None) -> str:
         if label:
             return label
     return "neznámy typ"
+
+
+def _verdict_confidence(verdict: dict) -> float | None:
+    """The verdict's confidence as a finite float, or None when missing/unparseable/NaN."""
+    try:
+        conf = float(verdict.get("confidence"))
+    except (TypeError, ValueError):
+        return None
+    return conf if math.isfinite(conf) else None
+
+
+def _scanner_maybe_dl(verdict: dict | None) -> bool:
+    """#495: True when a scanner scan MAY be a delivery note, so the warehouse must hear about
+    it: no verdict (unreadable / vision failed / OCR already looked like a DL), a DL-like
+    category (`SCANNER_MAYBE_DL_CATEGORIES`), or a confidence under `RESCUE_CONFIDENCE`.
+    False only for a CONFIDENT verdict of another kind (e.g. `no_processing` 0.9 — a personal
+    or official paper) — that one is posted nowhere. Leaning to True is the safe direction:
+    a wrong True costs one post, a wrong False hides a real DL from the warehouse."""
+    if not verdict:
+        return True
+    if str(verdict.get("category") or "") in SCANNER_MAYBE_DL_CATEGORIES:
+        return True
+    conf = _verdict_confidence(verdict)
+    return conf is None or conf < RESCUE_CONFIDENCE
+
+
+def _verdict_detail(verdict: dict | None) -> dict | None:
+    """The part of a vision verdict worth keeping on the timeline (never the raw dict — a
+    model may add arbitrary keys)."""
+    if not verdict:
+        return None
+    return {"category": str(verdict.get("category") or ""),
+            "confidence": _verdict_confidence(verdict),
+            "doc_type": str(verdict.get("doc_type") or "")[:80],
+            "reason": str(verdict.get("reason") or "")[:200]}
+
+
+def _log_notify(conn, message_id: str, status: str, *, route: str, verdict: dict | None,
+                kind: str | None = None, channel: int | None = None) -> None:
+    """#495: one `email_events` row per Layer-2 routing decision — WHY a scan reached a
+    channel (or none). Non-rollup: an operator-facing note, never the message's proc_status."""
+    outcome = {"warehouse": "nezaradený sken ohlásený skladu (možno dodací list)",
+               "ops": "nezaradený e-mail ohlásený na ops kanál",
+               "none": "nezaradený sken nejde do vlákna skladu — nie je to dodací list"}[route]
+    db.log_event(conn, message_id, "human_processing", NOTIFY_STAGE, status,
+                 outcome=outcome,
+                 detail={"route": route, "kind": kind, "channel": channel,
+                         "verdict": _verdict_detail(verdict)}, rollup=False)
 
 
 def _scanner_line(sender, subject, received, doc_type: str) -> str:
@@ -356,19 +425,32 @@ def _notify(conn, cfg, message: dict, verdict: dict | None = None) -> None:
 
     #336: the body is ONE short line; the explanation + the action link live ONCE in the
     per-kind grouped header `dl_alerts.flush_pending` builds (`GROUPED_ITEM_KINDS`) — #473:
-    the admin dashboard on the ops channel, none for the warehouse `scanner_not_dl`."""
+    the admin dashboard on the ops channel, none for the warehouse `scanner_not_dl`.
+
+    #495: a scanner scan the verdict CLEARLY places elsewhere (`_scanner_maybe_dl` False —
+    a personal/HR/official paper) is posted NOWHERE; it stays in `human_processing` on the
+    dashboard. Every decision (and the verdict behind it) is logged (`_log_notify`)."""
+    mid = message["message_id"]
     if dl_questions.is_scanner_sender(cfg, message.get("from_addr")):
+        if not _scanner_maybe_dl(verdict):
+            log.info("human_processing: scanner scan %s is clearly not a delivery note "
+                     "(verdict %s) — not posted to the warehouse thread",
+                     mid, _verdict_detail(verdict))
+            _log_notify(conn, mid, "skipped", route="none", verdict=verdict)
+            return
         channel = int(getattr(cfg, "delivery_notes_channel_id", 243) or 243)
         line = _scanner_line(message["from_addr"], message["subject"],
                              message.get("created_at"), _scanner_doc_type(verdict))
-        dl_alerts.enqueue(conn, channel, SCANNER_ALERT_KIND, line,
-                          message_id=message["message_id"])
+        dl_alerts.enqueue(conn, channel, SCANNER_ALERT_KIND, line, message_id=mid)
+        _log_notify(conn, mid, "enqueued", route="warehouse", verdict=verdict,
+                    kind=SCANNER_ALERT_KIND, channel=channel)
         return
     channel = report.ops_channel(cfg)
     line = dl_alerts.item_line(message["from_addr"], message["subject"],
                                message.get("created_at"))
-    dl_alerts.enqueue(conn, channel, ALERT_KIND, line,
-                      message_id=message["message_id"])
+    dl_alerts.enqueue(conn, channel, ALERT_KIND, line, message_id=mid)
+    _log_notify(conn, mid, "enqueued", route="ops", verdict=verdict, kind=ALERT_KIND,
+                channel=channel)
 
 
 def _horizon_cutoff(now: datetime, working_days: int) -> datetime:
@@ -398,7 +480,8 @@ def sweep(conn, cfg, classify=None, now=None) -> int:
     ops-digest nag stops). Each candidate is rescued (Layer 1) or notified (Layer 2),
     exactly once per message (deduped via `dl_alerts.already_pending`/`reminder_suppressed`
     on the notify kind — a rescued message leaves the pit, a notified one is skipped next
-    pass). Returns how many messages were handled (rescued or newly notified) this pass.
+    pass). Returns how many messages were handled (rescued, newly notified, or — #495 —
+    decided not to be posted anywhere) this pass.
     Never raises — a per-message failure is logged and the pass continues, mirroring
     `worker.run_forever`'s other sweeps. `now` (defaults to the wall clock) is injectable
     for deterministic horizon tests."""
@@ -429,6 +512,10 @@ def sweep(conn, cfg, classify=None, now=None) -> int:
     # sender, else ALERT_KIND), and a message's from_addr is fixed, so it only ever carries
     # ONE kind — matching `kind IN (both)` in the two dedup checks below is exact, never a
     # cross-kind leak, and keeps the #390 starvation guards working for both kinds.
+    # #495: two more unconditional exclusions (the #390 lesson — in SQL, before the LIMIT):
+    # a scanner alert is ONE-SHOT, so ANY row of that kind (delivered or not) ends the
+    # message's sweep life; and a scan already decided "not a DL, post nowhere" (a `skipped`
+    # notify event) is never re-classified.
     rows = conn.execute(
         """SELECT m.message_id, m.subject, m.from_addr, m.has_attachments, m.needs_vision,
                   m.created_at
@@ -441,14 +528,19 @@ def sweep(conn, cfg, classify=None, now=None) -> int:
               AND NOT EXISTS (
                   SELECT 1 FROM pending_alerts pa
                    WHERE pa.message_id = m.message_id
-                     AND pa.kind IN (%s, %s)
-                     AND pa.delivered_at IS NULL)
+                     AND ((pa.kind IN (%s, %s) AND pa.delivered_at IS NULL)
+                          OR pa.kind = %s))                 -- #495: one-shot scanner alert
               AND NOT EXISTS (
                   SELECT 1 FROM email_events ee
                    WHERE ee.message_id = m.message_id
                      AND ee.workflow = 'human_processing'
                      AND ee.stage = 'rescued'
                      AND ee.ts > now() - make_interval(hours => %s))
+              AND NOT EXISTS (                              -- #495: decided, posted nowhere
+                  SELECT 1 FROM email_events sk
+                   WHERE sk.message_id = m.message_id
+                     AND sk.workflow = 'human_processing'
+                     AND sk.stage = %s AND sk.status = 'skipped')
             ORDER BY
               -- #390: never-attempted messages first, then oldest
               EXISTS (SELECT 1 FROM pending_alerts pa2
@@ -457,8 +549,8 @@ def sweep(conn, cfg, classify=None, now=None) -> int:
               m.created_at ASC
             LIMIT 10""",
         (BACKLOG_CUTOFF, horizon_cutoff, STUCK_MINUTES,
-         ALERT_KIND, SCANNER_ALERT_KIND, dl_alerts.DEDUP_WINDOW_HOURS,
-         ALERT_KIND, SCANNER_ALERT_KIND)).fetchall()
+         ALERT_KIND, SCANNER_ALERT_KIND, SCANNER_ALERT_KIND, dl_alerts.DEDUP_WINDOW_HOURS,
+         NOTIFY_STAGE, ALERT_KIND, SCANNER_ALERT_KIND)).fetchall()
     handled = 0
     for message_id, subject, from_addr, has_attachments, needs_vision, created_at in rows:
         # #436: the notify kind is scanner-vs-ops per sender, so the dedup must key on the
@@ -472,7 +564,7 @@ def sweep(conn, cfg, classify=None, now=None) -> int:
         # call or re-notify off-cadence. `_recently_rescued` additionally blocks a re-rescue
         # loop for a message returned to human_processing after an earlier rescue (see its
         # docstring).
-        if (dl_alerts.reminder_suppressed(conn, cfg, alert_kind, message_id)
+        if (dl_alerts.reminder_suppressed(conn, cfg, alert_kind, message_id, now=now)
                 or _recently_rescued(conn, message_id)):
             continue
         message = {"message_id": message_id, "subject": subject, "from_addr": from_addr,
@@ -488,5 +580,6 @@ def sweep(conn, cfg, classify=None, now=None) -> int:
         except Exception:
             log.exception("human_processing sweep failed for %s", message_id)
     if handled:
-        log.warning("human_processing: %d stuck message(s) rescued or notified", handled)
+        log.warning("human_processing: %d stuck message(s) rescued, notified or decided "
+                    "(#495: a clear non-DL scan is posted nowhere)", handled)
     return handled
