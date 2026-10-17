@@ -105,13 +105,13 @@ leaves the reminder, its carryover incident clears like an imported one, and the
 deletion is never the `unknown` alarm; ONE ops alert per file asks to delete it. Its
 `import_confirmed_at` is no import pass: `_activity_today_at` (#255) reads `imported` rows only.
 
-**#495 — the warehouse DL thread hears about an open DESADV incident at most once a morning.**
+**#495 — the warehouse DL thread hears about an open DESADV carryover at most once a morning.**
 The 4-hourly reminder (10, 14, 18, 22 h) posted the same „Stále N dodacích listov neprevzatých"
-four times a day for two weeks. A `MORNING_ONLY_SOURCES` incident (DESADV, channel 243) is
-reminded once per working day past the morning hour (`_reminder_due` — the board-reminder
-cadence of `morning_check_active`), and the #255 evening check never opens one (the next
-morning's carryover check names the file). EDI orders (channel 152) keep the 4-hour reminder
-and the evening check.
+four times a day for two weeks. A carryover incident of a `MORNING_ONLY_SOURCES` source
+(DESADV, channel 243) is reminded once per working day past the morning hour (`_reminder_due`
+— the board-reminder cadence of `morning_check_active`), and the #255 evening check never opens
+one (the next morning's carryover check names the file). A failed/unknown DESADV incident and
+EDI orders (channel 152) keep the 4-hour reminder; EDI keeps the evening check.
 """
 from __future__ import annotations
 
@@ -140,11 +140,13 @@ LOCAL_TZ = ZoneInfo("Europe/Bratislava")
 _ALERT_STATUSES = ("failed", "unknown")
 
 # #495: the sources whose alerts reach the WAREHOUSE delivery-notes thread (DESADV → channel
-# 243). Their open incidents are reminded at most ONCE per working-day morning
-# (`_reminder_due`, the `morning_check_active` cadence) instead of every
+# 243). Their open CARRYOVER incident („Stále N … neprevzatých") is reminded at most ONCE per
+# working-day morning (`_reminder_due`, the `morning_check_active` cadence) instead of every
 # `import_alert_reminder_hours` (live: 10, 14, 18, 22 h — 47 identical posts in 14 days), and
 # the same-day evening check (#255) never opens one — the next morning's carryover check
-# names the file. EDI orders (channel 152) keep both, the owner asked only for the DL thread.
+# names the file. A failed/unknown incident keeps the 4-hour reminder (review round 1: it
+# never self-heals and folds a NEW failed file in silently — the reminder is how that one
+# surfaces). EDI orders (channel 152) keep both; the owner asked only for the DL thread.
 MORNING_ONLY_SOURCES = frozenset({"desadv"})
 
 
@@ -598,13 +600,13 @@ def _check_incidents_for_clear(conn, cfg, post, now: datetime) -> None:
                  channel_id, ledger.source)
 
 
-def _reminder_due(cfg, ledger: _Ledger, last_alert_at: datetime, now: datetime,
+def _reminder_due(cfg, ledger: _Ledger, kind: str, last_alert_at: datetime, now: datetime,
                   reminder_hours: int) -> bool:
-    """Is an open incident due its next reminder? #495: a `MORNING_ONLY_SOURCES` incident (the
-    warehouse DL thread) — at most once per working day, past the morning hour (Saturday /
-    Sunday skipped, `morning_check_active`), never twice on one local day; any other source
-    every `reminder_hours` since the last alert, as before."""
-    if ledger.source in MORNING_ONLY_SOURCES:
+    """Is an open incident due its next reminder? #495: a CARRYOVER incident of a
+    `MORNING_ONLY_SOURCES` source (the warehouse DL thread) — at most once per working day,
+    past the morning hour (Saturday / Sunday skipped, `morning_check_active`), never twice on
+    one local day; anything else every `reminder_hours` since the last alert, as before."""
+    if kind == "carryover" and ledger.source in MORNING_ONLY_SOURCES:
         return (morning_check_active(cfg, now)
                 and _local(last_alert_at).date() < _local(now).date())
     return (now - last_alert_at) >= timedelta(hours=reminder_hours)
@@ -657,7 +659,7 @@ def _handle_group(conn, cfg, post, channel_id: int, kind: str, rows: list[dict],
         return True
 
     _add_members(conn, incident["id"], rows, ledger)
-    due_for_reminder = _reminder_due(cfg, ledger, incident["last_alert_at"], now,
+    due_for_reminder = _reminder_due(cfg, ledger, kind, incident["last_alert_at"], now,
                                      reminder_hours)
     if due_for_reminder:
         if kind == "carryover":

@@ -30,8 +30,9 @@ This sweep closes that pit in two layers (see the #308 design comment):
   backlog must never auto-enter a pipeline/channel.
 - **#495 — a scanner scan reaches the warehouse thread only when it MAY be a DL, once.**
   The warehouse printer also scans personal/HR papers (a health card, an employment
-  contract …): 73 posts about 40 scans in 30 days, each reminded up to 9x. A scan the vision
-  verdict CLEARLY places elsewhere (`_scanner_maybe_dl` False) is posted NOWHERE — it stays in
+  contract …): 73 posts about 40 scans in 30 days, re-reminded every working-day morning. A
+  scan the vision verdict CLEARLY places elsewhere (`_scanner_maybe_dl` False — a confident
+  `no_processing`) is posted NOWHERE — it stays in
   `human_processing`, visible on the dashboard; a maybe-DL scan is posted ONCE
   (`scanner_not_dl` is a one-shot kind, `dl_alerts.ONE_SHOT_KINDS`). Every routing decision
   + the verdict is logged to `email_events` (`stage='notify'`); a `skipped` one is also what
@@ -112,12 +113,13 @@ ALERT_KIND = "human_processing_review"
 # per-message recognised document type survives. See `dl_alerts.GROUPED_ITEM_KINDS`.
 SCANNER_ALERT_KIND = "scanner_not_dl"
 
-# #495: the vision categories that mean "this scan MAY be a delivery note" — a DL itself, an
-# invoice (#485: some suppliers' invoice IS the DL), a CMR (#437), or "cannot decide". Any
-# OTHER category counts as a clear non-DL only when its confidence clears the same bar a
-# rescue trusts (`RESCUE_CONFIDENCE`); a missing/unparseable confidence is "unsure".
-SCANNER_MAYBE_DL_CATEGORIES = frozenset(
-    {"dodacie_listy", "invoices", "cmr", "human_processing"})
+# #495: the ONLY vision category that clears a scanner scan as "not a delivery note" — and
+# only with a confidence at the bar a rescue trusts (`RESCUE_CONFIDENCE`). Everything else is
+# "it may be a DL": a DL itself, an invoice (#485: some suppliers' invoice IS the DL), a CMR
+# (#437), "cannot decide" (`human_processing`), a processor category the rescue did not trust,
+# and any category outside the classifier's vocabulary (review round 1: an allowlist of
+# maybe-DL categories let a typo or an upper-case „DODACIE_LISTY" hide a real DL).
+SCANNER_NOT_DL_CATEGORIES = frozenset({"no_processing"})
 
 # #495: the `email_events` stage of every Layer-2 routing decision (status `enqueued` /
 # `skipped`). A `skipped` row is ALSO the durable "decided" marker the candidate query
@@ -230,14 +232,15 @@ def _verdict_confidence(verdict: dict) -> float | None:
 
 def _scanner_maybe_dl(verdict: dict | None) -> bool:
     """#495: True when a scanner scan MAY be a delivery note, so the warehouse must hear about
-    it: no verdict (unreadable / vision failed / OCR already looked like a DL), a DL-like
-    category (`SCANNER_MAYBE_DL_CATEGORIES`), or a confidence under `RESCUE_CONFIDENCE`.
-    False only for a CONFIDENT verdict of another kind (e.g. `no_processing` 0.9 — a personal
-    or official paper) — that one is posted nowhere. Leaning to True is the safe direction:
-    a wrong True costs one post, a wrong False hides a real DL from the warehouse."""
+    it: no verdict (unreadable / vision failed / OCR already looked like a DL), any category
+    but a known non-DL one (`SCANNER_NOT_DL_CATEGORIES`, compared case/space-insensitively),
+    or a confidence under `RESCUE_CONFIDENCE` (missing / unparseable / NaN = unsure). False
+    only for a CONFIDENT „nothing to process" verdict (`no_processing` 0.9 — a personal or
+    official paper) — that one is posted nowhere. Leaning to True is the safe direction: a
+    wrong True costs one post, a wrong False hides a real DL from the warehouse."""
     if not verdict:
         return True
-    if str(verdict.get("category") or "") in SCANNER_MAYBE_DL_CATEGORIES:
+    if str(verdict.get("category") or "").strip().lower() not in SCANNER_NOT_DL_CATEGORIES:
         return True
     conf = _verdict_confidence(verdict)
     return conf is None or conf < RESCUE_CONFIDENCE
@@ -370,9 +373,11 @@ def _apply_rescue(conn, cfg, message: dict, verdict: dict | None) -> bool:
     if not verdict:
         return False
     new_cat = str(verdict.get("category") or "")
-    conf = float(verdict.get("confidence") or 0)
+    # #495 review: through `_verdict_confidence` — a raw float() raised on „vysoká" (no
+    # alert, a vision call every tick) and let a NaN pass `< RESCUE_CONFIDENCE` as False
+    conf = _verdict_confidence(verdict)
     target = _rescue_target(cfg, message, new_cat)
-    if target is None or conf < RESCUE_CONFIDENCE:
+    if target is None or conf is None or conf < RESCUE_CONFIDENCE:
         return False
     # Mirror /api/message/<id>/reclassify: keep the original for audit, re-open for the
     # engine that owns the new category. The category-change trigger logs its own
@@ -436,9 +441,11 @@ def _notify(conn, cfg, message: dict, verdict: dict | None = None) -> None:
     mid = message["message_id"]
     if dl_questions.is_scanner_sender(cfg, message.get("from_addr")):
         if not _scanner_maybe_dl(verdict):
+            # the category/confidence only — the model's free text about a personal paper
+            # stays in the admin-only email_events detail, never in the app log
             log.info("human_processing: scanner scan %s is clearly not a delivery note "
-                     "(verdict %s) — not posted to the warehouse thread",
-                     mid, _verdict_detail(verdict))
+                     "(%s, %s) — not posted to the warehouse thread", mid,
+                     (verdict or {}).get("category"), _verdict_confidence(verdict or {}))
             _log_notify(conn, mid, "skipped", route="none", verdict=verdict)
             return
         channel = int(getattr(cfg, "delivery_notes_channel_id", 243) or 243)

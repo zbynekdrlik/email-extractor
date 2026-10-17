@@ -11,7 +11,7 @@ import logging
 import re
 import unicodedata
 
-from . import dl_report, invoice_dedup, report
+from . import claim, dl_report, invoice_dedup, report
 
 log = logging.getLogger("orders.dl_worker")
 
@@ -74,24 +74,30 @@ def _post(cfg, shadow: bool, build, post=None) -> None:
         log.exception("posting a DL Odoo message failed")
 
 
-def _review_doc_key(cfg, message: dict, supplier_ean: str, doc_number: str) -> str:
+def _review_doc_key(cfg, message: dict, supplier_ean: str, doc_number: str,
+                    part: str = "") -> str:
     """#495: WHICH delivery note a review is about — the supplier + the DL number reduced to
     its digits without leading zeros (`invoice_dedup.digits`: a reprint read as „0100…" and
     one read as „100…" are the same DL; < 5 digits is no number). The supplier is the matched
     EAN, else the sender — never a scanner/relay address (#407: it forwards every supplier's
-    paper, so it identifies nobody). No number or no supplier identity → the mail itself, so
-    such a review goes out once per mail."""
+    paper, so it identifies nobody). No number or no supplier identity → the mail itself,
+    narrowed to its `part` (an attachment) when the caller knows it, so such a review goes
+    out once per mail / attachment (review round 1: two unreadable attachments of one mail
+    must stay two reviews). Residual: before the supplier match the key is the sender, after
+    it the EAN — one DL reviewed for two different reasons at those two stages is two keys,
+    which is two posts anyway."""
     number = invoice_dedup.digits(doc_number)
     who = str(supplier_ean or "").strip()
     if not who:
-        # lazy: dl_questions imports dl_message, which imports this module
+        # lazy (the same as dl_matching / dl_message / dl_supplier_memory): dl_questions
+        # imports dl_message, which imports this module
         from .dl_questions import is_scanner_sender
         sender = str(message.get("from_addr") or "").strip().lower()
         if sender and not is_scanner_sender(cfg, sender):
             who = sender
     if number and who:
         return f"dl:{who}:{number}"
-    return f"mail:{message['message_id']}"
+    return f"mail:{message['message_id']}" + (f":{part}" if part else "")
 
 
 def _review_reason_hash(reason: str) -> str:
@@ -106,23 +112,30 @@ def _review_reason_hash(reason: str) -> str:
 
 
 def _claim_review(conn, doc_key: str, reason_hash: str, message_id: str,
-                  reason: str) -> int | None:
-    """Remember this review as sent BEFORE posting it — the row id, or None when the same DL +
-    reason already went out within `REVIEW_MEMORY_DAYS` (an older row is re-claimed in
-    place: the UNIQUE key never blocks a genuinely new DL). One atomic statement, so two
-    concurrent reprocesses of the same DL can never both post."""
+                  reason: str) -> tuple[bool, tuple]:
+    """Remember this review as sent BEFORE posting it — `claim.claim_or_identify` (#271): ONE
+    atomic statement claims the (DL, reason) pair or, when the same pair already went out
+    within `REVIEW_MEMORY_DAYS`, reports that earlier post (an older row is re-claimed in
+    place, so the UNIQUE key never blocks a genuinely new DL with a reused number). Two
+    concurrent reprocesses of the same DL can never both post. Returns `(claimed, (id,
+    message_id, created_at))` — the claimed row, or the earlier post. Run on a savepoint, so a
+    failing claim never aborts a transaction the caller may hold (`_post_review` then posts
+    anyway)."""
     with conn.transaction():
-        row = conn.execute(
-            """INSERT INTO dl_review_posts (doc_key, reason_hash, message_id, reason)
-               VALUES (%s, %s, %s, %s)
-               ON CONFLICT (doc_key, reason_hash) DO UPDATE
-                  SET message_id = EXCLUDED.message_id, reason = EXCLUDED.reason,
-                      created_at = now()
-                WHERE dl_review_posts.created_at
-                      < now() - make_interval(days => %s)
-               RETURNING id""",
-            (doc_key, reason_hash, message_id, reason, REVIEW_MEMORY_DAYS)).fetchone()
-    return int(row[0]) if row else None
+        return claim.claim_or_identify(
+            conn,
+            insert_sql="""INSERT INTO dl_review_posts (doc_key, reason_hash, message_id, reason)
+                          VALUES (%s, %s, %s, %s)
+                          ON CONFLICT (doc_key, reason_hash) DO UPDATE
+                             SET message_id = EXCLUDED.message_id, reason = EXCLUDED.reason,
+                                 created_at = now()
+                           WHERE dl_review_posts.created_at
+                                 < now() - make_interval(days => %s)
+                          RETURNING id, message_id, created_at""",
+            insert_params=(doc_key, reason_hash, message_id, reason, REVIEW_MEMORY_DAYS),
+            identify_sql="""SELECT id, message_id, created_at FROM dl_review_posts
+                             WHERE doc_key = %s AND reason_hash = %s""",
+            identify_params=(doc_key, reason_hash))
 
 
 def _review_event(conn, message_id: str, status: str, outcome: str, detail: dict) -> None:
@@ -139,41 +152,42 @@ def _review_event(conn, message_id: str, status: str, outcome: str, detail: dict
 def _post_review(conn, cfg, shadow: bool, message: dict, reason: str, *,
                  supplier_ean: str = "", supplier_name: str = "", doc_number: str = "",
                  delivery_date: str = "", link: str = "", history_link: str = "",
-                 cmr: bool = False, reason_key: str | None = None, post=None) -> bool:
+                 cmr: bool = False, reason_key: str | None = None, part: str = "",
+                 post=None) -> bool:
     """#495: THE one way a ❗ „Dodací list potrebuje kontrolu" (`dl_report.build_review`)
-    reaches Odoo. It goes out ONCE per delivery note (`_review_doc_key`) and reason
-    (`_review_reason_hash` of `reason_key`, else of the `reason` text — a caller whose text is
-    the model's own words passes a stable `reason_key`): every print and every reprocess of
-    the same DL with the same reason posted again before (live: the same DL up to 8x). A
-    DIFFERENT reason is posted. Shadow posts and remembers nothing. A post Odoo never got
-    (an exception or `None`) is not remembered — the next processing tries again. Every
-    decision is logged on the timeline (`review_post`: posted / suppressed / post_failed).
-    Never raises (R97): a failing memory lookup posts anyway — a repeat beats a lost review.
+    reaches Odoo. It goes out ONCE per delivery note (`_review_doc_key`; `part` narrows a
+    mail-level key to one attachment) and reason (`_review_reason_hash` of `reason_key`, else
+    of the `reason` text — a caller whose text is the model's own words passes a stable
+    `reason_key`): every print and every reprocess of the same DL with the same reason posted
+    again before (live: the same DL up to 8x). A DIFFERENT reason is posted. Shadow posts and
+    remembers nothing. A post Odoo never got (an exception or `None`) is not remembered — the
+    next processing tries again. Every decision is logged on the timeline (`review_post`:
+    posted / suppressed / post_failed). Never raises (R97): a failing memory posts anyway —
+    a repeat beats a lost review. Accepted residual: when the first poster's post fails while
+    a concurrent second one was suppressed by its claim, neither posts until the next run.
     Returns True when the review was delivered."""
     if shadow:
         return False
     mid = message["message_id"]
-    doc_key = _review_doc_key(cfg, message, supplier_ean, doc_number)
-    reason_hash = _review_reason_hash(reason_key or reason)
-    detail = {"doc_key": doc_key, "reason_hash": reason_hash[:16]}
+    claim_id = None
+    detail: dict = {}
     try:
-        claim_id = _claim_review(conn, doc_key, reason_hash, mid, reason or "")
-        if claim_id is None:
-            first = conn.execute(
-                "SELECT message_id, created_at FROM dl_review_posts "
-                "WHERE doc_key = %s AND reason_hash = %s", (doc_key, reason_hash)).fetchone()
-            if first:
-                detail["first_message_id"] = first[0]
-                detail["first_posted_at"] = first[1].isoformat()
+        doc_key = _review_doc_key(cfg, message, supplier_ean, doc_number, part)
+        reason_hash = _review_reason_hash(reason_key or reason)
+        detail = {"doc_key": doc_key, "reason_hash": reason_hash[:16]}
+        claimed, info = _claim_review(conn, doc_key, reason_hash, mid, reason or "")
+        if not claimed:
+            if info:
+                detail.update(first_message_id=info[1], first_posted_at=info[2].isoformat())
             log.info("DL review for %s (message %s) already posted with the same reason — "
                      "not repeated", doc_key, mid)
             _review_event(conn, mid, "suppressed",
                           "kontrola tohto dodacieho listu s tým istým dôvodom už bola "
                           "odoslaná do Odoo — neopakuje sa", detail)
             return False
+        claim_id = info[0]
     except Exception:
         log.exception("DL review memory failed for %s — posting anyway", mid)
-        claim_id = None
     post = post or dl_report.post   # dl_report.post already never raises
     try:
         result = post(cfg, dl_report.build_review(
@@ -209,7 +223,7 @@ def _flag_attachment(conn, cfg, shadow: bool, message: dict, link: str,
     #473: neither case raises a board question, so the caller passes `history_link` (the
     mail's História dodacích listov detail); `link` stays the fallback."""
     _post_review(conn, cfg, shadow, message, reason, link=link, history_link=history_link,
-                 post=post)
+                 part=f"att{att.get('idx')}", post=post)
     _event(conn, shadow, message["message_id"], stage="review", status=status,
           outcome=reason, detail={"idx": att.get("idx")}, rollup=False,
           workflow=dl_report.WORKFLOW)
