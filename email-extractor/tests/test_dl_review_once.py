@@ -298,3 +298,36 @@ def test_a_review_older_than_the_memory_window_is_posted_again(pg, tmp_path):
     assert len(post.reviews()) == 2, "past the window: a new DL, posted"
     assert pg.execute("SELECT count(*), max(message_id) FROM dl_review_posts").fetchone() \
         == (1, "dl-c")
+
+
+# --- review round 2 ---------------------------------------------------------------------
+
+def test_two_numberless_documents_of_one_mail_are_two_reviews(pg, tmp_path):
+    """Review round 2: a numberless document claims under a number made up from the MAIL
+    (#262 `generate_stable_doc_number`) — the review key must use the EXTRACTED number, or
+    every numberless document of the mail shares one key and only the first is posted."""
+    _snapshot(pg)
+    post = Poster()
+    _msg(pg, mid="dl-n")
+    for idx in (0, 1):
+        _attach(pg, tmp_path, "dl-n", idx=idx, filename=f"dl{idx + 1}.pdf")
+    no_match = {"gtin": "NO_MATCH", "matchConfidence": 0.0, "matchReason": "žiadna zhoda"}
+    docs = [_doc(doc_number="", total=3.0, items=[
+        {"name": name, "quantity": 3, "unit": "ks", "unitPrice": 1.0, "totalPrice": 3.0}])
+        for name in ("Neznámy chlebík", "Neznáma bageta")]
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    client = FakeClient({"dl_documents": docs, "dl_supplier": [SUPPLIER_MATCHED] * 2,
+                         "dl_item": [no_match] * 2})
+    dl_worker.tick(pg, cfg, client=client, upload=_no_upload, post=post)
+    reviews = post.reviews()
+    assert len(reviews) == 2, reviews
+    assert "Neznámy chlebík" in "".join(reviews) and "Neznáma bageta" in "".join(reviews)
+
+
+def test_the_reason_identity_ignores_spacing_inside_a_model_read_name():
+    """Review round 2: one diacritic fold for the package (`dl_match.fold`) and no word
+    separators — „Rožok 50g" and „Rozok 50 g" are the same reason; other words are not."""
+    from app.orders import dl_events
+    h = dl_events._review_reason_hash
+    assert h("Dodací list má 1 položku: Rožok 50g.") == h("Dodaci list ma 2 polozku: rozok 50 g")
+    assert h("Dodací list má 1 položku: Rožok 50g.") != h("Dodací list má 1 položku: Bageta 50g.")
