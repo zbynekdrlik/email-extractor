@@ -140,7 +140,9 @@ UNCAPPED_KINDS = frozenset({"dl_manual_in_codex"})
 # `reminder_suppressed` suppresses it as soon as ANY row for the message exists. The scanner
 # scan notice was re-posted to the warehouse thread every working-day morning while the scan
 # stayed unclassified; the warehouse acts on it once (rescan) or not at all, so a reminder is
-# only noise.
+# only noise. Accepted trade-off (review round 2): the old morning reminder also re-ran the
+# vision check, so a scan whose first verdict failed (a brief LLM error) could still be
+# rescued a day later; now the one notice asks the warehouse to rescan instead.
 ONE_SHOT_KINDS = frozenset({"scanner_not_dl"})
 
 # #473: a grouped kind that reaches a WAREHOUSE channel links the password-free board

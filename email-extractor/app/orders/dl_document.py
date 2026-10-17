@@ -26,6 +26,7 @@ from . import upload as upload_mod
 from .dl_events import (
     REVIEW_KEY_SUPPLIER_UNMATCHED,
     _dl_history_link,
+    _doc_part,
     _event,
     _post,
     _post_review,
@@ -313,12 +314,12 @@ def _process_document(conn, cfg, client, message: dict, doc: dict, catalog: list
     hlink = history_link
     if hlink is None:
         hlink = "" if shadow else _dl_history_link(conn, cfg, message["message_id"])
-    # #495: every ❗ below goes through the once-per-DL-and-reason choke point; a numberless
-    # document keys on its attachment (`part`), never the whole mail
-    part = "" if doc.get("source_attachment_idx") is None else f"att{doc['source_attachment_idx']}"
+    # #495: every ❗ below goes through the once-per-DL-and-reason choke point, keyed on the
+    # EXTRACTED number (never the #262 one made up from the mail) — a numberless document
+    # keys on its attachment (`part`), never the whole mail
     review = functools.partial(_post_review, conn, cfg, shadow, message,
-                               delivery_date=delivery_date, link=link, cmr=cmr, part=part,
-                               post=post)
+                               delivery_date=delivery_date, link=link, cmr=cmr,
+                               part=_doc_part(doc), key_doc_number=doc_number, post=post)
 
     # #485: an invoice-derived document passes the duplicate gate FIRST — a credit note, an
     # older version of a re-sent invoice, or goods CODEX / our own ledger already has never

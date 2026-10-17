@@ -21,7 +21,7 @@ from psycopg.pq import TransactionStatus
 
 from . import codex_receipts, desadv, desadv_edi, dl_report, invoice_dedup
 from .dl_correction import _mail_body_only
-from .dl_events import _event, _post_review
+from .dl_events import _doc_part, _event, _post_review
 
 log = logging.getLogger("orders.dl_worker")
 
@@ -128,7 +128,7 @@ def gate(conn, cfg, message: dict, doc: dict, supplier_ean: str, *,
                      supplier_name=doc.get("supplierName", ""),
                      doc_number=doc.get("docNumber") or "",
                      delivery_date=doc.get("deliveryDate", ""), link=link,
-                     history_link=history_link, post=post)
+                     history_link=history_link, part=_doc_part(doc), post=post)
         _event(conn, False, message["message_id"], stage="review", status="review",
                outcome=STALE_REASON, detail={"doc_number": doc.get("docNumber") or "",
                                              "held": True, "invoice_mode": True},
@@ -173,7 +173,7 @@ def review_conflict(conn, cfg, message: dict, doc: dict, dup: invoice_dedup.Dupl
     _post_review(conn, cfg, False, message, reason, supplier_ean=supplier_ean,
                  supplier_name=doc.get("supplierName", ""), doc_number=doc_number,
                  delivery_date=doc.get("deliveryDate", ""), link=link,
-                 history_link=history_link, post=post)
+                 history_link=history_link, part=_doc_part(doc), post=post)
     _event(conn, False, message["message_id"], stage=STAGE, status="review", outcome=reason,
            detail={"doc_number": doc_number, "invoice_number": doc.get("invoiceNumber") or "",
                    "dedup": dup.as_dict()},

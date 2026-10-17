@@ -9,9 +9,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-import unicodedata
 
 from . import claim, dl_report, invoice_dedup, report
+from .dl_match import fold
 
 log = logging.getLogger("orders.dl_worker")
 
@@ -27,6 +27,13 @@ REVIEW_KEY_SUPPLIER_UNMATCHED = "dodavatel-nesparovany"
 
 _DIGITS_RE = re.compile(r"\d+")
 _NON_WORD_RE = re.compile(r"[^a-z#]+")
+
+
+def _doc_part(doc: dict) -> str:
+    """#495: the part of a mail a document came from (`att<idx>`, the extraction's own
+    `source_attachment_idx` tag) — narrows a mail-level review key to one attachment."""
+    idx = doc.get("source_attachment_idx")
+    return "" if idx is None else f"att{idx}"
 
 # --- Odoo + event-log helpers -----------------------------------------------
 #
@@ -102,12 +109,12 @@ def _review_doc_key(cfg, message: dict, supplier_ean: str, doc_number: str,
 
 def _review_reason_hash(reason: str) -> str:
     """#495: the identity of a review REASON — what the warehouse is asked to do, not how the
-    text reads this time: casefolded, diacritics dropped, EVERY number masked (a reprint read
-    with other sums, dates or counts is still „the sum does not add up"), punctuation and
-    spacing collapsed, hashed to keep the key short. Item names stay — a hold whose open
-    lines change is a different reason and is posted again."""
-    text = unicodedata.normalize("NFKD", str(reason or "")).encode("ascii", "ignore")
-    norm = _NON_WORD_RE.sub(" ", _DIGITS_RE.sub("#", text.decode().lower())).strip()
+    text reads this time: folded (`dl_match.fold`, the package's ONE diacritic fold), EVERY
+    number masked (a reprint read with other sums, dates or counts is still „the sum does
+    not add up"), every non-letter dropped — no separators, so a model-read „Rožok 50g" and
+    „Rožok 50 g" are one reason (review round 2) — and hashed to keep the key short. Item
+    names stay: a hold whose open lines change is a different reason and is posted again."""
+    norm = _NON_WORD_RE.sub("", _DIGITS_RE.sub("#", fold(reason)))
     return hashlib.sha256(norm.encode()).hexdigest()
 
 
@@ -153,10 +160,12 @@ def _post_review(conn, cfg, shadow: bool, message: dict, reason: str, *,
                  supplier_ean: str = "", supplier_name: str = "", doc_number: str = "",
                  delivery_date: str = "", link: str = "", history_link: str = "",
                  cmr: bool = False, reason_key: str | None = None, part: str = "",
-                 post=None) -> bool:
+                 key_doc_number: str | None = None, post=None) -> bool:
     """#495: THE one way a ❗ „Dodací list potrebuje kontrolu" (`dl_report.build_review`)
-    reaches Odoo. It goes out ONCE per delivery note (`_review_doc_key`; `part` narrows a
-    mail-level key to one attachment) and reason (`_review_reason_hash` of `reason_key`, else
+    reaches Odoo. It goes out ONCE per delivery note (`_review_doc_key` of `key_doc_number`
+    — the number the document really carries; `doc_number` is only what the message shows,
+    e.g. a number made up from the mail for a numberless document, #262 — and `part`, which
+    narrows a mail-level key to one attachment) and reason (`_review_reason_hash` of `reason_key`, else
     of the `reason` text — a caller whose text is the model's own words passes a stable
     `reason_key`): every print and every reprocess of the same DL with the same reason posted
     again before (live: the same DL up to 8x). A DIFFERENT reason is posted. Shadow posts and
@@ -172,7 +181,9 @@ def _post_review(conn, cfg, shadow: bool, message: dict, reason: str, *,
     claim_id = None
     detail: dict = {}
     try:
-        doc_key = _review_doc_key(cfg, message, supplier_ean, doc_number, part)
+        doc_key = _review_doc_key(cfg, message, supplier_ean,
+                                  doc_number if key_doc_number is None else key_doc_number,
+                                  part)
         reason_hash = _review_reason_hash(reason_key or reason)
         detail = {"doc_key": doc_key, "reason_hash": reason_hash[:16]}
         claimed, info = _claim_review(conn, doc_key, reason_hash, mid, reason or "")
