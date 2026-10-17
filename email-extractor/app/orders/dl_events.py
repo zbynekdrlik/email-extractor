@@ -94,8 +94,10 @@ def _review_doc_key(cfg, message: dict, supplier_ean: str, doc_number: str,
     DLs scanned into one PDF stay two reviews before the supplier is known). Residuals: before
     the supplier match the key is the sender, after it the EAN — one DL reviewed for two
     different reasons at those two stages is two keys, which is two posts anyway; two
-    NUMBERLESS documents in the SAME attachment with the same reason share a key (rare — each
-    still raises its own board questions)."""
+    NUMBERLESS documents in the SAME attachment with the same reason share a key (rare —
+    accepted: the one ❗ still points the warehouse at that mail); a mail-level key includes
+    the number the model READ, so a reprocess that reads it differently repeats one ❗ (the
+    safe direction — `dl:<sender>:<number>` always had the same exposure)."""
     number = invoice_dedup.digits(doc_number)
     who = str(supplier_ean or "").strip()
     if not who:

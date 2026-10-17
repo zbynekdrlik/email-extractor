@@ -370,9 +370,12 @@ already went out; the ✅ per-DL success message and the ⏰ question reminders 
   narrowed by `part` (`_doc_part`: `att<idx>` — one review per unreadable attachment, a
   numberless document keys on its source attachment — review round 1) and STILL carrying the
   DL number when there is one (`mail:<id>:att0:<digits>` — round 3: two DLs scanned into one
-  PDF hitting the same pre-match reason posted one ❗). Residual: two NUMBERLESS documents in
-  the SAME attachment with the same reason share a key (rare; each still raises its own board
-  questions). The number is the one
+  PDF hitting the same pre-match reason posted one ❗). Residuals: two NUMBERLESS documents in
+  the SAME attachment with the same reason share a key (rare — accepted; most pre-match reasons
+  raise no board question of their own, and a scanner's unknown supplier shares ONE
+  `dlsupplier:<sender>` question, so the one ❗ is what points the warehouse at that mail); the
+  key carries the number the model READ, so a reprocess that reads it differently repeats one ❗
+  (the safe direction). The number is the one
   the document REALLY carries (`key_doc_number`, bound once in `_process_document`'s `review`
   partial): the #262 number made up from the MAIL for a numberless document
   (`generate_stable_doc_number`, what `built.doc_number` shows) is the same for every document
