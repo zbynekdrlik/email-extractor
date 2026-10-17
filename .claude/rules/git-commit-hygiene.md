@@ -185,3 +185,13 @@ shared by every worktree/sibling, `~/.gitconfig` by every repo): `GIT_AUTHOR_EMA
 GIT_COMMITTER_EMAIL=26905282+zbynekdrlik@users.noreply.github.com git commit -F <file>`. A
 commit already made with the wrong email (unpushed) → `git reset --soft HEAD~1` + recommit
 with the env vars (sanctioned above; never `--amend`).
+
+## A docs commit right after the PR merge is design-gated on the MERGE commit's `#N` (#495)
+
+After `git merge --ff-only origin/main` the dev HEAD is GitHub's „Merge pull request #<PR>"
+commit, and `block-commit-without-design.sh` keys on THAT `#<PR>` (a PR has no design comment)
+even when your own commit message names only the ticket — a docs-only autopilot-log / playbook
+commit then blocks. It is a docs commit with no design decision: add `[no-design: docs-only
+after the merge; HEAD is the PR merge commit]` to its message. And because the hook blocks the
+WHOLE compound command, a `cat >> docs/autopilot-log.md <<EOF … && git commit` chain loses the
+append too — write the file in its own call, check it (`tail -1`), then commit.
