@@ -202,3 +202,23 @@ def test_dl_review_posts_is_its_own_migration_revision_with_a_unique_key(pg):
                    "VALUES ('k', 'h', 'm2', 'r')")
     pg.execute("INSERT INTO dl_review_posts (doc_key, reason_hash, message_id, reason) "
                "VALUES ('k', 'other', 'm2', 'r2')")   # the same DL, another reason
+
+
+def test_two_unreadable_attachments_of_one_mail_are_two_reviews(pg, tmp_path):
+    """Review round 1: a mail key covers the whole mail, and digits are masked — „dl1.xls"
+    and „dl2.xls" must still be two reviews (each attachment is its own part of the mail)."""
+    _snapshot(pg)
+    post = Poster()
+    _msg(pg, mid="dl-x")
+    for idx in (0, 1):
+        _attach(pg, tmp_path, "dl-x", idx=idx, filename=f"dl{idx + 1}.xls",
+                mime="application/vnd.ms-excel", text="", method="xls")
+    cfg = _cfg(delivery_notes_engine="python", data_dir=str(tmp_path))
+    dl_worker.tick(pg, cfg, client=FakeClient({}), upload=_no_upload, post=post)
+    reviews = post.reviews()
+    assert len(reviews) == 2, reviews
+    assert "dl1.xls" in reviews[0] and "dl2.xls" in reviews[1]
+    # a reprocess of the same mail repeats neither
+    _reprocess(pg, "dl-x")
+    dl_worker.tick(pg, cfg, client=FakeClient({}), upload=_no_upload, post=post)
+    assert len(post.reviews()) == 2

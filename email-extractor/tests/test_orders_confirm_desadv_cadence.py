@@ -73,19 +73,22 @@ def test_a_desadv_incident_is_never_reminded_on_a_weekend(pg):
     assert len(posts.calls) == 2
 
 
-def test_a_desadv_failed_incident_is_reminded_daily_too(pg):
+def test_a_desadv_failed_incident_keeps_the_4h_reminder(pg):
+    """Review round 1: only the CARRYOVER reminder („Stále N … neprevzatých", the owner's
+    complaint) moves to the morning. A failed import never self-heals and folds new failed
+    files into its open incident silently — its 4-hour reminder is how a new one surfaces."""
     _insert_desadv_at(pg, "9", "DESADV_f1.txt", uploaded_at=MON_EVENING, doc_number="12345603")
     posts = PostRecorder()
     _sweep(pg, posts, TUE, unconfirmed=["DESADV_f1.txt"])
     assert len(posts.calls) == 1
-    # the failed row is terminal now; a later file of the same kind folds into the incident
     _insert_desadv_at(pg, "9", "DESADV_f2.txt", uploaded_at=MON_EVENING, doc_number="12345604")
-    _sweep(pg, posts, TUE.replace(hour=16), unconfirmed=["DESADV_f1.txt", "DESADV_f2.txt"])
-    assert len(posts.calls) == 1, "no 4-hourly repeat in the warehouse thread"
+    _sweep(pg, posts, TUE.replace(hour=13), unconfirmed=["DESADV_f1.txt", "DESADV_f2.txt"])
+    assert len(posts.calls) == 1, "not before 4 h"
     _insert_desadv_at(pg, "9", "DESADV_f3.txt", uploaded_at=MON_EVENING, doc_number="12345605")
-    _sweep(pg, posts, WED, unconfirmed=["DESADV_f1.txt", "DESADV_f2.txt", "DESADV_f3.txt"])
-    assert len(posts.calls) == 2
-
+    _sweep(pg, posts, TUE.replace(hour=16),
+           unconfirmed=["DESADV_f1.txt", "DESADV_f2.txt", "DESADV_f3.txt"])
+    assert len(posts.calls) == 2, "the failed incident is reminded after 4 h, as before"
+    assert "3 dodacie listy s problémom importu" in posts.calls[1][0]
 
 def test_an_edi_carryover_incident_keeps_its_4h_reminder(pg):
     _insert_at(pg, "8580000000019", "ORDER_c1.txt", uploaded_at=MON_EVENING)
@@ -129,7 +132,11 @@ def test_reminder_due_cadence_by_source():
     tue_10 = TUE.replace(hour=10, minute=30)
     last = TUE.replace(hour=9)
     desadv, edi = confirm.DESADV_LEDGER, confirm.EDI_LEDGER
-    assert confirm._reminder_due(cfg, desadv, last, tue_10.replace(hour=18), 4) is False
-    assert confirm._reminder_due(cfg, desadv, last, WED, 4) is True
-    assert confirm._reminder_due(cfg, edi, last, tue_10.replace(hour=13), 4) is True
-    assert confirm._reminder_due(cfg, edi, last, tue_10, 4) is False
+    due = confirm._reminder_due
+    assert due(cfg, desadv, "carryover", last, tue_10.replace(hour=18), 4) is False
+    assert due(cfg, desadv, "carryover", last, WED.replace(hour=9), 4) is False
+    assert due(cfg, desadv, "carryover", last, WED, 4) is True
+    assert due(cfg, desadv, "failed", last, tue_10.replace(hour=13), 4) is True
+    assert due(cfg, desadv, "unknown", last, tue_10, 4) is False
+    assert due(cfg, edi, "carryover", last, tue_10.replace(hour=13), 4) is True
+    assert due(cfg, edi, "carryover", last, tue_10, 4) is False

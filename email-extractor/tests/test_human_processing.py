@@ -647,3 +647,37 @@ def test_reminder_suppressed_never_re_reminds_a_one_shot_scanner_alert(pg):
     # the ops net keeps its once-per-morning reminder (#336)
     assert dl_alerts.reminder_suppressed(
         pg, cfg, "human_processing_review", "o1", now=tue) is False
+
+
+def test_an_unparseable_or_nan_confidence_never_breaks_the_sweep_nor_rescues(pg):
+    """Review round 1: `_apply_rescue` read `float(confidence)` raw — „vysoká" raised (no
+    alert, a new vision call on every tick, forever) and NaN passed `< 0.6` as False, so a
+    NaN-confident processor verdict was RESCUED. Both are „unsure": never rescued, posted once."""
+    cfg = _cfg(**_SCANNER_CFG)
+    for mid, conf in (("odd1", "vysoká"), ("odd2", float("nan"))):
+        _hp_msg(pg, mid, needs_vision=False, has_attachments=True)
+        _hp_attachment(pg, mid, _PAPER_OCR)
+        calls = []
+
+        def classify(c, a, conf=conf, calls=calls):
+            calls.append(1)
+            return {"category": "dodacie_listy", "confidence": conf, "doc_type": "?"}
+
+        human_processing.sweep(pg, cfg, classify=classify)
+        human_processing.sweep(pg, cfg, classify=classify)
+        cat = pg.execute("SELECT category FROM messages WHERE message_id = %s",
+                         (mid,)).fetchone()[0]
+        assert cat == "human_processing", f"{conf!r} must never rescue"
+        assert pg.execute("SELECT channel_id, kind FROM pending_alerts WHERE message_id = %s",
+                          (mid,)).fetchall() == [(243, "scanner_not_dl")]
+        assert len(calls) == 1, f"{conf!r}: one vision call, not one per tick"
+
+
+def test_an_out_of_vocabulary_category_is_a_maybe_dl():
+    """Review round 1: only a KNOWN non-DL verdict hides a scan — a category the classifier
+    should not return (upper case, a typo, an invented one) is „unsure", the safe side."""
+    maybe = human_processing._scanner_maybe_dl
+    assert maybe({"category": "DODACIE_LISTY", "confidence": 0.9}) is True
+    assert maybe({"category": "dodaci_list", "confidence": 0.9}) is True
+    assert maybe({"category": "vyplatna_paska", "confidence": 0.95}) is True
+    assert maybe({"category": " No_Processing ", "confidence": 0.9}) is False
