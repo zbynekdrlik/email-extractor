@@ -422,10 +422,13 @@ it, #467 flags it).
   = a NEWER ETL generation: a re-push of the same one settles nothing (`_prev_as_of` is strict),
   so after the option expect `renumbered=0` until the next ETL.
 - **Limit:** only the mapped card's rows change. Another card that also carries the old code keeps
-  it alive in the guard (CODEX would then accept it too) — check `codex_stock_cards` first.
-- A bad entry = `log.error`, skipped, never a failed push. Every replacement + a card missing from
+  it alive in the guard (CODEX would then accept it too) — the push warns „stays alive" once per
+  entry; check `codex_stock_cards` first.
+- A bad entry, or a second entry for one card (the FIRST stays) = `log.error`, skipped, never a
+  failed push. Every replacement + a card missing from
   the list = `log.warning` per push. **The option is a temporary fuse (#494: a copy-loader bug).**
-  Once the copy carries the code the entry is a no-op, the push logs „can be removed" and deleting
+  Once the copy carries the code on all the card's rows the entry is a no-op, the push logs „can be
+  removed" (never while a row of that card was still replaced) and deleting
   it moves nothing — delete it then: while it stands it also hides a later genuine code change.
 - **A mass correction of the copy (up to 43 codes on 27 cards) trips the breaker when more than 10
   of OUR cards change:** `blocked`, ONE ops alert, nothing moves, each card's line on a dead code is

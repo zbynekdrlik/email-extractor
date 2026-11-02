@@ -149,12 +149,16 @@ def latest_sync(conn) -> dict | None:
 
 def parse_code_overrides(text) -> dict[str, str]:
     """The `codex_code_overrides` add-on option („ACSKLP=code, …") → {ACSKLP: code}.
-    A bad entry is logged as an error and skipped — it must never stop the push."""
+    A bad entry is logged as an error and skipped — it must never stop the push. Of two entries
+    for one card the FIRST stays, the later one is a bad entry."""
     out: dict[str, str] = {}
     for entry in filter(str.strip, re.split(r"[,;]", str(text or ""))):
         card, _, value = (part.strip() for part in entry.partition("="))
         code = normalize_code(value)
-        if card and code:
+        if card in out:
+            log.error("codex_code_overrides: duplicate entry %r skipped, card %s stays on %s",
+                      entry, card, out[card])
+        elif card and code:
             out[card] = code
         else:
             log.error("codex_code_overrides: bad entry %r skipped (expected card=code)", entry)
@@ -179,8 +183,15 @@ def _override_codes(rows: dict[tuple, tuple], overrides: dict[str, str]) -> dict
         # two rows meeting on one key: an active one wins, or the card would leave the picker
         if key not in out or out[key][1]:
             out[key] = value
+    for card, old in sorted(replaced):
+        others = sorted({key[1] for key in out if key[0] == old and key[1] != card})
+        if others:
+            log.warning("codex_code_overrides: replaced code %s of card %s stays alive on "
+                        "card(s) %s — the guard still accepts it", old, card, ", ".join(others))
+    carried = {(key[0], key[1]) for key in rows if key[2] == PICK_STREDISKO}
+    changed = {card for card, _old in replaced}
     for card, code in sorted(overrides.items()):
-        if (code, card) in {(key[0], key[1]) for key in rows if key[2] == PICK_STREDISKO}:
+        if (code, card) in carried and card not in changed:
             log.warning("codex_code_overrides: the copy already carries %s for card %s — the "
                         "entry changes nothing and can be removed", code, card)
     for card in sorted(set(overrides) - {key[1] for key in out if key[2] == PICK_STREDISKO}):
