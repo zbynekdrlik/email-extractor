@@ -75,6 +75,13 @@ def test_a_bad_entry_is_refused_loudly_and_the_good_one_stays(caplog):
     assert sum("codex_code_overrides" in r.getMessage() for r in caplog.records) == 3
 
 
+def test_a_duplicate_entry_is_an_error_and_the_first_value_stays(caplog):
+    with caplog.at_level(logging.ERROR, logger="orders.codex_cards"):
+        got = codex_cards.parse_code_overrides(f"{CARD}={RIGHT}, {CARD}={OTHER}")
+    assert got == {CARD: RIGHT}
+    assert ["duplicate" in r.getMessage() for r in caplog.records] == [True]
+
+
 def test_the_config_reads_the_option(monkeypatch):
     monkeypatch.setenv("CODEX_CODE_OVERRIDES", f"{CARD}={RIGHT}")
     assert Config.load().codex_code_overrides == f"{CARD}={RIGHT}"
@@ -104,6 +111,22 @@ def test_the_same_acsklp_on_another_stredisko_is_another_card(pg):
     its old code goes everywhere that card carried it, another product keeps its own code."""
     _push(pg, cards=[_row(WRONG), _row(WRONG, stredisko=0), _row(OTHER, stredisko=4)])
     assert _stored(pg) == {(OTHER, CARD, 4), (RIGHT, CARD, 0), (RIGHT, CARD, 1)}
+
+
+def test_a_card_with_a_replaced_row_is_not_called_removable(pg, caplog):
+    with caplog.at_level(logging.WARNING, logger="orders.codex_cards"):
+        _push(pg, cards=[_row(RIGHT, sklad=1), _row(WRONG, sklad=100)])
+    assert _stored(pg) == {(RIGHT, CARD, 1)}
+    assert not any("can be removed" in r.getMessage() for r in caplog.records)
+
+
+def test_a_replaced_code_alive_on_another_card_warns_once(pg, caplog):
+    with caplog.at_level(logging.WARNING, logger="orders.codex_cards"):
+        _push(pg, cards=[_row(WRONG), _row(WRONG, stredisko=0), _row(WRONG, card="31"),
+                         _row(WRONG, card="31", sklad=1)])
+    assert codex_cards.live_guard(pg).has(WRONG), "the other card keeps the code alive"
+    hits = [r.getMessage() for r in caplog.records if "stays alive" in r.getMessage()]
+    assert len(hits) == 1 and WRONG in hits[0] and "31" in hits[0]
 
 
 def test_a_copy_that_already_has_the_right_code_changes_nothing(pg):
