@@ -52,6 +52,7 @@ options:
   codex_sync_apply: false
   codex_sync_max_code_changes: 10
   codex_sync_max_renames: 80
+  codex_code_overrides: ""
   orders_spend_cap_eur: 30
   openai_api_key: ""
   orders_model: "gpt-5.4"
@@ -128,6 +129,7 @@ schema:
   codex_sync_apply: bool?
   codex_sync_max_code_changes: int?
   codex_sync_max_renames: int?
+  codex_code_overrides: str?
   orders_spend_cap_eur: float?
   openai_api_key: password?
   orders_model: str?
