@@ -191,6 +191,53 @@ def test_the_same_etl_list_pushed_twice_does_not_settle_the_merge(pg):
     assert codex_sync.run(pg, _sync_cfg())["renumbered"] == 1
 
 
+def test_the_entry_is_harmless_once_the_copy_is_fixed_and_can_be_removed(pg, caplog):
+    """The temporary case: the corrected ETL carries the confirmed code itself. The entry changes
+    nothing, says so in the log, and deleting it moves nothing."""
+    _prod_shape(pg)
+    for hours in (5, 3):
+        _push(pg, hours_old=hours)
+        codex_sync.run(pg, _sync_cfg())
+    fixed = [_row(RIGHT), LIST[1]]
+    with caplog.at_level(logging.WARNING, logger="orders.codex_cards"):
+        _push(pg, hours_old=2, cards=fixed)
+    assert any("can be removed" in r.getMessage() for r in caplog.records)
+    res = codex_sync.run(pg, _sync_cfg())
+    assert (res["renumbered"], res["removed"], res["review"], res["renamed"]) == (0, 0, 0, 0)
+    _push(pg, hours_old=1, cards=fixed, overrides=None)
+    res = codex_sync.run(pg, _sync_cfg())
+    assert (res["renumbered"], res["removed"], res["review"], res["renamed"]) == (0, 0, 0, 0)
+    assert RIGHT in _live(pg) and WRONG not in _live(pg)
+
+
+def _bulk_list(fixed):
+    """12 cards of ours, each with a wrong code until the copy is corrected."""
+    return [_row(f"99900001{i:05d}" if not fixed else f"99900002{i:05d}", card=str(500 + i),
+                 name=f"Karta číslo {i}", sklad=1) for i in range(12)]
+
+
+def test_a_mass_code_correction_stops_visibly_and_applies_once_the_limit_is_raised(pg):
+    """Up to 43 codes change when the corrected ETL lands: over the limit nothing moves and ops
+    hears it; after raising the option each card keeps its name on its corrected code."""
+    dl_snapshot._freeze(pg, [
+        {"gtin": r["code"], "name": r["name"], "doplnok": "", "mass": None, "sklad": "1",
+         "cena": None} for r in _bulk_list(False)], [])
+    _push(pg, hours_old=5, overrides=None, cards=_bulk_list(False))
+    assert codex_sync.run(pg, _sync_cfg())["mode"] == "apply"
+    _push(pg, hours_old=3, overrides=None, cards=_bulk_list(True))
+    assert codex_sync.run(pg, _sync_cfg())["mode"] == "blocked"
+    assert pg.execute("SELECT count(*) FROM pending_alerts WHERE kind = 'codex_card_sync'"
+                      ).fetchone()[0] == 1
+    assert set(_live(pg)) == {r["code"] for r in _bulk_list(False)}
+    cfg = Config(pg_dsn="", data_dir="/tmp", ops_channel_id=77, codex_sync_apply=True,
+                 codex_sync_max_code_changes=45)
+    _push(pg, hours_old=1, overrides=None, cards=_bulk_list(True))
+    res = codex_sync.run(pg, cfg)
+    assert (res["mode"], res["renumbered"], res["renamed"]) == ("apply", 12, 0)
+    assert {g: c["name"] for g, c in _live(pg).items()} == {
+        r["code"]: r["name"] for r in _bulk_list(True)}
+
+
 # --- the DL output --------------------------------------------------------------------------
 
 CATALOG_CSV = ("GTIN,Názov,doplnok,hmotnost,Sklad,Cena\n"

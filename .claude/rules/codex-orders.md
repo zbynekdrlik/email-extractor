@@ -424,8 +424,14 @@ it, #467 flags it).
 - **Limit:** only the mapped card's rows change. Another card that also carries the old code keeps
   it alive in the guard (CODEX would then accept it too) — check `codex_stock_cards` first.
 - A bad entry = `log.error`, skipped, never a failed push. Every replacement + a card missing from
-  the list = `log.warning` per push. Once the copy is fixed the entry is a no-op; delete it then —
-  while it stands it also hides a later genuine change of that card's code.
+  the list = `log.warning` per push. **The option is a temporary fuse (#494: a copy-loader bug).**
+  Once the copy carries the code the entry is a no-op, the push logs „can be removed" and deleting
+  it moves nothing — delete it then: while it stands it also hides a later genuine code change.
+- **A mass correction of the copy (up to 43 codes on 27 cards) trips the breaker when more than 10
+  of OUR cards change:** `blocked`, ONE ops alert, nothing moves, each card's line on a dead code is
+  held with a question until it is applied. Raise `codex_sync_max_code_changes` to 45 BEFORE the
+  corrected ETL (or at the alert), let a push apply, lower it back. Identity follows the binding, so
+  a corrected code renumbers; it never renames a card.
 
 ## CODEX card sync — names + renumbers follow CODEX automatically (#478)
 

@@ -179,6 +179,10 @@ def _override_codes(rows: dict[tuple, tuple], overrides: dict[str, str]) -> dict
         # two rows meeting on one key: an active one wins, or the card would leave the picker
         if key not in out or out[key][1]:
             out[key] = value
+    for card, code in sorted(overrides.items()):
+        if (code, card) in {(key[0], key[1]) for key in rows if key[2] == PICK_STREDISKO}:
+            log.warning("codex_code_overrides: the copy already carries %s for card %s — the "
+                        "entry changes nothing and can be removed", code, card)
     for card in sorted(set(overrides) - {key[1] for key in out if key[2] == PICK_STREDISKO}):
         log.warning("codex_code_overrides: card %s is not on the pushed list", card)
     return out
