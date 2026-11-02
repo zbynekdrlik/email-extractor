@@ -565,3 +565,15 @@ prompts, skip it — don't retry". With that block the next two review rounds fi
 Detect a wedge early: parse the last non-attachment record of the dispatch's `.output` JSONL — an
 `assistant ['tool_use']` whose timestamp stays unchanged for > ~10 min means a stuck call, not a
 slow review.
+
+## dev2 is shared with heavy builds — a local full suite can take 90 min; scope it (#495)
+
+dev2 also runs other projects' Android/JVM builds (load average 20+ seen 2026-10-17): the full
+suite took ~90 min locally while the same suite is ~8 min in CI. Use a PRIVATE throwaway
+container for your own runs (`docker run -d --name ee-<ticket>-pg -e POSTGRES_PASSWORD=postgres
+-p 127.0.0.1:55<nnn>:5432 postgres:16`, `docker rm -f` it at the end) so a reviewer subagent or a
+second scoped run never shares a DSN with a long full run; run the touched area's test files
+(`ls tests/ | grep -E '^test_(dl|invoice|…)'`) there, start ONE full run detached
+(`nohup … > log; echo $? > exit`) on another DSN, and let CI's full run be the final gate when the
+box is loaded. `pkill -f "<pattern>"` also matches your own wrapper shell's command line (exit 144)
+— kill by the PID you saved, never by pattern.

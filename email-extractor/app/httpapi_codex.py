@@ -78,11 +78,12 @@ def register(app: Flask, deps: Deps) -> None:
         if not isinstance(payload, dict) or not isinstance(payload.get("cards"), list):
             return jsonify(error="body must be {\"cards\": [...]}"), 400
         force = request.args.get("force") in ("1", "true", "yes")
+        overrides = codex_cards.parse_code_overrides(deps.cfg.codex_code_overrides)
         try:
             with deps.db() as c:
                 res = codex_cards.replace_cards(c, payload["cards"],
                                                 source_as_of=payload.get("source_as_of"),
-                                                force=force)
+                                                force=force, code_overrides=overrides)
                 # #478: mirror the accepted list onto the cards we already have (names,
                 # renumbers, removed codes) — dry-run unless `codex_sync_apply`; a sync failure
                 # never fails the push (the list is already replaced; the next push retries)

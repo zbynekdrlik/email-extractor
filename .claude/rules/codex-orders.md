@@ -15,6 +15,7 @@ paths:
   - "email-extractor/tests/test_codex_orders_push.py"
   - "email-extractor/tests/test_codex_cards.py"
   - "email-extractor/tests/test_codex_cards_push.py"
+  - "email-extractor/tests/test_codex_code_overrides.py"
   - "email-extractor/tests/test_dl_codex_hold.py"
   - "email-extractor/tests/test_board_codex.py"
   - "email-extractor/app/orders/card_guard.py"
@@ -398,6 +399,43 @@ like DL (`card_guard.order_guard` = `codex_cards.live_guard`). Reusable rules:
   re-ship, never reset.
 - History „Doučiť" (teachback) teaches only onto an existing card of the scope's catalog
   (`card_guard.refuse_typed_card(error=TEACH_CARD_ONLY)`, 403 `codex_only`) — see `board.md`.
+## Owner-confirmed code for one card — `codex_code_overrides` (#494)
+
+The CODEX copy (`raw.sm002.NEANKOD`) can carry a code CODEX itself refuses at import while the real
+one is in no copy column (#494: the DESADVs CODEX took in carry one code, the copy says another —
+why they differ is codex-bridge's matter; the real mapping lives only in the add-on option). When the OWNER confirms the right code, set
+the add-on option `codex_code_overrides` („ACSKLP=code, …") — merge it
+into the FULL options (deploy.md), restart, then `sudo systemctl start codex-cards-push.service` on
+dev2 (a config change alone changes nothing: it is applied when a list arrives). Never for a code
+only inferred from the data, and never a hand edit of `dl_catalog_overrides` (the next sync reverts
+it, #467 flags it).
+
+- **The ONE place is `codex_cards.replace_cards(code_overrides=)`** (`_override_codes`): the
+  stored `codex_stock_cards` row carries the confirmed code, so `live_guard`, `pickable`, the
+  history, the sync + bindings and the DL output all read one truth; never add a second check at a
+  consumer. The stredisko-1 card decides; its replaced code changes wherever THAT card carries it
+  (stredisko 0); the same ACSKLP with another code on another stredisko is another product.
+- **Two lists settle it.** The first list only moves the guard: the old code is dead at once (a
+  memory row or a model pick of it never ships, `catalog_gtins` drops it), but our unbound number
+  with the confirmed code waits (`why_arrived`, one list is no proof). The next list binds it and
+  the sync merges old → confirmed (`renumbered`, memory moves, the old number to the Kôš). „Next"
+  = a NEWER ETL generation: a re-push of the same one settles nothing (`_prev_as_of` is strict),
+  so after the option expect `renumbered=0` until the next ETL.
+- **Limit:** only the mapped card's rows change. Another card that also carries the old code keeps
+  it alive in the guard (CODEX would then accept it too) — the push warns „stays alive" once per
+  entry; check `codex_stock_cards` first.
+- A bad entry, or a second entry for one card (the FIRST stays) = `log.error`, skipped, never a
+  failed push. Every replacement + a card missing from
+  the list = `log.warning` per push. **The option is a temporary fuse (#494: a copy-loader bug).**
+  Once the copy carries the code on all the card's rows the entry is a no-op, the push logs „can be
+  removed" (never while a row of that card was still replaced) and deleting
+  it moves nothing — delete it then: while it stands it also hides a later genuine code change.
+- **A mass correction of the copy (up to 43 codes on 27 cards) trips the breaker when more than 10
+  of OUR cards change:** `blocked`, ONE ops alert, nothing moves, each card's line on a dead code is
+  held with a question until it is applied. Raise `codex_sync_max_code_changes` to 45 BEFORE the
+  corrected ETL (or at the alert), let a push apply, lower it back. Identity follows the binding, so
+  a corrected code renumbers; it never renames a card.
+
 ## CODEX card sync — names + renumbers follow CODEX automatically (#478)
 
 After every ACCEPTED cards push, `httpapi_codex` calls `codex_sync.run_safely` on the same

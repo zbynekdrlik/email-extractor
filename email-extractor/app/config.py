@@ -107,6 +107,9 @@ class Config:
     # genuine mass change in CODEX, then lower back.
     codex_sync_max_code_changes: int = 10
     codex_sync_max_renames: int = 80
+    # #494: owner-confirmed CODEX codes, „ACSKLP=code, …" — they replace the code the CODEX copy
+    # says for that card when a cards push arrives (`codex_cards.replace_cards`)
+    codex_code_overrides: str = ""
     orders_spend_cap_eur: float = 30.0
     openai_api_key: str = ""
     orders_model: str = "gpt-5.4"
@@ -310,6 +313,8 @@ class Config:
                 o, "codex_sync_max_code_changes", "CODEX_SYNC_MAX_CODE_CHANGES", 10) or 10),
             codex_sync_max_renames=int(_get(
                 o, "codex_sync_max_renames", "CODEX_SYNC_MAX_RENAMES", 80) or 80),
+            codex_code_overrides=str(_get(
+                o, "codex_code_overrides", "CODEX_CODE_OVERRIDES", "") or ""),
             orders_spend_cap_eur=float(
                 _get(o, "orders_spend_cap_eur", "ORDERS_SPEND_CAP_EUR", 30) or 0),
             openai_api_key=_get(o, "openai_api_key", "OPENAI_API_KEY", "") or "",

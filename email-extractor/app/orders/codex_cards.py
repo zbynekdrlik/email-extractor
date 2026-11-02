@@ -39,7 +39,9 @@ would falsely hold cards whose NEANKOD lives on another sklad row of the same ca
 
 Codes are compared as canonical integer text (NEANKOD is a DOUBLE in CODEX, so leading zeros
 and a trailing `.0` never survive there) — `normalize_code` is the ONE normalizer both sides go
-through. Everything here is a read-model over our own table; nothing writes to CODEX or ORION.
+through. **`codex_code_overrides` (#494):** a code the owner confirmed for a card replaces the
+CODEX copy's on the way in (`replace_cards`) — the copy can carry a code CODEX itself refuses.
+Everything here is a read-model over our own table; nothing writes to CODEX or ORION.
 """
 from __future__ import annotations
 
@@ -145,11 +147,65 @@ def latest_sync(conn) -> dict | None:
             "row_count": row[3], "code_count": row[4]}
 
 
-def replace_cards(conn, cards: list, *, source_as_of=None, force: bool = False) -> dict:
+def parse_code_overrides(text) -> dict[str, str]:
+    """The `codex_code_overrides` add-on option („ACSKLP=code, …") → {ACSKLP: code}.
+    A bad entry is logged as an error and skipped — it must never stop the push. Of two entries
+    for one card the FIRST stays, the later one is a bad entry."""
+    out: dict[str, str] = {}
+    for entry in filter(str.strip, re.split(r"[,;]", str(text or ""))):
+        card, _, value = (part.strip() for part in entry.partition("="))
+        code = normalize_code(value)
+        if card in out:
+            log.error("codex_code_overrides: duplicate entry %r skipped, card %s stays on %s",
+                      entry, card, out[card])
+        elif card and code:
+            out[card] = code
+        else:
+            log.error("codex_code_overrides: bad entry %r skipped (expected card=code)", entry)
+    return out
+
+
+def _override_codes(rows: dict[tuple, tuple], overrides: dict[str, str]) -> dict[tuple, tuple]:
+    """#494: the owner-confirmed code replaces what the CODEX copy says for a stredisko-1 card
+    — there, and wherever that card carries the replaced code (ACSKLP alone is no identity: the
+    same number on another stredisko with another code is another product, #478). Done on the
+    way in, so the guard, the sync and the bindings all read one truth and no push reverts it."""
+    replaced = {(key[1], key[0]) for key in rows
+                if key[2] == PICK_STREDISKO and overrides.get(key[1]) not in (None, key[0])}
+    out: dict[tuple, tuple] = {}
+    for key, value in rows.items():
+        code, card, stredisko, sklad = key
+        if (card, code) in replaced:
+            log.warning("codex card %s (stredisko %d): code %s replaced by the confirmed %s "
+                        "(codex_code_overrides)", card, stredisko, code, overrides[card])
+            code = overrides[card]
+        key = (code, card, stredisko, sklad)
+        # two rows meeting on one key: an active one wins, or the card would leave the picker
+        if key not in out or out[key][1]:
+            out[key] = value
+    for card, old in sorted(replaced):
+        others = sorted({key[1] for key in out if key[0] == old and key[1] != card})
+        if others:
+            log.warning("codex_code_overrides: replaced code %s of card %s stays alive on "
+                        "card(s) %s — the guard still accepts it", old, card, ", ".join(others))
+    carried = {(key[0], key[1]) for key in rows if key[2] == PICK_STREDISKO}
+    changed = {card for card, _old in replaced}
+    for card, code in sorted(overrides.items()):
+        if (code, card) in carried and card not in changed:
+            log.warning("codex_code_overrides: the copy already carries %s for card %s — the "
+                        "entry changes nothing and can be removed", code, card)
+    for card in sorted(set(overrides) - {key[1] for key in out if key[2] == PICK_STREDISKO}):
+        log.warning("codex_code_overrides: card %s is not on the pushed list", card)
+    return out
+
+
+def replace_cards(conn, cards: list, *, source_as_of=None, force: bool = False,
+                  code_overrides: dict[str, str] | None = None) -> dict:
     """Swap the whole CODEX list for `cards` in ONE transaction (+ a ledger row). Rows without
     a usable code are skipped; duplicates collapse on (code, card, stredisko, sklad), the last
-    wins. Raises `ReplaceRefused` (400) for an empty list and (409) for a push that drops more
-    than `1 - MIN_KEEP_RATIO` of the previous codes unless `force`. Returns {rows, codes}."""
+    wins; `code_overrides` ({ACSKLP: code}, `parse_code_overrides`) are applied first. Raises
+    `ReplaceRefused` (400) for an empty list and (409) for a push that drops more than
+    `1 - MIN_KEEP_RATIO` of the previous codes unless `force`. Returns {rows, codes}."""
     rows: dict[tuple, tuple] = {}
     for c in cards or []:
         if not isinstance(c, dict):
@@ -165,6 +221,8 @@ def replace_cards(conn, cards: list, *, source_as_of=None, force: bool = False) 
         log.warning("codex cards push refused: no usable row among %d received",
                     len(cards or []))
         raise ReplaceRefused("zoznam kariet z CODEXu je prázdny — nič sa nenahrádza", 400)
+    if code_overrides:
+        rows = _override_codes(rows, code_overrides)
     codes = len({k[0] for k in rows})
     with conn.transaction():
         # serialize concurrent pushes; plain readers (ACCESS SHARE) are never blocked
