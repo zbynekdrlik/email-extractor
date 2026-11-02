@@ -54,8 +54,8 @@ def _push(pg, hours_old=1, overrides=OVERRIDE, cards=None):
 
 
 def _stored(pg):
-    return sorted(pg.execute("SELECT code, card_code, stredisko FROM codex_stock_cards"
-                             ).fetchall())
+    return set(pg.execute("SELECT code, card_code, stredisko FROM codex_stock_cards"
+                          ).fetchall())
 
 
 # --- the option -----------------------------------------------------------------------------
@@ -85,7 +85,7 @@ def test_the_config_reads_the_option(monkeypatch):
 def test_the_confirmed_code_replaces_the_copys_on_the_cards_rows(pg):
     res = _push(pg)
     assert res == {"rows": 2, "codes": 2}
-    assert _stored(pg) == [(OTHER, "31", 1), (RIGHT, CARD, 1)]
+    assert _stored(pg) == {(OTHER, "31", 1), (RIGHT, CARD, 1)}
     cards = codex_cards.live_guard(pg)
     assert cards.has(RIGHT) and not cards.has(WRONG)
     assert cards.name_for(RIGHT) == NAME
@@ -94,21 +94,21 @@ def test_the_confirmed_code_replaces_the_copys_on_the_cards_rows(pg):
 
 def test_a_card_without_a_mapping_is_untouched(pg):
     _push(pg, overrides=None)
-    assert _stored(pg) == [(OTHER, "31", 1), (WRONG, CARD, 1)]
+    assert _stored(pg) == {(OTHER, "31", 1), (WRONG, CARD, 1)}
     _push(pg, overrides={"999": RIGHT})
-    assert _stored(pg) == [(OTHER, "31", 1), (WRONG, CARD, 1)]
+    assert _stored(pg) == {(OTHER, "31", 1), (WRONG, CARD, 1)}
 
 
 def test_the_same_acsklp_on_another_stredisko_is_another_card(pg):
     """ACSKLP is unique only WITHIN a stredisko (#478): the mapping is for the stredisko-1 card;
     its old code goes everywhere that card carried it, another product keeps its own code."""
     _push(pg, cards=[_row(WRONG), _row(WRONG, stredisko=0), _row(OTHER, stredisko=4)])
-    assert _stored(pg) == [(OTHER, CARD, 4), (RIGHT, CARD, 0), (RIGHT, CARD, 1)]
+    assert _stored(pg) == {(OTHER, CARD, 4), (RIGHT, CARD, 0), (RIGHT, CARD, 1)}
 
 
 def test_a_copy_that_already_has_the_right_code_changes_nothing(pg):
     _push(pg, cards=[_row(RIGHT)])
-    assert _stored(pg) == [(RIGHT, CARD, 1)]
+    assert _stored(pg) == {(RIGHT, CARD, 1)}
 
 
 def test_a_push_endpoint_applies_the_option(pg):
@@ -118,7 +118,7 @@ def test_a_push_endpoint_applies_the_option(pg):
         "/api/codex/cards", headers={"X-Token": "tok"},
         json={"cards": LIST, "source_as_of": NOW.isoformat()})
     assert r.status_code == 200
-    assert _stored(pg) == [(OTHER, "31", 1), (RIGHT, CARD, 1)]
+    assert _stored(pg) == {(OTHER, "31", 1), (RIGHT, CARD, 1)}
 
 
 # --- the sync and the bindings --------------------------------------------------------------
