@@ -111,6 +111,14 @@ def test_a_copy_that_already_has_the_right_code_changes_nothing(pg):
     assert _stored(pg) == {(RIGHT, CARD, 1)}
 
 
+def test_a_row_already_on_the_confirmed_code_never_hides_the_active_one(pg):
+    """Both orders of the copy: the merged row stays active, or the card leaves the picker."""
+    active, inactive = _row(WRONG), dict(_row(RIGHT), inactive=True)
+    for cards in ([active, inactive], [inactive, active]):
+        _push(pg, cards=cards)
+        assert RIGHT in codex_cards.pickable(pg)
+
+
 def test_a_push_endpoint_applies_the_option(pg):
     cfg = Config(pg_dsn=os.environ.get("PG_TEST_DSN"), data_dir="/tmp", api_token="tok",
                  secret_key="s", ops_channel_id=77, codex_code_overrides=f"{CARD}={RIGHT}")
@@ -139,6 +147,10 @@ def _prod_shape(pg):
                "delivered_on, cnt, source, created_at) VALUES ('S1', 'syr strukany', "
                "'Syr strúhaný', %s, %s, %s, 1, 'human', %s)",
                (WRONG, NAME, date(2026, 10, 7), NOW - timedelta(hours=12)))
+    pg.execute("INSERT INTO dl_item_memory (supplier_ean, item_key, item_raw, gtin, card, "
+               "delivered_on, cnt, source, created_at) VALUES ('S1', 'syr strukany', "
+               "'Syr strúhaný', %s, %s, %s, 1, 'ship', %s)",
+               (RIGHT, NAME, date(2026, 9, 23), NOW - timedelta(hours=30)))
 
 
 def _sync_cfg():
@@ -165,6 +177,18 @@ def test_the_sync_moves_our_card_to_the_confirmed_code_and_cannot_revert_it(pg):
     res = codex_sync.run(pg, _sync_cfg())
     assert (res["renumbered"], res["removed"]) == (0, 0)
     assert WRONG not in _live(pg) and RIGHT in _live(pg)
+
+
+def test_the_same_etl_list_pushed_twice_does_not_settle_the_merge(pg):
+    """One list is no proof: a re-push of the same CODEX generation is not a next list — the
+    guard moved already, the merge waits for a newer ETL."""
+    _prod_shape(pg)
+    for _ in range(2):
+        _push(pg, hours_old=5)
+        assert codex_sync.run(pg, _sync_cfg())["renumbered"] == 0
+    assert not codex_cards.live_guard(pg).has(WRONG)
+    _push(pg, hours_old=3)
+    assert codex_sync.run(pg, _sync_cfg())["renumbered"] == 1
 
 
 # --- the DL output --------------------------------------------------------------------------
