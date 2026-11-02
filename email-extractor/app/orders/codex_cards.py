@@ -148,7 +148,7 @@ def latest_sync(conn) -> dict | None:
 
 
 def parse_code_overrides(text) -> dict[str, str]:
-    """The `codex_code_overrides` add-on option („100148=5904716013871, …") → {ACSKLP: code}.
+    """The `codex_code_overrides` add-on option („ACSKLP=code, …") → {ACSKLP: code}.
     A bad entry is logged as an error and skipped — it must never stop the push."""
     out: dict[str, str] = {}
     for entry in filter(str.strip, re.split(r"[,;]", str(text or ""))):
@@ -175,7 +175,10 @@ def _override_codes(rows: dict[tuple, tuple], overrides: dict[str, str]) -> dict
             log.warning("codex card %s (stredisko %d): code %s replaced by the confirmed %s "
                         "(codex_code_overrides)", card, stredisko, code, overrides[card])
             code = overrides[card]
-        out[(code, card, stredisko, sklad)] = value
+        key = (code, card, stredisko, sklad)
+        # two rows meeting on one key: an active one wins, or the card would leave the picker
+        if key not in out or out[key][1]:
+            out[key] = value
     for card in sorted(set(overrides) - {key[1] for key in out if key[2] == PICK_STREDISKO}):
         log.warning("codex_code_overrides: card %s is not on the pushed list", card)
     return out
