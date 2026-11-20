@@ -13,9 +13,17 @@ from __future__ import annotations
 from ...httpapi_common import _fold, _parse_emails_field
 from ...orders import dl_snapshot, snapshot
 from . import audit
-from .partners import PartnerError, matches, name_and_ean, row
+from .partners import (
+    DEFAULT_PAGE_SIZE,
+    PartnerError,
+    matches,
+    name_and_ean,
+    page_slice,
+    row,
+    sorted_rows,
+)
 
-PAGE = 50   # suppliers per page
+SORTS = ("name", "ean", "city", "count")   # #504: the table's sortable columns
 
 _COLS = ("orig_ean_edi", "orig_city", "ean_edi", "name", "emails", "city",
          "retired", "invoice_is_delivery_note")
@@ -27,7 +35,9 @@ def _dl_counts(conn) -> dict[str, int]:
     return {r[0]: int(r[1]) for r in rows}
 
 
-def list_suppliers(conn, *, q: str = "", page: int = 0) -> dict:
+def list_suppliers(conn, *, q: str = "", page: int = 0, sort: str = "name",
+                   desc: bool = False, size: int = DEFAULT_PAGE_SIZE) -> dict:
+    """The supplier table (#504): sorted by `sort` (name|ean|city|count), `size` 0 = all."""
     rows = dl_snapshot.dl_suppliers_for_management(conn)
     if q and q.strip():
         needle = _fold(q)
@@ -35,10 +45,11 @@ def list_suppliers(conn, *, q: str = "", page: int = 0) -> dict:
     counts = _dl_counts(conn)
     for r in rows:
         r["dls_shipped"] = counts.get(r.get("ean_edi") or "", 0)
-    rows.sort(key=lambda r: _fold(r.get("name") or ""))
-    page = max(0, int(page))
-    return {"suppliers": rows[page * PAGE:(page + 1) * PAGE],
-            "total": len(rows), "page": page, "page_size": PAGE}
+    sort = sort if sort in SORTS else "name"
+    rows = sorted_rows(rows, sort, desc, "dls_shipped")
+    shown, page = page_slice(rows, page, size)
+    return {"suppliers": shown, "total": len(rows), "page": page, "page_size": size,
+            "sort": sort, "desc": desc}
 
 
 def _before(conn, override_id, orig_ean_edi, orig_city) -> dict | None:

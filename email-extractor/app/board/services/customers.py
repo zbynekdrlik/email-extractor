@@ -14,9 +14,17 @@ from __future__ import annotations
 from ...httpapi_common import _fold, _parse_emails_field
 from ...orders import customer, snapshot
 from . import audit
-from .partners import PartnerError, matches, name_and_ean, row
+from .partners import (
+    DEFAULT_PAGE_SIZE,
+    PartnerError,
+    matches,
+    name_and_ean,
+    page_slice,
+    row,
+    sorted_rows,
+)
 
-PAGE = 25   # families per page
+SORTS = ("name", "ean", "city", "count")   # #504: the table's sortable columns
 
 # Business columns captured into the audit before/after (all real, restorable columns —
 # the pk `id` and timestamps are excluded; `_restore_update` re-validates each name).
@@ -54,7 +62,11 @@ def _group_families(rows: list[dict]) -> list[dict]:
     return families
 
 
-def list_customers(conn, *, q: str = "", page: int = 0) -> dict:
+def list_customers(conn, *, q: str = "", page: int = 0, sort: str = "name",
+                   desc: bool = False, size: int = DEFAULT_PAGE_SIZE) -> dict:
+    """The customer table (#504). `sort=name` keeps the multi-site families (#435) together
+    and pages by family; any other column pages flat rows (each site its own one-row
+    family, its „prevádzka i z n" tag kept). `size` 0 = all on one page."""
     rows = snapshot.customers_for_management(conn)
     if q and q.strip():
         needle = _fold(q)
@@ -62,10 +74,18 @@ def list_customers(conn, *, q: str = "", page: int = 0) -> dict:
     counts = _order_counts(conn)
     for r in rows:
         r["orders_shipped"] = counts.get(r.get("ean_edi") or "", 0)
+    sort = sort if sort in SORTS else "name"
     families = _group_families(rows)
-    page = max(0, int(page))
-    return {"families": families[page * PAGE:(page + 1) * PAGE],
-            "total": len(families), "page": page, "page_size": PAGE}
+    if sort == "name":
+        if desc:
+            families.reverse()
+    else:
+        sites = [s for f in families for s in f["sites"]]
+        families = [{"stem": "", "label": s.get("name") or "", "size": 1, "sites": [s]}
+                    for s in sorted_rows(sites, sort, desc, "orders_shipped")]
+    shown, page = page_slice(families, page, size)
+    return {"families": shown, "total": len(families), "rows": len(rows), "page": page,
+            "page_size": size, "sort": sort, "desc": desc}
 
 
 def _before(conn, override_id, orig_ean_edi, orig_street) -> dict | None:

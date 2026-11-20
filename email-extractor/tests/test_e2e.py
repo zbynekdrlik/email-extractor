@@ -606,6 +606,53 @@ def test_the_retired_znalosti_ean_link_seeds_the_customers_tab_search(live_serve
     assert console == [], f"browser console not clean: {console}"
 
 
+def test_customers_table_sorts_by_ean_pages_and_searches_by_ean(live_server, pg, page):
+    """#504: the Zákazníci tab is a compact table — clicking the „EAN EDI" header sorts
+    every customer by EAN (both directions, server-side), the „Na stranu" select changes the
+    page size, and an EAN typed with spaces finds its customer. Real browser, clean console."""
+    from app.httpapi import sklad_key
+    from app.orders import snapshot
+
+    for ean, name, city in (("8590000005043", "Alfa Pekáreň E2E", "Žilina"),
+                            ("8590000005041", "Cézar Bistro E2E", "Košice"),
+                            ("8590000005042", "Beta Kaviareň E2E", "Nitra")):
+        snapshot.upsert_customer(pg, override_id=None, orig_ean_edi=None, orig_street=None,
+                                 ean_edi=ean, name=name, emails=[], city=city, street="",
+                                 zip_="")
+    snapshot.rebuild_from_overrides(pg)
+
+    console = _collect_console(page)
+    page.goto(f"{live_server}/sklad/{sklad_key('e2e-secret')}")
+    page.wait_for_url(re.compile(r"/nastenka"))
+    page.goto(f"{live_server}/nastenka/zakaznici")
+    page.wait_for_selector(".p-table .p-row")
+
+    def eans():
+        return [t.strip() for t in page.locator(".p-table .p-row .p-ean").all_inner_texts()
+                if t.strip().startswith("859000000504")]
+
+    # default: by name → Alfa, Beta, Cézar
+    assert eans() == ["8590000005043", "8590000005042", "8590000005041"]
+    page.click('th[data-sort="ean"] .p-sort')
+    page.wait_for_selector('th[data-sort="ean"][aria-sort="ascending"]')
+    assert eans() == ["8590000005041", "8590000005042", "8590000005043"]
+    page.click('th[data-sort="ean"] .p-sort')
+    page.wait_for_selector('th[data-sort="ean"][aria-sort="descending"]')
+    assert eans() == ["8590000005043", "8590000005042", "8590000005041"]
+
+    with page.expect_response(lambda r: "/api/board/customers" in r.url and "size=50" in r.url):
+        page.select_option("#p-size", "50")
+    assert page.locator("#p-size").input_value() == "50"
+
+    old = page.query_selector(".p-table")
+    page.fill("#p-search", "8590 0000 05042")
+    page.wait_for_function("el => !el.isConnected", arg=old)
+    page.wait_for_selector("text=Beta Kaviareň E2E")
+    assert eans() == ["8590000005042"]
+
+    assert console == [], f"browser console not clean: {console}"
+
+
 def _board_seed_dl_item_question(pg, mid, wording, cands):
     import json
     pg.execute("INSERT INTO messages (message_id, from_addr, from_name, subject) "
