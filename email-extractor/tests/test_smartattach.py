@@ -109,6 +109,9 @@ class _Resp:
     def read(self, n=-1):
         return self._buf.read(n)
 
+    def read1(self, n=-1):
+        return self._buf.read1(n)
+
     def geturl(self):
         return self._url
 
@@ -294,6 +297,7 @@ def test_reextract_adds_the_link_file_to_an_already_ingested_message(pg, tmp_pat
 # --- review round 1: every failure is a note, never a crash; tighter SSRF + content checks -------
 
 @pytest.mark.parametrize("ip", ["::ffff:127.0.0.1", "::ffff:10.0.0.1", "2002:7f00:1::1",
+                                "::7f00:1", "::a00:1", "64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe",
                                 "fe80::1%eth0", "::", "0.0.0.0", "224.0.0.1",
                                 "2001:0:4136:e378:8000:63bf:f5ff:fffe"])
 def test_hidden_private_ipv4_and_odd_addresses_are_refused(monkeypatch, ip):
@@ -316,7 +320,7 @@ def test_a_broken_http_reply_is_a_fetch_error(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", _dns("93.184.216.34"))
 
     class _Broken(_Resp):
-        def read(self, n=-1):
+        def read1(self, n=-1):
             raise http.client.IncompleteRead(b"PK", 100)
     _opener(monkeypatch, _Broken(b"", XLSX_CT, "a.xlsx"))
     with pytest.raises(smartattach.FetchError, match="IncompleteRead"):
@@ -324,6 +328,7 @@ def test_a_broken_http_reply_is_a_fetch_error(monkeypatch):
 
 
 def test_a_slow_drip_download_stops_at_the_deadline(monkeypatch):
+    # read1 (one recv per call) is what makes the deadline reachable on a real socket
     monkeypatch.setattr(socket, "getaddrinfo", _dns("93.184.216.34"))
     clock = iter(range(0, 10_000, 50))
     monkeypatch.setattr(smartattach.time, "monotonic", lambda: next(clock))
@@ -354,6 +359,25 @@ def test_the_direct_download_must_keep_the_preview_pages_port():
     odd = ("https://mail.example.sk/collaboration/?ticket=T&"
            "url=https%3A//mail.example.sk%3A8443/teamchatapi/")
     assert smartattach.download_url(odd) is None
+    explicit = ("https://mail.example.sk/collaboration/?ticket=T&"
+                "url=https%3A//mail.example.sk%3A443/teamchatapi/")
+    assert smartattach.download_url(explicit) == (
+        "https://mail.example.sk:443/teamchatapi/files.download?ticket=T")
+
+
+def test_a_zip_whose_directory_understates_its_size_is_still_measured(monkeypatch):
+    import struct
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("xl/big.xml", b"\0" * (3 * 1024 * 1024))
+    data = bytearray(buf.getvalue())
+    # forge the central-directory uncompressed size to 10 bytes
+    cd = data.rfind(b"PK\x01\x02")
+    struct.pack_into("<I", data, cd + 24, 10)
+    monkeypatch.setattr(smartattach, "MAX_UNZIPPED", 1024 * 1024)
+    with pytest.raises(smartattach.FetchError):
+        smartattach._check_bytes("xlsx", bytes(data))
 
 
 def test_an_unexpected_fetch_exception_never_crashes_ingest():
@@ -381,7 +405,8 @@ def test_at_most_max_links_are_downloaded(monkeypatch):
         return smartattach.Fetched(filename=name, mime=XLSX_CT, data=_xlsx_bytes())
     rec = process.process_raw(_raw(body), fetch=fake)
     assert len(calls) == smartattach.MAX_LINKS
-    assert sum(a["flag"] == "link_failed" for a in rec["attachments"]) == 2
+    notes = [a for a in rec["attachments"] if a["flag"] == "link_failed"]
+    assert len(notes) == 1 and "subor6.xlsx, subor7.xlsx" in notes[0]["text"]
 
 
 def test_reextract_supersedes_an_earlier_failed_download_note(pg, tmp_path):
@@ -409,3 +434,26 @@ def test_reextract_supersedes_an_earlier_failed_download_note(pg, tmp_path):
     combined = pg.execute("SELECT combined_text FROM messages WHERE id = %s",
                           (msg_id,)).fetchone()[0]
     assert "nepodarilo stiahnuť" not in combined and "Rožok testovací 70g" in combined
+
+
+def test_reextract_dedupes_a_downloaded_file_by_content_not_name(pg, tmp_path):
+    from app import db, reextract
+    from app.config import Config
+
+    raw = _raw(BODY)
+    data = _xlsx_bytes()
+    rec = process.process_raw(raw, fetch=lambda u, n: smartattach.Fetched(
+        filename=n, mime=XLSX_CT, data=data))
+    raw_path = tmp_path / "raw.eml"
+    raw_path.write_bytes(raw)
+    from app import store
+    _, files = store.save_message(str(tmp_path), rec["identity"], raw, rec["attachments"],
+                                  "http://ee")
+    assert db.insert_message(pg, rec, "INBOX", 3, 1, str(raw_path), files)
+    msg_id = pg.execute("SELECT id FROM messages WHERE message_id = %s",
+                        (rec["identity"],)).fetchone()[0]
+    cfg = Config(pg_dsn="", data_dir=str(tmp_path), public_base_url="http://ee")
+    other = bytes(data)   # the same bytes again -> already stored
+    assert reextract.add_link_attachments(
+        pg, cfg, msg_id, fetch=lambda u, n: smartattach.Fetched(
+            filename=n, mime=XLSX_CT, data=other))["added"] == 0

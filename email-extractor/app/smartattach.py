@@ -16,8 +16,11 @@ Security boundary (the file comes from the internet on a link a mail named):
   link-local, multicast or reserved address (SSRF) — checked for every hop's resolved IPs;
 - `MAX_BYTES` read in chunks, `TIMEOUT` per request, only `ALLOWED_EXT` file types;
 - nothing is ever executed — the bytes only go to the existing parsers (openpyxl data_only etc.).
-Residual: DNS rebinding between the check and the connect; accepted, the first hop is pinned to
-icw.li and the parsers never execute content.
+Residuals (accepted): DNS rebinding between the check and the connect (the first hop is pinned to
+icw.li, the parsers never execute content); a server that dribbles its response HEADERS is bounded
+only by the per-operation `TIMEOUT`, not by `DEADLINE` (which covers the body). A failed link is
+a note in `combined_text` (the order engines); the DL engine reads only PDF/image attachments, so
+a DL sent this way that fails to download shows only on the dashboard (#506).
 """
 from __future__ import annotations
 
@@ -87,11 +90,18 @@ def file_ext(name: str) -> str:
     return name.rsplit(".", 1)[-1].lower() if "." in (name or "") else ""
 
 
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
 def _public(ip) -> bool:
     """True only for a globally routable unicast address — an IPv4 address hidden inside an
     IPv6 one (mapped, 6to4, Teredo) is judged by the IPv4 it carries."""
     if isinstance(ip, ipaddress.IPv6Address):
         inner = ip.ipv4_mapped or ip.sixtofour or (ip.teredo[1] if ip.teredo else None)
+        if inner is None and (int(ip) >> 32) == 0:                    # IPv4-compatible ::a.b.c.d
+            inner = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        if inner is None and ip in _NAT64:                             # 64:ff9b::a.b.c.d
+            inner = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
         if inner is not None:
             return _public(inner)
     return ip.is_global and not ip.is_multicast
@@ -129,13 +139,23 @@ def _check_bytes(ext: str, data: bytes) -> None:
     if ext in _ZIP_EXT:
         if not data.startswith(b"PK\x03\x04"):
             raise FetchError(f"súbor nie je platný {ext}")
+        # count the REAL inflated bytes — the central directory's sizes are the sender's word
+        total = 0
         try:
             with zipfile.ZipFile(io.BytesIO(data)) as z:
-                total = sum(i.file_size for i in z.infolist())
-        except zipfile.BadZipFile as e:
+                for info in z.infolist():
+                    with z.open(info) as member:
+                        while True:
+                            block = member.read(1024 * 1024)
+                            if not block:
+                                break
+                            total += len(block)
+                            if total > MAX_UNZIPPED:
+                                raise FetchError("súbor sa rozbalí na viac ako "
+                                                 f"{MAX_UNZIPPED // (1024 * 1024)} MB")
+        except (zipfile.BadZipFile, zipfile.LargeZipFile, OSError, EOFError,
+                NotImplementedError, RuntimeError) as e:
             raise FetchError(f"súbor nie je platný {ext} ({e})") from e
-        if total > MAX_UNZIPPED:
-            raise FetchError(f"súbor sa rozbalí na viac ako {MAX_UNZIPPED // (1024 * 1024)} MB")
     elif ext in _MAGIC and not data.startswith(_MAGIC[ext]):
         raise FetchError(f"súbor nie je platný {ext}")
 
@@ -183,7 +203,7 @@ def download_url(page_url: str) -> str | None:
     ticket, api = (q.get("ticket") or [""])[0], (q.get("url") or [""])[0]
     a = urllib.parse.urlsplit(api)
     try:
-        same = (a.hostname or "") == (p.hostname or "") and a.port == p.port
+        same = (a.hostname or "") == (p.hostname or "") and (a.port or 443) == (p.port or 443)
     except ValueError:
         return None
     if not ticket or a.scheme != "https" or not same:
@@ -200,7 +220,8 @@ def _open(opener, url: str):
 def fetch(url: str, expected_name: str = "") -> Fetched:
     """Download ONE SmartAttach file under the module's rules. Raises `FetchError` with a
     Slovak reason on any refusal or failure — never returns partial data."""
-    opener = urllib.request.build_opener(_Redirects())
+    # no env proxy: the IP checks must judge the host we actually connect to
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _Redirects())
     deadline = time.monotonic() + DEADLINE
     try:
         _check_url(url, first=True)
@@ -229,7 +250,7 @@ def fetch(url: str, expected_name: str = "") -> Fetched:
                 raise FetchError(f"nepodporovaný typ súboru „{name}“")
             chunks, total = [], 0
             while True:
-                chunk = resp.read(64 * 1024)
+                chunk = resp.read1(64 * 1024)   # one recv — the deadline is checked per chunk
                 if not chunk:
                     break
                 total += len(chunk)

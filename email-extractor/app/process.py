@@ -47,10 +47,13 @@ def link_attachments(body: str, fetch=smartattach.fetch) -> list[dict]:
         log.warning("smartattach: marker present but no link line recognised")
         return [_link_note("príloha", "v maile som nenašiel rozpoznateľný odkaz na stiahnutie")]
     out = []
-    for n, (name, url) in enumerate(links):
-        if n >= smartattach.MAX_LINKS:
-            out.append(_link_note(name, f"mail má viac ako {smartattach.MAX_LINKS} odkazov"))
-            continue
+    if len(links) > smartattach.MAX_LINKS:
+        rest = [n for n, _ in links[smartattach.MAX_LINKS:]]
+        out.append(_link_note(", ".join(rest[:5]) + (" …" if len(rest) > 5 else ""),
+                              f"mail má {len(links)} odkazov, sťahuje sa najviac "
+                              f"{smartattach.MAX_LINKS}"))
+        links = links[:smartattach.MAX_LINKS]
+    for name, url in links:
         try:
             got = fetch(url, name)
         except smartattach.FetchError as e:

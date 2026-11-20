@@ -33,12 +33,19 @@ def add_link_attachments(conn, cfg, msg_id: int, fetch=None) -> dict:
     raw = Path(raw_path).read_bytes()
     rec = process.process_raw(raw, **({"fetch": fetch} if fetch else {}))
     existing = conn.execute(
-        "SELECT idx, filename, flag, needs_vision, extracted_text FROM attachments "
+        "SELECT idx, filename, flag, sha256 FROM attachments "
         "WHERE message_id = %s ORDER BY idx", (identity,)).fetchall()
-    have = {(r[1] or "") for r in existing}
+    # a downloaded file is "already stored" by CONTENT (a MIME part may share its name);
+    # a failed-download note by its name
+    have_sha = {r[3] for r in existing if r[3]}
+    have_note = {(r[1] or "") for r in existing if (r[2] or "").endswith("link_failed")
+                 or (r[2] or "") == "skipped_link_superseded"}
     link_atts = [a for a in rec["attachments"]
                  if a.get("method") == "link" or a.get("_link")]
-    new = [a for a in link_atts if a["filename"] not in have]
+    new = [a for a in link_atts
+           if (a.get("_link") and hashlib.sha256(a.get("_data") or b"").hexdigest()
+               not in have_sha)
+           or (not a.get("_link") and a["filename"] not in have_note)]
     if not new:
         log.info("reextract %s: nothing new (%d link attachment(s) already stored)",
                  msg_id, len(link_atts))
