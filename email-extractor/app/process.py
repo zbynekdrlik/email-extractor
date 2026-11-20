@@ -1,10 +1,13 @@
 """Turn one raw email into a structured record: headers + body + extracted attachments."""
 from __future__ import annotations
 
+import logging
 import re
 
-from . import mailparse
+from . import mailparse, smartattach
 from .extract import extract_attachment
+
+log = logging.getLogger("process")
 
 # Invisible Unicode format chars that a mail client can insert between two tokens (observed:
 # a zero-width space glued into "45​ks" — AGEL Levoča incident, 2026-07-09, #41). Plain
@@ -24,7 +27,51 @@ def _strip_invisible(text: str) -> str:
     return _INVISIBLE_RE.sub(" ", text)
 
 
-def process_raw(raw: bytes) -> dict:
+def _link_note(name: str, reason: str) -> dict:
+    note = f"Prílohu „{name}“ cez odkaz sa nepodarilo stiahnuť: {reason}".encode()
+    a = extract_attachment(f"{name}.odkaz.txt", "text/plain", note)
+    a.update(method="link", flag="link_failed")
+    a["_data"] = note
+    return a
+
+
+def link_attachments(body: str, fetch=smartattach.fetch) -> list[dict]:
+    """#506: attachments delivered as an IceWarp SmartAttach LINK, downloaded and extracted
+    like a real MIME attachment. A link that cannot be downloaded — for ANY reason — becomes a
+    text attachment naming the reason (flag `link_failed`): visible on the dashboard and in the
+    text the engines read, never a silent loss and never a crash of the mail's ingest."""
+    if not smartattach.has_marker(body):
+        return []
+    links = smartattach.find_links(body)
+    if not links:
+        log.warning("smartattach: marker present but no link line recognised")
+        return [_link_note("príloha", "v maile som nenašiel rozpoznateľný odkaz na stiahnutie")]
+    out = []
+    if len(links) > smartattach.MAX_LINKS:
+        rest = [n for n, _ in links[smartattach.MAX_LINKS:]]
+        out.append(_link_note(", ".join(rest[:5]) + (" …" if len(rest) > 5 else ""),
+                              f"mail má {len(links)} odkazov, sťahuje sa najviac "
+                              f"{smartattach.MAX_LINKS}"))
+        links = links[:smartattach.MAX_LINKS]
+    for name, url in links:
+        try:
+            got = fetch(url, name)
+        except smartattach.FetchError as e:
+            log.warning("smartattach: %s not downloaded: %s", name, e)
+            out.append(_link_note(name, str(e)))
+            continue
+        except Exception as e:   # never let one link kill the mail's ingest
+            log.exception("smartattach: %s crashed the download", name)
+            out.append(_link_note(name, f"neočakávaná chyba ({type(e).__name__}: {e})"))
+            continue
+        a = extract_attachment(got.filename or name, got.mime, got.data)
+        a["_data"] = got.data
+        a["_link"] = True          # came from a link, not a MIME part (not persisted)
+        out.append(a)
+    return out
+
+
+def process_raw(raw: bytes, fetch=smartattach.fetch) -> dict:
     msg = mailparse.parse_message(raw)
     hdr = mailparse.headers(msg)
     btext, bsrc = mailparse.body_text(msg)
@@ -35,6 +82,7 @@ def process_raw(raw: bytes) -> dict:
         a = extract_attachment(fn, mime, data)
         a["_data"] = data           # raw bytes for the file store (not persisted in DB JSON)
         attachments.append(a)
+    attachments.extend(link_attachments(btext, fetch))
 
     combined = _combined_text(hdr, btext, attachments)
     return {
