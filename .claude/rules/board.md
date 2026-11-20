@@ -596,3 +596,13 @@ Ktorá správa kam vedie (rozhoduje KANÁL PRÍJEMCU, nie druh správy):
   v hlavičke riadku (`confirmDelete(box, rule)`) — jediné iné „Zmazať" tej záložky je vnútri
   editora, takže skrytím editora by pravidlo nešlo zmazať (review 8 #488). `editingOpen()`
   pozastaví 15 s refresh aj pri otvorenom `.r-confirm` (E2E to pinuje cez `page.clock`).
+
+## Zákazníci / Dodávatelia = zoraditeľná tabuľka (#504)
+
+- Zoradenie a veľkosť strany sú na SERVERI (`GET /api/board/{customers,suppliers}?sort=name|ean|city|count&dir=asc|desc&size=50|100|200|0`). Pomocníci sú v `services/partners.py`: `page_size` (whitelist, inak 100), `sorted_rows` (prázdny EAN/mesto vždy na konci), `page_slice` (stránka za koncom → posledná). Nikdy neraď v JS len aktuálnu stranu.
+- `sort=name` u zákazníkov stránkuje po RODINÁCH (#435). Iný stĺpec stránkuje ploché riadky, tag „prevádzka i z n“ ostáva. `total` je počet jednotiek strany, `rows` počet prevádzok.
+- `load()` v `tab-partners.js` zahodí odpoveď, ktorá nie je posledná požiadavka (`loadSeq`). Refresh každých 15 s a klik na hlavičku sa inak predbiehajú.
+- Živé overenie cez Playwright MCP bez vypísania odkazu skladu do transcriptu:
+  1. Odkaz `linkutil.sklad_url` sa zapíše do súboru v scratchpade (skript v kontajneri, výstup presmerovaný do súboru).
+  2. V `browser_run_code_unsafe` sa súbor načíta cez `page.goto('file://…')` a `body.innerText()`.
+  - `require('fs')` tam nie je dostupné.
