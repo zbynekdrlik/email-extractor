@@ -27,21 +27,39 @@ def _strip_invisible(text: str) -> str:
     return _INVISIBLE_RE.sub(" ", text)
 
 
+def _link_note(name: str, reason: str) -> dict:
+    note = f"Prílohu „{name}“ cez odkaz sa nepodarilo stiahnuť: {reason}".encode()
+    a = extract_attachment(f"{name}.odkaz.txt", "text/plain", note)
+    a.update(method="link", flag="link_failed")
+    a["_data"] = note
+    return a
+
+
 def link_attachments(body: str, fetch=smartattach.fetch) -> list[dict]:
     """#506: attachments delivered as an IceWarp SmartAttach LINK, downloaded and extracted
-    like a real MIME attachment. A link that cannot be downloaded becomes a text attachment
-    naming the reason (flag `link_failed`) — visible on the dashboard, never a silent loss."""
+    like a real MIME attachment. A link that cannot be downloaded — for ANY reason — becomes a
+    text attachment naming the reason (flag `link_failed`): visible on the dashboard and in the
+    text the engines read, never a silent loss and never a crash of the mail's ingest."""
+    if not smartattach.has_marker(body):
+        return []
+    links = smartattach.find_links(body)
+    if not links:
+        log.warning("smartattach: marker present but no link line recognised")
+        return [_link_note("príloha", "v maile som nenašiel rozpoznateľný odkaz na stiahnutie")]
     out = []
-    for name, url in smartattach.find_links(body):
+    for n, (name, url) in enumerate(links):
+        if n >= smartattach.MAX_LINKS:
+            out.append(_link_note(name, f"mail má viac ako {smartattach.MAX_LINKS} odkazov"))
+            continue
         try:
             got = fetch(url, name)
         except smartattach.FetchError as e:
             log.warning("smartattach: %s not downloaded: %s", name, e)
-            note = f"Prílohu „{name}“ cez odkaz sa nepodarilo stiahnuť: {e}".encode()
-            a = extract_attachment(f"{name}.odkaz.txt", "text/plain", note)
-            a.update(method="link", flag="link_failed")
-            a["_data"] = note
-            out.append(a)
+            out.append(_link_note(name, str(e)))
+            continue
+        except Exception as e:   # never let one link kill the mail's ingest
+            log.exception("smartattach: %s crashed the download", name)
+            out.append(_link_note(name, f"neočakávaná chyba ({type(e).__name__}: {e})"))
             continue
         a = extract_attachment(got.filename or name, got.mime, got.data)
         a["_data"] = got.data

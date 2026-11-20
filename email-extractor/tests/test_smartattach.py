@@ -289,3 +289,123 @@ def test_reextract_adds_the_link_file_to_an_already_ingested_message(pg, tmp_pat
     assert reextract.add_link_attachments(pg, cfg, msg_id, fetch=fake_fetch)["added"] == 0
     assert pg.execute("SELECT count(*) FROM attachments WHERE message_id = %s",
                       (old["identity"],)).fetchone()[0] == 1
+
+
+# --- review round 1: every failure is a note, never a crash; tighter SSRF + content checks -------
+
+@pytest.mark.parametrize("ip", ["::ffff:127.0.0.1", "::ffff:10.0.0.1", "2002:7f00:1::1",
+                                "fe80::1%eth0", "::", "0.0.0.0", "224.0.0.1",
+                                "2001:0:4136:e378:8000:63bf:f5ff:fffe"])
+def test_hidden_private_ipv4_and_odd_addresses_are_refused(monkeypatch, ip):
+    monkeypatch.setattr(socket, "getaddrinfo", _dns(ip))
+    with pytest.raises(smartattach.FetchError, match="neverejnej"):
+        smartattach.fetch("https://icw.li/x", "a.xlsx")
+
+
+def test_an_invalid_port_or_address_is_a_fetch_error_not_a_crash(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", _dns("93.184.216.34"))
+    with pytest.raises(smartattach.FetchError, match="port"):
+        smartattach.fetch("https://icw.li:99999/x", "a.xlsx")
+    monkeypatch.setattr(socket, "getaddrinfo", _dns("not-an-ip"))
+    with pytest.raises(smartattach.FetchError, match="neplatnú adresu"):
+        smartattach.fetch("https://icw.li/x", "a.xlsx")
+
+
+def test_a_broken_http_reply_is_a_fetch_error(monkeypatch):
+    import http.client
+    monkeypatch.setattr(socket, "getaddrinfo", _dns("93.184.216.34"))
+
+    class _Broken(_Resp):
+        def read(self, n=-1):
+            raise http.client.IncompleteRead(b"PK", 100)
+    _opener(monkeypatch, _Broken(b"", XLSX_CT, "a.xlsx"))
+    with pytest.raises(smartattach.FetchError, match="IncompleteRead"):
+        smartattach.fetch("https://icw.li/x", "a.xlsx")
+
+
+def test_a_slow_drip_download_stops_at_the_deadline(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", _dns("93.184.216.34"))
+    clock = iter(range(0, 10_000, 50))
+    monkeypatch.setattr(smartattach.time, "monotonic", lambda: next(clock))
+    _opener(monkeypatch, _Resp(b"PK\x03\x04" + b"x" * 400_000, XLSX_CT, "a.xlsx"))
+    with pytest.raises(smartattach.FetchError, match="dlhšie"):
+        smartattach.fetch("https://icw.li/x", "a.xlsx")
+
+
+def test_bytes_must_match_the_type_and_a_zip_bomb_is_refused(monkeypatch):
+    import zipfile
+    monkeypatch.setattr(socket, "getaddrinfo", _dns("93.184.216.34"))
+    _opener(monkeypatch, _Resp(b"MZ\x90\x00 not a spreadsheet", XLSX_CT, "a.xlsx"))
+    with pytest.raises(smartattach.FetchError, match="nie je platný xlsx"):
+        smartattach.fetch("https://icw.li/x", "a.xlsx")
+    _opener(monkeypatch, _Resp(b"<html>", "application/pdf", "a.pdf"))
+    with pytest.raises(smartattach.FetchError, match="nie je platný pdf"):
+        smartattach.fetch("https://icw.li/x", "a.pdf")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("xl/big.xml", b"\0" * (3 * 1024 * 1024))
+    monkeypatch.setattr(smartattach, "MAX_UNZIPPED", 1024 * 1024)
+    _opener(monkeypatch, _Resp(buf.getvalue(), XLSX_CT, "bomb.xlsx"))
+    with pytest.raises(smartattach.FetchError, match="rozbalí"):
+        smartattach.fetch("https://icw.li/x", "bomb.xlsx")
+
+
+def test_the_direct_download_must_keep_the_preview_pages_port():
+    odd = ("https://mail.example.sk/collaboration/?ticket=T&"
+           "url=https%3A//mail.example.sk%3A8443/teamchatapi/")
+    assert smartattach.download_url(odd) is None
+
+
+def test_an_unexpected_fetch_exception_never_crashes_ingest():
+    def boom(url, name):
+        raise RuntimeError("socket exploded")
+    rec = process.process_raw(_raw(BODY), fetch=boom)
+    notes = [a for a in rec["attachments"] if a["flag"] == "link_failed"]
+    assert len(notes) == 1 and "socket exploded" in notes[0]["text"]
+
+
+def test_a_marker_without_a_recognised_link_is_a_visible_note():
+    body = BODY.replace("(271 kB)", "")
+    rec = process.process_raw(_raw(body), fetch=lambda u, n: pytest.fail("must not fetch"))
+    notes = [a for a in rec["attachments"] if a["flag"] == "link_failed"]
+    assert len(notes) == 1 and "nenašiel" in notes[0]["text"]
+
+
+def test_at_most_max_links_are_downloaded(monkeypatch):
+    lines = "".join(f"{i}/7: subor{i}.xlsx (1 kB): https://icw.li/k{i}\n" for i in range(1, 8))
+    body = BODY.split("1/1:")[0] + lines
+    calls = []
+
+    def fake(url, name):
+        calls.append(url)
+        return smartattach.Fetched(filename=name, mime=XLSX_CT, data=_xlsx_bytes())
+    rec = process.process_raw(_raw(body), fetch=fake)
+    assert len(calls) == smartattach.MAX_LINKS
+    assert sum(a["flag"] == "link_failed" for a in rec["attachments"]) == 2
+
+
+def test_reextract_supersedes_an_earlier_failed_download_note(pg, tmp_path):
+    from app import db, reextract
+    from app.config import Config
+
+    raw = _raw(BODY)
+    failed = process.process_raw(raw, fetch=lambda u, n: (_ for _ in ()).throw(
+        smartattach.FetchError("odkaz dočasne nedostupný")))
+    raw_path = tmp_path / "raw.eml"
+    raw_path.write_bytes(raw)
+    assert db.insert_message(pg, failed, "INBOX", 2, 1, str(raw_path), [])
+    msg_id = pg.execute("SELECT id FROM messages WHERE message_id = %s",
+                        (failed["identity"],)).fetchone()[0]
+    cfg = Config(pg_dsn="", data_dir=str(tmp_path), public_base_url="http://ee")
+    data = _xlsx_bytes()
+    res = reextract.add_link_attachments(
+        pg, cfg, msg_id,
+        fetch=lambda u, n: smartattach.Fetched(filename=n, mime=XLSX_CT, data=data))
+    assert res["added"] == 1
+    flags = pg.execute("SELECT filename, flag FROM attachments WHERE message_id = %s "
+                       "ORDER BY idx", (failed["identity"],)).fetchall()
+    assert flags == [("VO cennik utorok 48 tyzden(1).xlsx.odkaz.txt", "skipped_link_superseded"),
+                     ("VO cennik utorok 48 tyzden(1).xlsx", "ok")]
+    combined = pg.execute("SELECT combined_text FROM messages WHERE id = %s",
+                          (msg_id,)).fetchone()[0]
+    assert "nepodarilo stiahnuť" not in combined and "Rožok testovací 70g" in combined

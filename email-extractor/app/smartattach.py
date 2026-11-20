@@ -21,13 +21,17 @@ icw.li and the parsers never execute content.
 """
 from __future__ import annotations
 
+import http.client
+import io
 import ipaddress
 import logging
 import re
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from email.message import Message
 
@@ -37,9 +41,17 @@ MARKER = "IceWarp SmartAttach"
 START_HOST = "icw.li"
 MAX_REDIRECTS = 3
 MAX_BYTES = 25 * 1024 * 1024
-TIMEOUT = 30
+MAX_UNZIPPED = 200 * 1024 * 1024   # an OOXML/ODF zip that expands past this is refused
+TIMEOUT = 30                       # per socket operation
+DEADLINE = 120                     # whole download (a slow-drip server cannot hold ingest)
+MAX_LINKS = 5                      # per message
 ALLOWED_EXT = {"xlsx", "xls", "xlsm", "ods", "csv", "pdf", "docx", "doc", "odt",
                "jpg", "jpeg", "png"}
+
+# magic bytes per type — the server's bytes must BE the type the name claims
+_ZIP_EXT = {"xlsx", "xlsm", "docx", "ods", "odt"}
+_MAGIC = {"pdf": (b"%PDF",), "xls": (b"\xd0\xcf\x11\xe0",), "doc": (b"\xd0\xcf\x11\xe0",),
+          "jpg": (b"\xff\xd8",), "jpeg": (b"\xff\xd8",), "png": (b"\x89PNG",)}
 
 # „1/1: VO Pekarová žena utorok 48 tyžden(1).xlsx (271 kB): https://icw.li/tRVOyq6vR"
 _LINK_RE = re.compile(
@@ -58,10 +70,14 @@ class Fetched:
     data: bytes
 
 
+def has_marker(body: str) -> bool:
+    return bool(body) and MARKER.lower() in body.lower()
+
+
 def find_links(body: str) -> list[tuple[str, str]]:
     """(filename, url) for every SmartAttach line of a mail that carries the marker. A mail
     without the marker gets nothing — a random link in a mail body is never downloaded."""
-    if not body or MARKER.lower() not in body.lower():
+    if not has_marker(body):
         return []
     return [(m.group("name").strip(), m.group("url").strip().rstrip(".,;>)"))
             for m in _LINK_RE.finditer(body)]
@@ -69,6 +85,16 @@ def find_links(body: str) -> list[tuple[str, str]]:
 
 def file_ext(name: str) -> str:
     return name.rsplit(".", 1)[-1].lower() if "." in (name or "") else ""
+
+
+def _public(ip) -> bool:
+    """True only for a globally routable unicast address — an IPv4 address hidden inside an
+    IPv6 one (mapped, 6to4, Teredo) is judged by the IPv4 it carries."""
+    if isinstance(ip, ipaddress.IPv6Address):
+        inner = ip.ipv4_mapped or ip.sixtofour or (ip.teredo[1] if ip.teredo else None)
+        if inner is not None:
+            return _public(inner)
+    return ip.is_global and not ip.is_multicast
 
 
 def _check_url(url: str, *, first: bool) -> None:
@@ -81,13 +107,37 @@ def _check_url(url: str, *, first: bool) -> None:
     if first and host != START_HOST:
         raise FetchError(f"odkaz nevedie na {START_HOST} ({host})")
     try:
-        infos = socket.getaddrinfo(host, p.port or 443, proto=socket.IPPROTO_TCP)
+        port = p.port or 443
+    except ValueError as e:
+        raise FetchError(f"odkaz má neplatný port ({e})") from e
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
     except OSError as e:
         raise FetchError(f"server {host} sa nedá nájsť ({e})") from e
     for info in infos:
-        ip = ipaddress.ip_address(info[4][0])
-        if not ip.is_global or ip.is_multicast:
+        try:
+            ip = ipaddress.ip_address(str(info[4][0]).split("%", 1)[0])
+        except ValueError as e:
+            raise FetchError(f"server {host} vrátil neplatnú adresu ({e})") from e
+        if not _public(ip):
             raise FetchError(f"server {host} je na neverejnej adrese {ip}")
+
+
+def _check_bytes(ext: str, data: bytes) -> None:
+    """The bytes must be what the name says, and a zip container must not expand past
+    `MAX_UNZIPPED` (a zip bomb would otherwise blow up the parser)."""
+    if ext in _ZIP_EXT:
+        if not data.startswith(b"PK\x03\x04"):
+            raise FetchError(f"súbor nie je platný {ext}")
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                total = sum(i.file_size for i in z.infolist())
+        except zipfile.BadZipFile as e:
+            raise FetchError(f"súbor nie je platný {ext} ({e})") from e
+        if total > MAX_UNZIPPED:
+            raise FetchError(f"súbor sa rozbalí na viac ako {MAX_UNZIPPED // (1024 * 1024)} MB")
+    elif ext in _MAGIC and not data.startswith(_MAGIC[ext]):
+        raise FetchError(f"súbor nie je platný {ext}")
 
 
 class _Redirects(urllib.request.HTTPRedirectHandler):
@@ -132,7 +182,11 @@ def download_url(page_url: str) -> str | None:
     q = urllib.parse.parse_qs(p.query)
     ticket, api = (q.get("ticket") or [""])[0], (q.get("url") or [""])[0]
     a = urllib.parse.urlsplit(api)
-    if not ticket or a.scheme != "https" or (a.hostname or "") != (p.hostname or ""):
+    try:
+        same = (a.hostname or "") == (p.hostname or "") and a.port == p.port
+    except ValueError:
+        return None
+    if not ticket or a.scheme != "https" or not same:
         return None
     base = api if api.endswith("/") else api + "/"
     return base + "files.download?" + urllib.parse.urlencode({"ticket": ticket})
@@ -146,9 +200,10 @@ def _open(opener, url: str):
 def fetch(url: str, expected_name: str = "") -> Fetched:
     """Download ONE SmartAttach file under the module's rules. Raises `FetchError` with a
     Slovak reason on any refusal or failure — never returns partial data."""
-    _check_url(url, first=True)
     opener = urllib.request.build_opener(_Redirects())
+    deadline = time.monotonic() + DEADLINE
     try:
+        _check_url(url, first=True)
         resp = _open(opener, url)
         try:
             _check_url(resp.geturl(), first=False)
@@ -178,6 +233,8 @@ def fetch(url: str, expected_name: str = "") -> Fetched:
                 if not chunk:
                     break
                 total += len(chunk)
+                if time.monotonic() > deadline:
+                    raise FetchError(f"sťahovanie trvá dlhšie ako {DEADLINE} s")
                 if total > MAX_BYTES:
                     raise FetchError(f"súbor je väčší ako {MAX_BYTES // (1024 * 1024)} MB")
                 chunks.append(chunk)
@@ -185,10 +242,12 @@ def fetch(url: str, expected_name: str = "") -> Fetched:
             resp.close()
     except FetchError:
         raise
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
-        raise FetchError(f"sťahovanie zlyhalo ({e})") from e
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError,
+            http.client.HTTPException) as e:
+        raise FetchError(f"sťahovanie zlyhalo ({type(e).__name__}: {e})") from e
     data = b"".join(chunks)
     if not data:
         raise FetchError("server vrátil prázdny súbor")
+    _check_bytes(ext, data)
     log.info("smartattach: downloaded %s (%d B, %s)", name, len(data), mime)
     return Fetched(filename=name, mime=mime, data=data)
