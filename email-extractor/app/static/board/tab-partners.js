@@ -177,7 +177,9 @@ function recall() {
 }
 
 // ---- load + render ----------------------------------------------------------------------
+let loadSeq = 0;   // a slower, older response must never overwrite a newer one
 async function load() {
+  const mine = ++loadSeq;
   const params = new URLSearchParams();
   if (state.q) params.set("q", state.q);
   params.set("page", String(state.page));
@@ -187,7 +189,11 @@ async function load() {
   let res;
   try {
     res = await apiGet(`${CFG.api}?${params.toString()}`);
-  } catch (e) { toast(e.message || "Načítanie zlyhalo.", { error: true }); return; }
+  } catch (e) {
+    if (mine === loadSeq) toast(e.message || "Načítanie zlyhalo.", { error: true });
+    return;
+  }
+  if (mine !== loadSeq) return;
   state.total = res.total || 0;
   state.sort = res.sort || state.sort;
   state.desc = !!res.desc;

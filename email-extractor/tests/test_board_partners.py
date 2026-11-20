@@ -122,6 +122,11 @@ def test_customer_family_paging(pg):
     assert cust.list_customers(pg)["page_size"] == 100
     assert partners.page_size("7") == 100 and partners.page_size("-1") == 100
     assert partners.page_size("200") == 200 and partners.page_size("0") == 0
+    # a page past the end (the list shrank after a delete) lands on the last page
+    past = cust.list_customers(pg, page=5, size=50)
+    assert past["page"] == 0 and len(past["families"]) == 30
+    assert partners.page_slice(list(range(120)), 9, 50) == (list(range(100, 120)), 2)
+    assert partners.page_slice([], 3, 50) == ([], 0)
 
 
 # --- #504: sort by column, rows per page, EAN search ------------------------------------

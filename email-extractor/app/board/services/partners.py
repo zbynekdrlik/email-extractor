@@ -105,5 +105,6 @@ def page_slice(items: list, page: int, size: int) -> tuple[list, int]:
     """(the items of `page`, the effective page) — size 0 = everything on page 0."""
     if size == 0:
         return items, 0
-    page = max(0, int(page))
+    last = max(0, (len(items) - 1) // size)
+    page = min(max(0, int(page)), last)   # a shrunk list (a delete) lands on its last page
     return items[page * size:(page + 1) * size], page
