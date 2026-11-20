@@ -274,7 +274,7 @@ body {
 .board-products .p-codex-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 14px; }
 
 /* --- Zákazníci / Dodávatelia (lane 5, #446) (scoped under .board-partners) --- */
-.board-partners { max-width: 980px; margin: 0 auto; }
+.board-partners { max-width: 1280px; margin: 0 auto; }
 .board-partners .p-toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
 .board-partners .p-search { flex: 1; min-width: 200px; padding: 7px 12px; border: 1px solid var(--line);
   border-radius: 8px; font-size: 14px; }
@@ -292,7 +292,27 @@ body {
 .board-partners .p-field--check { flex-direction: row; align-items: center; gap: 8px; color: var(--ink); }
 .board-partners .p-in { padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; font-size: 14px; }
 .board-partners .p-form-actions { display: flex; gap: 8px; margin-top: 12px; }
-.board-partners .p-list { display: flex; flex-direction: column; gap: 12px; }
+.board-partners .p-list { overflow-x: auto; }
+.board-partners .p-size-label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.board-partners .p-size { padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 14px; }
+/* #504: compact table — one row per card, sortable headers */
+.board-partners .p-table { width: 100%; border-collapse: collapse; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 12px; font-size: 14px; }
+.board-partners .p-table th, .board-partners .p-table td { padding: 6px 10px; text-align: left;
+  vertical-align: top; border-bottom: 1px solid var(--line); }
+.board-partners .p-th { font-size: 12px; color: var(--muted); font-weight: 600; white-space: nowrap; }
+.board-partners .p-sort { background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; }
+.board-partners .p-th--sort.is-active { color: var(--accent); }
+.board-partners .p-ean { font-family: ui-monospace, monospace; white-space: nowrap; }
+.board-partners .p-row:hover { background: #f6f8fb; }
+.board-partners .p-row--site .p-cell-name { padding-left: 22px; }
+.board-partners .p-family-row td { background: #eef1f5; font-weight: 600; }
+.board-partners .p-emails { max-width: 240px; }
+.board-partners .p-table .p-cardactions { margin-top: 0; white-space: nowrap; }
+.board-partners .p-table .p-site, .board-partners .p-table .p-tag { display: inline-block; margin: 2px 6px 0 0; }
+@media (max-width: 700px) {
+  .board-partners .p-emails, .board-partners .p-th:nth-child(4) { display: none; }
+}
 .board-partners .p-family { margin: 8px 0 0; font-size: 15px; color: var(--muted); }
 .board-partners .p-family-sites { display: flex; flex-direction: column; gap: 8px;
   border-left: 3px solid var(--line); padding-left: 12px; }

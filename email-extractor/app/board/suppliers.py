@@ -11,7 +11,7 @@ from flask import jsonify, request
 
 from .auth import actor
 from .services import suppliers
-from .services.partners import PartnerError
+from .services.partners import PartnerError, page_size
 
 
 def _int(value, default: int = 0) -> int:
@@ -26,7 +26,10 @@ def register_suppliers(bp, deps) -> None:
     def board_suppliers_list():
         with deps.db() as c:
             res = suppliers.list_suppliers(
-                c, q=(request.args.get("q") or ""), page=_int(request.args.get("page")))
+                c, q=(request.args.get("q") or ""), page=_int(request.args.get("page")),
+                sort=request.args.get("sort") or "name",
+                desc=request.args.get("dir") == "desc",
+                size=page_size(request.args.get("size")))
         return jsonify(res)
 
     @bp.post("/api/board/suppliers")

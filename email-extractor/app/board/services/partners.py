@@ -49,4 +49,61 @@ def matches(record: dict, needle: str, extra_keys=("street",)) -> bool:
     """Folded free-text match over name/EAN/city (+ street for customers) + every e-mail."""
     parts = [str(record.get(k) or "") for k in ("name", "ean_edi", "city", *extra_keys)]
     parts += [str(e) for e in (record.get("emails") or [])]
-    return needle in _fold(" ".join(parts))
+    if needle in _fold(" ".join(parts)):
+        return True
+    # #504: an EAN typed with spaces/dashes („2000 0000 00730") still finds the card
+    digits = _EAN_STRIP_RE.sub("", needle)
+    return digits.isdigit() and digits in str(record.get("ean_edi") or "")
+
+
+# --- list sorting + paging (#504) -------------------------------------------------------
+
+PAGE_SIZES = (50, 100, 200, 0)   # 0 = all on one page
+DEFAULT_PAGE_SIZE = 100
+
+
+def page_size(raw) -> int:
+    """The requested rows-per-page, only one of `PAGE_SIZES` (0 = all); anything else is
+    the default — never an unbounded or negative slice from a typed URL."""
+    try:
+        size = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_PAGE_SIZE
+    return size if size in PAGE_SIZES else DEFAULT_PAGE_SIZE
+
+
+def sort_key(sort: str, count_key: str):
+    """Key for one partner row. A blank value sorts LAST in both directions (the caller
+    splits blanks off before reversing), so an EAN-less card never tops the list."""
+    if sort == "ean":
+        def key(r):
+            ean = str(r.get("ean_edi") or "")
+            return (len(ean), ean)   # numeric order for digit strings of mixed length
+    elif sort == "city":
+        def key(r):
+            return (_fold(r.get("city") or ""), _fold(r.get("name") or ""))
+    elif sort == "count":
+        def key(r):
+            return int(r.get(count_key) or 0)
+    else:
+        def key(r):
+            return _fold(r.get("name") or "")
+    return key
+
+
+def is_blank(r: dict, sort: str) -> bool:
+    return (sort == "ean" and not r.get("ean_edi")) or (sort == "city" and not r.get("city"))
+
+
+def sorted_rows(rows: list[dict], sort: str, desc: bool, count_key: str) -> list[dict]:
+    key = sort_key(sort, count_key)
+    filled = sorted((r for r in rows if not is_blank(r, sort)), key=key, reverse=desc)
+    return filled + [r for r in rows if is_blank(r, sort)]
+
+
+def page_slice(items: list, page: int, size: int) -> tuple[list, int]:
+    """(the items of `page`, the effective page) — size 0 = everything on page 0."""
+    if size == 0:
+        return items, 0
+    page = max(0, int(page))
+    return items[page * size:(page + 1) * size], page

@@ -13,6 +13,7 @@ import os
 import pytest
 
 from app.board.services import customers as cust
+from app.board.services import partners
 from app.board.services import suppliers as supp
 from app.board.services.partners import PartnerError
 from app.config import Config
@@ -115,10 +116,90 @@ def test_customer_used_by_count_reflects_edi_sent(pg):
 def test_customer_family_paging(pg):
     for i in range(30):
         _mk_customer(pg, f"85940000000{i:02d}", f"Firma{i:02d} s.r.o.", city="C")
-    p0 = cust.list_customers(pg, page=0)
-    p1 = cust.list_customers(pg, page=1)
-    assert p0["total"] == 30 and p0["page_size"] == 25
-    assert len(p0["families"]) == 25 and len(p1["families"]) == 5
+    p0 = cust.list_customers(pg, page=0, size=50)
+    assert p0["total"] == 30 and p0["page_size"] == 50 and len(p0["families"]) == 30
+    # #504: the default page holds 100 rows, an unknown size falls back to it
+    assert cust.list_customers(pg)["page_size"] == 100
+    assert partners.page_size("7") == 100 and partners.page_size("-1") == 100
+    assert partners.page_size("200") == 200 and partners.page_size("0") == 0
+
+
+# --- #504: sort by column, rows per page, EAN search ------------------------------------
+
+def _sites(res):
+    return [s for f in res["families"] for s in f["sites"]]
+
+
+def test_customers_sort_by_ean_both_directions_blank_ean_never_first(pg):
+    _mk_customer(pg, "8590000000300", "Alfa", city="Z")
+    _mk_customer(pg, "8590000000100", "Cézar", city="A")
+    _mk_customer(pg, "8590000000200", "Beta", city="M")
+    up = [s["ean_edi"] for s in _sites(cust.list_customers(pg, sort="ean"))]
+    assert up == ["8590000000100", "8590000000200", "8590000000300"]
+    down = [s["ean_edi"] for s in _sites(cust.list_customers(pg, sort="ean", desc=True))]
+    assert down == ["8590000000300", "8590000000200", "8590000000100"]
+    assert [s["name"] for s in _sites(cust.list_customers(pg, sort="city"))] == [
+        "Cézar", "Beta", "Alfa"]
+    # a blank EAN sorts last in both directions
+    rows = [{"ean_edi": "", "name": "X"}, {"ean_edi": "2", "name": "Y"},
+            {"ean_edi": "10", "name": "Z"}]
+    assert [r["name"] for r in partners.sorted_rows(rows, "ean", False, "n")] == ["Y", "Z", "X"]
+    assert [r["name"] for r in partners.sorted_rows(rows, "ean", True, "n")] == ["Z", "Y", "X"]
+
+
+def test_customers_sort_by_orders_shipped(pg):
+    _mk_customer(pg, "8590000000401", "Málo", city="A")
+    _mk_customer(pg, "8590000000402", "Veľa", city="B")
+    pg.execute("INSERT INTO edi_sent (customer_ean, delivery_date, content_sha256, filename) "
+               "VALUES ('8590000000402','2026-09-15','h1','f1.txt'),"
+               "('8590000000402','2026-09-16','h2','f2.txt'),"
+               "('8590000000401','2026-09-16','h3','f3.txt')")
+    res = cust.list_customers(pg, sort="count", desc=True)
+    assert [s["name"] for s in _sites(res)] == ["Veľa", "Málo"]
+
+
+def test_customers_sorted_by_ean_page_flat_rows_but_keep_the_site_tag(pg):
+    _mk_customer(pg, "8590000000502", "Košík.sk MAKRO Žilina", city="Žilina")
+    _mk_customer(pg, "8590000000501", "Košík.sk sklad Zvolen", city="Zvolen")
+    _mk_customer(pg, "8590000000503", "Iný zákazník", city="Nitra")
+    by_name = cust.list_customers(pg)
+    assert by_name["total"] == 2 and by_name["rows"] == 3   # one family + one singleton
+    by_ean = cust.list_customers(pg, sort="ean", size=50)
+    assert by_ean["total"] == 3 and all(f["size"] == 1 for f in by_ean["families"])
+    first = by_ean["families"][0]["sites"][0]
+    assert first["ean_edi"] == "8590000000501" and first["site_total"] == 2
+    one = cust.list_customers(pg, sort="ean", size=50, page=0)
+    assert len(one["families"]) == 3
+    assert cust.list_customers(pg, sort="bogus")["sort"] == "name"
+
+
+def test_customer_search_finds_an_ean_typed_with_spaces(pg):
+    _mk_customer(pg, "2000000000730", "Caffetteria Test", city="Košice")
+    _mk_customer(pg, "2000000000999", "Iný", city="Košice")
+    for q in ("2000000000730", "2000 0000 00730", "00730"):
+        hits = _sites(cust.list_customers(pg, q=q))
+        assert [s["ean_edi"] for s in hits] == ["2000000000730"], q
+
+
+def test_suppliers_sort_by_ean_and_page_size(pg):
+    _mk_supplier(pg, "8597000000002", "Beta dodávateľ", city="B")
+    _mk_supplier(pg, "8597000000001", "Alfa dodávateľ", city="A")
+    res = supp.list_suppliers(pg, sort="ean", desc=True, size=200)
+    eans = [r["ean_edi"] for r in res["suppliers"] if r["ean_edi"].startswith("8597")]
+    assert eans == ["8597000000002", "8597000000001"]
+    assert res["page_size"] == 200
+
+
+def test_board_customers_api_passes_sort_dir_and_size(pg):
+    _mk_customer(pg, "8590000000601", "Prvý", city="A")
+    _mk_customer(pg, "8590000000602", "Druhý", city="B")
+    c = _client()
+    _login(c)
+    res = c.get("/api/board/customers?sort=ean&dir=desc&size=50").get_json()
+    assert res["sort"] == "ean" and res["desc"] is True and res["page_size"] == 50
+    assert [s["ean_edi"] for s in _sites(res)] == ["8590000000602", "8590000000601"]
+    sup = c.get("/api/board/suppliers?sort=ean&size=abc").get_json()
+    assert sup["sort"] == "ean" and sup["page_size"] == 100
 
 
 # --- customer create / update / delete DELEGATE + audit ----------------------------------

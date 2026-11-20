@@ -5,7 +5,15 @@
 <section class="board-partners" aria-label="Partneri">
   <div class="p-toolbar">
     <input id="p-search" class="p-search" type="search" autocomplete="off"
-           placeholder="Hľadať (názov, EAN, mesto, e-mail…)">
+           placeholder="Hľadať (EAN EDI, názov, mesto, e-mail…)">
+    <label class="p-size-label">Na stranu
+      <select id="p-size" class="p-size">
+        <option value="50">50</option>
+        <option value="100" selected>100</option>
+        <option value="200">200</option>
+        <option value="0">všetko</option>
+      </select>
+    </label>
     <button id="p-add" class="p-btn p-btn--primary" type="button">➕ Pridať</button>
   </div>
   <div id="p-editor" class="p-editor" hidden></div>
