@@ -66,6 +66,7 @@ Load the matching skill BEFORE working on that area (don't re-derive):
 - problém/chyba popísaná v Odoo Discuss (dodacie/objednávky/reklamácie, aj s fotkami) → load `.claude/skills/odoo-reported-issues`
 - extraction quality / OCR tuning → see `docs/superpowers/specs/` + the spike memory
 - prílohy / formáty (xlsx, xls, ods, fods, csv) → `.claude/rules/extraction-formats.md` (auto-loads on `app/extract.py`)
+- príloha ako odkaz (IceWarp SmartAttach `icw.li`, bezpečné stiahnutie, `app.reextract` pre už prijatý mail) (#506) → `.claude/rules/smartattach.md` (auto-loads on `app/smartattach.py`, `app/process.py`, `app/reextract.py`)
 - AI objednávky (matching, korpus, CI gate) → `.claude/rules/orders-corpus.md` (auto-loads on `app/orders/**`)
 - faktúra ako dodací list (#485) — push príjemok z CODEXu, brána duplicity (tri verdikty: duplikát / review / posiela sa), per-dodávateľ zámok, fail-closed → `.claude/rules/codex-orders.md` sekcia #485 (auto-loads on `app/orders/invoice_dedup.py`, `dl_invoice.py`, `codex_receipts.py`, DL wiring)
 - párovanie ZÁKAZNÍKA (`customer.resolve`) — viac-prevádzková rodina kariet, kmeň názvu (`_name_stem`), adresa doručenia NAD llm pickom, korpus-safety brána `owners==0`, anti-pattern doména (#435); viac predajní v jednom maile — identita predajne, pravidlá predajní, ulica len keď celý mail sedí na rodinu, naša doména nikdy nie je zákazník (#493) → `.claude/rules/customer-resolution.md` (auto-loads on `app/orders/customer.py`)
