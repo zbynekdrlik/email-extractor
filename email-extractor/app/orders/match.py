@@ -258,13 +258,105 @@ def _card_reference_words(card: dict, customer_name: str) -> set[str]:
     return words
 
 
+def _slice_marker(word: str) -> str | None:
+    """'sliced' / 'plain' for a folded word that states the slicing, else None."""
+    if word.startswith(("nerez", "nekraj")):
+        return "plain"
+    if word in ("rez", "kraj") or word.startswith(("rezan", "krajan")):
+        return "sliced"
+    return None
+
+
+def slice_state(text: str) -> str:
+    """'sliced' when the wording/card name says rez./rezaný/krájaný, else 'plain' (#503).
+
+    An explicit "nerezaný" is plain too. The marker is read on folded words, so
+    "rez." in a Karmen line and "rezaný" in a card name are the same state."""
+    states = {_slice_marker(w) for w in _norm(text).split()} - {None}
+    return "sliced" if states == {"sliced"} else "plain"
+
+
+def _variant_base(text: str) -> frozenset[str]:
+    """The wording without weights and without its slicing marker — what two variants of
+    ONE product (sliced / unsliced) have in common (#503)."""
+    return frozenset(w for w in _norm(text).split()
+                     if len(w) >= 3 and _slice_marker(w) is None)
+
+
+# Rules that a deterministic correction must never override: the warehouse said so.
+_TAUGHT_RULES = ("human_taught", "global_taught")
+
+
+def variant_sibling(decision: Decision, order_wordings: list[str],
+                    catalog: list[dict]) -> Decision:
+    """#503 (Karmen K12, 23.11.2026): ONE order naming both "Chlieb … 800g Granč" and
+    "Chlieb … 800g rez. Granč" proves they are two products. A line whose card carries the
+    OTHER slicing state than its own wording is moved to the catalog twin (same base name,
+    the line's slicing state) — or, when there is no single twin, asked (`variant_conflict`).
+
+    Fires ONLY on that sibling evidence: a customer writing "chlieb 800g" alone and getting
+    sliced bread by long history is left alone (many mean exactly that). A warehouse-taught
+    answer is never overridden."""
+    if not decision.gtin or decision.rule in _TAUGHT_RULES:
+        return decision
+    own_state, own_base = slice_state(decision.item_name), _variant_base(decision.item_name)
+    if not own_base:
+        return decision
+    if not any(_variant_base(w) == own_base and slice_state(w) != own_state
+               for w in order_wordings):
+        return decision
+    card = next((c for c in catalog if str(c.get("gtin")) == str(decision.gtin)), None)
+    if card is None or slice_state(card.get("name", "")) == own_state:
+        return decision
+    card_base = _variant_base(card.get("name", ""))
+    card_weight = weight_grams(card.get("name", ""))   # `_norm` drops weights — a twin
+    twins = {str(c.get("gtin")): c for c in catalog     # must be the SAME gramáž too
+             if str(c.get("gtin")) != str(decision.gtin)
+             and _variant_base(c.get("name", "")) == card_base
+             and weight_grams(c.get("name", "")) == card_weight
+             and slice_state(c.get("name", "")) == own_state}
+    variant = {"from_gtin": decision.gtin, "from_card": decision.card,
+               "state": own_state, "twins": sorted(twins)}
+    trace = dict(decision.trace or {}, variant=variant)
+    if len(twins) == 1:
+        twin = next(iter(twins.values()))
+        log.info("variant sibling: %r %s -> %s", decision.item_name, decision.gtin,
+                 twin.get("gtin"))
+        note = (f"V tej istej objednávke je aj druhý variant tohto výrobku, takže "
+                f"„{decision.item_name}“ je {'krájaný' if own_state == 'sliced' else 'nekrájaný'}"
+                f" — karta „{twin.get('name', '')}“ namiesto „{decision.card}“.")
+        return Decision(item_name=decision.item_name, gtin=str(twin.get("gtin")),
+                        card=twin.get("name", ""), confidence=decision.confidence,
+                        rule="variant_sibling", note=note, review=False, trace=trace,
+                        quantity=decision.quantity, unit=decision.unit)
+    log.warning("variant conflict: %r on %s, twins %s", decision.item_name, decision.gtin,
+                sorted(twins))
+    note = (f"V objednávke je krájaný aj nekrájaný variant, ale „{decision.item_name}“ "
+            f"dostal kartu „{decision.card}“ s opačným variantom — over kartu.")
+    return Decision(item_name=decision.item_name, gtin=decision.gtin, card=decision.card,
+                    confidence=decision.confidence, rule="variant_conflict", note=note,
+                    review=True, trace=trace, quantity=decision.quantity,
+                    unit=decision.unit)
+
+
+def apply_variant_siblings(decisions: list[Decision], catalog: list[dict]) -> list[Decision]:
+    """`variant_sibling` over every line of one order (the hold-release path, #503)."""
+    names = [d.item_name for d in decisions]
+    return [variant_sibling(d, names, catalog) for d in decisions]
+
+
 def _wordings_differ(a: str, b: str) -> bool:
     """True when two customer wordings share NO distinctive word at all — the sign that
     two DIFFERENT products both resolved to the same card (#157: "Chlieb olivovo
     paradajkový" and "Chlieb pšenično ražný" share nothing), not that the same product
     was simply written twice. Either wording carrying no distinctive word at all (too
     short/generic to compare) is treated as agreeing — there is nothing to disagree
-    ABOUT, and the ordinary "same wording repeated" case must keep merging."""
+    ABOUT, and the ordinary "same wording repeated" case must keep merging.
+
+    #503: a sliced and an unsliced wording ("… 800g" vs "… 800g rez.") always differ —
+    the 3-letter "rez." is too short to be a distinctive word, so it needs its own check."""
+    if slice_state(a) != slice_state(b):
+        return True
     wa, wb = _distinctive_words(a), _distinctive_words(b)
     if not wa or not wb:
         return False
@@ -705,8 +797,11 @@ def merge_same_card(decisions: list[Decision]) -> list[Decision]:
             out.append(d)
             continue
         first.quantity = (first.quantity or 0) + (d.quantity or 0)
+        # #503: the line keeps the customer's OWN first wording — a glued "A + B" name was
+        # written into item_memory as a wording nobody ever wrote
+        merged = list((first.trace or {}).get("merged_with") or [])
         if d.item_name and d.item_name != first.item_name:
-            first.item_name = f"{first.item_name} + {d.item_name}"
-        first.trace = {**(first.trace or {}), "merged_with": d.item_name,
+            merged.append(d.item_name)
+        first.trace = {**(first.trace or {}), "merged_with": merged,
                        "merged_rule": d.rule}
     return out
