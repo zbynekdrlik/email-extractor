@@ -1518,3 +1518,42 @@ def test_two_card_date_conflict_not_a_change_request_asks_customer_and_date(pg):
     held = pg.execute(
         "SELECT customer_ean, status FROM held_orders WHERE message_id='m1'").fetchone()
     assert held == ("", "held")
+
+
+# --- #503: an unsliced and a sliced line of the same bread stay two lines ---------------
+
+def test_a_sliced_and_an_unsliced_line_of_one_bread_ship_as_two_different_cards(pg):
+    """Karmen K12 (23.11.2026): the model put BOTH lines on the sliced card and the merge
+    summed them (2 + 6 → 8 ks rezaný). The order itself names both variants, so the
+    unmarked line must ship as the unsliced twin — two LIN lines, own quantities."""
+    cat = ("GTIN,Sklad,Názov,doplnok\n"
+           "8588001805609,1,Chlieb pšenično-ražný 800gr,\n"
+           "8588001805227,1,Chlieb pšenično-ražný rezaný 800 gr,\n")
+    sid = snapshot.import_snapshot(pg, cat, CUSTOMER_CSV)
+    pg.execute("INSERT INTO messages (message_id, category) VALUES ('m1', 'ai_orders')")
+    plain, sliced = "Chlieb pšen.‐ raž. 800g Granč", "Chlieb pšen.‐ raž. 800g rez. Granč"
+    mail = dict(MAIL, combined_text=f"na 04.08.2026 prosím 2x {plain}, 6x {sliced}")
+    extract_answer = {
+        "senderName": "Sklad", "senderEmail": "sklad@pekaren.sk",
+        "companyName": "Pekáreň Testovacia s.r.o.", "isChangeRequest": False, "notes": "",
+        "orders": [{"orderNumber": "", "deliveryDate": "04.08.2026", "recipientGroup": "",
+                    "items": [
+                        {"name": plain, "quantity": 2, "unit": "ks",
+                         "sourceQuote": f"2x {plain}"},
+                        {"name": sliced, "quantity": 6, "unit": "ks",
+                         "sourceQuote": f"6x {sliced}"}]}],
+    }
+    wrong = {"gtin": "8588001805227", "confidence": 0.93, "matchedCatalogName": "",
+             "reason": ""}
+    answers = [extract_answer, {"ean_edi": "2000000000001", "confidence": 0.95},
+               dict(wrong), dict(wrong)]
+    rec = Recorder()
+    result = pipeline.run(pg, _cfg(), mail, sid, client=ScriptedClient(answers),
+                          upload=rec.upload, post=rec.post)
+    assert result["status"] == "ok"
+    assert len(rec.uploads) == 1
+    content = rec.uploads[0][1]
+    assert content.count("LIN") == 2
+    assert "8588001805609" in content and "8588001805227" in content
+    rows = pg.execute("SELECT item_raw, gtin FROM item_memory ORDER BY gtin").fetchall()
+    assert rows == [(sliced, "8588001805227"), (plain, "8588001805609")]
