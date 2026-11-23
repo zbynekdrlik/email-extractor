@@ -1949,3 +1949,7 @@ base name, same weight, the line's slicing state) or asks `variant_conflict`. It
 and `nerez*`/`nekraj*` (plain) on `_norm`-folded words. `merge_same_card` keeps the FIRST
 wording; `trace.merged_with` is a LIST. Never glue the names into "A + B": that string went
 into `item_memory` as one wording.
+The FROZEN corpus catalog is not the live one: it names the unsliced card "…800gr", but the
+live catalog calls it "… voľný 800g". `voľný` counts as the plain marker (0.9.188). After
+deploying a rule that keys on card NAMES, run it in the container against
+`hold_redecide._current_catalog(conn)` (read-only) — the corpus cannot catch a live naming.
