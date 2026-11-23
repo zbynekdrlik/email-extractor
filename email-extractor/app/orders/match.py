@@ -260,7 +260,8 @@ def _card_reference_words(card: dict, customer_name: str) -> set[str]:
 
 def _slice_marker(word: str) -> str | None:
     """'sliced' / 'plain' for a folded word that states the slicing, else None."""
-    if word.startswith(("nerezan", "nekrajan")):
+    # "voľný" = the loose (unsliced) loaf — the live catalog's name for the unsliced twin
+    if word.startswith(("nerezan", "nekrajan", "voln")):
         return "plain"
     # "rezance" (noodles) is not a slicing marker; a bare "kraj" is a region ("… kraj")
     if word == "rez" or (word.startswith(("rezan", "krajan"))
