@@ -84,6 +84,18 @@ def _apply_confirmed_quantities(conn, decisions: list, question_ids: list) -> No
     if not by_key:
         return
     for d in decisions:
+        parts = (d.trace or {}).get("merged_parts")
+        if parts:
+            # #503: a merged line keeps its first wording as `item_name`; the confirmed
+            # quantity replaces only THAT wording's share, never the summed line
+            parts = [list(p) for p in parts]
+            for p in parts:
+                k = memory.item_key(p[0])
+                if k in by_key:
+                    p[1] = by_key.pop(k)
+            d.trace = {**d.trace, "merged_parts": parts}
+            d.quantity = sum(float(p[1] or 0) for p in parts)
+            continue
         k = memory.item_key(d.item_name)
         if k in by_key:
             d.quantity = by_key.pop(k)    # apply to exactly ONE decision per key

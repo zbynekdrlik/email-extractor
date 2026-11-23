@@ -260,9 +260,11 @@ def _card_reference_words(card: dict, customer_name: str) -> set[str]:
 
 def _slice_marker(word: str) -> str | None:
     """'sliced' / 'plain' for a folded word that states the slicing, else None."""
-    if word.startswith(("nerez", "nekraj")):
+    if word.startswith(("nerezan", "nekrajan")):
         return "plain"
-    if word in ("rez", "kraj") or word.startswith(("rezan", "krajan")):
+    # "rezance" (noodles) is not a slicing marker; a bare "kraj" is a region ("… kraj")
+    if word == "rez" or (word.startswith(("rezan", "krajan"))
+                         and not word.startswith("rezanc")):
         return "sliced"
     return None
 
@@ -329,14 +331,31 @@ def variant_sibling(decision: Decision, order_wordings: list[str],
                         card=twin.get("name", ""), confidence=decision.confidence,
                         rule="variant_sibling", note=note, review=False, trace=trace,
                         quantity=decision.quantity, unit=decision.unit)
+    # The card is PROVEN the wrong variant: no gtin, so a deadline / change-request ship
+    # lists the line as missing instead of shipping (and remembering) the wrong card.
     log.warning("variant conflict: %r on %s, twins %s", decision.item_name, decision.gtin,
                 sorted(twins))
     note = (f"V objednávke je krájaný aj nekrájaný variant, ale „{decision.item_name}“ "
-            f"dostal kartu „{decision.card}“ s opačným variantom — over kartu.")
-    return Decision(item_name=decision.item_name, gtin=decision.gtin, card=decision.card,
+            f"dostal kartu „{decision.card}“ s opačným variantom — vyber správnu kartu.")
+    return Decision(item_name=decision.item_name, gtin=None, card="",
                     confidence=decision.confidence, rule="variant_conflict", note=note,
                     review=True, trace=trace, quantity=decision.quantity,
                     unit=decision.unit)
+
+
+def _variant_question_cards(decision: Decision, catalog: list[dict]) -> list[dict]:
+    """A `variant_conflict` question's buttons: the twins of the line's OWN slicing state
+    first, then the rejected card — never the rejected card as the proposal (#503)."""
+    v = (decision.trace or {}).get("variant") or {}
+    gtins = list(v.get("twins") or []) + [str(v.get("from_gtin") or "")]
+    out = []
+    for g in gtins:
+        card = _card(catalog, g) if g else None
+        if card and all(str(c.get("gtin")) != g for c in out):
+            # kept as buttons by `plausible_candidates` regardless of their text score
+            out.append({**card, "score": max(float(card.get("score", 0) or 0),
+                                             PLAUSIBLE_CANDIDATE_SCORE)})
+    return out
 
 
 def apply_variant_siblings(decisions: list[Decision], catalog: list[dict]) -> list[Decision]:
@@ -461,6 +480,10 @@ def candidates_for_question(item_cands: list[dict], catalog: list[dict],
     Re-heading the list with the actual decision, computed AFTER the model call, guarantees
     the one card the warehouse needs to confirm is always clickable.
     """
+    if decision.rule == "variant_conflict":                       # #503
+        variant = _variant_question_cards(decision, catalog)
+        shown = {str(c.get("gtin")) for c in variant}
+        return variant + [c for c in item_cands if str(c.get("gtin")) not in shown]
     gtin = proposed_gtin(decision)
     if not gtin:
         return item_cands
@@ -796,12 +819,20 @@ def merge_same_card(decisions: list[Decision]) -> list[Decision]:
             group.append(d)
             out.append(d)
             continue
-        first.quantity = (first.quantity or 0) + (d.quantity or 0)
         # #503: the line keeps the customer's OWN first wording — a glued "A + B" name was
-        # written into item_memory as a wording nobody ever wrote
-        merged = list((first.trace or {}).get("merged_with") or [])
+        # written into item_memory as a wording nobody ever wrote. `merged_parts` keeps each
+        # merged line's own quantity, so a warehouse-confirmed quantity for ONE wording
+        # (hold_place._apply_confirmed_quantities) replaces that wording's share, never the sum.
+        trace = dict(first.trace or {})
+        old = trace.get("merged_with")
+        merged = [old] if isinstance(old, str) else list(old or [])   # pre-#503 held rows
+        parts = trace.get("merged_parts") or [[first.item_name, first.quantity or 0]]
         if d.item_name and d.item_name != first.item_name:
             merged.append(d.item_name)
-        first.trace = {**(first.trace or {}), "merged_with": merged,
+        parts = [list(p) for p in parts] + [
+            list(p) for p in ((d.trace or {}).get("merged_parts")
+                              or [[d.item_name, d.quantity or 0]])]
+        first.quantity = (first.quantity or 0) + (d.quantity or 0)
+        first.trace = {**trace, "merged_with": merged, "merged_parts": parts,
                        "merged_rule": d.rule}
     return out
