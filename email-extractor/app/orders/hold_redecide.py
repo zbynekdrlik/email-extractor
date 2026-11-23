@@ -58,7 +58,7 @@ def _redecide(conn, customer_ean: str, decisions: list, as_of: str = "",
     ordinary local dict is used and simply discarded.
     """
     from . import memory
-    from .match import decide_without_model, merge_same_card
+    from .match import apply_variant_siblings, decide_without_model, merge_same_card
 
     if catalog is None:
         catalog = _current_catalog(conn)
@@ -81,7 +81,11 @@ def _redecide(conn, customer_ean: str, decisions: list, as_of: str = "",
             changed = True
         else:
             out.append(d)
-    return merge_same_card(out) if changed else decisions
+    if not changed:
+        return decisions
+    # #503: a fresh `history_sure` must not move a line back onto the OTHER slicing
+    # variant the first pass corrected it away from
+    return merge_same_card(apply_variant_siblings(out, catalog))
 
 
 def _ask_still_ambiguous(conn, row: dict, decisions: list, still_asking: list,

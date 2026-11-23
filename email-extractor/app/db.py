@@ -476,6 +476,19 @@ CODEX_CUSTOMERS = [
     """,
 ]
 
+# #503 (revision 22): Karmen K12/K18/K22 — "Chlieb pšen.‐ raž. 800g Granč" (unsliced) got the
+# sliced card and was summed with the sliced line into one (13.–24.11.2026). Fixed by
+# `match.variant_sibling` in the SAME PR that adds this row (orders-corpus.md #188/#196).
+INCIDENT_503 = [
+    """
+    INSERT INTO match_incidents (occurred_on, description, issue_ref) VALUES
+        ('2026-11-23', 'Karmen K12/K18/K22: nekrájaný chlieb 800g dostal kartu krájaného a '
+                       'spočítal sa s krájaným riadkom do jedného (od 13.11.) — oprava '
+                       '#503 (krájaný/nekrájaný v jednej objednávke = dve karty)', '#503')
+    ON CONFLICT (issue_ref) DO NOTHING
+    """,
+]
+
 # #495: the ❗ „Dodací list potrebuje kontrolu" reviews already posted to Odoo — one row per
 # delivery note (`doc_key`: supplier + DL number, or the mail when there is none) and reason
 # (`reason_hash`), written by `dl_events._post_review` BEFORE the post and released if Odoo
@@ -555,6 +568,7 @@ REVISIONS = [
     migrate.Revision(19, "add_codex_receipts", CODEX_RECEIPTS),
     migrate.Revision(20, "add_codex_customers", CODEX_CUSTOMERS),
     migrate.Revision(21, "add_dl_review_posts", DL_REVIEW_POSTS),
+    migrate.Revision(22, "seed_incident_503", INCIDENT_503),
 ]
 
 

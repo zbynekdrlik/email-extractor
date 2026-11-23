@@ -882,3 +882,121 @@ def test_match_product_prompt_states_the_same_weight_tolerance_the_code_applies_
     prompt = pipeline._prompt("match_product.md")
     tolerance_pct = round(match.WEIGHT_TOLERANCE * 100)
     assert f"{tolerance_pct} %" in prompt or f"{tolerance_pct}%" in prompt
+
+
+# --- #503: sliced vs unsliced variant of the same bread in ONE order --------------------
+# Karmen K12 (msg 21398, 23.11.2026): "Chlieb pšen.‐ raž. 800g Granč" (unsliced) was
+# matched to the SLICED card and then summed with the real "… 800g rez. Granč" line into
+# one line (2 + 6 → 8 ks rezaný; ORION got 5 lines instead of 6).
+
+UNSLICED = "Chlieb pšen.‐ raž. 800g Granč"
+SLICED = "Chlieb pšen.‐ raž. 800g rez. Granč"
+VARIANT_CATALOG = [
+    {"gtin": "8588001805609", "name": "Chlieb pšenično-ražný 800gr", "alias": ""},
+    {"gtin": "8588001805227", "name": "Chlieb pšenično-ražný rezaný 800 gr", "alias": ""},
+    {"gtin": "8588001805234", "name": "Chlieb pšenično-ražný rezaný 500 gr", "alias": ""},
+]
+
+
+def test_slice_state_reads_the_marker_in_wordings_and_card_names():
+    assert match.slice_state(SLICED) == "sliced"
+    assert match.slice_state("Chlieb pšenično-ražný rezaný 800 gr") == "sliced"
+    assert match.slice_state("Chlieb krájaný 500g") == "sliced"
+    assert match.slice_state(UNSLICED) == "plain"
+    assert match.slice_state("Chlieb pšenično-ražný 800gr") == "plain"
+    assert match.slice_state("Chlieb nerezaný 800g") == "plain"
+
+
+def test_merge_same_card_never_sums_a_sliced_and_an_unsliced_line():
+    a = _dec(UNSLICED, "8588001805227", "Chlieb pšenično-ražný rezaný 800 gr", 2)
+    b = _dec(SLICED, "8588001805227", "Chlieb pšenično-ražný rezaný 800 gr", 6,
+             rule="history_sure")
+    out = match.merge_same_card([a, b])
+    assert len(out) == 2
+    assert sorted(d.quantity for d in out) == [2, 6]
+
+
+def test_merge_same_card_keeps_the_real_wording_not_a_glued_a_plus_b_name():
+    """The merged "A + B" name went into item_memory as ONE wording (#503) — history must
+    only ever hold wordings the customer actually wrote."""
+    a = _dec("Rožok 70g", "G70", "Rožok kváskový 70g", 3)
+    b = _dec("rožok 70 g", "G70", "Rožok kváskový 70g", 2)
+    out = match.merge_same_card([a, b])
+    assert len(out) == 1
+    assert out[0].quantity == 5
+    assert out[0].item_name == "Rožok 70g"
+    assert " + " not in out[0].item_name
+    assert out[0].trace["merged_with"] == ["rožok 70 g"]
+
+
+def test_variant_sibling_moves_the_unmarked_line_to_the_unsliced_twin():
+    d = _dec(UNSLICED, "8588001805227", "Chlieb pšenično-ražný rezaný 800 gr", 2,
+             confidence=0.93)
+    out = match.variant_sibling(d, [UNSLICED, SLICED], VARIANT_CATALOG)
+    assert out.gtin == "8588001805609"
+    assert out.card == "Chlieb pšenično-ražný 800gr"
+    assert out.rule == "variant_sibling"
+    assert out.quantity == 2
+    assert out.trace["variant"]["from_gtin"] == "8588001805227"
+
+
+def test_variant_sibling_moves_a_marked_line_off_an_unsliced_card():
+    d = _dec(SLICED, "8588001805609", "Chlieb pšenično-ražný 800gr", 6)
+    out = match.variant_sibling(d, [UNSLICED, SLICED], VARIANT_CATALOG)
+    assert out.gtin == "8588001805227"
+    assert out.rule == "variant_sibling"
+
+
+def test_variant_sibling_leaves_a_consistent_line_alone():
+    d = _dec(SLICED, "8588001805227", "Chlieb pšenično-ražný rezaný 800 gr", 6,
+             rule="history_sure")
+    assert match.variant_sibling(d, [UNSLICED, SLICED], VARIANT_CATALOG) is d
+
+
+def test_variant_sibling_needs_the_other_variant_in_the_same_order():
+    """A customer who writes "chlieb 800g" alone and gets sliced bread by long history is
+    NOT touched — only the same order naming both variants proves they differ."""
+    d = _dec(UNSLICED, "8588001805227", "Chlieb pšenično-ražný rezaný 800 gr", 2)
+    assert match.variant_sibling(d, [UNSLICED, "Lupačka 75g Granč"], VARIANT_CATALOG) is d
+
+
+def test_variant_sibling_never_overrides_a_human_answer():
+    d = _dec(UNSLICED, "8588001805227", "Chlieb pšenično-ražný rezaný 800 gr", 2,
+             rule="human_taught", confidence=1.0)
+    assert match.variant_sibling(d, [UNSLICED, SLICED], VARIANT_CATALOG) is d
+
+
+def test_variant_sibling_asks_when_the_catalog_has_no_twin():
+    cat = [c for c in VARIANT_CATALOG if c["gtin"] != "8588001805609"]
+    d = _dec(UNSLICED, "8588001805227", "Chlieb pšenično-ražný rezaný 800 gr", 2)
+    out = match.variant_sibling(d, [UNSLICED, SLICED], cat)
+    assert out.rule == "variant_conflict"
+    assert out.review is True
+    from app.orders import pipeline
+    assert "variant_conflict" in pipeline.ASK_THE_WAREHOUSE
+
+
+def test_variant_conflict_ships_no_card_and_offers_the_twins_first():
+    """Review finding: a conflict line that kept the PROVEN-wrong gtin shipped (and was
+    remembered) at the deadline; its question offered only the wrong card."""
+    cat = VARIANT_CATALOG + [{"gtin": "8588001899999", "name": "Chlieb pšenično-ražný 800 g",
+                              "alias": ""}]
+    d = _dec(UNSLICED, "8588001805227", "Chlieb pšenično-ražný rezaný 800 gr", 2)
+    out = match.variant_sibling(d, [UNSLICED, SLICED], cat)
+    assert out.rule == "variant_conflict" and out.gtin is None
+    shown = match.plausible_candidates(match.candidates_for_question([], cat, out))
+    assert [c["gtin"] for c in shown] == ["8588001805609", "8588001899999", "8588001805227"]
+
+
+def test_slice_markers_ignore_noodles_and_a_region():
+    assert match.slice_state("Rezance vaječné 250g") == "plain"
+    assert match.slice_state("Klobása Spišský kraj 300g") == "plain"
+    assert match.slice_state("Chlieb krájaný 500g") == "sliced"
+
+
+def test_merge_same_card_reads_a_pre_503_string_merged_with():
+    a = _dec("Rožok 70g", "G70", "Rožok kváskový 70g", 3)
+    a.trace = {"merged_with": "rožok 70 g"}
+    b = _dec("Rožok 70 g.", "G70", "Rožok kváskový 70g", 2)
+    out = match.merge_same_card([a, b])
+    assert out[0].trace["merged_with"] == ["rožok 70 g", "Rožok 70 g."]

@@ -87,9 +87,11 @@ TECHNICAL_REASONS = {Reason.CHANGE_REQUEST, Reason.LLM_REFUSED, Reason.UPLOAD_FA
 # in exactly one gramáž has no alternative to choose between, so asking is noise.
 # #479 `codex_missing`: the line's card has a code CODEX has no stock card for (live only,
 # `card_guard.gate_order_line`) — CODEX would not take it, so the warehouse picks the card.
+# #503 `variant_conflict`: a sliced/unsliced sibling in the same order and no single
+# catalog twin to move the line to (`match.variant_sibling`).
 ASK_THE_WAREHOUSE = ("unmatched", "llm_borderline", "history_weight",
                     "llm_sure_alias_conflict", "llm_sure_lexical_gap",
-                    card_guard.CODEX_MISSING)
+                    card_guard.CODEX_MISSING, "variant_conflict")
 
 PROMPTS = Path(__file__).with_name("prompts")
 
@@ -494,6 +496,11 @@ def _run(conn, cfg, message: dict, snapshot_id: int, client, upload=None,
                                         customer_name=matched.name if matched else "")
             decision.quantity = item.get("quantity")
             decision.unit = item.get("unit", "ks")
+            # #503: the same order naming a sliced AND an unsliced variant of one bread
+            # proves they are two products — a line on the other variant's card moves to
+            # its twin (or is asked), BEFORE the question/merge below see it
+            decision = match.variant_sibling(
+                decision, [it.get("name", "") for it in order.get("items") or []], catalog)
             # #479: a card whose code CODEX lacks → a cardless `codex_missing` line, asked +
             # held below like any other unsettled line (never an ORDER file CODEX rejects)
             decision = card_guard.gate_order_line(decision, codex)
