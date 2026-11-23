@@ -1000,3 +1000,15 @@ def test_merge_same_card_reads_a_pre_503_string_merged_with():
     b = _dec("Rožok 70 g.", "G70", "Rožok kváskový 70g", 2)
     out = match.merge_same_card([a, b])
     assert out[0].trace["merged_with"] == ["rožok 70 g", "Rožok 70 g."]
+
+
+def test_variant_sibling_finds_the_live_voľný_twin():
+    """Post-deploy finding (0.9.187): the live catalog names the unsliced card
+    "Chlieb pšenično ražný voľný 800g" — "voľný" (loose, not sliced) must count as the
+    unsliced marker, or the twin is never found and the line is only asked."""
+    cat = [{"gtin": "8588001805609", "name": "Chlieb pšenično ražný voľný 800g", "alias": ""},
+           {"gtin": "8588001805227", "name": "Chlieb pšenično-ražný rezaný 800 gr", "alias": ""}]
+    assert match.slice_state("Chlieb pšenično ražný voľný 800g") == "plain"
+    d = _dec(UNSLICED, "8588001805227", "Chlieb pšenično-ražný rezaný 800 gr", 2)
+    out = match.variant_sibling(d, [UNSLICED, SLICED], cat)
+    assert out.rule == "variant_sibling" and out.gtin == "8588001805609"
