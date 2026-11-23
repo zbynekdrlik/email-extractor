@@ -584,3 +584,22 @@ def test_the_worker_runs_the_stale_sweep_for_an_orders_only_install(pg):
     rows = pg.execute("SELECT channel_id FROM pending_alerts WHERE kind = %s",
                       (codex_cards.ALERT_KIND,)).fetchall()
     assert rows == [(77,)]
+
+
+def test_a_confirmed_quantity_replaces_only_its_own_share_of_a_merged_line(pg):
+    """#503 review finding: a merged line now keeps its first wording as `item_name`, so the
+    warehouse-confirmed quantity of that wording's question must replace that wording's
+    share only — never the summed line (the other wording's pieces would be dropped)."""
+    from app.orders import hold_place, match, teach
+    a = match.Decision(item_name="Rožok 70g", gtin="G70", card="Rožok", confidence=0.8,
+                       rule="llm_borderline", note="", quantity=5, unit="ks")
+    b = match.Decision(item_name="rožok 70 g kus", gtin="G70", card="Rožok", confidence=0.9,
+                       rule="llm_sure", note="", quantity=3, unit="ks")
+    merged = match.merge_same_card([a, b])
+    assert len(merged) == 1 and merged[0].quantity == 8
+    qid = teach.ask(pg, message_id="m-503", customer_ean="2000000000001",
+                    customer_name="X", wording="Rožok 70g", quantity=5, unit="ks",
+                    candidates=[{"gtin": "G70", "name": "Rožok"}], delivery_date="")
+    pg.execute("UPDATE order_questions SET quantity = 4 WHERE id = %s", (qid,))
+    hold_place._apply_confirmed_quantities(pg, merged, [qid])
+    assert merged[0].quantity == 7

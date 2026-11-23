@@ -974,3 +974,29 @@ def test_variant_sibling_asks_when_the_catalog_has_no_twin():
     assert out.review is True
     from app.orders import pipeline
     assert "variant_conflict" in pipeline.ASK_THE_WAREHOUSE
+
+
+def test_variant_conflict_ships_no_card_and_offers_the_twins_first():
+    """Review finding: a conflict line that kept the PROVEN-wrong gtin shipped (and was
+    remembered) at the deadline; its question offered only the wrong card."""
+    cat = VARIANT_CATALOG + [{"gtin": "8588001899999", "name": "Chlieb pšenično-ražný 800 g",
+                              "alias": ""}]
+    d = _dec(UNSLICED, "8588001805227", "Chlieb pšenično-ražný rezaný 800 gr", 2)
+    out = match.variant_sibling(d, [UNSLICED, SLICED], cat)
+    assert out.rule == "variant_conflict" and out.gtin is None
+    shown = match.plausible_candidates(match.candidates_for_question([], cat, out))
+    assert [c["gtin"] for c in shown] == ["8588001805609", "8588001899999", "8588001805227"]
+
+
+def test_slice_markers_ignore_noodles_and_a_region():
+    assert match.slice_state("Rezance vaječné 250g") == "plain"
+    assert match.slice_state("Klobása Spišský kraj 300g") == "plain"
+    assert match.slice_state("Chlieb krájaný 500g") == "sliced"
+
+
+def test_merge_same_card_reads_a_pre_503_string_merged_with():
+    a = _dec("Rožok 70g", "G70", "Rožok kváskový 70g", 3)
+    a.trace = {"merged_with": "rožok 70 g"}
+    b = _dec("Rožok 70 g.", "G70", "Rožok kváskový 70g", 2)
+    out = match.merge_same_card([a, b])
+    assert out[0].trace["merged_with"] == ["rožok 70 g", "Rožok 70 g."]
