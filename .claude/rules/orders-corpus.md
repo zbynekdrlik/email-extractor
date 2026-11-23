@@ -1928,3 +1928,24 @@ intentional there for cards it was tuned against.
   []`, `unshipped: 21` (each of the 5 shops asked once; a card's name only ranks the
   question). A re-record is needed whenever the customer of an order changes (the item calls
   carry the customer), the extraction cache stays valid.
+
+## A corpus case built from a prod incident can PASS on the broken code — seed the prod HISTORY too (#503)
+
+The Karmen K12 case (`karmen-k12-2026-11-23-503`) first passed on the pre-fix code: the
+corpus `history.json` had no K12 rows, so the model picked the right card. In prod the wrong
+pick came from the customer's OWN ship history (written by earlier wrong runs) that the model
+saw as a "predtým dodané" hint. Before trusting a new incident case, run it ALSO on the
+pre-fix code (`git -C <repo> archive <red-commit> email-extractor | tar -x -C <scratch>` and
+run `eval_run` from there with the same `LLM_CACHE_DIR`). If it passes there, the case does
+not pin the fix yet. Seed the prod `item_memory` rows the customer had before that day
+into `history.json`, re-record with `--live`, and re-check: old code must fail, new code
+must pass. Write down in the case's `why` which history you seeded.
+
+**Sliced / unsliced variants (#503):** `match.variant_sibling` runs in the pipeline item loop
+(before the question) and again in `hold_redecide`. It needs evidence from the SAME order: the
+other slicing variant of the same base wording. It moves the line to the catalog twin (same
+base name, same weight, the line's slicing state) or asks `variant_conflict`. It never touches
+`human_taught`/`global_taught`. `slice_state` reads `rez`/`rezan*`/`kraj`/`krajan*` (sliced)
+and `nerez*`/`nekraj*` (plain) on `_norm`-folded words. `merge_same_card` keeps the FIRST
+wording; `trace.merged_with` is a LIST. Never glue the names into "A + B": that string went
+into `item_memory` as one wording.

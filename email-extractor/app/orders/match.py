@@ -348,7 +348,7 @@ def _variant_question_cards(decision: Decision, catalog: list[dict]) -> list[dic
     first, then the rejected card — never the rejected card as the proposal (#503)."""
     v = (decision.trace or {}).get("variant") or {}
     gtins = list(v.get("twins") or []) + [str(v.get("from_gtin") or "")]
-    out = []
+    out: list[dict] = []
     for g in gtins:
         card = _card(catalog, g) if g else None
         if card and all(str(c.get("gtin")) != g for c in out):
