@@ -167,3 +167,42 @@ def test_config_reads_the_anthropic_key_from_the_environment(monkeypatch, tmp_pa
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-env")
     cfg = Config.load()
     assert cfg.anthropic_api_key == "sk-ant-env"
+
+
+# --- review findings (#511) -------------------------------------------------------------
+
+def _png(w=10, h=10):
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (w, h), "white").save(buf, "PNG")
+    return buf.getvalue()
+
+
+def test_claude_vision_declares_the_real_image_type(tmp_path):
+    """The Messages API checks the bytes against `media_type`: a PNG labelled image/jpeg
+    is a 400 — human_processing passes raw PNG/photo attachments through."""
+    fake = FakeAnthropic(["t"])
+    c, _ = _client(tmp_path, fake)
+    c.vision_call("P", images=[_png()], n=1)
+    assert fake.requests[0]["messages"][0]["content"][0]["source"]["media_type"] == "image/png"
+
+
+def test_claude_vision_shrinks_a_huge_scan_below_the_api_image_limit(tmp_path):
+    """A 600-DPI scanner JPEG can exceed the 5 MB per-image limit; Claude reads at most
+    ~1568 px on the long edge anyway, so the page is scaled to that before sending."""
+    import io
+    from PIL import Image
+    big = _png(5000, 7000)
+    fake = FakeAnthropic(["t"])
+    c, _ = _client(tmp_path, fake)
+    c.vision_call("P", images=[big], n=1)
+    src = fake.requests[0]["messages"][0]["content"][0]["source"]
+    img = Image.open(io.BytesIO(base64.b64decode(src["data"])))
+    assert max(img.size) <= 1568
+    assert len(base64.b64decode(src["data"])) < 5 * 1024 * 1024
+
+
+def test_a_dropped_connection_is_a_transient_failure():
+    from app.orders import dl_retry
+    assert dl_retry.TRANSIENT_RE.search("LlmError(\"APIConnectionError('Connection error.')\")")
