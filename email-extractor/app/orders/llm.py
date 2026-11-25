@@ -187,6 +187,43 @@ def _anthropic_json_request(payload: dict) -> dict:
             "messages": [{"role": "user", "content": user}]}
 
 
+# Claude reads an image at most ~1568 px on its long edge and rejects one over 5 MB, so a
+# 600-DPI scanner page is scaled down before sending: it buys nothing and would be a 400.
+ANTHROPIC_IMAGE_MAX_EDGE = 1568
+_IMAGE_MAGIC = ((b"\x89PNG", "image/png"), (b"GIF8", "image/gif"), (b"\xff\xd8", "image/jpeg"))
+
+
+def _image_media_type(raw: bytes) -> str:
+    """The real type of an image — the Messages API checks the bytes against it."""
+    for magic, media in _IMAGE_MAGIC:
+        if raw.startswith(magic):
+            return media
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"
+
+
+def _anthropic_image(raw: bytes) -> tuple[str, str]:
+    """(base64 data, media type) for one page: the real type, scaled to the API's limits."""
+    import io
+
+    from PIL import Image
+    try:
+        img = Image.open(io.BytesIO(raw))
+        too_big = max(img.size) > ANTHROPIC_IMAGE_MAX_EDGE
+    except Exception:
+        # not decodable here — send it as it is and let the API answer for it
+        return base64.b64encode(raw).decode(), _image_media_type(raw)
+    if not too_big:
+        return base64.b64encode(raw).decode(), _image_media_type(raw)
+    img.thumbnail((ANTHROPIC_IMAGE_MAX_EDGE, ANTHROPIC_IMAGE_MAX_EDGE))
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, "JPEG", quality=85)
+    log.info("claude vision: page %sx%s scaled to %s (%d -> %d bytes)",
+             *Image.open(io.BytesIO(raw)).size, img.size, len(raw), buf.tell())
+    return base64.b64encode(buf.getvalue()).decode(), "image/jpeg"
+
+
 def _anthropic_vision_request(payload: dict) -> tuple[dict, int]:
     """One request per sample: the Messages API has no `n`, so `n` independent calls."""
     blocks: list[dict] = []
@@ -195,9 +232,10 @@ def _anthropic_vision_request(payload: dict) -> tuple[dict, int]:
         if part["type"] == "text":
             prompt = part["text"]
         elif part["type"] == "image_url":
-            data = part["image_url"]["url"].split(",", 1)[1]
+            raw = base64.b64decode(part["image_url"]["url"].split(",", 1)[1])
+            data, media = _anthropic_image(raw)
             blocks.append({"type": "image", "source": {"type": "base64",
-                                                       "media_type": "image/jpeg",
+                                                       "media_type": media,
                                                        "data": data}})
         elif part["type"] == "file":
             data = part["file"]["file_data"].split(",", 1)[1]
