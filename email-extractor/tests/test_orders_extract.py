@@ -409,7 +409,7 @@ def test_the_cache_serves_a_repeated_call_without_touching_the_network(tmp_path)
         calls.append(payload)
         return {"orders": [{"deliveryDate": "31.07.2026", "items": []}]}
 
-    client = llm.Client(api_key="k", cache_dir=str(tmp_path), transport=fake_transport)
+    client = llm.Client(model="gpt-5.4", api_key="k", cache_dir=str(tmp_path), transport=fake_transport)
     first = client.json_call("system prompt", "user input", schema={"type": "object"})
     second = client.json_call("system prompt", "user input", schema={"type": "object"})
     assert first == second
@@ -418,7 +418,7 @@ def test_the_cache_serves_a_repeated_call_without_touching_the_network(tmp_path)
 
 def test_a_changed_prompt_is_a_different_cache_entry(tmp_path):
     calls = []
-    client = llm.Client(api_key="k", cache_dir=str(tmp_path),
+    client = llm.Client(model="gpt-5.4", api_key="k", cache_dir=str(tmp_path),
                         transport=lambda p, a, t: calls.append(p) or {"orders": []})
     client.json_call("prompt A", "input", schema={"type": "object"})
     client.json_call("prompt B", "input", schema={"type": "object"})
@@ -426,7 +426,7 @@ def test_a_changed_prompt_is_a_different_cache_entry(tmp_path):
 
 
 def test_the_prompt_hash_is_recorded_so_a_run_says_which_prompt_produced_it(tmp_path):
-    client = llm.Client(api_key="k", cache_dir=str(tmp_path),
+    client = llm.Client(model="gpt-5.4", api_key="k", cache_dir=str(tmp_path),
                         transport=lambda p, a, t: {"orders": []})
     client.json_call("system prompt", "user input", schema={"type": "object"})
     assert len(client.last_prompt_hash) == 12
@@ -435,7 +435,7 @@ def test_the_prompt_hash_is_recorded_so_a_run_says_which_prompt_produced_it(tmp_
 def test_offline_mode_refuses_a_cache_miss_instead_of_calling_out(tmp_path):
     """CI runs offline: a missing cache entry must fail loudly, never silently spend
     money or hang on a network call."""
-    client = llm.Client(api_key="", cache_dir=str(tmp_path), offline=True,
+    client = llm.Client(model="gpt-5.4", api_key="", cache_dir=str(tmp_path), offline=True,
                         transport=lambda p, a, t: {"orders": []})
     try:
         client.json_call("system", "input", schema={"type": "object"})
