@@ -173,6 +173,7 @@ def test_config_reads_the_anthropic_key_from_the_environment(monkeypatch, tmp_pa
 
 def _png(w=10, h=10):
     import io
+
     from PIL import Image
     buf = io.BytesIO()
     Image.new("RGB", (w, h), "white").save(buf, "PNG")
@@ -192,6 +193,7 @@ def test_claude_vision_shrinks_a_huge_scan_below_the_api_image_limit(tmp_path):
     """A 600-DPI scanner JPEG can exceed the 5 MB per-image limit; Claude reads at most
     ~1568 px on the long edge anyway, so the page is scaled to that before sending."""
     import io
+
     from PIL import Image
     big = _png(5000, 7000)
     fake = FakeAnthropic(["t"])
