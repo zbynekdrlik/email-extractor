@@ -112,7 +112,9 @@ class Config:
     codex_code_overrides: str = ""
     orders_spend_cap_eur: float = 30.0
     openai_api_key: str = ""
-    orders_model: str = "gpt-5.4"
+    # #511: the order/DL engines run on Claude, paid from the Claude plan's API credit
+    anthropic_api_key: str = ""
+    orders_model: str = "claude-sonnet-5-5"
     orders_reasoning_effort: str = "high"
     llm_cache_dir: str = "/data/llm-cache"
     odoo_url: str = ""
@@ -318,7 +320,9 @@ class Config:
             orders_spend_cap_eur=float(
                 _get(o, "orders_spend_cap_eur", "ORDERS_SPEND_CAP_EUR", 30) or 0),
             openai_api_key=_get(o, "openai_api_key", "OPENAI_API_KEY", "") or "",
-            orders_model=_get(o, "orders_model", "ORDERS_MODEL", "gpt-5.4") or "gpt-5.4",
+            anthropic_api_key=_get(o, "anthropic_api_key", "ANTHROPIC_API_KEY", "") or "",
+            orders_model=_get(o, "orders_model", "ORDERS_MODEL",
+                              "claude-sonnet-5-5") or "claude-sonnet-5-5",
             orders_reasoning_effort=_get(o, "orders_reasoning_effort",
                                          "ORDERS_REASONING_EFFORT", "high") or "high",
             llm_cache_dir=_get(o, "llm_cache_dir", "LLM_CACHE_DIR", "/data/llm-cache"),

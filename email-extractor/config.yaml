@@ -55,7 +55,8 @@ options:
   codex_code_overrides: ""
   orders_spend_cap_eur: 30
   openai_api_key: ""
-  orders_model: "gpt-5.4"
+  anthropic_api_key: ""
+  orders_model: "claude-sonnet-5-5"
   orders_reasoning_effort: "high"
   odoo_url: ""
   odoo_api_key: ""
@@ -132,6 +133,7 @@ schema:
   codex_code_overrides: str?
   orders_spend_cap_eur: float?
   openai_api_key: password?
+  anthropic_api_key: password?
   orders_model: str?
   orders_reasoning_effort: list(low|medium|high|xhigh)?
   odoo_url: str?

@@ -1,4 +1,4 @@
-"""Cached OpenAI client for the order pipeline (#61).
+"""Cached LLM client for the order pipeline (#61) — OpenAI or Claude (#511).
 
 Two things this owns:
 
@@ -9,12 +9,15 @@ Two things this owns:
   and a prompt edit is automatically a cache miss. In `offline=True` a miss RAISES rather
   than calling out — CI must never spend money or hang on a network call.
 
-Model and effort come from the config; the standing decision is the top tier
-(`gpt-5.4`, reasoning `high`), never downgraded to save cost.
+Model and effort come from the config. The provider follows the model id (#511): `claude-*`
+runs on the Anthropic Messages API (paid from the Claude plan's included API credit), any
+other id on OpenAI. Default `claude-sonnet-5-5`, effort `high` — matched gpt-5.4 on the
+order + DL corpora; rollback is the `orders_model` option set back to `gpt-5.4`.
 """
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import logging
@@ -29,9 +32,11 @@ API_URL = "https://api.openai.com/v1/responses"
 # single call (R41/R43's dual-transcript cross-check) — the Responses API has no
 # equivalent of Chat Completions' `n`, so vision_call() is a genuinely separate transport.
 CHAT_API_URL = "https://api.openai.com/v1/chat/completions"
-DEFAULT_MODEL = "gpt-5.4"
+DEFAULT_MODEL = "claude-sonnet-5-5"
 DEFAULT_EFFORT = "high"
 TIMEOUT = 300
+# Streaming keeps a large ceiling safe from HTTP timeouts; the answers themselves are small.
+ANTHROPIC_MAX_TOKENS = 64000
 
 
 class CacheMiss(Exception):
@@ -42,14 +47,24 @@ class LlmError(Exception):
     """The model call failed or returned something unusable."""
 
 
-# PRICES: per 1M tokens, developers.openai.com/api/docs/pricing (fetched 2026-07-31).
+# PRICES: per 1M tokens (input, cached input, output) — OpenAI from
+# developers.openai.com/api/docs/pricing (fetched 2026-07-31), Claude from
+# platform.claude.com pricing (2026-11-25).
 # An unlisted model RAISES rather than being priced at zero: a silent 0 would make the
 # €30/month tripwire (#89) permanently green, which is worse than no tripwire at all.
 PRICES = {
     "gpt-5.4": (2.50, 0.25, 15.00),
     "gpt-5.4-mini": (0.75, 0.075, 4.50),
     "gpt-5.5": (5.00, 0.50, 30.00),
+    "claude-sonnet-5-5": (2.00, 0.10, 10.00),
+    "claude-opus-5-5": (4.00, 0.20, 20.00),
+    "claude-haiku-5-5": (0.10, 0.01, 0.50),
 }
+
+
+def is_anthropic(model: str) -> bool:
+    """A `claude-*` model id runs on the Anthropic Messages API (#511)."""
+    return str(model or "").startswith("claude-")
 
 
 def cost_usd(usage: dict | None, model: str = DEFAULT_MODEL) -> float:
@@ -139,23 +154,159 @@ def _parse_response(body: dict) -> dict:
     raise LlmError(f"no output in response: {json.dumps(body)[:300]}")
 
 
+# --- Anthropic (Claude) transports (#511) -------------------------------------------------
+# They take the SAME payload `Client` builds for OpenAI and translate it, so the cache key,
+# offline replay and spend tally stay one code path for both providers.
+
+def _closed_schema(schema: dict) -> dict:
+    """Structured outputs need every object closed (`additionalProperties: false`), nested
+    ones included. A copy — the caller's schema (also an OpenAI request) stays untouched."""
+    out = copy.deepcopy(schema)
+
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("type") == "object" or "properties" in node:
+                node.setdefault("additionalProperties", False)
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+    walk(out)
+    return out
+
+
+def _anthropic_json_request(payload: dict) -> dict:
+    system = next(m["content"] for m in payload["input"] if m["role"] == "system")
+    user = next(m["content"] for m in payload["input"] if m["role"] == "user")
+    return {"model": payload["model"], "max_tokens": ANTHROPIC_MAX_TOKENS, "system": system,
+            "output_config": {"effort": payload["reasoning"]["effort"],
+                              "format": {"type": "json_schema",
+                                         "schema": _closed_schema(
+                                             payload["text"]["format"]["schema"])}},
+            "messages": [{"role": "user", "content": user}]}
+
+
+def _anthropic_vision_request(payload: dict) -> tuple[dict, int]:
+    """One request per sample: the Messages API has no `n`, so `n` independent calls."""
+    blocks: list[dict] = []
+    prompt = ""
+    for part in payload["messages"][0]["content"]:
+        if part["type"] == "text":
+            prompt = part["text"]
+        elif part["type"] == "image_url":
+            data = part["image_url"]["url"].split(",", 1)[1]
+            blocks.append({"type": "image", "source": {"type": "base64",
+                                                       "media_type": "image/jpeg",
+                                                       "data": data}})
+        elif part["type"] == "file":
+            data = part["file"]["file_data"].split(",", 1)[1]
+            blocks.append({"type": "document", "source": {"type": "base64",
+                                                          "media_type": "application/pdf",
+                                                          "data": data}})
+    blocks.append({"type": "text", "text": prompt})
+    req = {"model": payload["model"], "max_tokens": ANTHROPIC_MAX_TOKENS,
+           "output_config": {"effort": payload["reasoning_effort"]},
+           "messages": [{"role": "user", "content": blocks}]}
+    return req, int(payload.get("n", 1) or 1)
+
+
+def _anthropic_message(factory, api_key: str, timeout: int, request: dict):
+    try:
+        client = factory(api_key, timeout)
+        with client.messages.stream(**request) as stream:
+            msg = stream.get_final_message()
+    except Exception as e:
+        # rate limit / overload / timeout texts keep their wording for the transient checks
+        raise LlmError(repr(e)) from e
+    if msg.stop_reason == "refusal":
+        raise LlmError(f"refusal: {getattr(msg, 'stop_details', None)}")
+    if msg.stop_reason == "max_tokens":
+        raise LlmError("Claude answer cut off at max_tokens")
+    return msg
+
+
+def _anthropic_text(msg) -> str:
+    return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+
+
+def _anthropic_tokens(usage) -> tuple[int, int, int]:
+    """(all input incl. cache reads/writes, cache reads, output) from Anthropic usage."""
+    read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+    write = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    return int(usage.input_tokens or 0) + read + write, read, int(usage.output_tokens or 0)
+
+
+def _default_anthropic_factory(api_key: str, timeout: int):   # pragma: no cover - network
+    import anthropic
+    return anthropic.Anthropic(api_key=api_key, timeout=timeout, max_retries=4)
+
+
+def _anthropic_json_transport(factory):
+    def transport(payload: dict, api_key: str, timeout: int):
+        msg = _anthropic_message(factory, api_key, timeout, _anthropic_json_request(payload))
+        text = _anthropic_text(msg)
+        try:
+            result = json.loads(text)
+        except json.JSONDecodeError as e:
+            raise LlmError(f"model returned non-JSON: {text[:200]}") from e
+        tin, cached, tout = _anthropic_tokens(msg.usage)
+        return result, {"input_tokens": tin, "output_tokens": tout,
+                        "input_tokens_details": {"cached_tokens": cached},
+                        "output_tokens_details": {"reasoning_tokens": 0}}
+    return transport
+
+
+def _anthropic_vision_transport(factory):
+    def transport(payload: dict, api_key: str, timeout: int):
+        request, n = _anthropic_vision_request(payload)
+        texts, tin, cached, tout = [], 0, 0, 0
+        for _ in range(n):
+            msg = _anthropic_message(factory, api_key, timeout, request)
+            texts.append(_anthropic_text(msg))
+            a, b, c = _anthropic_tokens(msg.usage)
+            tin, cached, tout = tin + a, cached + b, tout + c
+        # Chat-Completions-shaped, so vision_call prices it through the same normaliser
+        return texts, {"prompt_tokens": tin, "completion_tokens": tout,
+                       "prompt_tokens_details": {"cached_tokens": cached},
+                       "completion_tokens_details": {"reasoning_tokens": 0}}
+    return transport
+
+
 class Client:
     def __init__(self, api_key: str = "", cache_dir: str = "", model: str = DEFAULT_MODEL,
                  reasoning_effort: str = DEFAULT_EFFORT, offline: bool = False,
-                 transport=None, timeout: int = TIMEOUT, vision_transport=None):
+                 transport=None, timeout: int = TIMEOUT, vision_transport=None,
+                 anthropic_api_key: str = "", anthropic_factory=None):
         self.api_key = api_key
+        self.anthropic_api_key = anthropic_api_key
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.model = model or DEFAULT_MODEL
         self.reasoning_effort = reasoning_effort or DEFAULT_EFFORT
         self.offline = offline
         self.timeout = timeout
-        self._transport = transport or _http_transport
-        self._vision_transport = vision_transport or _http_transport_chat
+        if is_anthropic(self.model):
+            factory = anthropic_factory or _default_anthropic_factory
+            self._transport = transport or _anthropic_json_transport(factory)
+            self._vision_transport = vision_transport or _anthropic_vision_transport(factory)
+        else:
+            self._transport = transport or _http_transport
+            self._vision_transport = vision_transport or _http_transport_chat
         self.last_prompt_hash = ""
         self.last_cached = False
         # The running bill for this client, so a run can persist what it cost (#89).
         self._spend = {"calls": 0, "cached_calls": 0, "tokens_in": 0, "tokens_cached": 0,
                        "tokens_out": 0, "tokens_reasoning": 0, "cost_usd": 0.0}
+
+    def _key_for_model(self) -> str:
+        """The API key of the model's provider, or a clear error naming the missing option."""
+        if is_anthropic(self.model):
+            if not self.anthropic_api_key:
+                raise LlmError("no Anthropic API key configured (option anthropic_api_key)")
+            return self.anthropic_api_key
+        if not self.api_key:
+            raise LlmError("no OpenAI API key configured (option openai_api_key)")
+        return self.api_key
 
     def spend(self) -> dict:
         return dict(self._spend, model=self.model)
@@ -203,8 +354,7 @@ class Client:
             raise CacheMiss(
                 f"offline: no cached answer for {key[:12]} (prompt {self.last_prompt_hash}). "
                 "Record it with the live tier before relying on it in CI.")
-        if not self.api_key:
-            raise LlmError("no OpenAI API key configured (option openai_api_key)")
+        api_key = self._key_for_model()
 
         payload = {
             "model": self.model,
@@ -214,7 +364,7 @@ class Client:
             "text": {"format": {"type": "json_schema", "name": name,
                                 "schema": schema, "strict": False}},
         }
-        answer = self._transport(payload, self.api_key, self.timeout)
+        answer = self._transport(payload, api_key, self.timeout)
         # A transport may report the token usage alongside the answer; the test doubles (and
         # any older transport) return the answer alone, and then the run is simply unpriced.
         result, usage = answer if isinstance(answer, tuple) else (answer, None)
@@ -260,8 +410,7 @@ class Client:
             raise CacheMiss(
                 f"offline: no cached vision answer for {key[:12]}. "
                 "Record it with the live tier before relying on it in CI.")
-        if not self.api_key:
-            raise LlmError("no OpenAI API key configured (option openai_api_key)")
+        api_key = self._key_for_model()
 
         content: list[dict] = [{"type": "text", "text": prompt}]
         for img in images or []:
@@ -280,7 +429,7 @@ class Client:
             "n": n,
             "messages": [{"role": "user", "content": content}],
         }
-        answer = self._vision_transport(payload, self.api_key, self.timeout)
+        answer = self._vision_transport(payload, api_key, self.timeout)
         texts, usage = answer if isinstance(answer, tuple) else (answer, None)
         self.last_cached = False
         self._tally(_chat_usage_as_responses(usage), cached=False)
@@ -293,6 +442,7 @@ class Client:
 
 def from_config(cfg, offline: bool = False) -> Client:
     return Client(api_key=getattr(cfg, "openai_api_key", ""),
+                  anthropic_api_key=getattr(cfg, "anthropic_api_key", "") or "",
                   cache_dir=getattr(cfg, "llm_cache_dir", "") or "",
                   model=getattr(cfg, "orders_model", DEFAULT_MODEL),
                   reasoning_effort=getattr(cfg, "orders_reasoning_effort", DEFAULT_EFFORT),
