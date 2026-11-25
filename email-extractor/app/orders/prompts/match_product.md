@@ -29,6 +29,12 @@ Abbreviated names are normal: "moravsky koláč tvaroh" is "Moravský koláč tv
 - **Be deterministic**: the same ordered name must always map to the same card, including
   when it repeats in one email.
 - Use `NO_MATCH` only when nothing in the catalog is related.
+- **A missing weight is not a doubt by itself.** When the ordered name gives no weight and
+  names the plain/basic product of a family ("obyčajný rožok", "rožok biely", "klasický
+  rožok"), and exactly one card is that plain variant while the other cards carry an extra
+  attribute the order does not mention (kváskový, cereálny, grahamový, plnený …), that plain
+  card IS the item — 0.9 or higher. The same holds whenever exactly one card fits the wording.
+  Stay below 0.85 only when two or more cards fit the wording equally well.
 
 Confidence: 0.95-1.0 clearly the same item (weight and wording agree, or the alias/history
 confirms); 0.85-0.95 same core product with minor wording doubts, but NEVER when the

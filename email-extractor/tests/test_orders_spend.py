@@ -31,20 +31,20 @@ def _client(tmp_path, answers, usages):
         calls["n"] += 1
         return answers[i], usages[i]
 
-    return llm.Client(api_key="k", cache_dir=str(tmp_path), transport=transport)
+    return llm.Client(model="gpt-5.4", api_key="k", cache_dir=str(tmp_path), transport=transport)
 
 
 # --- pricing -------------------------------------------------------------
 
 def test_a_call_is_priced_by_the_published_table():
-    got = llm.cost_usd(_usage(inp=1_000_000, cached=0, out=1_000_000))
+    got = llm.cost_usd(_usage(inp=1_000_000, cached=0, out=1_000_000), model="gpt-5.4")
     assert got == pytest.approx(IN + OUT)
 
 
 def test_cached_input_is_a_tenth_of_the_price():
     """The whole point of ordering the payload so the static part is a stable prefix."""
-    fresh = llm.cost_usd(_usage(inp=1_000_000, cached=0, out=0))
-    cached = llm.cost_usd(_usage(inp=1_000_000, cached=1_000_000, out=0))
+    fresh = llm.cost_usd(_usage(inp=1_000_000, cached=0, out=0), model="gpt-5.4")
+    cached = llm.cost_usd(_usage(inp=1_000_000, cached=1_000_000, out=0), model="gpt-5.4")
     assert fresh == pytest.approx(IN)
     assert cached == pytest.approx(CACHED)
 
@@ -63,8 +63,8 @@ def test_the_client_tallies_tokens_and_cost_across_calls(tmp_path):
     s = c.spend()
     assert s["calls"] == 2
     assert s["tokens_in"] == 3000 and s["tokens_out"] == 600
-    assert s["cost_usd"] == pytest.approx(llm.cost_usd(_usage())
-                                          + llm.cost_usd(_usage(inp=2000, out=100)))
+    assert s["cost_usd"] == pytest.approx(llm.cost_usd(_usage(), model="gpt-5.4")
+                                          + llm.cost_usd(_usage(inp=2000, out=100), model="gpt-5.4"))
 
 
 def test_a_cache_hit_costs_nothing_and_is_counted_as_such(tmp_path):
@@ -80,7 +80,7 @@ def test_a_cache_hit_costs_nothing_and_is_counted_as_such(tmp_path):
 
 def test_a_transport_that_reports_no_usage_does_not_break_the_run(tmp_path):
     """An old-style transport (and every test double) returns just the parsed answer."""
-    c = llm.Client(api_key="k", transport=lambda p, k, t: {"a": 1})
+    c = llm.Client(model="gpt-5.4", api_key="k", transport=lambda p, k, t: {"a": 1})
     assert c.json_call("s", "u", {"type": "object"}) == {"a": 1}
     assert c.spend()["calls"] == 1 and c.spend()["cost_usd"] == 0
 

@@ -10,6 +10,9 @@ Rules:
   branch (a named town/shop that matches another candidate).
 - Match on the company name from the signature or footer, and on the town/street when the
   email names one.
+- The sender's ADDRESS can name the branch too: a town or street written in the address
+  itself (e.g. `dedkolinovce@…` → the branch in Kolinovce) identifies that branch exactly
+  like the town in a signature, when exactly one candidate of that company is in that town.
 - Several branches of one chain differ ONLY by town/street — never pick between them by
   guessing; if the email does not say which, answer with an empty `ean_edi`.
 - Below 0.85 the match is discarded downstream and the order goes to the warehouse for

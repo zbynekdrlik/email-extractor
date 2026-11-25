@@ -1953,3 +1953,30 @@ The FROZEN corpus catalog is not the live one: it names the unsliced card "…80
 live catalog calls it "… voľný 800g". `voľný` counts as the plain marker (0.9.188). After
 deploying a rule that keys on card NAMES, run it in the container against
 `hold_redecide._current_catalog(conn)` (read-only) — the corpus cannot catch a live naming.
+
+## The engines run on Claude since 0.9.189 (#511) — the provider follows the model id
+
+`llm.Client` routes `claude-*` to the Anthropic Messages API and every other id to OpenAI.
+The cache key (model + effort + prompt + input + schema), offline replay and spend tally are
+the same code path for both providers. The default `orders_model` is `claude-sonnet-5-5`,
+effort `high`. The live add-on needs `anthropic_api_key` in its options. Rollback = set the
+`orders_model` option back to `gpt-5.4` (OpenAI key still configured), with no code change.
+
+- **A/B a model swap cheaply with a scratch transport harness, before touching code:** swap
+  `llm._http_transport` / `_http_transport_chat` for functions that translate the payload to
+  the other provider, then run `eval_run`/`dl_eval_run` `--live` with a SCRATCH
+  `LLM_CACHE_DIR`. Point `pipeline.PROMPTS` at a scratch prompt copy for tuning. Iterate on
+  only the failing cases (an isolated manifest, cents), then run the full corpus once. The
+  scratch cache files are byte-compatible with production keys, so after the switch they are
+  copied into the shared `llm-cache/`.
+- **Claude scores the RIGHT card lower than gpt-5.4** (0.6–0.72 for "obyčajný/biely rožok"),
+  so lines fell under the 0.85 gate. `match_product.md` now says a missing weight alone is no
+  doubt when exactly one plain card fits. `match_customer.md` says a town in the sender
+  address names the branch.
+- **A corpus case asserting only a line COUNT can pin a wrong substitution.** brezno-2026-06-26
+  "passed" on gpt-5.4 only because it shipped "Dánske pečivo s jahoda" as the blueberry card.
+  Before calling a model swap a regression, replay the OLD model's cache and compare the cards
+  it shipped.
+- A structured-output schema for Claude must be closed on every object
+  (`llm._closed_schema` adds `additionalProperties: false`). A `refusal` / `max_tokens` stop is
+  an `LlmError`, never an empty answer.

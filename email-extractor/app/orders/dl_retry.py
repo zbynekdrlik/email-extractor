@@ -16,7 +16,7 @@ TRANSIENT_RETRY_LIMIT = 3         # R17/W9: attempts 1-2 retry, 3-4 go to review
 TRANSIENT_RE = re.compile(
     r"service failed to process|timed out|timeout|rate limit|too many requests|"
     r"overloaded|do[cč]asn[yý] v[yý]padok|service unavailable|internal server error|"
-    r"bad gateway|econnreset|socket hang up", re.IGNORECASE)
+    r"bad gateway|econnreset|socket hang up|connection error", re.IGNORECASE)
 
 
 class _RetryLater(Exception):

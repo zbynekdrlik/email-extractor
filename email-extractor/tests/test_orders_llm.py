@@ -38,7 +38,7 @@ def _client(tmp_path, texts, usage=None, calls=None):
         calls["payloads"].append(payload)
         return texts, usage
 
-    c = llm.Client(api_key="k", cache_dir=str(tmp_path), vision_transport=vision_transport)
+    c = llm.Client(model="gpt-5.4", api_key="k", cache_dir=str(tmp_path), vision_transport=vision_transport)
     return c, calls
 
 
@@ -130,7 +130,7 @@ def test_offline_mode_raises_cache_miss_instead_of_calling_the_transport(tmp_pat
         calls["n"] += 1
         return ["should never be reached"], None
 
-    c = llm.Client(api_key="k", cache_dir=str(tmp_path), offline=True,
+    c = llm.Client(model="gpt-5.4", api_key="k", cache_dir=str(tmp_path), offline=True,
                     vision_transport=vision_transport)
     with pytest.raises(llm.CacheMiss):
         c.vision_call("transcribe", images=[JPEG_A], n=2)
@@ -138,11 +138,11 @@ def test_offline_mode_raises_cache_miss_instead_of_calling_the_transport(tmp_pat
 
 
 def test_offline_mode_still_serves_an_already_cached_vision_answer(tmp_path):
-    live = llm.Client(api_key="k", cache_dir=str(tmp_path),
+    live = llm.Client(model="gpt-5.4", api_key="k", cache_dir=str(tmp_path),
                        vision_transport=lambda p, a, t: (["cached answer"], None))
     live.vision_call("transcribe", images=[JPEG_A], n=2)
 
-    offline = llm.Client(api_key="k", cache_dir=str(tmp_path), offline=True,
+    offline = llm.Client(model="gpt-5.4", api_key="k", cache_dir=str(tmp_path), offline=True,
                           vision_transport=lambda p, a, t: (_ for _ in ()).throw(
                               AssertionError("must not call the transport")))
     got = offline.vision_call("transcribe", images=[JPEG_A], n=2)
@@ -156,7 +156,7 @@ def test_no_api_key_raises_before_ever_touching_the_transport(tmp_path):
         calls["n"] += 1
         return ["x"], None
 
-    c = llm.Client(api_key="", cache_dir=str(tmp_path), vision_transport=vision_transport)
+    c = llm.Client(model="gpt-5.4", api_key="", cache_dir=str(tmp_path), vision_transport=vision_transport)
     with pytest.raises(llm.LlmError):
         c.vision_call("transcribe", images=[JPEG_A], n=1)
     assert calls["n"] == 0

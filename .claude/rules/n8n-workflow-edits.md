@@ -1162,3 +1162,24 @@ and the error workflow spammed Discord. Fix (n8n version „Cap classifier input
 classify; the full text stays in the DB for the order/DL engines (never cap at ingest).
 Residual: any OTHER persistent chain failure still blocks the queue the same way — if it recurs,
 add `onError: continueErrorOutput` and mark only context-length errors `human_processing`.
+
+## Changing the model of an n8n AI node — A/B on real mail first (#510)
+
+OpenAI shut down `gpt-5` / `gpt-5-mini` on 11.12.2026. Email Sorting and Reklamácie moved to
+`gpt-6.1-sol` (25.11.2026). The add-on stays on `gpt-5.4` (owner). Check the dates on
+https://developers.openai.com/api/docs/deprecations and the models our key has (`GET /v1/models`).
+
+- **A/B offline before you touch the node.** Export recent mail read-only (base64 JSON via
+  `COPY … TO STDOUT`, because plain COPY text escapes break JSON). Replay the node's OWN Static
+  Classify JS under node to pick exactly the mails that reach the AI branch. Send the same system
+  prompt + the same 60k slice + AI Normalize to both models, then hand-review every difference.
+- **OpenAI's "recommended replacement" is not automatically good enough.** `gpt-6.1-terra` missed
+  3 of 84 real complaints that `gpt-5-mini` caught; `gpt-6.1-sol` caught them. `reasoning_effort`
+  low/medium did not help on either.
+- **The 6.x models do not reason by default.** Out tokens dropped from 129k to 6k on 516 mails, so
+  a pricier per-token model came out cheaper (~$7.3 vs ~$8.3 a month for Email Sorting).
+- **Changing the node:** `update_workflow` → `setNodeParameter` path `/model`, value
+  `{"__rl": true, "value": "<id>", "mode": "id"}`, then `publish_workflow`. Verify one live
+  execution: `generationInfo.model_name` in the `OpenAI Chat Model` run data. The node calls
+  the Responses API (`use_responses_api: true`). The `builtInTools` validator warning is
+  pre-existing and harmless.
